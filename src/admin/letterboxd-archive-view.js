@@ -451,7 +451,7 @@ function archiveIdentityOpen(session) {
   const status = session && session.identityStatus;
   const identity = session && session.identity;
   const committed = session && session.committed && Object.values(session.committed).some(item => item && item.kind === 'candidates' && item.state === 'succeeded');
-  const durable = status && status.present && ((status.pending || 0) + (status.admitting || 0) + (status.enrichmentPending || 0) > 0 || status.stopped);
+  const durable = status && status.present && ((status.pending || 0) + (status.admitting || 0) + (status.enrichmentPending || 0) > 0 || status.stopped || (status.retryable && status.retryable.length));
   if (!committed && !durable && !identity) return null;
   if (identity && identity.pending === false && !identity.stop && !durable) return 'done';
   return 'open';
@@ -466,11 +466,25 @@ function archiveIdentityHtml(session) {
   if (identity && identity.verified) note = 'Один фильм сверен и добавлен по TMDB. Watchlist не менялся.';
   else if (identity && identity.enriched) note = 'Один фильм получил метаданные или имена. Watchlist не менялся. Это не новая идентичность.';
   else if (identity && identity.stop) note = 'Проверка остановлена (' + identity.stop + '). Кандидат остаётся непроверенным. Это не подтверждение.';
-  else if (identity && identity.state === 'needs_review') note = 'Фильм неоднозначен и не добавлен. Это не подтверждение.';
+  else if (identity && identity.state === 'needs_review') {
+    note = identity.writes
+      ? 'Состояние кандидата записано в R2. Фильм в каталог не добавлен. Это не подтверждение.'
+      : 'Фильм неоднозначен и не добавлен. Это не подтверждение.';
+  } else if (identity && identity.writes && !identity.verified && !identity.enriched) note = 'Состояние очереди в R2 обновлено. Фильм в каталог не добавлен.';
   else if (identity) note = 'Идентичность не подтверждена.';
   if (status && status.present) note += ' Сохранено: ожидают ' + (status.pending || 0) + ', сверяются ' + (status.admitting || 0) + ', метаданные ' + (status.enrichmentPending || 0) + '.';
+  const retryable = status && Array.isArray(status.retryable) ? status.retryable : [];
+  if (retryable.length) note += ' Повтор разметки доступен для ' + retryable.length + ' код' + (retryable.length === 1 ? 'а' : 'ов') + ' с причиной shortlink_missing. Остальные кандидаты не трогаются.';
+  const retry = session && session.identityRetry;
+  let retryActions = '';
+  if (open === 'open' && retryable.length && !(retry && retry.confirmation)) {
+    retryActions = `<div class="archive-actions"><button type="button" class="admin-more" data-archive-retry-confirm="1">Подтвердить повтор разметки</button></div><p class="muted">Повтор только возвращает выбранные коды в очередь. Он не скачивает страницу и не добавляет фильм.</p>`;
+  } else if (open === 'open' && retry && retry.confirmation && !(retry && retry.done)) {
+    retryActions = `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-retry="1">Вернуть в очередь</button></div>`;
+  }
+  if (retry && retry.done) note += retry.writes ? ' Повтор записал выбранные коды обратно в pending.' : ' Повтор уже был применён.';
   const button = open === 'open' ? `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-identity="1">${archiveEscape(stopped ? 'Продолжить проверку' : 'Проверить одну идентичность')}</button></div>` : '';
-  return `<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted" role="status">${archiveEscape(note)}</p>${button}</article>`;
+  return `<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted" role="status">${archiveEscape(note)}</p>${retryActions}${button}</article>`;
 }
 function archiveReceiptHtml(answer, session) {
   const batches = answer.batches || {};

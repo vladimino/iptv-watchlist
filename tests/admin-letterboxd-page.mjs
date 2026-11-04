@@ -707,5 +707,41 @@ await run('onArchiveStatus()');
 assert.equal(currentStep(), 5);
 assert.match(result.innerHTML, /Продолжить проверку/);
 assert.match(result.innerHTML, /ожидают 1/);
+
+// 18. A parser-defect review tells the owner the candidate document changed and offers a two-click retry.
+run(`archiveLive.identity = {mode:'identity',writes:true,verified:false,enriched:false,fetched:true,pending:true,stop:null,code:'103U',state:'needs_review',reason:'shortlink_missing',reasons:['shortlink_missing'],reasonKind:'page_incomplete',persisted:'review'};`);
+run(`archiveLive.identityStatus = {mode:'identity_status',writes:false,present:true,pending:48,admitting:0,verified:0,needsReview:2,enrichmentPending:0,stopped:null,next:'Stay',phase:'identity',documentEtag:'etag-1',retryable:[{code:'103U',reason:'shortlink_missing',reasonKind:'page_incomplete'},{code:'10TQ',reason:'shortlink_missing',reasonKind:'page_incomplete'}]};`);
+run(`archiveLive.identityRetry = null; archiveLive.retryKey = null; archiveLive.viewStep = 5; archiveLive.reached = 5;`);
+run('archiveRepaint()');
+assert.match(result.innerHTML, /Состояние кандидата записано в R2/);
+assert.match(result.innerHTML, /Повтор разметки доступен для 2 кодов/);
+assert.match(result.innerHTML, /Подтвердить повтор разметки/);
+assert.doesNotMatch(result.innerHTML, /Вернуть в очередь/);
+let retryPosts = [];
+ctx.fetch = async (input, init = {}) => {
+  const url = String(input);
+  retryPosts.push(url);
+  if (url.endsWith('/identity-retry-confirm')) {
+    const body = JSON.parse(String(init.body));
+    assert.deepEqual(body.codes, ['103U', '10TQ']);
+    assert.equal(body.documentEtag, 'etag-1');
+    assert.equal(body.accepted, true);
+    return new Response(JSON.stringify({mode: 'identity_retry_confirm', writes: false, confirmation: {capability: 'letterboxd_identity_retry', idempotencyKey: body.idempotencyKey}, retryable: 2, preview: {codes: body.codes, requeue: body.codes}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+  }
+  if (url.endsWith('/identity-retry')) {
+    return new Response(JSON.stringify({mode: 'identity_retry', writes: true, replayed: false, state: 'succeeded', outcomes: [{id: '103U', outcome: 'written'}, {id: '10TQ', outcome: 'written'}]}), {status: 200, headers: {'Content-Type': 'application/json'}});
+  }
+  if (url.endsWith('/identity-status')) {
+    return new Response(JSON.stringify({mode: 'identity_status', writes: false, present: true, pending: 50, admitting: 0, verified: 0, needsReview: 0, enrichmentPending: 0, stopped: null, next: '103U', phase: 'identity', documentEtag: 'etag-2', retryable: []}), {status: 200, headers: {'Content-Type': 'application/json'}});
+  }
+  throw new Error('unexpected retry request ' + url);
+};
+await run('onArchiveRetryConfirm()');
+assert.match(result.innerHTML, /Вернуть в очередь/);
+await run('onArchiveRetry()');
+assert.ok(retryPosts.some(url => url.endsWith('/identity-retry')));
+assert.ok(retryPosts.some(url => url.endsWith('/identity-status')));
+assert.match(result.innerHTML, /Повтор записал выбранные коды обратно в pending/);
+assert.match(result.innerHTML, /ожидают 50/);
 ctx.fetch = previousFetch;
 console.log('admin-letterboxd-page: ok');

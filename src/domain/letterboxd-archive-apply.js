@@ -4,6 +4,7 @@
 export const APPLY_BATCH_SIZE = 50;
 export const APPLY_CAPABILITY_ID = 'letterboxd_archive_apply';
 export const ROLLBACK_CAPABILITY_ID = 'letterboxd_archive_rollback';
+export const RETRY_CAPABILITY_ID = 'letterboxd_identity_retry';
 
 // The baseline commit's item, in the key order `JSON.stringify` must keep so the plan hash matches the import receipt.
 export function baselineItem(item) {
@@ -54,6 +55,15 @@ export function applyIssue(lid) {
     id: 'letterboxd-archive-apply:' + lid,
     subject: {kind: 'letterboxd_archive_chunk', id: lid},
     action: {code: APPLY_CAPABILITY_ID, eligible: true, reason: 'compared'},
+    evidence: {completeness: 'complete'},
+  };
+}
+
+export function retryIssue(code) {
+  return {
+    id: 'letterboxd-identity-retry:' + code,
+    subject: {kind: 'letterboxd_archive_chunk', id: code},
+    action: {code: RETRY_CAPABILITY_ID, eligible: true, reason: 'parser_defect'},
     evidence: {completeness: 'complete'},
   };
 }

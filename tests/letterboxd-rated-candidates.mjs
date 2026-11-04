@@ -5,11 +5,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
+import {retryFingerprint} from '../src/domain/letterboxd-rated-admission.js';
 import {putOwned} from '../src/ratings-d1.js';
 import {d1Standin} from './d1-standin.mjs';
 import {loadArchiveWorker} from './fixtures/letterboxd-archive-worker.mjs';
 import {exportArchive} from './fixtures/letterboxd-archive.mjs';
 
+function expectRow(row) {
+  return {state: row.state, reason: row.reason || null, fingerprint: row.fingerprint || retryFingerprint(row), observedAt: row.observedAt || null, registeredAt: row.registeredAt || null};
+}
 const NOW = Date.parse('2026-10-31T09:00:00.000Z'), DAY = 86400000;
 const ORIGIN = 'https://iptv.test', G1 = '11111111-1111-4111-8111-111111111111';
 const NAME = 'letterboxd-demo-user-2026-10-20-08-15-utc.zip', GENERATED = '2026-10-20T08:15:00.000Z';
@@ -17,9 +21,12 @@ const ACCESS = 'owner-session-assertion';
 const records = new Map();
 let calls = [], version = 0, failReceipt = false, failPut = null;
 const net = {calls: []};
-function page({code, title, year, tmdb, type = 'movie', slug}) {
+function page({code, title, year, tmdb, type = 'movie', slug, shortlink = true, shortlinkHref, extraRel = ''}) {
   const ld = JSON.stringify({name: title, releasedEvent: [{'@type': 'PublicationEvent', startDate: String(year)}]});
-  return '<html><head><link rel="canonical" href="https://letterboxd.com/film/' + slug + '/"><link rel="shortlink" href="https://boxd.it/' + code + '">'
+  const rel = extraRel ? 'shortlink ' + extraRel : 'shortlink';
+  const href = shortlinkHref || ('https://boxd.it/' + code);
+  const short = shortlink ? '<link href="' + href + '" rel="' + rel + '">' : '';
+  return '<html><head><link rel="canonical" href="https://letterboxd.com/film/' + slug + '/">' + short
     + '<meta property="og:title" content="' + title + ' (' + year + ')">'
     + '<script type="application/ld+json">/* <![CDATA[ */' + ld + '/* ]]> */</script></head>'
     + '<body class="film" data-tmdb-type="' + type + '" data-tmdb-id="' + tmdb + '"></body></html>';
@@ -584,6 +591,186 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   await poisoned('Nn1', 'rated-key-nn1000001', 'tmdb_tv', html => html.replace('data-tmdb-type="movie"', 'data-tmdb-type="tv"'));
   await poisoned('Oo1', 'rated-key-oo1000001', 'shortlink_mismatch', html => html.replace('https://boxd.it/Oo1', 'https://boxd.it/Zz9'));
   await poisoned('Pp1', 'rated-key-pp1000001', 'canonical_mismatch', html => html.replace('https://letterboxd.com/film/enrich-cut/', 'https://letterboxd.com/film/other-cut/'));
+}
+
+// 6. AIR-346: a valid movie page without a shortlink tag still verifies, writes is honest, and retry is bounded.
+{
+  async function committed(films, key) {
+    seed([]);
+    const bytes = exportArchive(films);
+    const seen = await preview(bytes);
+    const chunk = seen.body.batches.chunks.find(item => item.kind === 'candidates');
+    const issued = await confirm(bytes, seen.body, chunk.chunk, key);
+    const written = await commit(bytes, issued.body.confirmation);
+    assert.equal(written.status, 200, JSON.stringify(written.body));
+    return seen.body.archive.sha256;
+  }
+  const sha = await committed([
+    {code: '103U', name: 'Men in Black 3', year: 2012, rating: 4},
+    {code: '10TQ', name: 'The Green Hornet', year: 2011, rating: 3.5},
+    {code: 'Zz9', name: 'Invented Alpha', year: 2001, rating: 4},
+  ], 'rated-key-air346001');
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  const docKey = 'letterboxd/imports/' + sha + '/rated-candidates.json';
+  net.calls = [];
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/103U') return http(301, '', {location: 'https://letterboxd.com/film/men-in-black-3/'});
+    if (address === 'https://letterboxd.com/film/men-in-black-3/') return http(200, page({code: '103U', title: 'Men in Black 3', year: 2012, tmdb: '41117', slug: 'men-in-black-3', shortlink: false}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/41117')) return http(200, JSON.stringify({id: 41117, media_type: 'movie', title: 'Men in Black 3', original_title: 'Men in Black 3', release_date: '2012-05-23'}));
+    throw new Error(address);
+  };
+  let step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true, code: '103U'}});
+  assert.equal(step.status, 200, JSON.stringify(step.body));
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+  assert.equal(step.body.writes, true);
+  assert.equal(step.body.persisted, 'admission');
+  assert.equal(read(docKey).candidates['10TQ'].state, 'pending', 'a targeted step does not walk the rest of the queue');
+  assert.equal(read(docKey).candidates.Zz9.state, 'pending');
+
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/10TQ') return http(301, '', {location: 'https://letterboxd.com/film/the-green-hornet/'});
+    if (address === 'https://letterboxd.com/film/the-green-hornet/') return http(200, page({code: '10TQ', title: 'The Green Hornet', year: 2011, tmdb: '40805', slug: 'the-green-hornet', extraRel: 'alternate', shortlinkHref: '//boxd.it/10TQ/'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/40805')) return http(200, JSON.stringify({id: 40805, media_type: 'movie', title: 'The Green Hornet', original_title: 'The Green Hornet', release_date: '2011-01-14'}));
+    throw new Error(address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true, code: '10TQ'}});
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+
+  net.handler = async url => {
+    if (String(url) === 'https://letterboxd.com/film/men-in-black-3/') return http(200, '<html>no metadata</html>');
+    throw new Error(String(url));
+  };
+  const unparsed = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true, code: '103U'}});
+  assert.equal(unparsed.body.reason, 'metadata_unparsed', JSON.stringify(unparsed.body));
+  assert.equal(unparsed.body.enriched, false);
+  assert.equal(unparsed.body.writes, true, 'markEnrichment is a write even when metadata is not stored');
+  assert.equal(unparsed.body.persisted, 'enrichment');
+  assert.equal(read(docKey).candidates['103U'].enrichment, 'pending');
+
+  const reviewSha = await committed([{code: 'Rv1', name: 'Review Film', year: 2003, rating: 4}, {code: 'Stay', name: 'Stay Pending', year: 2004, rating: 3}], 'rated-key-air346002');
+  const reviewKey = 'letterboxd/imports/' + reviewSha + '/rated-candidates.json';
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/Rv1') return http(301, '', {location: 'https://letterboxd.com/film/review-film/'});
+    if (address === 'https://letterboxd.com/film/review-film/') return http(200, page({code: 'Rv1', title: 'Review Film', year: 2003, tmdb: '9', type: 'tv', slug: 'review-film'}));
+    throw new Error(address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: reviewSha, accepted: true, code: 'Rv1'}});
+  assert.equal(step.body.state, 'needs_review', JSON.stringify(step.body));
+  assert.equal(step.body.writes, true, 'a review CAS is a write even though no Film was admitted');
+  assert.equal(step.body.persisted, 'review');
+  assert.equal(step.body.verified, false);
+  assert.ok(step.body.reasons.includes(step.body.reason));
+  const reviewDoc = read(reviewKey);
+  assert.equal(reviewDoc.candidates.Rv1.state, 'needs_review');
+  reviewDoc.candidates.Rv1.reason = 'shortlink_missing';
+  reviewDoc.candidates.Rv1.reasons = ['shortlink_missing'];
+  reviewDoc.candidates.Rv1.reasonKind = 'page_incomplete';
+  put(reviewKey, reviewDoc);
+  assert.equal(read(reviewKey).candidates.Stay.state, 'pending');
+
+  const status = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: reviewSha}});
+  assert.equal(status.body.writes, false);
+  assert.equal(status.body.retryable.length, 1);
+  assert.equal(status.body.retryable[0].code, 'Rv1');
+  const etag = status.body.documentEtag;
+  const fetchedAtStatus = net.calls.length;
+  const retryKey = 'rated-retry-key000001';
+  const retryRow = status.body.retryable[0];
+  const omitted = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], documentEtag: etag, idempotencyKey: 'rated-retry-key000006', accepted: true}});
+  assert.equal(omitted.status, 400, JSON.stringify(omitted.body));
+  const incomplete = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: {Rv1: {state: 'needs_review', reason: 'shortlink_missing'}}, documentEtag: etag, idempotencyKey: 'rated-retry-key000007', accepted: true}});
+  assert.equal(incomplete.status, 400, JSON.stringify(incomplete.body));
+  const expected = {Rv1: expectRow(retryRow), Stay: expectRow(read(reviewKey).candidates.Stay)};
+  const previewed = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1', 'Stay'], expected, documentEtag: etag, idempotencyKey: retryKey, accepted: true}});
+  assert.equal(previewed.status, 200, JSON.stringify(previewed.body));
+  assert.equal(previewed.body.writes, false);
+  assert.equal(previewed.body.retryable, 1);
+  assert.equal(net.calls.length, fetchedAtStatus, 'retry confirm does not fetch');
+  const retried = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: previewed.body.confirmation}});
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  assert.equal(retried.body.writes, true);
+  assert.equal(read(reviewKey).candidates.Rv1.state, 'pending');
+  assert.equal(read(reviewKey).candidates.Rv1.retryOf, 'shortlink_missing');
+  assert.equal(read(reviewKey).candidates.Stay.state, 'pending');
+  assert.equal(read(reviewKey).candidates.Stay.retryOf, undefined, 'an ordinary pending code is not mass-retried');
+  const replay = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: previewed.body.confirmation}});
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.writes, false);
+
+  const resetReview = read(reviewKey);
+  resetReview.candidates.Rv1.state = 'needs_review';
+  resetReview.candidates.Rv1.reason = 'shortlink_missing';
+  resetReview.candidates.Rv1.reasons = ['shortlink_missing'];
+  resetReview.candidates.Rv1.retryOf = null;
+  put(reviewKey, resetReview);
+  const statusDrift = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: reviewSha}});
+  const driftRow = statusDrift.body.retryable[0];
+  const driftExpected = {Rv1: expectRow(driftRow)};
+  const driftConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: statusDrift.body.documentEtag, idempotencyKey: 'rated-retry-key000004', accepted: true}});
+  assert.equal(driftConfirm.status, 200, JSON.stringify(driftConfirm.body));
+  const drifted = read(reviewKey);
+  drifted.candidates.Rv1.observedAt = '2026-11-04T00:00:00.000Z';
+  put(reviewKey, drifted);
+  const driftExec = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: driftConfirm.body.confirmation}});
+  assert.equal(driftExec.status, 409, JSON.stringify(driftExec.body));
+  drifted.candidates.Rv1.observedAt = driftRow.observedAt;
+  put(reviewKey, drifted);
+
+  failPut = key => {
+    if (!String(key).includes('letterboxd_identity_retry')) return false;
+    const stored = records.get(key);
+    if (!stored) return false;
+    const record = JSON.parse(stored.text);
+    if (record.state === 'approved' && !record.receipt) {
+      const live = JSON.parse(records.get(reviewKey).text);
+      live.candidates.Rv1.registeredAt = '2026-11-04T12:00:00.000Z';
+      records.set(reviewKey, {text: JSON.stringify(live), etag: 'raced-registeredAt'});
+    }
+    return false;
+  };
+  const raceConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: records.get(reviewKey).etag, idempotencyKey: 'rated-retry-key000008', accepted: true}});
+  assert.equal(raceConfirm.status, 200, JSON.stringify(raceConfirm.body));
+  const raced = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: raceConfirm.body.confirmation}});
+  assert.equal(raced.status, 409, JSON.stringify(raced.body));
+  assert.equal(read(reviewKey).candidates.Rv1.state, 'needs_review', 'a write between checkSubmission and CAS is not requeued');
+  failPut = null;
+  const unraced = read(reviewKey);
+  unraced.candidates.Rv1.registeredAt = driftRow.registeredAt;
+  put(reviewKey, unraced);
+
+  failPut = key => {
+    if (!String(key).includes('letterboxd_identity_retry')) return false;
+    const stored = records.get(key);
+    if (!stored) return false;
+    const record = JSON.parse(stored.text);
+    return record.state === 'running' && !record.receipt;
+  };
+  const lostConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: records.get(reviewKey).etag, idempotencyKey: 'rated-retry-key000005', accepted: true}});
+  assert.equal(lostConfirm.status, 200, JSON.stringify(lostConfirm.body));
+  const lostFirst = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: lostConfirm.body.confirmation}});
+  assert.equal(lostFirst.status, 500, JSON.stringify(lostFirst.body));
+  assert.equal(read(reviewKey).candidates.Rv1.state, 'pending', 'the candidate mutation survives a lost receipt');
+  failPut = null;
+  const lostReplay = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: lostConfirm.body.confirmation}});
+  assert.equal(lostReplay.status, 200, JSON.stringify(lostReplay.body));
+  assert.equal(lostReplay.body.replayed, true);
+  assert.ok(lostReplay.body.receipt);
+
+  const needs = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: reviewSha, accepted: true, code: 'Rv1'}});
+  assert.equal(needs.status, 200, 'requeued code can be checked by itself');
+
+  const verifiedDoc = read(reviewKey);
+  verifiedDoc.candidates.Rv1.state = 'verified';
+  verifiedDoc.candidates.Rv1.reason = null;
+  put(reviewKey, verifiedDoc);
+  const refuseVerified = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, idempotencyKey: 'rated-retry-key000002', accepted: true}});
+  assert.equal(refuseVerified.status, 409, JSON.stringify(refuseVerified.body));
+
+  const stale = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: 'not-the-etag', idempotencyKey: 'rated-retry-key000003', accepted: true}});
+  assert.equal(stale.status, 409, JSON.stringify(stale.body));
 }
 
 console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open');

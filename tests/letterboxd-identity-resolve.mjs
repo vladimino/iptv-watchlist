@@ -4,16 +4,18 @@ import {spawnSync} from 'node:child_process';
 import {appendFile,cp,mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {allowedHop,buildQueue,decide,isChallenge,isFilmPage,pageEvidence} from '../src/letterboxd-identity.js';
+import {allowedHop,boundReasons,buildQueue,decide,isChallenge,isFilmPage,isRetryableReason,pageEvidence,parseBoxdCode,reasonKind} from '../src/letterboxd-identity.js';
 import {POLICY,ResolveError,loadPageTools,resolve} from '../scripts/letterboxd-identity-resolve.mjs';
 
 const scratch=await mkdtemp(path.join(os.tmpdir(),'lbx-identity-'));
 const tools=loadPageTools();
 
 // An invented Letterboxd film page in the shape parseFilm reads.
-function page({code,title,year,tmdb='',type='movie',aliases=[],slug,ogYear=year,ldYear=year,shortlink=code,canonical=slug}){
+function page({code,title,year,tmdb='',type='movie',aliases=[],slug,ogYear=year,ldYear=year,shortlink=code,canonical=slug,shortlinkHref,extraRel=''}){
  const ld=JSON.stringify({name:title,...(ldYear?{releasedEvent:[{'@type':'PublicationEvent',startDate:String(ldYear)}]}:{})});
- return '<html><head>'+(canonical?'<link rel="canonical" href="https://letterboxd.com/film/'+canonical+'/">':'')+(shortlink?'<link rel="shortlink" href="https://boxd.it/'+shortlink+'">':'')
+ const rel=extraRel?('shortlink '+extraRel):'shortlink';
+ const href=shortlinkHref||('https://boxd.it/'+shortlink);
+ return '<html><head>'+(canonical?'<link rel="canonical" href="https://letterboxd.com/film/'+canonical+'/">':'')+(shortlink?'<link href="'+href+'" rel="'+rel+'">':'')
   +'<meta property="og:title" content="'+title+(ogYear?' ('+ogYear+')':'')+'">'
   +'<script type="application/ld+json">/* <![CDATA[ */'+ld+'/* ]]> */</script></head>'
   +'<body class="film" '+(type?'data-tmdb-type="'+type+'" ':'')+(tmdb?'data-tmdb-id="'+tmdb+'"':'')+'>'
@@ -107,6 +109,23 @@ assert.ok(isChallenge(503,headers({}),'<script src="/cdn-cgi/challenge-platform/
 assert.ok(!isChallenge(200,headers({}),page({code:'Zq01',title:'Invented Alpha',year:2001,tmdb:'1',slug:'a'})));
 const evidence=pageEvidence(page({code:'Zq09',title:'Original Name',year:2009,tmdb:'900009',aliases:['Invented Alias'],slug:'s'}),new URL('https://letterboxd.com/film/s/'),tools);
 assert.deepEqual({...evidence},{kind:'page',path:'/film/s/',shortCode:'Zq09',shortlinkPresent:true,canonicalPath:'/film/s/',tmdbIds:['900009'],tmdbTypes:['movie'],title:'Original Name',aliases:['Invented Alias'],years:[2009]});
+assert.equal(parseBoxdCode('https://boxd.it/103U/'),'103U');
+assert.equal(parseBoxdCode('//boxd.it/10TQ',new URL('https://letterboxd.com/film/x/')),'10TQ');
+assert.equal(parseBoxdCode('http://boxd.it/103U'),null);
+const extraRel=pageEvidence(page({code:'Ab1',title:'Invented Extra',year:2001,tmdb:'1',slug:'s',extraRel:'alternate',shortlinkHref:'https://boxd.it/Ab1/'}),new URL('https://letterboxd.com/film/s/'),tools);
+assert.equal(extraRel.shortCode,'Ab1');
+assert.equal(reasonKind(['shortlink_missing']),'page_incomplete');
+assert.equal(reasonKind(['title_differs','shortlink_missing']),'conflict');
+assert.equal(isRetryableReason('shortlink_missing'),true);
+assert.deepEqual(boundReasons(['shortlink_missing','shortlink_missing','x'.repeat(80)]),['shortlink_missing']);
+const noTag=page({code:'Zq01',title:'Invented Alpha',year:2001,tmdb:'900001',slug:'s',shortlink:''});
+const missing=pageEvidence(noTag,new URL('https://letterboxd.com/film/s/'),tools);
+assert.equal(missing.shortlinkPresent,false);
+const acceptedRedirect=decide([{code:'Zq01',group:'unmatched',name:'Invented Alpha',year:2001}],new Map([['Zq01',{...missing,redirectCode:'Zq01'}]]),{importedTmdb:new Set()});
+assert.equal(acceptedRedirect[0].decision,'accepted');
+const stillMissing=decide([{code:'Zq01',group:'unmatched',name:'Invented Alpha',year:2001}],new Map([['Zq01',missing]]),{importedTmdb:new Set()});
+assert.equal(stillMissing[0].decision,'owner_review');
+assert.deepEqual(stillMissing[0].reasons,['shortlink_missing']);
 assert.equal(pageEvidence('<html>no metadata</html>',new URL('https://letterboxd.com/film/s/'),tools).kind,'unparsable_page');
 assert.deepEqual(pageEvidence(page({code:'A1',title:'T',year:2000,tmdb:'1',slug:'s'}).replace('</body>','<div data-tmdb-id="2"></div></body>'),new URL('https://letterboxd.com/film/s/'),tools).tmdbIds,['1','2']);
 

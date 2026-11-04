@@ -237,18 +237,34 @@ const LetterboxdRatedCandidates = (() => {
     const reason = !row ? 'claim_missing' : row.state === 'removed' ? 'removed' : row.state === 'needs_review' ? 'needs_review' : row.state === 'admitting' ? 'intent_conflict' : 'claim_changed';
     return {ok: false, reason, state: row && row.state || null};
   }
-  async function markReview(env, key, code, reason, claim) {
-    await casDoc(env, key, null, current => {
+  function reviewReasons(reason, extra) {
+    const reasons = LetterboxdIdentity.boundReasons([reason, ...(extra || [])]);
+    return {reason: reasons[0] || reason, reasons, reasonKind: LetterboxdIdentity.reasonKind(reasons)};
+  }
+  function withWrites(result, writes, persisted) {
+    const reasons = result.reasons || (result.reason ? [result.reason] : []);
+    return {
+      ...result,
+      writes: writes === true,
+      persisted: persisted || 'none',
+      reasons,
+      reasonKind: result.reasonKind || (reasons.length ? LetterboxdIdentity.reasonKind(reasons) : null),
+    };
+  }
+  async function markReview(env, key, code, reason, claim, extra) {
+    const payload = reviewReasons(reason, extra);
+    const saved = await casDoc(env, key, null, current => {
       const row = current.candidates[code];
       if (!row || row.state === 'verified' || row.state === 'removed') return null;
       if (claim && !sameClaim(row, claim.tmdb, claim.filmPath)) return null;
-      current.candidates[code] = {...row, state: 'needs_review', reason, intendedTmdb: null};
+      current.candidates[code] = {...row, state: 'needs_review', reason: payload.reason, reasons: payload.reasons, reasonKind: payload.reasonKind, intendedTmdb: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
     });
+    return {...payload, changed: saved.changed === true};
   }
   async function park(env, key, doc, stopped) {
-    await casDoc(env, key, doc, current => {current.checkpoint = {...(current.checkpoint || {}), stopped}; return current;});
+    return casDoc(env, key, doc, current => {current.checkpoint = {...(current.checkpoint || {}), stopped}; return current;});
   }
 
   function refusedClaim(code, outcome) {
@@ -311,7 +327,7 @@ const LetterboxdRatedCandidates = (() => {
     return (Array.isArray(list) ? list : []).filter(person => person && typeof person.id === 'string').slice(0, 10).map(person => ({id: person.id, original: person.original || person.name || null, name: person.name || person.original || null}));
   }
   async function storeMetadata(env, filmId, parsed, filmPath) {
-    await casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
+    return casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
       const prior = current.films[filmId];
       if (!prior) return null;
       prior.synopsis = parsed.synopsis || null;
@@ -329,7 +345,7 @@ const LetterboxdRatedCandidates = (() => {
   }
   async function storeLocalization(env, filmId, film, titles) {
     const cached = titles[film.id];
-    await casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
+    return casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
       const prior = current.films[filmId];
       if (!prior) return null;
       if (cached && cached.title) {prior.titleRu = cached.title; prior.titleStatus = cached.status || 'provisional';}
@@ -372,34 +388,38 @@ const LetterboxdRatedCandidates = (() => {
     if (!film.metadataAt) {
       if (!film.filmPath || !LetterboxdIdentity.isFilmPage(new URL('https://letterboxd.com' + film.filmPath))) {
         const stopped = {reason: 'film_path_missing', code, at: new Date().toISOString(), phase: 'enrich'};
-        await park(env, key, opened.value, stopped);
-        return {pending: true, fetched: false, verified: false, enriched: false, stop: stopped, code, phase: 'enrich'};
+        const parked = await park(env, key, opened.value, stopped);
+        return {pending: true, fetched: false, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
       const fetched = await boundedFetch(fetchImpl, 'https://letterboxd.com' + film.filmPath, {redirect: 'manual', headers: {Accept: 'text/html'}}, PAGE_MS, PAGE_BYTES);
       if (fetched.stop) {
         const stopped = {reason: fetched.stop, code, at: new Date().toISOString(), phase: 'enrich'};
-        await park(env, key, opened.value, stopped);
-        return {pending: true, fetched: false, verified: false, enriched: false, stop: stopped, code, phase: 'enrich'};
+        const parked = await park(env, key, opened.value, stopped);
+        return {pending: true, fetched: false, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
       const status = fetched.response.status;
       const transport = LetterboxdIdentity.transportStop(status, fetched.response.headers, fetched.text);
       if (transport || status !== 200) {
         const stopped = {reason: transport || 'fetch_failed', code, at: new Date().toISOString(), phase: 'enrich'};
-        await park(env, key, opened.value, stopped);
-        return {pending: true, fetched: status === 200, verified: false, enriched: false, stop: stopped, code, phase: 'enrich'};
+        const parked = await park(env, key, opened.value, stopped);
+        return {pending: true, fetched: status === 200, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
       let parsed;
       try {parsed = letterboxdPageTools().parseFilm(fetched.text, {id: filmId, title: film.title, original: film.title, year: film.year, tmdbId: film.tmdb, url: 'https://letterboxd.com' + film.filmPath});}
-      catch {await markEnrichment(env, key, code, 'pending'); return {pending: true, fetched: true, verified: false, enriched: false, code, state: 'verified', reason: 'metadata_unparsed', phase: 'enrich'};}
+      catch {
+        const marked = await markEnrichment(env, key, code, 'pending');
+        return {pending: true, fetched: true, verified: false, enriched: false, writes: marked.changed === true, persisted: marked.changed ? 'enrichment' : 'none', code, state: 'verified', reason: 'metadata_unparsed', phase: 'enrich'};
+      }
       const agreed = enrichmentAgrees(fetched.text, film, code);
       if (!agreed.ok) {
         const stopped = {reason: agreed.reason, code, at: new Date().toISOString(), phase: 'enrich'};
-        await park(env, key, opened.value, stopped);
-        return {pending: true, fetched: true, verified: false, enriched: false, stop: stopped, code, phase: 'enrich'};
+        const parked = await park(env, key, opened.value, stopped);
+        return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
       }
-      await storeMetadata(env, filmId, parsed, film.filmPath);
-      await markEnrichment(env, key, code, 'metadata');
-      return {pending: true, fetched: true, verified: false, enriched: true, code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
+      const stored = await storeMetadata(env, filmId, parsed, film.filmPath);
+      const marked = await markEnrichment(env, key, code, 'metadata');
+      const wrote = stored.changed === true || marked.changed === true;
+      return {pending: true, fetched: true, verified: false, enriched: true, writes: wrote, persisted: wrote ? 'enrichment' : 'none', code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
     }
     const base = {id: filmId, title: film.title, original: film.title, year: film.year, tmdbId: film.tmdb, url: film.url, directors: film.directors || [], actors: film.actors || []};
     const titles = {};
@@ -409,97 +429,163 @@ const LetterboxdRatedCandidates = (() => {
       if (typeof localizePeople === 'function') await localizePeople([base], people, 'off');
     } catch {
       const stopped = {reason: 'localization_unavailable', code, at: new Date().toISOString(), phase: 'enrich'};
-      await park(env, key, opened.value, stopped);
-      return {pending: true, fetched: true, verified: false, enriched: false, stop: stopped, code, phase: 'enrich'};
+      const parked = await park(env, key, opened.value, stopped);
+      return {pending: true, fetched: true, verified: false, enriched: false, writes: parked.changed === true, persisted: parked.changed ? 'stop' : 'none', stop: stopped, code, phase: 'enrich'};
     }
-    await storeLocalization(env, filmId, base, titles);
-    await markEnrichment(env, key, code, 'done');
+    const localized = await storeLocalization(env, filmId, base, titles);
+    const marked = await markEnrichment(env, key, code, 'done');
     const after = await readDoc(env, key);
     const next = LetterboxdRatedAdmission.resumePending(after.value && after.value.checkpoint, after.value && after.value.candidates);
-    return {pending: !!next.next, fetched: true, verified: false, enriched: true, code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
+    const wrote = localized.changed === true || marked.changed === true;
+    return {pending: !!next.next, fetched: true, verified: false, enriched: true, writes: wrote, persisted: wrote ? 'enrichment' : 'none', code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
   }
   async function markEnrichment(env, key, code, enrichment) {
-    await casDoc(env, key, null, current => {
+    return casDoc(env, key, null, current => {
       if (current.candidates[code]) current.candidates[code] = {...current.candidates[code], enrichment};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
     });
   }
 
+  async function retryCandidates(env, {sha, codes, expected}) {
+    if (!HEX64.test(String(sha || ''))) return {error: 'invalid_request'};
+    const key = CANDIDATES(sha);
+    const opened = await readDoc(env, key);
+    if (opened.value === undefined) throw new Error('storage_unavailable');
+    if (!opened.value) return {error: 'not_eligible'};
+    const plan = LetterboxdRatedAdmission.planIdentityRetry(opened.value, {codes, expected});
+    if (!plan.ok) return {error: plan.refusal, outcomes: plan.outcomes || []};
+    if (!plan.requeue.length) return {replay: plan.outcomes.every(entry => entry.outcome === 'already_applied'), outcomes: plan.outcomes, changed: false, etag: opened.etag};
+    const now = new Date().toISOString();
+    const saved = await casDoc(env, key, opened.value, current => {
+      if (current.archiveSha256 !== sha) return null;
+      const live = LetterboxdRatedAdmission.planIdentityRetry(current, {codes, expected});
+      if (!live.ok || !live.requeue.length) return null;
+      for (const code of live.requeue) {
+        const row = current.candidates[code];
+        current.candidates[code] = {
+          ...row, state: 'pending', reason: null, reasons: null, reasonKind: null,
+          previousReason: row.reason, retryOf: row.reason, retriedAt: now,
+        };
+      }
+      return current;
+    });
+    const after = saved.changed ? {value: saved.value, etag: opened.etag} : await readDoc(env, key);
+    const outcomes = [];
+    for (const entry of plan.outcomes) {
+      if (entry.outcome !== 'written') {outcomes.push(entry); continue;}
+      const row = after.value && after.value.candidates && after.value.candidates[entry.id];
+      outcomes.push(row && row.state === 'pending' && row.retryOf ? entry : {id: entry.id, outcome: 'skipped_changed'});
+    }
+    return {replay: false, outcomes, changed: saved.changed === true, etag: after.etag};
+  }
+
   // One pending code, or one enrichment continuation. A stop is stored and the next code is not fetched.
-  async function identityStep(env, {sha, resume = false, fetchImpl = fetch} = {}) {
+  // `code` selects that one pending or admitting row and does not walk the rest of the queue.
+  async function identityStep(env, {sha, resume = false, code: requested = null, fetchImpl = fetch} = {}) {
     if (!HEX64.test(String(sha || ''))) return {error: 'invalid_request'};
     const key = CANDIDATES(sha);
     const opened = await readDoc(env, key);
     if (opened.value === undefined) return {error: 'storage_unavailable'};
     if (!opened.value) return {error: 'not_eligible'};
     const doc = opened.value;
-    if (doc.checkpoint?.stopped && !resume) return {pending: true, fetched: false, stop: doc.checkpoint.stopped, code: doc.checkpoint.stopped.code || null, phase: doc.checkpoint.stopped.phase || 'identity'};
-    const checkpoint = resume ? {cursor: doc.checkpoint?.cursor || null, stopped: null} : doc.checkpoint;
-    const view = LetterboxdRatedAdmission.resumePending(checkpoint, doc.candidates);
-    if (!view.next) return {pending: false, fetched: false, stop: null, remaining: 0, phase: null};
-    if (resume && doc.checkpoint?.stopped) await casDoc(env, key, doc, current => {current.checkpoint = {...(current.checkpoint || {}), stopped: null}; return current;});
-    const code = view.next;
-    const item = doc.candidates[code];
-    if (view.phase === 'enrich') return enrichOne(env, sha, code, fetchImpl);
+    if (doc.checkpoint?.stopped && !resume) return withWrites({pending: true, fetched: false, stop: doc.checkpoint.stopped, code: doc.checkpoint.stopped.code || null, phase: doc.checkpoint.stopped.phase || 'identity'}, false, 'none');
+    let code, item, phase;
+    if (requested) {
+      if (!/^[A-Za-z0-9]{1,16}$/.test(requested)) return {error: 'invalid_request'};
+      item = doc.candidates[requested];
+      if (!item || item.state === 'removed' || item.state === 'needs_review') return {error: 'not_eligible'};
+      code = requested;
+      phase = item.state === 'verified' ? 'enrich' : 'identity';
+    } else {
+      const checkpoint = resume ? {cursor: doc.checkpoint?.cursor || null, stopped: null} : doc.checkpoint;
+      const view = LetterboxdRatedAdmission.resumePending(checkpoint, doc.candidates);
+      if (!view.next) return withWrites({pending: false, fetched: false, stop: null, remaining: 0, phase: null}, false, 'none');
+      code = view.next;
+      item = doc.candidates[code];
+      phase = view.phase;
+    }
+    let clearedStop = false;
+    if (resume && doc.checkpoint?.stopped) {
+      const cleared = await casDoc(env, key, doc, current => {current.checkpoint = {...(current.checkpoint || {}), stopped: null}; return current;});
+      clearedStop = cleared.changed === true;
+    }
+    if (phase === 'enrich') {
+      const enriched = await enrichOne(env, sha, code, fetchImpl);
+      return withWrites(enriched, enriched.writes === true, enriched.persisted || 'none');
+    }
     if (item.state === 'admitting' && item.intendedTmdb) {
-      return commitVerified(env, sha, code, item, item.intendedTmdb, {title: item.name, years: Number.isInteger(item.year) ? [item.year] : [], path: item.filmPath}, doc.generatedAt);
+      const committed = await commitVerified(env, sha, code, item, item.intendedTmdb, {title: item.name, years: Number.isInteger(item.year) ? [item.year] : [], path: item.filmPath}, doc.generatedAt);
+      return withWrites(committed, committed.verified === true || committed.state === 'needs_review', committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
     }
     const namesake = collisionQueue(doc, code, item, null);
     if (namesake.blocked) {
-      await markReview(env, key, code, namesake.blocked);
-      return {pending: true, fetched: false, verified: false, code, state: 'needs_review', reason: namesake.blocked, phase: 'identity'};
+      const review = await markReview(env, key, code, namesake.blocked);
+      return withWrites({pending: true, fetched: false, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
     const page = await follow(fetchImpl, code);
     if (page.stop) {
       const stopped = {reason: page.stop, code, at: new Date().toISOString(), phase: 'identity'};
-      await park(env, key, doc, stopped);
-      return {pending: true, fetched: false, stop: stopped, code, verified: false, phase: 'identity'};
+      const parked = await park(env, key, doc, stopped);
+      return withWrites({pending: true, fetched: false, stop: stopped, code, verified: false, phase: 'identity'}, parked.changed === true, parked.changed ? 'stop' : 'none');
     }
     if (page.review) {
-      await markReview(env, key, code, page.review);
-      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: page.review, phase: 'identity'};
+      const review = await markReview(env, key, code, page.review);
+      return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
     const evidence = LetterboxdIdentity.pageEvidence(page.html, page.landing, letterboxdPageTools());
+    if (evidence && evidence.kind === 'page') evidence.redirectCode = code;
     const imported = await ownedMovieIds(env, doc, code);
     const queued = collisionQueue(doc, code, item, evidence);
     if (queued.blocked) {
-      await markReview(env, key, code, queued.blocked);
-      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: queued.blocked, phase: 'identity'};
+      const review = await markReview(env, key, code, queued.blocked);
+      return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
     const decision = LetterboxdIdentity.decide(queued.queue, queued.observations, {importedTmdb: imported})[queued.queue.length - 1];
     if (!decision || decision.decision !== 'accepted' || !decision.tmdbId) {
-      const reason = (decision && decision.reasons && decision.reasons[0]) || (decision && decision.decision) || 'not_accepted';
-      await markReview(env, key, code, reason);
-      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason, phase: 'identity'};
+      const extra = decision && decision.reasons || [];
+      const reason = extra[0] || (decision && decision.decision) || 'not_accepted';
+      const review = await markReview(env, key, code, reason, null, extra);
+      return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
     const detail = await movieDetail(env, decision.tmdbId, fetchImpl);
     if (detail.stop) {
       const stopped = {reason: detail.stop, code, at: new Date().toISOString(), phase: 'identity'};
-      await park(env, key, doc, stopped);
-      return {pending: true, fetched: true, verified: false, stop: stopped, code, phase: 'identity'};
+      const parked = await park(env, key, doc, stopped);
+      return withWrites({pending: true, fetched: true, verified: false, stop: stopped, code, phase: 'identity'}, parked.changed === true, parked.changed ? 'stop' : 'none');
     }
     const agree = detail.review ? {ok: false, reason: detail.review} : LetterboxdRatedAdmission.movieDetailAgrees(detail.detail, decision.tmdbId, evidence.title || item.name, (evidence.years && evidence.years[0]) || item.year);
     if (!agree.ok || (item.historicalTmdb && item.historicalTmdb !== String(decision.tmdbId))) {
       const reason = item.historicalTmdb && item.historicalTmdb !== String(decision.tmdbId) ? 'historical_alias_conflict' : agree.reason;
-      await markReview(env, key, code, reason);
-      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason, phase: 'identity'};
+      const review = await markReview(env, key, code, reason);
+      return withWrites({pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: review.reason, reasons: review.reasons, reasonKind: review.reasonKind, phase: 'identity'}, review.changed === true, review.changed ? 'review' : 'none');
     }
-    return commitVerified(env, sha, code, item, decision.tmdbId, evidence, doc.generatedAt);
+    const committed = await commitVerified(env, sha, code, item, decision.tmdbId, evidence, doc.generatedAt);
+    return withWrites(committed, committed.verified === true || committed.state === 'needs_review' || clearedStop, committed.verified ? 'admission' : committed.state === 'needs_review' ? 'review' : 'none');
   }
 
   function statusOf(doc) {
-    if (!doc) return {present: false, pending: 0, admitting: 0, verified: 0, needsReview: 0, enrichmentPending: 0, stopped: null, next: null, phase: null};
+    if (!doc) return {present: false, pending: 0, admitting: 0, verified: 0, needsReview: 0, enrichmentPending: 0, stopped: null, next: null, phase: null, retryable: []};
     const view = LetterboxdRatedAdmission.resumePending(doc.checkpoint, doc.candidates);
     const counts = {pending: 0, admitting: 0, verified: 0, needs_review: 0};
     let enrichmentPending = 0;
+    const retryable = [];
     for (const item of Object.values(doc.candidates || {})) {
       if (!item) continue;
       if (Object.prototype.hasOwnProperty.call(counts, item.state)) counts[item.state]++;
       if (item.state === 'verified' && item.enrichment !== 'done') enrichmentPending++;
+      if (item.state === 'needs_review' && LetterboxdIdentity.isRetryableReason(item.reason)) {
+        retryable.push({
+          code: item.code, state: item.state, reason: item.reason,
+          reasonKind: item.reasonKind || LetterboxdIdentity.reasonKind(item.reason),
+          fingerprint: LetterboxdRatedAdmission.retryFingerprint(item),
+          observedAt: item.observedAt || null, registeredAt: item.registeredAt || null,
+        });
+      }
     }
-    return {present: true, pending: counts.pending, admitting: counts.admitting, verified: counts.verified, needsReview: counts.needs_review, enrichmentPending, stopped: view.stopped, next: view.next, phase: view.phase};
+    retryable.sort((a, b) => a.code < b.code ? -1 : a.code > b.code ? 1 : 0);
+    return {present: true, pending: counts.pending, admitting: counts.admitting, verified: counts.verified, needsReview: counts.needs_review, enrichmentPending, stopped: view.stopped, next: view.next, phase: view.phase, retryable};
   }
 
-  return {CANDIDATES, ADMISSIONS, registerCandidates, rollbackCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES};
+  return {CANDIDATES, ADMISSIONS, registerCandidates, rollbackCandidates, retryCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES};
 })();

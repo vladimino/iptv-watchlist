@@ -5,6 +5,7 @@
 // not call this. LETTERBOXD_FACTS and LETTERBOXD_BASELINE_IMPORT are not consulted.
 const LBA_APPLY_PREFIX='admin/actions/letterboxd_archive_apply/v1/';
 const LBA_ROLLBACK_PREFIX='admin/actions/letterboxd_archive_rollback/v1/';
+const LBA_RETRY_PREFIX='admin/actions/letterboxd_identity_retry/v1/';
 const LBA_CONFIRM_FIELDS={chunk:5,planHash:64,programmeRunId:80,scopeFingerprint:8,idempotencyKey:80,accepted:5};
 const LBA_COMMIT_FIELDS={confirmation:24000};
 const LBA_HEX64=/^[0-9a-f]{64}$/,LBA_FP=/^[0-9a-f]{8}$/,LBA_RUN=/^[A-Za-z0-9_-]{1,80}$/,LBA_KEY=/^[A-Za-z0-9_-]{16,80}$/;
@@ -22,7 +23,14 @@ const LBA_ROLLBACK_CAP=AdminActions.defineCapability({
  compensation:{kind:'restore_before_image',guidance:'A second rollback of the same chunk is a replay. A later observation is kept.'},
  confirmTtlMs:10*60000,
 });
-const LBA_APPLY_REGISTRY=AdminActions.createRegistry([LBA_APPLY_CAP,LBA_ROLLBACK_CAP]);
+const LBA_RETRY_CAP=AdminActions.defineCapability({
+ id:'letterboxd_identity_retry',version:1,title:'Requeue rated codes that failed a proven parser defect',
+ subjectKinds:['letterboxd_archive_chunk'],healthActionCode:'letterboxd_identity_retry',
+ budget:{maxRecords:8,maxWritesPerRecord:1,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
+ compensation:{kind:'none',guidance:'Retry only returns a needs_review row to pending. It does not admit a Film and does not roll back a later identity.'},
+ confirmTtlMs:10*60000,
+});
+const LBA_APPLY_REGISTRY=AdminActions.createRegistry([LBA_APPLY_CAP,LBA_ROLLBACK_CAP,LBA_RETRY_CAP]);
 
 function lbaRefuse(refusal,status,extra={}){return json({error:refusal,refusal,...extra},status);}
 function lbaPrincipal(request,url){
@@ -198,22 +206,129 @@ async function lbaIdentityStatus(request,env){
  const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
  if(doc.value===undefined)return json({error:'storage_unavailable'},503);
  const status=LetterboxdRatedCandidates.statusOf(doc.value);
- return json({mode:'identity_status',writes:false,...status});
+ return json({mode:'identity_status',writes:false,documentEtag:doc.etag,...status});
 }
 async function lbaIdentityStep(request,env,url){
  const opened=await lbaRollbackBody(request);
  if(opened.response)return opened.response;
  const body=opened.body;
  if(body.accepted!==true||!LBA_HEX64.test(body.archiveSha256||''))return lbaRefuse('invalid_request',400);
+ if(body.code!=null&&(typeof body.code!=='string'||!/^[A-Za-z0-9]{1,16}$/.test(body.code)))return lbaRefuse('invalid_request',400);
  const started=Date.now();
  if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
  try{
-  const result=await LetterboxdRatedCandidates.identityStep(env,{sha:body.archiveSha256,resume:body.resume===true});
+  const result=await LetterboxdRatedCandidates.identityStep(env,{sha:body.archiveSha256,resume:body.resume===true,code:typeof body.code==='string'?body.code:null});
   if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
   if(result.error==='storage_unavailable')return json({error:'storage_unavailable'},503);
   if(result.error)return lbaRefuse('invalid_request',400);
-  return json({mode:'identity',writes:result.verified===true||result.enriched===true,verified:result.verified===true,enriched:result.enriched===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':result.enriched?'enriched':'pending'),reason:result.reason||null,tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.verified===true?result.rating||null:null,phase:result.phase||null});
+  return json({mode:'identity',writes:result.writes===true,verified:result.verified===true,enriched:result.enriched===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':result.enriched?'enriched':'pending'),reason:result.reason||null,reasons:result.reasons||(result.reason?[result.reason]:[]),reasonKind:result.reasonKind||null,persisted:result.persisted||'none',tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.verified===true?result.rating||null:null,phase:result.phase||null});
  }catch{return json({error:'storage_error'},500);}
+ finally{lbaFreeSlot(started);}
+}
+function lbaRetryFields(body){
+ const codes=Array.isArray(body.codes)?[...new Set(body.codes.map(code=>String(code||'')))]:[];
+ const expected=body.expected&&typeof body.expected==='object'&&!Array.isArray(body.expected)?body.expected:null;
+ if(!expected||!codes.length||codes.some(code=>!LetterboxdRatedAdmission.isCompleteExpected(expected[code])))return null;
+ return LBA_HEX64.test(body.archiveSha256||'')&&codes.length>=1&&codes.length<=8&&codes.every(code=>/^[A-Za-z0-9]{1,16}$/.test(code))&&LBA_KEY.test(body.idempotencyKey||'')&&body.accepted===true?{codes,expected}:null;
+}
+function lbaRetryVersion(item){
+ return LetterboxdRatedAdmission.retryFingerprint(item);
+}
+function lbaRetryObservation(doc,codes,pin,now){
+ return {
+  pin,now,
+  records:codes.map(code=>({id:code,version:lbaRetryVersion(doc&&doc.candidates&&doc.candidates[code])})),
+  issues:codes.map(code=>LetterboxdArchiveApply.retryIssue(code)),
+ };
+}
+async function lbaRetryConfirm(request,env){
+ const opened=await lbaRollbackBody(request);
+ if(opened.response)return opened.response;
+ const body=opened.body;
+ const fields=lbaRetryFields(body);
+ if(!fields)return lbaRefuse('invalid_request',400);
+ const started=Date.now();
+ if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
+ try{
+  const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(body.archiveSha256));
+  if(doc.value===undefined)return json({error:'storage_unavailable'},503);
+  if(!doc.value)return lbaRefuse('not_eligible',409);
+  if(body.documentEtag&&doc.etag&&body.documentEtag!==doc.etag)return lbaRefuse('record_changed',409);
+  const validated=LetterboxdRatedAdmission.validatedRetryExpected(doc.value,fields.codes,fields.expected);
+  if(!validated.ok)return lbaRefuse(validated.refusal||'invalid_request',validated.refusal==='record_changed'?409:400);
+  const plan=LetterboxdRatedAdmission.planIdentityRetry(doc.value,{codes:fields.codes,expected:validated.expected});
+  if(!plan.ok)return lbaRefuse(plan.refusal||'invalid_request',400);
+  if(!plan.requeue.length&&!plan.outcomes.some(entry=>entry.outcome==='already_applied'))return lbaRefuse('not_eligible',409);
+  const now=new Date(started).toISOString();
+  const pin=body.archiveSha256+':retry';
+  const preview=AdminActions.previewAction(LBA_APPLY_REGISTRY,{capability:LBA_RETRY_CAP.id,version:LBA_RETRY_CAP.version,subject:{kind:'letterboxd_archive_chunk',id:body.archiveSha256+':retry'},pin,ids:fields.codes},lbaRetryObservation(doc.value,fields.codes,pin,now));
+  if(preview.status!=='eligible')return lbaRefuse('not_eligible',409,{reason:preview.reason});
+  const issued=AdminActions.confirmAction(preview,{now,idempotencyKey:body.idempotencyKey,accepted:true});
+  if(issued.error)return lbaRefuse(issued.error,409);
+  const existing=await lbaActionRead(env,LBA_RETRY_PREFIX,body.idempotencyKey);
+  if(existing.record){
+   if(lbaSameIssued(existing.record.issued,issued))return json({mode:'identity_retry_confirm',writes:false,confirmation:existing.record.issued,retryable:plan.requeue.length,preview:{codes:fields.codes,requeue:plan.requeue}});
+   return lbaRefuse('idempotency_conflict',409);
+  }
+  const record={schemaVersion:1,kind:'letterboxd_identity_retry',idempotencyKey:body.idempotencyKey,state:'approved',issued,createdAt:now,archiveSha256:body.archiveSha256,codes:fields.codes,expected:validated.expected,documentEtag:doc.etag||null,receipt:null};
+  const saved=await lbaActionWrite(env,LBA_RETRY_PREFIX,body.idempotencyKey,record,null);
+  if(saved===null)return lbaRefuse('idempotency_conflict',409);
+  return json({mode:'identity_retry_confirm',writes:false,confirmation:issued,retryable:plan.requeue.length,preview:{codes:fields.codes,requeue:plan.requeue}});
+ }catch{return lbaRefuse('invalid_request',500);}
+ finally{lbaFreeSlot(started);}
+}
+async function lbaRetry(request,env,url){
+ const opened=await lbaRollbackBody(request);
+ if(opened.response)return opened.response;
+ let confirmation=opened.body.confirmation;
+ if(typeof confirmation==='string'){try{confirmation=JSON.parse(confirmation);}catch{return lbaRefuse('invalid_request',400);}}
+ const submitted=AdminActions.validateConfirmation(confirmation);
+ if(!submitted||submitted.capability!==LBA_RETRY_CAP.id)return lbaRefuse('invalid_request',400);
+ const started=Date.now();
+ if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
+ try{
+  let stored=await lbaActionRead(env,LBA_RETRY_PREFIX,submitted.idempotencyKey);
+  if(!stored.record||!stored.record.issued)return lbaRefuse('confirmation_missing',409);
+  if(stored.record.receipt)return json({mode:'identity_retry',writes:false,replayed:true,receipt:stored.record.receipt,state:stored.record.state});
+  const sha=stored.record.archiveSha256;
+  if(submitted.subject.id!==sha+':retry')return lbaRefuse('confirmation_mismatch',409);
+  const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
+  if(doc.value===undefined)return json({error:'storage_unavailable'},503);
+  if(!doc.value)return lbaRefuse('not_eligible',409);
+  const now=new Date().toISOString();
+  const pin=sha+':retry';
+  const resume=stored.record.state==='running';
+  const records=resume?lbaIssuedRecords(stored.record.issued):lbaRetryObservation(doc.value,stored.record.codes,pin,now).records;
+  if(!records)return lbaRefuse('invalid_request',400);
+  const fresh={pin,now,records,issues:records.map(record=>LetterboxdArchiveApply.retryIssue(record.id))};
+  const checked=AdminActions.checkSubmission(LBA_APPLY_REGISTRY,confirmation,fresh,{principal:lbaPrincipal(request,url),issued:stored.record.issued});
+  if(!checked.ok)return lbaRefuse(checked.refusal,checked.refusal==='confirmation_expired'||checked.refusal==='invalid_request'?400:409);
+  if(!resume){
+   const running={...stored.record,state:'running',startedAt:now};
+   const marked=await lbaActionWrite(env,LBA_RETRY_PREFIX,submitted.idempotencyKey,running,stored.etag);
+   if(marked===null)return lbaRefuse('in_progress',409);
+   stored={record:running,etag:marked.etag};
+   const live=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
+   if(live.value===undefined)return json({error:'storage_unavailable'},503);
+   const still=LetterboxdRatedAdmission.validatedRetryExpected(live.value,stored.record.codes,stored.record.expected);
+   if(!still.ok)return lbaRefuse(still.refusal==='record_changed'?'record_changed':'invalid_request',still.refusal==='record_changed'?409:400);
+  }
+  const result=await LetterboxdRatedCandidates.retryCandidates(env,{sha,codes:stored.record.codes,expected:stored.record.expected});
+  if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
+  if(result.error)return lbaRefuse(result.error,400);
+  if(!resume&&result.changed!==true&&result.outcomes&&result.outcomes.some(entry=>entry.outcome==='skipped_changed')&&!result.outcomes.some(entry=>entry.outcome==='written'||entry.outcome==='already_applied'))return lbaRefuse('record_changed',409);
+  const receipt=AdminActions.receiptOf({confirmation,capability:LBA_RETRY_CAP,startedAt:stored.record.startedAt||now,finishedAt:new Date().toISOString(),outcomes:result.outcomes});
+  const saved={...stored.record,state:receipt.state,finishedAt:receipt.finishedAt,receipt};
+  let durable;
+  try{durable=await lbaActionWrite(env,LBA_RETRY_PREFIX,submitted.idempotencyKey,saved,stored.etag);}
+  catch{return json({error:'storage_error'},500);}
+  if(durable===null){
+   const again=await lbaActionRead(env,LBA_RETRY_PREFIX,submitted.idempotencyKey);
+   if(again.record&&again.record.receipt)return json({mode:'identity_retry',writes:false,replayed:true,receipt:again.record.receipt,state:again.record.state,durable:true});
+   return json({error:'storage_error'},500);
+  }
+  return json({mode:'identity_retry',writes:result.changed===true,replayed:result.replay===true,receipt,state:receipt.state,outcomes:result.outcomes,durable:true});
+ }catch{return lbaRefuse('invalid_request',500);}
  finally{lbaFreeSlot(started);}
 }
 
@@ -433,6 +548,8 @@ async function lbaApplyRoute(request,env,url){
  const path=url.pathname;
  if(path==='/api/admin/letterboxd-archive/identity-status')return lbaIdentityStatus(request,env);
  if(path==='/api/admin/letterboxd-archive/identity-step')return lbaIdentityStep(request,env,url);
+ if(path==='/api/admin/letterboxd-archive/identity-retry-confirm')return lbaRetryConfirm(request,env);
+ if(path==='/api/admin/letterboxd-archive/identity-retry')return lbaRetry(request,env,url);
  if(path==='/api/admin/letterboxd-archive/rollback-confirm')return lbaRollbackConfirm(request,env,url);
  if(path==='/api/admin/letterboxd-archive/rollback')return lbaRollback(request,env,url);
  if(path==='/api/admin/letterboxd-archive/apply-confirm')return lbaApplyConfirm(request,env,url);
