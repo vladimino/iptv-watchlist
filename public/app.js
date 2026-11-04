@@ -8,7 +8,12 @@ let ratingsLoaded=false;
 const MECHANIC_LABELS={heist:'Ограбление',scam:'Афера',investigation:'Расследование',mystery:'Загадка',puzzle:'Головоломка',chase_escape:'Погоня / побег',rescue:'Спасение',escort_protection:'Защита / сопровождение',survival:'Выживание',siege:'Осада',ticking_clock:'Гонка со временем',expedition_discovery:'Экспедиция / исследование',plan_counterplan:'План / контрплан',multi_party_conflict:'Несколько сторон'};
 const normalizeMood=value=>typeof value==='string'?value.normalize('NFKC').toLocaleLowerCase('ru').replace(/\s+/g,' ').trim():'';
 const MOOD_LABELS={tense:'Напряжённый',dark:'Мрачный',light:'Лёгкий',adventurous:'Приключенческий',dynamic:'Динамичный',epic:'Масштабный',violent:'Жёсткий',funny:'Комедийный',black_humor:'Чёрный юмор',satirical:'Сатирический',absurd:'Абсурдный',romantic:'Романтический',warm:'Тёплый',touching:'Трогательный',inspiring:'Вдохновляющий',melancholic:'Меланхоличный',tragic:'Трагический',contemplative:'Созерцательный',surreal:'Сюрреалистический',eerie:'Мистический / пугающий',paranoid:'Параноидальный',noir:'Нуарный',military:'Военная тема',historical:'Историческая тема',family:'Семья и отношения',friendship:'Дружба и команда',political:'Политика и общество',revenge:'Месть и возмездие'};
+const MOOD_GROUPS={tone:['tense','dark','light','adventurous','dynamic','epic','funny','black_humor','satirical','romantic','warm','touching','inspiring','melancholic','tragic','contemplative','paranoid','eerie'],theme:['military','historical','political','family','friendship','revenge'],style:['noir','surreal','absurd'],property:['violent']};
+const MOOD_GROUP_ORDER=['tone','theme','style','property'];
+const MOOD_GROUP_LABELS={tone:'Настроение',theme:'Темы',style:'Стиль',property:'Особенности'};
+const GENERIC_THEME_IDS=new Set(['family','military','political','historical','revenge']);
 const moodLabel=id=>MOOD_LABELS[id]||id;
+function moodBucket(id){for(const bucket of MOOD_GROUP_ORDER)if(MOOD_GROUPS[bucket].includes(id))return bucket;return '';}
 const EXECUTION_FILTERS=[
  {id:'plot_engine',label:'Сюжетный двигатель',values:[['weak','слабый'],['medium','средний'],['strong','сильный']]},
  {id:'pace',label:'Темп',values:[['slow','медленный'],['medium','средний'],['fast','быстрый'],['variable','переменный']]},
@@ -410,9 +415,12 @@ function renderFacetBody(){
  const key=focused?facetInputKey(focused):'',index=focused?before.indexOf(focused):-1;
  const query=normalizeTitle(search?.value||'');
  const show=label=>!query||normalizeTitle(label).includes(query);
+ const optionHtml=(item,checked)=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(item.value)}"${checked?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`;
  const html=openFacetName==='execution'
   ?facetCatalog.execution.map(group=>{const options=group.options.filter(item=>show(item.label)||show(group.label));if(!options.length)return '';return `<section class="execution-facet"><h3 class="execution-name">${escapeHTML(group.label)}</h3>${options.map(item=>`<label class="genre-label"><input type="checkbox" data-execution="${escapeHTML(group.id)}" value="${escapeHTML(item.value)}"${state.execution[group.id].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('')}</section>`;}).join('')
-  :(facetCatalog[openFacetName]||[]).filter(item=>show(item.label)).map(item=>`<label class="genre-label"><input type="checkbox" value="${escapeHTML(item.value)}"${state[openFacetName].has(item.value)?' checked':''}><span>${escapeHTML(item.label)}</span><span class="genre-count">${item.count}</span></label>`).join('');
+  :openFacetName==='moods'
+  ?MOOD_GROUP_ORDER.map(bucket=>{const heading=MOOD_GROUP_LABELS[bucket],ids=new Set(MOOD_GROUPS[bucket]),options=(facetCatalog.moods||[]).filter(item=>ids.has(item.value)&&(show(item.label)||show(heading)));if(!options.length)return '';return `<section class="mood-facet-group" aria-labelledby="mood-group-${bucket}"><h3 class="mood-group-name" id="mood-group-${bucket}">${escapeHTML(heading)}</h3>${options.map(item=>optionHtml(item,state.moods.has(item.value))).join('')}</section>`;}).join('')
+  :(facetCatalog[openFacetName]||[]).filter(item=>show(item.label)).map(item=>optionHtml(item,state[openFacetName].has(item.value))).join('');
  body.innerHTML=html;
  if(!focused||typeof body.querySelectorAll!=='function')return;
  const inputs=[...body.querySelectorAll('input')];
@@ -723,7 +731,27 @@ function recommendation(film){
  const predictedBadge=p?`<div class="score-badge score-predicted${p.stale?' is-stale':''}" aria-label="Прогноз ${Number(p.predictedRating).toFixed(1)} из 5${p.stale?', ожидает пересчёта':chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${Number(p.predictedRating).toFixed(1)}</strong>${p.stale?'<small>ожидает пересчёта</small>':chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'';
  return `<div class="film-score-badges">${actualBadge}${predictedBadge}</div>`;
 }
-function moodTags(film){const ids=[...filmFacets(film).moods];return ids.length?`<div class="film-moods">${ids.slice(0,4).map(id=>`<span>${escapeHTML(moodLabel(id))}</span>`).join('')}</div>`:'';}
+function presentationGroups(film){const item=enrichment.films[String(film.id)]||{};if(Array.isArray(item.moodGroups))return item.moodGroups.filter(group=>Array.isArray(group)).map(group=>group.filter(id=>Object.hasOwn(MOOD_LABELS,id)));return [...filmFacets(film).moods].map(id=>[id]);}
+function presentationChips(film){
+ const lists={tone:[],theme:[],style:[],property:[]},seen={tone:new Set(),theme:new Set(),style:new Set(),property:new Set()};
+ for(const ids of presentationGroups(film)){const same=new Set(ids),list=same.has('funny')&&same.has('black_humor')?ids.filter(id=>id!=='funny'):ids;for(const id of list){const bucket=moodBucket(id);if(!bucket||seen[bucket].has(id))continue;seen[bucket].add(id);lists[bucket].push(id);}}
+ const genres=new Set(film.genres||[]);
+ let themes=lists.theme;
+ if(lists.tone.length)themes=themes.filter(id=>id!=='family');
+ if(genres.has('Военный'))themes=themes.filter(id=>id!=='military');
+ if(genres.has('Исторический'))themes=themes.filter(id=>id!=='historical');
+ const chips=[];
+ if(genres.has('Телефильм'))chips.push({bucket:'format',label:'Телефильм'});
+ const mechanic=(enrichment.films[String(film.id)]?.fingerprint?.plotMechanics||[]).find(id=>Object.hasOwn(MECHANIC_LABELS,id));
+ if(mechanic)chips.push({bucket:'mechanic',id:mechanic,label:MECHANIC_LABELS[mechanic]});
+ if(themes[0])chips.push({bucket:'theme',id:themes[0],label:moodLabel(themes[0])});
+ if(lists.style[0])chips.push({bucket:'style',id:lists.style[0],label:moodLabel(lists.style[0])});
+ if(lists.property[0])chips.push({bucket:'property',id:lists.property[0],label:moodLabel(lists.property[0])});
+ if(lists.tone[0])chips.push({bucket:'tone',id:lists.tone[0],label:moodLabel(lists.tone[0])});
+ if(chips.length===1&&chips[0].bucket==='theme'&&GENERIC_THEME_IDS.has(chips[0].id))return [];
+ return chips.slice(0,3);
+}
+function moodTags(film){const chips=presentationChips(film);return chips.length?`<div class="film-moods">${chips.map(chip=>`<span data-chip-bucket="${escapeHTML(chip.bucket)}"${chip.id?` data-chip-id="${escapeHTML(chip.id)}"`:''}>${escapeHTML(chip.label)}</span>`).join('')}</div>`:'';}
 function lastChanceBadge(film){
  if(!isLastChance(film))return '';
  const until=new Date(availabilityTime(film)),label=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(until);

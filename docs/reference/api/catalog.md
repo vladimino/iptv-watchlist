@@ -129,7 +129,7 @@ Nothing is stored: a new generation is evaluated afresh, so a film can be hidden
 | `films[].fingerprint` | The fingerprint facet (plot mechanics, mood ids, the general execution dimensions without `unknown` / `not_applicable`) when the stored fingerprint is the one the prediction was made from, otherwise `null` |
 | `channels` | One row per channel id with the number of returned films that have a show on it, for channel and period filters on the client |
 
-Not included on purpose: synopsis, aliases, the raw prediction and fingerprint objects, the mood vocabulary (served by `GET /api/enrichment/view`), and any ranking. Thresholds, ordering for display and franchise de-duplication are consumer decisions.
+Not included on purpose: synopsis, aliases, the raw prediction and fingerprint objects, the mood vocabulary and `moodGroups` (served by `GET /api/enrichment/view`), and any ranking. Thresholds, ordering for display and franchise de-duplication are consumer decisions. Catalog `moodIds` stay the full derived set used to match a Finds filter. The watchlist grid's one-to-three chips, including a hidden generic theme, are the [taxonomy contract](../domain/taxonomy.md) and use the view, not this route. A Finds card still shows at most two mechanic or mood labels from this payload.
 
 ## Consumers
 
