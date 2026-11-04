@@ -1,9 +1,9 @@
 # ADR 0087: A confirmed rated archive registers the short code, and only a verified movie admits the Film
 
-**Status:** Proposed
+**Status:** Accepted
 **Original decision date:** 2026-11-04
 **Recorded at:** 2026-11-04
-**Approval source:** not accepted. The offline delivery comments on [AIR-340](https://trello.com/c/zWxj3laC#comment-6aeb2fb8) and the [AIR-185 supplement](https://trello.com/c/zWxj3laC#comment-6aeb3174) authorize code, docs and synthetic tests only. They are not an acceptance of this record.
+**Approval source:** Explicit owner decision, 2026-11-04: [AIR-340 ADR 0087 acceptance](https://trello.com/c/zWxj3laC#comment-6aeb5bd58c6b564dd6ab475f). The owner accepted this architectural decision after independent review of PR #364 at `d4587d8732681855e2a75baa0e89a44f6e68a67c` and successful exact-head CI; no production ZIP import, identity-step or other production data writes were approved.
 **Related work:** [AIR-340](https://trello.com/c/zWxj3laC). Ratings reads follow [ADR 0084](0084-d1-authoritative-ratings.md). Watchlist admission stays [ADR 0086](0086-durable-watchlist-film-retention.md). [AIR-185](https://trello.com/c/PKvrDGKZ) is rejected and is not resumed. [AIR-320](https://trello.com/c/4cA5GlJn) and [AIR-321](https://trello.com/c/KHJM2gnK) are not prerequisites for this offline delivery.
 **Supersedes:** None
 **Superseded by:** None
@@ -44,11 +44,11 @@ This record authorizes no production write. Code rollback stops later identity s
 
 ## Evidence
 
-- **Original decision:** not accepted. Offline scope is the two comments on [AIR-340](https://trello.com/c/zWxj3laC) dated 2026-11-04.
+- **Owner decision:** Accepted on 2026-11-04; recorded in [AIR-340](https://trello.com/c/zWxj3laC#comment-6aeb5bd58c6b564dd6ab475f). The preceding AIR-340 comments authorized offline scope only.
 - **Implementation:** the ratings-backed archive read, the candidate chunk and its candidate receipt, the fenced identity step, the bounded page and movie fetches, the admissions object, the reader preference for a richer discovered film, and the explicit metadata continuation.
 - **Dated verification:** [synthetic rated-admission report, 4 November 2026](../evidence/letterboxd/air-340-rated-admission-2026-11-04.md). No production bucket was read.
 - **Uncertainty:** how many rated rows in a future owner ZIP lack an accepted identity is not measured here. The October count is not that number.
 
 ## Follow-ups
 
-Owner acceptance of this Proposed record is a separate gate. A production identity step, the enrichment continuation on that same route, and the projector upsert that would follow a written admissions object, each need their own explicit approval. AIR-321 remains the Film authority cutover. Finds eligibility for a rated Film stays a later card.
+Architecture accepted by the owner on 2026-11-04. A production identity step, the enrichment continuation on that same route, and the projector upsert that would follow a written admissions object, each still need their own explicit approval. AIR-321 remains the Film authority cutover. Finds eligibility for a rated Film stays a later card.
