@@ -34,3 +34,5 @@ A separate read-only query at 07:48:39 UTC. That query sent no write (`batches` 
 **Not done by this load.** Hold, seal, release, revert and a Ratings Task run are separate. A code rollback does not drop the rows and does not change the marker. Restoring the database is a Time Travel of the whole database and is its own approval.
 
 **Limits.** One committed command, then one read-back. No Worker route was called. The count of `{batch}` requests inside the command was not recorded. The read-back is the proof that generation 1, 475 document rows and 891 view rows are what landed.
+
+A later activation, not part of this load, set the marker to `d1` / `open` at 2026-11-04 08:02 UTC ([activation record](air-318-ratings-activate-2026-11-04.md)).
