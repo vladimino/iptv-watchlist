@@ -35,4 +35,6 @@ A separate read-only query at 08:02:59 UTC. That query sent no write (`batches` 
 
 **Not done by this activation.** Revert and a Ratings Task run are separate. A code rollback does not drop the rows and does not return the marker to `r2`. Returning an open marker to `r2` is `--revert --confirm r2` after the copy back to R2, and is its own approval. Restoring the database is a Time Travel of the whole database and is its own approval.
 
+A later manual MCP run, not a change to the 17:30 Europe/Madrid Ratings Task, finished at 2026-11-04 08:28 UTC and left this marker at generation 12 ([manual run](air-318-ratings-manual-run-2026-11-04.md)).
+
 **Limits.** One committed command, then one read-back. No Worker route was called. The intermediate hold was not read back on its own. The count of `{batch}` requests inside the command was not recorded.
