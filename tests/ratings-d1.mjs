@@ -9,7 +9,7 @@ import {webcrypto} from 'node:crypto';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import {activateDocuments, casOwned, importDocuments, listDocuments, overlayView, projectView, putOwned, readOwned, readRatingsAuthority, readRatingsRun, ratingsRunActivity, releaseHeld, revertMarker, routeRead, sealHeld} from '../src/ratings-d1.js';
 import {d1Standin} from './d1-standin.mjs';
-import {applyDecision} from '../scripts/ratings-domain-production.mjs';
+import {applyDecision, ratingsStatements} from '../scripts/ratings-domain-production.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-ratings-d1-'));
 let databases=0;
@@ -25,6 +25,7 @@ const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
 const ctx=vm.createContext({crypto:webcrypto,TextEncoder,console,Date,JSON,Map,Set,RatingsD1,structuredClone});
 const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+'\nLetterboxdFacts',ctx);
 
+assert.equal(ratingsStatements().length,9);
 assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/ratings-d1\.js','RatingsD1'\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/RatingsD1\.routeRead\(env,key\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/RatingsD1\.overlayView\(env,value\)/);
