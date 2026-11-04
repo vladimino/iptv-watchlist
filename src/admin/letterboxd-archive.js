@@ -3,10 +3,12 @@
 // the Worker reads it in memory within this request (LetterboxdArchiveZip), parses the four CSV files with the offline
 // parser (LetterboxdExport), matches them with the offline matcher (LetterboxdMatch) against single named R2 objects and
 // computes, with the baseline import's own merge functions, what an import would do to each fact. Nothing is stored: the
-// archive, its rows and the answer exist only in this request and its no-store response. The R2 reads go through a bucket
-// that has nothing but `get`; no key is listed, and fact-record GETs, including a redirect hop, stay within
-// PREVIEW_LIMITS.maxRecordReads. No outbound request is made and nothing is logged. This route does not write. A later
-// confirmed apply lives in src/admin/letterboxd-archive-apply.js and is not started by a successful preview.
+// archive, its rows and the answer exist only in this request and its no-store response. Fact documents follow the ratings
+// marker (ADR 0084): when it is d1 and cutover open, links, scan summaries and film records are read from D1 and are not
+// filled from R2. Other objects still use a bucket that has nothing but `get`. No key is listed, and fact-record reads,
+// including a redirect hop, stay within PREVIEW_LIMITS.maxRecordReads. No outbound request is made and nothing is logged.
+// This route does not write. A later confirmed apply lives in src/admin/letterboxd-archive-apply.js and is not started
+// by a successful preview.
 const LBA_PATH='/api/admin/letterboxd-archive/preview';
 const LBA_FORM_OVERHEAD=64*1024,LBA_NAME_MAX=255,LBA_DECLARED_MAX=40;
 const LBA_LID=/^[A-Za-z0-9_-]{1,80}$/,LBA_TMDB=/^[1-9]\d{0,11}$/;
@@ -31,6 +33,7 @@ const LBA_OMITTED={
  viewIndex:{key:'enrichment/view-index.json',effect:'rating_evidence_only'},
 };
 
+const lbaVersions=new WeakMap();
 function lbaReadOnly(env){
  const versions=new Map();
  const bucket={async get(key){
@@ -39,23 +42,53 @@ function lbaReadOnly(env){
   versions.set(key,object?String(object.etag??'present'):'absent');
   return object;
  }};
- return {env:{...env,BUCKET:bucket},versions};
+ const wrapped={...env,BUCKET:bucket};
+ lbaVersions.set(wrapped,versions);
+ return {env:wrapped,versions};
+}
+function lbaNote(env,key,token){const versions=lbaVersions.get(env);if(versions)versions.set(key,token);}
+// Ratings documents use the same contract as LetterboxdFacts.readJSON. An open D1 marker does not fall back to R2,
+// including when the document is absent. A marker that is not open still reads R2. A broken marker is unavailable.
+async function lbaRatingsRead(env,key){
+ if(typeof RatingsD1==='undefined'||!RatingsD1.ratingsMutableKey(key))return null;
+ try{
+  const owned=await RatingsD1.readOwned(env,key);
+  if(!owned.owned)return null;
+  const evidence=owned.value==null?'object_missing':'observed';
+  lbaNote(env,key,owned.etag||'absent');
+  return {evidence,value:owned.value,etag:owned.etag,authority:'d1'};
+ }catch{
+  lbaNote(env,key,'unavailable');
+  return {evidence:'unavailable',value:null,etag:null,authority:'d1'};
+ }
 }
 async function lbaRead(env,key){
+ const owned=await lbaRatingsRead(env,key);
+ if(owned)return owned;
  try{
   const object=await env.BUCKET.get(key);
-  if(!object)return {evidence:'object_missing',value:null,etag:null};
-  return {evidence:'observed',value:await object.json(),etag:typeof object.etag==='string'?object.etag:null};
- }catch{return {evidence:'unavailable',value:null,etag:null};}
+  if(!object)return {evidence:'object_missing',value:null,etag:null,authority:'r2'};
+  return {evidence:'observed',value:await object.json(),etag:typeof object.etag==='string'?object.etag:null,authority:'r2'};
+ }catch{return {evidence:'unavailable',value:null,etag:null,authority:'r2'};}
 }
 // The version of a key now, without parsing it: a changed etag between the first read and this one is drift.
 async function lbaVersion(env,key){
+ if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
+  try{
+   const owned=await RatingsD1.readOwned(env,key);
+   if(owned.owned)return owned.etag||'absent';
+  }catch{return 'unavailable';}
+ }
  try{
   const object=await env.BUCKET.get(key);
   if(!object)return 'absent';
   await adminDiscardBody(object);
   return typeof object.etag==='string'&&object.etag?object.etag:'present';
  }catch{return 'unavailable';}
+}
+async function lbaRatingsGate(env){
+ if(typeof RatingsD1==='undefined'||typeof RatingsD1.ratingsGate!=='function')return {ready:false,generation:null,error:false};
+ return RatingsD1.ratingsGate(env);
 }
 async function lbaBody(request,max){
  if(!request.body)return new Uint8Array(0);
@@ -91,6 +124,7 @@ async function lbaOutcomes(item,record,floors,origin){
 
 async function lbaCompare(env,parsed,origin){
  const {env:readEnv,versions}=lbaReadOnly(env);
+ const ratingsGate=await lbaRatingsGate(env);
  const sources={};
  let programme=null,publishedFence=null;
  try{
@@ -111,7 +145,7 @@ async function lbaCompare(env,parsed,origin){
   const key=lbaRatingsGenerationKey(pointer.value.generationId),generation=await lbaRead(readEnv,key);
   ratings=generation.value;sources.ratingsGeneration={evidence:generation.evidence,key};
  }else sources.ratingsGeneration={evidence:pointer.evidence==='unavailable'?'unavailable':'object_missing',key:LBA_RATINGS_POINTER_KEY,reason:pointer.evidence==='observed'?'not_projected':null};
- sources.links={evidence:links.evidence,key:LetterboxdFacts.FACTS_KEYS.links};
+ sources.links={evidence:links.evidence,key:LetterboxdFacts.FACTS_KEYS.links,authority:links.authority||'r2'};
  sources.filmsListSummary={evidence:filmsList.evidence,key:LetterboxdFacts.FACTS_KEYS.filmsList,observedAt:lbaSummaryValue(filmsList.value)?.observedAt??null};
  sources.watchlistSummary={evidence:watchlist.evidence,key:LetterboxdFacts.FACTS_KEYS.watchlist,observedAt:lbaSummaryValue(watchlist.value)?.observedAt??null};
  const receiptState=receipt.evidence==='unavailable'||intent.evidence==='unavailable'?{status:'unavailable',committedAt:null}
@@ -194,13 +228,19 @@ async function lbaCompare(env,parsed,origin){
  const first=new Map(fenced.map(key=>[key,versions.get(key)]));
  const again=await Promise.all(fenced.map(key=>lbaVersion(env,key)));
  const changed=fenced.filter((key,i)=>first.get(key)!==again[i]);
+ if(ratingsGate.error)changed.push('ratings_domain_unavailable');
+ else if(ratingsGate.ready){
+  const later=await lbaRatingsGate(env);
+  if(later.error||!later.ready||later.generation!==ratingsGate.generation)changed.push('ratings_domain_generation');
+ }
  if(publishedFence){
   let later=null;
   try{later=await PublishedEpg.currentGeneration(env);}catch{later=null;}
   if(!later||later.fence!==publishedFence)changed.push('published_epg_authority');
  }
+ const ratedAdmission=typeof LetterboxdRatedAdmission==='undefined'?null:LetterboxdRatedAdmission.classifyArchive({films:parsed.films,matches});
  return {
-  sources,omitted:LBA_OMITTED,receipt:receiptState,matches,hypothesis,indexSummary:index.summary,items,
+  sources,omitted:LBA_OMITTED,receipt:receiptState,matches,hypothesis,indexSummary:index.summary,items,ratedAdmission,
   recordReads:{limit,needed:toRead.length,done:recordReads},
   consistency:{status:changed.length?'drift':'stable',changed},
   reads:[...versions.keys()],
@@ -259,7 +299,7 @@ async function lbaIngest(request, allowed, now, signal){
 }
 
 async function adminLetterboxdArchiveRoute(request,env,url){
- if(url.pathname==='/api/admin/letterboxd-archive/apply-confirm'||url.pathname==='/api/admin/letterboxd-archive/apply'||url.pathname==='/api/admin/letterboxd-archive/rollback-confirm'||url.pathname==='/api/admin/letterboxd-archive/rollback')return lbaApplyRoute(request,env,url);
+ if(url.pathname==='/api/admin/letterboxd-archive/apply-confirm'||url.pathname==='/api/admin/letterboxd-archive/apply'||url.pathname==='/api/admin/letterboxd-archive/rollback-confirm'||url.pathname==='/api/admin/letterboxd-archive/rollback'||url.pathname==='/api/admin/letterboxd-archive/identity-step'||url.pathname==='/api/admin/letterboxd-archive/identity-status')return lbaApplyRoute(request,env,url);
  if(url.pathname!==LBA_PATH)return adminError('not_found',404);
  if(request.method!=='POST')return adminError('method_not_allowed',405);
  if(request.headers.get('Origin')!==url.origin)return adminError('origin_not_allowed',403);

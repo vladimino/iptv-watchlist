@@ -53,7 +53,30 @@ async function lbaChunkPlan(comparison,chunkIndex){
  if(!batch)return null;
  const records=[];
  for(const film of batch.films)records.push({id:film.lid,version:await adminDigest(LetterboxdArchiveApply.versionText(film))});
- return {batch,planHash:await adminDigest(LetterboxdArchiveApply.planText(batch.items)),records};
+ return {kind:'facts',batch,planHash:await adminDigest(LetterboxdArchiveApply.planText(batch.items)),records};
+}
+function lbaCandidateRows(comparison){
+ const rated=comparison&&comparison.ratedAdmission;
+ if(!rated)return [];
+ return [...(rated.pending||[]),...(rated.review||[])];
+}
+async function lbaCandidatePlan(comparison,chunkIndex,sha){
+ if(typeof LetterboxdRatedAdmission==='undefined')return null;
+ const facts=LetterboxdArchiveApply.splitBatches(LetterboxdArchiveApply.comparedFilms(comparison.items));
+ const batch=LetterboxdRatedAdmission.splitPending(lbaCandidateRows(comparison),facts.length).find(item=>item.chunk===chunkIndex);
+ if(!batch)return null;
+ const pin='archive-'+sha;
+ const records=[];
+ for(const film of batch.rows)records.push({id:film.code,version:await adminDigest([film.code,film.disposition,film.reason,film.rating].join('|'))});
+ const planHash=await adminDigest(JSON.stringify(batch.rows.map(film=>[film.code,film.disposition,film.reason,film.rating])));
+ return {kind:'candidates',batch,planHash,records,pin};
+}
+async function lbaResolvePlan(comparison,chunk,planHash,sha){
+ const fact=await lbaChunkPlan(comparison,chunk);
+ if(fact&&fact.planHash===planHash)return fact;
+ const candidates=await lbaCandidatePlan(comparison,chunk,sha);
+ if(candidates&&candidates.planHash===planHash)return candidates;
+ return null;
 }
 function lbaActionKey(prefix,idempotencyKey){return prefix+idempotencyKey+'.json';}
 async function lbaActionRead(env,prefix,idempotencyKey){
@@ -82,6 +105,11 @@ async function lbaOwnBaseline(env,sha,chunk,planHash){
  return {error:false,intent:intentHash===planHash,receipt:receiptHash===planHash,foreign:(!!intentHash&&intentHash!==planHash)||(!!receiptHash&&receiptHash!==planHash)};
 }
 function lbaImportObject(sha,chunk,kind){return 'letterboxd/imports/'+sha+'/chunks/'+chunk+'.'+kind+'.json';}
+async function lbaChunkReceipt(env,sha,chunk){
+ const fact=await lbaObject(env,lbaImportObject(sha,chunk,'receipt'));
+ if(fact.value||fact.value===undefined)return fact;
+ return lbaObject(env,lbaImportObject(sha,chunk,'candidates'));
+}
 async function lbaObject(env,key){
  try{const object=await env.BUCKET.get(key);return object?{value:await object.json(),etag:object.etag??null}:{value:null,etag:null};}
  catch{return {value:undefined,etag:null};}
@@ -108,8 +136,26 @@ async function lbaAttachBatches(answer,comparison,now){
   const source=batch.chunk===0&&comparison.receipt?comparison.receipt:{status:'not_read',committedAt:null};
   chunks.push({chunk:batch.chunk,films:batch.films.length,planHash,scopeFingerprint,changes:LetterboxdArchiveApply.changeCounts(batch.films),values:LetterboxdArchivePreview.summarizeFactValues(batch.films),confirmable,reason,receipt:{status:source.status,committedAt:source.committedAt??null}});
  }
- const reason=!chunks.length?'no_compared_films':drift?'facts_changed_during_read':!pin?'programme_unavailable':null;
- answer.batches={size:LetterboxdArchiveApply.APPLY_BATCH_SIZE,programmeRunId:pin,confirmable:chunks.some(chunk=>chunk.confirmable),reason,chunks};
+  const ratedRows=lbaCandidateRows(comparison);
+  const extra=typeof LetterboxdRatedAdmission==='undefined'?[]:LetterboxdRatedAdmission.splitPending(ratedRows,chunks.length);
+  const candidatePin='archive-'+answer.archive.sha256;
+  for(const batch of extra){
+   const records=[];
+   for(const film of batch.rows)records.push({id:film.code,version:await adminDigest([film.code,film.disposition,film.reason,film.rating].join('|'))});
+   const planHash=await adminDigest(JSON.stringify(batch.rows.map(film=>[film.code,film.disposition,film.reason,film.rating])));
+   let scopeFingerprint=null,confirmable=false,reason=null;
+   if(drift)reason='facts_changed_during_read';
+   else{
+    const preview=lbaApplyPreview(answer.archive.sha256,batch.chunk,candidatePin,records,new Date(now).toISOString());
+    scopeFingerprint=preview.scopeFingerprint||null;
+    confirmable=preview.status==='eligible'&&!!scopeFingerprint;
+    reason=confirmable?null:preview.reason||'not_eligible';
+   }
+   chunks.push({chunk:batch.chunk,kind:'candidates',films:batch.rows.length,planHash,pin:candidatePin,scopeFingerprint,changes:{},values:null,confirmable,reason,receipt:{status:'not_read',committedAt:null}});
+  }
+  const confirmable=chunks.some(chunk=>chunk.confirmable);
+  const reason=confirmable?null:!chunks.length?'no_compared_films':drift?'facts_changed_during_read':!pin?'programme_unavailable':null;
+ answer.batches={size:LetterboxdArchiveApply.APPLY_BATCH_SIZE,programmeRunId:pin,confirmable,reason,chunks};
 }
 
 // A replay of a stored baseline receipt is not a new success. A conflict stays failed and a newer fact stays skipped.
@@ -117,6 +163,8 @@ async function lbaAttachBatches(answer,comparison,now){
 function lbaFilmOutcome(entry,replay){
  if(entry.conflict)return {id:entry.lid,outcome:'failed',error:'conflict'};
  const outcomes=entry.outcomes||[];
+ if(outcomes.some(item=>item.fact==='candidate'&&item.outcome==='registered'))return {id:entry.lid,outcome:replay?'already_applied':'written'};
+ if(outcomes.some(item=>item.fact==='candidate'))return {id:entry.lid,outcome:'already_applied'};
  if(outcomes.some(item=>item.outcome==='new'||item.outcome==='replaces'))return {id:entry.lid,outcome:replay?'already_applied':'written'};
  if(outcomes.some(item=>item.outcome==='older'))return {id:entry.lid,outcome:'skipped_changed'};
  return {id:entry.lid,outcome:'already_applied'};
@@ -127,7 +175,46 @@ function lbaCommitOutcomes(result,ids){
  return ids.map(id=>byLid.get(id)||{id,outcome:'unknown'});
 }
 function lbaBaselineView(result){
- return {chunk:result.chunk,replay:result.replay===true,conflicts:result.conflicts||0,outcomes:result.outcomes||{}};
+ const view={chunk:result.chunk,replay:result.replay===true,conflicts:result.conflicts||0,outcomes:result.outcomes||{}};
+ if(result.kind==='candidates'){view.kind='candidates';view.fact='candidate';}
+ return view;
+}
+async function lbaRollbackCandidates(env,sha,chunk,receipt){
+ const key=lbaImportObject(sha,chunk,'candidates-rollback');
+ const done=await lbaObject(env,key);
+ if(done.value===undefined)throw new Error('storage_unavailable');
+ if(done.value)return {replay:true,facts:{restored:done.value.removed||0,superseded:0}};
+ const result=await LetterboxdRatedCandidates.rollbackCandidates(env,sha,receipt.codes||[]);
+ const body={schemaVersion:1,removed:result.removed.length,at:new Date().toISOString()};
+ const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ if(saved===null){const again=await lbaObject(env,key);if(again.value)return {replay:true,facts:{restored:again.value.removed||0,superseded:0}};}
+ return {replay:false,facts:{restored:result.removed.length,superseded:0}};
+}
+async function lbaIdentityStatus(request,env){
+ const opened=await lbaRollbackBody(request);
+ if(opened.response)return opened.response;
+ const sha=opened.body.archiveSha256;
+ if(!LBA_HEX64.test(sha||''))return lbaRefuse('invalid_request',400);
+ const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
+ if(doc.value===undefined)return json({error:'storage_unavailable'},503);
+ const status=LetterboxdRatedCandidates.statusOf(doc.value);
+ return json({mode:'identity_status',writes:false,...status});
+}
+async function lbaIdentityStep(request,env,url){
+ const opened=await lbaRollbackBody(request);
+ if(opened.response)return opened.response;
+ const body=opened.body;
+ if(body.accepted!==true||!LBA_HEX64.test(body.archiveSha256||''))return lbaRefuse('invalid_request',400);
+ const started=Date.now();
+ if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
+ try{
+  const result=await LetterboxdRatedCandidates.identityStep(env,{sha:body.archiveSha256,resume:body.resume===true});
+  if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
+  if(result.error==='storage_unavailable')return json({error:'storage_unavailable'},503);
+  if(result.error)return lbaRefuse('invalid_request',400);
+  return json({mode:'identity',writes:result.verified===true||result.enriched===true,verified:result.verified===true,enriched:result.enriched===true,fetched:result.fetched===true,pending:result.pending!==false,stop:result.stop||null,code:result.code||null,state:result.state||(result.verified?'verified':result.enriched?'enriched':'pending'),reason:result.reason||null,tmdb:result.tmdb||null,filmId:result.filmId||null,rating:result.verified===true?result.rating||null:null,phase:result.phase||null});
+ }catch{return json({error:'storage_error'},500);}
+ finally{lbaFreeSlot(started);}
 }
 
 async function lbaApplyConfirm(request,env,url){
@@ -142,10 +229,10 @@ async function lbaApplyConfirm(request,env,url){
   if(!LBA_CHUNK_OK(fields,chunk))return lbaRefuse('invalid_request',400);
   const comparison=await lbaCompare(env,opened.parsed,opened.origin);
   if(comparison.consistency?.status!=='stable')return lbaRefuse('record_changed',409);
-  const pin=lbaProgrammePin(comparison);
+  const plan=await lbaResolvePlan(comparison,chunk,fields.planHash,opened.origin.sha256);
+  if(!plan)return lbaRefuse('invalid_request',400);
+  const pin=plan.kind==='candidates'?plan.pin:lbaProgrammePin(comparison);
   if(!pin||fields.programmeRunId!==pin)return lbaRefuse('stale_pin',409,{pin});
-  const plan=await lbaChunkPlan(comparison,chunk);
-  if(!plan||plan.planHash!==fields.planHash)return lbaRefuse('invalid_request',400);
   const now=new Date(started).toISOString();
   const preview=lbaApplyPreview(opened.origin.sha256,chunk,pin,plan.records,now);
   if(preview.scopeFingerprint!==fields.scopeFingerprint)return lbaRefuse('record_changed',409);
@@ -154,13 +241,13 @@ async function lbaApplyConfirm(request,env,url){
   if(issued.error)return lbaRefuse(issued.error,409);
   const existing=await lbaActionRead(env,LBA_APPLY_PREFIX,fields.idempotencyKey);
   if(existing.record){
-   if(lbaSameIssued(existing.record.issued,issued))return json({mode:'apply_confirm',writes:false,confirmation:existing.record.issued,batch:{chunk,films:plan.batch.films.length,planHash:plan.planHash,scopeFingerprint:preview.scopeFingerprint}});
+   if(lbaSameIssued(existing.record.issued,issued))return json({mode:'apply_confirm',writes:false,confirmation:existing.record.issued,batch:{chunk,kind:plan.kind,films:plan.kind==='candidates'?plan.batch.rows.length:plan.batch.films.length,planHash:plan.planHash,scopeFingerprint:preview.scopeFingerprint}});
    return lbaRefuse('idempotency_conflict',409);
   }
   const record={schemaVersion:1,kind:'letterboxd_archive_apply',idempotencyKey:fields.idempotencyKey,state:'approved',issued,createdAt:now,startedAt:null,finishedAt:null,archiveSha256:opened.origin.sha256,generatedAt:opened.origin.generatedAt,generatedAtSource:opened.origin.generatedAtSource,chunk,planHash:plan.planHash,programmeRunId:pin,receipt:null,baseline:null};
   const saved=await lbaActionWrite(env,LBA_APPLY_PREFIX,fields.idempotencyKey,record,null);
   if(saved===null)return lbaRefuse('idempotency_conflict',409);
-  return json({mode:'apply_confirm',writes:false,confirmation:issued,batch:{chunk,films:plan.batch.films.length,planHash:plan.planHash,scopeFingerprint:preview.scopeFingerprint}});
+  return json({mode:'apply_confirm',writes:false,confirmation:issued,batch:{chunk,kind:plan.kind,films:plan.kind==='candidates'?plan.batch.rows.length:plan.batch.films.length,planHash:plan.planHash,scopeFingerprint:preview.scopeFingerprint}});
  }catch{return lbaRefuse('invalid_request',500);}
  finally{lbaFreeSlot(started);}
 }
@@ -187,10 +274,10 @@ async function lbaApplyCommit(request,env,url){
   if(stored.record.receipt)return json({mode:'apply',writes:false,replayed:true,receipt:stored.record.receipt,baseline:stored.record.baseline,state:stored.record.state});
   const comparison=await lbaCompare(env,opened.parsed,opened.origin);
   if(comparison.consistency?.status!=='stable')return lbaRefuse('record_changed',409);
-  const pin=lbaProgrammePin(comparison);
-  const plan=await lbaChunkPlan(comparison,stored.record.chunk);
-  if(!pin)return lbaRefuse('stale_pin',409);
-  if(!plan||plan.planHash!==stored.record.planHash)return lbaRefuse('record_changed',409);
+  const plan=await lbaResolvePlan(comparison,stored.record.chunk,stored.record.planHash,opened.origin.sha256);
+  const pin=plan&&plan.kind==='candidates'?plan.pin:lbaProgrammePin(comparison);
+  if(!pin||pin!==stored.record.programmeRunId)return lbaRefuse('stale_pin',409);
+  if(!plan)return lbaRefuse('record_changed',409);
   const now=new Date().toISOString();
   const own=await lbaOwnBaseline(env,opened.origin.sha256,stored.record.chunk,stored.record.planHash);
   if(own.error)return json({error:'storage_error'},500);
@@ -212,7 +299,9 @@ async function lbaApplyCommit(request,env,url){
   }
   let result;
   try{
-   result=await LetterboxdFacts.commitBaselineChunk(env,{origin:{archiveSha256:opened.origin.sha256,generatedAt:opened.origin.generatedAt,generatedAtSource:opened.origin.generatedAtSource},chunk:stored.record.chunk,items:plan.batch.items});
+   result=plan.kind==='candidates'
+    ?await lbaCommitCandidates(env,opened.origin,stored.record.chunk,plan)
+    :await LetterboxdFacts.commitBaselineChunk(env,{origin:{archiveSha256:opened.origin.sha256,generatedAt:opened.origin.generatedAt,generatedAtSource:opened.origin.generatedAtSource},chunk:stored.record.chunk,items:plan.batch.items});
   }catch(error){
    if(error instanceof LetterboxdFacts.FactsError&&error.code==='chunk_conflict')return lbaRefuse('idempotency_conflict',409);
    return json({error:'storage_error'},500);
@@ -229,6 +318,28 @@ async function lbaApplyCommit(request,env,url){
  finally{lbaFreeSlot(started);}
 }
 
+async function lbaCommitCandidates(env,origin,chunk,plan){
+ const key=lbaImportObject(origin.sha256,chunk,'candidates');
+ const existing=await lbaObject(env,key);
+ if(existing.value===undefined)throw new Error('storage_unavailable');
+ if(existing.value){
+  if(existing.value.itemsHash!==plan.planHash)throw new LetterboxdFacts.FactsError('chunk_conflict','This chunk was committed with other items');
+  return {replay:true,chunk,entries:lbaCandidateEntries(plan.batch.rows,null),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};
+ }
+ const registered=await LetterboxdRatedCandidates.registerCandidates(env,{sha:origin.sha256,generatedAt:origin.generatedAt,chunk,rows:plan.batch.rows});
+ const added=new Set(registered.added);
+ const body={schemaVersion:1,kind:'candidates',archiveSha256:origin.sha256,chunk,itemsHash:plan.planHash,origin,codes:plan.batch.rows.map(row=>row.code),registered:registered.added,kept:registered.kept,committedAt:new Date().toISOString()};
+ const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ if(saved===null){
+  const again=await lbaObject(env,key);
+  if(again.value&&again.value.itemsHash===plan.planHash)return {replay:true,chunk,entries:lbaCandidateEntries(plan.batch.rows,null),conflicts:0,outcomes:{registered:0,kept:plan.batch.rows.length},kind:'candidates'};
+  throw new LetterboxdFacts.FactsError('chunk_conflict','This chunk was committed with other items');
+ }
+ return {replay:false,chunk,kind:'candidates',conflicts:0,outcomes:{registered:registered.added.length,kept:registered.kept.length},entries:lbaCandidateEntries(plan.batch.rows,added)};
+}
+function lbaCandidateEntries(rows,added){
+ return rows.map(row=>({lid:row.code,outcomes:[{fact:'candidate',outcome:added&&added.has(row.code)?'registered':'kept'}]}));
+}
 function lbaRollbackPreview(sha,chunk,pin,now){
  const subject={kind:'letterboxd_archive_chunk',id:sha+':rollback:'+chunk};
  return AdminActions.previewAction(LBA_APPLY_REGISTRY,{capability:LBA_ROLLBACK_CAP.id,version:LBA_ROLLBACK_CAP.version,subject,pin,ids:['chunk']},{pin,now,records:[{id:'chunk',version:pin}],issues:[LetterboxdArchiveApply.rollbackIssue()]});
@@ -255,7 +366,7 @@ async function lbaRollbackConfirm(request,env,url){
  const started=Date.now();
  if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
  try{
-  const receipt=await lbaObject(env,lbaImportObject(body.archiveSha256,body.chunk,'receipt'));
+  const receipt=await lbaChunkReceipt(env,body.archiveSha256,body.chunk);
   if(receipt.value===undefined)return lbaRefuse('invalid_request',503);
   if(!receipt.value||typeof receipt.value.itemsHash!=='string'||!LBA_HEX64.test(receipt.value.itemsHash)||!receipt.value.origin)return lbaRefuse('not_eligible',409);
   const now=new Date(started).toISOString();
@@ -291,7 +402,7 @@ async function lbaRollback(request,env,url){
   if(stored.record.receipt)return json({mode:'rollback',writes:false,replayed:true,receipt:stored.record.receipt,state:stored.record.state});
   const sha=stored.record.archiveSha256,chunk=stored.record.chunk;
   if(submitted.subject.id!==sha+':rollback:'+chunk)return lbaRefuse('confirmation_mismatch',409);
-  const receipt=await lbaObject(env,lbaImportObject(sha,chunk,'receipt'));
+  const receipt=await lbaChunkReceipt(env,sha,chunk);
   if(receipt.value===undefined)return lbaRefuse('invalid_request',503);
   if(!receipt.value||receipt.value.itemsHash!==stored.record.itemsHash)return lbaRefuse('record_changed',409);
   const now=new Date().toISOString();
@@ -299,7 +410,11 @@ async function lbaRollback(request,env,url){
   const checked=AdminActions.checkSubmission(LBA_APPLY_REGISTRY,confirmation,fresh,{principal:lbaPrincipal(request,url),issued:stored.record.issued});
   if(!checked.ok)return lbaRefuse(checked.refusal,checked.refusal==='confirmation_expired'||checked.refusal==='invalid_request'?400:409);
   let result;
-  try{result=await LetterboxdFacts.rollbackBaselineChunk(env,{origin:receipt.value.origin,chunk});}
+  try{
+   result=receipt.value.kind==='candidates'
+    ?await lbaRollbackCandidates(env,sha,chunk,receipt.value)
+    :await LetterboxdFacts.rollbackBaselineChunk(env,{origin:receipt.value.origin,chunk});
+  }
   catch(error){if(error instanceof LetterboxdFacts.FactsError&&error.code==='not_committed')return lbaRefuse('not_eligible',409);return lbaRefuse('invalid_request',500);}
   const superseded=(result.facts&&result.facts.superseded)||0,restored=(result.facts&&result.facts.restored)||0;
   const outcome=result.replay? 'already_applied':restored? 'written':superseded? 'skipped_changed':'already_applied';
@@ -316,6 +431,8 @@ async function lbaApplyRoute(request,env,url){
  if(!lbaPrincipal(request,url).owner)return lbaRefuse('access_denied',403);
  if(!lbaBucket(env))return json({error:'storage_unavailable'},503);
  const path=url.pathname;
+ if(path==='/api/admin/letterboxd-archive/identity-status')return lbaIdentityStatus(request,env);
+ if(path==='/api/admin/letterboxd-archive/identity-step')return lbaIdentityStep(request,env,url);
  if(path==='/api/admin/letterboxd-archive/rollback-confirm')return lbaRollbackConfirm(request,env,url);
  if(path==='/api/admin/letterboxd-archive/rollback')return lbaRollback(request,env,url);
  if(path==='/api/admin/letterboxd-archive/apply-confirm')return lbaApplyConfirm(request,env,url);

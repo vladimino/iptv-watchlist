@@ -1,7 +1,7 @@
 // The archive preview page: one check per submit, the answer held in this tab's memory only. Leaving or resetting the page
 // drops it; nothing is written to storage, the URL or history. A write that has already left the browser is not undone by
 // Cancel, Escape, a new file or a failed response: the tab keeps that command and will not say the write never started.
-const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false};
+const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null};
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
@@ -28,6 +28,8 @@ function archiveHasOutcome() {
   for (const key in rollbackResult) if (rollbackResult[key] && !rollbackResult[key].pending) return true;
   const unknown = archiveLive.rollbackConfirmUnknown || {};
   for (const key in unknown) if (unknown[key]) return true;
+  if (archiveLive.identityStatus && archiveLive.identityStatus.present) return true;
+  if (archiveLive.identity) return true;
   return false;
 }
 
@@ -137,6 +139,8 @@ function archiveClearMemory() {
   archiveLive.rollbackResult = {};
   archiveLive.confirmUnknown = {};
   archiveLive.rollbackConfirmUnknown = {};
+  archiveLive.identity = null;
+  archiveLive.identityStatus = null;
   archiveLive.bound = null;
   archiveLive.stale = false;
   archiveLive.inflight = null;
@@ -332,7 +336,7 @@ function onArchiveConfirm(chunk) {
   archiveLive.confirmUnknown[chunk] = true;
   archiveRepaint();
   const pending = postArchiveConfirm(current.file, current.declared, {
-    chunk: String(chunk), planHash: batch.planHash, programmeRunId: archiveLive.answer.batches.programmeRunId,
+    chunk: String(chunk), planHash: batch.planHash, programmeRunId: batch.pin || archiveLive.answer.batches.programmeRunId,
     scopeFingerprint: batch.scopeFingerprint, idempotencyKey: archiveLive.keys[chunk], accepted: 'true',
   }, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
@@ -363,10 +367,57 @@ function onArchiveCommit(chunk) {
     if (run.seq !== archiveLive.seq) return result;
     if (result.mode !== 'ready') return archiveApplyFailed(result);
     const receipt = result.answer.receipt || {};
-    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, counts: receipt.counts || null};
+    archiveLive.committed[chunk] = {state: result.answer.state, replayed: result.answer.replayed === true, counts: receipt.counts || null, kind: result.answer.baseline && result.answer.baseline.kind || null};
     archiveLive.inflight = null;
     archiveLive.controller = null;
     archiveOfferReceipt();
+    archiveShow('ready', archiveLive.answer);
+    return result;
+  });
+  archiveLive.pending = pending;
+  return pending;
+}
+
+function onArchiveStatus() {
+  if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
+  const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
+  if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  const run = archiveBeginAction('status', 0);
+  const pending = postArchiveStatus({archiveSha256: sha}, {signal: run.signal}).then(result => {
+    if (run.seq !== archiveLive.seq) return result;
+    archiveLive.inflight = null;
+    archiveLive.controller = null;
+    if (result.mode !== 'ready') return archiveApplyFailed(result);
+    archiveLive.identityStatus = result.answer;
+    archiveLive.viewStep = 5;
+    archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
+    archiveShow('ready', archiveLive.answer);
+    return result;
+  });
+  archiveLive.pending = pending;
+  return pending;
+}
+
+function onArchiveIdentity() {
+  if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
+  const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
+  if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  archiveLive.viewStep = 5;
+  const resume = !!((archiveLive.identityStatus && archiveLive.identityStatus.stopped) || (archiveLive.identity && archiveLive.identity.stop));
+  const run = archiveBeginAction('identity', 0);
+  const pending = postArchiveIdentity({archiveSha256: sha, accepted: true, resume}, {signal: run.signal}).then(result => {
+    if (run.seq !== archiveLive.seq) return result;
+    if (result.mode !== 'ready') return archiveApplyFailed(result);
+    const answer = result.answer || {};
+    const stop = answer.stop && (answer.stop.reason || answer.stop);
+    archiveLive.identity = {verified: answer.verified === true, enriched: answer.enriched === true, stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null, pending: answer.pending !== false, phase: answer.phase || null, code: answer.code || null};
+    const status = archiveLive.identityStatus || {present: true, pending: 0, admitting: 0, enrichmentPending: 0, stopped: null};
+    status.present = true;
+    status.stopped = answer.stop || null;
+    if (answer.pending === false) {status.pending = 0; status.admitting = 0; status.enrichmentPending = 0;}
+    archiveLive.identityStatus = status;
+    archiveLive.inflight = null;
+    archiveLive.controller = null;
     archiveShow('ready', archiveLive.answer);
     return result;
   });
@@ -445,7 +496,7 @@ function onArchiveResultClick(event) {
   while (node && node !== archiveNode('#archive-result')) {
     if (node.getAttribute) {
       if (node.hasAttribute && node.hasAttribute('data-archive-nav')) {action = 'data-archive-nav'; chunk = node.getAttribute('data-archive-nav'); break;}
-      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon']) {
+      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon', 'data-archive-identity', 'data-archive-status']) {
         if (node.hasAttribute && node.hasAttribute(name)) {action = name; chunk = Number(node.getAttribute(name)); break;}
       }
     }
@@ -453,6 +504,8 @@ function onArchiveResultClick(event) {
     node = node.parentElement || node.parentNode;
   }
   if (action === 'data-archive-nav') return onArchiveNav(chunk);
+  if (action === 'data-archive-identity') return onArchiveIdentity();
+  if (action === 'data-archive-status') return onArchiveStatus();
   if (action === 'data-archive-confirm') return onArchiveConfirm(chunk);
   if (action === 'data-archive-commit') return onArchiveCommit(chunk);
   if (action === 'data-archive-rollback-confirm') return onArchiveRollbackConfirm(chunk);

@@ -403,6 +403,13 @@ function recordRatingChange(record,incoming,effective){
  // The owner's watched mark on a verified catalog film (ADR-0032) is the one writer that may create a record with only a trusted
  // TMDB alias: the identity is the catalog film the owner marked, never a Letterboxd id, a slug or a title. An existing record
  // that already holds tmdb:<n> is reused; no record is ever merged here.
+ // Movie ids already linked to a fact. A rated-archive identity check uses this so a second short code cannot claim the same movie.
+ async function knownMovieIds(env){
+  const {value}=await readJSON(env,FACTS_KEYS.links),ids=[];
+  if(!value||typeof value!=='object')return ids;
+  for(const alias of Object.keys(value)){const match=/^tmdb:([1-9]\d{0,11})$/.exec(alias);if(match)ids.push(match[1]);}
+  return ids;
+ }
  async function linkTmdbOnly(env,tmdb){
   if(!TMDB.test(String(tmdb)))throw new FactsError('invalid_identity','Invalid TMDB id');
   const alias='tmdb:'+tmdb;let factKey=null;
@@ -608,5 +615,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

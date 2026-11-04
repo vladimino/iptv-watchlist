@@ -34,6 +34,60 @@ function retainedWatchlistRecords(store,seen){
  }
  return records;
 }
+// A verified TMDB movie from a confirmed rated archive. The key is tmdb_<n>. There is no watchlist boolean and the short code is not the id.
+function retainedArchiveRecords(store,seen,tmdbSeen){
+ const admissions=store?.archiveAdmissions;
+ if(!admissions||typeof admissions!=='object'||Array.isArray(admissions))return [];
+ const records=[];
+ for(const id of Object.keys(admissions).sort()){
+  const item=admissions[id];
+  if(!item||typeof item.tmdb!=='string'||seen.has(id)||tmdbSeen.has(item.tmdb))continue;
+  if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
+  const record={id,tmdbId:item.tmdb,canonicalIdentity:'tmdb:'+item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null,externalIds:[{scheme:'tmdb',value:item.tmdb,trusted:true,conflicting:false}]};
+  if(item.synopsis)record.synopsis=item.synopsis;
+  if(item.synopsisFetchedAt)record.synopsisFetchedAt=item.synopsisFetchedAt;
+  if(item.metadataAt)record.metadataAt=item.metadataAt;
+  if(item.url)record.url=item.url;
+  if(Number.isInteger(item.runtime))record.runtime=item.runtime;
+  if(Array.isArray(item.genres))record.genres=item.genres;
+  if(Array.isArray(item.directors))record.directors=item.directors;
+  if(Array.isArray(item.actors))record.actors=item.actors;
+  if(item.peopleVersion)record.peopleVersion=item.peopleVersion;
+  if(item.peopleNamesVersion)record.peopleNamesVersion=item.peopleNamesVersion;
+  if(item.peopleLocalizedAt)record.peopleLocalizedAt=item.peopleLocalizedAt;
+  if(item.titleRu){record.titleRu=item.titleRu;record.titleStatus=item.titleStatus||'provisional';}
+  records.push(record);
+  seen.add(id);tmdbSeen.add(item.tmdb);
+ }
+ return records;
+}
+function sourceRichness(record){
+ if(!record||typeof record!=='object')return 0;
+ let score=0;
+ if(record.synopsis||record.synopsisFetchedAt)score+=2;
+ if((record.directors&&record.directors.length)||(record.actors&&record.actors.length)||record.peopleVersion===1)score+=2;
+ if(record.metadataAt||record.discoveredAt)score+=1;
+ return score;
+}
+function archiveItemFor(store,id,tmdb){
+ const admissions=store?.archiveAdmissions;
+ if(!admissions||typeof admissions!=='object')return null;
+ if(id&&admissions[id]&&!Object.prototype.hasOwnProperty.call(admissions[id],'watchlist'))return admissions[id];
+ const key=tmdb?'tmdb_'+tmdb:null;
+ return key&&admissions[key]&&!Object.prototype.hasOwnProperty.call(admissions[key],'watchlist')?admissions[key]:null;
+}
+// The map entry came from the rated-archive stub, not from a programme or watchlist row.
+function occupantIsArchiveStub(store,prior,archive){
+ if(!prior||!archive)return false;
+ if(storedFilmId(prior)!=='tmdb_'+archive.tmdb)return false;
+ const onList=[...(store.programme?.films||[]),...(store.watchlist?.films||[])].some(film=>film&&(String(film.id)===storedFilmId(prior)||String(film.tmdbId)===String(archive.tmdb)));
+ return !onList;
+}
+function trustedTmdbIds(films){
+ const ids=new Set();
+ for(const film of films||[])if(film?.tmdbId)ids.add(String(film.tmdbId));
+ return ids;
+}
 function primaryFilmIds(store){return new Set((store.programme?.films||store.watchlist?.films||[]).map(film=>film?.id==null?'':String(film.id)).filter(Boolean));}
 function sidecarKey(key){return key.endsWith('.json')?key.slice(0,-5)+LIFECYCLE_SIDECAR:key+LIFECYCLE_SIDECAR;}
 // `compatible` is the fingerprint transition verdict (ADR-0035) when the store supplies one; without it the strict rule applies.
@@ -64,6 +118,22 @@ function predictionFailure(store,id){return store.predictionRun?.failures?.[id]|
 function peopleOn(record){return [...(record?.directors||[]),...(record?.actors||[]),...(record?.people?.directors||[]),...(record?.people?.actors||[])];}
 function recordById(records,id){return records?recordsById(records).get(id)||null:null;}
 function catalogRecord(store,id){return recordsById(store.discoveredFilms).get(id)||null;}
+// The title the lifecycle view already took from a verified rated-archive Film. It does not admit the Film.
+function archiveRecord(store,id){
+ const item=store?.archiveAdmissions?.[id];
+ if(!item||typeof item.tmdb!=='string'||Object.prototype.hasOwnProperty.call(item,'watchlist'))return null;
+ if(String(id)!=='tmdb_'+item.tmdb)return null;
+ const record={id,tmdbId:item.tmdb,original:item.title||id,title:item.title||id,year:item.year??null};
+ if(item.synopsis)record.synopsis=item.synopsis;
+ if(item.metadataAt)record.metadataAt=item.metadataAt;
+ if(item.synopsisFetchedAt)record.synopsisFetchedAt=item.synopsisFetchedAt;
+ if(item.discoveredAt)record.discoveredAt=item.discoveredAt;
+ if(Array.isArray(item.directors))record.directors=item.directors;
+ if(Array.isArray(item.actors))record.actors=item.actors;
+ if(item.peopleVersion)record.peopleVersion=item.peopleVersion;
+ if(item.titleRu){record.titleRu=item.titleRu;record.titleStatus=item.titleStatus||'provisional';}
+ return record;
+}
 function presentTmdb(value){return value==null||value===''?null:String(value);}
 // Null does not hide a later id. Programme, metadata, watchlist, then the record itself. Two different ids stay a conflict.
 function identityEvidence(sources){
@@ -80,7 +150,7 @@ function reviewedTranslation(sources){
 function originalTitle(sources){for(const source of sources)if(source?.original)return source.original;return null;}
 function loadedSources(store,id,record){
  const metadata=cacheFor(store,id),programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
- return {metadata,programme,watchlist,record:record||catalogRecord(store,id)};
+ return {metadata,programme,watchlist,record:record||catalogRecord(store,id)||archiveRecord(store,id)};
 }
 function tmdbRetirementRecords(store,film){
  const lid=(film?.externalIds||[]).find(item=>item.scheme==='letterboxd'&&item.trusted&&!item.conflicting)?.value;
@@ -155,8 +225,10 @@ function legacyEnrichmentIds(store){
  const seen=new Set(),ids=[];
  const add=film=>{if(!film?.id)return;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))return;seen.add(identity);ids.push(String(film.id));};
  const primaryIds=primaryFilmIds(store);
- for(const film of store.programme?.films||store.watchlist?.films||[])add(film);
+ const primaryFilms=store.programme?.films||store.watchlist?.films||[];
+ for(const film of primaryFilms)add(film);
  for(const film of retainedWatchlistRecords(store,primaryIds))add(film);
+ for(const film of retainedArchiveRecords(store,primaryIds,trustedTmdbIds(primaryFilms)))add(film);
  for(const film of [...listOf(store.discoveredFilms)].sort((a,b)=>String(a.id).localeCompare(String(b.id),'en')))add(film);
  return ids.sort((a,b)=>a.localeCompare(b,'en'));
 }
@@ -261,15 +333,19 @@ function readLifecycle(store,now,options={}){
  const resolution=store.discoveryResolution||{};
  const films=new Map();
  const primary=store.programme?.films||store.watchlist?.films||[];
- for(const record of [...primary,...retainedWatchlistRecords(store,primaryFilmIds(store))]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
+ const seenIds=primaryFilmIds(store);
+ for(const record of [...primary,...retainedWatchlistRecords(store,seenIds),...retainedArchiveRecords(store,seenIds,trustedTmdbIds(primary))]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
  // AIR-297 (ADR 0057): the owner-approved TMDB retirements, only when the object exists. Absent, the view is what it was.
  const retirements=store.tmdbRetirements==null?null:applyTmdbRetirements([...films.values()],store.tmdbRetirements,film=>tmdbRetirementRecords(context,film));
  if(retirements)for(const film of retirements.films)films.set(storedFilmId(film),film);
  for(const record of listOf(store.discoveredFilms)){
-  if(films.has(String(record.id)))continue;
   const facts=filmFacts(record,context,resolution,now),incoming=projectFilm({...facts,letterboxdId:null,localId:null});
   if(!incoming)continue;
   const same=facts.tmdbId?[...films.values()].find(film=>(film.externalIds||[]).some(item=>item.scheme==='tmdb'&&item.trusted&&!item.conflicting&&item.value===facts.tmdbId)):null;
+  // A thin rated-archive stub uses the same stored id as a discovered film. Keep the discovered metadata and credits.
+  const archive=archiveItemFor(store,String(record.id),facts.tmdbId),prior=same||(films.has(String(record.id))?[...films.values()].find(film=>storedFilmId(film)===String(record.id)):null);
+  if(occupantIsArchiveStub(store,prior,archive)&&sourceRichness(record)>sourceRichness(archive)){films.delete(storedFilmId(prior));films.set(storedFilmId(incoming),incoming);continue;}
+  if(films.has(String(record.id)))continue;
   if(!same){films.set(storedFilmId(incoming),incoming);continue;}
   const linked=linkFilms(same,incoming,now);
   if(!linked.ok){films.set(storedFilmId(incoming),incoming);continue;}
@@ -294,7 +370,7 @@ function readLifecycle(store,now,options={}){
   candidates.push({key,film:null,identity:identityState({now,decision,discovery:decision.discovery||null,tmdbId:decision.tmdbId?String(decision.tmdbId):null}),excluded:false,missingCatalog:decision.status==='verified'});
  }
  const people=new Map();
- const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn)];
+ const embedded=[...peopleOn(store.programme),...(store.programme?.films||[]).flatMap(peopleOn),...(store.watchlist?.films||[]).flatMap(peopleOn),...listOf(store.metadata).flatMap(peopleOn),...listOf(store.discoveredFilms).flatMap(peopleOn),...listOf(store.archiveAdmissions).flatMap(peopleOn)];
  for(const person of embedded){if(!person?.id||people.has(person.id))continue;const view=personView(personFacts(person,context,now));if(view)people.set(person.id,view);}
  const filmList=[...films.values()].sort((a,b)=>storedFilmId(a).localeCompare(storedFilmId(b),'en'));
  const aliasConflicts=markSlugCollisions(filmList);

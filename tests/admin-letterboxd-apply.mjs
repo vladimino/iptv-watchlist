@@ -119,8 +119,10 @@ async function observation(factKey, fact, value, observedAt, source) {
   assert.equal(adds[0].outcomes.rating, 'new');
   assert.equal(seen.body.details.identity.rows.some(row => row.code === 'twin'), true, 'an ambiguous title stays held');
   assert.equal(seen.body.details.conflicts.rows.some(row => row.code === 'clash'), true);
-  assert.equal(seen.body.batches.chunks.length, 1);
-  assert.equal(seen.body.batches.chunks[0].films, 3, 'only the three compared films can be approved');
+  assert.equal(seen.body.batches.chunks.length, 2, 'the ambiguous rated film is a candidate chunk; the alias conflict stays on the fact path');
+  assert.equal(seen.body.batches.chunks[0].films, 3, 'only the three compared films can be approved as facts');
+  assert.equal(seen.body.batches.chunks[1].kind, 'candidates');
+  assert.equal(seen.body.batches.chunks[1].films, 1);
   assert.equal(seen.body.batches.chunks[0].confirmable, true);
   assert.equal(calls.some(call => call.startsWith('put:')), false, 'preview writes nothing');
 
