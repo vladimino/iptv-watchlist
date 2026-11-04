@@ -16,7 +16,7 @@ A future snapshot-free, target-scoped planner would require a separate implement
 - No film name, code, URI or rating reaches standard output, `report.json`, a commit message, a PR or a card; they exist only in `plan.jsonl` and the private `*.json` results of the remote steps.
 - Only films the export matching marks `accepted` are planned; `candidate`, `ambiguous`, `conflict`, `provisional` and `unmatched` films are counted, never imported by this CLI.
 - An export never sets `watched: false` or `watchlist: false`; absence is not an observation.
-- The CLI Worker route writes fact records, the link index, the conflict list, the view-index projection and `letterboxd/imports/<archive sha256>/chunks/<n>.intent.json`, `<n>.receipt.json` and `<n>.rollback.json`. The browser candidate path, which this CLI does not call, also writes `letterboxd/imports/<archive sha256>/rated-candidates.json`, `chunks/<n>.candidates.json` and, only after an explicit identity step, `letterboxd/admissions/verified-films.json` plus one tmdb-only fact ([ADR 0087](../adr/0087-rated-archive-film-admission.md), Proposed).
+- The CLI Worker route writes fact records, the link index, the conflict list, the view-index projection and `letterboxd/imports/<archive sha256>/chunks/<n>.intent.json`, `<n>.receipt.json` and `<n>.rollback.json`. The browser candidate path, which this CLI does not call, also writes `letterboxd/imports/<archive sha256>/rated-candidates.json`, `chunks/<n>.candidates.json` and, only after an explicit identity step, `letterboxd/admissions/verified-films.json` plus one tmdb-only fact ([ADR 0087](../adr/0087-rated-archive-film-admission.md), Accepted).
 
 ## Inputs
 
