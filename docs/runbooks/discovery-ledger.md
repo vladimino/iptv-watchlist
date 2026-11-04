@@ -164,8 +164,10 @@ The production split replaces the Worker's own first bounded commit, which would
 ## Chunk memory diagnostics (AIR-342)
 
 - **Confirm the cause.** Telemetry of the resolve request or the `POST /mcp` step shows `outcome: exceededMemory`. A status left at `checkpoint: cheap_pass` with an `orphaned` continuation is a chunk that died after its cheap pass. Read it with `epg_pipeline_status`; never repeat the chunk to observe it.
-- **Offline profile.** Run `npm run build`, then `node --expose-gc scripts/discovery-chunk-profile.mjs [--items 37000] [--films 3300] [--decisions 4400]`.
+- **Offline profile.** Run `npm run build`, then `node --expose-gc scripts/discovery-chunk-profile.mjs [--items 37000] [--films 3300] [--decisions 4400] [--call chunk|status|footer] [--interrupted]`.
   - It replays one chunk of the built Worker against a synthetic generation of production size. It makes no request and needs no data.
+  - `--call status` and `--call footer` replay the two status reads. `--interrupted` stores the interrupted state, in which the pipeline status also evaluates the recovery permit ([AIR-344 evidence](../evidence/discovery/air-344-status-memory-2026-11-04.md)).
+- **Status reads.** An `exceededMemory` end of `GET /api/enrichment/pipeline/status`, or an `epg_pipeline_status` slower than the client's 60 s, makes a recovery preflight unreadable. Do not confirm without a fresh `eligible`.
   - Compare the smallest `--max-old-space-size` a run completes in; the script header shows the loop.
 - **Reading the figures.** Node heap ranks code versions; it is not workerd's 128 MB limit. The dated reading is in the [AIR-342 evidence](../evidence/discovery/air-342-chunk-memory-2026-11-04.md).
 

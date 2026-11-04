@@ -1318,13 +1318,14 @@ async function footerStatus(env){
  const pinned=await pinEpg(env);
  let ratingsRun=null,ratingsBlocked=null;
  if(typeof LetterboxdRatings!=='undefined'){const state=await LetterboxdRatings.migrationState(env);if(state.migration==='complete')ratingsRun=LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now());else ratingsBlocked={migration:state.migration};}
- const [profile,index,report,catalog,storedQueue,run,lease,source,decisions,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease]=await Promise.all([
-  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(env,'epg/discovery-resolution.json'),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json'),loadJSON(env,'epg/resolver-lease.json')
+ // AIR-344: the ledger is streamed and counted once, without keeping its items, before the other records are read.
+ const decisions=await loadJSON(env,'epg/discovery-resolution.json');
+ const ledger=await ledgerStatusAggregates(pinned,decisions||{},Date.now());
+ const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease]=await Promise.all([
+  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json'),loadJSON(env,'epg/resolver-lease.json')
  ]);
- const coverage=canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile)),items=source?.items||[],queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
- const recognized=new Set();
- for(const candidate of items){const decision=decisions?.[candidate.key];if(decision?.status==='verified'&&decision.tmdbId)recognized.add(String(decision.tmdbId));}
- const counts=ledgerCounts(source,decisions||{},Date.now());
+ const coverage=canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile)),queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
+ const {recognized,counts}=ledger;
  const pendingRecognition=counts.currentUnresolved,historicalUnresolved=counts.historicalUnresolved+counts.expiredInactive;
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';

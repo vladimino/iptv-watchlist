@@ -51,30 +51,57 @@ function recordUncertain(decisions,candidate,status,now=Date.now()){
  const carried=ownerMarkerCarry(previous);
  decisions[candidate.key]={status,attempts,evidenceKey,lastAttemptAt:new Date(now).toISOString(),checkedAt:new Date(now).toISOString(),retryAt:terminal?null:new Date(now+Math.min(7,2**(attempts-1))*86400000).toISOString(),terminalReason:terminal?'repeated_uncertain_match':null,...carried,...(Object.keys(carried).length&&previous.scoring&&typeof previous.scoring==='object'?{scoring:previous.scoring}:{})};
 }
+function emptyDiscoveryCounts(){return {ledgerTotal:0,currentUnresolved:0,readyNow:0,retryBackoff:0,historicalUnresolved:0,ambiguous:0,terminalNoMatch:0,rejectedNonfilm:0,expiredInactive:0};}
+function countDiscoveryItem(counts,candidate,decision,now){
+ counts.ledgerTotal++;
+ const activity=candidateActivity(candidate,now);
+ if(screenedNonfilmReason(candidate,decision)){counts.rejectedNonfilm++;return;}
+ if(decision?.status==='verified')return;
+ if(activity==='expired'){counts.expiredInactive++;return;}
+ if(activity!=='current'){counts.historicalUnresolved++;return;}
+ if(decision?.terminalReason&&(!decision.evidenceKey||decision.evidenceKey===candidateEvidence(candidate))){counts.terminalNoMatch++;return;}
+ counts.currentUnresolved++;
+ if(decision?.status==='ambiguous')counts.ambiguous++;
+ else if(decision?.retryAt&&Date.parse(decision.retryAt)>now)counts.retryBackoff++;
+ else counts.readyNow++;
+}
 function discoveryCounts(items,decisions,now=Date.now()){
- const counts={ledgerTotal:items.length,currentUnresolved:0,readyNow:0,retryBackoff:0,historicalUnresolved:0,ambiguous:0,terminalNoMatch:0,rejectedNonfilm:0,expiredInactive:0};
- for(const candidate of items){
-  const decision=decisions?.[candidate.key],activity=candidateActivity(candidate,now);
-  if(screenedNonfilmReason(candidate,decision)){counts.rejectedNonfilm++;continue;}
-  if(decision?.status==='verified')continue;
-  if(activity==='expired'){counts.expiredInactive++;continue;}
-  if(activity!=='current'){counts.historicalUnresolved++;continue;}
-  if(decision?.terminalReason&&(!decision.evidenceKey||decision.evidenceKey===candidateEvidence(candidate))){counts.terminalNoMatch++;continue;}
-  counts.currentUnresolved++;
-  if(decision?.status==='ambiguous')counts.ambiguous++;
-  else if(decision?.retryAt&&Date.parse(decision.retryAt)>now)counts.retryBackoff++;
-  else counts.readyNow++;
- }
+ const counts=emptyDiscoveryCounts();
+ for(const candidate of items)countDiscoveryItem(counts,candidate,decisions?.[candidate.key],now);
  return counts;
 }
 // AIR-220 / ADR 0034: counts of a bounded ledger. Per-activity counters cover the active ledger; `ledgerTotal` adds the archived
 // keys that are not in it (`uniqueArchivedItems`, computed by the writer), so a leftover archive copy is never counted twice.
 // The `archive` block comes from the active ledger's own field: status never reads archive segments.
-function ledgerCounts(source,decisions,now=Date.now()){
- const counts=discoveryCounts(source?.items||[],decisions,now),archive=source?.archive;
+function ledgerCounts(source,decisions,now=Date.now()){return ledgerCountsFrom(source,discoveryCounts(source?.items||[],decisions,now));}
+function ledgerCountsFrom(source,counts){
+ const archive=source?.archive;
  if(!source?.ledgerMode)return counts;
  const unique=Number.isInteger(archive?.uniqueArchivedItems)?archive.uniqueArchivedItems:0;
  return {...counts,ledgerTotal:counts.ledgerTotal+unique,archive:{ledgerMode:source.ledgerMode,activeItems:counts.ledgerTotal,uniqueArchivedItems:unique,manifestId:archive?.manifestId??null,segments:archive?.segments??0,items:archive?.items??0,bytes:archive?.bytes??0}};
+}
+// AIR-344: the status readers' view of the pinned ledger, read once. An R2 ledger is streamed item by item and no item is
+// kept: each one is counted as it is read (the same rules as ledgerCounts) and the per-status tallies are taken from the
+// decisions, so the document is never held whole. A D1-routed or non-streamable ledger is counted from its parsed items.
+// `confirmed` is every verified tmdbId (String of it, as the pipeline status counts), `recognized` only the truthy ones
+// (as the footer counts). The returned `source` is the ledger's wrapper (programmeRunId, archive, ...) without items.
+async function ledgerStatusAggregates(pinned,decisions,now=Date.now()){
+ const counts=emptyDiscoveryCounts(),statuses={},confirmed=new Set(),recognized=new Set(),map=decisions||{};
+ const add=candidate=>{
+  const decision=map[candidate?.key];
+  countDiscoveryItem(counts,candidate,decision,now);
+  if(decision){statuses[decision.status]=(statuses[decision.status]||0)+1;if(decision.status==='verified'){confirmed.add(String(decision.tmdbId));if(decision.tmdbId)recognized.add(String(decision.tmdbId));}}
+ };
+ let streamed=false,loaded;
+ try{loaded=await loadJSON(pinned,'epg/discovery-latest.json',{item:item=>{streamed=true;add(item);return null;}});}
+ catch(e){
+  // A stored document without an `items` array is refused by the streamed reader; a whole parse reads it as before.
+  if(e?.message!=='Discovery ledger JSON is incomplete')throw e;
+  streamed=false;loaded=await loadJSON(pinned,'epg/discovery-latest.json');
+ }
+ if(!streamed)for(const item of loaded?.items||[])add(item);
+ const source=loaded?{...loaded,items:undefined}:null;
+ return {source,counts:ledgerCountsFrom(source,counts),statuses,confirmed,recognized};
 }
 // The public status still reports the retired variant-search counters. They stay zero: the Worker does not plan those searches.
 const VARIANT_DIAGNOSTIC={variantCalls:0,variantErrors:0,variantThrottled:0,variantSkipped:0};
@@ -1042,6 +1069,10 @@ function assessInterruptedRecovery({now,epgStage,publishedRunId,programmeRunId,s
  if(future(status?.retryAt))return refused('backoff');
  return {permit:'eligible',reason:'eligible',cause:null,budget:record.remainingChunks,proof:proof.proof};
 }
+// The recovery verdict reads the live generation's ledger itself, with the unpinned `env`, and never reuses the pinned
+// read a status caller made: the two can differ (a generation published between them, or a D1-published generation
+// beside an R2 ledger), and that difference is the `generation_mismatch` refusal. AIR-344 only changed how: the ledger is
+// streamed and its items are dropped as they are read, so just its wrapper (the run id) is kept.
 async function interruptedRecoveryFacts(env,{now,current,lease,published,programmeRunId}){
  let authority;
  if(typeof DiscoveryAuthority==='undefined')authority={mode:'r2',ready:false,held:false,cutover:null,transfer:'idle'};
@@ -1049,7 +1080,10 @@ async function interruptedRecoveryFacts(env,{now,current,lease,published,program
  const blocked=!!authority?.unavailable||authority?.transfer==='loading';
  let status=null,sync=null,source=null,diagnostics=null;
  if(!blocked){
-  try{[status,sync,source,diagnostics]=await Promise.all([loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'sync.json'),loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY)]);}
+  try{
+   [status,sync,diagnostics]=await Promise.all([loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'sync.json'),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY)]);
+   source=await loadJSON(env,'epg/discovery-latest.json',{item:()=>null});
+  }
   catch{authority={unavailable:true};}
  }
  else{try{sync=await loadJSON(env,'sync.json');}catch{sync=null;}}
@@ -1266,9 +1300,19 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  await closeContinuationStep(env,step,started,response,null,persistStep);
  return response;
 }
+// The first catalog entry, in insertion order, whose id is `id`: Object.values(catalog).find without copying the catalog.
+function catalogFilmById(catalog,id){
+ for(const key in catalog||{}){const film=catalog[key];if(String(film?.id)===id)return film;}
+ return undefined;
+}
 async function discoveryPipelineStatus(env){
  const pinned=await pinEpg(env);
- const [source,decisions,catalog,last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics,lease]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY),loadJSON(env,DISCOVERY_LEASE_KEY)]);
+ // AIR-344: the small records are read together; the decisions, the ledger and the catalog one after another, and the
+ // ledger is streamed and counted without keeping its items, so no two large documents are held at once.
+ const [last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics,lease]=await Promise.all([loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY),loadJSON(env,DISCOVERY_LEASE_KEY)]);
+ const decisionsMap=await loadJSON(pinned,'epg/discovery-resolution.json')||{};
+ const {source,counts,statuses,confirmed}=await ledgerStatusAggregates(pinned,decisionsMap,Date.now());
+ const catalog=await loadJSON(pinned,'epg/discovered-films.json');
  // AIR-154: the raw record cannot tell a live writer from an orphan; the derived health can.
  const continuationHealthReport=healthSummary(continuationHealth(continuation,lease,last,Date.now(),pinned.epgPin?.programmeRunId||null));
  let interruptedRecovery=null;
@@ -1276,8 +1320,7 @@ async function discoveryPipelineStatus(env){
   try{interruptedRecovery=await interruptedRecoveryFacts(env,{now:Date.now(),current:continuation,lease,published:pinned.epgPin?.programmeRunId||null,programmeRunId:(await loadJSON(env,'programme.json'))?.runId??null});}
   catch{interruptedRecovery={permit:'refused',reason:'owner_investigation',cause:'unreadable',budget:null,proof:null};}
  }
- const items=source?.items||[],decisionsMap=decisions||{},counts=ledgerCounts(source,decisionsMap,Date.now()),statuses={},confirmed=new Set();for(const candidate of items){const state=decisionsMap[candidate.key];if(state){statuses[state.status]=(statuses[state.status]||0)+1;if(state.status==='verified')confirmed.add(String(state.tmdbId));}}
- const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
+ const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=catalogFilmById(catalog,id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
  if(interruptedRecovery)pipeline.interruptedRecovery=interruptedRecovery;
  if(discoveryExecutorMode(env)!=='external')pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation);
  return pipeline;

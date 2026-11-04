@@ -20,6 +20,11 @@ import {fileURLToPath} from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2), option = (name, fallback) => {const index = args.indexOf('--' + name); return index < 0 ? fallback : Number(args[index + 1]);};
 const ITEMS = option('items', 37000), FILMS = option('films', 3300), DECISIONS = option('decisions', 4400), LIMIT = option('limit', 24);
+// --call chunk (default) runs one resolver chunk; --call status reads GET /api/enrichment/pipeline/status and --call footer
+// the footer status (AIR-344). --interrupted stores a paused/interrupted continuation with a cheap_pass status, the state
+// in which the pipeline status also evaluates the recovery permit.
+const CALL = (() => {const index = args.indexOf('--call'); return index < 0 ? 'chunk' : args[index + 1];})(), INTERRUPTED = args.includes('--interrupted');
+if (!['chunk', 'status', 'footer'].includes(CALL)) {console.error('--call is chunk, status or footer'); process.exit(2);}
 if (typeof global.gc !== 'function') {console.error('Run with node --expose-gc'); process.exit(2);}
 const bundle = path.join(ROOT, 'dist/server/index.js');
 if (!fs.existsSync(bundle)) {console.error('Run npm run build first'); process.exit(2);}
@@ -55,6 +60,11 @@ for (const key of ['epg/discovered-films.json', 'epg/generations/' + RUN + '/dis
 put('epg/discovery-resolution.json', decisions);
 const programme = {runId: RUN, updatedAt: new Date(NOW).toISOString(), films: []};
 for (const key of ['programme.json', 'epg/generations/' + RUN + '/programme.json']) put(key, programme);
+put('sync.json', {stage: 'complete', runId: RUN});
+if (INTERRUPTED) {
+  put('epg/resolver-continuation.json', {stage: 'paused', reason: 'interrupted', at: new Date(NOW - H).toISOString(), hopId: 'hop-1', remainingChunks: 12, programmeRunId: RUN, nextCatchUpAt: null, retryAt: null});
+  put('epg/discovery-status.json', {schemaVersion: 2, stage: 'partial', programmeRunId: RUN, hopId: 'hop-1', checkpoint: 'cheap_pass', touched: 3000, checked: 0, tmdbCalls: 0});
+}
 const sizes = {ledgerBytes: store.get('epg/discovery-latest.json').buf.length, catalogBytes: store.get('epg/discovered-films.json').buf.length, decisionsBytes: store.get('epg/discovery-resolution.json').buf.length};
 
 let since = 0, peak = 0;
@@ -97,6 +107,7 @@ for (const name of ['saveDiscoveredFilms', 'releaseLedgerDetail', 'refreshPredic
 global.gc();
 const start = sample(); since = start; peak = start;
 const started = Date.now();
-const summary = await vm.runInContext(`resolveDiscoveryBatch(env,report,${LIMIT})`, context);
+const result = await vm.runInContext(CALL === 'status' ? 'discoveryPipelineStatus(env)' : CALL === 'footer' ? 'footerStatus(env)' : `resolveDiscoveryBatch(env,report,${LIMIT})`, context);
+const summary = CALL === 'chunk' ? result : CALL === 'status' ? {stage: 'status', candidates: result.candidates, readyNow: result.readyNow, verifiedFilms: result.verifiedFilms, interruptedRecovery: result.interruptedRecovery?.permit ?? null} : {stage: 'footer', recognizedFilms: result.epgTmdb?.recognizedFilms, pendingRecognition: result.epgTmdb?.pendingRecognition};
 mark('end');
-console.log(JSON.stringify({items: ITEMS, films: FILMS, decisions: DECISIONS, ...Object.fromEntries(Object.entries(sizes).map(([key, value]) => [key.replace('Bytes', 'MB'), MB(value)])), startMB: MB(start), peakMB: MB(peak), peakAboveStartMB: MB(peak - start), ms: Date.now() - started, summary: {stage: summary.stage, checkpoint: summary.checkpoint ?? null, checked: summary.checked, touched: summary.touched, remaining: summary.remaining, tmdbCalls: summary.tmdbCalls, error: summary.error ?? null}, stages}, null, 1));
+console.log(JSON.stringify({call: CALL, interrupted: INTERRUPTED, items: ITEMS, films: FILMS, decisions: DECISIONS, ...Object.fromEntries(Object.entries(sizes).map(([key, value]) => [key.replace('Bytes', 'MB'), MB(value)])), startMB: MB(start), peakMB: MB(peak), peakAboveStartMB: MB(peak - start), ms: Date.now() - started, summary: CALL === 'chunk' ? {stage: summary.stage, checkpoint: summary.checkpoint ?? null, checked: summary.checked, touched: summary.touched, remaining: summary.remaining, tmdbCalls: summary.tmdbCalls, error: summary.error ?? null} : summary, stages}, null, 1));
