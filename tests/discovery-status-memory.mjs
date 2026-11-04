@@ -81,7 +81,7 @@ for (const continuation of [null, interrupted]) {
     const status = JSON.parse(JSON.stringify(await vm.runInContext('discoveryPipelineStatus(env)', run.live)));
     const label = `${continuation ? 'interrupted' : 'idle'} ${stream ? 'streamed' : 'parsed'}`;
     assert.equal(run.puts(), 0, label + ': the status writes nothing');
-    assert.equal(run.ledgerReads(), 1, label + ': the ledger is read once, also for the recovery facts');
+    assert.equal(run.ledgerReads(), continuation ? 2 : 1, label + ': the ledger is counted once, and read once more, independently, for the recovery verdict');
     assert.equal(run.maxReading(), 1, label + ': no two large documents are read at once');
     if (stream) assert.equal(run.wholeLedgerParses(), 0, label + ': a streamed ledger is never parsed whole');
     for (const [key, value] of Object.entries(JSON.parse(JSON.stringify(expected.counts)))) assert.deepEqual(status[key], value, label + ': ' + key);
@@ -109,6 +109,34 @@ for (const continuation of [null, interrupted]) {
   const run = harness(stored, {stream: true});
   const status = await vm.runInContext('discoveryPipelineStatus(env)', run.live);
   assert.notEqual(status.interruptedRecovery.permit, 'eligible', 'a ledger of another run is not eligible');
+}
+
+// The pinned generation and the live one diverge: a generation is published after the status pinned run-1. The status counts
+// the pinned ledger; the recovery verdict reads the live ledger itself (unpinned) and refuses. Only the ledger differs: the
+// programme still names run-1, so a verdict that reused the pinned ledger read would say `eligible`.
+for (const stream of [false, true]) {
+  const stored = records();
+  stored.set('epg/resolver-continuation.json', interrupted);
+  stored.set('epg/generations/run-1/discovery-latest.json', ledger);
+  stored.set('epg/generations/run-1/discovery-resolution.json', decisions);
+  stored.set('epg/generations/run-1/discovered-films.json', catalog);
+  stored.set('epg/generations/run-1/programme.json', {runId: 'run-1', films: []});
+  stored.set('epg/generations/run-2/discovery-latest.json', {...ledger, programmeRunId: 'run-2', items: ledger.items.slice(0, 10)});
+  const run = harness(stored, {stream});
+  const bucket = run.live.env.BUCKET, original = bucket.get.bind(bucket);
+  let flipped = false;
+  bucket.get = async key => {
+    const object = await original(key);
+    if (key !== 'epg/published-generation.json' || !object || flipped) return object;
+    const json = object.json;
+    return {...object, json: async () => {const value = await json(); flipped = true; stored.set(key, {phase: 'published', programmeRunId: 'run-2'}); return value;}};
+  };
+  const status = JSON.parse(JSON.stringify(await vm.runInContext('discoveryPipelineStatus(env)', run.live)));
+  assert.equal(flipped, true, 'the generation was published after the status pinned');
+  assert.equal(status.programmeRunId, 'run-1', 'the counts are those of the pinned generation');
+  assert.equal(status.candidates, ledger.items.length + 321, 'the pinned active ledger plus the shared archive');
+  assert.deepEqual({permit: status.interruptedRecovery.permit, reason: status.interruptedRecovery.reason}, {permit: 'refused', reason: 'generation_mismatch'}, 'the live ledger differs from the pinned one: refused');
+  assert.equal(run.puts(), 0);
 }
 
 // The recovery facts on their own (the confirm path) keep only the ledger's wrapper.

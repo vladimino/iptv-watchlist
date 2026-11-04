@@ -30,7 +30,7 @@ These are not the resolver chunk's ends (AIR-342): they are reads.
 
 On `main` `189e4ac`:
 - `discoveryPipelineStatus` read the ledger (46.3 MB in production), the decisions, the catalog (8.0 MB), the continuation, the queues, the score preview, the diagnostics and the lease in one `Promise.all`. Each large one was held as its text and its parsed tree at once.
-- With `reason: interrupted`, it then called `interruptedRecoveryFacts`, which read the whole ledger a second time for its `programmeRunId` alone, and the programme.
+- With `reason: interrupted`, it then called `interruptedRecoveryFacts`, which read the whole ledger a second time, parsed whole, for its `programmeRunId` alone, and the programme.
 - `footerStatus` read the same ledger, the decisions, the catalog and the programme in one `Promise.all`.
 
 ## 3. The fix
@@ -38,7 +38,7 @@ On `main` `189e4ac`:
 All in `src/discovery.js` and `src/enrichment.js`, with no new storage, route, flag or response field:
 1. **One streamed read.** `ledgerStatusAggregates` reads the pinned ledger once, through the streamed `loadJSON` option of AIR-342. Each item is counted as it is read (`countDiscoveryItem`, the same rules as `ledgerCounts`) and its decision status tallied; no item is kept. A D1-routed or non-streamable ledger is counted from its parsed items, as before.
 2. **Sequential reads.** The pipeline status reads the small records together, then the decisions, the ledger and the catalog one after another.
-3. **One ledger read in total.** The recovery facts take the `programmeRunId` of the ledger the status already read (the same pinned generation), instead of reading it again. On the confirm path they stream the ledger and keep only its wrapper.
+3. **Independent generation check kept.** The recovery verdict still reads the live ledger itself, with the unpinned environment, and compares its run with the published generation, the programme and the continuation. The status's pinned read is not reused: the two can differ after a generation is published, and that is the `generation_mismatch` refusal. Only how it reads changed: the ledger is streamed and its items dropped, so just the wrapper is kept. An interrupted status therefore streams the ledger twice, one after the other.
 4. **No catalog copy.** `nextHotPredictions` finds its five Films with an in-order scan of the catalog instead of `Object.values(catalog).find`, which copied the catalog into an array per id.
 5. **Footer.** `footerStatus` uses the same aggregates.
 
@@ -48,18 +48,18 @@ Smallest Node `--max-old-space-size` at which the call completes. Fixture: `scri
 
 | Call | `main` | This change | Node time, `main` → this change |
 | --- | --- | --- | --- |
-| `--call status --interrupted` | 256 MB | **48 MB** | 1.3 s → 3.8 s |
+| `--call status --interrupted` | 256 MB | **48 MB** | 1.3 s → 7.6 s |
 | `--call status` | 176 MB | **48 MB** | 0.7 s → 3.6 s |
 | `--call footer` | 192 MB | **48 MB** | 0.8 s → 3.8 s |
 
-**Cost.** The streamed parse costs CPU, about 3 s for a 50 MB ledger. That is far inside `cpu_ms` and adds little to production wall time, which is dominated by the R2 transfer.
+**Cost.** The streamed parse costs CPU, about 3 s for a 50 MB ledger, twice for an interrupted status. That is far inside `cpu_ms`. The R2 transfer, not the parse, dominates production wall time, but production wall time of the interrupted status was not measured.
 
 **Results are the same.** `tests/discovery-status-memory.mjs` checks, on a 6,000-observation ledger, parsed and streamed, idle and interrupted, with a shared archive:
 - the counts equal `ledgerCounts` of the whole parsed ledger;
 - `statuses`, confirmed and verified Films and `nextHotPredictions` are unchanged;
-- the recovery verdict is unchanged, and a ledger of another run is not `eligible`;
+- the recovery verdict is unchanged, a ledger of another run is not `eligible`, and a generation published after the status pinned its own is refused as `generation_mismatch`, parsed and streamed;
 - the footer is the same on both paths;
-- the ledger is read once, large documents never concurrently, and nothing is written.
+- the ledger is counted once and, for the interrupted verdict, read once more, large documents never concurrently, and nothing is written.
 
 ## 5. Limits
 

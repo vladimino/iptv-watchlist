@@ -1069,9 +1069,11 @@ function assessInterruptedRecovery({now,epgStage,publishedRunId,programmeRunId,s
  if(future(status?.retryAt))return refused('backoff');
  return {permit:'eligible',reason:'eligible',cause:null,budget:record.remainingChunks,proof:proof.proof};
 }
-// `sourceRunId`, when the caller already read the ledger, is its programmeRunId and the ledger is not read again;
-// otherwise only the ledger's wrapper is kept, streamed without its items (AIR-344).
-async function interruptedRecoveryFacts(env,{now,current,lease,published,programmeRunId,sourceRunId}){
+// The recovery verdict reads the live generation's ledger itself, with the unpinned `env`, and never reuses the pinned
+// read a status caller made: the two can differ (a generation published between them, or a D1-published generation
+// beside an R2 ledger), and that difference is the `generation_mismatch` refusal. AIR-344 only changed how: the ledger is
+// streamed and its items are dropped as they are read, so just its wrapper (the run id) is kept.
+async function interruptedRecoveryFacts(env,{now,current,lease,published,programmeRunId}){
  let authority;
  if(typeof DiscoveryAuthority==='undefined')authority={mode:'r2',ready:false,held:false,cutover:null,transfer:'idle'};
  else{try{authority=await DiscoveryAuthority.readAuthority(env);}catch{authority={unavailable:true};}}
@@ -1080,7 +1082,7 @@ async function interruptedRecoveryFacts(env,{now,current,lease,published,program
  if(!blocked){
   try{
    [status,sync,diagnostics]=await Promise.all([loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'sync.json'),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY)]);
-   source=sourceRunId!==undefined?{programmeRunId:sourceRunId}:await loadJSON(env,'epg/discovery-latest.json',{item:()=>null});
+   source=await loadJSON(env,'epg/discovery-latest.json',{item:()=>null});
   }
   catch{authority={unavailable:true};}
  }
@@ -1315,7 +1317,7 @@ async function discoveryPipelineStatus(env){
  const continuationHealthReport=healthSummary(continuationHealth(continuation,lease,last,Date.now(),pinned.epgPin?.programmeRunId||null));
  let interruptedRecovery=null;
  if(continuation?.reason==='interrupted'){
-  try{interruptedRecovery=await interruptedRecoveryFacts(env,{now:Date.now(),current:continuation,lease,published:pinned.epgPin?.programmeRunId||null,programmeRunId:(await loadJSON(env,'programme.json'))?.runId??null,sourceRunId:source?.programmeRunId??null});}
+  try{interruptedRecovery=await interruptedRecoveryFacts(env,{now:Date.now(),current:continuation,lease,published:pinned.epgPin?.programmeRunId||null,programmeRunId:(await loadJSON(env,'programme.json'))?.runId??null});}
   catch{interruptedRecovery={permit:'refused',reason:'owner_investigation',cause:'unreadable',budget:null,proof:null};}
  }
  const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=catalogFilmById(catalog,id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};

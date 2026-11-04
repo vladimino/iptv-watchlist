@@ -212,7 +212,7 @@ When the published EPG marker is `d1` ([ADR 0079](../../adr/0079-d1-authoritativ
 `GET /api/enrichment/pipeline/status` separates normalized EPG candidate titles, excluded non-movies, unresolved candidates, unique confirmed TMDB films, hot/cold cached films, queued predictions, hot predictions and cold deferred work. These populations differ; candidate counts must never be presented as film counts.
 
 **Status memory (AIR-344).** The pipeline status and `GET /api/enrichment/footer/status` read the pinned ledger once, streamed item by item, and count it without keeping the items. The decisions, the ledger and the catalog are read one after another.
-- With an interrupted continuation, the recovery facts take that same ledger's `programmeRunId` instead of reading the ledger again.
+- With an interrupted continuation, the recovery verdict reads the live ledger itself, streamed and without keeping its items, so its generation check against the published generation, the programme and the continuation is independent of the pinned read the counts use.
 - The response fields and values are unchanged, and the status writes nothing.
 
 Measurements: [AIR-344 evidence](../../evidence/discovery/air-344-status-memory-2026-11-04.md).
