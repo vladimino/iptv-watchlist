@@ -235,6 +235,8 @@ function parseFilm(html,base){
  // tmdbLink is evidence for an owner-confirmed retirement (ADR 0057), never an identity: tmdbId stays the attribute number.
  return {...base,directors,actors,peopleVersion:1,tmdbId:html.match(/data-tmdb-id="(\d+)"/)?.[1]||null,tmdbLink:letterboxdTmdbLink(html),original:decode(meta.name),aliases:[...new Set([base.title,decode(meta.name),...plain(alt).split(/,\s*/)].filter(Boolean))],genres:(Array.isArray(meta.genre)?meta.genre:meta.genre?[meta.genre]:[]).map(g=>GENRE_MAP[g]||g),poster:typeof meta.image==='string'&&meta.image.startsWith('https://')?meta.image:null,runtime,synopsis:parseSynopsis(html),synopsisFetchedAt:new Date().toISOString(),metadataAt:new Date().toISOString()};
 }
+// The rated-archive identity step runs in a later script. These consts are not globals; the step calls this.
+function letterboxdPageTools(){return {parseFilm,attr,extractYear};}
 function xmlTime(s){const m=s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-])(\d{2})(\d{2})$/);if(!m)return NaN;return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6])-(m[7]==='+'?1:-1)*(+m[8]*60 + +m[9])*60000;}
 async function scanEPG(stream,watchlist,now){
  const index=new Map();for(const film of watchlist){for(const title of new Set((film.aliases||[film.original]).map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}

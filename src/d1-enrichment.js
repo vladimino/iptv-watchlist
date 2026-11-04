@@ -44,7 +44,9 @@ function d1EnrichmentAdapter(binding){
 // The inputs fail closed. Every object the view needs must be present and of its shape: a missing object stops the run before
 // any D1 write, while a present, empty one is a real empty dataset. Three objects are optional: the Letterboxd diary, absent while its
 // own switch is off, the owner-approved TMDB retirements (ADR 0057), absent until a correction is approved, and the view index,
-// whose watchlist booleans admit Films that have left the current lists. A missing view index admits nobody. A retirements
+// whose watchlist booleans admit Films that have left the current lists. A missing view index admits nobody. A missing
+// verified-films admission admits nobody either: deploy does not upsert a rated Film that has not been verified.
+// A retirements
 // object that is present but fails its check as a whole stops the run as input_invalid. The read must also be one consistent cut
 // of R2:
 // - it does not start while a writer of these objects is at work: a live discovery lease, or a sync in its metadata or EPG stage;
@@ -83,7 +85,7 @@ async function d1EnrichmentStore(env){
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
   runId=pointer.programmeRunId;
  }
- const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex]=await Promise.all([
+ const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
@@ -94,6 +96,7 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,'enrichment/view-index.json',d1EnrichmentRecord,false),
+  d1EnrichmentRead(env,etags,'letterboxd/admissions/verified-films.json',value=>d1EnrichmentRecord(value)&&value.schemaVersion===1&&d1EnrichmentRecord(value.films),false),
  ]);
  if(!published){watchlist=watchlistObject;programme=programmeObject;}
  let ownerGate=null,ownerMirror=null,ownerDocument=null;
@@ -117,7 +120,7 @@ async function d1EnrichmentStore(env){
   }
   if(ownerDocument){OwnerReview.stampLocalized(programme,ownerDocument);OwnerReview.stampLocalized(watchlist,ownerDocument);}
  }
- const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
+ const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),archiveAdmissions:archiveDocument?EnrichmentProjection.archiveAdmissionsFromDocument(archiveDocument):null,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  if(ownerDocument)store.ownerReviews=ownerDocument;
  return {store,programmeRunId:runId};
 }
