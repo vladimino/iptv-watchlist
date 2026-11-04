@@ -39,3 +39,5 @@ A separate read-only query after the operator returned. That query sent no write
 **Not done by this apply.** Load, hold, seal, release and revert are separate. A code rollback does not drop the tables, does not return the version, and does not change the marker. Restoring the database is a Time Travel of the whole database and is its own approval.
 
 **Limits.** One refused attempt with no write, then one committed request, then one read-back. No Worker route was called. The REST `{sql}` body is not proof of Worker-binding atomicity; the read-back is the proof that these nine statements landed.
+
+A later load, not part of this apply, copied the objects at 2026-11-04 07:48 UTC and left the marker at `r2` ([load record](air-318-ratings-load-2026-11-04.md)).
