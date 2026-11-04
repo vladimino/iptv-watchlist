@@ -213,6 +213,67 @@ stateDiagram-v2
 
 The run record is one D1 document. It admits one running run and one active step, and the lease is that document. Diary history, the diary cursor, facts and the removal queue are separate D1 documents. A compare-and-swap of one document is one fenced batch: a film record also writes its `ratings_view` rows in that batch, and the batch advances `ratings_domain_authority.generation`. A stale etag leaves the batch uncommitted. Those documents do not fall back to R2. Removal events stay in the R2 event log. There is no transaction across D1 and R2, so a settle writes the event by compare-and-swap and only then marks the queue reference resolved. A kill between the two repeats the event write. The cursor join only moves forward. Its last-attempt diagnostics are a deterministic last-writer-wins record that never plans a read. The queue accepts an outcome only under the step's own claim. History and facts take an idempotent merge, so a late write can add a newer observation and does not move an existing one backwards. A late event merge can add the rating and does not move the D1 fact. The cursor and the queue are authoritative; the run record's checkpoint is a per-run counter. Each removal event keeps its own reference in the queue, and an unresolved one is never pruned. The diagram shows that open marker. The event log still has no multi-key transaction, so a step that outlived its lease is not fenced out of an event object. A removal step lists one page of `events/items/` only while a rated legacy entry still needs that scan, then writes the ratings of rated entries to their removal events (at most 100 references per step), then runs the lookups. With nothing left to link, the list does not run. Deploying this page does not start a ratings run. The ratings run reads Diary page 1 only ([ADR 0067](../adr/0067-diary-recent-window.md)). That is not a byte copy of the earlier multi-page reader. The queue and the cursor migration rules are unchanged. The migration's witness `letterboxd/ratings/migration.json` records each converted object, so the status reports one found back at version 1 as `regressed`. The queue and the cursor are migrated only by the owner-approved `ratings_storage_migrate` tool. The separate pipeline runs only once that migration is complete; until then the commit fails closed. A stale run is closed by the next start or step, never by the status read. Ownership, contracts, races, migration and rollback are in the ADR. The diagram is the production mode as of the 2026-10-31 live read (migration complete, Ratings Task enabled). The Worker does not read `RATINGS_PIPELINE`, `LETTERBOXD_DIARY_HISTORY` ([ADR 0075](../adr/0075-retire-letterboxd-diary-history-switch.md), Accepted 2026-11-01) or `REMOVAL_RATING_LOOKUP` ([ADR 0077](../adr/0077-retire-removal-rating-lookup-switch.md), Proposed). The up-to-five lookups on the Removal loop are that permanent fallback: a film the Diary already rated, or absent from the current Diary page with a confirmed stored fact, is not requested, including after a new reference reopens its queue entry, and a paused queue is not requested. A film that page lists without a rating is still looked up. A null or absent rating is not watched. A step probes at most five stored ratings and does not request a film it has not probed. The state-diagram arrows are unchanged. The sequence diagram draws the open marker ([ADR 0084](../adr/0084-d1-authoritative-ratings.md), Accepted). History, facts, the cursor, the removal queue and the run record go to the D1 participant. Event writes and the event-list page stay on R2. While `0010` is absent, or the marker is `r2`, those documents stay in R2; that state is not drawn. `0010` is applied and the marker is `d1` / `open`. Activation left generation 1 ([activation record](../evidence/d1-migration/air-318-ratings-activate-2026-11-04.md)). A manual MCP run at 08:28 UTC left generation 12 ([manual run](../evidence/d1-migration/air-318-ratings-manual-run-2026-11-04.md)) and did not change the 17:30 Europe/Madrid Ratings Task. The owner visually approved an earlier note on 2026-11-04, while these arrows still pointed at R2. This participant change needs a fresh rendered owner visual approval, as does the persistence arrow. A removal does not become a viewing. Diary page 1, the removal-lookup budgets, and the fail-closed migration states are unchanged. A migrated run enters Diary. One arrow leaves Diary for Removal when page 1 was read. A second leaves Diary for Removal when that request was blocked, rate-limited or failed and the page was not read: the removal phase still runs, and the run ends `error` on the arrow from Removal to Error. There is no off-gate arrow. Neither this diagram nor a deploy changes a task or deletes a leftover binding.
 
+## Proposed Cloudflare executors and shared recovery
+
+**Accepted architecture, not live.** Both diagrams below show the future implementation of [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Accepted; both diagrams visually approved by the owner on 2026-11-04). Nothing in this section is deployed as drawn: today EPG, Discovery and Ratings are driven by the external tasks above, the Discovery Workflow is inert, and the cron runs only the enrichment projector. Each domain moves to its executor only through its own owner-approved switch; the field-level contract is the [orchestration reliability reference](../reference/orchestration-reliability.md).
+
+```mermaid
+flowchart TD
+    cron["Worker cron: UTC firings,<br/>Madrid logical schedule"]
+    subgraph epgDomain["EPG domain"]
+        ensureEpg["ensure: reads, at most one create"]
+        epgCtl[("D1 control record:<br/>mode, epoch, Madrid date, budget")]
+        epgWf["Workflow instance:<br/>one bounded step each"]
+        epgAuth[("D1 published generation;<br/>R2 raw XML and mirrors")]
+        ensureEpg --> epgCtl --> epgWf -->|write, then checkpoint| epgAuth
+    end
+    subgraph discDomain["Discovery domain, after its D1 marker is open"]
+        ensureDisc["ensure: reads, at most one create"]
+        discCtl[("D1 control record:<br/>generation, series, budget")]
+        discWf["Workflow instance:<br/>one chunk per step"]
+        discAuth[("D1 discovery ledger")]
+        ensureDisc --> discCtl --> discWf -->|write, then checkpoint| discAuth
+    end
+    subgraph ratDomain["Ratings domain"]
+        ensureRat["ensure: reads, at most one create"]
+        ratCtl[("D1 control record:<br/>Madrid date, budget")]
+        ratWf["Workflow instance:<br/>one bounded step each"]
+        ratAuth[("D1 ratings documents;<br/>R2 removal events")]
+        ensureRat --> ratCtl --> ratWf -->|write, then checkpoint| ratAuth
+    end
+    status["Read-only status routes:<br/>orchestration read model"]
+    monitor["External monitor and alert,<br/>outside ChatGPT"]
+    hourly["Hourly ChatGPT Task:<br/>Predictions only"]
+    cron --> ensureEpg & ensureDisc & ensureRat
+    epgAuth -.->|fast path: queue fenced intent| discCtl
+    epgAuth -.->|ensure reconstructs intent from published generation| ensureDisc
+    epgAuth & discAuth & ratAuth -.->|read only| status
+    status -.-> monitor
+```
+
+The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each domain commit to D1 compares the epoch and mode in the same batch; R2 side effects are idempotent and bounded by the lease, and a mode switch is close admission, verified drain, then complete ([reference](../reference/orchestration-reliability.md#mode-switch-and-write-fencing)). Each instance writes its domain data first and then its fenced checkpoint and budget into its own control record, compared against the epoch. Each `ensure` runs no chunk, download or lookup. It reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication may queue Discovery's fenced intent as a fast path, not in one transaction with the pointer switch; `ensure Discovery` reconstructs the intent from the published generation if that write is missing, and EPG never waits for Discovery. The dotted arrows to the status routes are reads only; the read model reads each domain's control record and its authority.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Due: due
+    Due --> Running: owner CAS won
+    Running --> Due: checkpoint read back, more work
+    Running --> Idle: checkpoint read back, run key done
+    Running --> Unknown: outcome lost
+    Unknown --> Due: write found
+    Unknown --> Cooldown: no write
+    Running --> Cooldown: transient
+    Cooldown --> Due: cooldown over
+    Running --> Quarantined: unsafe, or cap reached
+    Unknown --> Quarantined: unreadable, or cap reached
+    Running --> FailedPermanent: credentials or contract
+    FailedPermanent --> Due: precondition holds
+    Quarantined --> Due: next run key or owner clear
+```
+
+`Due` includes a known future wake (`retryAt`, `Retry-After`, a pause or a lease), which the read model reports as `waiting`. `Unknown` means a timeout, a lost response or a killed step, resolved only by reading back. A duplicate firing while a run is `Due` or `Running` attaches to it. `Quarantined` returns to `Due` on the next run key only after a budget exhaustion; after unsafe evidence only an owner-approved clear does. Only a read-back checkpoint that moved forward resets the consecutive failure count; a create, an HTTP 200 or a lease does not. The executor never forces a step, never resets a lease and never clears its own quarantine. Predictions are outside both diagrams and stay on the hourly ChatGPT task.
+
 ## Timing and authority
 
 The timetable and enabled status belong to the external automation registry. The Worker states only the expected hourly trigger (`:20` Europe/Madrid) for display and keeps it apart from its own discovery wait gate; see [Scheduled Task timing](../reference/scheduled-tasks.md#timing-nominal-trigger-versus-server-gate). Historical records of successful scheduling are not a live status check; production task changes or manual invocations require separate owner approval. A GitHub deployment does not trigger any of these workflows.
