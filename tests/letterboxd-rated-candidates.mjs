@@ -478,6 +478,112 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: marked, accepted: true}});
   assert.equal(step.body.verified, true, JSON.stringify(step.body));
   assert.equal(read(Facts.recordKey('tmdb-900014')).rating.value, 4, 'resuming the verified mark does not write a second rating');
+
+  const ratedApi = vm.runInContext('LetterboxdRatedCandidates', context);
+  const pulled = await committed([{code: 'Ii1', name: 'Pull Cut', year: 2008, rating: 4}], 'rated-key-ii1000001');
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/Ii1') return http(301, '', {location: 'https://letterboxd.com/film/pull-cut/'});
+    if (address === 'https://letterboxd.com/film/pull-cut/') {
+      const removed = await ratedApi.rollbackCandidates(env, pulled, ['Ii1']);
+      if (!removed || removed.removed[0] !== 'Ii1') throw new Error('rollback did not remove the in-flight code');
+      return http(200, page({code: 'Ii1', title: 'Pull Cut', year: 2008, tmdb: '900015', slug: 'pull-cut'}));
+    }
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900015')) return http(200, JSON.stringify({id: 900015, media_type: 'movie', title: 'Pull Cut', original_title: 'Pull Cut', release_date: '2008-01-01'}));
+    throw new Error(address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: pulled, accepted: true}});
+  assert.equal(step.status, 200, JSON.stringify(step.body));
+  assert.equal(step.body.verified, false, JSON.stringify(step.body));
+  assert.equal(step.body.reason, 'removed', JSON.stringify(step.body));
+  assert.equal(read('letterboxd/imports/' + pulled + '/rated-candidates.json').candidates.Ii1.state, 'removed');
+  assert.equal(read('letterboxd/admissions/verified-films.json'), undefined, 'a rollback during the fetch admits nothing');
+  assert.equal(read(Facts.recordKey('tmdb-900015')), undefined, 'a rollback during the fetch writes no rating');
+
+  const race = await committed([{code: 'Jj1', name: 'Race Cut', year: 2010, rating: 4}], 'rated-key-jj1000001');
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  let arrived = 0;
+  let release;
+  const gate = new Promise(resolve => {release = resolve;});
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/Jj1') return http(301, '', {location: 'https://letterboxd.com/film/race-cut/'});
+    if (address === 'https://letterboxd.com/film/race-cut/') {
+      arrived += 1;
+      const mine = arrived;
+      if (arrived >= 2) release();
+      else await gate;
+      const tmdb = mine === 1 ? '900020' : '900021';
+      return http(200, page({code: 'Jj1', title: 'Race Cut', year: 2010, tmdb, slug: 'race-cut'}));
+    }
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900020')) return http(200, JSON.stringify({id: 900020, media_type: 'movie', title: 'Race Cut', original_title: 'Race Cut', release_date: '2010-01-01'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900021')) return http(200, JSON.stringify({id: 900021, media_type: 'movie', title: 'Race Cut', original_title: 'Race Cut', release_date: '2010-01-01'}));
+    throw new Error(address);
+  };
+  const fetchImpl = async (url, init) => {net.calls.push(String(url)); return net.handler(url, init);};
+  const pair = await Promise.all([
+    ratedApi.identityStep(env, {sha: race, fetchImpl}),
+    ratedApi.identityStep(env, {sha: race, fetchImpl}),
+  ]);
+  const winner = pair.find(item => item.verified === true);
+  const loser = pair.find(item => item !== winner);
+  assert.ok(winner, JSON.stringify(pair));
+  assert.equal(loser.reason, 'intent_conflict', JSON.stringify(pair));
+  const raceFilms = read('letterboxd/admissions/verified-films.json').films;
+  assert.deepEqual(Object.keys(raceFilms), ['tmdb_' + winner.tmdb]);
+  assert.equal(raceFilms['tmdb_' + winner.tmdb].sourceCode, 'Jj1');
+  assert.equal(read(Facts.recordKey('tmdb-' + (winner.tmdb === '900020' ? '900021' : '900020'))), undefined, 'the losing movie id is not rated');
+  assert.equal(read('letterboxd/imports/' + race + '/rated-candidates.json').candidates.Jj1.tmdb, winner.tmdb);
+
+  const bound = await committed([{code: 'Kk1', name: 'Bound Cut', year: 2009, rating: 4}], 'rated-key-kk1000001');
+  put('letterboxd/admissions/verified-films.json', {schemaVersion: 1, films: {tmdb_42: {tmdb: '42', sourceCode: 'Kk1', archiveSha256: 'b'.repeat(64), title: 'Older Cut', year: 1990, filmPath: '/film/older-cut/'}}});
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/Kk1') return http(301, '', {location: 'https://letterboxd.com/film/bound-cut/'});
+    if (address === 'https://letterboxd.com/film/bound-cut/') return http(200, page({code: 'Kk1', title: 'Bound Cut', year: 2009, tmdb: '900016', slug: 'bound-cut'}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/900016')) return http(200, JSON.stringify({id: 900016, media_type: 'movie', title: 'Bound Cut', original_title: 'Bound Cut', release_date: '2009-01-01'}));
+    throw new Error(address);
+  };
+  step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: bound, accepted: true}});
+  assert.equal(step.body.verified, false, JSON.stringify(step.body));
+  assert.equal(step.body.reason, 'historical_alias_conflict');
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_42.sourceCode, 'Kk1');
+  assert.equal(read('letterboxd/admissions/verified-films.json').films.tmdb_900016, undefined, 'one short code keeps one movie id across archives');
+  assert.equal(read(Facts.recordKey('tmdb-900016')), undefined);
+
+  async function poisoned(code, key, reason, mutate) {
+    const sha = await committed([{code, name: 'Enrich Cut', year: 2005, rating: 4}], key);
+    env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+    const good = page({code, title: 'Enrich Cut', year: 2005, tmdb: '900030', slug: 'enrich-cut'});
+    net.handler = async url => {
+      const address = String(url);
+      if (address === 'https://boxd.it/' + code) return http(301, '', {location: 'https://letterboxd.com/film/enrich-cut/'});
+      if (address === 'https://letterboxd.com/film/enrich-cut/') {
+        const seen = net.calls.filter(item => item === address).length;
+        return http(200, seen > 1 ? mutate(good) : good);
+      }
+      if (address.startsWith('https://api.themoviedb.org/3/movie/900030')) return http(200, JSON.stringify({id: 900030, media_type: 'movie', title: 'Enrich Cut', original_title: 'Enrich Cut', release_date: '2005-01-01'}));
+      throw new Error(address);
+    };
+    const verified = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    assert.equal(verified.body.verified, true, code + ' ' + JSON.stringify(verified.body));
+    const enrich = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true}});
+    assert.equal(enrich.body.enriched, false, JSON.stringify(enrich.body));
+    assert.equal(enrich.body.stop && enrich.body.stop.reason, reason, JSON.stringify(enrich.body));
+    const stored = read('letterboxd/admissions/verified-films.json').films.tmdb_900030;
+    assert.equal(stored.synopsis, undefined);
+    assert.equal(stored.metadataAt, undefined);
+    assert.equal(stored.sourceCode, code);
+    assert.equal(read('letterboxd/imports/' + sha + '/rated-candidates.json').candidates[code].state, 'verified');
+    assert.notEqual(read('letterboxd/imports/' + sha + '/rated-candidates.json').candidates[code].enrichment, 'metadata');
+    return sha;
+  }
+  await poisoned('Mm1', 'rated-key-mm1000001', 'tmdb_mismatch', html => html.replace('data-tmdb-id="900030"', 'data-tmdb-id="900031"'));
+  await poisoned('Nn1', 'rated-key-nn1000001', 'tmdb_tv', html => html.replace('data-tmdb-type="movie"', 'data-tmdb-type="tv"'));
+  await poisoned('Oo1', 'rated-key-oo1000001', 'shortlink_mismatch', html => html.replace('https://boxd.it/Oo1', 'https://boxd.it/Zz9'));
+  await poisoned('Pp1', 'rated-key-pp1000001', 'canonical_mismatch', html => html.replace('https://letterboxd.com/film/enrich-cut/', 'https://letterboxd.com/film/other-cut/'));
 }
 
 console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open');

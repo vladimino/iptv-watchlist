@@ -118,6 +118,11 @@ const LetterboxdRatedCandidates = (() => {
     let refused = null;
     const result = await casDoc(env, ADMISSIONS, {schemaVersion: 1, films: {}}, current => {
       refused = null;
+      for (const other of Object.values(current.films)) {
+        if (!other || !other.sourceCode || !other.tmdb) continue;
+        if (other.sourceCode === film.sourceCode && other.tmdb !== film.tmdb) {refused = 'historical_alias_conflict'; return null;}
+        if (other.tmdb === film.tmdb && other.sourceCode !== film.sourceCode) {refused = 'duplicate_tmdb'; return null;}
+      }
       const prior = current.films[film.filmId];
       if (prior && prior.tmdb === film.tmdb && prior.sourceCode === film.sourceCode) return null;
       if (prior && prior.sourceCode && prior.sourceCode !== film.sourceCode) {refused = 'duplicate_tmdb'; return null;}
@@ -221,9 +226,23 @@ const LetterboxdRatedCandidates = (() => {
     return {factKey, outcomes, watchlist: Object.prototype.hasOwnProperty.call(result.record, 'watchlist')};
   }
 
-  async function markReview(env, key, code, reason) {
+  function sameClaim(row, tmdb, filmPath) {
+    return !!(row && row.state === 'admitting' && row.intendedTmdb === String(tmdb) && row.filmPath === filmPath);
+  }
+  async function readClaim(env, key, code, tmdb, filmPath) {
+    const opened = await readDoc(env, key);
+    if (opened.value === undefined) return {ok: false, reason: 'storage_unavailable'};
+    const row = opened.value && opened.value.candidates && opened.value.candidates[code];
+    if (sameClaim(row, tmdb, filmPath)) return {ok: true, row};
+    const reason = !row ? 'claim_missing' : row.state === 'removed' ? 'removed' : row.state === 'needs_review' ? 'needs_review' : row.state === 'admitting' ? 'intent_conflict' : 'claim_changed';
+    return {ok: false, reason, state: row && row.state || null};
+  }
+  async function markReview(env, key, code, reason, claim) {
     await casDoc(env, key, null, current => {
-      if (current.candidates[code] && current.candidates[code].state !== 'verified') current.candidates[code] = {...current.candidates[code], state: 'needs_review', reason, intendedTmdb: null};
+      const row = current.candidates[code];
+      if (!row || row.state === 'verified' || row.state === 'removed') return null;
+      if (claim && !sameClaim(row, claim.tmdb, claim.filmPath)) return null;
+      current.candidates[code] = {...row, state: 'needs_review', reason, intendedTmdb: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
     });
@@ -232,31 +251,59 @@ const LetterboxdRatedCandidates = (() => {
     await casDoc(env, key, doc, current => {current.checkpoint = {...(current.checkpoint || {}), stopped}; return current;});
   }
 
-  // Fence the intended movie, admit that one source code, then write the rating. A lost response resumes the same fence.
+  function refusedClaim(code, outcome) {
+    const state = outcome === 'intent_conflict' ? 'admitting' : outcome === 'verified_conflict' || outcome === 'already' ? 'verified' : outcome === 'removed' || outcome === 'needs_review' ? outcome : 'pending';
+    return {pending: true, fetched: true, verified: false, code, state, reason: outcome, phase: 'identity'};
+  }
+  // Fence the intended movie, read it back, then admit that one source code and only then write the rating.
+  // A removed, reviewed or differently claimed row is not admitted and is not marked verified.
   async function commitVerified(env, sha, code, item, tmdb, evidence, generatedAt) {
     const key = CANDIDATES(sha);
     const film = LetterboxdRatedAdmission.admissionFilm({tmdb, sourceCode: code, archiveSha256: sha, title: evidence.title || item.name, year: (evidence.years && evidence.years[0]) || item.year});
     if (!film) return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: 'invalid_identity', phase: 'identity'};
     film.filmPath = evidence.path || item.filmPath || null;
+    let outcome = 'missing';
     await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
       const row = current.candidates[code];
-      if (!row || row.state === 'verified' || row.state === 'needs_review' || row.state === 'removed') return null;
-      if (row.state === 'admitting' && row.intendedTmdb === String(tmdb) && row.filmPath === film.filmPath) return null;
+      if (!row) {outcome = 'missing'; return null;}
+      if (row.state === 'removed' || row.state === 'needs_review') {outcome = row.state; return null;}
+      if (row.state === 'verified') {
+        outcome = row.tmdb === String(tmdb) && row.filmPath === film.filmPath ? 'already' : 'verified_conflict';
+        return null;
+      }
+      if (row.state === 'admitting') {
+        outcome = row.intendedTmdb === String(tmdb) && row.filmPath === film.filmPath ? 'held' : 'intent_conflict';
+        return null;
+      }
+      if (row.state !== 'pending') {outcome = 'claim_changed'; return null;}
       current.candidates[code] = {...row, state: 'admitting', intendedTmdb: String(tmdb), filmPath: film.filmPath, enrichment: 'pending', reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
+      outcome = 'claimed';
       return current;
     });
+    if (outcome === 'already') return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), filmId: film.filmId, phase: 'identity'};
+    if (outcome !== 'claimed' && outcome !== 'held') return refusedClaim(code, outcome);
+    const held = await readClaim(env, key, code, tmdb, film.filmPath);
+    if (!held.ok) return refusedClaim(code, held.reason);
     const admitted = await writeAdmission(env, film);
     if (!admitted.ok) {
-      await markReview(env, key, code, admitted.reason);
-      return {pending: true, fetched: true, verified: false, code, state: 'needs_review', reason: admitted.reason, phase: 'identity'};
+      const still = await readClaim(env, key, code, tmdb, film.filmPath);
+      if (still.ok) await markReview(env, key, code, admitted.reason, {tmdb, filmPath: film.filmPath});
+      return {pending: true, fetched: true, verified: false, code, state: still.ok ? 'needs_review' : still.state || 'pending', reason: still.ok ? admitted.reason : still.reason, phase: 'identity'};
     }
+    const beforeRating = await readClaim(env, key, code, tmdb, film.filmPath);
+    if (!beforeRating.ok) return refusedClaim(code, beforeRating.reason);
     const rating = await writeRating(env, tmdb, item, generatedAt, sha);
     await casDoc(env, key, emptyDoc(sha, generatedAt), current => {
-      if (current.candidates[code]) current.candidates[code] = {...current.candidates[code], state: 'verified', tmdb: String(tmdb), filmPath: film.filmPath, enrichment: current.candidates[code].enrichment || 'pending', intendedTmdb: null, reason: null};
+      const row = current.candidates[code];
+      if (!sameClaim(row, tmdb, film.filmPath)) return null;
+      current.candidates[code] = {...row, state: 'verified', tmdb: String(tmdb), filmPath: film.filmPath, enrichment: row.enrichment || 'pending', intendedTmdb: null, reason: null};
       current.checkpoint = {...(current.checkpoint || {}), cursor: code, stopped: null};
       return current;
     });
+    const after = await readDoc(env, key);
+    const row = after.value && after.value.candidates && after.value.candidates[code];
+    if (!row || row.state !== 'verified' || row.tmdb !== String(tmdb) || row.filmPath !== film.filmPath) return refusedClaim(code, 'claim_changed');
     return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), rating: rating.outcomes, filmId: film.filmId, phase: 'identity'};
   }
 
@@ -294,6 +341,22 @@ const LetterboxdRatedCandidates = (() => {
     });
   }
 
+  function enrichmentAgrees(html, film, code) {
+    let evidence;
+    try {evidence = LetterboxdIdentity.pageEvidence(html, new URL('https://letterboxd.com' + film.filmPath), letterboxdPageTools());}
+    catch {return {ok: false, reason: 'metadata_unparsed'};}
+    if (!evidence || evidence.kind !== 'page') return {ok: false, reason: 'metadata_unparsed'};
+    if (evidence.path !== film.filmPath) return {ok: false, reason: 'path_mismatch'};
+    if (!evidence.shortlinkPresent || evidence.shortCode !== code) return {ok: false, reason: 'shortlink_mismatch'};
+    if (evidence.canonicalPath !== film.filmPath) return {ok: false, reason: 'canonical_mismatch'};
+    if (!(evidence.tmdbTypes.length === 1 && evidence.tmdbTypes[0] === 'movie')) return {ok: false, reason: evidence.tmdbTypes.includes('tv') ? 'tmdb_tv' : 'tmdb_not_movie'};
+    if (evidence.tmdbIds.length !== 1 || evidence.tmdbIds[0] !== String(film.tmdb)) return {ok: false, reason: 'tmdb_mismatch'};
+    const norm = typeof LetterboxdMatch !== 'undefined' && LetterboxdMatch.normTitle ? LetterboxdMatch.normTitle : value => String(value || '').normalize('NFKC').toLowerCase().trim();
+    if (!film.title || !evidence.title || norm(evidence.title) !== norm(film.title)) return {ok: false, reason: 'title_mismatch'};
+    const year = evidence.years && evidence.years[0];
+    if (film.year && year && Math.abs(Number(year) - Number(film.year)) > 1) return {ok: false, reason: 'year_mismatch'};
+    return {ok: true};
+  }
   // One verified film. The first continuation reads the film page. The next one localizes that same film. Neither is cron.
   async function enrichOne(env, sha, code, fetchImpl) {
     const key = CANDIDATES(sha);
@@ -328,6 +391,12 @@ const LetterboxdRatedCandidates = (() => {
       let parsed;
       try {parsed = letterboxdPageTools().parseFilm(fetched.text, {id: filmId, title: film.title, original: film.title, year: film.year, tmdbId: film.tmdb, url: 'https://letterboxd.com' + film.filmPath});}
       catch {await markEnrichment(env, key, code, 'pending'); return {pending: true, fetched: true, verified: false, enriched: false, code, state: 'verified', reason: 'metadata_unparsed', phase: 'enrich'};}
+      const agreed = enrichmentAgrees(fetched.text, film, code);
+      if (!agreed.ok) {
+        const stopped = {reason: agreed.reason, code, at: new Date().toISOString(), phase: 'enrich'};
+        await park(env, key, opened.value, stopped);
+        return {pending: true, fetched: true, verified: false, enriched: false, stop: stopped, code, phase: 'enrich'};
+      }
       await storeMetadata(env, filmId, parsed, film.filmPath);
       await markEnrichment(env, key, code, 'metadata');
       return {pending: true, fetched: true, verified: false, enriched: true, code, tmdb: item.tmdb, filmId, phase: 'enrich', state: 'enriched'};
