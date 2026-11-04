@@ -211,6 +211,12 @@ When the published EPG marker is `d1` ([ADR 0079](../../adr/0079-d1-authoritativ
 
 `GET /api/enrichment/pipeline/status` separates normalized EPG candidate titles, excluded non-movies, unresolved candidates, unique confirmed TMDB films, hot/cold cached films, queued predictions, hot predictions and cold deferred work. These populations differ; candidate counts must never be presented as film counts.
 
+**Status memory (AIR-344).** The pipeline status and `GET /api/enrichment/footer/status` read the pinned ledger once, streamed item by item, and count it without keeping the items. The decisions, the ledger and the catalog are read one after another.
+- With an interrupted continuation, the recovery facts take that same ledger's `programmeRunId` instead of reading the ledger again.
+- The response fields and values are unchanged, and the status writes nothing.
+
+Measurements: [AIR-344 evidence](../../evidence/discovery/air-344-status-memory-2026-11-04.md).
+
 **Bounded ledger ([ADR 0034](../../adr/0034-bounded-discovery-ledger.md), implemented in [AIR-220](https://trello.com/c/uPvMc5ww); inactive by default).**
 
 - **Modes.** `DISCOVERY_LEDGER_MODE` ([feature flags](../feature-flags.md)) is `full` by default: `epg/discovery-latest.json` holds every candidate ever seen, as above. With `bounded` it holds only the latest scan's candidates. Candidates that left the EPG move losslessly into the archive `epg/discovery-archive/v1/`: write-once hash-segment and manifest versions behind the compare-and-swap pointer `current.json`. The EPG commit writes the archive under the discovery lease, fenced on the published pointer etag it read, and merges re-entering candidates back from it. With `frozen` archiving stops, and an existing archive stays history.
