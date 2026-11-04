@@ -41,7 +41,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `probe_echo` | no | Returns `text`, 1–200 characters. |
 | `feature_flags` | no | The registered feature flags of the deployed Worker, absent ones included: `state`, the literal `raw` value only when it is made of the flag's known tokens (otherwise `redacted` with its `shape`), `valid` and `issue`, the `effective` mode computed by the consumer's own function, and unmet requirements on other flags. No arguments, no storage, no other binding, no secret ([fields](../feature-flags.md#reading-the-deployed-values), [ADR 0039](../../adr/0039-allowlisted-feature-flag-readout.md)). |
 | `epg_status` | no | `GET /api/status` |
-| `epg_pipeline_status` | no | `GET /api/enrichment/pipeline/status`; reads an R2 ledger once, streamed, or walks a D1 ledger in pages of 500 |
+| `epg_pipeline_status` | no | `GET /api/enrichment/pipeline/status`; reads an R2 ledger once, streamed, or walks a D1 ledger in pages of 500 with a two-bind key range per page |
 | `enrichment_schema` | no | `GET /api/enrichment/schema`, including `contract`: the rules `prediction_submit` validates with and the issue codes it reports (see [the submit validation contract](enrichment.md#submit-validation-contract)). |
 | `enrichment_profile` | no | `GET /api/enrichment/profile` |
 | `enrichment_runner` | no | `GET /api/enrichment/runner` |
