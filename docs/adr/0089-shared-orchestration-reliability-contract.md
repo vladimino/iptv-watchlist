@@ -1,11 +1,11 @@
 # ADR 0089: Cloudflare-executed pipelines share one bounded, checkpoint-first reliability contract
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-04 (owner planning decision on the AIR-345 card)  
 **Recorded at:** 2026-11-04  
-**Approval source:** pending explicit owner decision (`Accepted` or `Declined`) before merge  
+**Approval source:** explicit owner decision, 2026-11-04 (AIR-345): ADR 0089 Accepted, both Mermaid diagrams visually approved, and partial supersession of ADR 0083 decisions 7 and 8 approved, following [independent PASS review of PR #371 HEAD 3ed77fb](https://github.com/vladimino/iptv-watchlist/pull/371#pullrequestreview-5776893532) and [green CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41925637139); architecture only, no production GO  
 **Related work:** [AIR-345](https://trello.com/c/rKtXn5tl); delivery cards [AIR-347 Ratings](https://trello.com/c/j2Ua76yv), [AIR-324 Discovery](https://trello.com/c/kNtaEbm8), [AIR-348 EPG](https://trello.com/c/PUrlzMuH), [AIR-349 monitoring](https://trello.com/c/VUyampoh); background [AIR-323](https://trello.com/c/SrWM43h0), [AIR-341](https://trello.com/c/r8tfPFjt), [AIR-342](https://trello.com/c/sFNZn818), [AIR-318](https://trello.com/c/slj7UjN5), [AIR-319](https://trello.com/c/pQL8NUTC), [AIR-320](https://trello.com/c/4cA5GlJn), [AIR-344](https://trello.com/c/8TV5soDb)  
-**Supersedes:** None now. Refines [ADR 0083](0083-inert-discovery-workflow.md) and [ADR 0005](0005-external-chatgpt-tasks.md) as stated under [Relationship to earlier decisions](#relationship-to-earlier-decisions); supersession pointers are added only by explicit owner decision  
+**Supersedes:** [ADR 0083](0083-inert-discovery-workflow.md) decisions 7 and 8 in part for the future Cloudflare Discovery executor, per explicit owner approval on 2026-11-04. The currently inert/external implementation is unchanged. [ADR 0005](0005-external-chatgpt-tasks.md) is superseded in part per domain only at a separately approved cutover.  
 **Superseded by:** None
 
 ## Context
@@ -140,7 +140,7 @@ It does not choose D1 table names, Workflow class names or exact cron expression
 
 ### Relationship to earlier decisions
 
-- [ADR 0083](0083-inert-discovery-workflow.md) stays Accepted. Its recovery (1/5/15/60 minutes, quarantine on the fifth failure, a confirmed chunk clears the count) is a conforming instance of decision 3 for the external-to-workflow transition. This record **refines** it in three points that the Discovery delivery must implement: the executor record moves to D1 with the discovery marker (decision 1.3) instead of `epg/discovery-workflow.json`; the reconciler is called by the cron `ensure` (decision 4); an interrupted hop is recovered automatically by the workflow under proof (decision 5). If the owner accepts this record, those points are recorded as a partial supersession of ADR 0083 decisions 7 and 8 only by an explicit owner decision.
+- [ADR 0083](0083-inert-discovery-workflow.md) stays Accepted. Its recovery (1/5/15/60 minutes, quarantine on the fifth failure, a confirmed chunk clears the count) is a conforming instance of decision 3 for the external-to-workflow transition. This record **refines** it in three points that the Discovery delivery must implement: the executor record moves to D1 with the discovery marker (decision 1.3) instead of `epg/discovery-workflow.json`; the reconciler is called by the cron `ensure` (decision 4); an interrupted hop is recovered automatically by the workflow under proof (decision 5). The owner explicitly approved the partial supersession of ADR 0083 decisions 7 and 8 on 2026-11-04. This changes only the target executor contract; AIR-324 implements it after separate owner approvals. External mode and ADR 0088 stay unchanged.
 - [ADR 0088](0088-guarded-interrupted-discovery-recovery.md) is unchanged: the external hourly step stays a stop and the manual confirm stays the external-mode recovery. Its existing refusal of the confirm under the workflow executor is the fence of decision 2.
 - [ADR 0005](0005-external-chatgpt-tasks.md) would be superseded in part per domain, only at that domain's accepted cutover (decision 8), and only by an explicit owner decision recorded then.
 - [ADR 0006](0006-one-chunk-discovery.md), [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0084](0084-d1-authoritative-ratings.md), [ADR 0085](0085-d1-authoritative-discovery.md) and the prediction ADRs are unchanged.
