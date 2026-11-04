@@ -4,7 +4,7 @@
 -- contract, including the owner-review tables. The file still accepts a
 -- complete version 8: the ten prediction tables, the nine published-EPG
 -- tables, and both authority rows. Owner-review tables are not part of
--- this file's prerequisite.
+-- the prerequisite in this file.
 -- The first statement refuses anything else and creates nothing.
 -- The version becomes 10 and never goes down. This file does not rewrite
 -- 0009. 0009 does not install after the contract is already 10.
@@ -13,7 +13,7 @@
 -- does not set mode d1.
 -- ratings_document stores the mutable JSON objects, split into parts.
 -- ratings_view is the projection of watched, actual rating and watchlist.
--- It is not a second owner: writers replace it in the same commit as the
+-- It is not a second owner: writers replace it in the same batch as the
 -- fact. actual_rating in schema v1 is not this projection.
 -- ratings_domain_cas is the batch fence, not a switch.
 -- Events, archive receipts, ZIP bytes and HTML snapshots stay outside these tables.
