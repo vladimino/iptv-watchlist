@@ -1,6 +1,6 @@
 // Pure rated-archive classification (AIR-340). Synthetic rows only. No storage and no network.
 import assert from 'node:assert/strict';
-import {admissionFilm, classifyArchive, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, splitPending} from '../src/domain/letterboxd-rated-admission.js';
+import {admissionFilm, classifyArchive, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, retryFingerprint, splitPending} from '../src/domain/letterboxd-rated-admission.js';
 import {transportStop} from '../src/letterboxd-identity.js';
 
 const rated = (code, extra = {}) => ({code, name: extra.name || 'Invented', year: extra.year ?? 2001, inRatings: true, rating: extra.rating ?? 4, ...extra});
@@ -84,5 +84,10 @@ assert.deepEqual(retryPlan.requeue, ['103U', '10TQ']);
 assert.equal(retryPlan.outcomes.find(entry => entry.id === 'Stay').outcome, 'skipped_changed');
 assert.equal(retryPlan.outcomes.find(entry => entry.id === 'Done').outcome, 'skipped_changed');
 assert.equal(planIdentityRetry({candidates: {}}, {codes: []}).ok, false);
+const stamped = {code: '103U', state: 'needs_review', reason: 'shortlink_missing', observedAt: '2026-10-20T00:00:00.000Z'};
+assert.equal(retryFingerprint(stamped), 'needs_review|shortlink_missing|2026-10-20T00:00:00.000Z');
+assert.equal(planIdentityRetry({candidates: {'103U': {...stamped, observedAt: '2026-11-01T00:00:00.000Z'}}}, {codes: ['103U'], expected: {'103U': {state: 'needs_review', reason: 'shortlink_missing', fingerprint: retryFingerprint(stamped), observedAt: stamped.observedAt}}}).outcomes[0].outcome, 'skipped_changed');
+assert.equal(planIdentityRetry({candidates: {'103U': {code: '103U', state: 'pending', retryOf: 'shortlink_missing', observedAt: stamped.observedAt}}}, {codes: ['103U'], expected: {'103U': {state: 'needs_review', reason: 'shortlink_missing', fingerprint: retryFingerprint(stamped), observedAt: stamped.observedAt}}}).outcomes[0].outcome, 'already_applied');
+assert.equal(planIdentityRetry({candidates: {'103U': {code: '103U', state: 'pending', retryOf: 'shortlink_missing', observedAt: '2026-11-01T00:00:00.000Z'}}}, {codes: ['103U'], expected: {'103U': {state: 'needs_review', reason: 'shortlink_missing', fingerprint: retryFingerprint(stamped), observedAt: stamped.observedAt}}}).outcomes[0].outcome, 'skipped_changed');
 
 console.log('Rated archive admission: pending is this archive, a historical count is not the queue, conflicts stay unmerged, a Film id is the movie id');

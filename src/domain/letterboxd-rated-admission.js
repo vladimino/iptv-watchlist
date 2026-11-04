@@ -82,6 +82,39 @@ export function planRegistration(stored, incoming, generatedAt) {
 // Enrichment of a verified film waits until no identity work remains.
 export const RETRY_LIMIT = 8;
 
+// The observation id is the archive write, not just state:reason. A later import that keeps
+// needs_review / shortlink_missing still changes this fingerprint.
+export function retryObservationId(item) {
+  return item && (item.observedAt || item.registeredAt) || '';
+}
+
+export function retryFingerprint(item) {
+  if (!item) return 'missing';
+  return [item.state || '', item.reason || '', retryObservationId(item)].join('|');
+}
+
+function observationIdFromExpect(expect) {
+  if (!expect) return '';
+  if (expect.observedAt) return expect.observedAt;
+  if (expect.fingerprint && expect.fingerprint !== 'missing') return String(expect.fingerprint).split('|').slice(2).join('|');
+  return expect.registeredAt || '';
+}
+
+function expectedMatches(item, expect) {
+  if (!expect) return true;
+  if (expect.fingerprint && retryFingerprint(item) !== expect.fingerprint) return false;
+  if (expect.observedAt != null && (item.observedAt || null) !== expect.observedAt) return false;
+  if (Object.prototype.hasOwnProperty.call(expect, 'state') && item.state !== expect.state) return false;
+  if (Object.prototype.hasOwnProperty.call(expect, 'reason') && (item.reason || null) !== (expect.reason || null)) return false;
+  return true;
+}
+
+function observationMatches(item, expect) {
+  if (!expect) return true;
+  const want = observationIdFromExpect(expect);
+  return !want || retryObservationId(item) === want;
+}
+
 // Requeue only needs_review rows whose stored reason is a proven parser/markup defect.
 // A verified, admitting, removed or other-reason row is left alone.
 export function planIdentityRetry(doc, {codes = [], expected = {}} = {}) {
@@ -94,15 +127,11 @@ export function planIdentityRetry(doc, {codes = [], expected = {}} = {}) {
     const item = doc && doc.candidates && doc.candidates[code];
     const expect = expected && expected[code];
     if (!item) {outcomes.push({id: code, outcome: 'failed', error: 'missing'}); continue;}
-    if (expect && (item.state !== expect.state || (item.reason || null) !== (expect.reason || null))) {
-      outcomes.push({id: code, outcome: 'skipped_changed'});
-      continue;
-    }
-    if (item.state === 'pending' && item.retryOf && LetterboxdIdentityIsRetryable(item.retryOf)) {
+    if (item.state === 'pending' && item.retryOf && LetterboxdIdentityIsRetryable(item.retryOf) && observationMatches(item, expect)) {
       outcomes.push({id: code, outcome: 'already_applied'});
       continue;
     }
-    if (item.state !== 'needs_review' || !LetterboxdIdentityIsRetryable(item.reason)) {
+    if (!expectedMatches(item, expect) || item.state !== 'needs_review' || !LetterboxdIdentityIsRetryable(item.reason)) {
       outcomes.push({id: code, outcome: 'skipped_changed'});
       continue;
     }

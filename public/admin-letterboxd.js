@@ -434,7 +434,7 @@ function onArchiveRetryConfirm() {
   if (!sha || !retryable.length) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
   if (!archiveLive.retryKey) archiveLive.retryKey = archiveIdempotencyKey();
   const expected = {};
-  for (const row of retryable) expected[row.code] = {state: 'needs_review', reason: row.reason};
+  for (const row of retryable) expected[row.code] = {state: row.state || 'needs_review', reason: row.reason, fingerprint: row.fingerprint, observedAt: row.observedAt || null, registeredAt: row.registeredAt || null};
   const run = archiveBeginAction('retry-confirm', 0);
   const pending = postArchiveRetryConfirm({
     archiveSha256: sha, codes: retryable.map(row => row.code), expected,
