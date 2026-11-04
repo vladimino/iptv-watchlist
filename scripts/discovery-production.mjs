@@ -6,16 +6,19 @@
 // --apply --confirm apply --target iptv sends only migrations/0011_discovery_authority.sql,
 // and only when the contract is a complete version 10 and every discovery table
 // is absent. The inserted marker stays mode r2, cutover open, generation 0.
-// --load --confirm load --target iptv copies the shared ledger into the
-// observation tables while the marker stays r2. A later --load resumes a clean
-// prefix: it compares the stored full etag, sha256, byte size and programme id,
-// reads the rows already stored, and sends only the missing suffix. A cursor
-// that is behind those rows is fenced forward. A torn or unknown prefix is
-// partial_mismatch and is not retried. --reset-load --confirm reset-load
-// discards an uncommitted copy only when the load checkpoint identity matches
-// the transfer. The first statement of that batch fails closed before any
-// delete. It does not download a replacement. Generation
-// becomes 1 only in the commit batch, after every key, payload and show matches.
+// --load --confirm load --target iptv copies every observation and every show
+// into the observation tables while the marker stays r2. Shows are not trimmed.
+// The statements of one observation may span requests. A later --load resumes
+// a clean prefix: it compares the stored full etag, sha256, byte size and
+// programme id, reads the rows already stored, and sends only the missing
+// suffix. A stored show list that is a clean prefix of that observation is
+// continued at the next show. A list that is not a prefix is partial_mismatch
+// and is not retried. A cursor that is behind the completed rows is fenced
+// forward. --reset-load --confirm reset-load discards an uncommitted copy only
+// when the load checkpoint identity matches the transfer. The first statement
+// of that batch fails closed before any delete. It does not download a
+// replacement. Generation becomes 1 only in the commit batch, after every key,
+// payload and show matches.
 // Catalog, decisions, scores, continuation, workflow, archive segments and the
 // resolver lease are not copied. Hold, seal, activation, archive import and
 // revert are not commands. A deploy does not run this script. Each write needs
@@ -37,14 +40,13 @@ export const PRODUCTION_DATABASE_NAME='iptv';
 export const PREREQUISITE=['prediction_domain_authority','prediction_domain_cas','prediction_profile','prediction_fingerprint','prediction_pointer','prediction_lineage','prediction_queue','prediction_lease','prediction_run','prediction_domain_intent','published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row','owner_review_authority','owner_review_cas','owner_review_entry','ratings_domain_authority','ratings_domain_cas','ratings_document','ratings_view'];
 export const DISCOVERY_TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 const STATEMENT_BYTES=100*1024;
-// One observation has at most 96 shows. Those statements and the two-statement
-// cursor fence have to travel in one request, so a failed batch cannot leave a
-// torn item that a later readback would be unable to place on a clean prefix.
+// One observation's statements may span requests. A request that finishes in
+// the middle of its shows does not move the item cursor. The stored show rows
+// are the resume point, and only a clean prefix of those shows is continued.
 const BATCH_STATEMENTS=100;
 const BATCH_BYTES=1024*1024;
 const READ_PAGE=20;
 const WRITER_WINDOW_MS=15*60*1000;
-const SHOW_CAP=96;
 export const LEDGER_MAX_BYTES=64*1024*1024;
 const MIGRATION_PATH=path.join(path.dirname(fileURLToPath(import.meta.url)),'../migrations/0011_discovery_authority.sql');
 const ALLOWED=/^(?:INSERT INTO schema_contract\b|UPDATE schema_contract\b|CREATE TABLE discovery_|CREATE INDEX discovery_|CREATE UNIQUE INDEX discovery_|CREATE TRIGGER\b|INSERT INTO discovery_)/i;
@@ -166,7 +168,6 @@ function storedInteger(value){
 
 function showsOf(item){
  const shows=Array.isArray(item?.shows)?item.shows:[];
- if(shows.length>SHOW_CAP)throw new OperatorStop('ledger_refused',3);
  return shows.map(show=>({channelId:show?.channelId??null,channel:show?.channel??null,start:storedInteger(show?.start),end:storedInteger(show?.end)}));
 }
 
@@ -177,30 +178,42 @@ export function observationShape(item){
  return {key:item.key,payload:JSON.stringify(payload),evidence:evidenceKey(item),shows:rows.map((show,ordinal)=>({ordinal,channelId:show.channelId??null,channel:show.channel??null,start:show.start,end:show.end}))};
 }
 
+function sameShow(left, right){
+ return Number(left.ordinal)===right.ordinal&&(left.channelId??null)===right.channelId&&(left.channel??null)===right.channel&&(left.start??null)===right.start&&(left.end??null)===right.end;
+}
+
 function sameShows(stored, expected){
  if(!Array.isArray(stored)||stored.length!==expected.length)return false;
- for(let index=0;index<expected.length;index++){
-  const left=stored[index], right=expected[index];
-  if(Number(left.ordinal)!==right.ordinal||(left.channelId??null)!==right.channelId||(left.channel??null)!==right.channel)return false;
-  if((left.start??null)!==right.start||(left.end??null)!==right.end)return false;
- }
+ for(let index=0;index<expected.length;index++)if(!sameShow(stored[index],expected[index]))return false;
+ return true;
+}
+
+function showsArePrefix(stored, expected){
+ if(!Array.isArray(stored)||stored.length>expected.length)return false;
+ for(let index=0;index<stored.length;index++)if(!sameShow(stored[index],expected[index]))return false;
  return true;
 }
 
 export function loadPrefix(items, stored){
+ const stopped={cursor:0,showCursor:0,resumeAt:0,mismatch:true};
+ if(stored?.orphans)return stopped;
  const byKey=new Map(stored.map(row=>[row.key,row]));
  let cursor=0;
  for(const item of items){
   const row=byKey.get(item.key);
   if(!row)break;
   const expected=observationShape(item);
-  if(row.payload!==expected.payload||row.evidence!==expected.evidence||!sameShows(row.shows,expected.shows))return {cursor,mismatch:true};
+  if(row.payload!==expected.payload||row.evidence!==expected.evidence)return {...stopped,cursor};
+  if(sameShows(row.shows,expected.shows)){byKey.delete(item.key);cursor++;continue;}
+  if(!showsArePrefix(row.shows,expected.shows))return {...stopped,cursor};
   byKey.delete(item.key);
-  cursor++;
+  for(const later of items.slice(cursor+1))if(byKey.has(later.key))return {...stopped,cursor};
+  if(byKey.size)return {...stopped,cursor};
+  return {cursor,showCursor:row.shows.length,resumeAt:1+row.shows.length,mismatch:false};
  }
- for(const item of items.slice(cursor))if(byKey.has(item.key))return {cursor,mismatch:true};
- if(byKey.size)return {cursor,mismatch:true};
- return {cursor,mismatch:false};
+ for(const item of items.slice(cursor))if(byKey.has(item.key))return {...stopped,cursor};
+ if(byKey.size)return {...stopped,cursor};
+ return {cursor,showCursor:0,resumeAt:0,mismatch:false};
 }
 
 export function ledgerStatements(document){
@@ -222,7 +235,7 @@ export function ledgerStatements(document){
   for(const sql of group)if(Buffer.byteLength(sql,'utf8')>STATEMENT_BYTES)throw new OperatorStop('batch_too_large',3);
   groups.push(group);
  }
- return {run,items:document.items.length,shows,groups,statements:groups.flat()};
+ return {run,items:document.items.length,shows,groups,statements:groups.flat(),source:document.items};
 }
 
 function fits(list, extra){
@@ -323,27 +336,53 @@ export function resetSql(claim){
  ];
 }
 
-export function packLoadSlice(groups, run, from){
+export function packLoadSlice(groups, run, from, skip=0){
+ if(!Number.isInteger(from)||from<0||from>groups.length||!Number.isInteger(skip)||skip<0)throw new OperatorStop('partial_mismatch',3);
  const batches=[];
  let index=from;
+ let offset=index<groups.length?skip:0;
+ if(index<groups.length&&offset>groups[index].length)throw new OperatorStop('partial_mismatch',3);
+ if(index<groups.length&&offset===groups[index].length)throw new OperatorStop('partial_mismatch',3);
+ let fenced=from;
  let current=[];
- let currentFrom=from;
+ let completes=0;
+ const canTake=(count)=>{
+  const piece=groups[index].slice(offset,offset+count);
+  const finishes=offset+count===groups[index].length;
+  const fence=finishes||completes>0?cursorSql(run,fenced,fenced+completes+(finishes?1:0)):[];
+  return fits(current.concat(piece),fence);
+ };
  const flush=()=>{
   if(!current.length)return;
-  const fence=cursorSql(run,currentFrom,index);
-  if(!fits(current,fence))throw new OperatorStop('batch_too_large',3);
-  batches.push(current.concat(fence));
+  let batch=current;
+  if(completes>0){
+   const fence=cursorSql(run,fenced,fenced+completes);
+   if(!fits(current,fence))throw new OperatorStop('batch_too_large',3);
+   batch=current.concat(fence);
+   fenced+=completes;
+  }
+  batches.push(batch);
   current=[];
-  currentFrom=index;
+  completes=0;
  };
- for(let cursor=from;cursor<groups.length;cursor++){
-  const group=groups[cursor];
-  const alone=cursorSql(run,cursor,cursor+1);
-  if(group.length+alone.length>BATCH_STATEMENTS||!fits(group,alone))throw new OperatorStop('batch_too_large',3);
-  const next=cursorSql(run,currentFrom,cursor+1);
-  if(current.length&&!fits(current.concat(group),next))flush();
-  current.push(...group);
-  index++;
+ while(index<groups.length){
+  if(!groups[index].length)throw new OperatorStop('batch_too_large',3);
+  if(!canTake(1)){
+   if(!current.length)throw new OperatorStop('batch_too_large',3);
+   flush();
+   continue;
+  }
+  let low=1;
+  let high=groups[index].length-offset;
+  while(low<high){
+   const mid=Math.ceil((low+high)/2);
+   if(canTake(mid))low=mid;
+   else high=mid-1;
+  }
+  current.push(...groups[index].slice(offset,offset+low));
+  offset+=low;
+  if(offset===groups[index].length){completes++;index++;offset=0;}
+  else flush();
  }
  flush();
  return batches;
@@ -591,7 +630,7 @@ async function readStored(binding){
   if(last.key<showKey||(last.key===showKey&&Number(last.ordinal)<=showOrdinal))throw new OperatorStop('unknown_state',3);
   for(const show of page){
    const row=byKey.get(show.key);
-   if(!row)continue;
+   if(!row){rows.orphans=(rows.orphans||0)+1;continue;}
    row.shows.push({ordinal:Number(show.ordinal),channelId:show.channelId??null,channel:show.channel??null,start:show.start==null?null:Number(show.start),end:show.end==null?null:Number(show.end)});
   }
   showKey=last.key;
@@ -605,10 +644,10 @@ function sameIdentity(stored, identity){
  return stored.etag===identity.etag&&stored.sha256===identity.sha256&&stored.bytes===identity.bytes&&stored.programmeRunId===identity.programmeRunId&&stored.items===identity.items&&stored.shows===identity.shows;
 }
 
-async function proveRows(binding, document, built){
+async function proveRows(binding, built){
  const loaded=await snapshotOf(binding);
- const verified=loadPrefix(document.items, await readStored(binding));
- if(verified.mismatch||verified.cursor!==built.items)throw new OperatorStop('readback_mismatch',4);
+ const verified=loadPrefix(built.source, await readStored(binding));
+ if(verified.mismatch||verified.cursor!==built.items||verified.resumeAt!==0)throw new OperatorStop('readback_mismatch',4);
  if(loaded.observations!==built.items||loaded.foreignObservations||loaded.foreignShows||loaded.sideRows)throw new OperatorStop('readback_mismatch',4);
  const showCount=await binding.prepare('SELECT COUNT(*) AS n FROM discovery_observation_show').bind().first();
  if(Number(showCount?.n)!==built.shows)throw new OperatorStop('readback_mismatch',4);
@@ -617,8 +656,8 @@ async function proveRows(binding, document, built){
  return loaded;
 }
 
-async function proveCommitted(binding, document, built, beforeMarkers){
- const loaded=await proveRows(binding, document, built);
+async function proveCommitted(binding, built, beforeMarkers){
+ const loaded=await proveRows(binding, built);
  if(loaded.transfer?.state!=='committed'||loaded.transfer.batches!==built.items||loaded.transfer.programmeRunId!==built.run)throw new OperatorStop('readback_mismatch',4);
  if(loaded.marker?.generation!==1||loaded.marker.programmeRunId!==built.run||loaded.marker.publishedProgrammeRunId!==built.run)throw new OperatorStop('readback_mismatch',4);
  if(loaded.checkpoint?.hopId!=null||loaded.checkpoint?.payload!=null)throw new OperatorStop('readback_mismatch',4);
@@ -760,6 +799,7 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
   if(built.run!==published)throw new OperatorStop('ledger_refused',3);
   const identity={bytes:ledger.bytes,etag:ledger.etag,items:built.items,programmeRunId:built.run,sha256:ledger.sha256,shows:built.shows};
   let cursorStart=0;
+  let resumeAt=0;
   let resumed=false;
   let finishCommitted=false;
   if(gate==='partial_load'){
@@ -768,14 +808,15 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    if(!sameIdentity(stored,identity))throw new OperatorStop('source_changed',3);
    const state=snapshot.transfer?.state;
    if(state!=='loading'&&state!=='committed')throw new OperatorStop('partial_mismatch',3);
-   const prefixState=loadPrefix(ledger.document.items, await readStored(binding));
+   const prefixState=loadPrefix(built.source, await readStored(binding));
    if(prefixState.mismatch)throw new OperatorStop('partial_mismatch',3);
    const recorded=snapshot.transfer?.batches;
    if(!Number.isInteger(recorded)||recorded<0||recorded>prefixState.cursor)throw new OperatorStop('partial_mismatch',3);
-   const complete=prefixState.cursor===built.items;
+   const complete=prefixState.cursor===built.items&&prefixState.resumeAt===0;
    if(state==='committed'&&(!complete||recorded!==built.items||snapshot.marker?.generation!==1||snapshot.marker?.programmeRunId!==built.run||snapshot.marker?.publishedProgrammeRunId!==built.run))throw new OperatorStop('partial_mismatch',3);
    finishCommitted=state==='committed';
    cursorStart=prefixState.cursor;
+   resumeAt=prefixState.resumeAt;
    resumed=true;
   }
   const guarded=await writerReport(client,binding,typeof now==='function'?now():now);
@@ -794,15 +835,15 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
   if(gate==='load')await send(openingSql(identity));
   if(!finishCommitted){
    if(resumed&&fresh.transfer.batches<cursorStart)await send(cursorSql(built.run,fresh.transfer.batches,cursorStart));
-   for(const batch of packLoadSlice(built.groups,built.run,cursorStart))await send(batch);
-   const ready=await proveRows(binding,ledger.document,built);
+   for(const batch of packLoadSlice(built.groups,built.run,cursorStart,resumeAt))await send(batch);
+   const ready=await proveRows(binding,built);
    const marker=ready.marker;
    const freshStart=marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
    const torn=marker.generation===1&&marker.programmeRunId===built.run&&marker.publishedProgrammeRunId===built.run;
    if((!freshStart&&!torn)||ready.transfer?.state!=='loading'||ready.transfer.programmeRunId!==built.run||ready.transfer.batches!==built.items)throw new OperatorStop('readback_mismatch',4);
   }
   await send(commitSql(built.run,built.items));
-  await proveCommitted(binding,ledger.document,built,beforeLoad);
+  await proveCommitted(binding,built,beforeLoad);
   writeState='committed';
   return {exit:0,result:{operation:'load',writes:true,writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:11,mode:'r2',cutover:'open',generation:1,programmeRunId:built.run,observations:built.items,shows:built.shows,batches:sent,resumed,cursorStart,etagCompared:true,etagPrefix:prefix(ledger.etag),shaPrefix:prefix(ledger.sha256),bytes:ledger.bytes,decisions:0,admissions:0}};
  }catch(error){

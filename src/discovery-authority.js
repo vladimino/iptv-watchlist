@@ -11,7 +11,6 @@ export const DISCOVERY_TABLES=TABLES;
 const FENCE_SQL='UPDATE discovery_cas SET ok=changes() WHERE id=1';
 export const LEASE_TTL_MS=90000;
 export const STATEMENT_CAP=40;
-const SHOW_CAP=96;
 export const INDEX_CAP=3000;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
@@ -282,8 +281,10 @@ async function writeScores(env,value,gate,context){
 }
 
 function showsOf(item){
+ // Every show is stored. A long list spans statement batches; it is not trimmed,
+ // because the evidence key is the full list. The observation index has its own
+ // smaller bound and does not remove these rows.
  const shows=Array.isArray(item?.shows)?item.shows:[];
- if(shows.length>SHOW_CAP)throw failed('discovery_bounded');
  return shows.map((show,ordinal)=>({ordinal,channelId:show?.channelId??null,channel:show?.channel??null,start:Number.isFinite(Number(show?.start))?Number(show.start):null,end:Number.isFinite(Number(show?.end))?Number(show.end):null}));
 }
 function validateItems(items){
