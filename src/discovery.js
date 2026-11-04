@@ -960,14 +960,13 @@ function interruptedCheckpointProof(record,status,diagnostics){
  if(!status||typeof status!=='object'||Array.isArray(status))return {ok:false,cause:'status_missing'};
  if(typeof status.hopId!=='string'||!status.hopId)return {ok:false,cause:'status_unattributed'};
  if(typeof status.programmeRunId==='string'&&status.programmeRunId&&status.programmeRunId!==record.programmeRunId)return {ok:false,cause:'status_generation'};
- const same=status.hopId===record.hopId,finished=typeof status.finishedAt==='string'&&!!status.finishedAt;
- if(same&&finished)return {ok:false,cause:'status_finished'};
+ if(status.hopId!==record.hopId)return {ok:false,cause:'status_other_hop'};
+ if(typeof status.finishedAt==='string'&&status.finishedAt)return {ok:false,cause:'status_finished'};
  const recent=diagnostics&&typeof diagnostics==='object'&&!Array.isArray(diagnostics)&&Array.isArray(diagnostics.recent)?diagnostics.recent:null;
  if(diagnostics!=null&&recent==null)return {ok:false,cause:'diagnostics_malformed'};
  const claimed=(recent||[]).some(item=>item?.checkpoint?.hopId===record.hopId&&(item?.interruption?.committed===true||item?.phase==='checkpointed'&&item?.checkpoint?.owned===true));
  if(claimed)return {ok:false,cause:'checkpoint_claimed'};
- if(!same&&!finished)return {ok:false,cause:'status_unattributed'};
- return {ok:true,proof:same?(status.checkpoint==='cheap_pass'?'cheap_pass':'partial'):'prior_hop'};
+ return {ok:true,proof:status.checkpoint==='cheap_pass'?'cheap_pass':'partial'};
 }
 function assessInterruptedRecovery({now,epgStage,publishedRunId,programmeRunId,sourceRunId,record,lease,status,diagnostics,authority}){
  const refused=(reason,cause=null)=>({permit:'refused',reason,cause:cause||reason,budget:null,proof:null});
@@ -1088,6 +1087,7 @@ async function advanceDiscovery(env,body={}){
   trace.interruptedRecovery=verdict;
   return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current,{nextAction:'stop'}),recovery:verdict,diagnostic:trace};
  }
+ if(recoveryBudget!=null&&body.onPersist)await body.onPersist();
  if(!env.TMDB_API_READ_ACCESS_TOKEN){
   trace.branch='missing_secret';
   const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
@@ -1190,7 +1190,11 @@ async function discoveryExecutorReadout(env,continuation){
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
- await openContinuationStep(env,step,true);
+ // A recovery report or refusal must not write the diagnostics ring. The ring is stored only once a confirm
+ // has passed the gate and is about to take the lease.
+ const recoveryRequested=body?.recovery==='interrupted';
+ let persistStep=!recoveryRequested;
+ await openContinuationStep(env,step,persistStep);
  let response;
  try{
   if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24)){step.branch='invalid_limit';response=json({error:'Invalid limit'},400);}
@@ -1208,10 +1212,10 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
    else if(recovery&&executor==='workflow'){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:'owner_investigation',cause:'executor_workflow',budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
    else if(recovery&&authorityCause){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:authorityCause,cause:authorityCause,budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
    else if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
-   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:recovery?false:body.chunks!==0,recoverInterrupted:recovery,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
+   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:recovery?false:body.chunks!==0,recoverInterrupted:recovery,trace:step.diagnostic,onPersist:async()=>{if(persistStep)return;persistStep=true;step.recorded.entered=await recordContinuationDiagnostic(env,step);},onCheckpoint:committed=>markContinuationCheckpoint(env,step,persistStep,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
   }
- }catch(e){await closeContinuationStep(env,step,started,null,e,true);throw e;}
- await closeContinuationStep(env,step,started,response,null,true);
+ }catch(e){await closeContinuationStep(env,step,started,null,e,persistStep);throw e;}
+ await closeContinuationStep(env,step,started,response,null,persistStep);
  return response;
 }
 async function discoveryPipelineStatus(env){

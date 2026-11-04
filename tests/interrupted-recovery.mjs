@@ -40,7 +40,6 @@ const iso=ms=>new Date(ms).toISOString();
 const GENERATION='a30f67e9-3a11-4f65-b9ec-ccdadfcedbfe',NEXT='5d6e7f80-1a2b-4c3d-8e9f-0a1b2c3d4e5f',HOP='4b9bc7c5-c429-460b-87a5-e4adf2d4fbe8',PRIOR='6d1f3f1e-5b7e-4d6a-9c2b-1a2b3c4d5e6f';
 const continuation=()=>records.get('epg/resolver-continuation.json');
 const decided=()=>Object.keys(records.get('epg/discovery-resolution.json')||{}).length;
-const dataWrites=()=>puts.filter(key=>!key.includes('continuation-diagnostics'));
 const items=count=>Array.from({length:count},(_,i)=>({key:'hot film|2020|'+i,title:'Hot Film',normalizedTitle:'hot film',year:2020,duration:200,durations:[200],firstAiring:clockTime,lastAiring:clockTime,airings:1,shows:[{channelId:'t',channel:'T',start:clockTime,end:clockTime+3600000}]}));
 function seed(patch={}){
  records.clear();etags.clear();puts=[];fetches.length=0;continuationGets=0;spoilOn=0;clockTime=Date.parse('2026-11-04T15:00:00.000Z');
@@ -92,7 +91,7 @@ assert.equal(assess(facts({authority:{mode:'d1',ready:false,held:false,cutover:'
 assert.equal(assess(facts({status:null})).cause,'status_missing');
 assert.equal(assess(facts({status:{programmeRunId:GENERATION,checkpoint:'cheap_pass'}})).cause,'status_unattributed');
 assert.equal(assess(facts({status:{hopId:HOP,programmeRunId:GENERATION,finishedAt:iso(clockTime),checkpoint:'cheap_pass'}})).cause,'status_finished');
-assert.equal(assess(facts({status:{hopId:PRIOR,programmeRunId:GENERATION,finishedAt:iso(clockTime-60000)}})).proof,'prior_hop');
+assert.equal(assess(facts({status:{hopId:PRIOR,programmeRunId:GENERATION,finishedAt:iso(clockTime-60000)}})).cause,'status_other_hop');
 assert.equal(assess(facts({diagnostics:{recent:[{checkpoint:{hopId:HOP,owned:true},interruption:{committed:true}}]}})).cause,'checkpoint_claimed');
 assert.equal(assess(facts({diagnostics:{recent:'no'}})).cause,'diagnostics_malformed');
 
@@ -106,10 +105,10 @@ puts=[];
 r=await recover({chunks:0});
 assert.equal(r.status,200);assert.equal(r.data.diagnostic.branch,'recovery_report');
 assert.deepEqual(r.data.recovery,{permit:'eligible',reason:'eligible',cause:null,budget:12,proof:'cheap_pass'});
-assert.equal(r.data.discovery.nextAction,'stop');assert.equal(kept(),before);assert.deepEqual(dataWrites(),[]);assert.deepEqual(fetches,[]);
+assert.equal(r.data.discovery.nextAction,'stop');assert.equal(kept(),before);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 const pipeline=await status();
 assert.equal(pipeline.interruptedRecovery.permit,'eligible');assert.equal(pipeline.interruptedRecovery.proof,'cheap_pass');
-assert.equal(kept(),before,'a status read does not recover the series');
+assert.equal(kept(),before,'a status read does not recover the series');assert.deepEqual(puts,[]);
 
 // One confirmed chunk. The checkpoint is an ordinary continuation, so the next hourly step may continue.
 const preserved={status:'verified',filmId:'tmdb_42',tmdbId:'42'};
@@ -122,8 +121,10 @@ assert.equal(continuation().programmeRunId,GENERATION);assert.notEqual(continuat
 assert.deepEqual(records.get('epg/discovery-resolution.json')['hot film|2020|0'],preserved);
 assert.equal(Object.keys(records.get('epg/discovered-films.json')).filter(key=>key==='tmdb_42').length,1);
 const afterChunk=decided();
+puts=[];
 r=await recover({});
 assert.equal(r.data.recovery.reason,'not_interrupted');assert.equal(r.data.diagnostic.branch,'recovery_refused');assert.equal(decided(),afterChunk,'a lost or repeated confirm does not run a second recovery chunk');
+assert.deepEqual(puts,[],'a repeat confirm writes nothing, including the diagnostics ring');
 assert.equal(continuation().remainingChunks,11);
 r=await step();
 assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(continuation().remainingChunks,10);assert.equal(decided(),afterChunk+24);
@@ -140,7 +141,7 @@ async function refuses(name,patch,reason,cause=reason){
  assert.equal(response.data.diagnostic.branch,'recovery_refused',name);
  assert.equal(response.data.recovery.reason,reason,name);
  assert.equal(response.data.recovery.cause,cause,name);
- assert.equal(kept(),snap,name);assert.deepEqual(dataWrites(),[],name);assert.deepEqual(fetches,[],name);assert.equal(decided(),patch.resolution?Object.keys(patch.resolution).length:0,name);
+ assert.equal(kept(),snap,name);assert.deepEqual(puts,[],name);assert.deepEqual(fetches,[],name);assert.equal(decided(),patch.resolution?Object.keys(patch.resolution).length:0,name);
 }
 await refuses('stage epg',{sync:{runId:'sync-1',stage:'epg',updatedAt:iso(clockTime)}},'epg_not_complete');
 await refuses('other generation',{published:{phase:'published',programmeRunId:NEXT}},'generation_mismatch');
@@ -154,18 +155,20 @@ await refuses('missing status',{dropStatus:true},'owner_investigation','status_m
 await refuses('claimed checkpoint',{diagnostics:{schemaVersion:1,recent:[{phase:'interrupted',checkpoint:{hopId:HOP,owned:true},interruption:{committed:true,cause:'unknown'}}]}},'owner_investigation','checkpoint_claimed');
 await refuses('no budget',{continuation:{remainingChunks:0}},'no_budget');
 
-// A prior hop's finished status is enough to show this hop did not commit, and its decisions stay.
-seed({status:{hopId:PRIOR,programmeRunId:GENERATION,finishedAt:iso(clockTime-60000),stage:'partial'},resolution:{'hot film|2020|1':preserved}});
+// A prior hop's finished status does not prove what the interrupted hop stored. Partial decisions with no status for this hop stay put.
+seed({status:{hopId:PRIOR,programmeRunId:GENERATION,finishedAt:iso(clockTime-60000),stage:'partial'},resolution:{'hot film|2020|1':{status:'verified',filmId:'tmdb_42',tmdbId:'42',checkedAt:iso(clockTime-1000)}}});
+const partial=JSON.stringify(records.get('epg/discovery-resolution.json'));
+before=kept();puts=[];
 r=await recover({});
-assert.equal(r.data.recovery.proof,'prior_hop');assert.equal(r.data.diagnostic.branch,'chunk');
-assert.deepEqual(records.get('epg/discovery-resolution.json')['hot film|2020|1'],preserved);
+assert.equal(r.data.recovery.reason,'owner_investigation');assert.equal(r.data.recovery.cause,'status_other_hop');assert.equal(r.data.diagnostic.branch,'recovery_refused');
+assert.equal(kept(),before);assert.equal(JSON.stringify(records.get('epg/discovery-resolution.json')),partial);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 
 // An expired lease is not a writer. A missing secret does not replace the stop with an error record.
 seed({lease:{id:HOP,expiresAt:clockTime-1000}});
 r=await recover({});assert.equal(r.data.diagnostic.branch,'chunk');
 seed();delete env.TMDB_API_READ_ACCESS_TOKEN;before=kept();puts=[];
 r=await recover({});
-assert.equal(r.data.recovery.reason,'missing_secret');assert.equal(kept(),before);assert.deepEqual(dataWrites(),[]);
+assert.equal(r.data.recovery.reason,'missing_secret');assert.equal(kept(),before);assert.deepEqual(puts,[]);
 env.TMDB_API_READ_ACCESS_TOKEN='test';
 
 // Compare-and-swap: the record moved between the gate and the running write. No chunk is claimed.
@@ -194,27 +197,28 @@ bucket.put=originalPut;
 // Authority transitions and the workflow executor refuse without a chunk. An open report is not required.
 function install(gate,read){context.DiscoveryAuthority={ownsKey:()=>false,readAuthority:read||(async()=>gate),readContinuation:async()=>({handled:false,record:null,etag:null}),readLease:async()=>({handled:false,lease:null}),routeRead:async()=>{throw new Error('discovery_incomplete');},routeWrite:async()=>{throw new Error('discovery_fence');}};}
 seed();install({mode:'d1',ready:false,held:true,cutover:'held',transfer:'idle'});before=kept();puts=[];
-r=await recover({});assert.equal(r.data.recovery.reason,'authority_held');assert.equal(kept(),before);assert.deepEqual(dataWrites(),[]);
-seed();install({mode:'d1',ready:true,held:false,cutover:'open',transfer:'loading',programmeRunId:GENERATION});before=kept();
-r=await recover({chunks:0});assert.equal(r.data.recovery.reason,'authority_loading');assert.equal(kept(),before);
-seed();install(null,async()=>{throw new Error('discovery_unavailable');});before=kept();
-r=await recover({});assert.equal(r.data.recovery.reason,'authority_unavailable');assert.equal(kept(),before);
+r=await recover({});assert.equal(r.data.recovery.reason,'authority_held');assert.equal(kept(),before);assert.deepEqual(puts,[]);
+seed();install({mode:'d1',ready:true,held:false,cutover:'open',transfer:'loading',programmeRunId:GENERATION});before=kept();puts=[];
+r=await recover({chunks:0});assert.equal(r.data.recovery.reason,'authority_loading');assert.equal(kept(),before);assert.deepEqual(puts,[]);
+seed();install(null,async()=>{throw new Error('discovery_unavailable');});before=kept();puts=[];
+r=await recover({});assert.equal(r.data.recovery.reason,'authority_unavailable');assert.equal(kept(),before);assert.deepEqual(puts,[]);
 delete context.DiscoveryAuthority;
 
 seed();env.DISCOVERY_EXECUTOR='workflow';before=kept();puts=[];
 r=await recover({});
-assert.equal(r.data.recovery.cause,'executor_workflow');assert.equal(kept(),before);assert.equal(records.has('epg/discovery-workflow.json'),false);assert.deepEqual(dataWrites(),[]);
+assert.equal(r.data.recovery.cause,'executor_workflow');assert.equal(kept(),before);assert.equal(records.has('epg/discovery-workflow.json'),false);assert.deepEqual(puts,[]);
 delete env.DISCOVERY_EXECUTOR;
 
 // chunk_budget renewal stays an ordinary step. Recovery does not spend it, and a due step still opens the next series.
 seed({continuation:{stage:'paused',reason:'chunk_budget',remainingChunks:0,nextCatchUpAt:iso(clockTime-1000),retryAt:null,hopId:HOP,programmeRunId:GENERATION,interruptions:undefined}});
-before=kept();r=await recover({});
-assert.equal(r.data.recovery.reason,'not_interrupted');assert.equal(kept(),before);
+before=kept();puts=[];r=await recover({});
+assert.equal(r.data.recovery.reason,'not_interrupted');assert.equal(kept(),before);assert.deepEqual(puts,[]);
 r=await step();assert.equal(r.data.diagnostic.branch,'chunk');assert.equal(continuation().remainingChunks,11);
 
 r=await post('/api/enrichment/discovery/resolve',{recovery:'force'});
 assert.equal(r.status,400);
+puts=[];
 r=await post('/api/enrichment/discovery/resolve',{recovery:'interrupted',chunks:2});
-assert.equal(r.status,400);
+assert.equal(r.status,400);assert.deepEqual(puts,[]);
 
 console.log('Interrupted recovery: hourly stop, read-only gate, one confirm, replay, force unchanged, refusals, prior hop, expired lease, missing secret, CAS, killed hop fail-closed, authority, workflow and chunk_budget renewal passed');
