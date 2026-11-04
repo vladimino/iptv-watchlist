@@ -20,7 +20,9 @@
 // replacement. Generation becomes 1 only in the commit batch, after every key,
 // payload and show matches.
 // --import --confirm import --producers-drained copies the catalog, decisions,
-// status, score preview, continuation and workflow while mode stays r2. The
+// status, score preview, continuation and workflow while mode stays r2. A
+// decision whose evidence key disagrees with the loaded observation is stored
+// with that key. A score preview for another programme stores no rows. The
 // commit pins that source on the checkpoint (hop imported) and keeps the pin
 // through hold. It does not copy an archive segment or the resolver lease.
 // --hold --confirm hold --producers-drained sets mode d1 and cutover held only
@@ -39,7 +41,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {evidenceKey} from '../src/discovery-authority.js';
-import {activateDecision, activateSql, admissionSql, assertDecisionEvidence, bodySha, catalogEntries, commitImportSql, decisionEntries, decisionGroup, holdDecision, holdSql, importDecision, importIdentity, isCutoverStop, openingImportSql, packImportBatches, parseImportIdentity, recordText, resetImportDecision, resetImportSql, sameImportIdentity, scoreEntries, SMALL_MAX_BYTES, statusText, valuePrefix} from './discovery-cutover.mjs';
+import {activateDecision, activateSql, admissionSql, bodySha, catalogEntries, commitImportSql, decisionEntries, decisionGroup, holdDecision, holdSql, importDecision, importIdentity, isCutoverStop, openingImportSql, packImportBatches, parseImportIdentity, recordText, resetImportDecision, resetImportSql, sameImportIdentity, scoreEntries, SMALL_MAX_BYTES, staleEvidenceCount, statusText, valuePrefix} from './discovery-cutover.mjs';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials} from './r2-snapshot-export.mjs';
@@ -763,12 +765,12 @@ async function buildCutover(client, binding, snapshot, writtenAt){
  const scores=await readImportBody(client,'epg/discovery-score-preview.json',{required:false,maxBytes:SMALL_MAX_BYTES});
  const continuation=await readImportBody(client,'epg/resolver-continuation.json',{required:false,maxBytes:SMALL_MAX_BYTES});
  const workflow=await readImportBody(client,'epg/discovery-workflow.json',{required:false,maxBytes:SMALL_MAX_BYTES});
- let films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody;
+ let films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody,staleEvidence;
  try{
   films=catalogEntries(catalog.value);
   decisionRows=decisionEntries(decisions.value);
   const evidence=new Map(await readPaged(binding,"SELECT observation_key AS key, evidence_key AS evidence FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key>? ORDER BY observation_key LIMIT 20",'key',row=>[row.key,row.evidence]));
-  assertDecisionEvidence(decisionRows,evidence);
+  staleEvidence=staleEvidenceCount(decisionRows,evidence);
   scoreRows=scoreEntries(scores.value,programme);
   statusBody=statusText(status.value,programme);
   continuationBody=recordText(continuation.value,programme);
@@ -789,7 +791,7 @@ async function buildCutover(client, binding, snapshot, writtenAt){
   workflow:workflow.present?{present:true,etag:workflow.etag,sha256:workflow.sha256,bytes:workflow.bytes}:{present:false,etag:null,sha256:null,bytes:0},
  };
  const payload=importIdentity(identity);
- return {programme,generation,batches,films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody,identity,payload,writtenAt};
+ return {programme,generation,batches,films,decisionRows,scoreRows,statusBody,continuationBody,workflowBody,identity,payload,writtenAt,staleEvidence};
 }
 
 async function proveCutover(binding, built){
@@ -868,7 +870,7 @@ async function executeCutover(args, adapter, binding, snapshot, client, now, rea
  if(decision==='imported'){
   if(!pinMatches)throw new OperatorStop('source_changed',3);
   if(!ready)throw new OperatorStop('partial_mismatch',3);
-  return {exit:0,result:{operation:'import',writes:false,writeState:'none',reason:'already_imported',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:built.generation,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length}};
+  return {exit:0,result:{operation:'import',writes:false,writeState:'none',reason:'already_imported',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:'r2',generation:built.generation,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,staleEvidence:built.staleEvidence}};
  }
  if(decision==='hold'||decision==='activate'){
   if(snapshot.checkpoint?.hopId!=='imported'||!pinMatches)throw new OperatorStop('source_changed',3);
@@ -915,7 +917,7 @@ async function executeCutover(args, adapter, binding, snapshot, client, now, rea
   if(marker?.mode!=='r2'||marker.cutover!=='open'||marker.generation!==built.generation||after.checkpoint?.hopId!=='imported'||after.checkpoint?.payload!==built.payload)throw new OperatorStop('readback_mismatch',4);
   if(!await cutoverMatches(binding,built))throw new OperatorStop('readback_mismatch',4);
  }
- return {exit:0,result:{operation:args.command.slice(2),writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:marker?.mode??null,cutover:marker?.cutover??null,generation:marker?.generation??null,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,scores:built.scoreRows.length,resumed:decision==='partial_import',neighboursMoved:neighbours}};
+ return {exit:0,result:{operation:args.command.slice(2),writes:true,writeState:reads.writeState,rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),mode:marker?.mode??null,cutover:marker?.cutover??null,generation:marker?.generation??null,programmeRunId:built.programme,films:built.films.length,decisions:built.decisionRows.length,scores:built.scoreRows.length,resumed:decision==='partial_import',neighboursMoved:neighbours,...(args.command==='--import'?{staleEvidence:built.staleEvidence}:{})}};
 }
 
 async function cutoverMatches(binding, built){
