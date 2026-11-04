@@ -90,4 +90,25 @@ flowchart LR
   rows -.->|may lag; not a read fallback| mirror
 ```
 
+## Watchlist fact keeps the Film
+
+**Visual review: pending.** This diagram is proposed with [ADR 0084](../adr/0084-durable-watchlist-film-retention.md) and is not approved. It does not replace the four diagrams above. A Letterboxd lid whose view-index `watchlist` is `true` or `false` stays one Film after the current programme and watchlist drop it. Metadata fills that Film and does not mint one on its own. Membership is true only while the current watchlist document names the lid. The grid reads that document, not the Film. Either boolean keeps the film out of the Finds first-watch offer. A watched or rated entry still excludes it on its own. `watchlist: false` is not a watched mark. R2 stays the Film authority.
+
+```mermaid
+flowchart LR
+  lists["Current programme or watchlist"]
+  fact["Letterboxd lid<br/>watchlist true or false"]
+  body["Metadata of that same lid"]
+  view["One Film"]
+  member["Watchlist membership"]
+  grid["Watchlist grid"]
+  finds["Finds first-watch offer"]
+  lists -->|builds the Film| view
+  lists -->|the grid reads this document| grid
+  fact -->|keeps the same Film after the lists drop it| view
+  body -.->|fills that Film; a cache alone does not mint one| view
+  view -->|true only while the current list names the lid| member
+  fact -.->|either value excludes the offer| finds
+```
+
 **Current/future boundary:** existing Worker read/write paths and authoritative R2 objects continue to serve the site. The person identity GET reads D1 and calls the derived reference. Finds reads that GET for a selected actor or director and still takes eligibility from the published catalog. The watchlist grid does not. D1 is not the authority for Films or Persons. Owner reviews are D1-authoritative: the marker is `d1` at generation 1 ([activation record](../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)). The canonical domain model, offline D1 repositories and a later general page cutover stay distinct; do not depict them as one deployed transactional entity store. See [D1 schema](../reference/data/d1-schema.md) and [staged migration ADR](../adr/0017-staged-d1-migration.md).

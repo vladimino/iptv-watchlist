@@ -112,6 +112,8 @@ function catalogPosters(metadata){
 // Letterboxd id with two stored TMDB ids, or with none, is matched by its own id alone. Titles are never compared.
 const CATALOG_TMDB_ID=/^tmdb_([1-9]\d*)$/;
 const catalogConsumed=item=>item?.watched===true||item?.actualRating!=null;
+// A watchlist fact, either value, is membership. It is not a first-watch offer. Missing the field leaves the other rules alone.
+const catalogWatchlistFact=item=>item?.watchlist===true||item?.watchlist===false;
 function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
  const byLid=new Map(),conflicted=new Set();
  const add=(id,tmdbId)=>{
@@ -220,7 +222,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   if(excluded.has(id)||excluded.has(identity))continue;
   const item=index?.[id];
   // Watched or rated, under this id or any id of the same TMDB film: never offered, so a prediction never stands in for a rating.
-  if(catalogConsumed(item)||consumedTmdb.has(String(film.tmdbId)))continue;
+  if(catalogConsumed(item)||catalogWatchlistFact(item)||consumedTmdb.has(String(film.tmdbId)))continue;
   // The same freshness rule as the queue and the view, for the same profile snapshot.
   if(!profile||!freshness.indexed(item,film))continue;
   if(!Array.isArray(film.shows)||film.showsProgrammeRunId!==programmeRunId)continue;

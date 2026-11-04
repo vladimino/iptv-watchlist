@@ -148,7 +148,7 @@ The repository's projector methods differ from `saveFilm`, `savePerson` and `app
 - **`projectFilm`** writes the identity and metadata dimensions only, never fingerprint or prediction. On a watchlist Film it keeps the stored `person:tmdb_*` credits the R2 roster does not list. They are appended after the R2 credits of their role in their stored order, in the same batch.
 - **`projectLink`** works like `applyLink` with the same ownership, inside the caller's transaction.
 - **`projectPerson`** works like `savePerson`, inside the caller's transaction.
-- **`releaseFilm`** removes only the watchlist membership of a Film no source lists. It skips a redirected id.
+- **`releaseFilm`** removes only the watchlist membership of a Film no source lists. It skips a redirected id. A Film the view still contains is not released. That includes a Film admitted by a watchlist boolean after the current lists dropped it ([ADR 0084](../../adr/0084-durable-watchlist-film-retention.md), Proposed). The projector marks absent only a stored Film the view does not contain.
 
 None of these methods reads back.
 

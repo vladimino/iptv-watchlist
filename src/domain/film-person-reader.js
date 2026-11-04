@@ -11,6 +11,25 @@ function storedFilmId(film){
  const tmdb=(film?.externalIds||[]).find(item=>item.scheme==='tmdb'&&!item.conflicting);
  return tmdb?'tmdb_'+tmdb.value:film?.id||null;
 }
+// A Letterboxd lid. A tmdb_<n> key is the same fact's alias and does not mint a second Film. A title, year, slug or diary title is not an id.
+const RETENTION_LID=/^[A-Za-z0-9_-]{1,80}$/;
+function retentionLid(id){const value=String(id||'');return RETENTION_LID.test(value)&&!value.startsWith('tmdb_');}
+// Films whose view-index entry carries a watchlist boolean stay in the catalog after they leave the current lists.
+// The boolean is membership history. It is not a watched mark and it does not put the film back on the watchlist.
+function retainedWatchlistRecords(store,seen){
+ const admissions=store?.watchlistAdmissions;
+ if(!admissions||typeof admissions!=='object'||Array.isArray(admissions))return [];
+ const records=[];
+ for(const id of Object.keys(admissions).sort()){
+  if(typeof admissions[id]!=='boolean'||!retentionLid(id)||seen.has(id))continue;
+  const metadata=store.metadata?.[id];
+  const record=metadata&&typeof metadata==='object'?{...metadata,id:metadata.id||id}:{id};
+  if(String(record.id)!==id)continue;
+  records.push(record);seen.add(id);
+ }
+ return records;
+}
+function primaryFilmIds(store){return new Set((store.programme?.films||store.watchlist?.films||[]).map(film=>film?.id==null?'':String(film.id)).filter(Boolean));}
 function sidecarKey(key){return key.endsWith('.json')?key.slice(0,-5)+LIFECYCLE_SIDECAR:key+LIFECYCLE_SIDECAR;}
 // `compatible` is the fingerprint transition verdict (ADR-0035) when the store supplies one; without it the strict rule applies.
 function fingerprintFacts(file,compatible){if(!file)return {present:false};return {present:true,schemaVersion:file.fingerprintSchemaVersion,promptVersion:file.fingerprintPromptVersion??1,invalidatedAt:file.invalidatedAt||null,generatedAt:file.generatedAt||null,...(typeof compatible==='boolean'?{compatible}:{})};}
@@ -130,7 +149,9 @@ function lifecycleBody(film){return {contractVersion:film.contractVersion,id:fil
 function legacyEnrichmentIds(store){
  const seen=new Set(),ids=[];
  const add=film=>{if(!film?.id)return;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))return;seen.add(identity);ids.push(String(film.id));};
+ const primaryIds=primaryFilmIds(store);
  for(const film of store.programme?.films||store.watchlist?.films||[])add(film);
+ for(const film of retainedWatchlistRecords(store,primaryIds))add(film);
  for(const film of [...listOf(store.discoveredFilms)].sort((a,b)=>String(a.id).localeCompare(String(b.id),'en')))add(film);
  return ids.sort((a,b)=>a.localeCompare(b,'en'));
 }
@@ -161,7 +182,10 @@ function legacyDisplayedTitle(store,storedId){
  if(dictionary?.status==='verified'&&dictionary.title&&(!tmdb||!dictionary.tmdbId||String(dictionary.tmdbId)===String(tmdb)))return dictionary.title;
  const cached=store.titles?.[storedId];
  if(cached?.title&&cached.tmdbId&&tmdb&&String(cached.tmdbId)===String(tmdb))return cached.title;
- return film?.title||null;
+ if(film?.title)return film.title;
+ // A Film kept only by a watchlist fact is on neither list. Its page title is the metadata title, the same string the view shows.
+ if(!film)return loaded.metadata?.title||loaded.metadata?.original||null;
+ return null;
 }
 function fingerprintVerdictOf(store,storedId){return typeof store?.fingerprintCompatible==='function'?store.fingerprintCompatible(storedId):undefined;}
 function legacyFingerprintStatus(file,verdict){
@@ -231,7 +255,8 @@ function readLifecycle(store,now,options={}){
  const context={...store,filmTitleIndex,personNameIndex,diarySlugs:diarySlugIndex(store.diaryHistory)};
  const resolution=store.discoveryResolution||{};
  const films=new Map();
- for(const record of store.programme?.films||store.watchlist?.films||[]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
+ const primary=store.programme?.films||store.watchlist?.films||[];
+ for(const record of [...primary,...retainedWatchlistRecords(store,primaryFilmIds(store))]){const facts=filmFacts(record,context,resolution,now),view=projectFilm(facts);if(view)films.set(storedFilmId(view),view);}
  // AIR-297 (ADR 0057): the owner-approved TMDB retirements, only when the object exists. Absent, the view is what it was.
  const retirements=store.tmdbRetirements==null?null:applyTmdbRetirements([...films.values()],store.tmdbRetirements,film=>tmdbRetirementRecords(context,film));
  if(retirements)for(const film of retirements.films)films.set(storedFilmId(film),film);
@@ -290,4 +315,31 @@ function readLifecycle(store,now,options={}){
  }
  for(const key of Object.keys(sidecars))if(FORBIDDEN_LIFECYCLE_KEYS.includes(key)||key.includes('discovery-latest')||key.includes('predictions'))throw new Error('lifecycle sidecar overwrites '+key);
  return {contractVersion:DOMAIN_CONTRACT_VERSION,films:filmList,aliasConflicts,people:sortedPeople(),candidates,conflicts,...retirementReport,sidecars,parity:{...idParity,ok:idParity.ok&&mismatches.length===0,mismatches,excludedCandidates:candidates.filter(candidate=>candidate.excluded).length,candidateKeys:candidates.map(candidate=>candidate.key)}};
+}
+// Classifies historical rows that are no longer on the current lists. It does not write, mint a Film, or merge an ambiguous row.
+function reconcileDepartedFilms({admissions={},existing=[],orphans=[]}={}){
+ const films=Array.isArray(existing)?existing.filter(Boolean):[];
+ const byLid=new Map();
+ for(const film of films)if(film.lid)byLid.set(String(film.lid),film);
+ const byTrusted=new Map();
+ for(const film of films)if(film.trusted&&film.tmdbScheme!=='tmdb_tv'&&film.tmdbId){const key=String(film.tmdbId);if(!byTrusted.has(key))byTrusted.set(key,[]);byTrusted.get(key).push(film);}
+ const rows=(Array.isArray(orphans)?orphans:[]).map(row=>({...row,key:String(row?.key??'')}));
+ const slugOwners=new Map(),unverified=new Map();
+ for(const row of rows){
+  if(row.slug&&row.lid){const set=slugOwners.get(row.slug)||new Set();set.add(String(row.lid));slugOwners.set(row.slug,set);}
+  if(!row.trusted&&row.tmdbId&&row.tmdbScheme!=='tmdb_tv'&&row.lid){const key=String(row.tmdbId);if(!unverified.has(key))unverified.set(key,new Set());unverified.get(key).add(String(row.lid));}
+ }
+ return rows.map(row=>{
+  const lid=row.lid?String(row.lid):'',tmdb=row.tmdbId?String(row.tmdbId):'',tv=row.tmdbScheme==='tmdb_tv';
+  if(tv&&(row.movieId||row.trusted))return {key:row.key,outcome:'conflict',reason:'tmdb_tv',filmId:null};
+  if(row.slug&&(slugOwners.get(row.slug)?.size||0)>1)return {key:row.key,outcome:'conflict',reason:'slug_collision',filmId:null};
+  if(lid&&!row.trusted&&tmdb&&(unverified.get(tmdb)?.size||0)>1)return {key:row.key,outcome:'ambiguous',reason:'unverified_tmdb',filmId:null};
+  const joined=lid?byLid.get(lid)||null:null;
+  if(joined&&row.trusted&&tmdb&&joined.trusted&&joined.tmdbId&&String(joined.tmdbId)!==tmdb)return {key:row.key,outcome:'conflict',reason:'trusted_tmdb',filmId:joined.id||null};
+  if(joined)return {key:row.key,outcome:'resolved',reason:'existing_film',filmId:joined.id||null};
+  if(row.trusted&&!tv&&tmdb){const matches=byTrusted.get(tmdb)||[];if(matches.length>1)return {key:row.key,outcome:'conflict',reason:'trusted_tmdb',filmId:null};if(matches.length===1)return {key:row.key,outcome:'resolved',reason:'existing_film',filmId:matches[0].id||null};}
+  if(lid&&typeof admissions[lid]==='boolean')return {key:row.key,outcome:'resolved',reason:'watchlist_fact',filmId:null};
+  if(lid||(row.trusted&&!tv&&tmdb))return {key:row.key,outcome:'unresolved',reason:'no_film',filmId:null};
+  return {key:row.key,outcome:'unresolved',reason:'no_identity',filmId:null};
+ });
 }
