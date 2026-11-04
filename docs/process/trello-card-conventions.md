@@ -1,6 +1,6 @@
 # IPTV Watchlist — Trello card conventions
 
-Version: 2026-10-23. Applies to the [IPTV Watchlist Roadmap](https://trello.com/b/HODRHtcO/iptv-watchlist-roadmap).
+Version: 2026-11-04. Applies to the [IPTV Watchlist Roadmap](https://trello.com/b/HODRHtcO/iptv-watchlist-roadmap).
 
 ## Why
 
@@ -40,6 +40,8 @@ Labels can be combined: D1 Film repository = Каталог + Платформа
 9. **Production rollout is not code delivery.** A green PR/code-only Done must not be misrepresented as an enabled production feature. Put shadow experiment, go/no-go, cutover, and stabilization in separate tickets.
 10. No unsanctioned flag toggles, manual sync/model/TMDB calls, live migration, destructive cleanup or source-of-truth change as a side effect of drafting, testing, or closing documentation cards.
 11. **Normal PR merge is part of the approved card delivery.** When an independently reviewed PR satisfies the scope, prerequisites, CI and resolved review findings, ChatGPT merges without asking for a second per-PR owner permission. If the card has a named pre-merge owner gate (for example rendered Mermaid QA) or newly surfaced scope/security/architecture risk, that gate is still mandatory. When a positive review leaves only owner gates on a `Proposed` ADR or a changed Mermaid diagram, the executor's handoff comment lists them and the executor stops following the PR; ChatGPT applies the owner's decision and any Markdown/Mermaid fixes on the branch ([rule](agent-workflow.md#owner-gates-after-a-positive-review-executor-hands-off-chatgpt-closes)). Post-deploy owner visual acceptance for UI and separate authorizations for production writers, flags, Tasks, migrations and cutovers are unaffected. See [the delivery pipeline](agent-workflow.md#delivery-pipeline-for-already-approved-work).
+
+12. **Final AIR-number uniqueness readback is mandatory before handoff.** Allocate a tentative `[AIR-N]` from the current board before creation, but do not treat that first lookup as a reservation. After creating the card and completing its description, labels and native prerequisites, **re-read the live board immediately before handing control to the owner or executor**. Check the exact `[AIR-N]` prefix across cards in every list, including `Готово` and `Отклонено`, and archived cards when accessible; do not rely solely on Trello search indexing, the highest remembered number, or the newly created card's own readback. If another card uses the number, use creation evidence to keep the number with the earlier-created card and renumber the later-created one; if order cannot be established, stop and reconcile rather than silently choosing. Keep the same Trello card URL, update affected descriptions, comments and cross-card references, and repeat the board-wide readback after the correction. Report a card as ready only when this final check finds exactly one owner of its AIR number. This reduces the race window but is not an atomic reservation; any later discovered collision must be resolved before implementation handoff.
 
 ## Rollout flag disposition and card completion
 
