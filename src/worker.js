@@ -2,6 +2,10 @@ const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
 const loadJSON=async(env,key)=>{
+ if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
+  const routed=await DiscoveryAuthority.routeRead(env,key);
+  if(routed.handled)return routed.value;
+ }
  const publishedKey=key===EPG_GENERATION_KEY||key==='programme.json'||key==='watchlist.json'||key==='epg/discovery-latest.json'||key==='epg/discovered-films.json';
  if(publishedKey&&typeof PublishedEpg!=='undefined'){
   const live=await PublishedEpg.currentGeneration(env);
@@ -295,6 +299,16 @@ async function catalogAvailableRoute(env){
  // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
  // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
  const generationCopy=async name=>{
+  if(name==='discovered-films.json'&&typeof DiscoveryAuthority!=='undefined'){
+   const gate=await DiscoveryAuthority.readAuthority(env);
+   if(gate.held){const error=new Error('discovery_fence');error.code='discovery_fence';throw error;}
+   if(gate.ready){
+    if(!pinnedRunId||gate.programmeRunId!==pinnedRunId)return null;
+    const routed=await DiscoveryAuthority.routeRead(env,epgGenerationKey(pinnedRunId,'discovered-films.json'));
+    if(!routed.handled){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+    return routed.value;
+   }
+  }
   if(publication.authority==='d1'&&name==='programme.json')return pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'programme',publication.generation):null;
   const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;
  };
@@ -318,6 +332,10 @@ async function updatePublishedFiles(env,files){
  return publication.programmeRunId;
 }
 const saveJSON=async(env,key,value)=>{
+ if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
+  const routed=await DiscoveryAuthority.routeWrite(env,key,value);
+  if(routed.handled)return;
+ }
  if(typeof PredictionD1!=='undefined'){
   const routed=await PredictionD1.saveMutable(env,key,value);
   if(routed?.handled)return {etag:'d1'};
@@ -575,12 +593,59 @@ async function putKnownLength(bucket,key,length,source,options){
  await writing;
  return stored;
 }
-async function storePlannedDiscovery(env,runId,meta,planned,next){
- if(!planned.emit){next['discovery-latest.json']={...meta,items:planned.items,...planned.ledger};return;}
+async function discoveryLedgerAuthoritative(env){
+ if(typeof DiscoveryAuthority==='undefined')return false;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence'});
+ return gate.ready===true;
+}
+async function storePlannedDiscovery(env,runId,meta,planned,next,lease){
+ const authoritative=await discoveryLedgerAuthoritative(env);
+ if(!planned.emit){
+  const document={...meta,items:planned.items,...planned.ledger};
+  if(!document.programmeRunId)document.programmeRunId=runId;
+  if(authoritative){
+   await DiscoveryAuthority.routeWrite(env,epgGenerationKey(runId,'discovery-latest.json'),document,{handoff:true,lease});
+   await env.BUCKET.put(epgGenerationKey(runId,'discovery-latest.json'),JSON.stringify(document),{httpMetadata:{contentType:'application/json'}});
+   return;
+  }
+  next['discovery-latest.json']=document;
+  return;
+ }
  try{
   if(!Number.isSafeInteger(planned.itemBytes)||!Number.isSafeInteger(planned.itemCount)||planned.itemBytes<0||planned.itemCount<0)throw new Error('Discovery document length is unknown');
   const framing=discoveryDocumentFraming(meta,planned.ledger);
-  await putKnownLength(env.BUCKET,epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentLength(framing,planned.itemBytes,planned.itemCount),discoveryDocumentStream(framing,planned.emit()),{httpMetadata:{contentType:'application/json'}});
+  const source=planned.emit();
+  let wrapped=source;
+  let ingestDone=null;
+  if(authoritative){
+   const decoder=new TextDecoder(),pending=[];
+   let wake=null,done=false,failure=null;
+   const kick=()=>{const fn=wake;wake=null;if(fn)fn();};
+   ingestDone=DiscoveryAuthority.ingestLedger(env,{programmeRunId:runId,handoff:true,lease,items:(async function*(){
+    for(;;){
+     while(!pending.length&&!done&&!failure)await new Promise(resolve=>{wake=resolve;});
+     if(failure)throw failure;
+     if(!pending.length)return;
+     yield pending.shift();
+    }
+   })()}).catch(error=>{failure=error;throw error;});
+   wrapped=(async function*(){
+    try{
+     for await(const bytes of source){
+      if(failure)throw failure;
+      pending.push(JSON.parse(decoder.decode(bytes)));
+      kick();
+      while(pending.length&&!failure)await new Promise(resolve=>setTimeout(resolve,0));
+      if(failure)throw failure;
+      yield bytes;
+     }
+    }catch(error){failure=failure||error;done=true;kick();throw error;}
+    done=true;kick();
+   })();
+  }
+  await putKnownLength(env.BUCKET,epgGenerationKey(runId,'discovery-latest.json'),discoveryDocumentLength(framing,planned.itemBytes,planned.itemCount),discoveryDocumentStream(framing,wrapped),{httpMetadata:{contentType:'application/json'}});
+  if(ingestDone)await ingestDone;
  }finally{if(planned.holder)planned.holder.discovery=null;}
 }
 // Departures (bounded mode) stay objects only for the archive write that follows; frozen mode keeps none.
@@ -730,7 +795,7 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
   const next={...files};
   if(ledger){
    const planned=await planDiscoveryLedger(env,{runId,latest:ledger.holder?.discovery??ledger.latest,mode:ledger.mode,lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null,holder:ledger.holder||null});
-   await storePlannedDiscovery(env,runId,ledger.meta,planned,next);
+   await storePlannedDiscovery(env,runId,ledger.meta,planned,next,lease);
   }
   if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
   for(const [name,value] of Object.entries(next)){if(value==null)continue;await saveJSON(env,epgGenerationKey(runId,name),value);next[name]=null;if(name!=='programme.json')files[name]=null;}
@@ -754,7 +819,7 @@ async function publishEpgGeneration(env,runId,files,ledger=null,watchlist=null){
   if(ledger){
    const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),published=pointer?await pointer.json():null;fencedEtag=pointer?.etag??null;
    const planned=await planDiscoveryLedger(env,{runId,latest:ledger.holder?.discovery??ledger.latest,mode:ledger.mode,lease,pointerEtag:fencedEtag,publishedRunId:published?.phase==='published'?published.programmeRunId||null:null,holder:ledger.holder||null});
-   await storePlannedDiscovery(env,runId,ledger.meta,planned,next);
+   await storePlannedDiscovery(env,runId,ledger.meta,planned,next,lease);
   }
   if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
   for(const [name,value] of Object.entries(next)){if(value==null)continue;await saveJSON(env,epgGenerationKey(runId,name),value);next[name]=null;if(name!=='programme.json')files[name]=null;}

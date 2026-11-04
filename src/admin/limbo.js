@@ -152,7 +152,7 @@ async function limboReadCoordination(env,observations){
  const readable=['fresh','stale'].includes(observations?.state);
  const records=Array.isArray(observations?.records)?observations.records:[];
  if(!readable||!records.length)return {judged:readable,version:'',reason:null};
- const [continuation,status,lease]=await Promise.all([drJson(env.BUCKET,DR_CONTINUATION_KEY),drJson(env.BUCKET,DR_STATUS_KEY),drJson(env.BUCKET,DISCOVERY_LEASE_KEY)]);
+ const [continuation,status,lease]=await Promise.all([drStored(env,DR_CONTINUATION_KEY,env.BUCKET),drStored(env,DR_STATUS_KEY,env.BUCKET),drStored(env,DISCOVERY_LEASE_KEY,env.BUCKET)]);
  let publishedEpg;
  try{publishedEpg=await identityPublishedEpgSupport(env);}catch{publishedEpg={supported:false,mode:null};}
  const reason=limboCoordinationReason(continuation,status,lease,publishedEpg);
