@@ -54,7 +54,7 @@ Bounds:
 
 - at most 3,000 records;
 - when the cap cuts, terminal records come first, then `ambiguous`, then `needs_verification`, then the rest, each in key order;
-- a candidate with more than 96 shows, more than 24 durations or an unreadable show is omitted, not trimmed, because a trimmed record would no longer reproduce the resolver's evidence key.
+- a candidate with more than 96 shows, more than 24 durations or an unreadable show is omitted, not trimmed, because a trimmed record would no longer reproduce the resolver's evidence key. The ledger copy and a later seal store those shows. This index omission does not remove them from the observation tables.
 
 `coverage` is `{scope, eligible, indexed, omitted: {cap, oversized, malformed}, complete, maxItems}`. The index is partial by construction: it never claims that an observation outside its scope is fine.
 

@@ -173,6 +173,16 @@ const wideShows=Array.from({length:40},(_,index)=>({channelId:'c'+index,start:in
 await Authority.replaceLedger(env,{programmeRunId:'run-b',items:[{...item,shows:wideShows}]});
 assert.equal((await Authority.routeRead(env,'epg/discovery-latest.json')).value.items[0].shows.length,40);
 await Authority.replaceLedger(env,{programmeRunId:'run-b',items:[item]});
+for(const size of [97,101,178]){
+ const shows=Array.from({length:size},(_,index)=>({channelId:'c',channel:'C',start:index,end:index+1}));
+ const lengths=[];
+ const watched=d1Standin(live.file,{onBatch:statements=>lengths.push(statements.length)});
+ await Authority.replaceLedger({DB:watched,BUCKET:bucket,discoveryLease:acquired.lease},{programmeRunId:'run-b',items:[{...item,shows}]});
+ assert.equal(lengths.length>0&&lengths.every(length=>length<=Authority.STATEMENT_CAP),true,String(size));
+ assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM discovery_observation_show WHERE source_key='active' AND observation_key='obs-1'"),size);
+}
+await Authority.replaceLedger(env,{programmeRunId:'run-b',items:[item]});
+assert.equal((await Authority.routeRead(env,'epg/discovery-latest.json')).value.items[0].shows.length,1);
 
 await Authority.releaseLease(env,acquired.lease);
 const segmentItems=Array.from({length:30},(_,index)=>({key:'arch-'+index,title:'A'+index,normalizedTitle:'a'+index,year:2000,durations:[80],shows:[{channelId:'c',start:index}]}));
