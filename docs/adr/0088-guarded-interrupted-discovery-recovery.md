@@ -1,9 +1,9 @@
 # ADR 0088: An interrupted discovery series resumes only through a gated confirm
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-04  
 **Recorded at:** 2026-11-04  
-**Approval source:** not documented  
+**Approval source:** explicit owner decision in ChatGPT on 2026-11-04 for AIR-341 / PR #366, reviewed HEAD `4e939a49792253f4683cacaf336b6f7d3537cb5d`; the owner accepted ADR 0088 without authorizing production recovery, TMDB, EPG, Tasks, flags, or R2/D1 mutations  
 **Related work:** [AIR-341](https://trello.com/c/r8tfPFjt), [ADR 0006](0006-one-chunk-discovery.md), [ADR 0030](0030-discovery-queued-at-publication.md), [ADR 0083](0083-inert-discovery-workflow.md), [ADR 0085](0085-d1-authoritative-discovery.md)  
 **Supersedes:** None  
 **Superseded by:** None
