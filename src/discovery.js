@@ -952,6 +952,61 @@ function generationHandoff(record,health,published,report){
  if(!other&&!contradictory)return null;
  return report?.runId===published?'recover':'pending';
 }
+// A paused/interrupted series is a stop for every ordinary step, including the hourly task. This gate is the
+// separate owner confirm (`recovery: 'interrupted'`). It reads the stored facts and returns a verdict. It does
+// not write, take a lease, or treat `force` as permission. A missing or contradictory checkpoint is
+// `owner_investigation`: the caller must not guess.
+function interruptedCheckpointProof(record,status,diagnostics){
+ if(!status||typeof status!=='object'||Array.isArray(status))return {ok:false,cause:'status_missing'};
+ if(typeof status.hopId!=='string'||!status.hopId)return {ok:false,cause:'status_unattributed'};
+ if(typeof status.programmeRunId==='string'&&status.programmeRunId&&status.programmeRunId!==record.programmeRunId)return {ok:false,cause:'status_generation'};
+ if(status.hopId!==record.hopId)return {ok:false,cause:'status_other_hop'};
+ if(typeof status.finishedAt==='string'&&status.finishedAt)return {ok:false,cause:'status_finished'};
+ const recent=diagnostics&&typeof diagnostics==='object'&&!Array.isArray(diagnostics)&&Array.isArray(diagnostics.recent)?diagnostics.recent:null;
+ if(diagnostics!=null&&recent==null)return {ok:false,cause:'diagnostics_malformed'};
+ const claimed=(recent||[]).some(item=>item?.checkpoint?.hopId===record.hopId&&(item?.interruption?.committed===true||item?.phase==='checkpointed'&&item?.checkpoint?.owned===true));
+ if(claimed)return {ok:false,cause:'checkpoint_claimed'};
+ return {ok:true,proof:status.checkpoint==='cheap_pass'?'cheap_pass':'partial'};
+}
+function assessInterruptedRecovery({now,epgStage,publishedRunId,programmeRunId,sourceRunId,record,lease,status,diagnostics,authority}){
+ const refused=(reason,cause=null)=>({permit:'refused',reason,cause:cause||reason,budget:null,proof:null});
+ if(!record||typeof record!=='object'||Array.isArray(record))return refused('owner_investigation','record_malformed');
+ if(record.stage!=='paused'||record.reason!=='interrupted')return refused('not_interrupted');
+ if(!authority||typeof authority!=='object'||authority.unavailable)return refused('authority_unavailable');
+ if(authority.held||authority.cutover==='held')return refused('authority_held');
+ if(authority.transfer==='loading')return refused('authority_loading');
+ if(authority.mode!=='r2'&&authority.mode!=='d1')return refused('authority_unavailable');
+ if(authority.mode==='d1'&&(authority.ready!==true||authority.transfer!=='idle'&&authority.transfer!=='committed'))return refused('authority_unavailable');
+ if(epgStage!=='complete')return refused('epg_not_complete');
+ const runs=[publishedRunId,programmeRunId,sourceRunId,record.programmeRunId];
+ if(runs.some(id=>typeof id!=='string'||!id)||new Set(runs).size!==1)return refused('generation_mismatch');
+ if(authority.ready&&authority.programmeRunId!==publishedRunId)return refused('generation_mismatch');
+ if(!Number.isInteger(record.remainingChunks))return refused('owner_investigation','budget_malformed');
+ if(record.remainingChunks<1)return refused('no_budget');
+ if(lease!=null){
+  if(typeof lease!=='object'||Array.isArray(lease)||typeof lease.expiresAt!=='number'||!Number.isFinite(lease.expiresAt))return refused('owner_investigation','lease_malformed');
+  if(lease.expiresAt>now)return refused('lease_live');
+ }
+ const future=value=>{const at=Date.parse(value||'');return Number.isFinite(at)&&at>now;};
+ if(future(record.retryAt)||future(record.nextCatchUpAt))return refused('backoff');
+ const proof=interruptedCheckpointProof(record,status,diagnostics);
+ if(!proof.ok)return refused('owner_investigation',proof.cause);
+ if(future(status?.retryAt))return refused('backoff');
+ return {permit:'eligible',reason:'eligible',cause:null,budget:record.remainingChunks,proof:proof.proof};
+}
+async function interruptedRecoveryFacts(env,{now,current,lease,published,programmeRunId}){
+ let authority;
+ if(typeof DiscoveryAuthority==='undefined')authority={mode:'r2',ready:false,held:false,cutover:null,transfer:'idle'};
+ else{try{authority=await DiscoveryAuthority.readAuthority(env);}catch{authority={unavailable:true};}}
+ const blocked=!!authority?.unavailable||authority?.transfer==='loading';
+ let status=null,sync=null,source=null,diagnostics=null;
+ if(!blocked){
+  try{[status,sync,source,diagnostics]=await Promise.all([loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'sync.json'),loadJSON(env,'epg/discovery-latest.json'),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY)]);}
+  catch{authority={unavailable:true};}
+ }
+ else{try{sync=await loadJSON(env,'sync.json');}catch{sync=null;}}
+ return assessInterruptedRecovery({now,epgStage:sync?.stage??null,publishedRunId:published,programmeRunId,sourceRunId:source?.programmeRunId??null,record:current,lease,status,diagnostics,authority});
+}
 // `body.trace`, when a caller passes an object, is filled with the branch taken and every intermediate
 // outcome (AIR-151). The same object is returned as `diagnostic`. It changes no decision.
 async function advanceDiscovery(env,body={}){
@@ -968,6 +1023,15 @@ async function advanceDiscovery(env,body={}){
  const published=generation?.phase==='published'?generation.programmeRunId||null:null;
  let health=continuationHealth(current,lease,last,now,published);
  trace.health=healthSummary(health);
+ let recoveryBudget=null;
+ if(body.recoverInterrupted){
+  const verdict=await interruptedRecoveryFacts(env,{now,current,lease,published,programmeRunId:report?.runId??null});
+  trace.interruptedRecovery=verdict;
+  const stopped=discoveryContract(current,{nextAction:'stop',reason:current?.reason??'interrupted'});
+  if(body.chunks===0){trace.branch='recovery_report';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:stopped,recovery:verdict,diagnostic:trace};}
+  if(verdict.permit!=='eligible'){trace.branch='recovery_refused';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:stopped,recovery:verdict,diagnostic:trace};}
+  recoveryBudget=verdict.budget;
+ }
  if(body.chunks===0){trace.branch='report_only';return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current,runningOverride(health)),diagnostic:trace};}
  if(lease?.expiresAt>now){trace.branch='lease_live';return busyOutcome(current,trace,health.leaseExpiresAt);}
  // Generation handoff: a checkpoint that does not belong to the published generation is superseded by a new
@@ -1001,8 +1065,9 @@ async function advanceDiscovery(env,body={}){
   }
   else if(health.failClosed){
    // The orphan's hop ended before its checkpoint, and so did the hop it was itself resumed from: fail closed.
-   // The record keeps the budget, the generation and the count; `interrupted` is a stop until the next EPG
-   // commit opens a new series or the owner forces a resolve. Nothing is run and no lease is taken.
+   // The record keeps the budget, the generation and the count. `interrupted` is a stop for every ordinary step
+   // until the next EPG commit opens a new series, the owner forces a resolve, or the separate interrupted-recovery
+   // confirm passes. Nothing is run and no lease is taken.
    const interruptions=health.interruptions+1,record={stage:'paused',reason:'interrupted',at,hopId:current.hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId:current.programmeRunId??null,interruptions};
    const settled=await replaceContinuation(env,record,stored.etag);
    trace.recovery={orphanHopId:health.hopId,action:'interrupted',chunkCompleted:false,budget:0,settled,interruptions};
@@ -1012,10 +1077,17 @@ async function advanceDiscovery(env,body={}){
   }
   else trace.recovery={orphanHopId:health.hopId,action:'resumed',chunkCompleted:false,budget:health.resumeBudget,settled:false,interruptions:health.interruptions+1};
  }
- const decision=continuationDecision(current,now);
+ const decision=recoveryBudget!=null?{run:true,budget:recoveryBudget}:continuationDecision(current,now);
  const hardWait=current&&(['chunk_budget','backoff'].includes(current.reason)||current.stage==='error'||current.retryAt)&&Date.parse(current.retryAt||current.nextCatchUpAt||0)>now;
- trace.decision={run:decision.run,budget:decision.run?decision.budget:null,force:!!body.force,hardWait:!!hardWait,nextAction:decision.run?null:decision.contract.nextAction};
+ trace.decision={run:decision.run,budget:decision.run?decision.budget:null,force:!!body.force,hardWait:!!hardWait,nextAction:decision.run?null:decision.contract?.nextAction??null,...(recoveryBudget!=null?{recovery:true}:{})};
  if(!decision.run&&(!body.force||hardWait)){trace.branch=trace.recovery?.settled&&trace.recovery.action==='settled'?'orphan_settled':'contract';return {stage:decision.contract.state,checked:0,remaining:null,discovery:decision.contract,diagnostic:trace};}
+ if(recoveryBudget!=null&&!env.TMDB_API_READ_ACCESS_TOKEN){
+  trace.branch='recovery_refused';
+  const verdict={permit:'refused',reason:'missing_secret',cause:'missing_secret',budget:null,proof:null};
+  trace.interruptedRecovery=verdict;
+  return {stage:current?.stage||'idle',checked:0,remaining:null,discovery:discoveryContract(current,{nextAction:'stop'}),recovery:verdict,diagnostic:trace};
+ }
+ if(recoveryBudget!=null&&body.onPersist)await body.onPersist();
  if(!env.TMDB_API_READ_ACCESS_TOKEN){
   trace.branch='missing_secret';
   const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
@@ -1032,8 +1104,11 @@ async function advanceDiscovery(env,body={}){
  // The running record names the generation the chunk will pin to, so a later orphan check can match it.
  const programmeRunId=current?.programmeRunId??published??null;
  // A hop resumed from an orphan that never reached its checkpoint carries the interruption count forward.
- const interruptions=trace.recovery?.action==='resumed'?trace.recovery.interruptions:0;
- const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId,...(interruptions?{interruptions}:{})},fresh.etag);
+ // An interrupted-recovery hop starts one below the fail-closed limit, so a death before its checkpoint
+ // stops the series again instead of becoming an automatic resume.
+ const interruptions=recoveryBudget!=null?DISCOVERY_INTERRUPTION_LIMIT-1:trace.recovery?.action==='resumed'?trace.recovery.interruptions:0;
+ const recoveryPermit=recoveryBudget!=null?{kind:'interrupted',at:new Date().toISOString(),fromHopId:diagnosticId(current?.hopId)}:null;
+ const opened=await replaceContinuation(env,{stage:'running',reason:null,at:new Date().toISOString(),hopId,remainingChunks:budget,nextCatchUpAt:null,retryAt:null,programmeRunId,...(interruptions?{interruptions}:{}),...(recoveryPermit?{recoveryPermit}:{})},fresh.etag);
  if(!opened){await releaseDiscoveryLease(env,acquired);trace.branch='record_changed';const after=(await readContinuation(env)).record;trace.saved={...continuationSummary(after),owned:false,write:'other_hop'};return busyOutcome(after,trace);}
  // The hop's checkpoint is the first durable write after its hop-marked status: the chunk calls `checkpoint`
  // right after saving that status, before the score preview, the lease release and the
@@ -1059,7 +1134,7 @@ async function advanceDiscovery(env,body={}){
  // An unsaved checkpoint of a record that still names this hop is an orphan the next call settles from the
  // hop-marked status; the contract says so instead of claiming the checkpoint was stored.
  const contract=outcome.saved?discoveryContract(record):kept?.stage==='running'&&kept.hopId===hopId?discoveryContract(kept,{state:'running',reason:'orphaned',nextAction:'continue',remainingChunks:Math.max(0,budget-1),nextCatchUpAt:null}):discoveryContract(kept);
- return {...result,discovery:contract,diagnostic:trace};
+ return {...result,discovery:contract,...(trace.interruptedRecovery?{recovery:trace.interruptedRecovery}:{}),diagnostic:trace};
 }
 // Workflow mode never rewrites the continuation record into `delegated`. The stored contract stays what the
 // Workflow reads; only the HTTP body tells an external client to stop driving chunks.
@@ -1115,20 +1190,32 @@ async function discoveryExecutorReadout(env,continuation){
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,'/api/enrichment/discovery/resolve',null);
- await openContinuationStep(env,step,true);
+ // A recovery report or refusal must not write the diagnostics ring. The ring is stored only once a confirm
+ // has passed the gate and is about to take the lease.
+ const recoveryRequested=body?.recovery==='interrupted';
+ let persistStep=!recoveryRequested;
+ await openContinuationStep(env,step,persistStep);
  let response;
  try{
   if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>24)){step.branch='invalid_limit';response=json({error:'Invalid limit'},400);}
+  else if(body.recovery!==undefined&&body.recovery!=='interrupted'){step.branch='invalid_recovery';response=json({error:'Invalid recovery'},400);}
+  else if(body.recovery==='interrupted'&&body.chunks!==undefined&&body.chunks!==0){step.branch='invalid_recovery';response=json({error:'Invalid recovery'},400);}
   else{
    const report=await loadJSON(env,'programme.json');
    const executor=discoveryExecutorMode(env);
+   const recovery=body.recovery==='interrupted';
+   let authority=null;
+   if(recovery&&typeof DiscoveryAuthority!=='undefined'){try{authority=await DiscoveryAuthority.readAuthority(env);}catch{authority={unavailable:true};}}
+   const authorityCause=authority?.unavailable?'authority_unavailable':authority?.transfer==='loading'?'authority_loading':authority?.held||authority?.cutover==='held'?'authority_held':null;
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
    else if(executor==='invalid'){step.branch='executor_invalid';response=json({error:'discovery_executor_invalid',executor:'invalid'},503);}
+   else if(recovery&&executor==='workflow'){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:'owner_investigation',cause:'executor_workflow',budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
+   else if(recovery&&authorityCause){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:authorityCause,cause:authorityCause,budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
    else if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
-   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:body.chunks!==0,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
+   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:recovery?false:body.chunks!==0,recoverInterrupted:recovery,trace:step.diagnostic,onPersist:async()=>{if(persistStep)return;persistStep=true;step.recorded.entered=await recordContinuationDiagnostic(env,step);},onCheckpoint:committed=>markContinuationCheckpoint(env,step,persistStep,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
   }
- }catch(e){await closeContinuationStep(env,step,started,null,e,true);throw e;}
- await closeContinuationStep(env,step,started,response,null,true);
+ }catch(e){await closeContinuationStep(env,step,started,null,e,persistStep);throw e;}
+ await closeContinuationStep(env,step,started,response,null,persistStep);
  return response;
 }
 async function discoveryPipelineStatus(env){
@@ -1136,8 +1223,14 @@ async function discoveryPipelineStatus(env){
  const [source,decisions,catalog,last,queue,continuation,persistedQueue,scorePreview,continuationDiagnostics,lease]=await Promise.all([loadJSON(pinned,'epg/discovery-latest.json'),loadJSON(pinned,'epg/discovery-resolution.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(pinned,'epg/discovery-status.json'),queueStatus(env),loadJSON(pinned,'epg/resolver-continuation.json'),loadJSON(pinned,predictionQueueKey),loadJSON(env,DISCOVERY_SCORE_PREVIEW_KEY),loadJSON(env,CONTINUATION_DIAGNOSTICS_KEY),loadJSON(env,DISCOVERY_LEASE_KEY)]);
  // AIR-154: the raw record cannot tell a live writer from an orphan; the derived health can.
  const continuationHealthReport=healthSummary(continuationHealth(continuation,lease,last,Date.now(),pinned.epgPin?.programmeRunId||null));
+ let interruptedRecovery=null;
+ if(continuation?.reason==='interrupted'){
+  try{interruptedRecovery=await interruptedRecoveryFacts(env,{now:Date.now(),current:continuation,lease,published:pinned.epgPin?.programmeRunId||null,programmeRunId:(await loadJSON(env,'programme.json'))?.runId??null});}
+  catch{interruptedRecovery={permit:'refused',reason:'owner_investigation',cause:'unreadable',budget:null,proof:null};}
+ }
  const items=source?.items||[],decisionsMap=decisions||{},counts=ledgerCounts(source,decisionsMap,Date.now()),statuses={},confirmed=new Set();for(const candidate of items){const state=decisionsMap[candidate.key];if(state){statuses[state.status]=(statuses[state.status]||0)+1;if(state.status==='verified')confirmed.add(String(state.tmdbId));}}
  const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=Object.values(catalog||{}).find(f=>String(f.id)===id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
+ if(interruptedRecovery)pipeline.interruptedRecovery=interruptedRecovery;
  if(discoveryExecutorMode(env)!=='external')pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation);
  return pipeline;
 }
