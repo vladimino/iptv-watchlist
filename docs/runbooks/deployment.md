@@ -72,6 +72,19 @@ The daily commit reads the active discovery ledger as bytes when the stored obje
 
 Node measurements of this path are not the isolate limit. The dated synthetic reading and its limits are in [the 3 November memory evidence](../evidence/epg-commit-memory-2026-11-03.md). A separate workerd reading of the fixed-length put is in [the 3 November R2 length evidence](../evidence/epg-r2-known-length-2026-11-03.md). Neither applies an isolate memory cap, and a green deploy does not by itself show that a live commit will stay under the limit.
 
+## Moving a pipeline to a Cloudflare executor
+
+This is the operator sequence of the proposed shared reliability contract ([ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md), Proposed; [reference](../reference/orchestration-reliability.md#rollout-and-rollback)). It applies to EPG publication, Discovery and Ratings one domain at a time; Predictions stay on the hourly ChatGPT task. No step below is part of a deploy, and every numbered step is its own owner approval.
+
+1. **Inert code.** The executor, its `ensure`, the read model and the tests are merged and deployed with the domain mode `external`. Both GitHub Actions jobs succeed. Verify with the domain's read-only status route that `orchestration.mode` is `external` and no Cloudflare owner is live. Nothing else is called.
+2. **Fence and activate.** With an owner GO for this domain only, switch the mode to `cloudflare`. Read back the mode and the new `epoch`. The external tool path for the domain now answers `external_writer_fenced`; do not test it with a write.
+3. **Acceptance.** Observe at least one complete run through the read model: `health` `healthy` or `idle`, `lastDurableProgressAt` advancing, no `quarantine`. Do not trigger a run to speed this up unless that run has its own GO.
+4. **Retire the task path.** With a separate owner GO, change the ChatGPT task registry so the task no longer drives this domain, and read the registry back. The hourly task keeps Predictions.
+
+**Rollback.** With an owner GO, switch the domain mode back to `external`; the epoch increases and the running instance stops at its next ownership check. Wait until the read model shows no live Cloudflare owner (**drain**). Only then, with its own GO, re-enable the ChatGPT task path. A code rollback alone leaves the mode, the data, the cron trigger and the task registry as they were.
+
+**Quarantine.** `quarantined` with reason `budget_exhausted` ends only the current run key; the next run key retries by itself. Any other quarantine reason is `unsafe` and stays until an owner-approved clear. Read the `failure` fingerprint and the domain's checkpoint first; clearing never resets a lease or forces a step.
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
