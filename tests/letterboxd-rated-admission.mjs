@@ -1,6 +1,6 @@
 // Pure rated-archive classification (AIR-340). Synthetic rows only. No storage and no network.
 import assert from 'node:assert/strict';
-import {admissionFilm, classifyArchive, classifyRow, movieDetailAgrees, planRegistration, resumePending, splitPending} from '../src/domain/letterboxd-rated-admission.js';
+import {admissionFilm, classifyArchive, classifyRow, movieDetailAgrees, planIdentityRetry, planRegistration, resumePending, splitPending} from '../src/domain/letterboxd-rated-admission.js';
 import {transportStop} from '../src/letterboxd-identity.js';
 
 const rated = (code, extra = {}) => ({code, name: extra.name || 'Invented', year: extra.year ?? 2001, inRatings: true, rating: extra.rating ?? 4, ...extra});
@@ -66,5 +66,23 @@ assert.equal(transportStop(403, headers({}), ''), 'forbidden');
 assert.equal(transportStop(429, headers({}), ''), 'rate_limited');
 assert.equal(transportStop(200, headers({}), '<title>Just a moment...'), 'challenge');
 assert.equal(transportStop(200, headers({}), '<html>film</html>'), null);
+
+const retryPlan = planIdentityRetry({
+  candidates: {
+    '103U': {code: '103U', state: 'needs_review', reason: 'shortlink_missing'},
+    '10TQ': {code: '10TQ', state: 'needs_review', reason: 'shortlink_missing'},
+    Stay: {code: 'Stay', state: 'pending', reason: 'no_stored_title'},
+    Done: {code: 'Done', state: 'verified', reason: null},
+  },
+}, {codes: ['103U', '10TQ', 'Stay', 'Done'], expected: {
+  '103U': {state: 'needs_review', reason: 'shortlink_missing'},
+  '10TQ': {state: 'needs_review', reason: 'shortlink_missing'},
+  Stay: {state: 'pending', reason: 'no_stored_title'},
+  Done: {state: 'verified', reason: null},
+}});
+assert.deepEqual(retryPlan.requeue, ['103U', '10TQ']);
+assert.equal(retryPlan.outcomes.find(entry => entry.id === 'Stay').outcome, 'skipped_changed');
+assert.equal(retryPlan.outcomes.find(entry => entry.id === 'Done').outcome, 'skipped_changed');
+assert.equal(planIdentityRetry({candidates: {}}, {codes: []}).ok, false);
 
 console.log('Rated archive admission: pending is this archive, a historical count is not the queue, conflicts stay unmerged, a Film id is the movie id');

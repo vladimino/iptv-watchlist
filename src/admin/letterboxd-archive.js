@@ -299,7 +299,7 @@ async function lbaIngest(request, allowed, now, signal){
 }
 
 async function adminLetterboxdArchiveRoute(request,env,url){
- if(url.pathname==='/api/admin/letterboxd-archive/apply-confirm'||url.pathname==='/api/admin/letterboxd-archive/apply'||url.pathname==='/api/admin/letterboxd-archive/rollback-confirm'||url.pathname==='/api/admin/letterboxd-archive/rollback'||url.pathname==='/api/admin/letterboxd-archive/identity-step'||url.pathname==='/api/admin/letterboxd-archive/identity-status')return lbaApplyRoute(request,env,url);
+ if(url.pathname==='/api/admin/letterboxd-archive/apply-confirm'||url.pathname==='/api/admin/letterboxd-archive/apply'||url.pathname==='/api/admin/letterboxd-archive/rollback-confirm'||url.pathname==='/api/admin/letterboxd-archive/rollback'||url.pathname==='/api/admin/letterboxd-archive/identity-step'||url.pathname==='/api/admin/letterboxd-archive/identity-status'||url.pathname==='/api/admin/letterboxd-archive/identity-retry-confirm'||url.pathname==='/api/admin/letterboxd-archive/identity-retry')return lbaApplyRoute(request,env,url);
  if(url.pathname!==LBA_PATH)return adminError('not_found',404);
  if(request.method!=='POST')return adminError('method_not_allowed',405);
  if(request.headers.get('Origin')!==url.origin)return adminError('origin_not_allowed',403);

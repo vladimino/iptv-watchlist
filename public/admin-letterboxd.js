@@ -1,7 +1,7 @@
 // The archive preview page: one check per submit, the answer held in this tab's memory only. Leaving or resetting the page
 // drops it; nothing is written to storage, the URL or history. A write that has already left the browser is not undone by
 // Cancel, Escape, a new file or a failed response: the tab keeps that command and will not say the write never started.
-const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null};
+const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null, identityRetry: null, retryKey: null};
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
@@ -141,6 +141,8 @@ function archiveClearMemory() {
   archiveLive.rollbackConfirmUnknown = {};
   archiveLive.identity = null;
   archiveLive.identityStatus = null;
+  archiveLive.identityRetry = null;
+  archiveLive.retryKey = null;
   archiveLive.bound = null;
   archiveLive.stale = false;
   archiveLive.inflight = null;
@@ -410,7 +412,7 @@ function onArchiveIdentity() {
     if (result.mode !== 'ready') return archiveApplyFailed(result);
     const answer = result.answer || {};
     const stop = answer.stop && (answer.stop.reason || answer.stop);
-    archiveLive.identity = {verified: answer.verified === true, enriched: answer.enriched === true, stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null, pending: answer.pending !== false, phase: answer.phase || null, code: answer.code || null};
+    archiveLive.identity = {verified: answer.verified === true, enriched: answer.enriched === true, writes: answer.writes === true, persisted: answer.persisted || 'none', stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null, reasons: Array.isArray(answer.reasons) ? answer.reasons : [], pending: answer.pending !== false, phase: answer.phase || null, code: answer.code || null};
     const status = archiveLive.identityStatus || {present: true, pending: 0, admitting: 0, enrichmentPending: 0, stopped: null};
     status.present = true;
     status.stopped = answer.stop || null;
@@ -420,6 +422,47 @@ function onArchiveIdentity() {
     archiveLive.controller = null;
     archiveShow('ready', archiveLive.answer);
     return result;
+  });
+  archiveLive.pending = pending;
+  return pending;
+}
+
+function onArchiveRetryConfirm() {
+  if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
+  const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
+  const retryable = archiveLive.identityStatus && Array.isArray(archiveLive.identityStatus.retryable) ? archiveLive.identityStatus.retryable : [];
+  if (!sha || !retryable.length) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  if (!archiveLive.retryKey) archiveLive.retryKey = archiveIdempotencyKey();
+  const expected = {};
+  for (const row of retryable) expected[row.code] = {state: 'needs_review', reason: row.reason};
+  const run = archiveBeginAction('retry-confirm', 0);
+  const pending = postArchiveRetryConfirm({
+    archiveSha256: sha, codes: retryable.map(row => row.code), expected,
+    documentEtag: archiveLive.identityStatus.documentEtag || null,
+    idempotencyKey: archiveLive.retryKey, accepted: true,
+  }, {signal: run.signal}).then(result => {
+    if (run.seq !== archiveLive.seq) return result;
+    if (result.mode !== 'ready') return archiveApplyFailed(result);
+    archiveLive.identityRetry = {confirmation: result.answer.confirmation, done: false, writes: false};
+    archiveLive.inflight = null;
+    archiveLive.controller = null;
+    archiveShow('ready', archiveLive.answer);
+    return result;
+  });
+  archiveLive.pending = pending;
+  return pending;
+}
+
+function onArchiveRetry() {
+  if (!archiveLive.identityRetry || !archiveLive.identityRetry.confirmation || archiveLive.controller) return Promise.resolve(null);
+  const run = archiveBeginAction('retry', 0);
+  const pending = postArchiveRetry(archiveLive.identityRetry.confirmation, {signal: run.signal}).then(result => {
+    if (run.seq !== archiveLive.seq) return result;
+    if (result.mode !== 'ready') return archiveApplyFailed(result);
+    archiveLive.identityRetry = {confirmation: archiveLive.identityRetry.confirmation, done: true, writes: result.answer.writes === true, state: result.answer.state || null};
+    archiveLive.inflight = null;
+    archiveLive.controller = null;
+    return onArchiveStatus();
   });
   archiveLive.pending = pending;
   return pending;
@@ -496,7 +539,7 @@ function onArchiveResultClick(event) {
   while (node && node !== archiveNode('#archive-result')) {
     if (node.getAttribute) {
       if (node.hasAttribute && node.hasAttribute('data-archive-nav')) {action = 'data-archive-nav'; chunk = node.getAttribute('data-archive-nav'); break;}
-      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon', 'data-archive-identity', 'data-archive-status']) {
+      for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon', 'data-archive-identity', 'data-archive-status', 'data-archive-retry-confirm', 'data-archive-retry']) {
         if (node.hasAttribute && node.hasAttribute(name)) {action = name; chunk = Number(node.getAttribute(name)); break;}
       }
     }
@@ -506,6 +549,8 @@ function onArchiveResultClick(event) {
   if (action === 'data-archive-nav') return onArchiveNav(chunk);
   if (action === 'data-archive-identity') return onArchiveIdentity();
   if (action === 'data-archive-status') return onArchiveStatus();
+  if (action === 'data-archive-retry-confirm') return onArchiveRetryConfirm();
+  if (action === 'data-archive-retry') return onArchiveRetry();
   if (action === 'data-archive-confirm') return onArchiveConfirm(chunk);
   if (action === 'data-archive-commit') return onArchiveCommit(chunk);
   if (action === 'data-archive-rollback-confirm') return onArchiveRollbackConfirm(chunk);

@@ -80,6 +80,43 @@ export function planRegistration(stored, incoming, generatedAt) {
 // A stop fetches nothing until resume. The next code is an admitting fence, then any still-pending code.
 // A cursor is only a progress mark: a later chunk can register a code that sorts before it, and that code stays eligible.
 // Enrichment of a verified film waits until no identity work remains.
+export const RETRY_LIMIT = 8;
+
+// Requeue only needs_review rows whose stored reason is a proven parser/markup defect.
+// A verified, admitting, removed or other-reason row is left alone.
+export function planIdentityRetry(doc, {codes = [], expected = {}} = {}) {
+  const requested = [...new Set((Array.isArray(codes) ? codes : []).map(code => String(code || '')).filter(Boolean))];
+  if (!requested.length || requested.length > RETRY_LIMIT) return {ok: false, refusal: 'invalid_request', requeue: [], outcomes: []};
+  const outcomes = [];
+  const requeue = [];
+  for (const code of requested) {
+    if (!CODE.test(code)) {outcomes.push({id: code, outcome: 'failed', error: 'invalid_request'}); continue;}
+    const item = doc && doc.candidates && doc.candidates[code];
+    const expect = expected && expected[code];
+    if (!item) {outcomes.push({id: code, outcome: 'failed', error: 'missing'}); continue;}
+    if (expect && (item.state !== expect.state || (item.reason || null) !== (expect.reason || null))) {
+      outcomes.push({id: code, outcome: 'skipped_changed'});
+      continue;
+    }
+    if (item.state === 'pending' && item.retryOf && LetterboxdIdentityIsRetryable(item.retryOf)) {
+      outcomes.push({id: code, outcome: 'already_applied'});
+      continue;
+    }
+    if (item.state !== 'needs_review' || !LetterboxdIdentityIsRetryable(item.reason)) {
+      outcomes.push({id: code, outcome: 'skipped_changed'});
+      continue;
+    }
+    requeue.push(code);
+    outcomes.push({id: code, outcome: 'written'});
+  }
+  return {ok: true, requeue, outcomes};
+}
+
+function LetterboxdIdentityIsRetryable(reason) {
+  if (typeof LetterboxdIdentity !== 'undefined' && LetterboxdIdentity.isRetryableReason) return LetterboxdIdentity.isRetryableReason(reason);
+  return reason === 'shortlink_missing';
+}
+
 export function resumePending(checkpoint, candidates) {
   const items = Object.values(candidates || {}).filter(item => item && item.code);
   const admitting = items.filter(item => item.state === 'admitting').map(item => item.code).sort();
