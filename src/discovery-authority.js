@@ -14,6 +14,7 @@ export const STATEMENT_CAP=40;
 export const INDEX_CAP=3000;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
+export const BIND_CAP=100;
 const GENERATION_KEY=/^epg\/generations\/([^/]+)\/(discovery-latest|discovered-films)\.json$/;
 function generationRequest(key){
  const match=GENERATION_KEY.exec(key);
@@ -405,23 +406,46 @@ function decisionFromRow(row){
  let parsed;try{parsed=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
  return parsed;
 }
+function pageKeySet(rows){
+ const keys=new Set();
+ for(const row of rows)keys.add(row.observation_key);
+ return keys;
+}
+async function loadPageShows(env,after,lastKey,pageKeys){
+ const showRows=await many(database(env),'SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key>? AND observation_key<=? ORDER BY observation_key, ordinal',[after,lastKey]);
+ const shows=new Map();
+ for(const show of showRows){
+  if(!pageKeys.has(show.observation_key))continue;
+  const list=shows.get(show.observation_key)||[];
+  list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});
+  shows.set(show.observation_key,list);
+ }
+ return shows;
+}
+async function loadPageDecisions(env,after,lastKey,pageKeys){
+ const decisionRows=await many(database(env),'SELECT observation_key, payload_json FROM discovery_decision WHERE observation_key>? AND observation_key<=?',[after,lastKey]);
+ const decisions=new Map();
+ for(const row of decisionRows){
+  if(!pageKeys.has(row.observation_key))continue;
+  decisions.set(row.observation_key,decisionFromRow(row));
+ }
+ return decisions;
+}
 async function visitActivePage(env,after,limit,visit){
  const rows=await many(database(env),'SELECT observation_key, payload_json FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key>? ORDER BY observation_key LIMIT ?',[after,limit]);
  if(!rows.length)return {after,count:0};
- const marks=rows.map(()=>'?').join(',');
- const keys=rows.map(row=>row.observation_key);
- const showRows=await many(database(env),`SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (${marks}) ORDER BY observation_key, ordinal`,keys);
- const shows=new Map();
- for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
- const decisionRows=await many(database(env),`SELECT observation_key, payload_json FROM discovery_decision WHERE observation_key IN (${marks})`,keys);
- const decisions=new Map();
- for(const row of decisionRows)decisions.set(row.observation_key,decisionFromRow(row));
+ const lastKey=rows[rows.length-1].observation_key;
+ const pageKeys=pageKeySet(rows);
+ const shows=await loadPageShows(env,after,lastKey,pageKeys);
+ const decisions=await loadPageDecisions(env,after,lastKey,pageKeys);
  for(const row of rows)await visit(observationFromRow(row,shows.get(row.observation_key)||[]),decisions.get(row.observation_key)||null);
- return {after:rows[rows.length-1].observation_key,count:rows.length};
+ return {after:lastKey,count:rows.length};
 }
 // Status and footer count every active observation without holding the ledger
-// or the decision map. A page is LEDGER_PAGE rows. READ_CAP stays the bound
-// for a whole-document read; this walk is not that read and does not raise it.
+// or the decision map. A page is LEDGER_PAGE rows. Shows and decisions for that
+// page are a two-bind key range, then filtered to the page keys, so a query
+// stays at or under BIND_CAP (D1's 100 bound parameters). READ_CAP stays the
+// bound for a whole-document read; this walk is not that read and does not raise it.
 export async function streamActiveLedger(env,visit){
  const opened=await readAuthority(env);
  if(!opened.ready)return {handled:false};
@@ -467,9 +491,8 @@ export async function readObservationPage(env,options={}){
  const page=more?rows.slice(0,limit):rows;
  const shows=new Map();
  if(page.length){
-  const marks=page.map(()=>'?').join(',');
-  const showRows=await many(database(env),`SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (${marks}) ORDER BY observation_key, ordinal`,page.map(row=>row.observation_key));
-  for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
+  const loaded=await loadPageShows(env,after,page[page.length-1].observation_key,pageKeySet(page));
+  for(const [key,list] of loaded)shows.set(key,list);
  }
  return {programmeRunId:gate.programmeRunId,items:page.map(row=>observationFromRow(row,shows.get(row.observation_key)||[])),more,after:page.length?page[page.length-1].observation_key:after};
 }
