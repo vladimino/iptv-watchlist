@@ -245,12 +245,13 @@ flowchart TD
     monitor["External monitor and alert,<br/>outside ChatGPT"]
     hourly["Hourly ChatGPT Task:<br/>Predictions only"]
     cron --> ensureEpg & ensureDisc & ensureRat
-    epgAuth -.->|publication queues fenced intent| discCtl
+    epgAuth -.->|fast path: queue fenced intent| discCtl
+    epgAuth -.->|ensure reconstructs intent from published generation| ensureDisc
     epgAuth & discAuth & ratAuth -.->|read only| status
     status -.-> monitor
 ```
 
-The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each instance writes its domain data first and then its fenced checkpoint and budget into its own control record, compared against the epoch. Each `ensure` runs no chunk, download or lookup. It reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication queues Discovery's fenced intent and does not wait for Discovery. The dotted arrows to the status routes are reads only; the read model reads each domain's control record and its authority.
+The three domains share no lease, queue, store or Workflow instance; the only shared element is the clock. Each domain commit to D1 compares the epoch and mode in the same batch; R2 side effects are idempotent and bounded by the lease, and a mode switch is close admission, verified drain, then complete ([reference](../reference/orchestration-reliability.md#mode-switch-and-write-fencing)). Each instance writes its domain data first and then its fenced checkpoint and budget into its own control record, compared against the epoch. Each `ensure` runs no chunk, download or lookup. It reads its own control record and creates or attaches at most one instance with an id derived from the run key, so a duplicate firing attaches to the same instance. EPG publication may queue Discovery's fenced intent as a fast path, not in one transaction with the pointer switch; `ensure Discovery` reconstructs the intent from the published generation if that write is missing, and EPG never waits for Discovery. The dotted arrows to the status routes are reads only; the read model reads each domain's control record and its authority.
 
 ```mermaid
 stateDiagram-v2

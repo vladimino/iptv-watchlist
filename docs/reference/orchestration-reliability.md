@@ -12,7 +12,7 @@ This is the field-level contract that every Cloudflare executor for EPG publicat
 | --- | --- | --- | --- |
 | `transient` | `network_error`, `timeout`, `rate_limited` (HTTP 429), `upstream_blocked` (Letterboxd 403 `cf-mitigated`; no in-run retry), `upstream_5xx`, `exceeded_memory`, `exceeded_cpu`, `worker_1102`, `wakeup_lost`, `instance_terminated`, `instance_errored`, `create_uncertain`, `owner_unknown` | Read back, then retry after cooldown | `consecutive` and `total` +1 |
 | `permanent` | `credentials_missing`, `credentials_rejected`, `contract_unsupported`, `config_invalid` | Stop; re-check the precondition cheaply on each due wakeup; resume when it holds | Not counted; health `failed_permanent` |
-| `unsafe` | `evidence_unreadable`, `evidence_contradictory`, `checkpoint_malformed`, `lease_malformed`, `stale_generation_write`, `owner_conflict`, `epoch_mismatch`, `authority_held`, `authority_loading` | Quarantine the domain immediately; no retry | Quarantine reason is the code |
+| `unsafe` | `evidence_unreadable`, `evidence_contradictory`, `checkpoint_malformed`, `lease_malformed`, `stale_generation_write`, `owner_conflict`, `epoch_mismatch` (a commit from a stale epoch or mode is refused), `authority_held`, `authority_loading` | Quarantine the domain immediately; no retry | Quarantine reason is the code |
 
 Not failures: `stale_generation` (a newer published generation took over), `rollover` (a healthy successor instance), `backlog_empty`, `complete`, a domain pause that the upstream asked for, and a lost CAS against a live owner (`busy`).
 
@@ -25,7 +25,8 @@ One record per domain, in that domain's authoritative store (D1 for an activated
 | Field | Meaning |
 | --- | --- |
 | `domain` | `epg`, `discovery` or `ratings` |
-| `mode` | `external` (ChatGPT Task path, executor inert) or `cloudflare` |
+| `mode` | `external` (ChatGPT Task path, executor inert), `cloudflare`, or `switching` (admission closed, draining) |
+| `target`, `drain` | While `switching`: the mode being entered, and the drain state (`lease_live`, `instance_live`, `verified`) |
 | `epoch` | Integer, increased by every mode change. Every executor write compares it |
 | `runKey` | EPG / Ratings: Madrid date `YYYY-MM-DD`. Discovery: `programmeRunId` + series |
 | `phase`, `checkpoint` | Domain phase and the last read-back checkpoint |
@@ -68,9 +69,9 @@ With the defaults, a fault that never clears quarantines after cooldowns of abou
 | Allowed write order | Stage data, then switch the D1 pointer, then mirrors and tail | Decisions and catalogue updates, then the checkpoint | D1 documents, event by CAS, then the queue reference resolved |
 | Read-after-unknown | Read the published pointer and the run record | Read the hop status, the diagnostics ring and the continuation | Read the run record, cursor and queue entry |
 | Durable progress | A later stage checkpoint, or the pointer naming this run | A stored checkpoint for the same generation | A forward checkpoint with a higher authority generation, a forward cursor, or a resolved reference |
-| Fenced external path | `epg_sync_start`, `epg_sync_step` | `epg_sync_step` discovery chunk, resolve, interrupted confirm | `ratings_sync_start`, `ratings_sync_step` |
+| Fenced external path (after the drain is verified) | `epg_sync_start`, `epg_sync_step` | `epg_sync_step` discovery chunk, resolve, interrupted confirm | `ratings_sync_start`, `ratings_sync_step` |
 
-A fenced call answers `external_writer_fenced` and writes nothing. Read-only status tools stay available in every mode.
+A fenced call answers `external_writer_fenced` and writes nothing. While the mode is `switching`, both paths answer `switch_in_progress` and write nothing. Read-only status tools stay available in every mode.
 
 ## Domain rules
 
@@ -100,6 +101,28 @@ A fenced call answers `external_writer_fenced` and writes nothing. Read-only sta
 ### Predictions
 
 Outside this contract. The hourly ChatGPT task keeps the leased queue, `prediction_validate` and `prediction_submit`. A model quota of zero leaves items pending; no Cloudflare executor generates predictions.
+
+## Mode switch and write fencing
+
+The switch is three steps, each an owner-approved action ([ADR 0089 decision 2a](../adr/0089-shared-orchestration-reliability-contract.md#2a-mode-switch-protocol-and-what-the-fence-can-and-cannot-guarantee)):
+
+1. **Close admission:** one CAS sets `mode: switching`, `target` and `epoch+1`. No new step of either writer is admitted (`switch_in_progress`).
+2. **Verified drain:** the old owner's lease is absent or expired with margin greater than the longest step wall time, the previous Workflow instance is finished or absent, and the domain lease or run-record lease is released or expired. An unverifiable drain stays open and is `unsafe` evidence.
+3. **Complete:** a second CAS sets `mode` to the target; only then does the target writer start and the other path answer `external_writer_fenced`.
+
+Every authoritative D1 commit carries the epoch and mode it was admitted under and is applied only if the control record still equals them, in the same batch as the data. Fencing by write kind:
+
+| Write | Fence | Domain examples |
+| --- | --- | --- |
+| D1 authoritative commit | Transactional: epoch and mode compared in the same batch | EPG pointer and generation; Ratings documents and run record; Discovery ledger and control record; every checkpoint |
+| R2 write with etag CAS | Conditional, plus admission recheck immediately before | Objects the domain already writes by CAS |
+| R2 write without a transactional fence | Admission recheck, lease TTL bound, idempotent by construction; never the evidence of progress | Ratings removal events (event key); EPG raw XML (content digest) and R2 mirrors (derived only from the currently published D1 generation); Discovery archive or side objects |
+
+An unknown outcome of an R2 write is read back by key and compared (byte length and SHA-256, or event key) before anything is repeated; unreadable is `evidence_unreadable`. The contract does not claim immediate exclusivity at the epoch increment: exclusivity holds once the drain is verified.
+
+## Discovery intent after an EPG publication
+
+The published D1 pointer is the source of truth for whether Discovery owes work. `ensure Discovery` compares the published `programmeRunId` with the Discovery control record and, when the record does not name it and the generation has no terminal outcome, creates the intent by one CAS (run key `programmeRunId` + series 0, generation pin, Discovery authority fence). The receipt is the control record read back naming `programmeRunId` with the owner epoch. A held or `loading` marker writes nothing (`unsafe`). The EPG publication's own queue write is a fast path using the same CAS; its failure never fails or unpublishes the EPG run. The worst-case delay of a missing intent is one cron period. While Discovery is not activated, the existing generation handoff applies.
 
 ## Time rules
 
@@ -165,7 +188,16 @@ Every domain delivery implements the rows that apply to it, against an injected 
 | T19 | Mode revert while an instance runs | Epoch mismatch stops it at the next ownership check; no write after the switch |
 | T20 | Prediction model quota zero | Queue items stay pending; no Cloudflare retry or failure count |
 | T21 | Status read during any of the above | No write, no create; correct `health` |
+| T22 | Old writer checked the epoch, the owner closes admission, the old writer then commits to D1 | Commit refused as `epoch_mismatch` in the same batch; nothing written; the stale instance stops without retry |
+| T23 | Old writer passed its admission check, the switch begins, the old writer then writes an R2 object (event, mirror, raw payload) | Write may land inside the lease window; it is idempotent (same key or digest, or a mirror of the published generation); the new owner's rewrite converges; no duplicate viewing, removal or older-generation mirror survives repair; no D1 checkpoint is written by the old writer |
+| T24 | Reverse: rollback to `external` while the Cloudflare instance is mid-step | Admission closes first; the instance's D1 commits are refused after the epoch increment; the external path stays `switch_in_progress` until the drain is verified, then the ChatGPT task path is allowed |
+| T25 | Completing the switch with a live lease, a live Workflow instance, an unreadable lease, or a margin shorter than the longest step wall time | Second CAS refused; `drain` stays open; `unsafe` evidence; target writer not started |
+| T26 | R2 write with unknown outcome during or after a switch | Read back by key and compare; equal: complete the checkpoint; absent or different: only the current owner repeats; unreadable: quarantine |
+| T27 | EPG pointer switched, Discovery intent never written (crash between) | EPG date stays published; the next `ensure Discovery` reconstructs the intent from the published generation by CAS; receipt read back; read model shows `due` then `healthy` |
+| T28 | Intent write with unknown outcome, then duplicate recovery by `ensure` and by the EPG fast path | Read-back finds the receipt; the second creator loses the CAS and attaches; exactly one series 0 for `programmeRunId`; no second chunk run |
+| T29 | Intent reconstruction with a held, `loading` or unreadable Discovery marker | Nothing written; `authority_held` or `authority_loading` quarantine; EPG unaffected |
+| T30 | Published generation already processed to a terminal outcome | `ensure` does not re-queue it |
 
 ## Rollout and rollback
 
-Each domain moves alone: inert code with mode `external`; an owner-approved mode switch to `cloudflare` that increments the epoch and fences the external path; real production acceptance from the read model; then, separately, disabling that domain's ChatGPT task path. Rollback is an owner-approved switch back (epoch increment), a drain until no Cloudflare owner is live, then re-enabling the task path. A code rollback changes neither data, mode, cron nor the task registry. Operator steps: [deployment runbook](../runbooks/deployment.md#moving-a-pipeline-to-a-cloudflare-executor).
+Each domain moves alone: inert code with mode `external`; an owner-approved three-step mode switch to `cloudflare` (close admission, verified drain, complete); real production acceptance from the read model; then, separately, disabling that domain's ChatGPT task path. Rollback is the same three-step switch in the other direction (close admission, verified drain, second CAS), then re-enabling the task path. A code rollback changes neither data, mode, cron nor the task registry. Operator steps: [deployment runbook](../runbooks/deployment.md#moving-a-pipeline-to-a-cloudflare-executor).
