@@ -1,6 +1,6 @@
 # Orchestration reliability contract for Cloudflare-executed pipelines
 
-This is the field-level contract that every Cloudflare executor for EPG publication, Discovery and Ratings must implement. The decision and its rationale are [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Proposed). The target topology and lifecycle are drawn in [scheduling and orchestration](../architecture/scheduling-and-orchestration.md#proposed-cloudflare-executors-and-shared-recovery).
+This is the field-level contract that every Cloudflare executor for EPG publication, Discovery and Ratings must implement. The decision and its rationale are [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Accepted; not activated). The target topology and lifecycle are drawn in [scheduling and orchestration](../architecture/scheduling-and-orchestration.md#proposed-cloudflare-executors-and-shared-recovery).
 
 **Implementation status.** No domain implements this contract in production. The inert Discovery Workflow ([ADR 0083](../adr/0083-inert-discovery-workflow.md)) implements an earlier subset (capped recovery, quarantine, rollover, owner record) and is not active. EPG and Ratings are driven by external ChatGPT Scheduled Tasks ([contract](scheduled-tasks.md)). Predictions stay on ChatGPT and are outside this contract. This page authorizes no operation.
 
