@@ -12,7 +12,9 @@
 // reads the rows already stored, and sends only the missing suffix. A cursor
 // that is behind those rows is fenced forward. A torn or unknown prefix is
 // partial_mismatch and is not retried. --reset-load --confirm reset-load
-// discards an uncommitted copy and does not download a replacement. Generation
+// discards an uncommitted copy only when the load checkpoint identity matches
+// the transfer. The first statement of that batch fails closed before any
+// delete. It does not download a replacement. Generation
 // becomes 1 only in the commit batch, after every key, payload and show matches.
 // Catalog, decisions, scores, continuation, workflow, archive segments and the
 // resolver lease are not copied. Hold, seal, activation, archive import and
@@ -133,15 +135,26 @@ export function resetDecision(snapshot){
  if(snapshot.transfer?.state==='committed')return 'already_loaded';
  if(Number(snapshot.foreignObservations)>0||Number(snapshot.foreignShows)>0||Number(snapshot.sideRows)>0)return 'partial_mismatch';
  const hop=snapshot.checkpoint?.hopId??null;
- if(hop&&hop!=='load')return 'partial_mismatch';
  const observations=Number(snapshot.observations);
  const state=snapshot.transfer?.state??null;
  const clean=state==='idle'&&observations===0&&hop==null&&marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
  if(clean)return 'already_reset';
- const openPartial=marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null&&(state==='loading'||observations>0||hop==='load');
- const tornCommit=marker.generation===1&&marker.programmeRunId&&marker.publishedProgrammeRunId===marker.programmeRunId&&state==='loading';
- if(openPartial||tornCommit)return 'reset';
+ const identity=loadResetIdentity(snapshot);
+ if(!identity)return 'partial_mismatch';
+ const openPartial=marker.generation===0&&marker.programmeRunId==null&&marker.publishedProgrammeRunId==null;
+ const tornCommit=marker.generation===1&&marker.programmeRunId===identity.programmeRunId&&marker.publishedProgrammeRunId===identity.programmeRunId;
+ if(openPartial)return 'reset';
+ if(tornCommit)return 'reset_torn';
  return 'partial_mismatch';
+}
+
+function loadResetIdentity(snapshot){
+ if(snapshot.checkpoint?.hopId!=='load')return null;
+ const identity=parseLoadIdentity(snapshot.checkpoint.payload);
+ if(!identity)return null;
+ if(snapshot.checkpoint.programmeRunId!==identity.programmeRunId)return null;
+ if(snapshot.transfer?.state!=='loading'||snapshot.transfer.programmeRunId!==identity.programmeRunId)return null;
+ return identity;
 }
 
 function storedInteger(value){
@@ -258,15 +271,54 @@ export function commitSql(run, items){
  ];
 }
 
-export function resetSql(){
+const RESET_CLEAN="NOT EXISTS (SELECT 1 FROM discovery_observation WHERE residence<>'active' OR source_key<>'active' OR (source_key='active' AND residence='active' AND programme_run_id IS NOT ?)) AND NOT EXISTS (SELECT 1 FROM discovery_observation_show WHERE source_key<>'active') AND NOT EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND NOT EXISTS (SELECT 1 FROM discovery_observation o WHERE o.source_key='active' AND o.residence='active' AND o.observation_key=s.observation_key AND o.programme_run_id=?)) AND NOT EXISTS (SELECT 1 FROM discovery_decision) AND NOT EXISTS (SELECT 1 FROM discovery_admission) AND NOT EXISTS (SELECT 1 FROM discovery_segment) AND NOT EXISTS (SELECT 1 FROM discovery_score) AND NOT EXISTS (SELECT 1 FROM discovery_intent)";
+
+export function resetSql(claim){
+ if(!claim||(claim.shape!=='open'&&claim.shape!=='torn')||typeof claim.programmeRunId!=='string'||typeof claim.payload!=='string')throw new OperatorStop('partial_mismatch',3);
+ const run=claim.programmeRunId;
+ const payload=claim.payload;
+ const torn=claim.shape==='torn';
+ const authority=torn
+  ? "a.generation=1 AND a.programme_run_id=? AND a.published_programme_run_id=?"
+  : "a.generation=0 AND a.programme_run_id IS NULL AND a.published_programme_run_id IS NULL";
+ const authorityExists=torn
+  ? "EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=1 AND programme_run_id=? AND published_programme_run_id=?)"
+  : "EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL)";
+ const authorityParams=torn?[run,run]:[];
+ const owned=authorityExists+" AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='loading' AND programme_run_id=?) AND EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?) AND "+RESET_CLEAN;
+ const ownedParams=authorityParams.concat([run,run,payload,run,run]);
+ const fence=renderSql(
+  "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority a, discovery_transfer t, discovery_checkpoint c WHERE a.id=1 AND t.id=1 AND c.id=1 AND a.mode='r2' AND a.cutover='open' AND "+authority+" AND t.state='loading' AND t.programme_run_id=? AND c.hop_id='load' AND c.programme_run_id=? AND c.payload_json=? AND "+RESET_CLEAN+")",
+  authorityParams.concat([run,run,payload,run,run]),
+ );
+ const deleteShows=renderSql(
+  "DELETE FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id=?) AND "+owned,
+  [run].concat(ownedParams),
+ );
+ const deleteRows=renderSql(
+  "DELETE FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id=? AND "+owned,
+  [run].concat(ownedParams),
+ );
+ const clearAuthority=torn
+  ? renderSql("UPDATE discovery_authority SET programme_run_id=NULL, published_programme_run_id=NULL, generation=0 WHERE id=1 AND mode='r2' AND cutover='open' AND generation=1 AND programme_run_id=? AND published_programme_run_id=? AND "+owned,[run,run].concat(ownedParams))
+  : renderSql("UPDATE discovery_authority SET programme_run_id=NULL, published_programme_run_id=NULL, generation=0 WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL AND "+owned,ownedParams);
+ const clearTransfer=renderSql(
+  "UPDATE discovery_transfer SET state='idle', programme_run_id=NULL, batches=0 WHERE id=1 AND state='loading' AND programme_run_id=? AND EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?) AND "+RESET_CLEAN,
+  [run,run,payload,run,run],
+ );
+ const clearCheckpoint=renderSql(
+  "UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND hop_id='load' AND programme_run_id=? AND payload_json=?",
+  [run,payload],
+ );
  return [
-  "DELETE FROM discovery_observation_show WHERE source_key='active'",
-  "DELETE FROM discovery_observation WHERE source_key='active' AND residence='active'",
-  "UPDATE discovery_authority SET programme_run_id=NULL, published_programme_run_id=NULL, generation=0 WHERE id=1 AND mode='r2' AND cutover='open' AND ((generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL) OR (generation=1 AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='loading')))",
+  fence,
+  deleteShows,
+  deleteRows,
+  clearAuthority,
   "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL)",
-  "UPDATE discovery_transfer SET state='idle', programme_run_id=NULL, batches=0 WHERE id=1 AND state IN ('idle','loading')",
+  clearTransfer,
   "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='idle' AND programme_run_id IS NULL AND batches=0)",
-  "UPDATE discovery_checkpoint SET programme_run_id=NULL, generation=0, hop_id=NULL, payload_json=NULL WHERE id=1 AND (hop_id IS NULL OR hop_id='load')",
+  clearCheckpoint,
   "INSERT INTO discovery_cas (id, ok) SELECT 1, 1 WHERE NOT EXISTS (SELECT 1 FROM discovery_checkpoint WHERE id=1 AND hop_id IS NULL AND payload_json IS NULL AND programme_run_id IS NULL AND generation=0)",
  ];
 }
@@ -674,10 +726,16 @@ export async function runDiscoveryProduction({argv=process.argv,env=process.env,
    if(neighboursMoved(snapshot.markers,fresh.markers))throw new OperatorStop('source_changed',3);
    const resetGate=resetDecision(fresh);
    if(resetGate==='already_reset')return {exit:0,result:{operation:'reset-load',writes:false,writeState:'none',reason:'already_reset',rowsWritten:reads.rowsWritten,bookmarkPrefix:prefix(bookmark),schemaVersion:fresh.schemaVersion,mode:fresh.marker?.mode??null,generation:fresh.marker?.generation??null,observations:fresh.observations}};
-   if(resetGate!=='reset')throw new OperatorStop(resetGate,3);
+   if(resetGate!=='reset'&&resetGate!=='reset_torn')throw new OperatorStop(resetGate,3);
+   const identity=loadResetIdentity(fresh);
+   if(!identity||fresh.checkpoint?.payload==null)throw new OperatorStop('partial_mismatch',3);
+   const otherProgramme=await binding.prepare("SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id IS NOT ?").bind(identity.programmeRunId).first();
+   if(Number(otherProgramme?.n)!==0)throw new OperatorStop('partial_mismatch',3);
+   const again=await snapshotOf(binding);
+   if(resetDecision(again)!==resetGate||again.checkpoint?.payload!==fresh.checkpoint.payload||again.transfer?.programmeRunId!==fresh.transfer?.programmeRunId||again.transfer?.state!==fresh.transfer?.state)throw new OperatorStop('partial_mismatch',3);
    const leaseBefore=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
    writeState='unknown';
-   await adapter.executeRendered(resetSql());
+   await adapter.executeRendered(resetSql({programmeRunId:identity.programmeRunId,payload:fresh.checkpoint.payload,shape:resetGate==='reset_torn'?'torn':'open'}));
    const cleared=await snapshotOf(binding);
    const leaseAfter=await binding.prepare('SELECT lease_id AS leaseId, expires_at AS expiresAt FROM discovery_lease WHERE id=1').bind().first();
    const marker=cleared.marker;

@@ -50,11 +50,21 @@ assert.equal(tail.length,1);
 assert.match(tail[0].join('\n'),/batches=51/);
 assert.match(tail[0].join('\n'),/batches=40/);
 assert.throws(()=>packLoadSlice([Array.from({length:99},()=>'SELECT 1')],'run-old',0),error=>error.reason==='batch_too_large');
-const fenced=commitSql('run-old',3).concat(resetSql()).join('\n');
-assert.equal(/mode='d1'|\bdiscovery_lease\b|\bdiscovery_decision\b|\bINTO\s+film\b/i.test(fenced),false);
+const loadPayload=JSON.stringify({bytes:3,etag:'etag-value',items:1,programmeRunId:'run-old',sha256:'abc',shows:0});
+const loadCheckpoint={hopId:'load',programmeRunId:'run-old',payload:loadPayload};
+const resetClaim={programmeRunId:'run-old',payload:loadPayload,shape:'open'};
+const resetStatements=resetSql(resetClaim);
+assert.match(resetStatements[0],/^INSERT INTO discovery_cas/);
+assert.equal(resetStatements[0].includes('DELETE'),false);
+assert.equal(resetStatements.findIndex(sql=>sql.startsWith('DELETE FROM discovery_observation_show '))>0,true);
+assert.equal(resetStatements.findIndex(sql=>sql.startsWith('DELETE FROM discovery_observation '))>resetStatements.findIndex(sql=>sql.startsWith('DELETE FROM discovery_observation_show ')),true);
+assert.match(resetStatements[1],/programme_run_id='run-old'/);
+assert.match(resetStatements[0],/generation=0/);
+assert.match(resetSql({...resetClaim,shape:'torn'})[0],/generation=1/);
+assert.equal(/mode='d1'|\bINTO\s+discovery_lease\b|\bINTO\s+discovery_decision\b|\bINTO\s+film\b|\bUPDATE\s+discovery_lease\b|\bUPDATE\s+discovery_decision\b|\bDELETE\s+FROM\s+discovery_lease\b|\bDELETE\s+FROM\s+discovery_decision\b/i.test(resetStatements.join('\n')),false);
+const fenced=commitSql('run-old',3).concat(resetStatements).join('\n');
 assert.match(fenced,/generation=1/);
 assert.equal(fenced.includes('generation+1'),false);
-assert.match(resetSql().join('\n'),/residence='active'/);
 const shapeA=observationShape({key:'a',title:'A',normalizedTitle:'a',year:1});
 const shapeB=observationShape({key:'b',title:'B',normalizedTitle:'b',year:2,shows:[{channelId:'c',channel:'C',start:1,end:2}]});
 const rowA={key:'a',payload:shapeA.payload,evidence:shapeA.evidence,shows:[]};
@@ -70,8 +80,12 @@ assert.equal(parseLoadIdentity('x'.repeat(2001)),null);
 assert.equal(loadDecision({...fresh,checkpoint:{hopId:'load'}}),'partial_load');
 assert.equal(resetDecision(fresh),'already_reset');
 assert.equal(resetDecision({...fresh,transfer:{state:'committed',programmeRunId:'run-old'},marker:{mode:'r2',cutover:'open',generation:1,programmeRunId:'run-old',publishedProgrammeRunId:'run-old'}}),'already_loaded');
-assert.equal(resetDecision({...fresh,transfer:{state:'loading',programmeRunId:'run-old'},checkpoint:{hopId:'load'}}),'reset');
-assert.equal(resetDecision({...fresh,marker:{mode:'r2',cutover:'open',generation:1,programmeRunId:'run-old',publishedProgrammeRunId:'run-old'},transfer:{state:'loading',programmeRunId:'run-old'}}),'reset');
+assert.equal(resetDecision({...fresh,transfer:{state:'loading',programmeRunId:'run-old'},checkpoint:loadCheckpoint}),'reset');
+assert.equal(resetDecision({...fresh,transfer:{state:'loading',programmeRunId:'run-old'},checkpoint:{hopId:'load'}}),'partial_mismatch');
+assert.equal(resetDecision({...fresh,transfer:{state:'loading',programmeRunId:null}}),'partial_mismatch');
+assert.equal(resetDecision({...fresh,observations:2}),'partial_mismatch');
+assert.equal(resetDecision({...fresh,marker:{mode:'r2',cutover:'open',generation:1,programmeRunId:'run-old',publishedProgrammeRunId:'run-old'},transfer:{state:'loading',programmeRunId:'run-old'},checkpoint:loadCheckpoint}),'reset_torn');
+assert.equal(resetDecision({...fresh,marker:{mode:'r2',cutover:'open',generation:1,programmeRunId:'run-old',publishedProgrammeRunId:'run-old'},transfer:{state:'loading',programmeRunId:'run-old'}}),'partial_mismatch');
 assert.equal(resetDecision({...fresh,marker:{mode:'d1',cutover:'open',generation:0,programmeRunId:null,publishedProgrammeRunId:null}}),'marker_refused');
 assert.equal(resetDecision({...fresh,sideRows:1,transfer:{state:'loading'}}),'partial_mismatch');
 assert.equal(resetDecision({...fresh,foreignObservations:1,transfer:{state:'loading'}}),'partial_mismatch');
@@ -176,6 +190,7 @@ async function install(count){
    const body=JSON.parse(init.body);
    if(body.batch){
     calls.batches.push(body.batch.map(item=>item.sql));
+    if(control.beforeBatch)control.beforeBatch(calls.batches.at(-1));
     if(control.failAt===calls.batches.length)return responseJson({success:false},500);
     const response=runBatch(body.batch.map(item=>item.sql));
     if(control.afterBatch)control.afterBatch(calls.batches.length);
@@ -391,16 +406,11 @@ const sample={key:'obs-1',title:"O'Brien",normalizedTitle:'фильм',year:1999
  assert.equal(installed.calls.batches.length,1);
  assert.equal(installed.calls.gets.includes('epg/discovery-latest.json'),false);
  const cleared=await run(['--reset-load','--confirm','reset-load','--target','iptv'], installed);
- assert.equal(cleared.exit,0,JSON.stringify(cleared.result));
- assert.equal(cleared.result.writes,true);
- assert.equal(cleared.result.generation,0);
- assert.equal(sql(installed.productionFile,"SELECT state, batches FROM discovery_transfer WHERE id=1;",{json:true})[0].state,'idle');
- assert.equal(sql(installed.productionFile,'SELECT hop_id FROM discovery_checkpoint WHERE id=1;',{json:true})[0].hop_id,null);
- const again=await run(['--reset-load','--confirm','reset-load','--target','iptv'], installed);
- assert.equal(again.exit,0,JSON.stringify(again.result));
- assert.equal(again.result.reason,'already_reset');
- assert.equal(again.result.writes,false);
- assert.equal(installed.calls.batches.length,2);
+ assert.equal(cleared.exit,3,JSON.stringify(cleared.result));
+ assert.equal(cleared.result.reason,'partial_mismatch');
+ assert.equal(cleared.result.writes,false);
+ assert.equal(installed.calls.batches.length,1);
+ assert.equal(sql(installed.productionFile,"SELECT state FROM discovery_transfer WHERE id=1;",{json:true})[0].state,'loading');
 }
 
 {
@@ -788,6 +798,45 @@ async function tornCommit(){
  assert.equal(refused.result.reason,'writer_active');
  assert.equal(installed.calls.gets.includes('epg/discovery-latest.json'),false);
  assert.equal(installed.calls.batches.length,1);
+}
+
+{
+ const installed=await appliedInstall();
+ sql(installed.productionFile,"INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, payload_json) VALUES ('active', 'hand', 'active', 'run-old', '{}');");
+ const refused=await run(['--reset-load','--confirm','reset-load','--target','iptv'], installed);
+ assert.equal(refused.exit,3,JSON.stringify(refused.result));
+ assert.equal(refused.result.reason,'partial_mismatch');
+ assert.equal(refused.result.writes,false);
+ assert.equal(sql(installed.productionFile,"SELECT observation_key FROM discovery_observation;",{json:true})[0].observation_key,'hand');
+ assert.equal(installed.calls.batches.length,1);
+}
+
+{
+ const {installed,before}=await tornCommit();
+ sql(installed.productionFile,"INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, payload_json) VALUES ('active', 'other-run', 'active', 'other-run', '{}');");
+ const refused=await run(['--reset-load','--confirm','reset-load','--target','iptv'], installed);
+ assert.equal(refused.exit,3,JSON.stringify(refused.result));
+ assert.equal(refused.result.reason,'partial_mismatch');
+ assert.equal(refused.result.writes,false);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_observation;',{json:true})[0].n,2);
+ assert.equal(installed.calls.batches.length,before+3);
+}
+
+{
+ const {installed,before}=await tornCommit();
+ installed.control.beforeBatch=batch=>{
+  if(batch.some(sql=>sql.startsWith('DELETE FROM discovery_observation ')))sql(installed.productionFile,"UPDATE discovery_checkpoint SET payload_json='{}' WHERE id=1;");
+ };
+ const raced=await run(['--reset-load','--confirm','reset-load','--target','iptv'], installed);
+ assert.equal(raced.exit,3,JSON.stringify(raced.result));
+ assert.equal(raced.result.reason,'d1_statement');
+ assert.equal(raced.result.writes,null);
+ assert.equal(sql(installed.productionFile,'SELECT COUNT(*) AS n FROM discovery_observation;',{json:true})[0].n,1);
+ assert.equal(sql(installed.productionFile,"SELECT observation_key FROM discovery_observation;",{json:true})[0].observation_key,'obs-1');
+ assert.equal(sql(installed.productionFile,'SELECT generation FROM discovery_authority WHERE id=1;',{json:true})[0].generation,1);
+ assert.equal(sql(installed.productionFile,"SELECT state FROM discovery_transfer WHERE id=1;",{json:true})[0].state,'loading');
+ assert.equal(sql(installed.productionFile,'SELECT generation FROM ratings_domain_authority WHERE id=1;',{json:true})[0].generation,12);
+ assert.equal(installed.calls.batches.length,before+4);
 }
 
 {
