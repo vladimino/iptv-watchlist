@@ -394,19 +394,62 @@ export async function ingestLedger(env,spec){
  }catch(error){throw error.code?error:failed('discovery_unavailable',error);}
  return {handled:true,items:count};
 }
+async function ledgerArchive(env){
+ const archive=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'archive\' AND observation_key NOT IN (SELECT observation_key FROM discovery_observation WHERE residence=\'active\')');
+ const unreferenced=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'unreferenced\'');
+ const segments=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_segment WHERE residence=\'archive\'');
+ return {uniqueArchivedItems:Number(archive?.n||0),unreferencedItems:Number(unreferenced?.n||0),segments:Number(segments?.n||0)};
+}
+function decisionFromRow(row){
+ if(!row?.payload_json)return null;
+ let parsed;try{parsed=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
+ return parsed;
+}
+async function visitActivePage(env,after,limit,visit){
+ const rows=await many(database(env),'SELECT observation_key, payload_json FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key>? ORDER BY observation_key LIMIT ?',[after,limit]);
+ if(!rows.length)return {after,count:0};
+ const marks=rows.map(()=>'?').join(',');
+ const keys=rows.map(row=>row.observation_key);
+ const showRows=await many(database(env),`SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key IN (${marks}) ORDER BY observation_key, ordinal`,keys);
+ const shows=new Map();
+ for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
+ const decisionRows=await many(database(env),`SELECT observation_key, payload_json FROM discovery_decision WHERE observation_key IN (${marks})`,keys);
+ const decisions=new Map();
+ for(const row of decisionRows)decisions.set(row.observation_key,decisionFromRow(row));
+ for(const row of rows)await visit(observationFromRow(row,shows.get(row.observation_key)||[]),decisions.get(row.observation_key)||null);
+ return {after:rows[rows.length-1].observation_key,count:rows.length};
+}
+// Status and footer count every active observation without holding the ledger
+// or the decision map. A page is LEDGER_PAGE rows. READ_CAP stays the bound
+// for a whole-document read; this walk is not that read and does not raise it.
+export async function streamActiveLedger(env,visit){
+ const opened=await readAuthority(env);
+ if(!opened.ready)return {handled:false};
+ if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ const counted=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\'');
+ const itemCount=Number(counted?.n||0);
+ const archive=await ledgerArchive(env);
+ let after='';
+ for(;;){
+  const page=await visitActivePage(env,after,LEDGER_PAGE,visit);
+  if(!page.count)break;
+  after=page.after;
+  if(page.count<LEDGER_PAGE)break;
+ }
+ const closedGate=await readAuthority(env);
+ if(!closedGate.ready||closedGate.generation!==opened.generation||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer==='loading')throw failed('discovery_fence');
+ return {handled:true,programmeRunId:opened.programmeRunId,itemCount,ledgerMode:opened.programmeRunId?'bounded':null,archive};
+}
 async function readLedger(env,gate){
  const counted=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\'');
  const itemCount=Number(counted?.n||0);
- if(itemCount>READ_CAP)return {programmeRunId:gate.programmeRunId,paged:true,itemCount,items:null,ledgerMode:gate.programmeRunId?'bounded':null};
+ if(itemCount>READ_CAP)return {programmeRunId:gate.programmeRunId,paged:true,itemCount,items:null,ledgerMode:gate.programmeRunId?'bounded':null,archive:await ledgerArchive(env)};
  const rows=await many(database(env),'SELECT observation_key, payload_json, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' ORDER BY observation_key');
  const showRows=await many(database(env),'SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key=\'active\' ORDER BY observation_key, ordinal');
  const shows=new Map();
  for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
- const items=rows.map(row=>{let payload;try{payload=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}return {...payload,key:row.observation_key,shows:shows.get(row.observation_key)||[]};});
- const archive=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'archive\' AND observation_key NOT IN (SELECT observation_key FROM discovery_observation WHERE residence=\'active\')');
- const unreferenced=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'unreferenced\'');
- const segments=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_segment WHERE residence=\'archive\'');
- return {programmeRunId:gate.programmeRunId,items,ledgerMode:gate.programmeRunId?'bounded':null,archive:{uniqueArchivedItems:Number(archive?.n||0),unreferencedItems:Number(unreferenced?.n||0),segments:Number(segments?.n||0)}};
+ const items=rows.map(row=>observationFromRow(row,shows.get(row.observation_key)||[]));
+ return {programmeRunId:gate.programmeRunId,items,ledgerMode:gate.programmeRunId?'bounded':null,archive:await ledgerArchive(env)};
 }
 function observationFromRow(row,shows){
  let payload;try{payload=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}

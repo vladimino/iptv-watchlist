@@ -6,7 +6,7 @@
 **Approval source:** Explicit owner decision, 2026-11-04: [AIR-340 ADR 0087 acceptance](https://trello.com/c/zWxj3laC#comment-6aeb5bd58c6b564dd6ab475f). The owner accepted this architectural decision after independent review of PR #364 at `d4587d8732681855e2a75baa0e89a44f6e68a67c` and successful exact-head CI; no production ZIP import, identity-step or other production data writes were approved.
 **Related work:** [AIR-340](https://trello.com/c/zWxj3laC). Ratings reads follow [ADR 0084](0084-d1-authoritative-ratings.md). Watchlist admission stays [ADR 0086](0086-durable-watchlist-film-retention.md). [AIR-185](https://trello.com/c/PKvrDGKZ) is rejected and is not resumed. [AIR-320](https://trello.com/c/4cA5GlJn) and [AIR-321](https://trello.com/c/KHJM2gnK) are not prerequisites for this offline delivery.
 **Supersedes:** None
-**Superseded by:** [ADR 0090](0090-rated-identity-redirect-proof-and-retry.md) in part, for HTML shortlink evidence, `writes`, stored review reasons, and the owner retry of a parser-defect review.
+**Superseded by:** [ADR 0090](0090-rated-identity-redirect-proof-and-retry.md), Accepted 2026-11-05, in part, for HTML shortlink evidence, `writes`, stored review reasons, and the owner retry of a parser-defect review.
 
 ## Context
 

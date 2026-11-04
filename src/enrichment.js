@@ -1319,7 +1319,8 @@ async function footerStatus(env){
  let ratingsRun=null,ratingsBlocked=null;
  if(typeof LetterboxdRatings!=='undefined'){const state=await LetterboxdRatings.migrationState(env);if(state.migration==='complete')ratingsRun=LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now());else ratingsBlocked={migration:state.migration};}
  // AIR-344: the ledger is streamed and counted once, without keeping its items, before the other records are read.
- const decisions=await loadJSON(env,'epg/discovery-resolution.json');
+ const authority=typeof DiscoveryAuthority!=='undefined'?await DiscoveryAuthority.readAuthority(env):null;
+ const decisions=authority?.ready?{}:await loadJSON(env,'epg/discovery-resolution.json');
  const ledger=await ledgerStatusAggregates(pinned,decisions||{},Date.now());
  const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease]=await Promise.all([
   loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json'),loadJSON(env,'epg/resolver-lease.json')
