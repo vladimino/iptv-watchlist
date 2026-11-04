@@ -114,7 +114,8 @@ const CATALOG_TMDB_ID=/^tmdb_([1-9]\d*)$/;
 const catalogConsumed=item=>item?.watched===true||item?.actualRating!=null;
 // A watchlist fact, either value, is membership. It is not a first-watch offer. Missing the field leaves the other rules alone.
 const catalogWatchlistFact=item=>item?.watchlist===true||item?.watchlist===false;
-function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
+// Letterboxd lid to one TMDB id, only while every stored id agrees. Two ids, or none, leave the lid unbridged. Titles are never read.
+function catalogLidTmdb({metadata,watchlist,programme,catalog}){
  const byLid=new Map(),conflicted=new Set();
  const add=(id,tmdbId)=>{
   if(id==null||tmdbId==null)return;const lid=String(id),tmdb=String(tmdbId);
@@ -124,10 +125,15 @@ function catalogConsumedTmdb({index,metadata,watchlist,programme,catalog}){
  for(const [id,record] of Object.entries(metadata||{}))add(record?.id??id,record?.tmdbId);
  for(const film of [...(watchlist?.films||[]),...(programme?.films||[])])add(film?.id,film?.tmdbId);
  for(const film of Object.values(catalog||{}))if(film?.tmdbId&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId))add(film.id,film.tmdbId);
- const consumed=new Set();
- for(const [id,item] of Object.entries(index||{})){if(!catalogConsumed(item))continue;const tmdb=CATALOG_TMDB_ID.exec(id)?.[1]||byLid.get(id);if(tmdb)consumed.add(tmdb);}
- return consumed;
+ return byLid;
 }
+function catalogMatchedTmdb(index,byLid,accept){
+ const matched=new Set();
+ for(const [id,item] of Object.entries(index||{})){if(!accept(item))continue;const tmdb=CATALOG_TMDB_ID.exec(id)?.[1]||byLid.get(id);if(tmdb)matched.add(tmdb);}
+ return matched;
+}
+function catalogConsumedTmdb(input){return catalogMatchedTmdb(input.index,catalogLidTmdb(input),catalogConsumed);}
+function catalogWatchlistTmdb(input){return catalogMatchedTmdb(input.index,catalogLidTmdb(input),catalogWatchlistFact);}
 // Display-only exclusion of watched export films without a proven identity (ADR-0028). It reads one private list of normalized
 // export names and years on every request, and removes a catalog film from this response only. No variable selects it: the
 // former FINDS_TITLE_EXCLUSION switch is retired (ADR 0041) and a stale binding is inert. The rule
@@ -213,7 +219,7 @@ function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
 function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
- const consumedTmdb=catalogConsumedTmdb({index,metadata,watchlist,programme,catalog});
+ const bridge={index,metadata,watchlist,programme,catalog},consumedTmdb=catalogConsumedTmdb(bridge),watchlistTmdb=catalogWatchlistTmdb(bridge);
  const hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
@@ -222,7 +228,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   if(excluded.has(id)||excluded.has(identity))continue;
   const item=index?.[id];
   // Watched or rated, under this id or any id of the same TMDB film: never offered, so a prediction never stands in for a rating.
-  if(catalogConsumed(item)||catalogWatchlistFact(item)||consumedTmdb.has(String(film.tmdbId)))continue;
+  if(catalogConsumed(item)||catalogWatchlistFact(item)||consumedTmdb.has(String(film.tmdbId))||watchlistTmdb.has(String(film.tmdbId)))continue;
   // The same freshness rule as the queue and the view, for the same profile snapshot.
   if(!profile||!freshness.indexed(item,film))continue;
   if(!Array.isArray(film.shows)||film.showsProgrammeRunId!==programmeRunId)continue;

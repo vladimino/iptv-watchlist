@@ -307,4 +307,53 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  await assert.rejects(seedProjection(openSqlite(bare),{at:T,keys:[]}),/apply migrations\/0004/);
 }
 
+// 18. An admitted Film whose cache disappeared keeps the body already stored. A cache row with another id is not a new body.
+{
+ const {db:kept}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state']);
+ const sourceBucket=r2();
+ const first=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(first.outcome,'complete',JSON.stringify(first));
+ const beforeCredits=credits(kept,'film:heat');
+ const snap=()=>({
+  credits:credits(kept,'film:heat'),
+  tmdb:one(kept,"SELECT value FROM film_external_id WHERE film_id='film:heat' AND scheme='tmdb' AND trusted=1"),
+  identity:one(kept,"SELECT status FROM film_dimension WHERE film_id='film:heat' AND dimension='identity'"),
+  canonical:one(kept,"SELECT canonical_identity FROM film WHERE id='film:heat'"),
+  year:one(kept,"SELECT year FROM film_metadata WHERE film_id='film:heat'"),
+  sync:one(kept,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:heat'"),
+  title:one(kept,"SELECT original_title FROM film WHERE id='film:heat'")
+ });
+ const stored=snap();
+ assert.equal(stored.tmdb,'949');
+ assert.equal(stored.identity,'resolved');
+ assert.equal(stored.year,1995);
+ assert.equal(stored.sync,T);
+ const read=async key=>JSON.parse(await (await sourceBucket.get(key)).text());
+ const watch=await read('watchlist.json');
+ watch.films=watch.films.filter(film=>film.id!=='heat');
+ await sourceBucket.put('watchlist.json',JSON.stringify(watch));
+ const programme=await read('epg/generations/run-1/programme.json');
+ programme.films=programme.films.filter(film=>film.id!=='heat');
+ await sourceBucket.put('epg/generations/run-1/programme.json',JSON.stringify(programme));
+ const metadata=await read('metadata.json');
+ delete metadata.heat;
+ await sourceBucket.put('metadata.json',JSON.stringify(metadata));
+ await sourceBucket.put('enrichment/view-index.json',JSON.stringify({heat:{watchlist:false},collateral:{watchlist:true}}));
+ const departedRun=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(departedRun.outcome,'complete',JSON.stringify(departedRun));
+ assert.deepEqual(snap(),stored);
+ assert.deepEqual(beforeCredits,stored.credits);
+ assert.equal(one(kept,"SELECT COUNT(*) FROM watchlist_film WHERE film_id='film:heat'"),0);
+ assert.equal(one(kept,"SELECT change_key='absent' FROM projection_state WHERE projection='enrichment' AND kind='film' AND id='film:heat'"),0);
+ const again=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(again.writtenFilms,0,JSON.stringify(again));
+ assert.deepEqual(snap(),stored);
+ metadata.heat={id:'other',tmdbId:'1',original:'Other',metadataAt:T,peopleVersion:1,peopleNamesVersion:2,synopsis:'Nope',synopsisFetchedAt:T,directors:[MANN],actors:[PACINO]};
+ await sourceBucket.put('metadata.json',JSON.stringify(metadata));
+ const clash=await run({DB:kept,BUCKET:sourceBucket,D1_ENRICHMENT_WRITE:'on'});
+ assert.equal(clash.outcome,'complete',JSON.stringify(clash));
+ assert.deepEqual(snap(),stored,'a cache id that disagrees does not replace the stored Film');
+ assert.equal(one(kept,"SELECT COUNT(*) FROM film WHERE id='film:heat'"),1);
+}
+
 console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed');

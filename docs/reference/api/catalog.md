@@ -46,7 +46,7 @@ Titles, years and aliases are never compared, so a remake or a namesake of a wat
 
 ### Watchlist facts
 
-A view-index entry excludes its catalog id when `watchlist` is `true` or `false` ([ADR 0084](../../adr/0084-durable-watchlist-film-retention.md), Proposed). `false` is a recorded removal. It is not a watched mark, it does not delete the Film, and it does not put the film on the watchlist grid. A missing `watchlist` field leaves this rule unused. The route still does not read the fact records.
+A view-index entry excludes its catalog id when `watchlist` is `true` or `false` ([ADR 0086](../../adr/0086-durable-watchlist-film-retention.md), Proposed). The same boolean on a Letterboxd lid also excludes a catalog row `tmdb_<n>` when that lid bridges to `n` by the same stored-id rule as [watched and rated films](#watched-and-rated-films): one agreed id from the metadata cache, the watchlist, the programme or a verified catalog record. Two stored ids, or none, leave the lid unbridged. Titles are never compared. `false` is a recorded removal. It is not a watched mark, it does not delete the Film, and it does not put the film on the watchlist grid. A missing `watchlist` field leaves this rule unused. The route still does not read the fact records.
 
 One entry per canonical identity: when two records share a TMDB identity, the one whose availability ends later is kept, then the smaller id. The list is ordered by `availableUntil`, then id, so the same stored state always produces the same order.
 

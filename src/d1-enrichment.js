@@ -240,6 +240,8 @@ async function d1EnrichmentDiff(env,db,now,summary){
   for(const entry of inputs.films){
    if(held.has(entry.id))continue;
    viewed.add(entry.id);
+   // No usable cache: leave the stored clocks. A null sync here would delete them.
+   if(entry.preserveCanonical)continue;
    const key=EnrichmentProjection.filmSyncChangeKey(entry.sync);
    const previous=storedSync.get(entry.id);
    if(entry.sync){if(previous!==key)plan.sync.push({id:entry.id,sync:entry.sync,key});}
@@ -340,7 +342,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
     const entry=task.item;
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
-     await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined});
+     await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
      for(const redirect of entry.film.redirects||[])await repository.projectLink({survivor:entry.film,redirect});
      if(pending)await writeSync(pending);
      await state('film',entry.id,entry.key);

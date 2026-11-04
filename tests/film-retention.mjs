@@ -62,6 +62,13 @@ orphan.metadata={cache:body('cache')};
 orphan.fingerprints={cache:{fingerprintSchemaVersion:1,fingerprintHash:'x'}};
 assert.deepEqual(ids(orphan),[],'metadata, a fingerprint or a title does not admit a film');
 
+const foreign=base();
+foreign.watchlistAdmissions={gone:false};
+foreign.metadata={gone:{...body('other'),tmdbId:'99'}};
+const foreignFilm=filmOf(foreign,'gone');
+assert.equal(storedFilmId(foreignFilm),'gone','a cache row with another id does not drop the admitted lid');
+assert.equal((foreignFilm.externalIds||[]).some(item=>item.value==='99'),false,'that cache is not this film');
+
 const unverified={programme:{films:[],runId:'run-1'},watchlist:{films:[]},metadata:{one:body('one',{tmdbId:'7'}),two:body('two',{tmdbId:'7'})},watchlistAdmissions:{one:false,two:false},discoveredFilms:{}};
 const split=readLifecycle(unverified,NOW).films;
 assert.equal(split.length,2,'an unverified TMDB id does not join two lids');
@@ -133,5 +140,15 @@ const available=JSON.parse(vm.runInContext('const input='+JSON.stringify({
  profile:{version:1},metadata:{},programmeRunId:'run',pinned:false,now,titleExclusion:{state:'unavailable'}
 })+';input.freshness={indexed:()=>true};JSON.stringify(catalogAvailable(input).films.map(film=>film.id))',catalogCtx));
 assert.deepEqual(available,['fresh']);
+let offerCase=0;
+const offerRun=(catalog,index,metadata,watchlist={films:[]})=>{
+ const name='offerCase'+(offerCase++);
+ return JSON.parse(vm.runInContext('const '+name+'='+JSON.stringify({
+  catalog,programme:{films:[],runId:'run'},watchlist,index,profile:{version:1},metadata,programmeRunId:'run',pinned:false,now,titleExclusion:{state:'unavailable'}
+ })+';'+name+'.freshness={indexed:()=>true};JSON.stringify(catalogAvailable('+name+').films.map(film=>film.id))',catalogCtx));
+};
+assert.deepEqual(offerRun({alias:offer('tmdb_11','11')},{gone:{...facet,watchlist:false},tmdb_11:facet},{gone:{id:'gone',tmdbId:'11'}}),[],'a lid-only watchlist fact reaches the catalog id through one stored TMDB id');
+assert.deepEqual(offerRun({alias:offer('tmdb_11','11')},{gone:{...facet,watchlist:false},tmdb_11:facet},{gone:{id:'gone',tmdbId:'11'}},{films:[{id:'gone',tmdbId:'99'}]}),['tmdb_11'],'two stored TMDB ids do not bridge the fact');
+assert.deepEqual(offerRun({alias:offer('tmdb_11','11')},{gone:facet,tmdb_11:facet},{gone:{id:'gone',tmdbId:'11'}}),['tmdb_11'],'a missing watchlist field does not exclude');
 
 console.log('Film retention: departed watchlist films stay, re-add keeps one film, Finds skips a watchlist fact, orphan classes do not write');

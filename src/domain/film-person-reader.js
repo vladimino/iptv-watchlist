@@ -14,6 +14,13 @@ function storedFilmId(film){
 // A Letterboxd lid. A tmdb_<n> key is the same fact's alias and does not mint a second Film. A title, year, slug or diary title is not an id.
 const RETENTION_LID=/^[A-Za-z0-9_-]{1,80}$/;
 function retentionLid(id){const value=String(id||'');return RETENTION_LID.test(value)&&!value.startsWith('tmdb_');}
+// A cache row stored under this lid whose own id names a different film is not this film's body. The lid still stands.
+function cacheFor(store,id){
+ const metadata=store.metadata?.[id];
+ if(!metadata||typeof metadata!=='object'||Array.isArray(metadata))return null;
+ if(metadata.id!=null&&String(metadata.id)!==String(id))return null;
+ return metadata;
+}
 // Films whose view-index entry carries a watchlist boolean stay in the catalog after they leave the current lists.
 // The boolean is membership history. It is not a watched mark and it does not put the film back on the watchlist.
 function retainedWatchlistRecords(store,seen){
@@ -22,10 +29,8 @@ function retainedWatchlistRecords(store,seen){
  const records=[];
  for(const id of Object.keys(admissions).sort()){
   if(typeof admissions[id]!=='boolean'||!retentionLid(id)||seen.has(id))continue;
-  const metadata=store.metadata?.[id];
-  const record=metadata&&typeof metadata==='object'?{...metadata,id:metadata.id||id}:{id};
-  if(String(record.id)!==id)continue;
-  records.push(record);seen.add(id);
+  const metadata=cacheFor(store,id);
+  records.push(metadata?{...metadata,id}:{id});seen.add(id);
  }
  return records;
 }
@@ -74,7 +79,7 @@ function reviewedTranslation(sources){
 }
 function originalTitle(sources){for(const source of sources)if(source?.original)return source.original;return null;}
 function loadedSources(store,id,record){
- const metadata=store.metadata?.[id]||null,programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
+ const metadata=cacheFor(store,id),programme=recordById(store.programme?.films,id),watchlist=recordById(store.watchlist?.films,id);
  return {metadata,programme,watchlist,record:record||catalogRecord(store,id)};
 }
 function tmdbRetirementRecords(store,film){

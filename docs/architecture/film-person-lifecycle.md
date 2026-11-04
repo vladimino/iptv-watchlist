@@ -92,7 +92,7 @@ flowchart LR
 
 ## Watchlist fact keeps the Film
 
-**Visual review: pending.** This diagram is proposed with [ADR 0084](../adr/0084-durable-watchlist-film-retention.md) and is not approved. It does not replace the four diagrams above. A Letterboxd lid whose view-index `watchlist` is `true` or `false` stays one Film after the current programme and watchlist drop it. Metadata fills that Film and does not mint one on its own. Membership is true only while the current watchlist document names the lid. The grid reads that document, not the Film. Either boolean keeps the film out of the Finds first-watch offer. A watched or rated entry still excludes it on its own. `watchlist: false` is not a watched mark. R2 stays the Film authority.
+**Visual review: pending.** This diagram is proposed with [ADR 0086](../adr/0086-durable-watchlist-film-retention.md) and is not approved. It does not replace the four diagrams above. A Letterboxd lid whose view-index `watchlist` is `true` or `false` stays one Film after the current programme and watchlist drop it. Metadata fills that Film and does not mint one on its own. A cache row whose id names another film is not that body, and the lid stays. Membership is true only while the current watchlist document names the lid. The grid reads that document, not the Film. Either boolean keeps the film out of the Finds first-watch offer, including a catalog id `tmdb_<n>` when the lid bridges to `n` by one agreed stored id. Two stored ids, or none, do not bridge. A watched or rated entry still excludes it on its own. `watchlist: false` is not a watched mark. R2 stays the Film authority. Accepting the ADR does not authorize the projector write; that deploy is a separate owner approval.
 
 ```mermaid
 flowchart LR

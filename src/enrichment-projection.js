@@ -123,14 +123,29 @@ export function enrichmentStore({watchlist=null,programme=null,metadata=null,tit
 // metadataSha256 names the metadata.json version a row was read from. The offline import passes the snapshot object's checksum;
 // the projector and its seed pass none, so a projected film_metadata row carries content_sha256 NULL: it comes from a live read,
 // not from a pinned object version, and no checksum of another Film's change ever lands on it (ADR 0056).
+function letterboxdOf(film){return (film?.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;}
+function onCurrentList(store,lid){
+ if(!lid)return false;
+ const same=item=>item&&String(item.id)===String(lid);
+ return (store.watchlist?.films||[]).some(same)||(store.programme?.films||[]).some(same);
+}
+// A cache row whose id names another film is not usable. A missing id is this key's row.
+function usableMetadata(record,lid){
+ if(!record||typeof record!=='object'||Array.isArray(record))return null;
+ if(record.id!=null&&lid&&String(record.id)!==String(lid))return null;
+ return record;
+}
 export function enrichmentInputs({view,store,metadataSha256=null}){
  const sources=sourceIndex(store);
  const films=view.films.map(film=>{
   const {fingerprint,prediction,predictionHistory,availability,...owned}=film;
-  const roster=creditRoster(sources(film));
-  const record=metadataRecord(store.metadata,film);
-  const metadata=catalogMetadata(record,'metadata.json',metadataSha256);
-  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:roster.unmatched.length?undefined:roster.credits,unmatched:roster.unmatched.length,metadata,sync:filmSyncState(record)};
+  const lid=letterboxdOf(film);
+  const body=usableMetadata(metadataRecord(store.metadata,film),lid);
+  // An admitted lid with no usable cache is not a new body. The writer keeps the stored Film and only moves membership.
+  const withhold=!!lid&&typeof store.watchlistAdmissions?.[lid]==='boolean'&&!onCurrentList(store,lid)&&!body;
+  const roster=withhold?null:creditRoster(sources(film));
+  const metadata=withhold?undefined:catalogMetadata(body,'metadata.json',metadataSha256);
+  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:withhold||roster.unmatched.length?undefined:roster.credits,unmatched:roster?roster.unmatched.length:0,metadata,sync:withhold?null:filmSyncState(body),preserveCanonical:withhold||undefined};
  });
  return {films,people:view.people.map(person=>({id:person.id,person}))};
 }

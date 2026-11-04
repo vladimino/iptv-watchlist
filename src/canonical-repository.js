@@ -86,16 +86,18 @@ async function planFilm(db,input){
  const film=input?.film;
  const id=requiredFilm(film?.id);
  if(await db.get('SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]))throw new Error('Film id is a redirect');
+ const watchlist=input.watchlist===true?true:input.watchlist===false?false:null;
+ const owner=input.owner??null;
+ if(owner!==null&&owner!=='enrichment')throw new Error('Unknown write owner');
+ // A watchlist fact with no usable cache must not replace a Film that already has a body. Membership still moves.
+ if(input.preserveCanonical===true&&await db.get('SELECT id FROM film WHERE id=?',[id]))return {film:{id},metadata:undefined,credits:undefined,watchlist,owner,kept:[],preserveCanonical:true,updatedAt:updatedAtOf(film)};
  const stored=await dimensionRow(db,'film_dimension','film_id',id,'localization');
  const guarded=guardReviewed(film,stored,'title');
  for(const item of guarded.externalIds||[]){
   if(!item?.trusted||item.conflicting)continue;
-  const owner=await db.get('SELECT film_id FROM film_external_id WHERE scheme=? AND value=? AND trusted=1 AND conflicting=0',[item.scheme,String(item.value)]);
-  if(owner&&owner.film_id!==id&&owner.film_id!==input.releasing)throw new Error('identity_collision');
+  const ownerRow=await db.get('SELECT film_id FROM film_external_id WHERE scheme=? AND value=? AND trusted=1 AND conflicting=0',[item.scheme,String(item.value)]);
+  if(ownerRow&&ownerRow.film_id!==id&&ownerRow.film_id!==input.releasing)throw new Error('identity_collision');
  }
- const watchlist=input.watchlist===true?true:input.watchlist===false?false:null;
- const owner=input.owner??null;
- if(owner!==null&&owner!=='enrichment')throw new Error('Unknown write owner');
  const kept=owner==='enrichment'&&input.credits!==undefined&&watchlist===true?await db.all("SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? AND person_id LIKE 'person:tmdb!_%' ESCAPE '!' ORDER BY role,ordinal",[id]):[];
  return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,owner,kept,updatedAt:updatedAtOf(guarded)};
 }
@@ -120,6 +122,11 @@ async function planRetirement(db,redirect){
 
 async function writeFilm(db,plan){
  const film=plan.film;
+ if(plan.preserveCanonical){
+  if(plan.watchlist===true)await db.run('INSERT INTO watchlist_film (film_id,updated_at) VALUES (?,?) ON CONFLICT(film_id) DO UPDATE SET updated_at=excluded.updated_at',[film.id,plan.updatedAt]);
+  if(plan.watchlist===false)await db.run('DELETE FROM watchlist_film WHERE film_id=?',[film.id]);
+  return;
+ }
  await db.run('INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=excluded.canonical_identity,original_title=excluded.original_title,updated_at=excluded.updated_at',[film.id,film.contractVersion,film.canonicalIdentity??null,film.originalTitle??null,plan.updatedAt]);
  await db.run('DELETE FROM film_external_id WHERE film_id=?',[film.id]);
  if(plan.credits!==undefined&&!plan.keepHistory)await db.run('DELETE FROM film_person_credit WHERE film_id=?',[film.id]);
