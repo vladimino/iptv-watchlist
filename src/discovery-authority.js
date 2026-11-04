@@ -1,9 +1,10 @@
 // D1 authority for discovery observations, decisions, admission, the lease and
-// the continuation (ADR 0084). The marker starts at r2. Mode d1 with cutover
+// the continuation (ADR 0085). The marker starts at r2. Mode d1 with cutover
 // open is the only authority. Held is not that authority: readers stay on R2
-// and writers fail closed. A missing binding, or a contract below version 10,
-// stays on R2. Version 10 without these tables, a bad marker, a loading
-// transfer, or a failed read fails closed and does not serve the R2 ledger.
+// and writers fail closed. A missing binding, or a contract below version 11,
+// stays on R2, including schema v10 with the ratings tables and no discovery
+// tables. Version 11 without these tables, a bad marker, a loading transfer,
+// or a failed read fails closed and does not serve the R2 ledger.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 const TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 export const DISCOVERY_TABLES=TABLES;
@@ -83,7 +84,7 @@ export async function readAuthority(env){
   throw failed('discovery_unavailable',error);
  }
  const numeric=Number(version);
- if(!Number.isFinite(numeric)||numeric<10)return {...closed(),version:Number.isFinite(numeric)?numeric:null};
+ if(!Number.isFinite(numeric)||numeric<11)return {...closed(),version:Number.isFinite(numeric)?numeric:null};
  let names;
  try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'discovery\\_%' ESCAPE '\\'")).map(row=>row.name);}
  catch(error){throw failed('discovery_unavailable',error);}

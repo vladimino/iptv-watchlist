@@ -1,10 +1,15 @@
--- Schema v10: discovery observations, decisions and catalog admission (ADR 0084).
--- Additive. A deploy does not apply this file. Production order is 0007, then
--- 0008, then 0009, then this file. 0009 is a different domain; it occupies
--- version 9, so this file refuses anything that is not a complete version 9.
--- The inserted marker is mode r2 and cutover open. Applying this file does
--- not copy a ledger, a decision or a catalog film, and it does not set mode d1.
--- No statement inserts film, person, credit or owner-review rows.
+-- Schema v11: discovery observations, decisions and catalog admission (ADR 0085).
+-- Additive. A deploy does not apply this file. The natural order is 0009,
+-- already applied, then 0010_ratings_authority, then this file. 0010 is the
+-- ratings migration and is a separate GO. This file refuses anything that is
+-- not a complete version 10: the prediction tables, the published-EPG tables,
+-- the owner-review tables, the four ratings tables, and those four authority
+-- rows. A version 9, and a version 10 that is missing owner reviews, are
+-- refused before any discovery table is created.
+-- The inserted marker is mode r2 and cutover open, generation 0. Applying
+-- this file does not copy a ledger, a decision or a catalog film, does not
+-- set mode d1, and does not change the ratings marker.
+-- No statement inserts film, person, credit, owner-review or ratings rows.
 -- discovery_cas is the batch fence, not a switch. cutover held is not a
 -- visible d1. observation_key and film_id are not foreign keys to film.
 
@@ -12,7 +17,7 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version >= 9 AND version < 10
+ WHERE id = 1 AND version >= 10 AND version < 11
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'table' AND name IN (
@@ -37,12 +42,17 @@ WHERE NOT EXISTS (
    'published_epg_stage_row',
    'owner_review_authority',
    'owner_review_cas',
-   'owner_review_entry'
+   'owner_review_entry',
+   'ratings_domain_authority',
+   'ratings_domain_cas',
+   'ratings_document',
+   'ratings_view'
   )
- ) = 22
+ ) = 26
  AND EXISTS (SELECT 1 FROM prediction_domain_authority WHERE id = 1)
  AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id = 1)
  AND EXISTS (SELECT 1 FROM owner_review_authority WHERE id = 1)
+ AND EXISTS (SELECT 1 FROM ratings_domain_authority WHERE id = 1)
 );
 
 CREATE TABLE discovery_authority (
@@ -226,6 +236,6 @@ INSERT INTO discovery_checkpoint (id, programme_run_id, generation, hop_id, payl
 INSERT INTO discovery_workflow (id, revision, instance_id, programme_run_id, series, payload_json) VALUES (1, 0, NULL, NULL, NULL, NULL);
 
 UPDATE schema_contract
-SET version = 10,
-    note = 'Schema v10: discovery authority. Marker mode r2 until a separate activation. Version 10 follows a complete version 9.'
-WHERE id = 1 AND version >= 9 AND version < 10;
+SET version = 11,
+    note = 'Schema v11: discovery authority. Marker mode r2 until a separate activation. Version 11 follows a complete version 10, including ratings and owner reviews.'
+WHERE id = 1 AND version >= 10 AND version < 11;

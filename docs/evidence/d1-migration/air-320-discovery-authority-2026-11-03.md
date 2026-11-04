@@ -1,14 +1,14 @@
 # AIR-320 discovery authority, local contract
 
 **Date:** 2026-11-03, with the review cases on 2026-11-04 (UTC)
-**Scope:** `node tests/discovery-authority.mjs` against local SQLite files created in a temporary directory. Migrations `0001` through `0010` were applied only to those files, in order. No Cloudflare API, no production D1, no production R2, no live TMDB. The 429 and 403 answers are a `fetch` stub inside the test process.
+**Scope:** `node tests/discovery-authority.mjs` against local SQLite files created in a temporary directory. Migrations `0001` through `0011` were applied only to those files, in order. `0010` in that chain is the ratings file. `0011` is discovery. No Cloudflare API, no production D1, no production R2, no live TMDB. The 429 and 403 answers are a `fetch` stub inside the test process.
 
 ## Result
 
 The local contract holds for the cases in that file. After `npm ci` on 3 November 2026, `npm test` passed 209 self-contained files and `npm run build` completed. The review cases below were run again on 4 November 2026: `npm test` passed the same 209 files and `npm run build` completed. Neither run opened production.
 
-- `0010` refuses schema v1 and a complete schema v8 before it creates a discovery table. The v8 file stays at version 8.
-- The full chain leaves version 10. The inserted marker is `mode` `r2`, `cutover` `open`, generation 0. `film` stays empty. A downgrade of `schema_contract.version` raises `schema_contract_downgrade`.
+- `0011` refuses schema v1, a complete schema v8, a complete schema v9, and a version 10 that has the ratings tables without the owner-review tables. None of those files gains a discovery table. The refused version 10 stays at 10, and its ratings marker stays `r2`.
+- The full chain leaves version 11. The inserted discovery marker is `mode` `r2`, `cutover` `open`, generation 0. `film` stays empty. A downgrade of `schema_contract.version` raises `schema_contract_downgrade`. A version 10 database with the ratings tables and no discovery tables stays on the R2 path and does not raise `discovery_unavailable`. Version 11 without the discovery tables does.
 - With the marker set to `d1` / `open` in that local file only: two acquirers, the second gets no lease; a departed observation is archived rather than deleted; a decision whose evidence key does not match is `discovery_fence` and the stored decision stays; decision history records the first hash; a renew for the sealed programme succeeds and a renew for an older programme does not.
 - A future `retryAt` makes `resolveDiscoveryChunk` return `backoff` without calling `fetch`.
 - Movie `tmdb:41` and TV `tmdb_tv:41` are both admitted. A duplicate movie id and a canonical identity that does not match the id throw `discovery_conflict` and leave the previous admission. Fifty movie admissions fit in batches of at most 40 statements. An observation with 40 shows round-trips. `film` stays empty.
@@ -34,7 +34,7 @@ Same file, still only the temporary SQLite. These cases answer the blocking revi
 ## Not verified
 
 - Production D1 and production R2 were not opened.
-- `0009` and `0010` were not applied to any database outside the temporary directory.
+- `0009`, `0010` and `0011` were not applied to any database outside the temporary directory. The ratings marker in those files was not set to `d1`.
 - The marker was not set to `d1` anywhere except that temporary file, inside the test.
 - The limbo page was not opened in a browser.
 - Worker CPU on a production-sized ledger was not measured. The statement cap is asserted on the local batches above, not on a live generation.

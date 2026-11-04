@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Offline status for the discovery marker (ADR 0084). Default is read-only.
+// Offline status for the discovery marker (ADR 0085). Default is read-only.
 // This process does not apply a migration, does not import a ledger, does not
 // set mode d1, and does not call the network. A database path that names
 // production is refused before sqlite is opened.

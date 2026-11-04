@@ -1,4 +1,4 @@
-// ADR 0084. Discovery stays on R2 until its own marker is d1 and cutover open.
+// ADR 0085. Discovery stays on R2 until its own marker is d1 and cutover open.
 // These are local sqlite stand-ins. Nothing here calls Cloudflare, TMDB, or production D1.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -15,7 +15,7 @@ import {d1Standin} from './d1-standin.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-discovery-authority-'));
 let databases=0;
-const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_discovery_authority'];
+const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
 const migrated=(list=chain)=>{
  const file=path.join(root,'discovery-'+(databases++)+'.sqlite');
  const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+list.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
@@ -36,27 +36,59 @@ assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeR
 assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeWrite\(env,key,value\)/);
 assert.doesNotMatch(fs.readFileSync('src/discovery-authority.js','utf8'),/ensureDiscoveryWorkflow|reconcileDiscoveryWorkflow|\.create\(/);
 assert.match(fs.readFileSync('src/discovery-workflow.js','utf8'),/if\(mode==='external'\)return \{started:false,reason:'external'\}/);
-assert.match(fs.readFileSync('migrations/0010_discovery_authority.sql','utf8'),/version >= 9 AND version < 10/);
+const discoverySql=fs.readFileSync('migrations/0011_discovery_authority.sql','utf8');
+const ratingsSql=fs.readFileSync('migrations/0010_ratings_authority.sql','utf8');
+assert.match(discoverySql,/version >= 10 AND version < 11/);
+assert.match(ratingsSql,/version >= 8 AND version < 10/);
+const apply=(file,sql)=>spawnSync('sqlite3',['-bail',file],{input:sql,encoding:'utf8'});
+const discoveryTables=db=>count(db,"SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name='discovery_authority'");
 
-const refused=spawnSync('sqlite3',['-bail',path.join(root,'refused.sqlite')],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0001_schema_v1.sql','utf8')+'\n'+fs.readFileSync('migrations/0010_discovery_authority.sql','utf8'),encoding:'utf8'});
+const refused=apply(path.join(root,'refused.sqlite'),'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0001_schema_v1.sql','utf8')+'\n'+discoverySql);
 assert.notEqual(refused.status,0);
-const version8=migrated(chain.slice(0,-2));
-const blocked=spawnSync('sqlite3',['-bail',version8.file],{input:fs.readFileSync('migrations/0010_discovery_authority.sql','utf8'),encoding:'utf8'});
-assert.notEqual(blocked.status,0);
+const version8=migrated(chain.slice(0,8));
+const blocked8=apply(version8.file,discoverySql);
+assert.notEqual(blocked8.status,0);
 assert.equal(count(version8.db,'SELECT version FROM schema_contract'),8);
+assert.equal(discoveryTables(version8.db),0);
+const version9=migrated(chain.slice(0,9));
+const blocked9=apply(version9.file,discoverySql);
+assert.notEqual(blocked9.status,0);
+assert.equal(count(version9.db,'SELECT version FROM schema_contract'),9);
+assert.equal(discoveryTables(version9.db),0);
+const ratingsOnly=migrated(chain.slice(0,8));
+const ratingsApplied=apply(ratingsOnly.file,ratingsSql);
+assert.equal(ratingsApplied.status,0,ratingsApplied.stderr);
+assert.equal(count(ratingsOnly.db,'SELECT version FROM schema_contract'),10);
+assert.equal(one(ratingsOnly.db,'SELECT mode FROM ratings_domain_authority WHERE id=1').mode,'r2');
+const blockedRatings=apply(ratingsOnly.file,discoverySql);
+assert.notEqual(blockedRatings.status,0);
+assert.equal(count(ratingsOnly.db,'SELECT version FROM schema_contract'),10);
+assert.equal(discoveryTables(ratingsOnly.db),0);
+
+const ratingsReady=migrated(chain.slice(0,-1));
+assert.equal(count(ratingsReady.db,'SELECT version FROM schema_contract'),10);
+assert.equal(discoveryTables(ratingsReady.db),0);
+const ratingsGate=await Authority.readAuthority({DB:ratingsReady.db});
+assert.equal(ratingsGate.ready,false);
+assert.equal(ratingsGate.version,10);
+assert.deepEqual(await Authority.routeRead({DB:ratingsReady.db},'epg/discovery-resolution.json'),{handled:false});
 
 const installed=migrated();
-assert.equal(count(installed.db,'SELECT version FROM schema_contract'),10);
-assert.equal(one(installed.db,'SELECT mode FROM discovery_authority WHERE id=1').mode,'r2');
+assert.equal(count(installed.db,'SELECT version FROM schema_contract'),11);
+assert.equal(one(installed.db,'SELECT mode, generation FROM discovery_authority WHERE id=1').mode,'r2');
+assert.equal(one(installed.db,'SELECT generation FROM discovery_authority WHERE id=1').generation,0);
 assert.equal(count(installed.db,'SELECT COUNT(*) AS n FROM film'),0);
-assert.throws(()=>installed.db.sql('UPDATE schema_contract SET version=9'),/schema_contract_downgrade/);
+assert.throws(()=>installed.db.sql('UPDATE schema_contract SET version=10'),/schema_contract_downgrade/);
 assert.equal((await Authority.readAuthority({DB:installed.db})).ready,false);
 assert.deepEqual(await Authority.routeRead({DB:installed.db},'epg/discovery-resolution.json'),{handled:false});
 
 const bare=await Authority.routeRead({},'epg/discovery-latest.json');
 assert.equal(bare.handled,false);
+const ratingsContract=d1Standin(path.join(root,'ratings-contract.sqlite'));
+ratingsContract.sql("CREATE TABLE schema_contract (id INTEGER, version INTEGER, note TEXT); INSERT INTO schema_contract (id, version, note) VALUES (1, 10, 'ratings');");
+assert.equal((await Authority.readAuthority({DB:ratingsContract})).ready,false);
 const missing=d1Standin(path.join(root,'missing.sqlite'));
-missing.sql("CREATE TABLE schema_contract (id INTEGER, version INTEGER, note TEXT); INSERT INTO schema_contract (id, version, note) VALUES (1, 10, 'incomplete');");
+missing.sql("CREATE TABLE schema_contract (id INTEGER, version INTEGER, note TEXT); INSERT INTO schema_contract (id, version, note) VALUES (1, 11, 'incomplete');");
 await assert.rejects(()=>Authority.readAuthority({DB:missing}),error=>error.code==='discovery_unavailable');
 
 const held=migrated();
@@ -217,7 +249,7 @@ assert.equal((await Authority.readObservationIndex({DB:quiet.db},{})).index.stat
 
 const outage={prepare(){throw new Error('d1 down');}};
 await assert.rejects(()=>Authority.routeRead({DB:outage},'epg/discovery-resolution.json'),error=>error.code==='discovery_unavailable');
-const marker={prepare(sql){return {bind(){return this;},async first(){if(sql.includes('schema_contract'))return {version:10};if(sql.includes('discovery_authority'))return {mode:'other',cutover:'open',generation:1,programmeRunId:null,publishedProgrammeRunId:null};return {state:'committed'};},async all(){return {results:Authority.DISCOVERY_TABLES.map(name=>({name}))};}};}};
+const marker={prepare(sql){return {bind(){return this;},async first(){if(sql.includes('schema_contract'))return {version:11};if(sql.includes('discovery_authority'))return {mode:'other',cutover:'open',generation:1,programmeRunId:null,publishedProgrammeRunId:null};return {state:'committed'};},async all(){return {results:Authority.DISCOVERY_TABLES.map(name=>({name}))};}};}};
 await assert.rejects(()=>Authority.readAuthority({DB:marker}),error=>error.code==='discovery_unavailable');
 
 const script=spawnSync(process.execPath,['scripts/discovery-authority.mjs','--database',live.file],{encoding:'utf8'});
