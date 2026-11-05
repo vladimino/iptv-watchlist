@@ -1,4 +1,4 @@
-# Bounded discovery ledger: modes, verification and rollback (owner approval required)
+# Bounded discovery ledger: modes, verification and recovery authorization
 
 **Recovery proportionality:** a failed or deferred **single discovery observation** is normally recovered by the published next eligible chunk, not by replaying the entire discovery archive, exporting a full R2 snapshot or rebuilding a global ledger. These expensive procedures below are reserved for actual archive corruption, authority rollback or bulk split. Preserve the resolver lease, generation fencing, owner authorization for explicit runs and the rule of one chunk per request; they prevent two writers from overwriting the same decision map. A safe status read is not a reason to reset a lease or force a whole chunk early. See [risk classification](../process/agent-workflow.md#risk-proportional-operational-safeguards).
 
@@ -27,7 +27,9 @@ A stored ledger that exposes `body` or `text` is folded one candidate at a time.
 
 In bounded mode no discovery chunk and no status read touches the archive. `POST /api/enrichment/discovery/scan` and `/reconcile` answer `409` whenever the mode is not `full` or an archive exists.
 
-## Read-only verification (no write)
+## Read-only verification (L0, no write)
+
+Verified side-effect-free observations and SELECT-only preflight are standing-authorized L0; no per-read owner message is needed when connected with appropriate least-privilege credentials. GET routes with repair side effects, forced resolver chunks and any write remain outside L0. See [authorization](../process/authorization-and-escalation.md).
 
 - `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`):
   - **`full`**: no `archive` field.
@@ -57,7 +59,7 @@ There is no per-observation retry or lookup. The owner page explains one observa
    - An `ambiguous` decision with no confirmed movie id and no id already on the decision has no identity form. The panel says that a choice from the title alone is not possible. Reconsideration stays unavailable for that case.
    - A candidate outside the EPG window cannot be resolved until it airs again.
    - A terminal decision on unchanged evidence (`no_more_evidence`) stays out of the resolver's work until new airings arrive. This is the one case the action addresses.
-4. **Reconsider, only as the owner.** This is a production write. Agents never run it without the owner's explicit approval of that run. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
+4. **Reconsider, only as the owner.** This is a production write. Agents may run this write only under an existing owner-approved bounded plan or future operation-specific L2 contract; [AIR-358 authorization policy](../process/authorization-and-escalation.md) itself does not permit an autonomous writer. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
    1. Tick the checkbox naming the exact observation, then press «Подтвердить». This issues a confirmation valid for 10 minutes and changes no decision.
    2. Press «Повторно направить на проверку» once.
    
@@ -189,15 +191,15 @@ A D1 chunk has three clocks that must all fit: the MCP client's timeout (about 6
 
 **Symptoms.** `epg_status` shows `stage: epg` with `error: discovery_incomplete`; `epg_pipeline_status` and every ledger reader fail with `discovery_incomplete`; no new EPG generation is published. Telemetry shows an EPG commit step (`generation_publish`) with outcome `canceled` after about two minutes and a high CPU time.
 
-**Read-only preflight (SELECT only).** `discovery_transfer` (`state`, `programme_run_id`, `batches`), `discovery_lease` (is it expired), `discovery_authority` (marker and programme), `discovery_observation` grouped by `residence` and `programme_run_id` (`retiring` against `active`), and the counts of decisions, admissions and history. A stalled seal has `retiring` rows of the previous run and a few `active` rows of the new one, and no decision, admission or history row changes.
+**Read-only L0 preflight (SELECT only).** `discovery_transfer` (`state`, `programme_run_id`, `batches`), `discovery_lease` (is it expired), `discovery_authority` (marker and programme), `discovery_observation` grouped by `residence` and `programme_run_id` (`retiring` against `active`), and the counts of decisions, admissions and history. A stalled seal has `retiring` rows of the previous run and a few `active` rows of the new one, and no decision, admission or history row changes.
 
 **What is open.** The catalog, the status and the continuation are readable and marked `transfer: loading` ([reference](../reference/domain/candidate-discovery.md#reads-while-a-ledger-seal-is-loading)), so predictions and the EPG input scan can read. Ledger reads and every write stay closed.
 
-**What not to do.** Do not repeat the EPG commit: a retry takes the expired lease and replays the seal from the first observation, so it is cancelled again and an interrupted attempt can leave less written than the one before. A killed attempt also holds its lease for the 90 s TTL. Do not reset the lease or the transfer, edit `discovery_observation`, or switch the marker. Each of those is a separate owner-approved operation, and none finishes the seal.
+**What not to do.** Do not repeat the EPG commit: a retry takes the expired lease and replays the seal from the first observation, so it is cancelled again and an interrupted attempt can leave less written than the one before. A killed attempt also holds its lease for the 90 s TTL. Do not reset the lease or the transfer, edit `discovery_observation`, or switch the marker. These are not ordinary retry tools; each would require its own specifically approved high-impact recovery plan, and none finishes the seal.
 
 **Recovery order (AIR-356, [ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md), Proposed; each step needs its own owner approval).** Deploy the code; a read-only preflight of the transfer, lease, authority and observation counts; apply migration `0012`; a read-only readback; one EPG commit (a `loading` transfer without a job is taken over by the seal, which flips the previous ledger once); repeated `epg_sync_step` while `nextAction` is `continue` (stage `seal`: ledger, catalog, publish); a readback of the transfer, published pointer and counts; a Predictions check. A cancelled step is safe to repeat; the cursor and the rows agree. Do not apply `0012` or run any step before the approval.
 
-**Earlier note.** The seal must finish in explicit bounded steps; that handoff is a separate delivery, and its production steps (a read-only preflight, a bounded recovery, a readback, one EPG commit, a prediction check) each need their own approval. Evidence: [stalled seal](../evidence/d1-migration/air-355-incident-seal-loading-2026-11-05.md).
+**Earlier note.** The seal must finish in explicit bounded steps; that handoff is a separate delivery, and its production steps (a read-only preflight, a bounded recovery, a readback, one EPG commit, a prediction check) may be covered by one owner-approved bounded execution plan with explicit holdpoints, independent readbacks and the existing safety guards. No new autonomous recovery is authorized by this documentation. Evidence: [stalled seal](../evidence/d1-migration/air-355-incident-seal-loading-2026-11-05.md).
 
 ## Commit memory diagnostics (AIR-263)
 

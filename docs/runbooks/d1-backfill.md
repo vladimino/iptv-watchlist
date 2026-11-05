@@ -1,10 +1,12 @@
-# D1 backfill execution and recovery (owner approval required)
+# D1 backfill execution and recovery (owner-approved L3 plan)
 
 **Scope boundary:** the fenced snapshot, batch receipts and complete parity below protect a **bulk authoritative R2-to-D1 backfill**, not routine replay of a recoverable projector unit or a small read-only D1 check. Do not transplant this whole-database procedure into those operations. Where the current D1 projector offers idempotent unit-level replay and scoped readback, use that published contract and [risk classification](../process/agent-workflow.md#risk-proportional-operational-safeguards); keep target ownership and no-blind-retry. This statement does **not** turn the backfill CLI into a unit-replay CLI or authorize any D1 write. Full parity remains mandatory when claiming complete baseline migration or cutover.
 
 `scripts/d1-backfill.mjs` imports one verified production baseline into the D1 database `iptv` without changing the runtime: R2 stays authoritative, the Worker reads D1 only through the read-only catalog views and keeps serving from R2. The decisions are [ADR-0019](../adr/0019-live-d1-backfill-boundaries.md); the contract (source and target identity, receipts, stop rules) is the [D1 contract](../reference/data/d1-schema.md#backfill-executor). This page is the procedure. None of its production steps is authorised by a merge, a deploy or this page: creating the database, applying the schema, reading production R2, creating credentials, running the import and any destructive recovery each need their own action-specific owner approval.
 
 ## Inputs and what each run checks
+
+This bulk migration/backfill procedure remains L3 under [authorization and escalation](../process/authorization-and-escalation.md). A specific approved plan may cover bounded preparation, write batches, verification and agreed holdpoints, but AIR-358 does not authorize a new production migration, cutover, cleanup or restore. Never treat a safe SELECT as a data-changing command.
 
 | Input | Where it comes from | Checked by the executor |
 | --- | --- | --- |
@@ -265,7 +267,7 @@ While the tables are absent and the contract is below version 11, discovery stay
 **Rollback.** A code rollback does not drop the tables, does not return the contract version, and does not change the marker. A Worker that only reads R2 while `mode` is `d1` would decide from a ledger that may lag. This delivery cannot return the marker to `r2`. Restoring the database is a Time Travel of the whole database and is its own approval. It is not part of apply, import or activation.
 
 
-## GO/NO-GO for one run
+## GO/NO-GO for one approved L3 run
 
 | Outcome in `report.json` | Meaning | Next step |
 | --- | --- | --- |
@@ -292,13 +294,13 @@ While the tables are absent and the contract is below version 11, discovery stay
 | `no_go: commit_readback_mismatch` | the commit landed but the final tables differ from the plan | stop the window; the owner decides between the recovery below and an investigation |
 | `staged.gate.go: false` | a commit took longer than 10 seconds | NO-GO for production per ADR-0021, even though the commit itself succeeded |
 
-## Stage cleanup (separate owner approval)
+## Stage cleanup (L3, separate approved scope)
 
 Staged rows of a `failed` or `superseded` stage stay until the owner approves their removal. `node scripts/d1-backfill.mjs --discard-stage <programmeRunId> --cleanup-approved --target d1|sqlite --output /abs/cleanup [--database /abs/dry.sqlite]` deletes staging rows only, in bounded batches, children before parents, and writes `cleanup.json`. `--abandon` first marks a stage that never committed (one left by another baseline) as failed; a committed stage is never abandoned. Without `--cleanup-approved` the command refuses (exit code 2). Final tables are never touched, so this is reversible only by re-staging, not by restore.
 
 ## Recovery and rollback
 
-The executor never deletes, drops or resets anything. Recovery is an owner action with a written decision recorded before it is taken:
+The executor never deletes, drops or resets anything. High-impact recovery remains an owner-approved L3 plan with a written decision recorded before execution; safe preflight and readback steps within the plan do not need repetitive separate prompts:
 
 1. Stop: no further runs against the target.
 2. Restore the target to the bookmark recorded in step 4 (D1 Time Travel), or delete and re-create the database and re-apply the frozen schema. Both are destructive and need their own approval.
