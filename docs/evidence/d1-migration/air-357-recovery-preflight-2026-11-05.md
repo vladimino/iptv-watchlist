@@ -37,4 +37,6 @@ No other credential was tried. The operator entry `scripts/discovery-production.
 
 ### Second attempt with the backfill token (owner-approved single use)
 
-The owner then approved one use of the `D1_BACKFILL_*` token for this statement set. The pre-check read (`SELECT` of `schema_contract` and `sqlite_master`) was refused: HTTP 401, error 10000 "Authentication error", so the script aborted before any write. Nothing was applied and no further credential was tried; production remains schema 11 without `discovery_seal`.
+The owner then approved one use of the `D1_BACKFILL_*` token for this statement set. The pre-check read (`SELECT` of `schema_contract` and `sqlite_master`) was refused: HTTP 401, error 10000 "Authentication error", so the script aborted before any write. Nothing was applied in that session.
+
+A later session on 2026-11-05 about 20:48–20:51 UTC repeated the read-only preflight (picture unchanged) and applied the same `0012` statement set. Read-back: schema 12, one idle `discovery_seal` row, marker/transfer/counts/lease unchanged. Dated apply record: [AIR-357 0012 apply](air-357-0012-apply-2026-11-05.md).
