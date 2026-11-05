@@ -106,13 +106,38 @@ function assertOpen(gate){
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
 }
 
+// ADR 0091. A ledger seal that stopped before it finished leaves the transfer `loading`. The seal writes only the active
+// ledger (observations and their shows), the transfer row, the lease and the generation; it never writes the catalog, the
+// status or the continuation. Those three keys stay readable while the loading transfer is a ledger seal, and the answer
+// says so. Every other owned key, every write and every ledger-dependent read stays closed.
+const SEAL_SAFE_KEYS=new Set(['epg/discovered-films.json','epg/discovery-status.json','epg/resolver-continuation.json']);
+function sealSafeKey(key){return SEAL_SAFE_KEYS.has(key)||(generationRequest(key)!==null&&key.endsWith('discovered-films.json'));}
+// `loading` is a ledger seal, and not a catalog, decision or segment load in progress, only when the ledger is mid-handoff
+// (retiring rows, or a transfer for another programme) and no admission is pending.
+async function loadingIsLedgerSeal(env){
+ if(!await ledgerSealLoading(env))return false;
+ const pending=await one(database(env),"SELECT 1 AS n FROM discovery_admission WHERE state='pending' LIMIT 1");
+ return !pending;
+}
 export async function routeRead(env,key){
  if(!ownsKey(key))return {handled:false};
  const opened=await readAuthority(env);
  if(!opened.ready)return {handled:false};
- if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ let sealing=false;
+ if(opened.transfer==='loading'){
+  if(!sealSafeKey(key)||!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+  sealing=true;
+ }
+ const requested=generationRequest(key);
+ if(sealing&&requested&&requested!==opened.programmeRunId)return {handled:true,value:null,transfer:'loading'};
  const value=await readKey(env,key,opened);
  const closedGate=await readAuthority(env);
+ // A seal moves the generation with every batch; that does not touch these keys, so a sealing read is stable while the
+ // authority, the programme and the loading state hold, and a finished or restarted seal fails the read.
+ if(sealing){
+  if(!closedGate.ready||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer!=='loading'||!await loadingIsLedgerSeal(env))throw failed('discovery_fence');
+  return {handled:true,value,transfer:'loading'};
+ }
  if(!closedGate.ready||closedGate.generation!==opened.generation||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer==='loading')throw failed('discovery_fence');
  return {handled:true,value};
 }

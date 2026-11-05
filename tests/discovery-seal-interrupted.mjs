@@ -1,5 +1,5 @@
 // Incident 5 Nov 2026: a ledger seal that does not finish inside one request. Local sqlite stand-ins only.
-// It records what the current code does when the handoff is interrupted: readers fail closed, a retry replays
+// It records what the code does when the handoff is interrupted: ledger readers fail closed, a retry replays
 // from the start, and no attempt accumulates progress. Nothing here calls Cloudflare, TMDB or production D1.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
@@ -49,10 +49,15 @@ const partial1=count(file,"source_key='active' AND residence='active'");
 assert.ok(partial1>0&&partial1<120,'partial progress: '+partial1);
 assert.equal(count(file,"residence='retiring'"),120-partial1,'the rest of the previous ledger is retiring');
 
-// 2. While `loading` every owned key fails closed, with or without a lease: the catalog, the decisions and the status,
-// which the seal never touches, are unreadable too. This is what the EPG input scan and the prediction queue hit.
+// 2. While `loading` the keys the seal never writes (catalog, status, continuation) stay readable and say the transfer is
+// loading; every other owned key and every ledger read fails closed, with or without a lease (ADR 0091).
 sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');
-for(const key of ['epg/discovered-films.json','epg/discovery-resolution.json','epg/discovery-status.json','epg/resolver-continuation.json']){
+for(const key of ['epg/discovered-films.json','epg/discovery-status.json','epg/resolver-continuation.json']){
+ const read=await Authority.routeRead(first.env,key);
+ assert.equal(read.handled,true,key);
+ assert.equal(read.transfer,'loading',key);
+}
+for(const key of ['epg/discovery-resolution.json','epg/discovery-score-preview.json','epg/discovery-latest.json','epg/discovery-workflow.json']){
  await assert.rejects(()=>Authority.routeRead(first.env,key),error=>error.code==='discovery_incomplete',key);
 }
 await assert.rejects(()=>Authority.walkObservationPages(first.env,{onPage(){}}),error=>error.code==='discovery_incomplete');
@@ -83,4 +88,4 @@ const full=await attempt(sealed,{run:'run-new',total:120,killAfterBatches:b2.bat
 assert.ok(full.killed,'the kill lands in the last batch, which is finish');
 assert.equal(transfer(sealed).state,'loading');
 assert.equal(count(sealed,"source_key='active' AND residence='active' AND programme_run_id='run-new'"),120);
-console.log('seal interruption reproduced: loading fails closed, replay restarts, no accumulated progress');
+console.log('seal interruption: ledger reads fail closed, independent reads stay open, replay restarts without accumulated progress');
