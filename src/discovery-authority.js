@@ -496,6 +496,44 @@ export async function readObservationPage(env,options={}){
  }
  return {programmeRunId:gate.programmeRunId,items:page.map(row=>observationFromRow(row,shows.get(row.observation_key)||[])),more,after:page.length?page[page.length-1].observation_key:after};
 }
+// A chunk's whole-ledger read, in key-range pages that load `concurrency` at a time. The page starts come from one
+// query, so a range is exactly LEDGER_PAGE rows and no page waits for its predecessor's last key. Pages reach
+// `onPage` in key order. `beforeBatch` runs before each batch of loads, which is where the caller renews its lease
+// (a read this long can outlast the lease TTL). `shouldStop` (the caller's budget check) stops it between batches with `complete: false`. The walk reads and writes nothing else; it fails closed when the
+// authority marker, the programme or the generation changed while it ran.
+export async function walkObservationPages(env,options={}){
+ const opened=await readAuthority(env);
+ if(opened.held)throw failed('discovery_fence');
+ if(!opened.ready)throw failed('discovery_not_authoritative');
+ if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ const concurrency=Math.max(1,Math.min(6,Number.isInteger(options.concurrency)&&options.concurrency>0?options.concurrency:4));
+ const db=database(env);
+ const starts=(await many(db,'SELECT observation_key FROM (SELECT observation_key, ROW_NUMBER() OVER (ORDER BY observation_key) AS rn FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\') WHERE (rn-1)%?=0 ORDER BY observation_key',[LEDGER_PAGE])).map(row=>row.observation_key);
+ const load=async index=>{
+  const from=starts[index],to=index+1<starts.length?starts[index+1]:null;
+  const range=to==null?' AND observation_key>=?':' AND observation_key>=? AND observation_key<?',params=to==null?[from]:[from,to];
+  const rows=await many(db,'SELECT observation_key, payload_json FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\''+range+' ORDER BY observation_key',params);
+  const showRows=await many(db,'SELECT observation_key, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key=\'active\''+range+' ORDER BY observation_key, ordinal',params);
+  const shows=new Map();
+  for(const show of showRows){
+   const list=shows.get(show.observation_key)||[];
+   list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});
+   shows.set(show.observation_key,list);
+  }
+  return rows.map(row=>observationFromRow(row,shows.get(row.observation_key)||[]));
+ };
+ let items=0,complete=true;
+ for(let index=0;index<starts.length;index+=concurrency){
+  // Out of budget: stop between batches. The caller learns the ledger was not fully read and must not select from it.
+  if(options.shouldStop&&options.shouldStop()){complete=false;break;}
+  if(options.beforeBatch)await options.beforeBatch({page:index,pages:starts.length});
+  const batch=await Promise.all(Array.from({length:Math.min(concurrency,starts.length-index)},(_,offset)=>load(index+offset)));
+  for(const page of batch){items+=page.length;await options.onPage(page);}
+ }
+ const closed=await readAuthority(env);
+ if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ return {programmeRunId:opened.programmeRunId,pages:starts.length,items,complete};
+}
 
 function validateCatalog(films){
  if(!films||typeof films!=='object'||Array.isArray(films))throw failed('discovery_conflict');
