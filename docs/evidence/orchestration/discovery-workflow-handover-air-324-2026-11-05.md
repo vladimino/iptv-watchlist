@@ -15,7 +15,8 @@
 - A stale generation and a superseded series write no Discovery decisions and make no TMDB call.
 - Cron `scheduled` invokes `reconcileDiscoveryWorkflow` and not `advanceDiscovery`. With the flag absent the cron creates nothing. With `workflow` it creates at most one instance and writes no decisions.
 - A missing continuation after a published generation is reconstructed by `queueDiscovery` compare-and-swap; the receipt names the published `programmeRunId`.
-- A terminal `stop` is not re-queued.
+- A same-generation `programme_changed` artefact is replaced once; the next `ensure` attaches to the same instance and does not open a second series.
+- A terminal `stop` (`complete`) is not re-queued.
 - A held, `loading` or throwing D1 authority returns `authority_held` / `authority_loading` / `d1_unavailable` and does not call `create()`.
 - `closed()` (absent DB), schema v10 and an explicit `r2/open` marker return `authority_not_ready` from both `ensure` and `reconcile`: no `create()`, no continuation/workflow/decision R2 write.
 - Clearing the flag (`external` rollback) creates nothing.

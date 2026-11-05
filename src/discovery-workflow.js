@@ -200,7 +200,9 @@ async function discoveryWorkflowAdmission(env){
 }
 async function ensurePublishedDiscoveryIntent(env,programmeRunId){
  const before=(await readContinuation(env)).record;
- if(before?.programmeRunId===programmeRunId){
+ const same=before?.programmeRunId===programmeRunId;
+ // Same-generation programme_changed is the publication-copy artefact queueDiscovery replaces.
+ if(same&&before.reason!=='programme_changed'){
   if(discoveryContract(before).nextAction==='stop')return {ok:false,reason:'stopped'};
   return {ok:true,reconstructed:false};
  }
@@ -208,8 +210,8 @@ async function ensurePublishedDiscoveryIntent(env,programmeRunId){
  catch{return {ok:false,reason:'intent_uncertain'};}
  const after=(await readContinuation(env)).record;
  if(!after||after.programmeRunId!==programmeRunId)return {ok:false,reason:after?.programmeRunId?'stale_generation':'intent_unconfirmed'};
- if(discoveryContract(after).nextAction==='stop')return {ok:false,reason:'stopped'};
- return {ok:true,reconstructed:true};
+ if(after.reason==='programme_changed'||discoveryContract(after).nextAction==='stop')return {ok:false,reason:'stopped'};
+ return {ok:true,reconstructed:!same||before.reason==='programme_changed'};
 }
 function workflowAdmissionError(error){
  const code=error?.code||error?.reason||'';

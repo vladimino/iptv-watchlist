@@ -327,6 +327,20 @@ assert.equal(reconstructed.started,true);assert.equal(reconstructed.instanceId,I
 assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);
 assert.equal(creates.length,1);assert.equal(decided(),0);
 
+// Same-generation programme_changed is a replaceable publication artefact, not a terminal stop.
+seed();
+set('epg/resolver-continuation.json',{stage:'paused',reason:'programme_changed',at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+creates.length=0;
+const recoveredChanged=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(recoveredChanged.started,true);assert.equal(recoveredChanged.instanceId,INSTANCE);
+assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);
+assert.equal(continuation().remainingChunks,12);assert.equal(creates.length,1);
+const recoveredAgain=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(recoveredAgain.instanceId,INSTANCE);
+assert.equal(recoveredAgain.attached===true||recoveredAgain.reason==='attached'||recoveredAgain.started===true,true,JSON.stringify(recoveredAgain));
+assert.equal(continuation().reason,'epg_committed');
+assert.equal(new Set(creates.map(item=>item.id)).size,1);
+
 // A terminal series is not re-queued. D1 held, loading or unavailable creates nothing.
 set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
 creates.length=0;
