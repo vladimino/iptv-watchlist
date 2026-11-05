@@ -171,7 +171,8 @@ const RatingsOrchestration=(()=>{
 
  // ---- admission and one executor action ---------------------------------------------------------------------
  async function admit(env,{runKey,series,epoch,id}){
-  const mode=await readMode(env);
+  let mode;
+  try{mode=await readMode(env);}catch(error){return {ok:false,reason:classifyThrown(error),transient:classifyThrown(error)==='d1_unavailable'};}
   if(mode.malformed)return {ok:false,reason:'evidence_unreadable',unsafe:true};
   if(mode.record.mode==='switching')return {ok:false,reason:'switch_in_progress'};
   if(mode.record.mode!=='cloudflare')return {ok:false,reason:'not_cloudflare'};

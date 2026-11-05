@@ -104,7 +104,7 @@ function setup({start=T0,pages=1}={}){
  // honour the epoch fence like the real batch, and none of it is logged as an R2 write.
  const ownedKeys=new Set([MODE,CONTROL]);
  const ownedStub={ratingsMutableKey:key=>ownedKeys.has(key),ratingsGate:async()=>({ready:authority.ready,generation:1,error:authority.error}),
-  async readOwned(env,key){if(!authority.ready)return {owned:false};const object=await bucket.get(key);return {owned:true,value:object?await object.json():null,etag:object?.etag??null};},
+  async readOwned(env,key){if(!authority.ready)throw Object.assign(new Error('held'),{code:'ratings_domain_not_authoritative'});const object=await bucket.get(key);return {owned:true,value:object?await object.json():null,etag:object?.etag??null};},
   chain:Promise.resolve(),
   putOwned(env,key,previous,value){const run=this.chain.then(()=>this.commit(env,key,previous,value));this.chain=run.catch(()=>{});return run;},
   async commit(env,key,previous,value){
@@ -236,7 +236,7 @@ const modeDoc=world=>world.bucket.value(MODE);
  dead.workflow.status='throw';eq(plain(await dead.RO.ensure(dead.env,{now:dead.clock.now+4*MIN})).reason,'status_unknown');
  // No D1 ratings authority: nothing starts.
  const held=setup({start:T0});await activate(held);held.authority.ready=false;
- eq(plain(await held.RO.ensure(held.env,{now:held.clock.now})).reason,'authority_held');held.authority.ready=true;held.authority.error=true;
+ eq(plain(await held.RO.ensure(held.env,{now:held.clock.now})).reason,'mode_unreadable');held.authority.ready=true;held.authority.error=true;
  eq(plain(await held.RO.ensure(held.env,{now:held.clock.now})).reason,'d1_unavailable');
  assert.equal(held.workflow.creates.length,0);
 }
@@ -524,6 +524,25 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   assert.ok(refused.body.refused,'the switch is refused');assert.equal(h.bucket.writes().length,0);assert.equal(h.bucket.value(MODE),null);
   const held=await d1World();held.db.sql("UPDATE ratings_domain_authority SET cutover='held'");
   assert.ok(plain(await held.RO.handle(held.env,{action:'close_admission',target:'cloudflare'})).body.refused);assert.equal(held.bucket.writes().length,0);assert.equal(held.bucket.value(MODE),null);
+ }
+ // 16b2. An unreadable owner is never an external writer: D1 says `cloudflare`, the authority is held or r2, stale R2 fixtures say otherwise.
+ for(const [label,sql] of [['held',"UPDATE ratings_domain_authority SET cutover='held'"],['r2',"UPDATE ratings_domain_authority SET mode='r2'"]]){
+  const w=await d1World();
+  eq((await w.RO.switchMode(w.owner,{action:'close_admission',target:'cloudflare'},w.clock.now)).closed,true);
+  assert.equal((await w.RO.switchMode(w.owner,{action:'complete'},w.clock.now)).completed,true);
+  // Stale legacy fixtures in R2: an old external mode record, a run and an old queue; all of them must be ignored.
+  w.bucket.set(MODE,{schemaVersion:1,mode:'external',epoch:0,target:null,drain:null});
+  w.bucket.set(RUN,{schemaVersion:1,runId:'stale-r2-run',state:'finished',phase:'done',lease:{step:null,expiresAt:null}});
+  const before=JSON.stringify(w.bucket.snapshot());w.db.sql(sql);
+  for(const [action,body] of [['start',{trigger:'scheduled'}],['step',{runId:'stale-r2-run'}],['migrate',{mode:'apply'}]]){
+   const attempt=await w.R.handle(w.env,action,body).then(reply=>({reply:plain(reply)}),error=>({error}));
+   assert.ok(!attempt.error,label+' '+action+': refused with a reply, not thrown');
+   eq([attempt.reply.body.nextAction,attempt.reply.body.reason??attempt.reply.body.refused],['stop','evidence_unreadable'],label+' '+action);
+  }
+  assert.equal(w.bucket.writes().length,0,label+': zero R2 writes');assert.equal(JSON.stringify(w.bucket.snapshot()),before,label+': R2 untouched');
+  // The status does not claim external while ownership is unreadable, and ensure creates nothing.
+  const status=plain(await w.R.status(w.env));assert.notEqual(status.orchestration?.mode,'external',label);assert.equal(status.orchestration.health,'unknown');
+  assert.notEqual(plain(await w.RO.ensure(w.env,{now:w.clock.now})).started,true);assert.equal(w.workflow.creates.length,0);
  }
  // 16c. Blocker 3: ratings_storage_migrate apply is gated like start and step; dry_run stays a read. Both entry paths use `handle`.
  {

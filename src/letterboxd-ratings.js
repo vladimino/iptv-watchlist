@@ -28,12 +28,12 @@ const LetterboxdRatings=(()=>{
  const D1_ONLY=new Set(['letterboxd/ratings/executor.json','letterboxd/ratings/orchestration.json']);
  const unavailable=()=>Object.assign(new Error('Ratings D1 authority is not open'),{code:'ratings_domain_unavailable'});
  async function read(env,key){
-  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,value:owned.value};if(env?.ratingsFence?.hard)throw unavailable();}
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,value:owned.value};if(env?.ratingsFence?.hard||D1_ONLY.has(key))throw unavailable();}
   const object=await env.BUCKET.get(key);return {object,value:object?await object.json():null};
  }
  const put=async(env,key,object,value)=>{
   const strict=D1_ONLY.has(key)||env?.ratingsFence?.hard===true;
-  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.putOwned(env,key,object?.etag??null,value);if(owned.owned)return owned.saved;if(strict)throw unavailable();}
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.putOwned(env,key,object?.etag??null,value);if(owned.owned)return owned.saved;if(strict||env?.ratingsFence)throw unavailable();}
   else if(strict&&D1_ONLY.has(key))throw unavailable();
   return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  };
