@@ -18,6 +18,8 @@ Fixture: 120 channels, programmes from 80 hours back to 170 hours ahead, 300 wat
 
 Reading: the hot discovery work is identical, so days 2-7 add no discovery, resolver or prediction load. Retained shows grow with the number of reliable watchlist matches only. Scan time and heap track the feed size, which the source already delivers; the extra programmes are parsed and then dropped unless they match a watchlist film.
 
-Tests: `tests/epg-extended-future.mjs` (scan horizons), `tests/programme-freshness.mjs` (reader states).
+Tests: `tests/epg-extended-future.mjs` (scan horizons and a two-generation cancel/reschedule fixture), `tests/programme-freshness.mjs` (reader states), `tests/programme-display-window.mjs` (rolling 72 h / 24 h reader window).
+
+Local browser QA at 1280 px and 390 px with a mocked programme snapshot: a film airing 5 days ahead is not listed on a fresh snapshot (2 h old) or a snapshot 40 h old, and is listed once the clock is 20 h before it (snapshot 4 days old, still marked «Данные устарели»); no horizontal overflow at either width; an 8-day-old snapshot shows «Будущее закончилось» with no films.
 
 Limitations: one synthetic feed on a development container; no production Worker CPU or memory was observed.

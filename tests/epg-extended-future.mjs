@@ -51,4 +51,20 @@ const hotOnly=await scan(Array.from({length:50},(_,i)=>programme('Filler '+i+'',
 const withWeek=await scan([...Array.from({length:50},(_,i)=>programme('Filler '+i+'',1+i/10)),...Array.from({length:600},(_,i)=>programme('Later Filler '+i+'',30+i/4,i%2?'one':'two'))],watchlist);
 assert.equal(withWeek.stats.discoveryCandidates,hotOnly.stats.discoveryCandidates,'six extra days of unmatched programmes add no discovery work');
 assert.equal(withWeek.stats.retained,hotOnly.stats.retained,'and are not retained');
+// Two generations: a cancelled airing disappears and a rescheduled one moves; nothing of generation 1 is merged into generation 2.
+{
+ const gen1=await scan([programme('Weekly Film',5),programme('Weekly Film',30),programme('Weekly Film',100)],watchlist);
+ assert.deepEqual(plain(gen1.films.find(item=>item.id==='wk').shows.map(show=>(show.start-now)/H)),[5,30,100]);
+ const later=now+24*H;
+ // Generation 2, a day later: the +5 h airing has aired (still inside the archive), the +30 h one is cancelled, the +100 h one moved to +110 h, a new one at +60 h.
+ const scan2=async()=>{
+  const xml='<tv><channel id="one"><display-name>Кино</display-name></channel>'+[programme('Weekly Film',5),programme('Weekly Film',110),programme('Weekly Film',60)].join('')+'</tv>';
+  context.stream=Readable.toWeb(Readable.from([Buffer.from(xml)]));context.now=later;context.watchlist=watchlist;
+  return vm.runInContext('scanEPG(stream,watchlist,now)',context);
+ };
+ const gen2=await scan2();
+ assert.deepEqual(plain(gen2.films.find(item=>item.id==='wk').shows.map(show=>(show.start-now)/H)).sort((a,b)=>a-b),[5,60,110],'only generation 2 shows: cancelled +30 h gone, +100 h moved to +110 h, +60 h new');
+ const commit=fs.readFileSync('src/worker.js','utf8');
+ assert.match(commit,/withAvailability\(\{\.\.\.f,\.\.\.byId\.get\(String\(f\.id\)\),shows:byId\.get\(String\(f\.id\)\)\?\.shows\|\|\[\]\}\)/,'the commit builds every show list from the new scan only, never from the previous generation');
+}
 console.log('AIR-188 scan: 168 h retention for reliable watchlist shows, 24 h hot horizon for discovery and catalog-only, unchanged 72 h archive edge passed');

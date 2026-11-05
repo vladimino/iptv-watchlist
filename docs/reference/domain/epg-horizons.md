@@ -34,6 +34,10 @@ Fields added to the programme report:
 
 Older snapshots without `window.hotTo` or `coverage` read as before (a 96-hour window).
 
+## What the reader sees
+
+The reader window stays the rolling `[now - 72h, now + 24h)`, clipped to the saved window: `effectiveWindow` keeps the saved `window` as `retained` (storage and coverage metadata) and uses `{from: window.from, to: min(window.to, now + 24h)}` as the display envelope. A retained show beyond 24 hours ahead is **hidden** from the period sections, the «Дальше» group and the period counters, and appears when the clock reaches 24 hours before it, with or without a fresh EPG sync (a skipped sync therefore keeps revealing the saved week as time passes). Legacy snapshots, whose window already ends at `cutoff + 24h`, read unchanged.
+
 ## Reader states
 
 The programme status (`programmeStatus` in `public/app.js`) distinguishes:
@@ -45,7 +49,7 @@ The programme status (`programmeStatus` in `public/app.js`) distinguishes:
 | Future ended | Window has no shows ahead, archive remains | «Будущее закончилось» |
 | None | Saved window over | «Нет актуального окна» |
 
-The known end is the feed's last show, never the window edge, so an older programme is not passed off as fresh and no show is invented.
+The known end is the feed's last show (from `retained`), never the display edge, so an older programme is not passed off as fresh and no show is invented.
 
 ## Consumers that stay on 24 hours
 
