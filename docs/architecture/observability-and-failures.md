@@ -46,3 +46,7 @@ A committed taste-profile publication records one `taste_profile` event after th
 For pipelines moved to Cloudflare executors, [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Accepted; not yet implemented) specifies one `orchestration` read model per domain on the existing status routes ([fields](../reference/orchestration-reliability.md#read-model)). It separates a healthy wait or a scheduled cooldown from a stall: `waiting` and `cooldown` have a known future wake, while `stalled` has due work, no durable progress within the domain threshold and no future wake. Failures carry one class (`transient`, `permanent`, `unsafe`) and a fingerprint, with the consecutive and total counts against their caps. The same provenance rule applies: a formed response, a Workflow create or a lease is not durable progress; only a read-back checkpoint is. The read model is read-only and is the input for external alerts. It is not implemented in production; the diagnostics above remain the current evidence.
 
 No live operations are introduced by this page.
+
+## Ratings orchestration read model (AIR-347)
+
+`ratings_sync_status.orchestration` is implemented and read-only: health idle/healthy/waiting/cooldown/stalled/quarantined/failed_permanent, stall threshold two hours after the 17:30 Madrid due time. A failed read yields `health: unknown` and does not break the status.

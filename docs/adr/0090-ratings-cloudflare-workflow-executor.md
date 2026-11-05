@@ -1,0 +1,50 @@
+# ADR 0090: The daily Ratings run may be executed by an inert Cloudflare Workflow with D1-document control and mode records
+
+**Status:** Accepted  
+**Original decision date:** 2026-11-05 (implementation choice inside the AIR-347 card)  
+**Recorded at:** 2026-11-05  
+**Approval source:** explicit owner decision, 2026-11-05 (AIR-347 / PR #375): ADR 0090 Accepted, with logical due at 17:30 Europe/Madrid and the existing hourly cron's first tick normally near 17:37 Madrid. Architecture decision only; no production mode switch, Ratings run, Workflow activation, or Scheduled Task edit. Following [independent technical PASS at HEAD `232164c`](https://github.com/vladimino/iptv-watchlist/pull/375#pullrequestreview-5779881350) and [successful exact-head CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41942341372)  
+**Related work:** [AIR-347](https://trello.com/c/j2Ua76yv); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md); [ADR 0084](0084-d1-authoritative-ratings.md)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+[ADR 0089](0089-shared-orchestration-reliability-contract.md) fixed the contract (Madrid day key, failure classes, bounded retries, three-step mode switch with an epoch fence) and left each executor's mechanism to its delivery card. [AIR-347](https://trello.com/c/j2Ua76yv) asks for the Ratings executor, with Cron versus Workflow chosen inside the task. The Ratings run is one leased, checkpointed record; its removal phase takes an unbounded number of bounded steps (at most 5 lookups per step), so one cron invocation cannot finish it.
+
+## Decision
+
+1. **Workflow, not Cron-only.** A new Workflow binding `RATINGS_WORKFLOW` (`RatingsWorkflow`) runs the existing `LetterboxdRatings.start` and `step` in a loop of `step.do` actions separated by `step.sleepUntil`. The existing hourly cron only calls `RatingsOrchestration.ensure`, which creates at most one deterministic instance `ratings_<YYYYMMDD>_<series>` per Madrid date and 17:30 Europe/Madrid (DST by IANA zone). No new cron trigger is added. The logical 17:30 Madrid due is **not** the exact execution instant: the existing `37 * * * *` UTC cron normally calls `ensure` around **17:37 Madrid** (16:37 UTC in CET and 15:37 UTC in CEST). Cloudflare delivery can be late; a missed tick defers checking until a later tick. The IANA zone determines the Madrid day key across DST.
+2. **Inert by default.** `ensure` does nothing unless the owner-written mode document says `cloudflare`. An absent document means `external`, epoch 0. Deployment creates the Workflow resource but no instance, flag, Task change or run.
+3. **Control and mode records are D1-owned ratings documents** (`letterboxd/ratings/executor.json`, `letterboxd/ratings/orchestration.json`), so no migration is needed. `executor.json` is written only by the owner-approved switch (`POST /api/letterboxd/ratings/executor`: `close_admission`, `complete`, `clear_quarantine`).
+4. **Epoch fence.** Every executor commit into D1 runs in the same transactional batch as an assertion that the mode document's etag is unchanged (`ratingsFence`). A stale instance whose mode or epoch moved has its whole batch refused with its data. R2 event writes stay idempotent by event key (ADR 0089 decision 2a).
+5. **External writer gate and fence.** `LetterboxdRatings.handle` answers `start`, `step` and `migrate` with `mode: apply` with `switch_in_progress` or `external_writer_fenced` (`nextAction: stop`) while the mode is `switching` or `cloudflare`. Reads, status and `migrate` `dry_run` stay open. An admitted external operation also carries a soft epoch fence: the mode document's etag (or its absence) read at admission is asserted in the same D1 batch as every commit, so an operation admitted before `close_admission` cannot commit after it, including a `start` that holds no lease yet; the verified drain therefore needs no knowledge of such operations. The mode switch itself requires D1 authority, so the soft fence is absent only where no switch can exist.
+6. **D1-only executor state.** The mode and control records are read and written only in D1, and every write of an env that carries any epoch fence (hard or soft) never falls back to R2. An owner that cannot be read (held, non-`d1` or unavailable authority) is never read as `external`: the external gate answers `evidence_unreadable`, the status reports `health: unknown`, `ensure` creates nothing, and a stale R2 mode document is ignored: a held, non-`d1` or unreadable authority refuses the write (`ratings_domain_unavailable` is `d1_unavailable`, a bounded sleep) and the owner's switch is refused with nothing written.
+7. **Read model.** `ratings_sync_status` gains the read-only `orchestration` object (mode, epoch, run key, health, failure, budget, cooldown, quarantine, `nextWakeAt`, `oldestPendingAt`).
+8. **New failure codes** `d1_unavailable` and `step_failed` are transient and are added to the [reference table](../reference/orchestration-reliability.md). Durable progress is a checkpoint counter that advanced in the same run; starting or restarting a run is not progress.
+
+Not decided: activation. The mode switch, any Workflow instance, disabling the external Ratings Task and the first production run each need a separate action-specific owner approval.
+
+## Alternatives considered
+
+- **Cron-only stepping:** rejected; an hourly cron cannot drive the unbounded removal phase to completion within the same date and cannot sleep for a 6-hour 429 pause.
+- **New D1 tables for control state:** rejected for now; existing D1-owned documents with CAS avoid a migration and keep the fence in one batch.
+
+## Consequences
+
+One more Workflow resource is created on deploy. The cron handler now also calls an inert `ensure`. The external Ratings Task keeps working until the owner closes admission. Rolling back code does not revert D1 documents.
+
+## Recovery and migration boundary
+
+Reversible: code. Not reverted by code rollback: mode and control documents, epoch, an existing Workflow instance. The switch back uses the same three steps with a verified drain. This ADR authorizes no flag, Task, cron, Workflow instance, D1/R2 write or cutover.
+
+## Evidence
+
+- **Original decision:** [AIR-347](https://trello.com/c/j2Ua76yv)
+- **Implementation:** the AIR-347 pull request
+- **Dated verification:** [offline evidence 2026-11-05](../evidence/orchestration/ratings-executor-air-347-2026-11-05.md); no production observation
+- **Uncertainty:** real Workflow instance behaviour, memory/CPU of a live step and Cloudflare's wakeup timing are unobserved until an authorized acceptance run.
+
+## Follow-ups
+
+Activation and production acceptance remain gated by separate owner approval on [AIR-347](https://trello.com/c/j2Ua76yv).

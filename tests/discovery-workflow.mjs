@@ -298,6 +298,6 @@ const indexWrite=build.slice(build.indexOf("fs.writeFileSync('dist/server/index.
 assert.match(indexWrite,/src\/discovery-workflow\.js/);
 assert.doesNotMatch(indexWrite,/cloudflare:workers/);
 assert.match(build,/import \{ WorkflowEntrypoint \} from 'cloudflare:workers'/);
-assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow \}/);
+assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow(, runRatingsWorkflow)? \}/);
 
 console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery and an inert binding passed');

@@ -10,7 +10,7 @@ This is the field-level contract that every Cloudflare executor for EPG publicat
 
 | Class | Typical codes | Executor action | Budget effect |
 | --- | --- | --- | --- |
-| `transient` | `network_error`, `timeout`, `rate_limited` (HTTP 429), `upstream_blocked` (Letterboxd 403 `cf-mitigated`; no in-run retry), `upstream_5xx`, `exceeded_memory`, `exceeded_cpu`, `worker_1102`, `wakeup_lost`, `instance_terminated`, `instance_errored`, `create_uncertain`, `owner_unknown` | Read back, then retry after cooldown | `consecutive` and `total` +1 |
+| `transient` | `network_error`, `timeout`, `rate_limited` (HTTP 429), `upstream_blocked` (Letterboxd 403 `cf-mitigated`; no in-run retry), `upstream_5xx`, `exceeded_memory`, `exceeded_cpu`, `worker_1102`, `wakeup_lost`, `instance_terminated`, `instance_errored`, `create_uncertain`, `owner_unknown`, `d1_unavailable` (D1 read or write failed or the authority is unreadable), `step_failed` (a Workflow action threw before classification) | Read back, then retry after cooldown | `consecutive` and `total` +1 |
 | `permanent` | `credentials_missing`, `credentials_rejected`, `contract_unsupported`, `config_invalid` | Stop; re-check the precondition cheaply on each due wakeup; resume when it holds | Not counted; health `failed_permanent` |
 | `unsafe` | `evidence_unreadable`, `evidence_contradictory`, `checkpoint_malformed`, `lease_malformed`, `stale_generation_write`, `owner_conflict`, `epoch_mismatch` (a commit from a stale epoch or mode is refused), `authority_held`, `authority_loading` | Quarantine the domain immediately; no retry | Quarantine reason is the code |
 
@@ -201,3 +201,7 @@ Every domain delivery implements the rows that apply to it, against an injected 
 ## Rollout and rollback
 
 Each domain moves alone: inert code with mode `external`; an owner-approved three-step mode switch to `cloudflare` (close admission, verified drain, complete); real production acceptance from the read model; then, separately, disabling that domain's ChatGPT task path. Rollback is the same three-step switch in the other direction (close admission, verified drain, second CAS), then re-enabling the task path. A code rollback changes neither data, mode, cron nor the task registry. Operator steps: [deployment runbook](../runbooks/deployment.md#moving-a-pipeline-to-a-cloudflare-executor).
+
+## Ratings implementation status (AIR-347)
+
+Implemented and **inert**: `src/domain/orchestration-policy.js` (pure policy), `src/ratings-orchestration.js` (`RATINGS_WORKFLOW`, `RatingsOrchestration.ensure`, owner route `POST /api/letterboxd/ratings/executor`), the D1 epoch fence in `src/ratings-d1.js`, the external-writer gate in `src/letterboxd-ratings.js` and the `orchestration` object of `ratings_sync_status`. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md). Nothing runs until the owner switches the mode.

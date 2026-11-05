@@ -37,6 +37,11 @@
       "name": "iptv-discovery",
       "binding": "DISCOVERY_WORKFLOW",
       "class_name": "DiscoveryWorkflow"
+    },
+    {
+      "name": "iptv-ratings",
+      "binding": "RATINGS_WORKFLOW",
+      "class_name": "RatingsWorkflow"
     }
   ]
 }

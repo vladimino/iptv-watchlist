@@ -975,7 +975,8 @@ async function epgSync(env,run){
 }
 export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs only the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
-async scheduled(controller,env,execution){execution.waitUntil(runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}));},
+// AIR-347 (ADR 0089): the same firing also calls the ratings executor's `ensure`; with the executor mode external it reads one document and returns.
+async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}),RatingsOrchestration.ensure(env,{now:Date.now()})]));},
 async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
@@ -999,6 +1000,7 @@ async fetch(request,env,execution){
   if(url.pathname.startsWith('/api/letterboxd/baseline/'))return await LetterboxdFacts.handleBaselineRequest(request,env,url.pathname);
   if(url.pathname==='/api/letterboxd/diary'&&request.method==='GET'){const filmId=url.searchParams.get('filmId');if(filmId!=null&&!/^[A-Za-z0-9_-]{1,80}$/.test(filmId))return json({error:'Invalid filmId'},400);return json(await LetterboxdDiary.readHistory(env,{filmId}));}
   if(url.pathname==='/api/letterboxd/ratings/status'&&request.method==='GET')return json(await LetterboxdRatings.status(env));
+  if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step','/api/letterboxd/ratings/migrate'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
