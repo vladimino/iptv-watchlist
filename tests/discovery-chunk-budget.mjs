@@ -36,14 +36,14 @@ const HOT=[
 const hotItem=(spec)=>({key:spec.key,title:'Film '+spec.key,normalizedTitle:'film '+spec.key,year:spec.year,durations:[100],shows:[{channelId:'c',channel:'C',start:spec.lastAiring,end:spec.lastAiring+1000}],seenInLatestSnapshot:true,lastAiring:spec.lastAiring});
 
 // One migrated, opened, loaded database. `extraHot` adds more actionable candidates; `decisions` is the stored map.
-async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},decided=[]}={}){
+async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},decided=[],catalog={},items=[]}={}){
  const file=migrated();
  const db=d1Standin(file,{latencyMs:0});
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  const setup={DB:db,BUCKET:new MemoryBucket(),discoveryLease:null};
  const lease=await Authority.acquireLease(setup,{programmeRunId:null});
  setup.discoveryLease=lease.lease;
- const hot=[...HOT.map(hotItem),...decided.map((key,index)=>hotItem({key,year:2005,lastAiring:hotStart+30000+index}))];
+ const hot=[...HOT.map(hotItem),...items,...decided.map((key,index)=>hotItem({key,year:2005,lastAiring:hotStart+30000+index}))];
  // `mixNN` titles carry no punctuation, so the stub can answer a search for exactly that title.
  for(let index=0;index<mix;index++){const key='mix'+String(index).padStart(2,'0');hot.push({...hotItem({key,year:2000,lastAiring:hotStart+100000-index}),title:'Film '+key,normalizedTitle:'film '+key});}
  for(let index=0;index<extraHot;index++)hot.push(hotItem({key:'x-'+String(index).padStart(3,'0'),year:1980+index%10,lastAiring:hotStart+1000+index}));
@@ -52,6 +52,7 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
  for(let index=0;index<WIDE-hot.length;index++)rows.push(`('active','w${String(index).padStart(5,'0')}','active','${RUN}','t','T',1990,'',0,1,NULL,NULL,'{"seenInLatestSnapshot":false,"lastSeenAt":1,"title":"T","normalizedTitle":"t","year":1990,"durations":[90]}')`);
  for(let index=0;index<rows.length;index+=400)sql(file,'INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES '+rows.slice(index,index+400).join(','));
  if(Object.keys(decisions).length)await Authority.routeWrite(setup,'epg/discovery-resolution.json',decisions);
+ if(Object.keys(catalog).length)await Authority.upsertAdmissions(setup,catalog,{lease:lease.lease});
  await Authority.releaseLease(setup,lease.lease);
  // The chunk's own handle: the queries it makes pay `latencyMs`; `onQuery` can end the lease mid-chunk.
  const chunkDb=d1Standin(file,{latencyMs,onQuery});
@@ -61,6 +62,7 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
 
 // The discovery source as a vm context, with a controllable clock and a TMDB stub that records its queries.
 function chunkContext({clock,onFetch,respond=null}){
+ const queueRefreshes=[];
  const realNow=Date.now.bind(Date);
  const FakeDate=class extends Date{static now(){return realNow()+clock.offset;}};
  const searched=[],timeouts=[];
@@ -68,11 +70,11 @@ function chunkContext({clock,onFetch,respond=null}){
  const context=vm.createContext({console,Date:FakeDate,Promise,URL,URLSearchParams,AbortSignal:signals,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
   fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:Authority,pinEpg:async value=>value,
+  refreshPredictionQueue:async(target,report,trigger)=>{queueRefreshes.push(trigger);},
   loadJSON:async(target,key)=>{const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
- vm.runInContext(fs.readFileSync('src/sources.js','utf8'),context);
- vm.runInContext(fs.readFileSync('src/discovery.js','utf8'),context);
- return {context,searched,timeouts};
+ for(const file of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
+ return {context,searched,timeouts,queueRefreshes};
 }
 const statusPayload=file=>sql(file,'SELECT payload_json FROM discovery_status')[0]?.payload_json??null;
 const decisionCount=file=>Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision')[0].n);
@@ -213,7 +215,9 @@ async function lostLease({failAt,mutate}){
  assert.ok(error,'the chunk must not complete');
  assert.equal(error.name,'LeaseLostError');
  assert.equal(error.message,'resolver lease lost');
- assert.equal(statusPayload(base.file),statusBefore,'no status write after the lease is lost');
+ // Only the cheap-pass checkpoint may have been stored before the loss (a loss during the walk stores nothing); never a final summary.
+ const storedStatus=statusPayload(base.file);
+ if(storedStatus!==statusBefore)assert.equal(JSON.parse(storedStatus).checkpoint,'cheap_pass','no final status after the lease is lost');
  assert.equal(decisionCount(base.file),decisionsBefore);
  return {error,file:base.file,lease:lease.lease};
 }
@@ -231,19 +235,23 @@ async function lostLease({failAt,mutate}){
  assert.equal(leaseRow(lost.file).lease_id,'other-hop');
 }
 {
- // The lease ends during the TMDB phase while no renewal is due: the final fence refuses the write.
+ // The lease ends during the TMDB phase while no renewal is due: the first fenced write refuses and the renewal confirms the loss.
  const lost=await lostLease({failAt:'final',mutate:()=>false});
- assert.equal(lost.error.timings.failedAt,'final');
+ assert.equal(lost.error.timings.failedAt,'write','the first write of the TMDB phase finds the lease gone');
  assert.equal(Number(leaseRow(lost.file).expires_at),1);
 }
 
 // 7. The TMDB call cap is enforced at the request boundary: a candidate needing a request past it stops the loop.
-// Fifteen candidates match on their first locale (15 requests); the sixteenth misses twice and would make 17.
+// Fifteen candidates whose Film is already in the catalog need only the detail request (15 requests); the sixteenth is
+// unknown, its first search is request 16 and its second search would make 17.
+const movieFor=(id,title)=>({id,title,original_title:title,release_date:'2000-06-01',runtime:100,overview:'x',credits:{cast:[],crew:[]},translations:{translations:[]},alternative_titles:{titles:[]}});
+const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+index;return {id:'tmdb_'+tmdb,tmdbId:String(tmdb),canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:2000};};
 {
- const {env}=await fixture({mix:16});
+ const catalog={};for(let index=0;index<15;index++){const film=knownFilm(index);catalog[film.id]=film;}
+ const {file,env}=await fixture({mix:16,catalog});
  const {context,searched}=chunkContext({clock:{offset:0},respond(url){
-  const title=url.searchParams.get('query'),first=url.searchParams.get('language')==='ru-RU',index=Number(title.slice(-2));
-  return {results:index<15&&first?[{id:1000+index,title,original_title:title,release_date:'2000-06-01'}]:[]};
+  if(url.pathname.includes('/movie/')){const id=Number(url.pathname.split('/').pop());return movieFor(id,'Film mix'+String(id-1000).padStart(2,'0'));}
+  return {results:[]};
  }});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
@@ -254,6 +262,7 @@ async function lostLease({failAt,mutate}){
  assert.equal(result.retryAt,null,'and sets no retry time');
  assert.equal(result.stage,'partial');
  assert.equal(result.remaining,16+HOT.length-15);
+ assert.equal(decisionCount(file),15,'the sixteenth candidate has no decision');
  await Authority.releaseLease(env,lease.lease);
 }
 
@@ -318,6 +327,125 @@ async function lostLease({failAt,mutate}){
  const stored=JSON.parse(statusPayload(base.file)).timings;
  assert.equal(stored.totalMs,null,'a stored status never claims a finished checkpoint');
  assert.equal(stored.statusMs,null);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+
+// 11. The paged chunk resolves its candidates and stores the result, one Film and one decision each, and never repeats
+// a candidate it has decided: a second chunk makes progress instead of searching the same titles again.
+{
+ const {file,env}=await fixture({mix:3});
+ const detail=url=>{const id=Number(url.pathname.split('/').pop());return movieFor(id,'Film mix'+String(id-1000).padStart(2,'0'));};
+ const respond=url=>{
+  if(url.pathname.includes('/movie/'))return detail(url);
+  const title=url.searchParams.get('query'),index=Number(title.slice(-2));
+  // mix00 matches; every other title matches nothing.
+  return {results:index===0?[{id:1000,title,original_title:title,release_date:'2000-06-01'}]:[]};
+ };
+ const first=chunkContext({clock:{offset:0},respond});
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const one=await first.context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(one.stage,'complete');
+ assert.equal(one.error,null);
+ assert.equal(one.added,1);
+ assert.equal(one.checked,3+HOT.length,'all eight actionable candidates were resolved');
+ assert.equal(one.remaining,0);
+ const decisionsNow=Object.fromEntries(sql(file,'SELECT observation_key, status, film_id FROM discovery_decision').map(row=>[row.observation_key,row]));
+ assert.equal(decisionsNow.mix00.status,'verified');
+ assert.equal(decisionsNow.mix00.film_id,'tmdb_1000');
+ assert.equal(decisionsNow.mix01.status,'no_confident_match');
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission WHERE state='current'")[0].n,1);
+ assert.equal(sql(file,"SELECT canonical_identity FROM discovery_admission")[0].canonical_identity,'tmdb:1000');
+ assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n),3+HOT.length,'one history row per decision');
+ assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_score')[0].n),3+HOT.length,'the score preview holds this chunk');
+ assert.deepEqual(first.queueRefreshes,['resolver_checkpoint'],'an admitted Film refreshes the prediction queue once');
+ assert.equal(JSON.parse(statusPayload(file)).checked,3+HOT.length);
+ await Authority.releaseLease(env,lease.lease);
+ // A second chunk has nothing left: no search, no write, no repeat.
+ const second=chunkContext({clock:{offset:0},respond});
+ lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const historyBefore=Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n);
+ const two=await second.context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(second.searched.length,0,'no title is searched twice');
+ assert.equal(two.stage,'complete');
+ assert.equal(two.remaining,0);
+ assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n),historyBefore,'and nothing is rewritten');
+ assert.deepEqual(second.queueRefreshes,[]);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+// 12. The cheap pass: screened non-film candidates, known aliases and touched hot Films, a bounded part per chunk.
+{
+ const nonfilm=index=>({...hotItem({key:'nf'+String(index).padStart(2,'0'),year:null,lastAiring:hotStart+200000+index}),title:'Show: episode '+index,normalizedTitle:'show episode '+index});
+ const items=[];for(let index=0;index<45;index++)items.push(nonfilm(index));
+ items.push({...hotItem({key:'alias1',year:1999,lastAiring:hotStart+300000}),title:'Known Alias',normalizedTitle:'known alias',confirmedTmdbId:'777'});
+ items.push(hotItem({key:'touch1',year:1998,lastAiring:hotStart+310000}));
+ const touchFilm={id:'tmdb_2000',tmdbId:'2000',canonicalIdentity:'tmdb:2000',title:'Film touch1',original:'Film touch1',year:1998};
+ const decisions={touch1:{status:'verified',filmId:'tmdb_2000',tmdbId:'2000',identitySource:'tmdb_detail'}};
+ const {file,env}=await fixture({items,decisions,catalog:{tmdb_2000:touchFilm}});
+ const run=()=>chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const first=run();
+ const one=await first.context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ // The first 40 decisions in key order: the alias (`alias1` sorts first) and 39 screened ones.
+ assert.equal(one.screenedOut+one.reused,40,'at most 40 decisions of the cheap pass are written per chunk');
+ assert.equal(one.screenedOut,39);
+ assert.equal(one.reused,1);
+ assert.equal(one.cheapRemaining,6,'six screened decisions are left; the touched Film fit in its own batch');
+ assert.equal(one.touched,1);
+ assert.equal(one.stage,'partial','cheap work left keeps the chunk partial');
+ const touched=JSON.parse(sql(file,"SELECT payload_json FROM discovery_admission WHERE film_id='tmdb_2000'")[0].payload_json);
+ assert.equal(touched.showsProgrammeRunId,RUN,'the hot Film took the candidate airings');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE status='excluded_nonfilm'")[0].n),39);
+ assert.equal(first.searched.some(title=>/Show/.test(title)),false,'a screened title is not searched');
+ await Authority.releaseLease(env,lease.lease);
+ // The next chunk finds the rest again and writes only that.
+ lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const history=Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n);
+ const two=await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(two.screenedOut,6);
+ assert.equal(two.reused,0);
+ assert.equal(two.cheapRemaining,0);
+ assert.equal(two.touched,0,'an already touched Film is not rewritten');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE status='excluded_nonfilm'")[0].n),45);
+ assert.equal(sql(file,"SELECT status FROM discovery_decision WHERE observation_key='alias1'")[0].status,'verified');
+ assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n),history+6,'only the new decisions add history');
+ await Authority.releaseLease(env,lease.lease);
+}
+
+// 13. A decision the owner stores while the chunk works stands: the chunk skips that key and overwrites nothing.
+{
+ const {file,env}=await fixture({mix:1});
+ const owner={status:'verified',filmId:'tmdb_5',tmdbId:'5',identitySource:'owner'};
+ let fired=false;
+ const {context}=chunkContext({clock:{offset:0},respond:()=>({results:[]}),onFetch(){
+  if(!fired){fired=true;sql(file,`INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, evidence_key, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('mix00','${RUN}',1,'verified',NULL,'5','movie','tmdb_5','owner-hash','${JSON.stringify(owner)}')`);}
+ }});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(sql(file,"SELECT decision_hash FROM discovery_decision WHERE observation_key='mix00'")[0].decision_hash,'owner-hash');
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision_history WHERE observation_key='mix00'")[0].n,0);
+ assert.equal(result.error,null);
+ assert.equal(result.checked,1+HOT.length,'the candidate counts as handled');
+ await Authority.releaseLease(env,lease.lease);
+}
+
+// 14. A Film whose identity belongs to another film id is not merged: the chunk stops, backs off and keeps the decision unwritten.
+{
+ const clash={id:'legacy_1000',tmdbId:'1000',canonicalIdentity:'tmdb:1000',title:'Legacy'};
+ const {file,env}=await fixture({mix:1,catalog:{legacy_1000:clash}});
+ const {context}=chunkContext({clock:{offset:0},respond(url){
+  if(url.pathname.includes('/movie/'))return movieFor(1000,'Film mix00');
+  const title=url.searchParams.get('query');
+  return {results:title==='Film mix00'?[{id:1000,title,original_title:title,release_date:'2000-06-01'}]:[]};
+ }});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(result.error,'admission_identity_conflict');
+ assert.ok(Date.parse(result.retryAt)>Date.now());
+ assert.equal(result.added,0);
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE observation_key='mix00'")[0].n,0,'no decision without its Film');
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission")[0].n,1);
  await Authority.releaseLease(env,lease.lease);
 }
 

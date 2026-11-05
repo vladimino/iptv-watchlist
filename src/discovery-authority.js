@@ -589,6 +589,104 @@ export async function replaceCatalog(env,films,context={}){
  if(Number(stuck?.n||0)!==0)throw failed('discovery_conflict');
  return {handled:true};
 }
+// A chunk writes the decisions and the admissions it just made, not the whole map. Each key is one atomic batch behind
+// the lease and generation fence, and it lands only if the stored decision is still the one the chunk read (`previous`,
+// or none): a decision the owner changed in the meantime wins and the chunk skips that key. A batch that fails is
+// diagnosed from the stored rows, so a write that landed and lost its response counts as written, not as a conflict.
+export const DECISION_DELTA_CAP=64;
+export async function writeDecisionDelta(env,changes,context={}){
+ const lease=context.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const entries=Object.entries(changes&&typeof changes==='object'?changes:{});
+ if(entries.length>DECISION_DELTA_CAP)throw failed('discovery_bounded');
+ const db=database(env);
+ let gate=await readAuthority(env);
+ assertOpen(gate);
+ const written=[],skipped=[];
+ for(const [key,change] of entries){
+  const next=change?.next;
+  if(!next||typeof next!=='object'||Array.isArray(next))throw failed('discovery_conflict');
+  const previous=change.previous&&typeof change.previous==='object'?change.previous:null;
+  const expected=previous?await decisionHash(previous):null;
+  const hash=await decisionHash(next);
+  if(hash===expected){skipped.push({key,reason:'unchanged'});continue;}
+  const kind=mediaKind(next),evidence=next.evidenceKey??null;
+  const cas=expected==null?'NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=?)':'EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)';
+  const live=' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1) AND EXISTS (SELECT 1 FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=? AND (? IS NULL OR evidence_key IS NULL OR evidence_key=?)) AND '+cas;
+  const generation=gate.generation+1,at=new Date().toISOString();
+  try{
+   await commit(db,[
+    fence(gate,lease,live,[key,evidence,evidence,key,...(expected==null?[]:[expected])]),
+    [FENCE_SQL,[]],
+    ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[key,key,generation,at,'resolver_chunk',JSON.stringify(next),key,hash]],
+    ['INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(observation_key) DO UPDATE SET programme_run_id=excluded.programme_run_id, generation=excluded.generation, status=excluded.status, attempts=excluded.attempts, evidence_key=excluded.evidence_key, terminal_reason=excluded.terminal_reason, retry_at=excluded.retry_at, tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, film_id=excluded.film_id, decision_hash=excluded.decision_hash, payload_json=excluded.payload_json',[key,gate.programmeRunId,generation,next.status??null,Number.isInteger(next.attempts)?next.attempts:null,evidence,next.terminalReason??null,next.retryAt??null,next.tmdbId==null?null:String(next.tmdbId),next.tmdbId==null?null:kind,next.filmId??null,hash,JSON.stringify(next)]],
+    [FENCE_SQL,[]],
+   ]);
+   gate={...gate,generation};
+   written.push(key);
+  }catch(error){
+   const after=await readAuthority(env);
+   assertOpen(after);
+   const stored=await one(db,'SELECT decision_hash FROM discovery_decision WHERE observation_key=?',[key]);
+   if(stored?.decision_hash===hash){gate=after;written.push(key);continue;}
+   const observation=await one(db,'SELECT evidence_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=?',[key]);
+   if(!observation){gate=after;skipped.push({key,reason:'observation_gone'});continue;}
+   if(evidence!=null&&observation.evidence_key!=null&&observation.evidence_key!==evidence){gate=after;skipped.push({key,reason:'evidence_changed'});continue;}
+   if((stored?.decision_hash??null)!==expected){gate=after;skipped.push({key,reason:'conflict'});continue;}
+   throw error.code?error:failed('discovery_unavailable',error);
+  }
+ }
+ return {written,skipped};
+}
+// Admissions the chunk made or touched, in batches. Each batch is behind the lease and generation fence; a film whose
+// identity (media kind and TMDB id) already belongs to another film id is refused, never merged. A refusal leaves the
+// rows that landed before it in place and names the film ids that did not.
+export async function upsertAdmissions(env,films,context={}){
+ const lease=context.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const entries=Object.entries(films&&typeof films==='object'?films:{});
+ if(entries.length>READ_CAP)throw failed('discovery_bounded');
+ for(const [filmId,film] of entries)validateCatalog({[filmId]:film});
+ const db=database(env);
+ const written=[],refused=[];
+ // Two statements per film (the upsert and its fence) after the opening fence pair.
+ const per=Math.max(1,Math.floor((STATEMENT_CAP-2)/2));
+ const apply=async batch=>{
+  const gate=await readAuthority(env);
+  assertOpen(gate);
+  const statements=[
+   fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
+   [FENCE_SQL,[]],
+  ];
+  for(const [filmId,film] of batch){
+   statements.push(['INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES (?,?,?,?,?,?,?,\'current\',?) ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=excluded.payload_json WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind',[filmId,String(film.tmdbId),mediaKind(film),film.canonicalIdentity,film.observationKey??null,gate.programmeRunId,gate.generation+1,JSON.stringify(film)]]);
+   statements.push([FENCE_SQL,[]]);
+  }
+  await commit(db,statements);
+ };
+ // One film alone: a write that landed and lost its response is written; an identity owned by another film id is refused.
+ const applyOne=async entry=>{
+  try{await apply([entry]);written.push(entry[0]);return;}
+  catch(error){
+   if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
+   const stored=await one(db,'SELECT payload_json FROM discovery_admission WHERE film_id=? AND state=\'current\'',[entry[0]]);
+   if(stored?.payload_json===JSON.stringify(entry[1])){written.push(entry[0]);return;}
+   const owner=await one(db,'SELECT film_id FROM discovery_admission WHERE media_kind=? AND tmdb_id=?',[mediaKind(entry[1]),String(entry[1].tmdbId)]);
+   if(owner&&owner.film_id!==entry[0]){refused.push({filmId:entry[0],reason:'identity_conflict'});return;}
+   throw error;
+  }
+ };
+ for(let index=0;index<entries.length;index+=per){
+  const batch=entries.slice(index,index+per);
+  try{await apply(batch);for(const [filmId] of batch)written.push(filmId);}
+  catch(error){
+   if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
+   // A batch that cannot be applied whole is retried one film at a time, so one refused identity does not hide the rest.
+   for(const entry of batch)await applyOne(entry);
+  }
+ }
+ return {written,refused};
+}
 async function readCatalog(env){
  const rows=await many(database(env),'SELECT film_id, payload_json, canonical_identity, tmdb_id, media_kind FROM discovery_admission WHERE state=\'current\' ORDER BY film_id');
  if(rows.length>READ_CAP)throw failed('discovery_bounded');
