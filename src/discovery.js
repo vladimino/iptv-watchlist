@@ -9,6 +9,12 @@ function filmIsHot(film,now=Date.now()){
 }
 function candidateIsHot(candidate,now=Date.now()){return Array.isArray(candidate.shows)?filmIsHot({shows:candidate.shows},now):filmIsHot({epgLastAiring:candidate.lastAiring},now);}
 const DISCOVERY_ATTEMPT_LIMIT=5;
+// The paged (D1) chunk. The wall budget sits inside the shortest known MCP client timeout (about 60 s); the renew
+// margin is half of the 90 s lease TTL, so a lease is renewed while it still has at least that long to live.
+const PAGED_CHUNK_BUDGET_MS=40000;
+const PAGED_TMDB_CALLS=16;
+const PAGED_WALK_CONCURRENCY=4;
+const DISCOVERY_LEASE_RENEW_MARGIN_MS=45000;
 function candidateEvidence(candidate){const shows=[...(candidate.shows||[])].map(show=>`${show.channelId||''}:${show.start}`).sort(),durations=[...(candidate.durations||[])].filter(Number.isFinite).sort((a,b)=>a-b);return [candidate.normalizedTitle||'',candidate.year||'',durations.join(','),shows.join(',')].join('|');}
 function candidateActivity(candidate,now=Date.now()){
  const from=now-72*3600000,to=now+24*3600000,shows=Array.isArray(candidate.shows)?candidate.shows:null,inWindow=!!shows?.some(show=>Number(show.start)>=from&&Number(show.start)<to);
@@ -565,33 +571,47 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence){
  const last=await loadJSON(env,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
+ // The D1 lease lives 90 s and cannot be renewed once it has expired, so the chunk renews it on every long phase
+ // boundary instead of only before its final write. `timings` is the chunk's own wall clock: it is the evidence a
+ // later reader needs to tell a slow read from a lost lease or a client that went away.
+ const t0=Date.parse(startedAt)||Date.now(),timings={walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,tmdbMs:null,totalMs:null};
+ const heartbeat=async()=>{
+  if(!lease||lease.expiresAt-Date.now()>DISCOVERY_LEASE_RENEW_MARGIN_MS)return;
+  try{await fence();}catch(e){if(e?.name==='LeaseLostError')e.timings={...timings,sinceStartMs:Date.now()-t0,failedAt:'heartbeat'};throw e;}
+  timings.renewals++;if(timings.firstRenewMs==null)timings.firstRenewMs=Date.now()-t0;
+ };
  const decisions=(await loadJSON(env,'epg/discovery-resolution.json'))||{};
  const pending=[];
- let remaining=0,after='',seen=0,maxPage=0;
- for(;;){
-  const page=await DiscoveryAuthority.readObservationPage(env,{after});
-  maxPage=Math.max(maxPage,page.items.length);
-  seen+=page.items.length;
+ let remaining=0,seen=0,maxPage=0;
+ const walkStarted=Date.now();
+ const walked=await DiscoveryAuthority.walkObservationPages(env,{concurrency:PAGED_WALK_CONCURRENCY,beforeBatch:heartbeat,onPage:items=>{
+  maxPage=Math.max(maxPage,items.length);
+  seen+=items.length;
   const now=Date.now();
-  for(const candidate of page.items){
+  for(const candidate of items){
    if(!resolutionActionability(candidate,decisions[candidate.key],now))continue;
    remaining++;
    pending.push(candidate);
    pending.sort((a,b)=>(candidateIsHot(b,now)?1:0)-(candidateIsHot(a,now)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
    if(pending.length>limit)pending.pop();
   }
-  if(!page.more)break;
-  after=page.after;
- }
+ }});
+ timings.walkMs=Date.now()-walkStarted;timings.pages=walked.pages;
  if(seen!==source.itemCount)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  let checked=0,tmdbCalls=0,error=null,retryAt=null;
  const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
- for(const candidate of pending){
-  try{await scoredSearchCandidates(query,candidate);checked++;}
-  catch(e){if(e?.name==='LeaseLostError')throw e;error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
+ const tmdbStarted=Date.now(),deadline=t0+PAGED_CHUNK_BUDGET_MS;
+ for(const [index,candidate] of pending.entries()){
+  // Stop at the wall budget or the call cap, but always take the first candidate so a slow read cannot make a chunk that does nothing.
+  if(index>0&&(Date.now()>deadline||tmdbCalls>=PAGED_TMDB_CALLS))break;
+  try{await heartbeat();await scoredSearchCandidates(query,candidate);checked++;}
+  catch(e){if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'tmdb'};throw e;}error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
  }
- const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:Math.max(0,remaining-checked),error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls};
- await fence();await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);return summary;
+ timings.tmdbMs=Date.now()-tmdbStarted;
+ const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:Math.max(0,remaining-checked),error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,timings};
+ try{await fence();}catch(e){if(e?.name==='LeaseLostError')e.timings={...timings,sinceStartMs:Date.now()-t0,failedAt:'final'};throw e;}
+ timings.totalMs=Date.now()-t0;
+ await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);return summary;
 }
 // AIR-342. The chunk's ledger is its own parse and is never written back. Its fields serve three readers:
 // - the cheap pass, the counts, the filters and the observation index read the key, titles, year, durations, shows,
@@ -831,7 +851,15 @@ function diagnosticError(error){return {code:diagnosticErrorCode(error),name:dia
 function diagnosticReason(value){return value==null?null:DIAGNOSTIC_VOCABULARY.reason.includes(value)?value:diagnosticErrorCode({message:String(value)});}
 function continuationSummary(record){return record&&typeof record==='object'?{stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,record.stage),reason:diagnosticReason(record.reason),remainingChunks:diagnosticCount(record.remainingChunks),programmeRunId:diagnosticId(record.programmeRunId),at:diagnosticTime(record.at),nextCatchUpAt:diagnosticTime(record.nextCatchUpAt),retryAt:diagnosticTime(record.retryAt),hopId:diagnosticId(record.hopId)}:null;}
 function discoverySummary(contract){return contract&&typeof contract==='object'?{state:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,contract.state),nextAction:diagnosticCode(DIAGNOSTIC_VOCABULARY.nextAction,contract.nextAction),reason:diagnosticReason(contract.reason),remainingChunks:diagnosticCount(contract.remainingChunks),programmeRunId:diagnosticId(contract.programmeRunId),nextCatchUpAt:diagnosticTime(contract.nextCatchUpAt),retryAt:diagnosticTime(contract.retryAt)}:null;}
-function chunkSummary(result){return {stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),added:diagnosticCount(result.added),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
+// The chunk's own wall clock, as bounded integers. `failedAt` names the phase that found the lease gone.
+function diagnosticTimings(timings){
+ if(!timings||typeof timings!=='object')return null;
+ const out={};
+ for(const field of ['walkMs','pages','concurrency','renewals','firstRenewMs','tmdbMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
+ if(['heartbeat','tmdb','final'].includes(timings.failedAt))out.failedAt=timings.failedAt;
+ return Object.keys(out).length?out:null;
+}
+function chunkSummary(result){return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),added:diagnosticCount(result.added),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
 // One structured line per phase for Workers Logs; never throws.
 function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
 // A step entry. `runId` is kept only when it has the server-generated UUID shape; `runIdShape` says
@@ -1217,7 +1245,7 @@ async function advanceDiscovery(env,body={}){
   result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){
   if(committed){result=committed.summary;trace.trailingError=diagnosticErrorCode(e);}
-  else result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null};
+  else result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
  }
  trace.chunk=chunkSummary(result);
  if(!committed){try{await checkpoint(result);}catch(e){await release();throw e;}}

@@ -128,6 +128,13 @@ The canonical cache is persistent, independently of current broadcasts. `hot` is
 
 `POST /api/enrichment/discovery/resolve` keeps the existing `limit` (1–24) contract. A chunk is also bounded by 22 seconds and 16 TMDB requests, with 200 ms pacing. Each confirmed cache record and resolution decision is persisted individually; a conditional R2 lease prevents overlapping resolver writers. On restart, already confirmed identities are reused. HTTP 429 retains work and stores `retryAt`; no busy retry loop. Ambiguous/no-match decisions remain unresolved with exponential daily retry, capped at seven days.
 
+When the discovery authority is D1 and the active ledger is above the whole-document read cap (20,000 observations), the chunk reads the ledger in key-range pages instead of one document (the *paged chunk*):
+
+- **Concurrent read.** One query returns the page starts; pages of 500 observations then load four at a time and reach the selection in key order. The walk fails closed (`discovery_fence`) when the marker, the programme or the authority generation changes while it runs. Eligibility, hot/year/last-airing/key priority and the `remaining` count are unchanged.
+- **Lease renewal.** The D1 lease lives 90 seconds and cannot be renewed once it has expired, so the chunk renews it before a batch of page loads and before each TMDB candidate whenever less than 45 seconds remain, and always immediately before its status write. A lost, expired or foreign lease aborts the chunk before any write; it is never revived.
+- **Wall budget.** The chunk stops starting candidates after 40 seconds or 16 TMDB requests, whichever comes first, but always takes its first candidate so a slow read cannot make a chunk that does nothing. The budget sits inside the shortest known MCP client timeout (about 60 seconds). The stored status is `partial` while candidates remain.
+- **Timings.** The chunk's status summary and the step diagnostic carry `timings`: `walkMs`, `pages`, `concurrency`, `renewals`, `firstRenewMs`, `tmdbMs`, `totalMs`, and for a lost lease also `sinceStartMs` and `failedAt` (`heartbeat`, `tmdb` or `final`). They are bounded integers; no title, key or payload is logged. A client that disconnects cannot be observed by the Worker, so a step that ends that way shows `entered` without an outcome and `unknown` for its cause; the platform's `canceled` outcome in Workers telemetry is the evidence.
+
 One request runs one discovery chunk and does not schedule another. A separate HTTP request does not guarantee a new Cloudflare isolate; one chunk per request is a memory hypothesis to verify in production after this change is deployed.
 
 **Chunk memory (AIR-342).** A chunk reads its inputs one after another.

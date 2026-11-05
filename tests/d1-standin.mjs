@@ -9,7 +9,7 @@ const literal=value=>{
  if(typeof value==='boolean')return value?'1':'0';
  return "'"+String(value).replace(/'/g,"''")+"'";
 };
-export function d1Standin(file,{onBatch=null,maxBinds=null}={}){
+export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=null}={}){
  const calls={queries:0,batches:0,statements:0};
  const sqlite=(sql,json)=>{const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr.trim()||'sqlite failed');return result.stdout;};
  const rows=text=>{const out=sqlite(text+';',true).trim();return out?JSON.parse(out):[];};
@@ -17,7 +17,9 @@ export function d1Standin(file,{onBatch=null,maxBinds=null}={}){
   if(maxBinds!=null&&params.length>maxBinds)throw new Error('D1_ERROR: too many SQL variables at offset 0: SQLITE_ERROR');
   let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('missing parameter');return literal(params[index++]);});
   if(index!==params.length)throw new Error('parameter count');
-  return {text,async first(){calls.queries++;return rows(text)[0]??null;},async all(){calls.queries++;return {results:rows(text)};},async run(){calls.queries++;sqlite(text+';');return {success:true};}};
+  // `latencyMs` models D1's round trip so a test can tell a sequential read from a concurrent one; `onQuery` sees each statement before it runs.
+  const wait=async()=>{if(latencyMs)await new Promise(resolve=>setTimeout(resolve,latencyMs));if(onQuery)await onQuery(text);};
+  return {text,async first(){calls.queries++;await wait();return rows(text)[0]??null;},async all(){calls.queries++;await wait();return {results:rows(text)};},async run(){calls.queries++;await wait();sqlite(text+';');return {success:true};}};
  };
  return {
   calls,
