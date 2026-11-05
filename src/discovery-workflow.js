@@ -180,23 +180,23 @@ async function discoveryWorkflowAdmission(env){
  if(mode==='external')return {ok:false,reason:'external'};
  if(mode!=='workflow')return {ok:false,reason:'invalid'};
  if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return {ok:false,reason:'workflow_unavailable'};
- if(typeof DiscoveryAuthority!=='undefined'){
-  let gate;
-  try{gate=await DiscoveryAuthority.readAuthority(env);}
-  catch{return {ok:false,reason:'d1_unavailable'};}
-  if(gate?.held||gate?.cutover==='held')return {ok:false,reason:'authority_held'};
-  if(gate?.transfer==='loading')return {ok:false,reason:'authority_loading'};
-  // closed() (no DB / schema < 11) and an r2 marker are ready:false. Do not reconstruct
-  // intent or create() against the R2 ledger (AIR-324 D1-first).
-  if(gate?.ready!==true||gate.mode!=='d1'||gate.cutover!=='open')return {ok:false,reason:'authority_not_ready'};
-  if(gate.transfer!=='idle'&&gate.transfer!=='committed')return {ok:false,reason:'authority_not_ready'};
-  const programmeRunId=gate.publishedProgrammeRunId||gate.programmeRunId||null;
-  if(!programmeRunId)return {ok:false,reason:'generation_unpublished'};
-  return {ok:true,programmeRunId};
- }
- const programmeRunId=publishedProgrammeRunId(await loadJSON(env,EPG_GENERATION_KEY));
- if(!programmeRunId)return {ok:false,reason:'generation_unpublished'};
- return {ok:true,programmeRunId};
+ if(typeof DiscoveryAuthority==='undefined')return {ok:false,reason:'authority_not_ready'};
+ let gate;
+ try{gate=await DiscoveryAuthority.readAuthority(env);}
+ catch{return {ok:false,reason:'d1_unavailable'};}
+ if(gate?.held||gate?.cutover==='held')return {ok:false,reason:'authority_held'};
+ if(gate?.transfer==='loading')return {ok:false,reason:'authority_loading'};
+ if(gate?.ready!==true||gate.mode!=='d1'||gate.cutover!=='open')return {ok:false,reason:'authority_not_ready'};
+ if(gate.transfer!=='idle'&&gate.transfer!=='committed')return {ok:false,reason:'authority_not_ready'};
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')return {ok:false,reason:'generation_unpublished'};
+ let live;
+ try{live=await PublishedEpg.currentGeneration(env);}
+ catch{return {ok:false,reason:'d1_unavailable'};}
+ const published=live?.programmeRunId||null;
+ if(!published)return {ok:false,reason:'generation_unpublished'};
+ const discoveryPin=gate.publishedProgrammeRunId||null;
+ if(!discoveryPin||discoveryPin!==published)return {ok:false,reason:'generation_handoff',programmeRunId:published};
+ return {ok:true,programmeRunId:published};
 }
 async function ensurePublishedDiscoveryIntent(env,programmeRunId){
  const before=(await readContinuation(env)).record;

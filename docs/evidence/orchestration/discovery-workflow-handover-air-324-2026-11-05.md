@@ -19,6 +19,7 @@
 - A terminal `stop` (`complete`) is not re-queued.
 - A held, `loading` or throwing D1 authority returns `authority_held` / `authority_loading` / `d1_unavailable` and does not call `create()`.
 - `closed()` (absent DB), schema v10 and an explicit `r2/open` marker return `authority_not_ready` from both `ensure` and `reconcile`: no `create()`, no continuation/workflow/decision R2 write.
+- Matching D1/open Discovery pin and current published EPG pointer admits `create()`. An A→B EPG pointer while Discovery still names A, a missing EPG pointer, a null Discovery published pin, or a mismatched Discovery pin returns `generation_handoff` / `generation_unpublished` and writes no continuation or Workflow record.
 - Clearing the flag (`external` rollback) creates nothing.
 
 The binding in `wrangler.jsonc` still has no `schedules`. `DISCOVERY_EXECUTOR` is still absent from `vars`.
