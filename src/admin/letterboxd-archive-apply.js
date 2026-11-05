@@ -231,6 +231,24 @@ function lbaRetryFields(body){
  if(!expected||!codes.length||codes.some(code=>!LetterboxdRatedAdmission.isCompleteExpected(expected[code])))return null;
  return LBA_HEX64.test(body.archiveSha256||'')&&codes.length>=1&&codes.length<=8&&codes.every(code=>/^[A-Za-z0-9]{1,16}$/.test(code))&&LBA_KEY.test(body.idempotencyKey||'')&&body.accepted===true?{codes,expected}:null;
 }
+// The chosen codes whose stored row no longer has the fingerprint the owner saw. Codes only, no row content.
+function lbaRetryChanged(doc,codes,expected){
+ return codes.filter(code=>{
+  const item=doc&&doc.candidates&&doc.candidates[code];
+  return !item||LetterboxdRatedAdmission.retryFingerprint(item)!==(expected&&expected[code]&&expected[code].fingerprint);
+ });
+}
+// Immutable request identity of a stored retry action: archive, chosen codes and each code's fingerprint. Not the clock.
+function lbaSameRetryRequest(record,sha,fields){
+ if(!record||record.archiveSha256!==sha||!Array.isArray(record.codes))return false;
+ const stored=[...record.codes].sort(),asked=[...fields.codes].sort();
+ if(stored.length!==asked.length||stored.some((code,index)=>code!==asked[index]))return false;
+ return asked.every(code=>record.expected&&record.expected[code]&&record.expected[code].fingerprint===fields.expected[code].fingerprint);
+}
+function lbaIssuedChanged(issued,fresh){
+ const versions=new Map((fresh||[]).map(record=>[record.id,record.version]));
+ return (lbaIssuedRecords(issued)||[]).filter(record=>versions.get(record.id)!==record.version).map(record=>record.id);
+}
 function lbaRetryVersion(item){
  return LetterboxdRatedAdmission.retryFingerprint(item);
 }
@@ -250,12 +268,25 @@ async function lbaRetryConfirm(request,env){
  const started=Date.now();
  if(!lbaTrySlot(started))return lbaRefuse('preview_busy',429);
  try{
+  // A stored action for this key comes first. If its confirmation was persisted and the answer was lost, a chosen row may
+  // have changed since: a replay of the same request must recover the stored confirmation, not report record_changed.
+  // The request must be the same one (archive, codes, per-code fingerprints); anything else is idempotency_conflict.
+  const prior=await lbaActionRead(env,LBA_RETRY_PREFIX,body.idempotencyKey);
+  if(prior.record){
+   if(!lbaSameRetryRequest(prior.record,body.archiveSha256,fields)||!prior.record.issued)return lbaRefuse('idempotency_conflict',409);
+   const requeue=Array.isArray(prior.record.requeue)?prior.record.requeue:[];
+   return json({mode:'identity_retry_confirm',writes:false,replayed:true,confirmation:prior.record.issued,retryable:requeue.length,preview:{codes:prior.record.codes,requeue}});
+  }
   const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(body.archiveSha256));
   if(doc.value===undefined)return json({error:'storage_unavailable'},503);
   if(!doc.value)return lbaRefuse('not_eligible',409);
-  if(body.documentEtag&&doc.etag&&body.documentEtag!==doc.etag)return lbaRefuse('record_changed',409);
+  // AIR-350: the document ETag is not a blocker. Another candidate's write changes it without touching the codes the owner
+  // chose. Each chosen code is checked against its own full expected fingerprint, and the requeue itself is a CAS.
   const validated=LetterboxdRatedAdmission.validatedRetryExpected(doc.value,fields.codes,fields.expected);
-  if(!validated.ok)return lbaRefuse(validated.refusal||'invalid_request',validated.refusal==='record_changed'?409:400);
+  if(!validated.ok){
+   if(validated.refusal==='record_changed')return lbaRefuse('record_changed',409,{writes:false,changed:lbaRetryChanged(doc.value,fields.codes,fields.expected)});
+   return lbaRefuse(validated.refusal||'invalid_request',400);
+  }
   const plan=LetterboxdRatedAdmission.planIdentityRetry(doc.value,{codes:fields.codes,expected:validated.expected});
   if(!plan.ok)return lbaRefuse(plan.refusal||'invalid_request',400);
   if(!plan.requeue.length&&!plan.outcomes.some(entry=>entry.outcome==='already_applied'))return lbaRefuse('not_eligible',409);
@@ -265,16 +296,19 @@ async function lbaRetryConfirm(request,env){
   if(preview.status!=='eligible')return lbaRefuse('not_eligible',409,{reason:preview.reason});
   const issued=AdminActions.confirmAction(preview,{now,idempotencyKey:body.idempotencyKey,accepted:true});
   if(issued.error)return lbaRefuse(issued.error,409);
-  const existing=await lbaActionRead(env,LBA_RETRY_PREFIX,body.idempotencyKey);
-  if(existing.record){
-   if(lbaSameIssued(existing.record.issued,issued))return json({mode:'identity_retry_confirm',writes:false,confirmation:existing.record.issued,retryable:plan.requeue.length,preview:{codes:fields.codes,requeue:plan.requeue}});
+  const record={schemaVersion:1,kind:'letterboxd_identity_retry',idempotencyKey:body.idempotencyKey,state:'approved',issued,createdAt:now,archiveSha256:body.archiveSha256,codes:fields.codes,expected:validated.expected,requeue:plan.requeue,documentEtag:doc.etag||null,receipt:null};
+  const saved=await lbaActionWrite(env,LBA_RETRY_PREFIX,body.idempotencyKey,record,null);
+  if(saved===null){
+   // Lost the create race: the winner is the same request or a conflict.
+   const winner=await lbaActionRead(env,LBA_RETRY_PREFIX,body.idempotencyKey);
+   if(winner.record&&winner.record.issued&&lbaSameRetryRequest(winner.record,body.archiveSha256,fields)){
+    const requeue=Array.isArray(winner.record.requeue)?winner.record.requeue:[];
+    return json({mode:'identity_retry_confirm',writes:false,replayed:true,confirmation:winner.record.issued,retryable:requeue.length,preview:{codes:winner.record.codes,requeue}});
+   }
    return lbaRefuse('idempotency_conflict',409);
   }
-  const record={schemaVersion:1,kind:'letterboxd_identity_retry',idempotencyKey:body.idempotencyKey,state:'approved',issued,createdAt:now,archiveSha256:body.archiveSha256,codes:fields.codes,expected:validated.expected,documentEtag:doc.etag||null,receipt:null};
-  const saved=await lbaActionWrite(env,LBA_RETRY_PREFIX,body.idempotencyKey,record,null);
-  if(saved===null)return lbaRefuse('idempotency_conflict',409);
   return json({mode:'identity_retry_confirm',writes:false,confirmation:issued,retryable:plan.requeue.length,preview:{codes:fields.codes,requeue:plan.requeue}});
- }catch{return lbaRefuse('invalid_request',500);}
+ }catch{return json({error:'storage_error'},500);}
  finally{lbaFreeSlot(started);}
 }
 async function lbaRetry(request,env,url){
@@ -289,7 +323,7 @@ async function lbaRetry(request,env,url){
  try{
   let stored=await lbaActionRead(env,LBA_RETRY_PREFIX,submitted.idempotencyKey);
   if(!stored.record||!stored.record.issued)return lbaRefuse('confirmation_missing',409);
-  if(stored.record.receipt)return json({mode:'identity_retry',writes:false,replayed:true,receipt:stored.record.receipt,state:stored.record.state});
+  if(stored.record.receipt)return json({mode:'identity_retry',writes:false,replayed:true,receipt:stored.record.receipt,state:stored.record.state,outcomes:stored.record.receipt.outcomes||[]});
   const sha=stored.record.archiveSha256;
   if(submitted.subject.id!==sha+':retry')return lbaRefuse('confirmation_mismatch',409);
   const doc=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
@@ -302,33 +336,40 @@ async function lbaRetry(request,env,url){
   if(!records)return lbaRefuse('invalid_request',400);
   const fresh={pin,now,records,issues:records.map(record=>LetterboxdArchiveApply.retryIssue(record.id))};
   const checked=AdminActions.checkSubmission(LBA_APPLY_REGISTRY,confirmation,fresh,{principal:lbaPrincipal(request,url),issued:stored.record.issued});
+  // A chosen code that changed after confirmation refuses the whole confirmation before anything is marked: the owner
+  // confirmed that exact set. The answer names each chosen code as changed or unchanged. Another code's write is not here.
+  if(!checked.ok&&checked.refusal==='record_changed'){
+   const changed=lbaIssuedChanged(stored.record.issued,records);
+   return lbaRefuse('record_changed',409,{writes:false,changed,outcomes:stored.record.codes.map(code=>({id:code,outcome:changed.includes(code)?'skipped_changed':'not_attempted'}))});
+  }
   if(!checked.ok)return lbaRefuse(checked.refusal,checked.refusal==='confirmation_expired'||checked.refusal==='invalid_request'?400:409);
   if(!resume){
    const running={...stored.record,state:'running',startedAt:now};
    const marked=await lbaActionWrite(env,LBA_RETRY_PREFIX,submitted.idempotencyKey,running,stored.etag);
    if(marked===null)return lbaRefuse('in_progress',409);
    stored={record:running,etag:marked.etag};
-   const live=await LetterboxdRatedCandidates.readDoc(env,LetterboxdRatedCandidates.CANDIDATES(sha));
-   if(live.value===undefined)return json({error:'storage_unavailable'},503);
-   const still=LetterboxdRatedAdmission.validatedRetryExpected(live.value,stored.record.codes,stored.record.expected);
-   if(!still.ok)return lbaRefuse(still.refusal==='record_changed'?'record_changed':'invalid_request',still.refusal==='record_changed'?409:400);
   }
+  // From here the action is running. The requeue re-plans every chosen code inside the document CAS, so a write that lands
+  // between the check above and the CAS is skipped per code, never overwritten. Every path below stores a receipt, so the
+  // same key read back later answers what happened and a lost answer is never retried as a new action.
   const result=await LetterboxdRatedCandidates.retryCandidates(env,{sha,codes:stored.record.codes,expected:stored.record.expected});
-  if(result.error==='not_eligible')return lbaRefuse('not_eligible',409);
-  if(result.error)return lbaRefuse(result.error,400);
-  if(!resume&&result.changed!==true&&result.outcomes&&result.outcomes.some(entry=>entry.outcome==='skipped_changed')&&!result.outcomes.some(entry=>entry.outcome==='written'||entry.outcome==='already_applied'))return lbaRefuse('record_changed',409);
-  const receipt=AdminActions.receiptOf({confirmation,capability:LBA_RETRY_CAP,startedAt:stored.record.startedAt||now,finishedAt:new Date().toISOString(),outcomes:result.outcomes});
+  const outcomes=result.error
+   ?stored.record.codes.map(code=>({id:code,outcome:'skipped_changed'}))
+   :result.outcomes;
+  const receipt=AdminActions.receiptOf({confirmation,capability:LBA_RETRY_CAP,startedAt:stored.record.startedAt||now,finishedAt:new Date().toISOString(),outcomes});
   const saved={...stored.record,state:receipt.state,finishedAt:receipt.finishedAt,receipt};
   let durable;
   try{durable=await lbaActionWrite(env,LBA_RETRY_PREFIX,submitted.idempotencyKey,saved,stored.etag);}
-  catch{return json({error:'storage_error'},500);}
+  catch{return json({error:'storage_error',writes:result.changed===true?'unknown':false},500);}
   if(durable===null){
    const again=await lbaActionRead(env,LBA_RETRY_PREFIX,submitted.idempotencyKey);
-   if(again.record&&again.record.receipt)return json({mode:'identity_retry',writes:false,replayed:true,receipt:again.record.receipt,state:again.record.state,durable:true});
+   if(again.record&&again.record.receipt)return json({mode:'identity_retry',writes:false,replayed:true,receipt:again.record.receipt,state:again.record.state,outcomes:again.record.receipt.outcomes||[],durable:true});
    return json({error:'storage_error'},500);
   }
-  return json({mode:'identity_retry',writes:result.changed===true,replayed:result.replay===true,receipt,state:receipt.state,outcomes:result.outcomes,durable:true});
- }catch{return lbaRefuse('invalid_request',500);}
+  const done=outcomes.some(entry=>entry.outcome==='written'||entry.outcome==='already_applied');
+  if(!done)return lbaRefuse('record_changed',409,{writes:false,changed:outcomes.filter(entry=>entry.outcome==='skipped_changed').map(entry=>entry.id),outcomes,receipt,state:receipt.state});
+  return json({mode:'identity_retry',writes:result.changed===true,replayed:result.replay===true,receipt,state:receipt.state,outcomes,durable:true});
+ }catch{return json({error:'storage_error'},500);}
  finally{lbaFreeSlot(started);}
 }
 

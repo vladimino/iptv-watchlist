@@ -451,40 +451,151 @@ function archiveIdentityOpen(session) {
   const status = session && session.identityStatus;
   const identity = session && session.identity;
   const committed = session && session.committed && Object.values(session.committed).some(item => item && item.kind === 'candidates' && item.state === 'succeeded');
-  const durable = status && status.present && ((status.pending || 0) + (status.admitting || 0) + (status.enrichmentPending || 0) > 0 || status.stopped || (status.retryable && status.retryable.length));
+  const durable = status && status.present && ((status.pending || 0) + (status.admitting || 0) + (status.enrichmentPending || 0) > 0 || status.stopped || (status.retryable && status.retryable.length) || (status.requeued && status.requeued.length));
   if (!committed && !durable && !identity) return null;
   if (identity && identity.pending === false && !identity.stop && !durable) return 'done';
   return 'open';
+}
+// AIR-350: identity retry and identity step answers are their own words, never the ZIP facts text.
+const ARCHIVE_RETRY_OUTCOME_TEXT = {
+  written: 'возвращён в очередь',
+  already_applied: 'уже был возвращён в очередь раньше',
+  skipped_changed: 'состояние изменилось — не тронут',
+  not_attempted: 'не выполнялся',
+  failed: 'отказ',
+  unknown: 'исход неизвестен',
+};
+const ARCHIVE_IDENTITY_REFUSAL_TEXT = {
+  record_changed: 'Состояние выбранных кодов изменилось после того, как ты его видел. Ничего не вернул в очередь. Состояние перечитано: подтверди повтор заново.',
+  idempotency_conflict: 'Этот ключ уже занят другим подтверждением. Состояние перечитано: подтверди повтор заново.',
+  confirmation_expired: 'Подтверждение истекло. Ничего не вернул в очередь. Подтверди повтор заново.',
+  confirmation_missing: 'Сервер не нашёл это подтверждение. Ничего не вернул в очередь. Подтверди повтор заново.',
+  confirmation_mismatch: 'Подтверждение относится к другому архиву. Ничего не вернул в очередь.',
+  eligibility_changed: 'Выбранные коды больше не подходят для повтора. Состояние перечитано.',
+  not_eligible: 'Для этого кода сейчас нет допустимого шага. Состояние перечитано.',
+  invalid_request: 'Запрос не прошёл проверку. Ничего не изменено.',
+  access_denied: 'Действие доступно только владельцу с этой страницы. Ничего не изменено.',
+  preview_busy: 'Сервер занят другой проверкой. Ничего не изменено; попробуй чуть позже.',
+};
+function archiveIdentityErrorText(kind, error, lost) {
+  if (lost) {
+    if (kind === 'retry-confirm') return 'Ответ на подтверждение повтора не получен. Подтверждение могло сохраниться; в очередь этим шагом ничего не возвращается. Следующее нажатие отправит тот же ключ и прочитает сохранённое.';
+    if (kind === 'retry') return 'Ответ на возврат в очередь не получен. Исход неизвестен: сервер мог уже вернуть коды в очередь. Нажми «Узнать исход» — это тот же ключ, сервер вернёт сохранённую квитанцию, а не начнёт новый повтор.';
+    if (kind === 'identity') return 'Ответ на проверку идентичности не получен. Исход неизвестен: сервер мог записать состояние кода или Film. Прочитай сохранённое состояние, прежде чем проверять снова.';
+  }
+  if (kind === 'retry' && error === 'in_progress') return 'Этот возврат в очередь уже выполняется. Исход пока неизвестен. Нажми «Узнать исход» позже — это тот же ключ.';
+  if (kind === 'identity' && error === 'not_eligible') return 'Для этого кода сейчас нет шага проверки (он не в очереди). Ничего не изменено. Состояние перечитано.';
+  return ARCHIVE_IDENTITY_REFUSAL_TEXT[error] || ('Отказ сервера: ' + String(error || 'неизвестная ошибка') + '.');
+}
+function archiveCodeLabel(row) {
+  const name = row && row.name ? row.name + (row.year ? ' (' + row.year + ')' : '') : '';
+  return (row && row.code || '') + (name ? ' · ' + name : '');
+}
+function archiveRequeuedState(row) {
+  if (!row) return 'нет данных';
+  if (row.state === 'pending') return 'в очереди, идентичность ещё не проверена';
+  if (row.state === 'admitting') return 'сверка начата, Film ещё не подтверждён';
+  if (row.state === 'verified') return 'Film admitted' + (row.filmId ? ' (' + row.filmId + ')' : '') + (row.enrichment === 'done' ? ', метаданные готовы' : ', enrichment pending');
+  if (row.state === 'needs_review') return 'снова требует разбора' + (row.reason ? ' (' + row.reason + ')' : '');
+  if (row.state === 'removed') return 'удалён из архива';
+  return String(row.state || 'неизвестно');
+}
+function archiveStepSummary(step) {
+  if (!step) return '';
+  if (step.running) return 'Проверка выполняется…';
+  if (step.unknown) return 'Исход последней проверки неизвестен. Прочитай сохранённое состояние.';
+  if (step.refused) return 'Последняя проверка отклонена: ' + step.refused + '. Ничего не изменено.';
+  if (step.verified) return 'Последняя проверка: Film admitted' + (step.filmId ? ' (' + step.filmId + ')' : '') + '. Watchlist не менялся.';
+  if (step.enriched) return 'Последняя проверка: метаданные или имена записаны.';
+  if (step.stop) return 'Последняя проверка остановлена (' + step.stop + '). Код не подтверждён.';
+  if (step.state === 'needs_review') return 'Последняя проверка: требует разбора' + (step.reason ? ' (' + step.reason + ')' : '') + (step.writes ? '; состояние записано' : '') + '.';
+  if (step.persisted === 'enrichment') return 'Последняя проверка: метаданные не разобраны, enrichment pending' + (step.reason ? ' (' + step.reason + ')' : '') + '.';
+  if (!step.writes) return 'Последняя проверка ничего не изменила.';
+  return 'Последняя проверка записала состояние кода.';
+}
+function archiveRetryOutcomesHtml(outcomes) {
+  if (!Array.isArray(outcomes) || !outcomes.length) return '';
+  return '<ul class="archive-codes">' + outcomes.map(entry => `<li><code>${archiveEscape(entry.id)}</code> — ${archiveEscape(ARCHIVE_RETRY_OUTCOME_TEXT[entry.outcome] || entry.outcome)}</li>`).join('') + '</ul>';
+}
+function archiveRetryHtml(session, open, busy) {
+  const status = session && session.identityStatus;
+  const retryable = status && Array.isArray(status.retryable) ? status.retryable : [];
+  const retry = session && session.identityRetry;
+  const phase = retry && retry.phase || null;
+  let html = '';
+  if (phase === 'done') {
+    const lead = retry.replayed ? 'Повтор уже был выполнен раньше; показана сохранённая квитанция.' : retry.writes ? 'Повтор записал выбранные коды обратно в pending.' : 'Повтор ничего не изменил.';
+    html += `<p role="status">${archiveEscape(lead)} Film этим шагом не добавляется.</p>${archiveRetryOutcomesHtml(retry.outcomes)}`;
+  } else if (phase === 'changed' || phase === 'refused') {
+    const changed = Array.isArray(retry.changed) && retry.changed.length ? ' Изменились: ' + retry.changed.join(', ') + '.' : '';
+    html += `<p role="status">${archiveEscape((phase === 'changed' ? 'Состояние выбранных кодов изменилось; ничего не возвращено в очередь.' : 'Повтор отклонён (' + (retry.error || 'отказ') + '); ничего не возвращено в очередь.') + changed)}</p>${archiveRetryOutcomesHtml(retry.outcomes)}`;
+  }
+  if (open !== 'open') return html;
+  if (phase === 'confirmed' || phase === 'running') {
+    const codes = (retry.codes || []).join(', ');
+    html += `<p role="status">${archiveEscape('Подтверждение выдано для: ' + codes + '. В очередь ещё ничего не возвращено.')}</p><div class="archive-actions"><button type="button" class="admin-refresh" data-archive-retry="1"${busy ? ' disabled' : ''}>Вернуть в очередь</button></div>`;
+    return html;
+  }
+  if (phase === 'unknown') {
+    html += `<p role="status">${archiveEscape('Исход возврата в очередь неизвестен для: ' + (retry.codes || []).join(', ') + '. Новый повтор не предлагается, пока исход не прочитан.')}</p><div class="archive-actions"><button type="button" class="admin-refresh" data-archive-retry="1"${busy ? ' disabled' : ''}>Узнать исход (тот же ключ)</button></div>`;
+    return html;
+  }
+  if (phase === 'confirm_unknown' || phase === 'confirming') {
+    html += `<p role="status">${archiveEscape('Ответ на подтверждение не получен для: ' + (retry.codes || []).join(', ') + '. Следующее нажатие отправит тот же ключ.')}</p><div class="archive-actions"><button type="button" class="admin-more" data-archive-retry-confirm="1"${busy ? ' disabled' : ''}>Прочитать подтверждение (тот же ключ)</button></div>`;
+    return html;
+  }
+  if (!retryable.length) return html;
+  const pick = session.retryPick || {};
+  const rows = retryable.map((row, index) => {
+    const on = pick[row.code] !== false && index < 8;
+    return `<li><label><input type="checkbox" data-archive-retry-pick="${archiveEscape(row.code)}"${on ? ' checked' : ''}${busy ? ' disabled' : ''}> <code>${archiveEscape(row.code)}</code>${row.name ? ' · ' + archiveEscape(row.name) + (row.year ? ' (' + archiveEscape(row.year) + ')' : '') : ''} — ${archiveEscape(row.reason || '')}</label></li>`;
+  }).join('');
+  const picked = retryable.filter((row, index) => pick[row.code] !== false && index < 8).length;
+  html += `<fieldset class="archive-pick"><legend>Повтор разметки: выбери коды (до 8)</legend><ul class="archive-codes">${rows}</ul></fieldset><div class="archive-actions"><button type="button" class="admin-more" data-archive-retry-confirm="1"${busy || !picked ? ' disabled' : ''}>Подтвердить повтор разметки (${picked})</button></div><p class="muted">Повтор только возвращает выбранные коды в очередь. Он не скачивает страницу и не добавляет фильм. Изменения других кандидатов его не блокируют.</p>`;
+  return html;
+}
+function archiveRequeuedHtml(session, open, busy) {
+  const status = session && session.identityStatus;
+  const rows = status && Array.isArray(status.requeued) ? status.requeued : [];
+  if (!rows.length) return '';
+  const byCode = session.identityByCode || {};
+  const stopped = !!(status && status.stopped);
+  const items = rows.map(row => {
+    const actionable = open === 'open' && (row.state === 'pending' || row.state === 'admitting' || (row.state === 'verified' && row.enrichment !== 'done'));
+    const verb = row.state === 'verified' ? 'Дозаполнить метаданные ' : stopped ? 'Продолжить и проверить ' : 'Проверить ';
+    const button = actionable ? ` <button type="button" class="admin-refresh" data-archive-identity-code="${archiveEscape(row.code)}"${busy ? ' disabled' : ''}>${archiveEscape(verb + row.code)}</button>` : '';
+    const last = archiveStepSummary(byCode[row.code]);
+    return `<li><strong>${archiveEscape(archiveCodeLabel(row))}</strong> — ${archiveEscape(archiveRequeuedState(row))}${button}${last ? `<br><span class="muted" role="status">${archiveEscape(last)}</span>` : ''}</li>`;
+  }).join('');
+  return `<h4>Возвращённые в очередь коды</h4><p class="muted">Кнопка проверяет только названный код, не следующий в общей очереди. Состояние прочитано из сохранённого документа.</p><ul class="archive-codes">${items}</ul>`;
 }
 function archiveIdentityHtml(session) {
   const open = archiveIdentityOpen(session);
   if (!open) return '';
   const identity = session && session.identity;
   const status = session && session.identityStatus;
+  const busy = !!(session && session.inflight);
   const stopped = (identity && identity.stop) || (status && status.stopped && (status.stopped.reason || status.stopped));
   let note = 'Кандидаты сохранены. Страница Letterboxd и TMDB ещё не читались.';
-  if (identity && identity.verified) note = 'Один фильм сверен и добавлен по TMDB. Watchlist не менялся.';
-  else if (identity && identity.enriched) note = 'Один фильм получил метаданные или имена. Watchlist не менялся. Это не новая идентичность.';
+  if (identity && identity.unknown) note = 'Исход последней проверки идентичности неизвестен. Прочитай сохранённое состояние.';
+  else if (identity && identity.refused) note = 'Последняя проверка идентичности отклонена (' + identity.refused + '). Ничего не изменено.';
+  else if (identity && identity.verified) note = (identity.code ? identity.code + ': ' : '') + 'Film admitted' + (identity.filmId ? ' (' + identity.filmId + ')' : '') + ' — сверен по TMDB. Watchlist не менялся.';
+  else if (identity && identity.enriched) note = (identity.code ? identity.code + ': ' : '') + 'метаданные или имена записаны. Watchlist не менялся. Это не новая идентичность.';
   else if (identity && identity.stop) note = 'Проверка остановлена (' + identity.stop + '). Кандидат остаётся непроверенным. Это не подтверждение.';
   else if (identity && identity.state === 'needs_review') {
-    note = identity.writes
-      ? 'Состояние кандидата записано в R2. Фильм в каталог не добавлен. Это не подтверждение.'
-      : 'Фильм неоднозначен и не добавлен. Это не подтверждение.';
-  } else if (identity && identity.writes && !identity.verified && !identity.enriched) note = 'Состояние очереди в R2 обновлено. Фильм в каталог не добавлен.';
+    note = (identity.code ? identity.code + ': ' : '') + (identity.writes
+      ? 'состояние кандидата записано в R2. Фильм в каталог не добавлен. Это не подтверждение.'
+      : 'фильм неоднозначен и не добавлен. Это не подтверждение.');
+  } else if (identity && identity.persisted === 'enrichment') note = (identity.code ? identity.code + ': ' : '') + 'метаданные не разобраны, enrichment pending.';
+  else if (identity && identity.writes && !identity.verified && !identity.enriched) note = 'Состояние очереди в R2 обновлено. Фильм в каталог не добавлен.';
   else if (identity) note = 'Идентичность не подтверждена.';
   if (status && status.present) note += ' Сохранено: ожидают ' + (status.pending || 0) + ', сверяются ' + (status.admitting || 0) + ', метаданные ' + (status.enrichmentPending || 0) + '.';
   const retryable = status && Array.isArray(status.retryable) ? status.retryable : [];
   if (retryable.length) note += ' Повтор разметки доступен для ' + retryable.length + ' код' + (retryable.length === 1 ? 'а' : 'ов') + ' с причиной shortlink_missing. Остальные кандидаты не трогаются.';
-  const retry = session && session.identityRetry;
-  let retryActions = '';
-  if (open === 'open' && retryable.length && !(retry && retry.confirmation)) {
-    retryActions = `<div class="archive-actions"><button type="button" class="admin-more" data-archive-retry-confirm="1">Подтвердить повтор разметки</button></div><p class="muted">Повтор только возвращает выбранные коды в очередь. Он не скачивает страницу и не добавляет фильм.</p>`;
-  } else if (open === 'open' && retry && retry.confirmation && !(retry && retry.done)) {
-    retryActions = `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-retry="1">Вернуть в очередь</button></div>`;
-  }
-  if (retry && retry.done) note += retry.writes ? ' Повтор записал выбранные коды обратно в pending.' : ' Повтор уже был применён.';
-  const button = open === 'open' ? `<div class="archive-actions"><button type="button" class="admin-refresh" data-archive-identity="1">${archiveEscape(stopped ? 'Продолжить проверку' : 'Проверить одну идентичность')}</button></div>` : '';
-  return `<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted" role="status">${archiveEscape(note)}</p>${retryActions}${button}</article>`;
+  const retryHtml = archiveRetryHtml(session, open, busy);
+  const requeuedHtml = archiveRequeuedHtml(session, open, busy);
+  const button = open === 'open' ? `<div class="archive-actions"><button type="button" class="admin-more" data-archive-identity="1"${busy ? ' disabled' : ''}>${archiveEscape(stopped ? 'Продолжить проверку' : 'Проверить следующий в общей очереди')}</button></div><p class="muted">Эта кнопка берёт следующий код общей очереди, а не выбранный фильм.</p>` : '';
+  return `<article class="archive-batch"><h3>Проверка идентичности</h3><p class="muted" role="status">${archiveEscape(note)}</p>${retryHtml}${requeuedHtml}${button}</article>`;
 }
 function archiveReceiptHtml(answer, session) {
   const batches = answer.batches || {};
