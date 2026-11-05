@@ -1,6 +1,6 @@
 # MCP connection, safe probes and recovery
 
-> **Operator procedure — not production authorization.** Never invoke writable MCP tools, change Access, secrets or Scheduled Tasks without an action-specific owner approval. Protocol, tool schemas and trust boundaries: [MCP reference](../reference/api/mcp.md).
+> **Operator procedure under [L0–L3 authorization](../process/authorization-and-escalation.md).** Proven read-only MCP/Cloudflare diagnostics are L0, without repetitive owner approval. Writable tools, Access, secrets and Scheduled Tasks require their existing operation-specific contract or an owner-approved L3 plan. Protocol, tool schemas and trust boundaries: [MCP reference](../reference/api/mcp.md).
 
 ## Connecting ChatGPT
 
@@ -18,7 +18,7 @@ The repository's `.claude/settings.json` pre-approves only `probe_read` and `pro
 
 ## Safe verification procedure
 
-These checks contact production only through Cloudflare Access and the two probes. None of them reaches R2. Run them only with the owner's approval. Never paste tokens, JWTs, or cookies into logs, issues, or chats.
+These checks contact production only through Cloudflare Access and the two probes. None of them reaches R2. They are standing-authorized L0 when the documented side-effect-free probes and Access identity are used; no extra owner prompt is needed. Never paste tokens, JWTs, or cookies into logs, issues, or chats.
 
 0. Local: `npm ci`, `npm test`, `npm run build`.
 1. Unauthenticated discovery. Access answers these requests; they never reach Worker code.
@@ -35,7 +35,7 @@ These checks contact production only through Cloudflare Access and the two probe
 4. Ask it to call `probe_echo` with a marker such as `mcp-probe-2026-10-19`. Expect the identical text back.
 5. Repeat step 1. The unauthenticated request must still get `401` from Access.
 
-Leave Scheduled Tasks and writer MCP tools out of this connectivity smoke test. `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete` may write R2 or advance a run; AIR-62 completion is not permission for extra production calls. In contrast, `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` are read-only tools, suitable for separately authorized diagnostic checks. Do not use `/api/*`, the dashboard or synchronization as connectivity probes; some `GET` routes have side effects (see [README](../../README.md)).
+Leave Scheduled Tasks and writer MCP tools out of this connectivity smoke test. `epg_sync_start`, `epg_sync_step`, `prediction_start`, `prediction_next`, `prediction_submit`, `prediction_heartbeat`, and `prediction_complete` may write R2 or advance a run; AIR-62 completion is not permission for extra production calls. In contrast, `prediction_queue_overview`, `prediction_film_diagnostics`, and `prediction_pending` are read-only tools, suitable for L0 diagnostics once their exact read-only semantics and active credentials are verified. Tool-level prompts or lack of a connector cannot be bypassed by this policy. Do not use `/api/*`, the dashboard or synchronization as connectivity probes; some `GET` routes have side effects (see [README](../../README.md)).
 
 
 ## Reading the deployed feature flags
