@@ -321,6 +321,11 @@
 .archive-batch{display:flex;flex-direction:column;gap:8px;margin:0 0 12px;padding:12px 14px;border:1px solid #3a4038;border-radius:8px}
 .archive-batch h3{margin:0;font-size:16px}
 .archive-batch p{margin:0}
+.archive-batch h4{margin:4px 0 0;font-size:14px}
+.archive-codes{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px;overflow-wrap:anywhere}
+.archive-codes button{margin-top:4px}
+.archive-pick{margin:0;padding:8px 10px;border:1px solid #3a4038;border-radius:6px;min-width:0}
+.archive-pick label{display:inline-flex;gap:6px;align-items:baseline;flex-wrap:wrap}
 .archive-apply-note{margin:0 0 12px}
 .archive-actions{display:flex;flex-wrap:wrap;gap:10px}
 .archive-actions .admin-more,.archive-actions .admin-refresh{width:auto;margin:0}
