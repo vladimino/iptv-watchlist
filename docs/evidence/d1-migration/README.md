@@ -2,6 +2,7 @@
 
 | Report | Capture and scope | Verdict | Used by | Later / authority |
 | --- | --- | --- | --- | --- |
+| [AIR-356 resumable ledger seal](air-356-resumable-seal-2026-11-05.md) | 5 Nov 2026, offline tests and a local SQLite stand-in; no production access | Offline contract and volume measurement only; no production verdict | [ADR 0092](../../adr/0092-resumable-bounded-ledger-seal.md) | Not a production run |
 | [AIR-355 stalled D1 ledger seal](air-355-incident-seal-loading-2026-11-05.md) | 5 Nov 2026 17:39–17:50 UTC, read-only `SELECT`s and telemetry on production plus offline sqlite stand-ins | **INCIDENT READING** — an EPG commit seal cancelled mid-handoff left `discovery_transfer` `loading`; no data lost; three independent reads opened by ADR 0091 (Proposed); seal not finished |
 | [AIR-352 paged chunk resolution and keyed writes](air-352-paged-write-path-2026-11-05.md) | 5 Nov 2026, offline sqlite stand-ins on `main` `33ba94d` | **OFFLINE ONLY** — the paged chunk resolves candidates and stores Films and decisions with keyed, fenced writes; no production chunk run |
 | [AIR-352 chunk lease, budget and timings](air-352-chunk-budget-2026-11-05.md) | 5 Nov 2026, offline sqlite stand-ins on `main` `e7a2a47` and read-only production telemetry and `SELECT`s from the RCA | **OFFLINE ONLY** — lease heartbeat, concurrent ledger read, 40 s budget and timings; no production chunk run; decisions still not persisted by the paged chunk |

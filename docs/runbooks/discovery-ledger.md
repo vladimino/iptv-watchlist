@@ -195,7 +195,9 @@ A D1 chunk has three clocks that must all fit: the MCP client's timeout (about 6
 
 **What not to do.** Do not repeat the EPG commit: a retry takes the expired lease and replays the seal from the first observation, so it is cancelled again and an interrupted attempt can leave less written than the one before. A killed attempt also holds its lease for the 90 s TTL. Do not reset the lease or the transfer, edit `discovery_observation`, or switch the marker. Each of those is a separate owner-approved operation, and none finishes the seal.
 
-**Recovery.** The seal must finish in explicit bounded steps; that handoff is a separate delivery, and its production steps (a read-only preflight, a bounded recovery, a readback, one EPG commit, a prediction check) each need their own approval. Evidence: [stalled seal](../evidence/d1-migration/air-355-incident-seal-loading-2026-11-05.md).
+**Recovery order (AIR-356, [ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md), Proposed; each step needs its own owner approval).** Deploy the code; a read-only preflight of the transfer, lease, authority and observation counts; apply migration `0012`; a read-only readback; one EPG commit (a `loading` transfer without a job is taken over by the seal, which flips the previous ledger once); repeated `epg_sync_step` while `nextAction` is `continue` (stage `seal`: ledger, catalog, publish); a readback of the transfer, published pointer and counts; a Predictions check. A cancelled step is safe to repeat; the cursor and the rows agree. Do not apply `0012` or run any step before the approval.
+
+**Earlier note.** The seal must finish in explicit bounded steps; that handoff is a separate delivery, and its production steps (a read-only preflight, a bounded recovery, a readback, one EPG commit, a prediction check) each need their own approval. Evidence: [stalled seal](../evidence/d1-migration/air-355-incident-seal-loading-2026-11-05.md).
 
 ## Commit memory diagnostics (AIR-263)
 
