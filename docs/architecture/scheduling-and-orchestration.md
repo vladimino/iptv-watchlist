@@ -277,3 +277,7 @@ stateDiagram-v2
 ## Timing and authority
 
 The timetable and enabled status belong to the external automation registry. The Worker states only the expected hourly trigger (`:20` Europe/Madrid) for display and keeps it apart from its own discovery wait gate; see [Scheduled Task timing](../reference/scheduled-tasks.md#timing-nominal-trigger-versus-server-gate). Historical records of successful scheduling are not a live status check; production task changes or manual invocations require separate owner approval. A GitHub deployment does not trigger any of these workflows.
+
+## Ratings executor implementation (AIR-347)
+
+The hourly cron calls `RatingsOrchestration.ensure` after the enrichment projector. It is inert unless the D1-owned mode document says `cloudflare`; then it claims the Madrid date by CAS and creates one `RatingsWorkflow` instance. The instance loops `start`/`step` with `sleepUntil` between actions and commits through the etag epoch fence. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md).
