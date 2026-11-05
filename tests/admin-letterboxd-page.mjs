@@ -667,17 +667,17 @@ assert.doesNotMatch(result.innerHTML, /data-archive-identity/);
 run(`archiveLive.committed[0] = {kind:'candidates', state:'succeeded'}; archiveLive.reached = 5;`);
 run('onArchiveNav("5")');
 assert.equal(currentStep(), 5);
-assert.match(result.innerHTML, /Проверить одну идентичность/);
+assert.match(result.innerHTML, /Проверить следующий в общей очереди/);
 assert.match(result.innerHTML, /Страница Letterboxd и TMDB ещё не читались/);
 assert.equal((result.innerHTML.match(/data-archive-identity/g) || []).length, 1);
 
-// 17. Two identity steps stay available, a stop can be resumed, and a reload reads the stored queue.
+// 17. The general step takes the shared queue; after each step the page reads the stored queue instead of guessing.
 const identityAnswers = [
-  {mode: 'identity', writes: true, verified: true, enriched: false, fetched: true, pending: true, stop: null, code: 'Aa1', state: 'verified', phase: 'identity'},
+  {mode: 'identity', writes: true, verified: true, enriched: false, fetched: true, pending: true, stop: null, code: 'Aa1', state: 'verified', phase: 'identity', filmId: 'tmdb_1'},
   {mode: 'identity', writes: false, verified: false, enriched: false, fetched: false, pending: true, stop: {reason: 'forbidden', code: 'Bb1'}, code: 'Bb1', state: 'pending', phase: 'identity'},
   {mode: 'identity', writes: false, verified: false, enriched: false, fetched: false, pending: true, stop: {reason: 'forbidden', code: 'Bb1'}, code: 'Bb1', state: 'pending', phase: 'identity'},
 ];
-let identityPosts = 0;
+let identityPosts = 0, storedStop = null;
 const previousFetch = ctx.fetch;
 ctx.fetch = async (input, init = {}) => {
   const url = String(input);
@@ -685,16 +685,19 @@ ctx.fetch = async (input, init = {}) => {
     const body = JSON.parse(String(init.body));
     const answer = identityAnswers[identityPosts++];
     assert.equal(body.resume, identityPosts >= 3, 'resume follows a stored stop');
+    assert.equal(body.code, undefined, 'the general step names no code');
+    storedStop = answer.stop;
     return new Response(JSON.stringify(answer), {status: 200, headers: {'Content-Type': 'application/json'}});
   }
   if (url.endsWith('/identity-status')) {
-    return new Response(JSON.stringify({mode: 'identity_status', writes: false, present: true, pending: 1, admitting: 0, verified: 1, needsReview: 0, enrichmentPending: 1, stopped: {reason: 'forbidden', code: 'Bb1'}, next: null, phase: 'identity'}), {status: 200, headers: {'Content-Type': 'application/json'}});
+    return new Response(JSON.stringify({mode: 'identity_status', writes: false, present: true, pending: 1, admitting: 0, verified: 1, needsReview: 0, enrichmentPending: 1, stopped: storedStop, next: null, phase: 'identity', retryable: [], requeued: []}), {status: 200, headers: {'Content-Type': 'application/json'}});
   }
   throw new Error('unexpected page request ' + url);
 };
 await run('onArchiveIdentity()');
-assert.match(result.innerHTML, /Один фильм сверен и добавлен по TMDB/);
-assert.match(result.innerHTML, /Проверить одну идентичность/);
+assert.match(result.innerHTML, /Aa1: Film admitted \(tmdb_1\)/);
+assert.match(result.innerHTML, /Проверить следующий в общей очереди/);
+assert.match(result.innerHTML, /берёт следующий код общей очереди, а не выбранный фильм/);
 await run('onArchiveIdentity()');
 assert.match(result.innerHTML, /Проверка остановлена \(forbidden\)/);
 assert.match(result.innerHTML, /Продолжить проверку/);
@@ -708,40 +711,108 @@ assert.equal(currentStep(), 5);
 assert.match(result.innerHTML, /Продолжить проверку/);
 assert.match(result.innerHTML, /ожидают 1/);
 
-// 18. A parser-defect review tells the owner the candidate document changed and offers a two-click retry.
+// 18. AIR-350: retry is chosen per code, confirm does not send the document ETag, outcomes are per code, and a
+// targeted identity step names the code and touches no other.
+const json200 = value => new Response(JSON.stringify(value), {status: 200, headers: {'Content-Type': 'application/json'}});
+const json409 = value => new Response(JSON.stringify(value), {status: 409, headers: {'Content-Type': 'application/json'}});
+const retryRow = (code, name, year) => ({code, name, year, state: 'needs_review', reason: 'shortlink_missing', reasonKind: 'page_incomplete', fingerprint: 'needs_review|shortlink_missing|2026-10-20T08:15:00.000Z|2026-11-01T00:00:00.000Z', observedAt: '2026-10-20T08:15:00.000Z', registeredAt: '2026-11-01T00:00:00.000Z'});
+const reviewStatus = {mode: 'identity_status', writes: false, present: true, pending: 48, admitting: 0, verified: 0, needsReview: 2, enrichmentPending: 0, stopped: null, next: 'Stay', phase: 'identity', documentEtag: 'etag-1', retryable: [retryRow('103U', 'Men in Black 3', 2012), retryRow('10TQ', 'The Green Hornet', 2011)], requeued: []};
 run(`archiveLive.identity = {mode:'identity',writes:true,verified:false,enriched:false,fetched:true,pending:true,stop:null,code:'103U',state:'needs_review',reason:'shortlink_missing',reasons:['shortlink_missing'],reasonKind:'page_incomplete',persisted:'review'};`);
-run(`archiveLive.identityStatus = {mode:'identity_status',writes:false,present:true,pending:48,admitting:0,verified:0,needsReview:2,enrichmentPending:0,stopped:null,next:'Stay',phase:'identity',documentEtag:'etag-1',retryable:[{code:'103U',reason:'shortlink_missing',reasonKind:'page_incomplete'},{code:'10TQ',reason:'shortlink_missing',reasonKind:'page_incomplete'}]};`);
-run(`archiveLive.identityRetry = null; archiveLive.retryKey = null; archiveLive.viewStep = 5; archiveLive.reached = 5;`);
+run(`archiveLive.identityStatus = ${JSON.stringify(reviewStatus)};`);
+run(`archiveLive.identityRetry = null; archiveLive.retryKey = null; archiveLive.retryPick = null; archiveLive.identityByCode = {}; archiveLive.viewStep = 5; archiveLive.reached = 5;`);
 run('archiveRepaint()');
-assert.match(result.innerHTML, /Состояние кандидата записано в R2/);
+assert.match(result.innerHTML, /103U: состояние кандидата записано в R2/);
 assert.match(result.innerHTML, /Повтор разметки доступен для 2 кодов/);
-assert.match(result.innerHTML, /Подтвердить повтор разметки/);
+assert.match(result.innerHTML, /Подтвердить повтор разметки \(2\)/);
+assert.match(result.innerHTML, /data-archive-retry-pick="103U" checked/);
+assert.match(result.innerHTML, /Men in Black 3 \(2012\)/);
 assert.doesNotMatch(result.innerHTML, /Вернуть в очередь/);
-let retryPosts = [];
+// The owner unticks 10TQ: only 103U is confirmed.
+run('onArchiveRetryPick("10TQ", false)');
+assert.match(result.innerHTML, /Подтвердить повтор разметки \(1\)/);
+let retryPosts = [], confirmBodies = [], retryMode = 'lost-confirm';
+let statusAnswer = reviewStatus;
 ctx.fetch = async (input, init = {}) => {
   const url = String(input);
   retryPosts.push(url);
   if (url.endsWith('/identity-retry-confirm')) {
     const body = JSON.parse(String(init.body));
-    assert.deepEqual(body.codes, ['103U', '10TQ']);
-    assert.equal(body.documentEtag, 'etag-1');
+    confirmBodies.push(body);
+    assert.equal(body.documentEtag, undefined, 'the document-wide ETag is not sent');
     assert.equal(body.accepted, true);
-    return new Response(JSON.stringify({mode: 'identity_retry_confirm', writes: false, confirmation: {capability: 'letterboxd_identity_retry', idempotencyKey: body.idempotencyKey}, retryable: 2, preview: {codes: body.codes, requeue: body.codes}}), {status: 200, headers: {'Content-Type': 'application/json'}});
+    for (const code of body.codes) assert.ok(body.expected[code] && body.expected[code].fingerprint.includes('|'), 'each code carries its full expected row');
+    if (retryMode === 'lost-confirm') {retryMode = 'confirm'; throw new TypeError('network down');}
+    if (retryMode === 'changed-confirm') {retryMode = 'confirm'; return json409({error: 'record_changed', refusal: 'record_changed', writes: false, changed: ['103U']});}
+    return json200({mode: 'identity_retry_confirm', writes: false, confirmation: {capability: 'letterboxd_identity_retry', idempotencyKey: body.idempotencyKey}, retryable: body.codes.length, preview: {codes: body.codes, requeue: body.codes}});
   }
   if (url.endsWith('/identity-retry')) {
-    return new Response(JSON.stringify({mode: 'identity_retry', writes: true, replayed: false, state: 'succeeded', outcomes: [{id: '103U', outcome: 'written'}, {id: '10TQ', outcome: 'written'}]}), {status: 200, headers: {'Content-Type': 'application/json'}});
+    if (retryMode === 'lost-retry') {retryMode = 'replay'; return new Response('{"error":"storage_error"}', {status: 500, headers: {'Content-Type': 'application/json'}});}
+    if (retryMode === 'replay') return json200({mode: 'identity_retry', writes: false, replayed: true, state: 'succeeded', receipt: {outcomes: [{id: '103U', outcome: 'written'}]}, outcomes: [{id: '103U', outcome: 'written'}]});
+    return json200({mode: 'identity_retry', writes: true, replayed: false, state: 'succeeded', outcomes: [{id: '103U', outcome: 'written'}]});
   }
-  if (url.endsWith('/identity-status')) {
-    return new Response(JSON.stringify({mode: 'identity_status', writes: false, present: true, pending: 50, admitting: 0, verified: 0, needsReview: 0, enrichmentPending: 0, stopped: null, next: '103U', phase: 'identity', documentEtag: 'etag-2', retryable: []}), {status: 200, headers: {'Content-Type': 'application/json'}});
-  }
+  if (url.endsWith('/identity-status')) return json200(statusAnswer);
+  if (url.endsWith('/identity-step')) throw new Error('no identity step in this part');
   throw new Error('unexpected retry request ' + url);
 };
+// A lost confirm answer keeps the key and the exact request; the next click reads it back.
 await run('onArchiveRetryConfirm()');
+assert.match(error.textContent, /Следующее нажатие отправит тот же ключ/);
+assert.match(result.innerHTML, /Прочитать подтверждение \(тот же ключ\)/);
+assert.doesNotMatch(error.textContent, /Факты в R2|Проверь архив/, 'no ZIP facts text for an identity retry');
+await run('onArchiveRetryConfirm()');
+assert.equal(confirmBodies.length, 2);
+assert.equal(confirmBodies[1].idempotencyKey, confirmBodies[0].idempotencyKey, 'a lost confirm is read back with the same key');
+assert.deepEqual(confirmBodies[1].codes, ['103U']);
+assert.match(result.innerHTML, /Подтверждение выдано для: 103U\. В очередь ещё ничего не возвращено/);
 assert.match(result.innerHTML, /Вернуть в очередь/);
+// A lost execute answer is unknown: same confirmation, no new key, no «ничего не записано».
+retryMode = 'lost-retry';
 await run('onArchiveRetry()');
-assert.ok(retryPosts.some(url => url.endsWith('/identity-retry')));
-assert.ok(retryPosts.some(url => url.endsWith('/identity-status')));
-assert.match(result.innerHTML, /Повтор записал выбранные коды обратно в pending/);
-assert.match(result.innerHTML, /ожидают 50/);
+assert.match(error.textContent, /Исход неизвестен/);
+assert.doesNotMatch(error.textContent, /Ничего не записано|Ничего не вернул/);
+assert.match(result.innerHTML, /Узнать исход \(тот же ключ\)/);
+assert.doesNotMatch(result.innerHTML, /Подтвердить повтор разметки/, 'no new confirmation while the outcome is unknown');
+statusAnswer = {...reviewStatus, needsReview: 1, pending: 49, retryable: [retryRow('10TQ', 'The Green Hornet', 2011)], requeued: [{code: '103U', name: 'Men in Black 3', year: 2012, state: 'pending', reason: null, retryOf: 'shortlink_missing', retriedAt: '2026-11-05T09:00:00.000Z', tmdb: null, filmId: null, enrichment: null}]};
+await run('onArchiveRetry()');
+assert.match(result.innerHTML, /Повтор уже был выполнен раньше; показана сохранённая квитанция/);
+assert.match(result.innerHTML, /<code>103U<\/code> — возвращён в очередь/);
+assert.match(result.innerHTML, /Возвращённые в очередь коды/);
+assert.match(result.innerHTML, /103U · Men in Black 3 \(2012\)<\/strong> — в очереди, идентичность ещё не проверена/);
+assert.match(result.innerHTML, /data-archive-identity-code="103U"/);
+assert.ok(retryPosts.filter(url => url.endsWith('/identity-status')).length >= 1, 'the queue is read back from the server');
+
+// A changed row on confirm is per code, re-reads the state and asks for a new conscious confirmation.
+retryMode = 'changed-confirm';
+await run('onArchiveRetryConfirm()');
+assert.match(error.textContent, /Состояние выбранных кодов изменилось/);
+assert.doesNotMatch(error.textContent, /Факты в R2|Проверь архив ещё раз/);
+assert.match(result.innerHTML, /Изменились: 103U/);
+assert.match(result.innerHTML, /Подтвердить повтор разметки \(1\)/, 'a new confirmation is offered, not run');
+const lastKey = confirmBodies[confirmBodies.length - 1].idempotencyKey;
+retryMode = 'confirm';
+await run('onArchiveRetryConfirm()');
+assert.notEqual(confirmBodies[confirmBodies.length - 1].idempotencyKey, lastKey, 'a definite refusal frees the key for a new confirmation');
+
+// Targeted identity step: the request names 103U; the answer and the re-read state are shown for 103U.
+let stepBodies = [];
+ctx.fetch = async (input, init = {}) => {
+  const url = String(input);
+  if (url.endsWith('/identity-step')) {
+    const body = JSON.parse(String(init.body));
+    stepBodies.push(body);
+    if (body.code === '10TQ') return json409({error: 'not_eligible', refusal: 'not_eligible'});
+    return json200({mode: 'identity', writes: true, verified: true, enriched: false, fetched: true, pending: true, stop: null, code: '103U', state: 'verified', phase: 'identity', persisted: 'admission', filmId: 'tmdb_41117', tmdb: '41117'});
+  }
+  if (url.endsWith('/identity-status')) return json200({...statusAnswer, requeued: [{...statusAnswer.requeued[0], state: 'verified', tmdb: '41117', filmId: 'tmdb_41117', enrichment: null}]});
+  throw new Error('unexpected step request ' + url);
+};
+await run('onArchiveIdentityCode("103U")');
+assert.equal(stepBodies.length, 1);
+assert.equal(stepBodies[0].code, '103U', 'the step names the chosen code');
+assert.match(result.innerHTML, /103U: Film admitted \(tmdb_41117\)/);
+assert.match(result.innerHTML, /Film admitted \(tmdb_41117\), enrichment pending/);
+assert.match(result.innerHTML, /Дозаполнить метаданные 103U/);
+await run('onArchiveIdentityCode("10TQ")');
+assert.equal(stepBodies.length, 1, 'a code that is not in the requeued list is not posted');
 ctx.fetch = previousFetch;
 console.log('admin-letterboxd-page: ok');

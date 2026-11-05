@@ -565,26 +565,40 @@ const LetterboxdRatedCandidates = (() => {
   }
 
   function statusOf(doc) {
-    if (!doc) return {present: false, pending: 0, admitting: 0, verified: 0, needsReview: 0, enrichmentPending: 0, stopped: null, next: null, phase: null, retryable: []};
+    if (!doc) return {present: false, pending: 0, admitting: 0, verified: 0, needsReview: 0, enrichmentPending: 0, stopped: null, next: null, phase: null, retryable: [], requeued: []};
     const view = LetterboxdRatedAdmission.resumePending(doc.checkpoint, doc.candidates);
     const counts = {pending: 0, admitting: 0, verified: 0, needs_review: 0};
     let enrichmentPending = 0;
     const retryable = [];
+    // AIR-350: codes an owner retry returned to the queue, with their current state, so the page can offer one
+    // addressed identity step per code and show what that code became. Read only; the stored row is the source.
+    const requeued = [];
     for (const item of Object.values(doc.candidates || {})) {
       if (!item) continue;
       if (Object.prototype.hasOwnProperty.call(counts, item.state)) counts[item.state]++;
       if (item.state === 'verified' && item.enrichment !== 'done') enrichmentPending++;
+      if (item.retryOf && item.code) {
+        requeued.push({
+          code: item.code, name: item.name || null, year: Number.isInteger(item.year) ? item.year : null,
+          state: item.state || null, reason: item.reason || null, retryOf: item.retryOf, retriedAt: item.retriedAt || null,
+          tmdb: item.state === 'verified' && item.tmdb ? String(item.tmdb) : null,
+          filmId: item.state === 'verified' && item.tmdb ? 'tmdb_' + item.tmdb : null,
+          enrichment: item.state === 'verified' ? (item.enrichment || null) : null,
+        });
+      }
       if (item.state === 'needs_review' && LetterboxdIdentity.isRetryableReason(item.reason)) {
         retryable.push({
-          code: item.code, state: item.state, reason: item.reason,
+          code: item.code, name: item.name || null, year: Number.isInteger(item.year) ? item.year : null, state: item.state, reason: item.reason,
           reasonKind: item.reasonKind || LetterboxdIdentity.reasonKind(item.reason),
           fingerprint: LetterboxdRatedAdmission.retryFingerprint(item),
           observedAt: item.observedAt || null, registeredAt: item.registeredAt || null,
         });
       }
     }
-    retryable.sort((a, b) => a.code < b.code ? -1 : a.code > b.code ? 1 : 0);
-    return {present: true, pending: counts.pending, admitting: counts.admitting, verified: counts.verified, needsReview: counts.needs_review, enrichmentPending, stopped: view.stopped, next: view.next, phase: view.phase, retryable};
+    const byCode = (a, b) => a.code < b.code ? -1 : a.code > b.code ? 1 : 0;
+    retryable.sort(byCode);
+    requeued.sort(byCode);
+    return {present: true, pending: counts.pending, admitting: counts.admitting, verified: counts.verified, needsReview: counts.needs_review, enrichmentPending, stopped: view.stopped, next: view.next, phase: view.phase, retryable, requeued};
   }
 
   return {CANDIDATES, ADMISSIONS, registerCandidates, rollbackCandidates, retryCandidates, identityStep, readDoc, statusOf, PAGE_BYTES, DETAIL_BYTES};

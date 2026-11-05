@@ -175,7 +175,7 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   resetCache();
 
   const receiptHtml = view.archiveReceiptHtml(seen.body, {committed: {[chunk.chunk]: {kind: 'candidates', state: 'succeeded'}}});
-  assert.match(receiptHtml, /Проверить одну идентичность/);
+  assert.match(receiptHtml, /Проверить следующий в общей очереди/);
   assert.match(receiptHtml, /ещё не читались/);
 
   net.handler = async url => {
@@ -771,6 +771,172 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
 
   const stale = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: reviewSha, codes: ['Rv1'], expected: driftExpected, documentEtag: 'not-the-etag', idempotencyKey: 'rated-retry-key000003', accepted: true}});
   assert.equal(stale.status, 409, JSON.stringify(stale.body));
+}
+
+// 7. AIR-350: the document ETag is not a blocker. Another candidate's write between status and confirm, or between confirm
+// and execute, does not make the chosen codes stale. A chosen code that changed is refused per code and never overwritten.
+{
+  seed([]);
+  const bytes = exportArchive([
+    {code: '103U', name: 'Men in Black 3', year: 2012, rating: 4},
+    {code: '10TQ', name: 'The Green Hornet', year: 2011, rating: 3.5},
+    {code: 'Nb1', name: 'Neighbour Alpha', year: 2001, rating: 4},
+    {code: 'Nb2', name: 'Neighbour Beta', year: 2002, rating: 3},
+  ]);
+  const seen = await preview(bytes);
+  const chunk = seen.body.batches.chunks.find(item => item.kind === 'candidates');
+  const issued = await confirm(bytes, seen.body, chunk.chunk, 'rated-key-air350001');
+  assert.equal((await commit(bytes, issued.body.confirmation)).status, 200);
+  const sha = seen.body.archive.sha256;
+  const docKey = 'letterboxd/imports/' + sha + '/rated-candidates.json';
+  const review = read(docKey);
+  for (const code of ['103U', '10TQ']) Object.assign(review.candidates[code], {state: 'needs_review', reason: 'shortlink_missing', reasons: ['shortlink_missing'], reasonKind: 'page_incomplete'});
+  put(docKey, review);
+  net.calls = [];
+  net.handler = async url => {throw new Error('no outbound request on status, confirm or retry: ' + url);};
+  const retryKeyOf = key => 'admin/actions/letterboxd_identity_retry/v1/' + key + '.json';
+
+  const status = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+  assert.equal(status.status, 200);
+  assert.deepEqual(status.body.retryable.map(row => row.code), ['103U', '10TQ']);
+  assert.equal(status.body.retryable[0].name, 'Men in Black 3');
+  assert.equal(status.body.retryable[0].year, 2012);
+  assert.deepEqual(status.body.requeued, []);
+  const expected = Object.fromEntries(status.body.retryable.map(row => [row.code, expectRow(row)]));
+
+  // An unrelated candidate is rewritten after status: the stored ETag moves, the chosen rows do not.
+  const neighbour = read(docKey);
+  neighbour.candidates.Nb1.state = 'needs_review';
+  neighbour.candidates.Nb1.reason = 'tmdb_tv';
+  put(docKey, neighbour);
+  assert.notEqual(records.get(docKey).etag, status.body.documentEtag);
+  const confirmed = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: sha, codes: ['103U', '10TQ'], expected, documentEtag: status.body.documentEtag, idempotencyKey: 'rated-retry-air350-01', accepted: true}});
+  assert.equal(confirmed.status, 200, 'a neighbour write is not record_changed: ' + JSON.stringify(confirmed.body));
+  assert.equal(confirmed.body.writes, false);
+  assert.equal(read(docKey).candidates['103U'].state, 'needs_review', 'confirm requeues nothing');
+
+  // Another unrelated write between confirm and execute.
+  const between = read(docKey);
+  between.candidates.Nb2.rating = 5;
+  put(docKey, between);
+  const retried = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: confirmed.body.confirmation}});
+  assert.equal(retried.status, 200, JSON.stringify(retried.body));
+  assert.equal(retried.body.writes, true);
+  assert.deepEqual(retried.body.outcomes, [{id: '103U', outcome: 'written'}, {id: '10TQ', outcome: 'written'}]);
+  const after = read(docKey);
+  assert.equal(after.candidates['103U'].state, 'pending');
+  assert.equal(after.candidates['10TQ'].state, 'pending');
+  assert.equal(after.candidates.Nb1.reason, 'tmdb_tv', 'the neighbour row is kept');
+  assert.equal(after.candidates.Nb2.rating, 5, 'the neighbour write between confirm and execute is kept');
+  assert.equal(net.calls.length, 0, 'status, confirm and retry fetch nothing');
+
+  const requeued = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+  assert.deepEqual(requeued.body.retryable, []);
+  assert.deepEqual(requeued.body.requeued.map(row => [row.code, row.state, row.retryOf]), [['103U', 'pending', 'shortlink_missing'], ['10TQ', 'pending', 'shortlink_missing']]);
+  assert.equal(requeued.body.requeued[0].filmId, null, 'a requeued code is not a Film');
+
+  // The same confirmation again is a replay of the stored receipt with the same per-code outcomes.
+  const replay = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: confirmed.body.confirmation}});
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.writes, false);
+  assert.deepEqual(replay.body.outcomes, retried.body.outcomes);
+
+  // Reset both rows to needs_review for the changed-row cases.
+  const reset = read(docKey);
+  for (const code of ['103U', '10TQ']) Object.assign(reset.candidates[code], {state: 'needs_review', reason: 'shortlink_missing', retryOf: null});
+  put(docKey, reset);
+  const again = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+  const fresh = Object.fromEntries(again.body.retryable.map(row => [row.code, expectRow(row)]));
+
+  // Same code, new observedAt between status and confirm: refused per code, no action record.
+  const observed = read(docKey);
+  observed.candidates['103U'].observedAt = '2026-11-04T00:00:00.000Z';
+  put(docKey, observed);
+  const changedConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: sha, codes: ['103U', '10TQ'], expected: fresh, idempotencyKey: 'rated-retry-air350-02', accepted: true}});
+  assert.equal(changedConfirm.status, 409);
+  assert.equal(changedConfirm.body.error, 'record_changed');
+  assert.deepEqual(changedConfirm.body.changed, ['103U'], 'the answer names the changed code only');
+  assert.equal(changedConfirm.body.writes, false);
+  assert.equal(records.has(retryKeyOf('rated-retry-air350-02')), false, 'a refused confirm stores no action');
+  observed.candidates['103U'].observedAt = again.body.retryable[0].observedAt;
+  put(docKey, observed);
+
+  // Same code, new registeredAt between confirm and execute: refused before the action is marked running.
+  const ok = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: sha, codes: ['103U', '10TQ'], expected: fresh, idempotencyKey: 'rated-retry-air350-03', accepted: true}});
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  const registered = read(docKey);
+  registered.candidates['10TQ'].registeredAt = '2026-11-04T12:00:00.000Z';
+  put(docKey, registered);
+  const changedExec = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: ok.body.confirmation}});
+  assert.equal(changedExec.status, 409, JSON.stringify(changedExec.body));
+  assert.deepEqual(changedExec.body.changed, ['10TQ']);
+  assert.deepEqual(changedExec.body.outcomes, [{id: '103U', outcome: 'not_attempted'}, {id: '10TQ', outcome: 'skipped_changed'}]);
+  assert.equal(read(docKey).candidates['103U'].state, 'needs_review', 'an unchanged code of a refused confirmation is not requeued alone');
+  assert.equal(read(docKey).candidates['10TQ'].state, 'needs_review', 'the changed row is not overwritten');
+  assert.equal(JSON.parse(records.get(retryKeyOf('rated-retry-air350-03')).text).state, 'approved', 'a refusal before running leaves no running action');
+
+  // A change that lands inside the run (after the running mark, before the CAS) is skipped per code and the receipt is stored.
+  const now = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+  const current = Object.fromEntries(now.body.retryable.map(row => [row.code, expectRow(row)]));
+  const inside = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: sha, codes: ['103U', '10TQ'], expected: current, idempotencyKey: 'rated-retry-air350-04', accepted: true}});
+  assert.equal(inside.status, 200);
+  failPut = key => {
+    if (key !== retryKeyOf('rated-retry-air350-04')) return false;
+    const stored = records.get(key);
+    if (stored && JSON.parse(stored.text).state === 'approved') {
+      const live = JSON.parse(records.get(docKey).text);
+      live.candidates['103U'].observedAt = '2026-11-05T00:00:00.000Z';
+      records.set(docKey, {text: JSON.stringify(live), etag: 'raced-inside'});
+    }
+    return false;
+  };
+  const partial = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: inside.body.confirmation}});
+  failPut = null;
+  assert.equal(partial.status, 200, JSON.stringify(partial.body));
+  assert.equal(partial.body.state, 'partial');
+  assert.deepEqual(partial.body.outcomes, [{id: '103U', outcome: 'skipped_changed'}, {id: '10TQ', outcome: 'written'}]);
+  assert.equal(read(docKey).candidates['103U'].state, 'needs_review', 'the raced row is kept');
+  assert.equal(read(docKey).candidates['10TQ'].state, 'pending');
+  const stored = JSON.parse(records.get(retryKeyOf('rated-retry-air350-04')).text);
+  assert.equal(stored.state, 'partial');
+  assert.ok(stored.receipt, 'a partial run stores its receipt');
+
+  // A verified, admitting or removed chosen code is refused on confirm as changed.
+  for (const state of ['verified', 'admitting', 'removed']) {
+    const doc = read(docKey);
+    const before = doc.candidates['103U'];
+    doc.candidates['103U'] = {...before, state, reason: null};
+    put(docKey, doc);
+    const refused = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: sha, codes: ['103U'], expected: {'103U': expectRow({...before})}, idempotencyKey: 'rated-retry-air350-s' + state.slice(0, 3), accepted: true}});
+    assert.equal(refused.status, 409, state);
+    assert.deepEqual(refused.body.changed, ['103U'], state);
+    doc.candidates['103U'] = before;
+    put(docKey, doc);
+  }
+
+  // A targeted identity step for 10TQ fetches only 10TQ and touches no other code.
+  env.TMDB_API_READ_ACCESS_TOKEN = 'synthetic-token';
+  net.calls = [];
+  net.handler = async url => {
+    const address = String(url);
+    if (address === 'https://boxd.it/10TQ') return http(301, '', {location: 'https://letterboxd.com/film/the-green-hornet/'});
+    if (address === 'https://letterboxd.com/film/the-green-hornet/') return http(200, page({code: '10TQ', title: 'The Green Hornet', year: 2011, tmdb: '40805', slug: 'the-green-hornet', shortlink: false}));
+    if (address.startsWith('https://api.themoviedb.org/3/movie/40805')) return http(200, JSON.stringify({id: 40805, media_type: 'movie', title: 'The Green Hornet', original_title: 'The Green Hornet', release_date: '2011-01-14'}));
+    throw new Error(address);
+  };
+  const beforeStep = read(docKey);
+  const step = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true, code: '10TQ'}});
+  assert.equal(step.body.verified, true, JSON.stringify(step.body));
+  assert.equal(step.body.code, '10TQ');
+  assert.ok(net.calls.every(url => !/103U|Nb1|Nb2/.test(url)), 'no other code is fetched');
+  const afterStep = read(docKey);
+  for (const code of ['103U', 'Nb1', 'Nb2']) assert.deepEqual(afterStep.candidates[code], beforeStep.candidates[code], code + ' is untouched');
+  const admitted = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+  const row = admitted.body.requeued.find(item => item.code === '10TQ');
+  assert.equal(row.state, 'verified');
+  assert.equal(row.filmId, 'tmdb_40805');
+  const notQueued = await send('/api/admin/letterboxd-archive/identity-step', {json: {archiveSha256: sha, accepted: true, code: '103U'}});
+  assert.equal(notQueued.status, 409, 'a needs_review code is not stepped by name');
 }
 
 console.log('Rated archive candidates: preview is local, a commit keeps the code, a stop waits, a verified movie is not a watchlist fact, D1 wins only while open');

@@ -1,7 +1,7 @@
 // The archive preview page: one check per submit, the answer held in this tab's memory only. Leaving or resetting the page
 // drops it; nothing is written to storage, the URL or history. A write that has already left the browser is not undone by
 // Cancel, Escape, a new file or a failed response: the tab keeps that command and will not say the write never started.
-const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null, identityRetry: null, retryKey: null};
+const archiveLive = {seq: 0, controller: null, pending: null, answer: null, issued: {}, keys: {}, committed: {}, rollbackIssued: {}, rollbackKeys: {}, rollbackResult: {}, confirmUnknown: {}, rollbackConfirmUnknown: {}, bound: null, stale: false, inflight: null, viewStep: 1, reached: 1, navAway: false, identity: null, identityStatus: null, identityRetry: null, retryKey: null, retryPick: null, identityByCode: {}, identityTarget: null};
 
 function archiveNode(selector) {return document.querySelector(selector);}
 
@@ -143,6 +143,9 @@ function archiveClearMemory() {
   archiveLive.identityStatus = null;
   archiveLive.identityRetry = null;
   archiveLive.retryKey = null;
+  archiveLive.retryPick = null;
+  archiveLive.identityByCode = {};
+  archiveLive.identityTarget = null;
   archiveLive.bound = null;
   archiveLive.stale = false;
   archiveLive.inflight = null;
@@ -257,6 +260,7 @@ function archiveLostText(kind) {
   if (kind === 'confirm') return 'Ответ на подтверждение не получен. Согласие могло сохраниться. Факты этим шагом не записываются. Повтор сам не запускается.';
   if (kind === 'rollback-confirm') return 'Ответ на подтверждение отката не получен. Повтор сам не запускается.';
   if (kind === 'rollback') return 'Ответ на откат не получен или не прочитан. Откат мог начаться. Повтор сам не запускается.';
+  if (kind === 'status') return 'Сохранённое состояние не прочитано. Чтение состояния ничего не пишет; прочитай ещё раз.';
   return 'Ответ на запись не получен или не прочитан. Исход неизвестен: сервер мог уже изменить факты. Повтор сам не запускается.';
 }
 
@@ -380,11 +384,14 @@ function onArchiveCommit(chunk) {
   return pending;
 }
 
-function onArchiveStatus() {
+function onArchiveStatus(options = {}) {
   if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
   const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
   if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  const banner = archiveNode('#archive-error');
+  const kept = options.keepError && banner && !banner.hidden ? banner.textContent : null;
   const run = archiveBeginAction('status', 0);
+  if (kept) {banner.hidden = false; banner.textContent = kept;}
   const pending = postArchiveStatus({archiveSha256: sha}, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
     archiveLive.inflight = null;
@@ -394,56 +401,122 @@ function onArchiveStatus() {
     archiveLive.viewStep = 5;
     archiveLive.reached = Math.max(archiveLive.reached || 1, 5);
     archiveShow('ready', archiveLive.answer);
+    // A refusal that triggered this read stays on screen: the re-read state is the context for it, not a replacement.
+    if (kept) {const again = archiveNode('#archive-error'); again.hidden = false; again.textContent = kept;}
     return result;
   });
   archiveLive.pending = pending;
   return pending;
 }
 
+// The general step takes the next code of the shared queue, which is not necessarily a film the owner chose. The page then
+// reads the stored queue again instead of guessing counts from one answer.
 function onArchiveIdentity() {
   if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
   const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
   if (!sha) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
   archiveLive.viewStep = 5;
+  archiveLive.identityTarget = null;
   const resume = !!((archiveLive.identityStatus && archiveLive.identityStatus.stopped) || (archiveLive.identity && archiveLive.identity.stop));
   const run = archiveBeginAction('identity', 0);
   const pending = postArchiveIdentity({archiveSha256: sha, accepted: true, resume}, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
-    if (result.mode !== 'ready') return archiveApplyFailed(result);
+    if (result.mode !== 'ready') return archiveIdentityFailed('identity', result);
     const answer = result.answer || {};
     const stop = answer.stop && (answer.stop.reason || answer.stop);
-    archiveLive.identity = {verified: answer.verified === true, enriched: answer.enriched === true, writes: answer.writes === true, persisted: answer.persisted || 'none', stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null, reasons: Array.isArray(answer.reasons) ? answer.reasons : [], pending: answer.pending !== false, phase: answer.phase || null, code: answer.code || null};
-    const status = archiveLive.identityStatus || {present: true, pending: 0, admitting: 0, enrichmentPending: 0, stopped: null};
-    status.present = true;
-    status.stopped = answer.stop || null;
-    if (answer.pending === false) {status.pending = 0; status.admitting = 0; status.enrichmentPending = 0;}
-    archiveLive.identityStatus = status;
+    archiveLive.identity = {verified: answer.verified === true, enriched: answer.enriched === true, writes: answer.writes === true, persisted: answer.persisted || 'none', stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null, reasons: Array.isArray(answer.reasons) ? answer.reasons : [], pending: answer.pending !== false, phase: answer.phase || null, code: answer.code || null, filmId: answer.filmId || null};
     archiveLive.inflight = null;
     archiveLive.controller = null;
-    archiveShow('ready', archiveLive.answer);
-    return result;
+    return onArchiveStatus();
   });
   archiveLive.pending = pending;
   return pending;
 }
 
+// AIR-350: the identity retry is its own flow, not a ZIP facts write. Every answer is shown per code. A lost answer keeps
+// the same idempotency key and the same request, so the next click reads the stored action back instead of starting a
+// new one. A definite refusal (the chosen row changed) drops the key, re-reads the stored state and asks again.
+function archiveRetryRows() {
+  const status = archiveLive.identityStatus;
+  return status && Array.isArray(status.retryable) ? status.retryable : [];
+}
+
+function archiveRetryPicked() {
+  const rows = archiveRetryRows();
+  const pick = archiveLive.retryPick || {};
+  return rows.filter(row => pick[row.code] !== false).slice(0, 8);
+}
+
+function onArchiveRetryPick(code, checked) {
+  const retry = archiveLive.identityRetry;
+  if (archiveLive.controller || (retry && (retry.phase === 'confirm_unknown' || retry.phase === 'confirmed' || retry.phase === 'unknown'))) return null;
+  if (!archiveLive.retryPick) archiveLive.retryPick = {};
+  const current = archiveLive.retryPick[code] !== false;
+  archiveLive.retryPick[code] = typeof checked === 'boolean' ? checked : !current;
+  archiveRepaint();
+  return null;
+}
+
+function archiveIdentityFailed(kind, result) {
+  archiveSetWait(false, false);
+  archiveNode('#archive-submit').disabled = false;
+  archiveLive.controller = null;
+  archiveLive.inflight = null;
+  const lost = archiveTransportLost(result);
+  const error = result && result.error || 'aborted';
+  const detail = result && result.detail || {};
+  const retry = archiveLive.identityRetry || {};
+  let reread = false;
+  if (kind === 'retry-confirm') {
+    if (lost) archiveLive.identityRetry = {...retry, phase: 'confirm_unknown'};
+    else {
+      archiveLive.identityRetry = {phase: error === 'record_changed' ? 'changed' : 'refused', error, changed: detail.changed || [], outcomes: [], codes: retry.codes || []};
+      archiveLive.retryKey = null;
+      reread = error === 'record_changed';
+    }
+  } else if (kind === 'retry') {
+    if (lost || error === 'in_progress') archiveLive.identityRetry = {...retry, phase: 'unknown', error};
+    else {
+      archiveLive.identityRetry = {phase: error === 'record_changed' ? 'changed' : 'refused', error, changed: detail.changed || [], outcomes: detail.outcomes || [], codes: retry.codes || []};
+      archiveLive.retryKey = null;
+      reread = true;
+    }
+  } else if (kind === 'identity') {
+    const code = archiveLive.identityTarget || null;
+    if (code) archiveLive.identityByCode[code] = lost ? {unknown: true} : {refused: error};
+    archiveLive.identity = lost ? {unknown: true, code, pending: true} : {refused: error, code, pending: true};
+    reread = !lost;
+  }
+  const banner = archiveNode('#archive-error');
+  banner.hidden = false;
+  banner.textContent = archiveIdentityErrorText(kind, error, lost);
+  if (banner.focus) banner.focus();
+  if (archiveLive.answer) archiveRepaint();
+  return reread ? onArchiveStatus({keepError: true}) : result;
+}
+
 function onArchiveRetryConfirm() {
   if (!archiveLive.answer || archiveLive.controller) return Promise.resolve(null);
   const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
-  const retryable = archiveLive.identityStatus && Array.isArray(archiveLive.identityStatus.retryable) ? archiveLive.identityStatus.retryable : [];
-  if (!sha || !retryable.length) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
-  if (!archiveLive.retryKey) archiveLive.retryKey = archiveIdempotencyKey();
-  const expected = {};
-  for (const row of retryable) expected[row.code] = {state: row.state || 'needs_review', reason: row.reason, fingerprint: row.fingerprint, observedAt: row.observedAt || null, registeredAt: row.registeredAt || null};
+  const prior = archiveLive.identityRetry;
+  let request;
+  if (prior && prior.phase === 'confirm_unknown' && prior.request && archiveLive.retryKey) request = prior.request;
+  else {
+    const picked = archiveRetryPicked();
+    if (!sha || !picked.length) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+    archiveLive.retryKey = archiveIdempotencyKey();
+    const expected = {};
+    for (const row of picked) expected[row.code] = {state: row.state || 'needs_review', reason: row.reason, fingerprint: row.fingerprint, observedAt: row.observedAt || null, registeredAt: row.registeredAt || null};
+    request = {archiveSha256: sha, codes: picked.map(row => row.code), expected, idempotencyKey: archiveLive.retryKey, accepted: true};
+  }
+  archiveLive.identityRetry = {phase: 'confirming', codes: request.codes, request};
   const run = archiveBeginAction('retry-confirm', 0);
-  const pending = postArchiveRetryConfirm({
-    archiveSha256: sha, codes: retryable.map(row => row.code), expected,
-    documentEtag: archiveLive.identityStatus.documentEtag || null,
-    idempotencyKey: archiveLive.retryKey, accepted: true,
-  }, {signal: run.signal}).then(result => {
+  archiveRepaint();
+  const pending = postArchiveRetryConfirm(request, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
-    if (result.mode !== 'ready') return archiveApplyFailed(result);
-    archiveLive.identityRetry = {confirmation: result.answer.confirmation, done: false, writes: false};
+    if (result.mode !== 'ready') return archiveIdentityFailed('retry-confirm', result);
+    const preview = result.answer.preview || {};
+    archiveLive.identityRetry = {phase: 'confirmed', codes: request.codes, request, confirmation: result.answer.confirmation, requeue: Array.isArray(preview.requeue) ? preview.requeue : []};
     archiveLive.inflight = null;
     archiveLive.controller = null;
     archiveShow('ready', archiveLive.answer);
@@ -454,12 +527,47 @@ function onArchiveRetryConfirm() {
 }
 
 function onArchiveRetry() {
-  if (!archiveLive.identityRetry || !archiveLive.identityRetry.confirmation || archiveLive.controller) return Promise.resolve(null);
+  const retry = archiveLive.identityRetry;
+  if (!retry || !retry.confirmation || archiveLive.controller) return Promise.resolve(null);
+  archiveLive.identityRetry = {...retry, phase: 'running'};
   const run = archiveBeginAction('retry', 0);
-  const pending = postArchiveRetry(archiveLive.identityRetry.confirmation, {signal: run.signal}).then(result => {
+  archiveRepaint();
+  const pending = postArchiveRetry(retry.confirmation, {signal: run.signal}).then(result => {
     if (run.seq !== archiveLive.seq) return result;
-    if (result.mode !== 'ready') return archiveApplyFailed(result);
-    archiveLive.identityRetry = {confirmation: archiveLive.identityRetry.confirmation, done: true, writes: result.answer.writes === true, state: result.answer.state || null};
+    if (result.mode !== 'ready') return archiveIdentityFailed('retry', result);
+    const answer = result.answer;
+    const outcomes = Array.isArray(answer.outcomes) ? answer.outcomes : (answer.receipt && Array.isArray(answer.receipt.outcomes) ? answer.receipt.outcomes : []);
+    archiveLive.identityRetry = {phase: 'done', codes: retry.codes, outcomes, writes: answer.writes === true, replayed: answer.replayed === true, state: answer.state || null};
+    archiveLive.retryKey = null;
+    archiveLive.retryPick = null;
+    archiveLive.inflight = null;
+    archiveLive.controller = null;
+    return onArchiveStatus();
+  });
+  archiveLive.pending = pending;
+  return pending;
+}
+
+// One identity step for the code the owner named. The server never walks to another pending code on this request.
+function onArchiveIdentityCode(code) {
+  if (!archiveLive.answer || archiveLive.controller || typeof code !== 'string' || !/^[A-Za-z0-9]{1,16}$/.test(code)) return Promise.resolve(null);
+  const sha = archiveLive.answer.archive && archiveLive.answer.archive.sha256;
+  const rows = archiveLive.identityStatus && Array.isArray(archiveLive.identityStatus.requeued) ? archiveLive.identityStatus.requeued : [];
+  if (!sha || !rows.some(row => row.code === code)) return archiveApplyFailed({mode: 'error', error: 'invalid_request', detail: null});
+  archiveLive.viewStep = 5;
+  archiveLive.identityTarget = code;
+  const resume = !!(archiveLive.identityStatus && archiveLive.identityStatus.stopped);
+  const run = archiveBeginAction('identity', 0);
+  archiveLive.identityByCode[code] = {running: true};
+  archiveRepaint();
+  const pending = postArchiveIdentity({archiveSha256: sha, accepted: true, resume, code}, {signal: run.signal}).then(result => {
+    if (run.seq !== archiveLive.seq) return result;
+    if (result.mode !== 'ready') return archiveIdentityFailed('identity', result);
+    const answer = result.answer || {};
+    const stop = answer.stop && (answer.stop.reason || answer.stop);
+    const summary = {verified: answer.verified === true, enriched: answer.enriched === true, writes: answer.writes === true, persisted: answer.persisted || 'none', stop: typeof stop === 'string' ? stop : null, state: answer.state || null, reason: answer.reason || null, filmId: answer.filmId || null, phase: answer.phase || null, code: answer.code || code};
+    archiveLive.identityByCode[code] = summary;
+    archiveLive.identity = {...summary, reasons: Array.isArray(answer.reasons) ? answer.reasons : [], pending: answer.pending !== false, targeted: true};
     archiveLive.inflight = null;
     archiveLive.controller = null;
     return onArchiveStatus();
@@ -539,6 +647,8 @@ function onArchiveResultClick(event) {
   while (node && node !== archiveNode('#archive-result')) {
     if (node.getAttribute) {
       if (node.hasAttribute && node.hasAttribute('data-archive-nav')) {action = 'data-archive-nav'; chunk = node.getAttribute('data-archive-nav'); break;}
+      if (node.hasAttribute && node.hasAttribute('data-archive-identity-code')) {action = 'data-archive-identity-code'; chunk = node.getAttribute('data-archive-identity-code'); break;}
+      if (node.hasAttribute && node.hasAttribute('data-archive-retry-pick')) {action = 'data-archive-retry-pick'; chunk = node.getAttribute('data-archive-retry-pick'); break;}
       for (const name of ['data-archive-confirm', 'data-archive-commit', 'data-archive-rollback-confirm', 'data-archive-rollback', 'data-archive-abandon', 'data-archive-identity', 'data-archive-status', 'data-archive-retry-confirm', 'data-archive-retry']) {
         if (node.hasAttribute && node.hasAttribute(name)) {action = name; chunk = Number(node.getAttribute(name)); break;}
       }
@@ -547,6 +657,8 @@ function onArchiveResultClick(event) {
     node = node.parentElement || node.parentNode;
   }
   if (action === 'data-archive-nav') return onArchiveNav(chunk);
+  if (action === 'data-archive-identity-code') return onArchiveIdentityCode(chunk);
+  if (action === 'data-archive-retry-pick') return onArchiveRetryPick(chunk, typeof node.checked === 'boolean' ? node.checked : undefined);
   if (action === 'data-archive-identity') return onArchiveIdentity();
   if (action === 'data-archive-status') return onArchiveStatus();
   if (action === 'data-archive-retry-confirm') return onArchiveRetryConfirm();

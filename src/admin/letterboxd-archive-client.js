@@ -43,6 +43,17 @@ function archiveIdempotencyKey(){
  return text;
 }
 
+// A refusal may name the chosen codes (AIR-350). Only short codes and the closed outcome words are kept.
+const ARCHIVE_CODE=/^[A-Za-z0-9]{1,16}$/;
+const ARCHIVE_OUTCOME_WORDS=['written','already_applied','skipped_changed','failed','unknown','not_attempted'];
+function archiveCodes(list){
+ return Array.isArray(list)?list.filter(code=>typeof code==='string'&&ARCHIVE_CODE.test(code)).slice(0,8):[];
+}
+function archiveOutcomes(list){
+ if(!Array.isArray(list))return [];
+ return list.filter(entry=>entry&&typeof entry.id==='string'&&ARCHIVE_CODE.test(entry.id)&&ARCHIVE_OUTCOME_WORDS.includes(entry.outcome)).slice(0,8).map(entry=>({id:entry.id,outcome:entry.outcome}));
+}
+
 // One same-origin POST. `expect` is the mode the answer must have. A write route also sends the action header; the
 // Access assertion is added by the edge, never by this page.
 async function archiveRequest(url,body,options,expect){
@@ -55,7 +66,7 @@ async function archiveRequest(url,body,options,expect){
  try{payload=await response.json();}catch{payload=null;}
  if(!response.ok){
   const error=payload&&typeof payload.error==='string'?payload.error:'http_'+response.status;
-  return {mode:'error',error,detail:payload&&typeof payload==='object'?{code:typeof payload.code==='string'?payload.code:null,file:typeof payload.file==='string'?payload.file:null,record:Number.isInteger(payload.record)?payload.record:null,refusal:typeof payload.refusal==='string'?payload.refusal:null}:null,answer:null};
+  return {mode:'error',error,detail:payload&&typeof payload==='object'?{code:typeof payload.code==='string'?payload.code:null,file:typeof payload.file==='string'?payload.file:null,record:Number.isInteger(payload.record)?payload.record:null,refusal:typeof payload.refusal==='string'?payload.refusal:null,changed:archiveCodes(payload.changed),outcomes:archiveOutcomes(payload.outcomes)}:null,answer:null};
  }
  if(!payload||payload.mode!==expect)return {mode:'error',error:'unexpected_answer',detail:null,answer:null};
  if(expect==='preview'&&payload.writes!==false)return {mode:'error',error:'unexpected_answer',detail:null,answer:null};
