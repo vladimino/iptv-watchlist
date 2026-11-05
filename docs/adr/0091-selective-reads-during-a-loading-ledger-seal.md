@@ -1,9 +1,9 @@
 # ADR 0091: Three independent reads stay open while a ledger seal is loading
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-05  
 **Recorded at:** 2026-11-05  
-**Approval source:** not yet decided; the owner decides `Accepted` or `Declined` before this record merges ([workflow](../process/agent-workflow.md))  
+**Approval source:** explicit owner decision `Accepted` in ChatGPT IPTV Migration conversation on 2026-11-05 (Europe/Madrid), after technical PASS review of PR #381 ([review](https://github.com/vladimino/iptv-watchlist/pull/381#pullrequestreview-5789756011)) and [exact-head CI](https://github.com/vladimino/iptv-watchlist/actions/runs/42080386070)  
 **Related work:** [AIR-355](https://trello.com/c/HbhJNQ7V), [ADR 0085](0085-d1-authoritative-discovery.md), [dated evidence](../evidence/d1-migration/air-355-incident-seal-loading-2026-11-05.md)  
 **Supersedes:** None. It narrows one consequence of ADR 0085 and leaves the rest of that record in force.  
 **Superseded by:** None
