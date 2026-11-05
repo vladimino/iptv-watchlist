@@ -66,7 +66,7 @@ async function archiveRequest(url,body,options,expect){
  try{payload=await response.json();}catch{payload=null;}
  if(!response.ok){
   const error=payload&&typeof payload.error==='string'?payload.error:'http_'+response.status;
-  return {mode:'error',error,detail:payload&&typeof payload==='object'?{code:typeof payload.code==='string'?payload.code:null,file:typeof payload.file==='string'?payload.file:null,record:Number.isInteger(payload.record)?payload.record:null,refusal:typeof payload.refusal==='string'?payload.refusal:null,changed:archiveCodes(payload.changed),outcomes:archiveOutcomes(payload.outcomes)}:null,answer:null};
+  return {mode:'error',error,status:response.status,detail:payload&&typeof payload==='object'?{code:typeof payload.code==='string'?payload.code:null,file:typeof payload.file==='string'?payload.file:null,record:Number.isInteger(payload.record)?payload.record:null,refusal:typeof payload.refusal==='string'?payload.refusal:null,changed:archiveCodes(payload.changed),outcomes:archiveOutcomes(payload.outcomes)}:null,answer:null};
  }
  if(!payload||payload.mode!==expect)return {mode:'error',error:'unexpected_answer',detail:null,answer:null};
  if(expect==='preview'&&payload.writes!==false)return {mode:'error',error:'unexpected_answer',detail:null,answer:null};

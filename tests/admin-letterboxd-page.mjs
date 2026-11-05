@@ -793,6 +793,76 @@ retryMode = 'confirm';
 await run('onArchiveRetryConfirm()');
 assert.notEqual(confirmBodies[confirmBodies.length - 1].idempotencyKey, lastKey, 'a definite refusal frees the key for a new confirmation');
 
+// AIR-350 review: any 5xx after dispatch is an unknown outcome, whatever its body says. The confirmation and the key are kept,
+// no new confirmation is offered, and the same-key read-back recovers the stored receipt.
+for (const [label, make] of [
+  ['storage_error', () => new Response('{"error":"storage_error"}', {status: 500, headers: {'Content-Type': 'application/json'}})],
+  ['5xx with another error word', () => new Response('{"error":"invalid_request"}', {status: 500, headers: {'Content-Type': 'application/json'}})],
+  ['5xx with an unreadable body', () => new Response('<html>boom</html>', {status: 502, headers: {'Content-Type': 'text/html'}})],
+]) {
+  const keyBefore = run('archiveLive.retryKey');
+  assert.ok(keyBefore, label + ': a confirmed retry holds its key');
+  let sawKey = [];
+  ctx.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith('/identity-retry')) {
+      sawKey.push(JSON.parse(String(init.body)).confirmation.idempotencyKey);
+      return sawKey.length === 1 ? make() : json200({mode: 'identity_retry', writes: false, replayed: true, state: 'succeeded', receipt: {outcomes: [{id: '103U', outcome: 'written'}]}, outcomes: [{id: '103U', outcome: 'written'}]});
+    }
+    if (url.endsWith('/identity-status')) return json200(statusAnswer);
+    throw new Error('unexpected request ' + url);
+  };
+  await run('onArchiveRetry()');
+  assert.equal(run('archiveLive.retryKey'), keyBefore, label + ': the key is kept');
+  assert.equal(run('archiveLive.identityRetry.phase'), 'unknown', label);
+  assert.match(error.textContent, /Исход неизвестен/, label);
+  assert.match(result.innerHTML, /Узнать исход \(тот же ключ\)/, label);
+  assert.doesNotMatch(result.innerHTML, /Подтвердить повтор разметки/, label + ': no new action while unknown');
+  await run('onArchiveRetry()');
+  assert.deepEqual(sawKey, [keyBefore, keyBefore], label + ': the read-back uses the same confirmation key');
+  assert.equal(run('archiveLive.identityRetry.phase'), 'done', label);
+  // Back to a confirmed retry for the next case.
+  ctx.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith('/identity-retry-confirm')) {
+      const body = JSON.parse(String(init.body));
+      return json200({mode: 'identity_retry_confirm', writes: false, confirmation: {capability: 'letterboxd_identity_retry', idempotencyKey: body.idempotencyKey}, retryable: body.codes.length, preview: {codes: body.codes, requeue: body.codes}});
+    }
+    if (url.endsWith('/identity-status')) return json200({...reviewStatus, retryable: [retryRow('103U', 'Men in Black 3', 2012)], requeued: []});
+    throw new Error('unexpected request ' + url);
+  };
+  await run('onArchiveStatus()');
+  await run('onArchiveRetryConfirm()');
+  assert.equal(run('archiveLive.identityRetry.phase'), 'confirmed', label + ': re-confirmed for the next case');
+}
+// A confirm whose answer is a 5xx may have been stored: the key and exact request are kept for a same-key read-back.
+{
+  const posts = [];
+  ctx.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.endsWith('/identity-retry-confirm')) {
+      posts.push(JSON.parse(String(init.body)));
+      return posts.length === 1 ? new Response('{"error":"storage_error"}', {status: 500, headers: {'Content-Type': 'application/json'}}) : json200({mode: 'identity_retry_confirm', writes: false, replayed: true, confirmation: {capability: 'letterboxd_identity_retry', idempotencyKey: posts[0].idempotencyKey}, retryable: 1, preview: {codes: posts[0].codes, requeue: posts[0].codes}});
+    }
+    if (url.endsWith('/identity-status')) return json200({...reviewStatus, retryable: [retryRow('103U', 'Men in Black 3', 2012)], requeued: []});
+    throw new Error('unexpected request ' + url);
+  };
+  run('archiveLive.identityRetry = null; archiveLive.retryKey = null; archiveLive.retryPick = null');
+  await run('onArchiveStatus()');
+  await run('onArchiveRetryConfirm()');
+  assert.equal(run('archiveLive.identityRetry.phase'), 'confirm_unknown', 'a 5xx confirm is unknown, not refused');
+  assert.ok(run('archiveLive.retryKey'), 'the confirm key is kept');
+  await run('onArchiveRetryConfirm()');
+  assert.equal(posts[1].idempotencyKey, posts[0].idempotencyKey, 'the read-back uses the same key');
+  assert.equal(run('archiveLive.identityRetry.phase'), 'confirmed');
+}
+// Restore the queue state the targeted-step part below reads.
+ctx.fetch = async input => {
+  if (String(input).endsWith('/identity-status')) return json200(statusAnswer);
+  throw new Error('unexpected request ' + input);
+};
+await run('onArchiveStatus()');
+
 // Targeted identity step: the request names 103U; the answer and the re-read state are shown for 103U.
 let stepBodies = [];
 ctx.fetch = async (input, init = {}) => {

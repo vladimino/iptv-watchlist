@@ -901,6 +901,67 @@ vm.runInContext(fs.readFileSync('src/admin/letterboxd-archive-view.js', 'utf8'),
   assert.equal(stored.state, 'partial');
   assert.ok(stored.receipt, 'a partial run stores its receipt');
 
+  // AIR-350 review 1: a confirmation persisted but its answer lost. The chosen row then changes. The same request with the same
+  // key recovers the stored confirmation; another request under that key is a conflict; a new key sees record_changed.
+  {
+    const lostStatus = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+    const lostExpected = {'103U': expectRow(lostStatus.body.retryable.find(row => row.code === '103U'))};
+    const lostRequest = {archiveSha256: sha, codes: ['103U'], expected: lostExpected, idempotencyKey: 'rated-retry-air350-L1', accepted: true};
+    const first = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: lostRequest});
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const before = read(docKey);
+    const mutated = read(docKey);
+    mutated.candidates['103U'].observedAt = '2026-11-05T11:00:00.000Z';
+    put(docKey, mutated);
+    const recovered = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: lostRequest});
+    assert.equal(recovered.status, 200, 'a lost confirm is recovered even though the row changed: ' + JSON.stringify(recovered.body));
+    assert.equal(recovered.body.replayed, true);
+    assert.deepEqual(recovered.body.confirmation, first.body.confirmation, 'the stored confirmation is returned, not a new one');
+    assert.deepEqual(recovered.body.preview, first.body.preview);
+    assert.equal(recovered.body.writes, false);
+    const foreignExpected = {'103U': {...lostExpected['103U'], fingerprint: lostExpected['103U'].fingerprint + 'x|y'}};
+    const foreign = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {...lostRequest, expected: foreignExpected}});
+    assert.equal(foreign.status, 409);
+    assert.equal(foreign.body.error, 'idempotency_conflict', 'another request under a stored key is a conflict');
+    const otherCodes = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {...lostRequest, codes: ['103U', '10TQ'], expected: {...lostExpected, '10TQ': lostExpected['103U']}}});
+    assert.equal(otherCodes.body.error, 'idempotency_conflict', 'other codes under a stored key are a conflict');
+    const freshKey = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {...lostRequest, idempotencyKey: 'rated-retry-air350-L2'}});
+    assert.equal(freshKey.status, 409);
+    assert.equal(freshKey.body.error, 'record_changed', 'a new key still sees the changed row');
+    assert.equal(records.has(retryKeyOf('rated-retry-air350-L2')), false);
+    const executed = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: recovered.body.confirmation}});
+    assert.equal(executed.status, 409, 'the recovered confirmation still refuses a changed row at execute');
+    assert.deepEqual(executed.body.changed, ['103U']);
+    assert.equal(read(docKey).candidates['103U'].state, 'needs_review');
+    put(docKey, before);
+  }
+
+  // AIR-350 review 2: the candidate CAS succeeds, then the receipt write fails (storage_error 500). The action stays running;
+  // the same key recovers the outcome and no second action is created.
+  {
+    const faultStatus = await send('/api/admin/letterboxd-archive/identity-status', {json: {archiveSha256: sha}});
+    const faultExpected = {'103U': expectRow(faultStatus.body.retryable.find(row => row.code === '103U'))};
+    const faultKey = 'rated-retry-air350-F1';
+    const faultConfirm = await send('/api/admin/letterboxd-archive/identity-retry-confirm', {json: {archiveSha256: sha, codes: ['103U'], expected: faultExpected, idempotencyKey: faultKey, accepted: true}});
+    assert.equal(faultConfirm.status, 200, JSON.stringify(faultConfirm.body));
+    failPut = key => key === retryKeyOf(faultKey) && JSON.parse(records.get(key).text).state === 'running';
+    const faulted = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: faultConfirm.body.confirmation}});
+    failPut = null;
+    assert.equal(faulted.status, 500, JSON.stringify(faulted.body));
+    assert.equal(faulted.body.error, 'storage_error');
+    assert.equal(read(docKey).candidates['103U'].state, 'pending', 'the candidate CAS had already landed');
+    assert.equal(JSON.parse(records.get(retryKeyOf(faultKey)).text).state, 'running', 'no receipt yet: the action stays running');
+    const recoveredRun = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: faultConfirm.body.confirmation}});
+    assert.ok([200, 409].includes(recoveredRun.status), JSON.stringify(recoveredRun.body));
+    assert.ok(Array.isArray(recoveredRun.body.outcomes), 'the same key answers with per-code outcomes');
+    const storedFault = JSON.parse(records.get(retryKeyOf(faultKey)).text);
+    assert.ok(storedFault.receipt, 'the same-key read-back stores the receipt');
+    assert.equal(read(docKey).candidates['103U'].state, 'pending');
+    const again = await send('/api/admin/letterboxd-archive/identity-retry', {json: {confirmation: faultConfirm.body.confirmation}});
+    assert.equal(again.body.replayed, true, 'afterwards the key replays the stored receipt');
+    put(docKey, read(docKey).candidates ? (() => {const doc = read(docKey); Object.assign(doc.candidates['103U'], {state: 'needs_review', reason: 'shortlink_missing', retryOf: null}); return doc;})() : null);
+  }
+
   // A verified, admitting or removed chosen code is refused on confirm as changed.
   for (const state of ['verified', 'admitting', 'removed']) {
     const doc = read(docKey);

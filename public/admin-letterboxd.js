@@ -267,6 +267,8 @@ function archiveLostText(kind) {
 function archiveTransportLost(result) {
   if (!result || result.mode === 'aborted') return true;
   if (result.mode !== 'error') return false;
+  // Any 5xx is an ambiguous outcome whatever its body says: the server may have written before it failed.
+  if (Number(result.status) >= 500) return true;
   const error = String(result.error || '');
   return error === 'network' || error === 'unexpected_answer' || error === 'storage_unavailable' || error === 'storage_error' || /^http_5\d\d$/.test(error);
 }
