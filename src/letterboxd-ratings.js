@@ -23,12 +23,18 @@ const LetterboxdRatings=(()=>{
  const iso=ms=>new Date(ms).toISOString();
  const clone=value=>JSON.parse(JSON.stringify(value));
  class LeaseLost extends Error{constructor(){super('Ratings step lease lost');}}
+ // AIR-347 / ADR 0089: the executor's mode and control records, and every write of an env that carries a hard epoch fence, are
+ // D1-only. A held or lost authority is never read as permission to write R2 (it would split the authoritative state).
+ const D1_ONLY=new Set(['letterboxd/ratings/executor.json','letterboxd/ratings/orchestration.json']);
+ const unavailable=()=>Object.assign(new Error('Ratings D1 authority is not open'),{code:'ratings_domain_unavailable'});
  async function read(env,key){
-  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,value:owned.value};}
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.readOwned(env,key);if(owned.owned)return {object:owned.etag?{etag:owned.etag}:null,value:owned.value};if(env?.ratingsFence?.hard)throw unavailable();}
   const object=await env.BUCKET.get(key);return {object,value:object?await object.json():null};
  }
  const put=async(env,key,object,value)=>{
-  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.putOwned(env,key,object?.etag??null,value);if(owned.owned)return owned.saved;}
+  const strict=D1_ONLY.has(key)||env?.ratingsFence?.hard===true;
+  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){const owned=await RatingsD1.putOwned(env,key,object?.etag??null,value);if(owned.owned)return owned.saved;if(strict)throw unavailable();}
+  else if(strict&&D1_ONLY.has(key))throw unavailable();
   return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  };
 
@@ -341,14 +347,20 @@ const LetterboxdRatings=(()=>{
  // AIR-347: once the owner has closed admission or switched the domain to Cloudflare, the external writer path answers
  // `switch_in_progress` or `external_writer_fenced` and writes nothing (ADR 0089 decision 2). Reads and migrate are not gated.
  async function fencedReply(env,action,body){
-  const reason=typeof RatingsOrchestration==='undefined'?null:await RatingsOrchestration.externalGate(env,action);
-  if(!reason)return null;
-  return action==='start'?{runId:null,created:false,nextAction:'stop',reason}:{runId:body.runId,state:null,phase:null,nextAction:'stop',reason,nextCatchUpAt:null,step:null,summary:null};
+  const gate=typeof RatingsOrchestration==='undefined'?{reason:null,etag:null}:await RatingsOrchestration.externalGate(env,action,body);
+  if(!gate.reason)return {fenceEnv:gate.fence?{...env,ratingsFence:gate.fence}:env};
+  const reason=gate.reason;
+  if(action==='migrate')return {reply:{mode:body.mode,refused:reason,nextAction:'stop',reason}};
+  return {reply:action==='start'?{runId:null,created:false,nextAction:'stop',reason}:{runId:body.runId,state:null,phase:null,nextAction:'stop',reason,nextCatchUpAt:null,step:null,summary:null}};
  }
+ // The external writer's commits carry a soft epoch fence: the mode document's etag as read at admission. In D1 every commit
+ // asserts it in its own batch, so an operation admitted before `close_admission` cannot commit after it, and the verified
+ // drain needs no knowledge of operations that have not leased yet.
  async function handle(env,action,body){
   const error=validate(action,body);if(error)return {status:400,body:{error}};
-  const fenced=await fencedReply(env,action,body);if(fenced)return {status:200,body:fenced};
-  return {status:200,body:await (action==='start'?start(env,body):action==='step'?step(env,body):migrate(env,body))};
+  const gated=await fencedReply(env,action,body);if(gated.reply)return {status:200,body:gated.reply};
+  const fe=gated.fenceEnv;
+  return {status:200,body:await (action==='start'?start(fe,body):action==='step'?step(fe,body):migrate(fe,body))};
  }
  return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

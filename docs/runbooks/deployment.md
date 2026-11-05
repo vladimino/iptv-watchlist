@@ -95,4 +95,4 @@ This is the operational Cloudflare runbook. Historical Sites exports and imports
 
 ## Ratings executor switch (AIR-347)
 
-Every step needs a separate owner approval: (1) `close_admission` with target `cloudflare` (epoch+1, both writers refused); (2) verify the drain, then `complete`; (3) disable the external Ratings Task. Rollback is the same protocol with target `external`. Code deploy and Workflow resource creation start nothing. `clear_quarantine` runs no step.
+Every step needs a separate owner approval: (1) `close_admission` with target `cloudflare` (epoch+1, both writers refused); (2) verify the drain, then `complete`; (3) disable the external Ratings Task. Rollback is the same protocol with target `external`. The switch needs D1 ratings authority open; with a held or non-`d1` marker it is refused and writes nothing. `ratings_storage_migrate apply` is refused while the mode is not `external`. Code deploy and Workflow resource creation start nothing. `clear_quarantine` runs no step.

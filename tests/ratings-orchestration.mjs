@@ -100,7 +100,20 @@ function setup({start=T0,pages=1}={}){
  const {clock,FakeDate,crypto}=makeClock(start),net=makeNetwork(),bucket=makeBucket();
  const ctx=loadContext({net,clock,FakeDate,crypto});
  const authority={ready:true,error:false};
- ctx.RatingsD1=new Proxy({},{get:(_,key)=>key==='ratingsMutableKey'?()=>false:key==='ratingsGate'?async()=>({ready:authority.ready,generation:1,error:authority.error}):async()=>({owned:false,handled:false,changed:0})});
+ // An owned-document stand-in over the bucket's records: D1-only keys are served only while the authority is ready, writes
+ // honour the epoch fence like the real batch, and none of it is logged as an R2 write.
+ const ownedKeys=new Set([MODE,CONTROL]);
+ const ownedStub={ratingsMutableKey:key=>ownedKeys.has(key),ratingsGate:async()=>({ready:authority.ready,generation:1,error:authority.error}),
+  async readOwned(env,key){if(!authority.ready)return {owned:false};const object=await bucket.get(key);return {owned:true,value:object?await object.json():null,etag:object?.etag??null};},
+  chain:Promise.resolve(),
+  putOwned(env,key,previous,value){const run=this.chain.then(()=>this.commit(env,key,previous,value));this.chain=run.catch(()=>{});return run;},
+  async commit(env,key,previous,value){
+   if(!authority.ready)return {owned:false};
+   if(env?.ratingsFence){const mode=await bucket.get(env.ratingsFence.key);if((mode?.etag??null)!==env.ratingsFence.etag)return {owned:true,saved:null};}
+   const current=await bucket.get(key);if((current?.etag??null)!==(previous??null))return {owned:true,saved:null};
+   bucket.set(key,value);return {owned:true,saved:{etag:(await bucket.get(key)).etag}};
+  }};
+ ctx.RatingsD1=new Proxy(ownedStub,{get:(target,name)=>name in target?target[name].bind?target[name].bind(target):target[name]:async()=>({owned:false,handled:false,changed:0})});
  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+fs.readFileSync('src/ratings-orchestration.js','utf8'),ctx);
  const workflow=fakeWorkflow();
  const env=baseEnv(bucket,{...SEPARATE,RATINGS_WORKFLOW:workflow});
@@ -439,6 +452,94 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   assert.equal(net.fetches.length,0);
   // The old instance cannot write after the switch completes either: a later action is refused at admission.
   eq(plain(await RO.act(env,payload)).reason,'switch_in_progress');
+ }
+ // 16. The review blockers (AIR-347 PR #375). A real D1 stand-in, the real RatingsD1, the real ratings pipeline.
+ const d1World=async()=>{
+  const db=load(),{clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket();
+  const ctx=loadContext({net,clock,FakeDate,crypto,extra:{}});
+  ctx.RatingsD1=RatingsD1;
+  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+fs.readFileSync('src/ratings-orchestration.js','utf8'),ctx);
+  const RO=g(ctx,'RatingsOrchestration'),R=g(ctx,'LetterboxdRatings'),workflow=fakeWorkflow();
+  const env=baseEnv(bucket,{...SEPARATE,RATINGS_WORKFLOW:workflow,DB:db,RATINGS_DB_REQUIRED:'on'});
+  migrated(bucket);
+  // The migrated queue and cursor are D1 documents once the ratings authority is d1.
+  for(const [key,value] of Object.entries(bucket.snapshot()))if(RatingsD1.ratingsMutableKey(key)){assert.ok((await RatingsD1.putOwned({DB:db},key,null,value)).saved,key);}
+  net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-24','99001')],false));
+  const hook={onBatch:null},origBatch=db.batch.bind(db);
+  db.batch=async statements=>{if(hook.onBatch&&!hook.running){hook.running=true;try{await hook.onBatch(statements);}finally{hook.running=false;}}return origBatch(statements);};
+  const mode=async()=>(await RatingsD1.readOwned({DB:db},MODE)).value;
+  return {db,clock,net,bucket,RO,R,workflow,env,hook,mode,owner:{DB:db}};
+ };
+ const touchesRun=statements=>statements.some(item=>JSON.stringify(item).includes(RUN));
+ // 16a. Blocker 1: an external start admitted before close_admission cannot commit after the verified drain.
+ {
+  const w=await d1World();
+  w.hook.onBatch=async statements=>{
+   if(!touchesRun(statements))return;w.hook.onBatch=null;
+   assert.equal((await w.RO.switchMode(w.owner,{action:'close_admission',target:'cloudflare'},w.clock.now)).closed,true);
+   assert.equal((await w.RO.switchMode(w.owner,{action:'complete'},w.clock.now)).completed,true,'nothing is leased, so the drain verifies');
+  };
+  const attempt=await w.R.handle(w.env,'start',{trigger:'scheduled'}).then(reply=>({reply}),error=>({error}));
+  assert.ok(attempt.error||attempt.reply.body.created!==true,'the delayed start did not create a run');
+  assert.equal((await RatingsD1.readOwned(w.owner,RUN)).value,null,'the old start wrote no run record after the drain');
+  assert.equal(w.bucket.writes().length,0,'and nothing went to R2');
+  eq([(await w.mode()).mode,(await w.mode()).epoch],['cloudflare',1]);
+  // The same holds for a step admitted before the switch: it commits nothing once the epoch moved.
+  const w2=await d1World();
+  const first=plain(await w2.R.handle(w2.env,'start',{trigger:'scheduled'}));assert.equal(first.body.created,true);
+  const runBefore=(await RatingsD1.readOwned(w2.owner,RUN)).value;
+  w2.hook.onBatch=async statements=>{
+   if(!touchesRun(statements))return;w2.hook.onBatch=null;
+   await w2.RO.switchMode(w2.owner,{action:'close_admission',target:'cloudflare'},w2.clock.now);
+   await w2.RO.switchMode(w2.owner,{action:'complete'},w2.clock.now);
+  };
+  const stepped=await w2.R.handle(w2.env,'step',{runId:first.body.runId}).then(reply=>({reply}),error=>({error}));
+  assert.ok(stepped.error||stepped.reply.status===200,'the stale step ended without throwing out of the route contract');
+  eq((await RatingsD1.readOwned(w2.owner,RUN)).value.lease,runBefore.lease,'a stale external step leaves the run record as it was');
+  // Reverse rollback: after the switch back, the old executor instance is refused and writes nothing; the external path is admitted again.
+  const w3=await d1World();
+  await w3.RO.switchMode(w3.owner,{action:'close_admission',target:'cloudflare'},w3.clock.now);await w3.RO.switchMode(w3.owner,{action:'complete'},w3.clock.now);
+  const claimed=plain(await w3.RO.ensure(w3.env,{now:w3.clock.now}));assert.equal(claimed.started,true);
+  w3.workflow.instances.get(claimed.instanceId).status='terminated';
+  await w3.RO.switchMode(w3.env,{action:'close_admission',target:'external'},w3.clock.now);await w3.RO.switchMode(w3.env,{action:'complete'},w3.clock.now+20*MIN);
+  eq((await w3.mode()).mode,'external');
+  const stale=plain(await w3.RO.act(w3.env,{runKey:claimed.runKey,series:claimed.series,epoch:1,id:claimed.instanceId,now:()=>w3.clock.now,random:()=>0.5}));
+  assert.equal(stale.kind,'stop');assert.equal(w3.net.fetches.length,0);assert.equal((await RatingsD1.readOwned(w3.owner,RUN)).value,null);
+  assert.equal(plain(await w3.R.handle(w3.env,'start',{trigger:'manual'})).body.created,true,'after the rollback the external path writes again');
+ }
+ // 16b. Blocker 2: a held or lost D1 authority is never permission to write R2.
+ {
+  const w=await d1World();
+  eq((await w.RO.switchMode(w.owner,{action:'close_admission',target:'cloudflare'},w.clock.now)).closed,true);
+  assert.equal((await w.RO.switchMode(w.owner,{action:'complete'},w.clock.now)).completed,true);
+  const claimed=plain(await w.RO.ensure(w.env,{now:w.clock.now}));assert.equal(claimed.started,true);
+  w.hook.onBatch=async statements=>{if(!touchesRun(statements))return;w.hook.onBatch=null;w.db.sql("UPDATE ratings_domain_authority SET mode='r2'");};
+  const result=plain(await w.RO.act(w.env,{runKey:claimed.runKey,series:claimed.series,epoch:1,id:claimed.instanceId,now:()=>w.clock.now,random:()=>0.5}));
+  assert.notEqual(result.kind,'done');
+  assert.equal(w.bucket.writes().length,0,'authority flipped between admission and write: zero R2 writes');
+  for(const key of [MODE,CONTROL,RUN])assert.equal(w.bucket.value(key),null,key+' was not written to R2');
+  // The owner's switch with a held or non-d1 marker is refused and writes nothing.
+  const h=await d1World();h.db.sql("UPDATE ratings_domain_authority SET mode='r2'");
+  const refused=plain(await h.RO.handle(h.env,{action:'close_admission',target:'cloudflare'}));
+  assert.ok(refused.body.refused,'the switch is refused');assert.equal(h.bucket.writes().length,0);assert.equal(h.bucket.value(MODE),null);
+  const held=await d1World();held.db.sql("UPDATE ratings_domain_authority SET cutover='held'");
+  assert.ok(plain(await held.RO.handle(held.env,{action:'close_admission',target:'cloudflare'})).body.refused);assert.equal(held.bucket.writes().length,0);assert.equal(held.bucket.value(MODE),null);
+ }
+ // 16c. Blocker 3: ratings_storage_migrate apply is gated like start and step; dry_run stays a read. Both entry paths use `handle`.
+ {
+  const w=setup();
+  assert.equal(plain(await w.R.handle(w.env,'migrate',{mode:'dry_run'})).body.refused,undefined);
+  await w.RO.switchMode(w.env,{action:'close_admission',target:'cloudflare'},w.clock.now);
+  const before=JSON.stringify(w.bucket.snapshot());
+  const applying=plain(await w.R.handle(w.env,'migrate',{mode:'apply'}));eq([applying.body.refused,applying.body.nextAction],['switch_in_progress','stop']);
+  assert.equal(plain(await w.R.handle(w.env,'migrate',{mode:'dry_run'})).body.refused,undefined,'dry_run stays open');
+  await w.RO.switchMode(w.env,{action:'complete'},w.clock.now);
+  assert.equal(plain(await w.R.handle(w.env,'migrate',{mode:'apply'})).body.refused,'external_writer_fenced');
+  assert.equal(JSON.stringify(w.bucket.snapshot()).includes('migratedAt'),JSON.stringify(JSON.parse(before)).includes('migratedAt'));
+  const worker=fs.readFileSync('src/worker.js','utf8'),mcp=fs.readFileSync('src/mcp.js','utf8');
+  assert.match(worker,/\/api\/letterboxd\/ratings\/migrate'\]\.includes\(url\.pathname\)/);assert.match(worker,/LetterboxdRatings\.handle\(env,/);
+  assert.match(mcp,/LetterboxdRatings\.handle\(env,params\.name==='ratings_sync_start'\?'start':params\.name==='ratings_sync_step'\?'step':'migrate'/);
+  assert.doesNotMatch(worker+mcp,/LetterboxdRatings\.migrate\(/,'no entry path calls migrate around the gate');
  }
 }
 

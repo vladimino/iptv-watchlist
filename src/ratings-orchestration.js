@@ -33,7 +33,7 @@ const RatingsOrchestration=(()=>{
   const ok=typeof value==='object'&&!Array.isArray(value)&&value.schemaVersion===1&&value.budget&&Number.isInteger(value.budget.consecutive)&&Number.isInteger(value.budget.total);
   return {record:ok?value:null,etag:object?.etag??null,stored:true,malformed:!ok};
  }
- const fencedEnv=(env,etag)=>({...env,ratingsFence:{key:MODE_KEY,etag}});
+ const fencedEnv=(env,etag)=>({...env,ratingsFence:{key:MODE_KEY,etag,hard:true}});
  async function authorityState(env){
   if(typeof RatingsD1==='undefined')return {ready:false,error:false};
   const gate=await RatingsD1.ratingsGate(env);
@@ -148,18 +148,25 @@ const RatingsOrchestration=(()=>{
  }
  async function handle(env,body){
   const error=validate(body);if(error)return {status:400,body:{error}};
-  if(body.action==='clear_quarantine')return {status:200,body:await clearQuarantine(env)};
-  return {status:200,body:await switchMode(env,body)};
+  try{
+   if(body.action==='clear_quarantine')return {status:200,body:await clearQuarantine(env)};
+   return {status:200,body:await switchMode(env,body)};
+  }catch(error){
+   // The mode and control records are D1-only: an unavailable or held authority refuses the action and writes nothing to R2.
+   return {status:200,body:{action:body.action,refused:classifyThrown(error)}};
+  }
  }
  // The external path's gate for ratings_sync_start and ratings_sync_step: `switch_in_progress` while admission is closed,
  // `external_writer_fenced` once the switch to Cloudflare has completed, whatever an old Task prompt sends. Reads stay open.
- async function externalGate(env,action){
-  if(action!=='start'&&action!=='step')return null;
-  const mode=await readMode(env);
-  if(mode.malformed)return 'evidence_unreadable';
-  if(mode.record.mode==='switching')return 'switch_in_progress';
-  if(mode.record.mode==='cloudflare')return 'external_writer_fenced';
-  return null;
+ async function externalGate(env,action,body={}){
+  const writes=action==='start'||action==='step'||(action==='migrate'&&body?.mode==='apply');
+  if(!writes)return {reason:null,fence:null};
+  let mode;
+  try{mode=await readMode(env);}catch{return {reason:'evidence_unreadable',fence:null};}
+  if(mode.malformed)return {reason:'evidence_unreadable',fence:null};
+  if(mode.record.mode==='switching')return {reason:'switch_in_progress',fence:null};
+  if(mode.record.mode==='cloudflare')return {reason:'external_writer_fenced',fence:null};
+  return {reason:null,fence:{key:MODE_KEY,etag:mode.etag??null}};
  }
 
  // ---- admission and one executor action ---------------------------------------------------------------------
@@ -265,7 +272,13 @@ const RatingsOrchestration=(()=>{
    if(outcome.finished){next.doneAt=iso(now);next.phase='done';}else next.phase=outcome.wake?'waiting':'running';
    result=outcome.finished?{kind:'stop',reason:'complete'}:outcome.wake?{kind:'sleep',until:outcome.wake,reason:outcome.note||'wait'}:{kind:'continue',reason:null};
   }
-  if(!await writeControl(env,adm,next)){
+  let committed;
+  try{committed=await writeControl(env,adm,next);}
+  catch(error){
+   // The control record is D1-only. An unavailable or held authority records nothing (the next action re-reads) and sleeps.
+   return {kind:'sleep',until:now+policy().cooldownMs(1,ctx.random),reason:classifyThrown(error)};
+  }
+  if(!committed){
    // Lost compare-and-swap or a commit refused by the epoch fence: read the mode before anything else.
    const again=await admit(env,{runKey,series,epoch,id});
    if(!again.ok&&(again.reason==='epoch_mismatch'||again.reason==='switch_in_progress'||again.reason==='not_cloudflare'))return {kind:'stop',reason:again.reason};

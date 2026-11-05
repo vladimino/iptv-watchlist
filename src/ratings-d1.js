@@ -185,8 +185,9 @@ function writeStatements(key,text,etag,now,previousEtag,mode){
 function epochFence(env){
  const fence=env?.ratingsFence;
  if(!fence)return [];
- if(typeof fence.key!=='string'||typeof fence.etag!=='string'||!fence.etag)throw failed('ratings_domain_fence');
- return [['UPDATE ratings_document SET etag=etag WHERE key=? AND part=0 AND etag=?',[fence.key,fence.etag]],[FENCE_SQL,[]]];
+ if(typeof fence.key!=='string'||!(fence.etag===null||(typeof fence.etag==='string'&&fence.etag)))throw failed('ratings_domain_fence');
+ // `etag: null` asserts that the mode document does not exist yet (the default external mode). ok=0 trips the CHECK (ok >= 1).
+ return [["UPDATE ratings_domain_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM ratings_document WHERE key=? AND part=0 AND (? IS NULL OR etag=?))=? THEN 1 ELSE 0 END WHERE id=1",[fence.key,fence.etag,fence.etag,fence.etag===null?0:1]]];
 }
 
 export async function putOwned(env,key,previousEtag,value,{mode='d1',extra=[]}={}){
