@@ -16,7 +16,7 @@ The documentation is organized by **purpose**, not by the former flat file layou
 
 ## Common starting points
 
-- **New contributor:** [README](../README.md), [AGENTS.md](../AGENTS.md), [CONTRIBUTING.md](../CONTRIBUTING.md) and [agent workflow](process/agent-workflow.md).
+- **New contributor:** [README](../README.md), [AGENTS.md](../AGENTS.md), [CONTRIBUTING.md](../CONTRIBUTING.md) , [authorization](process/authorization-and-escalation.md) and [agent workflow](process/agent-workflow.md).
 - **Runtime feature flags:** [flag contract and dated production evidence](reference/feature-flags.md); live bindings must be verified separately.
 - **Runtime / deployment:** [system context](architecture/system-context.md), [deployment and rollback diagram](architecture/deployment-and-rollback.md), [deployment runbook](runbooks/deployment.md).
 - **EPG / discovery:** [EPG publication](architecture/epg-and-availability.md), [discovery and resolution](architecture/discovery-and-resolution.md), [scored-resolution contract](reference/domain/scored-resolution.md), [candidate discovery](reference/domain/candidate-discovery.md).
@@ -29,8 +29,6 @@ The documentation is organized by **purpose**, not by the former flat file layou
 
 ## How to interpret the documentation
 
-GitHub `main` is the canonical **code** source. The currently deployed Cloudflare Worker `iptv` uses R2 bucket `iptv` as authoritative production storage. D1 schema and offline repositories do **not** imply production D1 cutover; the historical ChatGPT Site is a reserve, not a concurrent writer. External ChatGPT Scheduled Tasks orchestrate EPG/predictions, rather than Worker Cron. A successful GitHub deployment does not execute these jobs or establish production acceptance.
+GitHub main is canonical **code**; production data authority is **per domain**. D1 owns several mutable domains and R2 remains authoritative for other sources. Verify current authority markers and [persistence contracts](architecture/persistence-and-migration.md), not historical all-R2 boilerplate. The old ChatGPT Site is reserve. External Scheduled Tasks and Cloudflare executor authority vary by domain; verify live state before relying on schedule descriptions.
 
-**Use the right evidence:** Trello and live GitHub establish delivery state; the maintained reference describes contracts; ADRs record durable choices; runbooks describe allowed operations; dated evidence proves only the captured sample. Before relying on a runtime claim, check its current state through an **authorized safe diagnostic**. Some GET endpoints have write side effects. Do not launch production sync, discovery/TMDB, model calls, retries, lease resets, flag changes, Tasks, Access changes or storage operations without separate owner approval.
-
-New architecture changes should update the relevant [diagrams](architecture/README.md), [ADR register](adr/README.md) when a substantial decision changes, and current [reference](reference/README.md) / [runbooks](runbooks/README.md) in the same reviewed delivery. Mermaid diagrams need actual rendered visual QA when an owner-review gate applies.
+Trello and GitHub establish delivery status, reference pages define contracts, ADRs record accepted choices, runbooks describe supported operations, and dated evidence proves only the captured sample. [Authorization](process/authorization-and-escalation.md) classifies L0–L3, but does **not** change credentials or grant a new production writer. Some GETs have side effects. New material architecture requires owner approval; routine Mermaid changes require rendered independent review.

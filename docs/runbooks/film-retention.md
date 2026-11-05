@@ -8,7 +8,7 @@ The reader and the enrichment projector share one admission rule. The projector 
 
 `D1_ENRICHMENT_WRITE` is already `on`. A deploy of this rule makes the next projector cron apply the wider view under the existing lease, batch and query budget. A Film the view newly contains is upserted. A Film the view no longer contains is marked absent, and `releaseFilm` removes watchlist membership only. One cron does not drain a large set; later crons continue. There is no new flag and no separate import command.
 
-That deploy is not implied by accepting the ADR. Merge to `main` deploys the Worker, so it waits for a separate explicit owner approval of the expanded writes.
+That deploy is not implied by accepting the ADR: merging to `main` also expands the next projector's writes, so it requires an **explicit approved L3 rollout plan** covering the changed writer behavior and holdpoints. This is a genuine high-impact exception, not a routine docs/Mermaid approval. See [authorization](../process/authorization-and-escalation.md).
 
 An admitted lid that is on neither current list and has no usable metadata does not replace an existing Film. The write moves watchlist membership only. Credits, metadata, trusted external ids, identity and metadata dimensions, and sync clocks stay. A cache row whose id names another film is not used as the body, and the lid stays admitted. A Film row that does not exist yet is still inserted.
 
@@ -23,7 +23,7 @@ The watchlist grid still reads the watchlist document. Finds hide a catalog row 
 
 ## Recovery
 
-Do not merge until the separate write approval above is recorded. A merge deploys the Worker, and the next cron would then upsert admitted Films.
+Do not merge until the approved high-impact rollout plan above is recorded; do not assume PR acceptance alone authorizes the expanded projector writes. A merge deploys the Worker, and the next cron would then upsert admitted Films.
 
 Code rollback stops later projector runs from using the new admission. Film rows, credits, fingerprints, predictions and R2 objects already written stay. Membership can be removed by a later release; the Film row is not what `releaseFilm` deletes. Restoring a previous view that drops an admitted Film marks that Film absent and removes membership only.
 
