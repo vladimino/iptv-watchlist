@@ -59,7 +59,7 @@ There is no per-observation retry or lookup. The owner page explains one observa
    - An `ambiguous` decision with no confirmed movie id and no id already on the decision has no identity form. The panel says that a choice from the title alone is not possible. Reconsideration stays unavailable for that case.
    - A candidate outside the EPG window cannot be resolved until it airs again.
    - A terminal decision on unchanged evidence (`no_more_evidence`) stays out of the resolver's work until new airings arrive. This is the one case the action addresses.
-4. **Reconsider, only as the owner.** This is a production write. Agents may run this write only under an existing owner-approved bounded plan or future operation-specific L2 contract; [AIR-358 authorization policy](../process/authorization-and-escalation.md) itself does not permit an autonomous writer. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
+4. **Reconsider only within an approved execution plan.** This is a production write. Agents may run this write only under an existing owner-approved bounded plan or future operation-specific L2 contract; [AIR-358 authorization policy](../process/authorization-and-escalation.md) itself does not permit an autonomous writer. When the panel offers «Повторно направить на проверку», it states the cost (no TMDB request, no resolver run, one decision written), the risk and the effect.
    1. Tick the checkbox naming the exact observation, then press «Подтвердить». This issues a confirmation valid for 10 minutes and changes no decision.
    2. Press «Повторно направить на проверку» once.
    
