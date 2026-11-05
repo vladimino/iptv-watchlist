@@ -51,11 +51,14 @@ function effectiveWindow(snapshot,now){
  let envelope=null,basis='snapshot';
  if(from!==null&&to!==null&&from<to)envelope={from,to};
  else{const cutoff=finiteTime(snapshot?.cutoff)??finiteTime(snapshot?.updatedAt);if(cutoff===null)return {basis:'unavailable',now:clock,envelope:null,archive:null,future:null,black:true,epgEnd:finiteTime(snapshot?.stats?.epgEnd)};envelope={from:cutoff-72*3600000,to:cutoff+24*3600000};basis='estimate';}
+ // The retained window (up to 168 h ahead) is storage and coverage metadata. What the reader sees stays the rolling [now - 72 h, now + 24 h]:
+ // a show further ahead is kept but hidden until the clock reaches 24 h before it, with or without a fresh EPG sync.
+ const retained=envelope;envelope={from:retained.from,to:Math.min(retained.to,clock+24*3600000)};
  const archiveFrom=Math.max(envelope.from,clock-72*3600000),archiveTo=Math.min(envelope.to,clock);
  const archive=archiveFrom<archiveTo?{from:archiveFrom,to:archiveTo,fromExclusive:archiveFrom===clock-72*3600000}:null;
  const futureFrom=Math.max(envelope.from,clock);
  const future=futureFrom<envelope.to?{from:futureFrom,to:envelope.to}:null;
- return {basis,now:clock,envelope,archive,future,black:!archive&&!future,epgEnd:finiteTime(snapshot?.stats?.epgEnd)};
+ return {basis,now:clock,envelope,retained,archive,future,black:!archive&&!future,epgEnd:finiteTime(snapshot?.stats?.epgEnd)};
 }
 function viewingClock(){if(viewClock!=null)return viewClock;if(!report&&WINDOW_START!=null&&Number.isFinite(CUTOFF))return CUTOFF;return Date.now();}
 function snapshotForClock(now){if(report)return report;if(WINDOW_START!=null&&WINDOW_END!=null)return {window:{from:WINDOW_START,to:WINDOW_END},cutoff:CUTOFF};return {updatedAt:now};}
@@ -474,7 +477,7 @@ function filmWord(n){return n%10===1&&n%100!==11?'фильм':n%10>=2&&n%10<=4&&
 function showWord(n){return n%10===1&&n%100!==11?'показ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'показа':'показов';}
 function programmeWindow(snapshot){
  const start=Number(snapshot.window?.from),end=Number(snapshot.window?.to);
- if(Number.isFinite(start)&&Number.isFinite(end)&&end-start>=24*3600000)return {start,cutoff:end-24*3600000,end};
+ if(Number.isFinite(start)&&Number.isFinite(end)&&end-start>=24*3600000){const hot=Number(snapshot.window?.hotTo),saved=Number(snapshot.cutoff);return {start,cutoff:Number.isFinite(hot)?hot-24*3600000:Number.isFinite(saved)?saved:end-24*3600000,end};}
  const cutoff=Date.parse(snapshot.updatedAt);
  return {start:cutoff-72*3600000,cutoff,end:cutoff+24*3600000};
 }
@@ -1775,11 +1778,24 @@ function endedPhrase(at,now){const hours=Math.max(0,Math.floor((now-at)/3600000)
 function programmeStatus(model=viewingWindow()){
  const title='Границы сохранённого снимка. Это не гарантия, что у каждого канала есть передача до конца окна.';
  if(!model?.envelope||model.black)return {level:'critical',badge:'Нет актуального окна',coverage:'Программа и архив недоступны; ждём обновления',title:model?.basis==='estimate'?'У снимка не было окна. Оценка по времени снимка тоже закончилась.':'Сохранённое окно закончилось или его не удалось прочитать.'};
- if(model.basis==='estimate')return {level:'warning',badge:'Окно оценено по снимку',coverage:`Оценка по времени снимка · программа до ${madridStamp(model.envelope.to)}`,title};
- if(!model.future){const span=model.archive.to-model.archive.from;const ended=`Программа закончилась ${endedPhrase(model.envelope.to,model.now)}`;const archive=`Архив с ${madridStamp(model.archive.from)}`;if(span<=3600000)return {level:'warning',badge:'Архив заканчивается',coverage:`${ended} · ${archive} · осталось меньше часа`,title};return {level:'warning',badge:'Будущее закончилось',coverage:`${ended} · ${archive}`,title};}
+ if(model.basis==='estimate')return {level:'warning',badge:'Окно оценено по снимку',coverage:`Оценка по времени снимка · программа до ${madridStamp(model.retained.to)}`,title};
+ if(!model.future){const span=model.archive.to-model.archive.from;const ended=`Программа закончилась ${endedPhrase(model.retained.to,model.now)}`;const archive=`Архив с ${madridStamp(model.archive.from)}`;if(span<=3600000)return {level:'warning',badge:'Архив заканчивается',coverage:`${ended} · ${archive} · осталось меньше часа`,title};return {level:'warning',badge:'Будущее закончилось',coverage:`${ended} · ${archive}`,title};}
  const archive=model.archive?`Архив с ${madridStamp(model.archive.from)} · `:'';
- return {level:'ok',badge:'Программа актуальна',coverage:`${archive}Программа до ${madridStamp(model.future.to)}`,title};
+ // The retained future runs to the last show the feed really had (never past the saved window); a skipped refresh keeps it until
+ // those shows start, with the data age said out loud so an old programme is never passed off as a fresh one.
+ const savedAt=finiteTime(report?.updatedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
+ const ageText=age===null?'':`Обновлено ${ageWords(age)} назад · `,stale=age!==null&&age>PROGRAMME_STALE_MS;
+ // Known future programming comes from the feed's real last show, never from the saved window's edge. When that show has already
+ // started the schedule ahead is unknown, whatever the window still allows; nothing is extended to the retention edge.
+ const feedEnd=model.epgEnd;
+ if(Number.isFinite(feedEnd)&&feedEnd<=model.now)return {level:'warning',badge:'Будущей программы нет',coverage:`${archive}${ageText}Лента закончилась ${endedPhrase(feedEnd,model.now)} · расписание дальше неизвестно`,title:'Последний показ в сохранённой ленте уже начался. Показов впереди нет, и расписание не додумывается: ждём нового обновления.'};
+ const knownEnd=Number.isFinite(feedEnd)?Math.min(model.retained.to,feedEnd):model.retained.to;
+ const left=`осталось ${ageWords(Math.max(0,knownEnd-model.now))}`;
+ if(stale)return {level:'warning',badge:'Данные устарели',coverage:`${archive}Обновлено ${ageWords(age)} назад · известные показы до ${madridStamp(knownEnd)} (${left})`,title:'Обновление программы пропущено. Показано расписание последней целостной публикации: изменения и отмены эфира после неё не учтены.'};
+ return {level:'ok',badge:'Программа актуальна',coverage:`${archive}Программа до ${madridStamp(knownEnd)}${age===null?'':' · обновлено '+ageWords(age)+' назад'}`,title};
 }
+const PROGRAMME_STALE_MS=36*3600000;
+function ageWords(ms){const hours=Math.floor(ms/3600000);if(hours<1)return 'меньше часа';if(hours<48)return `${hours} ч`;return `${Math.floor(hours/24)} дн`;}
 function updateProgrammeStatus(){
  const badge=$('#connection-badge'),coverage=$('#snapshot-coverage'),updated=$('#snapshot-updated'),note=$('#window-note');
  if(!report){if(badge&&programmeRefreshError){badge.textContent='Ошибка обновления';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}return;}

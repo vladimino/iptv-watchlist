@@ -45,5 +45,6 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-86 replay results | [scored-resolver/air-86-replay-results.json](scored-resolver/air-86-replay-results.json) |
 | AIR-99 detail cards | [scored-resolver/air-99-detail.json](scored-resolver/air-99-detail.json) |
 | AIR-347 Ratings executor offline evidence | [orchestration/ratings-executor-air-347-2026-11-05.md](orchestration/ratings-executor-air-347-2026-11-05.md) |
+| AIR-188 extended future EPG fixture measurements | [epg-extended-future-air-188-2026-11-05.md](epg-extended-future-air-188-2026-11-05.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.
