@@ -1,9 +1,9 @@
 # ADR 0090: The daily Ratings run may be executed by an inert Cloudflare Workflow with D1-document control and mode records
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-05 (implementation choice inside the AIR-347 card)  
 **Recorded at:** 2026-11-05  
-**Approval source:** not documented (Proposed; the owner decides when reviewing the AIR-347 PR)  
+**Approval source:** explicit owner decision, 2026-11-05 (AIR-347 / PR #375): ADR 0090 Accepted, with logical due at 17:30 Europe/Madrid and the existing hourly cron's first tick normally near 17:37 Madrid. Architecture decision only; no production mode switch, Ratings run, Workflow activation, or Scheduled Task edit. Following [independent technical PASS at HEAD `232164c`](https://github.com/vladimino/iptv-watchlist/pull/375#pullrequestreview-5779881350) and [successful exact-head CI](https://github.com/vladimino/iptv-watchlist/actions/runs/41942341372)  
 **Related work:** [AIR-347](https://trello.com/c/j2Ua76yv); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0060](0060-independent-letterboxd-ratings-pipeline.md); [ADR 0084](0084-d1-authoritative-ratings.md)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -14,7 +14,7 @@
 
 ## Decision
 
-1. **Workflow, not Cron-only.** A new Workflow binding `RATINGS_WORKFLOW` (`RatingsWorkflow`) runs the existing `LetterboxdRatings.start` and `step` in a loop of `step.do` actions separated by `step.sleepUntil`. The existing hourly cron only calls `RatingsOrchestration.ensure`, which creates at most one deterministic instance `ratings_<YYYYMMDD>_<series>` per Madrid date and 17:30 Europe/Madrid (DST by IANA zone). No new cron trigger is added.
+1. **Workflow, not Cron-only.** A new Workflow binding `RATINGS_WORKFLOW` (`RatingsWorkflow`) runs the existing `LetterboxdRatings.start` and `step` in a loop of `step.do` actions separated by `step.sleepUntil`. The existing hourly cron only calls `RatingsOrchestration.ensure`, which creates at most one deterministic instance `ratings_<YYYYMMDD>_<series>` per Madrid date and 17:30 Europe/Madrid (DST by IANA zone). No new cron trigger is added. The logical 17:30 Madrid due is **not** the exact execution instant: the existing `37 * * * *` UTC cron normally calls `ensure` around **17:37 Madrid** (16:37 UTC in CET and 15:37 UTC in CEST). Cloudflare delivery can be late; a missed tick defers checking until a later tick. The IANA zone determines the Madrid day key across DST.
 2. **Inert by default.** `ensure` does nothing unless the owner-written mode document says `cloudflare`. An absent document means `external`, epoch 0. Deployment creates the Workflow resource but no instance, flag, Task change or run.
 3. **Control and mode records are D1-owned ratings documents** (`letterboxd/ratings/executor.json`, `letterboxd/ratings/orchestration.json`), so no migration is needed. `executor.json` is written only by the owner-approved switch (`POST /api/letterboxd/ratings/executor`: `close_admission`, `complete`, `clear_quarantine`).
 4. **Epoch fence.** Every executor commit into D1 runs in the same transactional batch as an assertion that the mode document's etag is unchanged (`ratingsFence`). A stale instance whose mode or epoch moved has its whole batch refused with its data. R2 event writes stay idempotent by event key (ADR 0089 decision 2a).
