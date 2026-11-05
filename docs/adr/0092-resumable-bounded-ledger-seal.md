@@ -1,9 +1,9 @@
 # ADR 0092: The discovery ledger is sealed by a resumable job in bounded steps, and publication follows the seal
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-05  
 **Recorded at:** 2026-11-05  
-**Approval source:** not yet decided; the owner decides `Accepted` or `Declined` before this record merges ([workflow](../process/agent-workflow.md)); the owner chose a migration for the job's cursor on 2026-11-05  
+**Approval source:** explicit owner `Accepted` decision on 2026-11-05 in the ChatGPT IPTV D1 Migration conversation for AIR-356 / PR #382, after independent re-review PASS of HEAD `fe39a899` and green exact-head CI. The owner also visually approved the rendered `docs/architecture/epg-and-availability.md` Mermaid on GitHub. This approves the architecture only, not migration `0012` or any production recovery.  
 **Related work:** [AIR-356](https://trello.com/c/JJI9O5I5), [AIR-355](https://trello.com/c/HbhJNQ7V), [ADR 0085](0085-d1-authoritative-discovery.md), [ADR 0091](0091-selective-reads-during-a-loading-ledger-seal.md), [dated evidence](../evidence/d1-migration/air-356-resumable-seal-2026-11-05.md)  
 **Supersedes:** None. It changes how the publish handoff of [ADR 0085](0085-d1-authoritative-discovery.md) is carried out; the marker, the fail-closed reads and the lease of that record stay.  
 **Superseded by:** None
