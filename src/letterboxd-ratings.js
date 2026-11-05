@@ -308,7 +308,12 @@ const LetterboxdRatings=(()=>{
    removal:{schemaVersion:queue?.schemaVersion??null,lookupEnabled:true,entries:entries.length,pending:entries.filter(entry=>entry.state==='pending').length,unresolved:entries.reduce((n,entry)=>n+removalUnresolvedRefs(entry),0),unresolvedEntries:entries.filter(entry=>removalUnresolvedRefs(entry)>0).length,
     refIssues:Object.fromEntries(REMOVAL_REF_ISSUES.map(issue=>[issue,entries.reduce((n,entry)=>n+(entry.refs||[]).filter(ref=>ref.resolved!==true&&ref.issue===issue).length,0)])),
     legacy:entries.filter(entry=>entry.legacy===true).length,expired:entries.filter(entry=>entry.state==='expired').length,droppedRefs:queue?.droppedRefs||0,pausedUntil:queue?.pausedUntil&&Date.parse(queue.pausedUntil)>now?queue.pausedUntil:null},
-   freshness:freshnessOf(run),readAt:iso(now),sideEffects:'none'};
+   freshness:freshnessOf(run),orchestration:await orchestrationOf(env,now),readAt:iso(now),sideEffects:'none'};
+ }
+ // The executor read model (ADR 0089 decision 7). A failed read is reported, never thrown into the status.
+ async function orchestrationOf(env,now){
+  if(typeof RatingsOrchestration==='undefined')return null;
+  try{return await RatingsOrchestration.readModel(env,now);}catch{return {mode:null,health:'unknown',failure:{class:null,code:'evidence_unreadable'},sideEffects:'none'};}
  }
  // The footer's letterboxd_ratings source under the separate pipeline, from the run record alone.
  function health(run,now){
@@ -333,9 +338,17 @@ const LetterboxdRatings=(()=>{
   if(action==='start'&&body.clearIsolation===true&&body.trigger!=='manual')return 'clearIsolation requires trigger manual';
   return null;
  }
+ // AIR-347: once the owner has closed admission or switched the domain to Cloudflare, the external writer path answers
+ // `switch_in_progress` or `external_writer_fenced` and writes nothing (ADR 0089 decision 2). Reads and migrate are not gated.
+ async function fencedReply(env,action,body){
+  const reason=typeof RatingsOrchestration==='undefined'?null:await RatingsOrchestration.externalGate(env,action);
+  if(!reason)return null;
+  return action==='start'?{runId:null,created:false,nextAction:'stop',reason}:{runId:body.runId,state:null,phase:null,nextAction:'stop',reason,nextCatchUpAt:null,step:null,summary:null};
+ }
  async function handle(env,action,body){
   const error=validate(action,body);if(error)return {status:400,body:{error}};
+  const fenced=await fencedReply(env,action,body);if(fenced)return {status:200,body:fenced};
   return {status:200,body:await (action==='start'?start(env,body):action==='step'?step(env,body):migrate(env,body))};
  }
- return {KEYS,CONTRACT_VERSION,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

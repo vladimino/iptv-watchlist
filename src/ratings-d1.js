@@ -23,6 +23,9 @@ const EXACT=new Set([
  'letterboxd/diary/state.json',
  'letterboxd/ratings/run.json',
  'letterboxd/ratings/migration.json',
+ // AIR-347 / ADR 0089: the executor mode and epoch (written only by the owner's mode switch) and the executor's control record.
+ 'letterboxd/ratings/executor.json',
+ 'letterboxd/ratings/orchestration.json',
  'enrichment/removal-rating-lookups.json',
 ]);
 
@@ -176,6 +179,16 @@ function writeStatements(key,text,etag,now,previousEtag,mode){
  return statements;
 }
 
+// AIR-347 / ADR 0089 decision 2a. An executor's env carries `ratingsFence: {key, etag}`: the document that holds the executor
+// mode and epoch, and the etag it had when the step was admitted. Every authoritative commit made through such an env asserts
+// in its own batch that this document is unchanged, so a commit from a stale epoch or mode is refused with the data.
+function epochFence(env){
+ const fence=env?.ratingsFence;
+ if(!fence)return [];
+ if(typeof fence.key!=='string'||typeof fence.etag!=='string'||!fence.etag)throw failed('ratings_domain_fence');
+ return [['UPDATE ratings_document SET etag=etag WHERE key=? AND part=0 AND etag=?',[fence.key,fence.etag]],[FENCE_SQL,[]]];
+}
+
 export async function putOwned(env,key,previousEtag,value,{mode='d1',extra=[]}={}){
  if(!ratingsMutableKey(key))return {owned:false};
  if(mode!=='d1'&&mode!=='r2')throw failed('ratings_domain_unavailable');
@@ -186,7 +199,7 @@ export async function putOwned(env,key,previousEtag,value,{mode='d1',extra=[]}={
  const now=new Date().toISOString();
  const statements=writeStatements(key,text,etag,now,previousEtag,mode);
  const bump=statements.pop();
- try{await fenced(gate.db,[...statements,...(extra||[]),bump]);}
+ try{await fenced(gate.db,[...statements,...(extra||[]),...epochFence(env),bump]);}
  catch(error){
   if(error.code==='ratings_domain_fence')return {owned:true,saved:null};
   throw error;
@@ -255,7 +268,7 @@ export async function projectView(env,records){
  if(!gate.open)return {owned:false,changed:0};
  const statements=await viewWrites(gate.db,records);
  if(!statements.length)return {owned:true,changed:0};
- const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
+ const batch=[["UPDATE ratings_domain_authority SET generation=generation WHERE id=1 AND mode='d1' AND cutover='open'",[]],[FENCE_SQL,[]],...epochFence(env),...statements,["UPDATE ratings_domain_authority SET generation=generation+1 WHERE id=1 AND mode='d1' AND cutover='open'",[]]];
  await fenced(gate.db,batch);
  return {owned:true,changed:statements.length};
 }

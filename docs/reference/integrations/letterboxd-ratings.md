@@ -162,3 +162,7 @@ When migration is complete, the `letterboxd_ratings` source of the integration f
 ## Kept objects
 
 The retirement deletes nothing. `enrichment/ratings/status.json`, `published.json`, `pending.json`, `lease.json` and `generations/<id>.json` stay in R2 as written. The view index keeps every `actualRating` already projected from a generation. A leftover `pending.json` is no longer finished by anyone; `status` reports its id as `pendingGenerationId` and the view index is unaffected by it.
+
+## Cloudflare executor (AIR-347, inert)
+
+The status adds a read-only `orchestration` object (`mode` external/switching/cloudflare, `epoch`, `runKey`, `health`, `failure`, caps, `cooldownUntil`, `quarantine`, `nextWakeAt`, `oldestPendingAt`). While the mode is `switching` or `cloudflare`, `start` and `step` answer `nextAction: stop` with `switch_in_progress` or `external_writer_fenced`; reads and `migrate` stay open. The owner route `POST /api/letterboxd/ratings/executor` takes `close_admission`, `complete` or `clear_quarantine`. Default and absent mode is `external`: the Task path is unchanged. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md).

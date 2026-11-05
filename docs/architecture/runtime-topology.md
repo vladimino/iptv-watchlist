@@ -58,3 +58,7 @@ The one Worker cron trigger runs only the [enrichment projector](../adr/0056-d1-
 Runtime mode and configured Cloudflare Access policies must be rechecked for live-state claims.
 
 See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract](../reference/api/mcp.md) and [D1 schema boundary](../reference/data/d1-schema.md).
+
+## Ratings Workflow binding (AIR-347)
+
+`wrangler.jsonc` declares Workflow `iptv-ratings` (`RATINGS_WORKFLOW`, class `RatingsWorkflow`). Deployment creates the resource only; no instance exists until `ensure` runs in `cloudflare` mode.

@@ -92,3 +92,7 @@ This is the operator sequence of the accepted but not yet activated shared relia
 - [Historical legacy Sites publication and rollback](../archive/legacy-sites/site-release.md) — archived evidence and steps, **not** the current production deployment flow.
 
 This is the operational Cloudflare runbook. Historical Sites exports and imports live under [the archive](../archive/README.md).
+
+## Ratings executor switch (AIR-347)
+
+Every step needs a separate owner approval: (1) `close_admission` with target `cloudflare` (epoch+1, both writers refused); (2) verify the drain, then `complete`; (3) disable the external Ratings Task. Rollback is the same protocol with target `external`. Code deploy and Workflow resource creation start nothing. `clear_quarantine` runs no step.
