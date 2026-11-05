@@ -24,7 +24,7 @@ const sql=(file,text)=>{const result=spawnSync('sqlite3',['-json','-bail',file],
 const hotStart=Date.now()+3600000;
 const RUN='run-budget';
 // 20,001 observations put the ledger above READ_CAP, which is what routes a chunk to the paged path.
-const WIDE=20001;
+const WIDE=Number(process.env.CHUNK_BUDGET_ROWS)||20001;
 const HOT=[
  // Priority: hot first, then has a year, then the latest airing, then the key. `h-e` has no year.
  {key:'h-a',year:2001,lastAiring:hotStart+5000},
@@ -71,7 +71,7 @@ function chunkContext({clock,onFetch,respond=null}){
   fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:Authority,pinEpg:async value=>value,
   refreshPredictionQueue:async(target,report,trigger)=>{queueRefreshes.push(trigger);},
-  loadJSON:async(target,key)=>{const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
+  loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const file of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(file,'utf8'),context);
  return {context,searched,timeouts,queueRefreshes};
@@ -109,7 +109,8 @@ const leaseRow=file=>sql(file,'SELECT lease_id, expires_at FROM discovery_lease 
 // 2. The concurrent walk is faster than the sequential one under D1 round-trip latency, with the same result.
 {
  const {env,file}=await fixture();
- const slow=d1Standin(file,{latencyMs:20});
+ const latency=Number(process.env.CHUNK_BUDGET_LATENCY)||20;
+ const slow=d1Standin(file,{latencyMs:latency});
  const slowEnv={...env,DB:slow};
  let t=Date.now();
  for(let after='';;){const page=await Authority.readObservationPage(slowEnv,{after});if(!page.more)break;after=page.after;}
@@ -117,9 +118,10 @@ const leaseRow=file=>sql(file,'SELECT lease_id, expires_at FROM discovery_lease 
  t=Date.now();
  await Authority.walkObservationPages(slowEnv,{concurrency:4,onPage(){}});
  const concurrentMs=Date.now()-t;
- if(process.env.CHUNK_BUDGET_REPORT)console.log(JSON.stringify({rows:WIDE,pages:Math.ceil(WIDE/Authority.LEDGER_PAGE),latencyMsPerQuery:20,sequentialMs,concurrentMs}));
+ if(process.env.CHUNK_BUDGET_REPORT)console.log(JSON.stringify({rows:WIDE,pages:Math.ceil(WIDE/Authority.LEDGER_PAGE),latencyMsPerQuery:latency,sequentialMs,concurrentMs}));
  assert.ok(concurrentMs<sequentialMs*0.7,`concurrent ${concurrentMs} ms vs sequential ${sequentialMs} ms`);
 }
+if(process.env.CHUNK_BUDGET_ONLY_WALK){console.log('walk report done');process.exit(0);}
 
 // 3. A successful chunk renews its lease on the walk and records its timings, with eligibility and priority as before.
 {
@@ -302,7 +304,9 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
 {
  const base=await fixture();
  const clock={offset:0};
- const {context,searched,timeouts}=chunkContext({clock,onFetch(){clock.offset+=24000;}});
+ // The first request takes 21 s, the second 11 s: the second is made with 11 s left and carries a timeout cut to it, and the
+ // next candidate, which would need a request and two writes past the durable-write deadline, is not started.
+ const {context,searched,timeouts}=chunkContext({clock,onFetch(query,n){clock.offset+=n===1?21000:11000;}});
  const lease=await Authority.acquireLease(base.env,{programmeRunId:RUN});base.env.discoveryLease=lease.lease;
  const result=await context.resolveDiscoveryChunk(base.env,{films:[]},24,lease.lease);
  assert.equal(searched.length,2,'one candidate, two locales; the next request has no time left');
@@ -310,6 +314,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(result.error,null);
  assert.equal(timeouts[0],12000);
  assert.ok(timeouts.some(ms=>ms<12000&&ms>=2000),'the second request carries the shortened timeout: '+timeouts);
+ assert.equal(timeouts.filter(ms=>ms<12000).length,1);
  await Authority.releaseLease(base.env,lease.lease);
 }
 
@@ -358,7 +363,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(sql(file,"SELECT canonical_identity FROM discovery_admission")[0].canonical_identity,'tmdb:1000');
  assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n),3+HOT.length,'one history row per decision');
  assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_score')[0].n),3+HOT.length,'the score preview holds this chunk');
- assert.deepEqual(first.queueRefreshes,['resolver_checkpoint'],'an admitted Film refreshes the prediction queue once');
+ assert.deepEqual(first.queueRefreshes,[],'the chunk does not refresh the prediction queue; the runner does');
  assert.equal(JSON.parse(statusPayload(file)).checked,3+HOT.length);
  await Authority.releaseLease(env,lease.lease);
  // A second chunk has nothing left: no search, no write, no repeat.
@@ -446,6 +451,101 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(result.added,0);
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE observation_key='mix00'")[0].n,0,'no decision without its Film');
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission")[0].n,1);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+
+// 15. The continuation, not only the chunk: cheap work left with no candidate left keeps the series going. Through
+// `advanceDiscovery` the persisted record stays `paused` with chunks to run, the contract's nextAction is `continue`, the
+// next step finishes the cheap work and only then does the record become `complete`.
+{
+ const nonfilm=index=>({...hotItem({key:'nf'+String(index).padStart(2,'0'),year:null,lastAiring:hotStart+200000+index}),title:'Show: episode '+index,normalizedTitle:'show episode '+index});
+ const items=[];for(let index=0;index<45;index++)items.push(nonfilm(index));
+ const {file,env}=await fixture({items});
+ const {context}=chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ const continuation=()=>{const row=sql(file,'SELECT payload_json FROM discovery_continuation')[0];return row?.payload_json?JSON.parse(row.payload_json):null;};
+ const first=await context.advanceDiscovery(env,{});
+ assert.equal(first.remaining,0,'every candidate is decided');
+ assert.ok(first.cheapRemaining>0,'and cheap work is left: '+first.cheapRemaining);
+ assert.equal(continuation().stage,'paused');
+ assert.equal(continuation().reason,null);
+ assert.ok(continuation().remainingChunks>0,'the series is not over');
+ assert.equal(first.discovery.nextAction,'continue');
+ assert.equal(first.diagnostic.chunk.cheapRemaining,first.cheapRemaining,'the step diagnostic carries it');
+ const second=await context.advanceDiscovery(env,{});
+ assert.equal(second.cheapRemaining,0);
+ assert.equal(second.stage,'complete');
+ assert.equal(continuation().stage,'complete');
+ assert.equal(second.discovery.nextAction,'stop');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE status='excluded_nonfilm'")[0].n),45);
+}
+
+// 16. A slow D1 write path: the cheap pass, the candidate writes and the preview are checked against the clock between
+// atomic writes. Already written decisions are kept and counted, work that does not fit is left for the next chunk, and
+// the final status and checkpoint are still written inside the budget.
+{
+ const nonfilm=index=>({...hotItem({key:'nf'+String(index).padStart(2,'0'),year:null,lastAiring:hotStart+200000+index}),title:'Show: episode '+index,normalizedTitle:'show episode '+index});
+ const items=[];for(let index=0;index<45;index++)items.push(nonfilm(index));
+ const base=await fixture({items});
+ const clock={offset:0};
+ // Every D1 write batch costs three virtual seconds.
+ const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=3000;}})};
+ const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ let checkpoints=0;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
+ const stored=Number(sql(base.file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE status='excluded_nonfilm'")[0].n);
+ assert.ok(stored>0&&stored<40,'some of the cheap pass is written, not all: '+stored);
+ assert.equal(result.screenedOut,stored,'the counters match what is stored');
+ assert.equal(result.cheapRemaining,45-stored,'what was not written is counted');
+ assert.equal(result.stage,'partial');
+ assert.equal(checkpoints,1,'the checkpoint is written');
+ assert.ok(result.timings.totalMs<=40000,'the chunk finishes inside the budget: '+result.timings.totalMs);
+ assert.ok(result.timings.writeMaxMs>=3000,'the slowest write is measured: '+result.timings.writeMaxMs);
+ assert.equal(searched.length,0,'no candidate is started with no time to store it');
+ assert.ok(statusPayload(base.file));
+ await Authority.releaseLease(env,lease.lease);
+}
+{
+ // Candidate writes at 2 virtual seconds per batch: only the candidates whose request and two writes fit are started, and
+ // each one that is started is stored whole.
+ const base=await fixture({mix:6});
+ const clock={offset:0};
+ const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=2000;}})};
+ const movie=(id)=>movieFor(id,'Film mix'+String(id-1000).padStart(2,'0'));
+ const {context}=chunkContext({clock,respond(url){
+  if(url.pathname.includes('/movie/'))return movie(Number(url.pathname.split('/').pop()));
+  const title=url.searchParams.get('query'),index=Number(title.slice(-2));
+  return {results:index<6?[{id:1000+index,title,original_title:title,release_date:'2000-06-01'}]:[]};
+ }});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ const decisions=Number(sql(base.file,'SELECT COUNT(*) AS n FROM discovery_decision')[0].n);
+ assert.ok(result.checked>0&&result.checked<6+HOT.length,'some candidates are resolved, not all: '+result.checked);
+ assert.equal(decisions,result.checked,'every counted candidate has its decision');
+ assert.equal(Number(sql(base.file,"SELECT COUNT(*) AS n FROM discovery_admission")[0].n),result.added,'and every added Film its admission');
+ assert.ok(result.timings.totalMs<=40000,'inside the budget: '+result.timings.totalMs);
+ assert.equal(result.error,null);
+ assert.equal(result.stage,'partial');
+ await Authority.releaseLease(env,lease.lease);
+}
+{
+ // A D1 that takes five seconds per batch: the final writes alone need most of the budget, so no candidate is started, the
+ // chunk says it made no progress and backs off, and its checkpoint is still stored inside the budget.
+ const base=await fixture({mix:3});
+ const clock={offset:0};
+ const env={...base.env,DB:d1Standin(base.file,{onBatch(){clock.offset+=5000;}})};
+ const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ let checkpoints=0;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
+ assert.equal(searched.length,0);
+ assert.equal(result.checked,0);
+ assert.equal(result.error,'wall_budget');
+ assert.ok(Date.parse(result.retryAt)>Date.now());
+ assert.equal(checkpoints,1);
+ assert.ok(result.timings.totalMs<=40000,'the checkpoint is inside the budget: '+result.timings.totalMs);
+ assert.equal(Number(sql(base.file,'SELECT COUNT(*) AS n FROM discovery_decision')[0].n),0);
  await Authority.releaseLease(env,lease.lease);
 }
 

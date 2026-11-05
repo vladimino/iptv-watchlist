@@ -21,6 +21,13 @@ const PAGED_BUDGET_BACKOFF_MS=300000;
 const PAGED_TMDB_CALLS=16;
 const PAGED_WALK_CONCURRENCY=4;
 // The cheap pass writes at most this many decisions and Film touches per chunk; the rest waits for the next one.
+const PAGED_CHEAP_GROUP=4;
+// The last stretch before the budget ends belongs to the final lease renewal, the status write and the checkpoint.
+const PAGED_CHECKPOINT_RESERVE_MS=5000;
+// Write batches after the last stored candidate: the preview (renewal and write), the final renewal, the status and the checkpoint.
+const PAGED_FINAL_WRITES=6;
+// What a D1 write batch is assumed to cost until the chunk has measured one.
+const PAGED_DEFAULT_WRITE_MS=500;
 const PAGED_CHEAP_DECISIONS=40;
 const PAGED_CHEAP_FILMS=38;
 const DISCOVERY_LEASE_RENEW_MARGIN_MS=45000;
@@ -584,8 +591,18 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // The D1 lease lives 90 s and cannot be renewed once it has expired, so the chunk renews it on every long phase
  // boundary instead of only before its final write. `timings` is the chunk's own wall clock: it is the evidence a
  // later reader needs to tell a slow read from a lost lease or a client that went away.
- const t0=Date.parse(startedAt)||Date.now(),timings={walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,cheapMs:null,tmdbMs:null,preCommitMs:null,statusMs:null,checkpointMs:null,totalMs:null};
+ const t0=Date.parse(startedAt)||Date.now(),timings={walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,cheapMs:null,tmdbMs:null,writeMaxMs:null,preCommitMs:null,statusMs:null,checkpointMs:null,totalMs:null};
+ // Three deadlines inside the budget. No unit of work (a cheap-pass write, a TMDB request, a candidate) starts after
+ // `candidateDeadline`; no durable write other than the final status and checkpoint starts after `persistLimit`; the
+ // last PAGED_CHECKPOINT_RESERVE_MS are the final renewal, status and checkpoint. A D1 write batch cannot be pre-empted, so
+ // each unit is also started only if the slowest write batch seen so far still fits before its deadline.
  const candidateDeadline=t0+PAGED_CHUNK_BUDGET_MS-PAGED_COMMIT_RESERVE_MS,walkDeadline=candidateDeadline-PAGED_MIN_REQUEST_MS;
+ let writeCostMs=0;
+ const timedWrite=async write=>{const began=Date.now();try{return await write();}finally{writeCostMs=Math.max(writeCostMs,Date.now()-began);}};
+ const writeEstimate=count=>(writeCostMs||PAGED_DEFAULT_WRITE_MS)*count;
+ // The final writes (preview, renewal, status, checkpoint) cost as much as D1 makes a write cost, so the reserve for them
+ // grows with the slowest write seen: on a slow D1 the chunk stops storing earlier and still checkpoints inside the budget.
+ const persistLimit=()=>t0+PAGED_CHUNK_BUDGET_MS-Math.max(PAGED_CHECKPOINT_RESERVE_MS,PAGED_FINAL_WRITES*(writeCostMs||PAGED_DEFAULT_WRITE_MS));
  const lost=(e,failedAt)=>{if(e?.name==='LeaseLostError')e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt};return e;};
  const heartbeat=async()=>{
   if(!lease||lease.expiresAt-Date.now()>DISCOVERY_LEASE_RENEW_MARGIN_MS)return;
@@ -652,29 +669,40 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
  const cheapStarted=Date.now();
  if(walkComplete){
-  // Decisions first, then the touched Films, each bounded and each skipped once the candidate phase has no time left.
+  // Decisions first, then the touched Films, in small atomic groups. The clock is checked between groups, so a slow D1
+  // stops the cheap pass with what is already written kept and the rest counted in `cheapRemaining`.
   const planned=[...cheap.decisions];
   const changedFilms=[...cheap.films].filter(key=>JSON.stringify(films[key])!==cheap.before.get(key));
   const filmBatch=changedFilms.slice(0,PAGED_CHEAP_FILMS);
-  cheapRemaining=(cheap.decisionTotal-planned.length)+(changedFilms.length-filmBatch.length);
-  if(planned.length&&Date.now()<candidateDeadline){
+  let decisionsAttempted=0,filmsAttempted=0;
+  for(let index=0;index<planned.length;index+=PAGED_CHEAP_GROUP){
+   if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
+   const group=planned.slice(index,index+PAGED_CHEAP_GROUP);
    await heartbeat();
-   const wrote=await guarded(()=>DiscoveryAuthority.writeDecisionDelta(env,Object.fromEntries(planned.map(([key,item])=>[key,{previous:item.previous,next:item.next}])),{lease}));
+   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,Object.fromEntries(group.map(([key,item])=>[key,{previous:item.previous,next:item.next}])),{lease})));
    if(!wrote)return programmeChanged();
    const done=new Set(wrote.written);
-   for(const [key,item] of planned)if(done.has(key)){decisions[key]=item.next;if(item.kind==='screened')screenedOut++;else knownAliases++;}
    // A key the chunk skipped belongs to another writer now (the owner, or a ledger that changed): it is not cheap work left.
-  }else cheapRemaining+=planned.length;
-  if(filmBatch.length&&Date.now()<candidateDeadline){
+   for(const [key,item] of group)if(done.has(key)){decisions[key]=item.next;if(item.kind==='screened')screenedOut++;else knownAliases++;}
+   decisionsAttempted+=group.length;
+  }
+  const perBatch=Math.max(1,Math.floor((DiscoveryAuthority.STATEMENT_CAP-2)/2));
+  for(let index=0;index<filmBatch.length;index+=perBatch){
+   if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
+   const group=filmBatch.slice(index,index+perBatch);
    await heartbeat();
-   const wrote=await guarded(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(filmBatch.map(key=>[key,films[key]])),{lease}));
+   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(group.map(key=>[key,films[key]])),{lease})));
    if(!wrote)return programmeChanged();
-   touchedWritten=wrote.written.length;
-  }else cheapRemaining+=filmBatch.length;
+   touchedWritten+=wrote.written.length;
+   filmsAttempted+=group.length;
+  }
+  cheapRemaining=(cheap.decisionTotal-decisionsAttempted)+(changedFilms.length-filmsAttempted);
   // The status the interrupted-recovery gate reads as this hop's proof that its cheap pass ran.
-  await heartbeat();
-  try{await fence();}catch(e){throw lost(e,'cheap_pass');}
-  await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
+  if(Date.now()+writeEstimate(1)<=persistLimit()){
+   await heartbeat();
+   try{await fence();}catch(e){throw lost(e,'cheap_pass');}
+   await timedWrite(()=>saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'}));
+  }
  }
  timings.cheapMs=Date.now()-cheapStarted;
  // The call cap and the time left are enforced at the request boundary: a candidate that would need a request beyond
@@ -689,22 +717,26 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // One Film and one decision per candidate, each its own fenced write: the Film first, so a crash between the two is
  // repaired by alias reuse, as on the document path. A decision another writer changed meanwhile stands.
  const saveCandidate=async(candidate,previous,filmEntry)=>{
+  // Too late for a durable write that must still leave the final checkpoint its time: the candidate is not stored and not counted.
+  if(Date.now()>persistLimit())return 'late';
   await heartbeat();
   if(filmEntry){
    if(!await publishedGenerationMatches(env,source.programmeRunId))return 'changed';
-   const wrote=await guarded(()=>DiscoveryAuthority.upsertAdmissions(env,{[filmEntry[0]]:filmEntry[1]},{lease}));
+   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[filmEntry[0]]:filmEntry[1]},{lease})));
    if(!wrote)return 'changed';
    // An identity that already belongs to another film id is never merged: the chunk stops and backs off.
    if(wrote.refused.length)return 'refused';
    if(!wrote.written.includes(filmEntry[0]))return 'changed';
   }
-  const wrote=await guarded(()=>DiscoveryAuthority.writeDecisionDelta(env,{[candidate.key]:{previous:previous??null,next:decisions[candidate.key]}},{lease}));
+  const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[candidate.key]:{previous:previous??null,next:decisions[candidate.key]}},{lease})));
   if(!wrote)return 'changed';
   if(wrote.skipped.some(item=>item.reason==='conflict'||item.reason==='observation_gone'||item.reason==='evidence_changed'))decisions[candidate.key]=previous;
   return 'saved';
  };
  const preview={},now=Date.now(),tmdbStarted=Date.now();
  if(!error)for(const candidate of pending){
+  // Start a candidate only if a request and its two writes still fit before the durable-write deadline.
+  if(Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit())break;
   try{
    const previous=decisions[candidate.key];
    let candidates=knownScorerCandidates(aliasIndex,candidate);
@@ -745,6 +777,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    }
    const saved=await saveCandidate(candidate,previous,filmEntry);
    if(saved==='changed')return programmeChanged();
+   if(saved==='late'){decisions[candidate.key]=previous;if(newFilm){added--;delete films[filmEntry[0]];}break;}
    if(saved==='refused'){error='admission_identity_conflict';retryAt=new Date(Date.now()+3600000).toISOString();decisions[candidate.key]=previous;if(newFilm){added--;delete films[filmEntry[0]];}break;}
    checked++;
   }catch(e){
@@ -756,13 +789,11 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // Candidates were waiting and none could be taken before the budget ended: say so, and back off.
  if(!error&&pending.length&&checked===0){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
  timings.tmdbMs=Date.now()-tmdbStarted;
- // A newly admitted Film joins the prediction queue; a touch alone does not change who is in it.
- if(added>0){
-  try{await refreshPredictionQueue(env,await loadJSON(env,'programme.json')||report,'resolver_checkpoint',{beforeWrite:fence});}
-  catch(e){if(e?.name==='LeaseLostError')throw lost(e,'queue');error=error||'prediction_queue_checkpoint: '+String(e.message).slice(0,100);}
- }
+ // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
+ // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
  // The preview is the last scored chunk's outcomes; a chunk that never read the whole ledger has none to replace it with.
- if(walkComplete){try{await fence();await saveScorePreview(env,source,preview);}catch(e){throw lost(e,'preview');}}
+ if(walkComplete&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){throw lost(e,'preview');}}
+ timings.writeMaxMs=writeCostMs;
  const summary={schemaVersion:2,stage:error||remaining>checked||cheapRemaining>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining:walkComplete?Math.max(0,remaining-checked):null,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
@@ -1020,11 +1051,11 @@ function discoverySummary(contract){return contract&&typeof contract==='object'?
 function diagnosticTimings(timings){
  if(!timings||typeof timings!=='object')return null;
  const out={};
- for(const field of ['walkMs','pages','concurrency','renewals','firstRenewMs','cheapMs','tmdbMs','preCommitMs','statusMs','checkpointMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
- if(['heartbeat','tmdb','final','write','cheap_pass','queue','preview'].includes(timings.failedAt))out.failedAt=timings.failedAt;
+ for(const field of ['walkMs','pages','concurrency','renewals','firstRenewMs','cheapMs','tmdbMs','writeMaxMs','preCommitMs','statusMs','checkpointMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
+ if(['heartbeat','tmdb','final','write','cheap_pass','preview'].includes(timings.failedAt))out.failedAt=timings.failedAt;
  return Object.keys(out).length?out:null;
 }
-function chunkSummary(result){return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),added:diagnosticCount(result.added),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
+function chunkSummary(result){return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),cheapRemaining:diagnosticCount(result.cheapRemaining),added:diagnosticCount(result.added),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
 // One structured line per phase for Workers Logs; never throws.
 function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
 // A step entry. `runId` is kept only when it has the server-generated UUID shape; `runIdShape` says
@@ -1194,7 +1225,7 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  if(result.stage==='error')return {stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null};
  if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
- if(!result.remaining)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ if(!result.remaining&&!result.cheapRemaining)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
  return {stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
 }

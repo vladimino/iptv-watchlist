@@ -15,7 +15,7 @@ The paged chunk (ledger above 20,000 observations) walked the ledger and searche
 
 - `DiscoveryAuthority.writeDecisionDelta`: one atomic batch per key behind the lease and generation fence, compare-and-set on the decision hash (a decision stored meanwhile wins and the key is skipped), a history row, and a diagnosis from the stored rows after a failed batch so a write that landed and lost its answer counts as written.
 - `DiscoveryAuthority.upsertAdmissions`: batches of 19 films behind the fence; a film whose media kind and TMDB id belong to another film id is refused and the rest of its batch lands.
-- The paged chunk resolves its selected candidates as the document path does, stores the Film and then the decision of each, folds the cheap pass into its single walk with at most 40 decisions and 38 Films written per chunk (`cheapRemaining` counts the rest), writes the `cheap_pass` status, replaces the score preview after a complete walk, and refreshes the prediction queue when it admitted a new Film. No schema change and no migration: the tables, the history and the fence statements are those of the existing writers.
+- The paged chunk resolves its selected candidates as the document path does, stores the Film and then the decision of each, folds the cheap pass into its single walk with at most 40 decisions and 38 Films written per chunk (`cheapRemaining` counts the rest), writes the `cheap_pass` status, replaces the score preview after a complete walk, and leaves the prediction queue to the prediction runner, which refreshes it from the catalog on every step (the call has no time bound of its own). No schema change and no migration: the tables, the history and the fence statements are those of the existing writers.
 
 ## 3. Offline results
 
@@ -36,9 +36,31 @@ The paged chunk (ledger above 20,000 observations) walked the ledger and searche
 | Film identity owned by another film id | `admission_identity_conflict`, one-hour back-off, no decision without its Film |
 | 15 catalog-known candidates (1 request each) and an unknown one | exactly 16 requests; 15 decisions; no error, no retry time |
 
+## 3a. Review follow-up: continuation and slow writes
+
+| Case | Result |
+| --- | --- |
+| `advanceDiscovery` with 45 screened titles and no candidate left | the chunk reports `remaining` 0 and `cheapRemaining` > 0; the stored continuation stays `paused` with chunks to run and `nextAction` is `continue`; the next step finishes the cheap work and the record becomes `complete`; the step diagnostic carries `cheapRemaining` |
+| 3 virtual seconds per D1 write batch, cheap pass of 45 titles | some decisions written, not all; the counters equal the stored rows; `cheapRemaining` equals the rest; no candidate started; checkpoint written; `totalMs` ≤ 40 s; `writeMaxMs` ≥ 3 s |
+| 2 virtual seconds per batch, 6 candidates | only the candidates whose request and two writes fit are started; each counted candidate has its decision and each added Film its admission; inside the budget |
+| 5 virtual seconds per batch | no candidate started, `wall_budget` with a back-off, no decision written, checkpoint inside the budget |
+
+A first version of the slow-write case failed: with a fixed 5 s reserve a D1 at 5 s per batch needed 46 s because the final writes alone (preview, renewals, status, checkpoint) cost six batches. The reserve now scales with the slowest write measured.
+
+## 3b. Walk at production row count (model)
+
+`CHUNK_BUDGET_ROWS=36999 CHUNK_BUDGET_LATENCY=300 CHUNK_BUDGET_REPORT=1 CHUNK_BUDGET_ONLY_WALK=1 node tests/discovery-chunk-budget.mjs`: 36,999 observations (74 pages), a stand-in that adds 300 ms to every query.
+
+| Read | Time |
+| --- | --- |
+| Sequential pages (the previous order) | 136 s |
+| `walkObservationPages`, 4 at a time | 14.8 s |
+
+300 ms per query is a deliberately pessimistic model (the observed sequential status read of the same ledger was 45–60 s), and the stand-in also pays a local sqlite process per query, which partly serialises the concurrent reads. It shows the walk fits the 30 s walk limit with margin under that model. It is **not** a production measurement: the real latency is unmeasured, and a query-side selection is not part of this change.
+
 ## 4. Limits
 
 - No production chunk was run. The production wall time of the walk, the cheap pass and the keyed writes at real D1 latency is unmeasured; the step diagnostic's `timings` (`walkMs`, `cheapMs`, `tmdbMs`, `statusMs`, `checkpointMs`) will show it. If the walk cannot finish inside the budget, the chunk backs off (`wall_budget`) and a query-side selection is the next change.
 - The cheap pass touches at most 38 Films per chunk, so the first chunks of a new generation rewrite the hot Films gradually; Finds airings catch up over those chunks.
-- The prediction queue refresh on an admission uses the document-path routine unchanged; its cost at production size inside the chunk budget is unmeasured.
+- The paged chunk does not refresh the prediction queue. A Film it admits joins the queue on the prediction runner's next step; that delay is not measured here.
 - A decision conflict is skipped without a retry in the same chunk; the candidate counts as handled.
