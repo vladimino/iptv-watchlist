@@ -56,11 +56,25 @@ A first version of the slow-write case failed: with a fixed 5 s reserve a D1 at 
 | Sequential pages (the previous order) | 136 s |
 | `walkObservationPages`, 4 at a time | 14.8 s |
 
-300 ms per query is a deliberately pessimistic model (the observed sequential status read of the same ledger was 45–60 s), and the stand-in also pays a local sqlite process per query, which partly serialises the concurrent reads. It shows the walk fits the 30 s walk limit with margin under that model. It is **not** a production measurement: the real latency is unmeasured, and a query-side selection is not part of this change.
+300 ms per query is a deliberately pessimistic model (the observed sequential status read of the same ledger was 45–60 s), and the stand-in also pays a local sqlite process per query, which partly serialises the concurrent reads. It shows the walk fits the 30 s walk limit with margin under that model. It is a model; the production queries are measured below, and a query-side selection is not part of this change.
+
+### Production read-only measurement of the walk's queries (5 November 2026, about 07:30 UTC)
+
+Owner decision of the day: measure read-only before deciding on a query-side selection. Only `SELECT` statements, through the Cloudflare D1 REST query endpoint from the agent container, on production D1 `iptv`: the page-start query once and the two page queries (observations of a key range, shows of the same range) for the first 12 of the 74 pages. No write, no Worker route, no TMDB call, no chunk.
+
+| Query | D1 execution time (`meta.duration`) | Rows read | Round trip seen by the caller |
+| --- | --- | --- | --- |
+| Page starts (window function over the 36,999 active rows) | 116 ms | 111,072 | 650 ms |
+| Observations of one page (500 rows) | 4.6–9.6 ms | 501 | 290–660 ms |
+| Shows of one page (455–767 rows) | 2.1–3.6 ms | 455–767 | 260–400 ms |
+
+Reading: D1 itself executes a page in about 10 ms; the time of a walk is the round trip, 0.25–0.65 s per query on this path. A sequential walk is 74 pages × 2 queries, which agrees with the 45–60 s of the status read seen earlier. Four pages at a time give about 19 batches × 2 queries × 0.3–0.5 s ≈ 11–19 s, inside the 30 s walk limit. The REST path adds HTTP overhead the Worker's binding does not have, so this is an upper estimate of the Worker's round trip, but it is not a measurement of the Worker.
+
+Cost note: one walk reads about 190,000 rows (111,072 for the page starts, about 37,000 observations, about 40,000 shows). The page-start query is the largest part and can be made cheaper without changing the walk; that is not done here.
 
 ## 4. Limits
 
-- No production chunk was run. The production wall time of the walk, the cheap pass and the keyed writes at real D1 latency is unmeasured; the step diagnostic's `timings` (`walkMs`, `cheapMs`, `tmdbMs`, `statusMs`, `checkpointMs`) will show it. If the walk cannot finish inside the budget, the chunk backs off (`wall_budget`) and a query-side selection is the next change.
+- No production chunk was run. The Worker's own wall time of the walk, the cheap pass and the keyed writes is unmeasured (the read-only measurement above is of the queries through the REST path, not of the Worker); the step diagnostic's `timings` (`walkMs`, `cheapMs`, `tmdbMs`, `statusMs`, `checkpointMs`) will show it. If the walk cannot finish inside the budget, the chunk backs off (`wall_budget`) and a query-side selection is the next change.
 - The cheap pass touches at most 38 Films per chunk, so the first chunks of a new generation rewrite the hot Films gradually; Finds airings catch up over those chunks.
 - The paged chunk does not refresh the prediction queue. A Film it admits joins the queue on the prediction runner's next step; that delay is not measured here.
 - A decision conflict is skipped without a retry in the same chunk; the candidate counts as handled.
