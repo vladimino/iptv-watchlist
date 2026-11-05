@@ -28,3 +28,9 @@
 4. Acceptance readback: the published generation changed exactly once, transfer `committed`, seal `done`, no active/retiring duplicates, decisions, admissions and history unchanged in count, programme and watchlist readers and the Predictions snapshot consistent.
 
 Unmeasured: the real D1 batch latency and the Worker CPU of a step. Code rollback does not revert D1 or R2.
+
+## Step 2 attempt: migration `0012` not applied (owner GO given, write refused)
+
+At about 20:55 UTC, after the owner's GO for exactly `migrations/0012_discovery_seal.sql`, the Cloudflare API connector re-read `schema_contract` (11) and the absence of `discovery_seal`, then sent the migration as one D1 `{sql}` body. Cloudflare refused it: HTTP 400, error 7500 "You do not have permission to perform this operation" (the connector's D1 permission is read-only). A readback right after showed `schema_contract` still 11 and no `discovery_seal` table: **nothing was applied**. The authority, transfer, observation and lease rows were not touched.
+
+No other credential was tried. The operator entry `scripts/discovery-production.mjs --apply` sends only `0011`, and the `D1_BACKFILL_*` token is scoped to the backfill scripts. Applying `0012` needs either an operator apply path for `0012` (a reviewed script change) or a D1 write permission the owner grants for this one statement set.
