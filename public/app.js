@@ -474,7 +474,7 @@ function filmWord(n){return n%10===1&&n%100!==11?'фильм':n%10>=2&&n%10<=4&&
 function showWord(n){return n%10===1&&n%100!==11?'показ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'показа':'показов';}
 function programmeWindow(snapshot){
  const start=Number(snapshot.window?.from),end=Number(snapshot.window?.to);
- if(Number.isFinite(start)&&Number.isFinite(end)&&end-start>=24*3600000)return {start,cutoff:end-24*3600000,end};
+ if(Number.isFinite(start)&&Number.isFinite(end)&&end-start>=24*3600000){const hot=Number(snapshot.window?.hotTo),saved=Number(snapshot.cutoff);return {start,cutoff:Number.isFinite(hot)?hot-24*3600000:Number.isFinite(saved)?saved:end-24*3600000,end};}
  const cutoff=Date.parse(snapshot.updatedAt);
  return {start:cutoff-72*3600000,cutoff,end:cutoff+24*3600000};
 }
@@ -1778,8 +1778,16 @@ function programmeStatus(model=viewingWindow()){
  if(model.basis==='estimate')return {level:'warning',badge:'Окно оценено по снимку',coverage:`Оценка по времени снимка · программа до ${madridStamp(model.envelope.to)}`,title};
  if(!model.future){const span=model.archive.to-model.archive.from;const ended=`Программа закончилась ${endedPhrase(model.envelope.to,model.now)}`;const archive=`Архив с ${madridStamp(model.archive.from)}`;if(span<=3600000)return {level:'warning',badge:'Архив заканчивается',coverage:`${ended} · ${archive} · осталось меньше часа`,title};return {level:'warning',badge:'Будущее закончилось',coverage:`${ended} · ${archive}`,title};}
  const archive=model.archive?`Архив с ${madridStamp(model.archive.from)} · `:'';
- return {level:'ok',badge:'Программа актуальна',coverage:`${archive}Программа до ${madridStamp(model.future.to)}`,title};
+ // The retained future runs to the last show the feed really had (never past the saved window); a skipped refresh keeps it until
+ // those shows start, with the data age said out loud so an old programme is never passed off as a fresh one.
+ const savedAt=finiteTime(report?.updatedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
+ const knownEnd=Number.isFinite(model.epgEnd)?Math.min(model.future.to,Math.max(model.epgEnd,model.now)):model.future.to;
+ const left=`осталось ${ageWords(Math.max(0,knownEnd-model.now))}`;
+ if(age!==null&&age>PROGRAMME_STALE_MS)return {level:'warning',badge:'Данные устарели',coverage:`${archive}Обновлено ${ageWords(age)} назад · известные показы до ${madridStamp(knownEnd)} (${left})`,title:'Обновление программы пропущено. Показано расписание последней целостной публикации: изменения и отмены эфира после неё не учтены.'};
+ return {level:'ok',badge:'Программа актуальна',coverage:`${archive}Программа до ${madridStamp(knownEnd)}${age===null?'':' · обновлено '+ageWords(age)+' назад'}`,title};
 }
+const PROGRAMME_STALE_MS=36*3600000;
+function ageWords(ms){const hours=Math.floor(ms/3600000);if(hours<1)return 'меньше часа';if(hours<48)return `${hours} ч`;return `${Math.floor(hours/24)} дн`;}
 function updateProgrammeStatus(){
  const badge=$('#connection-badge'),coverage=$('#snapshot-coverage'),updated=$('#snapshot-updated'),note=$('#window-note');
  if(!report){if(badge&&programmeRefreshError){badge.textContent='Ошибка обновления';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}return;}
