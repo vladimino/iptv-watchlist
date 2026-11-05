@@ -329,6 +329,12 @@ function itemStatements(item,run){
  for(const show of shows)statements.push(['INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES (\'active\',?,?,?,?,?,?)',[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end]]);
  return statements;
 }
+function observationUpsert(item,run){
+ const shows=showsOf(item);
+ const payload={...item};delete payload.shows;
+ const upsert=['INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES (\'active\',?,\'active\',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_key, observation_key) DO UPDATE SET residence=\'active\', programme_run_id=excluded.programme_run_id, normalized_title=excluded.normalized_title, title=excluded.title, year=excluded.year, evidence_key=excluded.evidence_key, seen_in_latest=excluded.seen_in_latest, last_seen_at=excluded.last_seen_at, last_airing=excluded.last_airing, confirmed_tmdb_id=excluded.confirmed_tmdb_id, payload_json=excluded.payload_json',[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,evidenceKey(item),item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,Number.isFinite(Number(item.lastAiring))?Number(item.lastAiring):null,item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),JSON.stringify(payload)]];
+ return {upsert,shows:shows.map(show=>[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end])};
+}
 function loadingFence(generation,lease){
  return [
   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?) AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state=\'loading\')',[generation,lease.id,nowMs()]],
@@ -560,6 +566,155 @@ export async function walkObservationPages(env,options={}){
  return {programmeRunId:opened.programmeRunId,pages:starts.length,items,complete};
 }
 
+// ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity
+// and cursor; every batch of observation rows moves the cursor in the SAME D1 batch (compare-and-set on `cursor_items`),
+// so a request that dies leaves the rows and the cursor agreeing. The batch itself is idempotent (an upsert and a
+// delete-and-insert of the shows), so a replay after an unknown outcome is safe. The previous ledger is flipped to
+// `retiring` once, when the job begins, and never again for the same job. The ledger stays unpublished until every
+// observation is written and every retiring row is archived; the commit is the last batch.
+const SEAL_BATCH_OVERHEAD=5;
+const SEAL_SHOW_ROWS=16;
+const SEAL_KEYS_PER_BATCH=80;
+export async function sealSupported(env){
+ try{return !!await one(database(env),"SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='discovery_seal'");}
+ catch{return false;}
+}
+async function readSeal(env){
+ return await one(database(env),'SELECT job_id, programme_run_id, source_key, source_etag, item_total, cursor_items, cursor_bytes, phase, updated_at FROM discovery_seal WHERE id=1');
+}
+export async function sealState(env){
+ if(!await sealSupported(env))return {supported:false};
+ const row=await readSeal(env);
+ const gate=await readAuthority(env);
+ if(!row)return {supported:true,phase:'idle',transfer:gate.transfer};
+ return {supported:true,phase:row.phase,jobId:row.job_id??null,programmeRunId:row.programme_run_id??null,sourceKey:row.source_key??null,sourceEtag:row.source_etag??null,itemTotal:Number(row.item_total||0),cursorItems:Number(row.cursor_items||0),cursorBytes:Number(row.cursor_bytes||0),transfer:gate.transfer,updatedAt:row.updated_at??null};
+}
+// Begins a job, or reports that the same job is already running. A job for another source, or a `loading` transfer
+// that has no job (the interrupted handoff of the old inline seal), starts over: the previous ledger and whatever an
+// earlier attempt wrote are flipped to `retiring` in one batch, together with the job row.
+export async function sealBegin(env,spec){
+ const lease=spec.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ if(!await sealSupported(env))throw failed('discovery_unavailable');
+ const run=typeof spec.programmeRunId==='string'&&spec.programmeRunId?spec.programmeRunId:null;
+ if(!run||typeof spec.jobId!=='string'||!spec.jobId||typeof spec.sourceKey!=='string'||!Number.isInteger(spec.itemTotal)||spec.itemTotal<0)throw failed('discovery_conflict');
+ const gate=await readAuthority(env);
+ const db=database(env);
+ const current=await readSeal(env);
+ if(current&&current.job_id===spec.jobId&&(current.phase==='items'||current.phase==='archive')&&gate.transfer==='loading')return {resumed:true,...await sealState(env)};
+ if(current&&current.job_id===spec.jobId&&current.phase==='done')return {resumed:true,...await sealState(env)};
+ const now=nowMs(),updated=new Date(now).toISOString();
+ const fenceStatements=gate.transfer==='loading'?(()=>{return loadingFence(gate.generation,lease);})():(()=>{assertOpen(gate);return [fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),[FENCE_SQL,[]]];})();
+ if(gate.transfer==='loading'){
+  const holder=await one(db,'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?',[lease.id,now]);
+  if(!holder)throw failed('discovery_incomplete');
+ }
+ await commit(db,[
+  ...fenceStatements,
+  ['UPDATE discovery_lease SET expires_at=?, programme_run_id=COALESCE(programme_run_id,?) WHERE id=1 AND lease_id=? AND expires_at>?',[now+LEASE_TTL_MS,gate.programmeRunId,lease.id,now]],
+  ['UPDATE discovery_transfer SET state=\'loading\', programme_run_id=?, batches=batches+1 WHERE id=1',[run]],
+  ['UPDATE discovery_observation SET residence=\'retiring\' WHERE source_key=\'active\' AND residence=\'active\'',[]],
+  ['UPDATE discovery_seal SET job_id=?, programme_run_id=?, source_key=?, source_etag=?, item_total=?, cursor_items=0, cursor_bytes=?, phase=\'items\', updated_at=? WHERE id=1',[spec.jobId,run,spec.sourceKey,spec.sourceEtag??null,spec.itemTotal,Number.isInteger(spec.startBytes)?spec.startBytes:0,updated]],
+ ]);
+ return {resumed:false,...await sealState(env)};
+}
+// One atomic batch: the fence, a lease renewal, the observation rows of as many of `items` as fit, and the cursor move.
+// `items` are `{item,bytes}` where `bytes` is the length the item takes in the source document including its separator.
+// Returns how many were written. A cursor that is not `expectedCursor` is a lost race and writes nothing.
+export async function sealWrite(env,spec){
+ const lease=spec.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const gate=await readAuthority(env);
+ if(!gate.ready||gate.transfer!=='loading')throw failed('discovery_incomplete');
+ const state=await readSeal(env);
+ if(!state||state.job_id!==spec.jobId||state.phase!=='items'||Number(state.cursor_items)!==spec.expectedCursor)throw failed('discovery_fence');
+ const run=state.programme_run_id;
+ // One upsert per observation, one delete of all their shows, and the shows as multi-row inserts (6 binds a row, 100 bind
+ // limit): about 1.2 statements an observation instead of 3 to 4, so a batch carries about three times as many.
+ const written=[],upserts=[],showRows=[],keys=[];
+ let bytes=0;
+ const cost=(count,rows)=>SEAL_BATCH_OVERHEAD+count+1+Math.ceil(rows/SEAL_SHOW_ROWS);
+ for(const entry of spec.items){
+  const built=observationUpsert(entry.item,run);
+  const rows=showRows.length+built.shows.length;
+  if(written.length>0&&(written.length+1>SEAL_KEYS_PER_BATCH||cost(written.length+1,rows)>STATEMENT_CAP))break;
+  if(cost(1,built.shows.length)>STATEMENT_CAP)throw failed('discovery_bounded');
+  upserts.push(built.upsert);showRows.push(...built.shows);keys.push(entry.item.key);bytes+=entry.bytes;written.push(entry);
+ }
+ const statements=[...upserts,['DELETE FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key IN ('+keys.map(()=>'?').join(',')+')',keys]];
+ for(let at=0;at<showRows.length;at+=SEAL_SHOW_ROWS){
+  const slice=showRows.slice(at,at+SEAL_SHOW_ROWS);
+  statements.push(['INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES '+slice.map(()=>'(\'active\',?,?,?,?,?,?)').join(','),slice.flatMap(row=>row)]);
+ }
+ if(!written.length)return {written:0,cursorItems:spec.expectedCursor,cursorBytes:Number(state.cursor_bytes)};
+ const now=nowMs();
+ await commit(database(env),[
+  ...loadingFence(gate.generation,lease),
+  ['UPDATE discovery_lease SET expires_at=? WHERE id=1 AND lease_id=? AND expires_at>?',[now+LEASE_TTL_MS,lease.id,now]],
+  ...statements,
+  ['UPDATE discovery_seal SET cursor_items=cursor_items+?, cursor_bytes=cursor_bytes+?, updated_at=? WHERE id=1 AND job_id=? AND phase=\'items\' AND cursor_items=?',[written.length,bytes,new Date(now).toISOString(),spec.jobId,spec.expectedCursor]],
+  [FENCE_SQL,[]],
+ ]);
+ return {written:written.length,cursorItems:spec.expectedCursor+written.length,cursorBytes:Number(state.cursor_bytes)+bytes};
+}
+// Archives up to `limit` retiring observations (and their shows) in one batch, then commits the seal when none are
+// left. The first call moves the job to `archive` only when every observation is written.
+export async function sealArchive(env,spec){
+ const lease=spec.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const limit=Number.isInteger(spec.limit)&&spec.limit>0?Math.min(spec.limit,2000):500;
+ const gate=await readAuthority(env);
+ if(!gate.ready||gate.transfer!=='loading')throw failed('discovery_incomplete');
+ const db=database(env);
+ const state=await readSeal(env);
+ if(!state||state.job_id!==spec.jobId)throw failed('discovery_fence');
+ if(state.phase==='items'&&Number(state.cursor_items)!==Number(state.item_total))throw failed('discovery_incomplete');
+ if(state.phase!=='items'&&state.phase!=='archive')throw failed('discovery_fence');
+ const run=state.programme_run_id;
+ const written=await one(db,'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND programme_run_id=?',[run]);
+ if(Number(written?.n||0)!==Number(state.item_total))throw failed('discovery_incomplete');
+ const left=await one(db,'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\'');
+ const now=nowMs(),stamp=new Date(now).toISOString();
+ const renew=['UPDATE discovery_lease SET expires_at=? WHERE id=1 AND lease_id=? AND expires_at>?',[now+LEASE_TTL_MS,lease.id,now]];
+ const phase=['UPDATE discovery_seal SET phase=\'archive\', updated_at=? WHERE id=1 AND job_id=? AND phase IN (\'items\',\'archive\')',[stamp,spec.jobId]];
+ if(Number(left?.n||0)>0){
+  await commit(db,[
+   ...loadingFence(gate.generation,lease),renew,phase,[FENCE_SQL,[]],
+   ['UPDATE discovery_observation_show SET source_key=\'archive:\'||(SELECT programme_run_id||\':\'||(SELECT generation FROM discovery_authority WHERE id=1)||\':\'||observation_key FROM discovery_observation o WHERE o.source_key=\'active\' AND o.residence=\'retiring\' AND o.observation_key=discovery_observation_show.observation_key) WHERE source_key=\'active\' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\' ORDER BY observation_key LIMIT ?)',[limit]],
+   ['UPDATE discovery_observation SET residence=\'archive\', source_key=\'archive:\'||programme_run_id||\':\'||(SELECT generation FROM discovery_authority WHERE id=1)||\':\'||observation_key WHERE source_key=\'active\' AND residence=\'retiring\' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\' ORDER BY observation_key LIMIT ?)',[limit]],
+  ]);
+  const after=await one(db,'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'retiring\'');
+  return {committed:false,retiring:Number(after?.n||0)};
+ }
+ await commit(db,[
+  ...loadingFence(gate.generation,lease),renew,phase,[FENCE_SQL,[]],
+  ['UPDATE discovery_lease SET programme_run_id=? WHERE id=1 AND lease_id=?',[run,lease.id]],
+  ['UPDATE discovery_authority SET programme_run_id=?, published_programme_run_id=? WHERE id=1',[run,run]],
+  ['UPDATE discovery_transfer SET state=\'committed\', programme_run_id=?, batches=batches+1 WHERE id=1',[run]],
+  ['UPDATE discovery_seal SET phase=\'done\', updated_at=? WHERE id=1 AND job_id=?',[stamp,spec.jobId]],
+ ]);
+ return {committed:true,retiring:0};
+}
+
+// Films that left the catalog become `superseded`, never deleted, in bounded batches behind the fence.
+export async function supersedeAdmissions(env,ids,context={}){
+ const lease=context.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const list=[...new Set((ids||[]).map(String))];
+ let done=0;
+ for(let at=0;at<list.length;at+=80){
+  const slice=list.slice(at,at+80);
+  const gate=await readAuthority(env);
+  assertOpen(gate);
+  await commit(database(env),[
+   fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
+   [FENCE_SQL,[]],
+   ['UPDATE discovery_admission SET state=\'superseded\', generation=? WHERE state=\'current\' AND film_id IN ('+slice.map(()=>'?').join(',')+')',[gate.generation+1,...slice]],
+  ]);
+  done+=slice.length;
+ }
+ return {superseded:done};
+}
 function validateCatalog(films){
  if(!films||typeof films!=='object'||Array.isArray(films))throw failed('discovery_conflict');
  const seen=new Set();

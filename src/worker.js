@@ -412,7 +412,7 @@ async function setStarted(env,body){
  await writeEvent(env,event);return json({id:body.id,started:body.started});
 }
 async function beginSync(env){
- const current=await loadJSON(env,'sync.json');if(current&&['metadata','epg'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
+ const current=await loadJSON(env,'sync.json');if(current&&['metadata','epg','seal'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
  try{
  const sources=sourceConfig(env),watchlistObservedAt=new Date().toISOString();let url=sources.watchlist,pages=0,total=null;const films=new Map();
  while(url){const p=parseWatchlist(await getHTML(url));pages++;if(pages>100)throw new Error('Watchlist pagination limit exceeded');if(!Number.isInteger(p.total))throw new Error('Watchlist total not found');if(total===null)total=p.total;if(total!==p.total)throw new Error('Watchlist changed during synchronization; retry');if(p.films.length===0&&total>0)throw new Error('Watchlist page has no films');for(const f of p.films){if(films.has(f.id))throw new Error('Duplicate film across pages; retry');films.set(f.id,f);}if(p.next&&!new RegExp('^/'+sources.letterboxdUsername+'/watchlist/page/\\d+/$').test(p.next))throw new Error('Unexpected pagination URL');url=p.next?'https://letterboxd.com'+p.next:null;}
@@ -849,6 +849,158 @@ async function publishGenerationWithLedger(env,runId,discovery,meta,files,watchl
  const mode=discoveryLedgerMode(env);
  return publishEpgGeneration(env,runId,files,{latest:holder.discovery,meta,mode,holder},watchlist);
 }
+// ADR 0092. With D1-authoritative discovery the EPG commit no longer writes the active ledger into D1 inside its own
+// request: that takes tens of minutes and every client cancels at about two minutes. The commit stores everything the
+// publication needs (the immutable generation ledger in R2, a staging payload) and moves the run to stage `seal`. Bounded
+// steps then seal the ledger (`ledger`), bring the catalog up to date (`catalog`) and publish (`publish`); the published
+// pointer moves only after the ledger is sealed and committed.
+const SEAL_STEP_BUDGET_MS=30000;
+const SEAL_FLUSH_ITEMS=60;
+async function sealedPublishAvailable(env){
+ if(typeof DiscoveryAuthority==='undefined'||typeof PublishedEpg==='undefined')return false;
+ if(!await discoveryLedgerAuthoritative(env))return false;
+ return DiscoveryAuthority.sealSupported(env);
+}
+function sealPayloadKey(runId){return 'epg/seal/'+runId+'/payload.json';}
+function sealResponse(run,discovery,extra={}){
+ return {runId:run.runId,stage:'seal',remaining:0,failures:run.failures?.length??0,seal:{phase:run.seal?.phase??null,...(extra.seal||{})},discovery:{state:'paused',remainingChunks:null,nextAction:'continue',reason:'ledger_seal',at:new Date().toISOString(),nextCatchUpAt:null,nextScheduledRunAt:null,retryAt:null,programmeRunId:run.runId,...discovery}};
+}
+// Stores the generation ledger (R2 only, streamed with a known length) and the staging payload, then moves the run to
+// `seal`. It writes nothing to the D1 ledger and does not touch the lease row beyond holding it for the duration.
+async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,uncertain,publication}){
+ const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
+ let planned=null;
+ try{
+  planned=await planDiscoveryLedger(env,{runId:run.runId,latest:holder.discovery,mode:discoveryLedgerMode(env),lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null,holder});
+  const encoder=new TextEncoder();
+  const framing=discoveryDocumentFraming(meta,planned.ledger);
+  let source,itemBytes,itemCount;
+  if(planned.emit){source=planned.emit();itemBytes=planned.itemBytes;itemCount=planned.itemCount;}
+  else{const encoded=(planned.items||[]).map(item=>encoder.encode(JSON.stringify(item)));itemBytes=encoded.reduce((n,bytes)=>n+bytes.byteLength,0);itemCount=encoded.length;source=(async function*(){for(const bytes of encoded)yield bytes;})();}
+  if(!Number.isSafeInteger(itemBytes)||!Number.isSafeInteger(itemCount)||itemBytes<0||itemCount<0)throw new Error('Discovery document length is unknown');
+  const key=epgGenerationKey(run.runId,'discovery-latest.json');
+  await putKnownLength(env.BUCKET,key,discoveryDocumentLength(framing,itemBytes,itemCount),discoveryDocumentStream(framing,source),{httpMetadata:{contentType:'application/json'}});
+  const stored=await env.BUCKET.head(key);if(!stored?.etag)throw new Error('Generation ledger was not stored');
+  await env.BUCKET.put(sealPayloadKey(run.runId),JSON.stringify({runId:run.runId,report:pending['programme.json'],catalog:pending['discovered-films.json'],watchlist:nextWatchlist,uncertain,fence:publication.fence,expectedProgrammeRunId:publication.programmeRunId??null}),{httpMetadata:{contentType:'application/json'}});
+  run.seal={jobId:crypto.randomUUID(),phase:'ledger',sourceKey:key,etag:stored.etag,itemTotal:itemCount,prefixBytes:framing.prefix.byteLength,stagedAt:new Date().toISOString()};
+  run.stage='seal';run.updatedAt=new Date().toISOString();delete run.error;
+  await saveJSON(env,'sync.json',run);
+  return sealResponse(run,{},{seal:{itemTotal:itemCount}});
+ }finally{if(planned?.holder)planned.holder.discovery=null;await releaseDiscoveryLease(env,lease);}
+}
+// Reads the generation ledger from `offset` and hands its items to `visit` in order. `visit` may stop the read by
+// returning false. The bytes of each item are the bytes it took in the document (its JSON text and the comma that
+// follows it), which is how the cursor moves.
+async function readSealedItems(env,job,offset,visit){
+ const object=await env.BUCKET.get(job.sourceKey,{range:{offset}});
+ if(!object)throw new Error('Generation ledger is missing');
+ if(object.etag&&job.etag&&object.etag!==job.etag)throw new Error('Generation ledger changed during the seal');
+ const encoder=new TextEncoder(),stop=new Error('seal_read_stop');
+ async function* chunks(){yield '{"items":[';for await(const chunk of ledgerChunks(object))yield chunk;}
+ try{
+  await forEachJsonArrayItems(chunks(),'items',async item=>{if(await visit(item,encoder.encode(JSON.stringify(item)).byteLength+1)===false)throw stop;});
+ }catch(error){if(error!==stop)throw error;try{await object.body?.cancel?.();}catch{}}
+}
+async function sealLedgerStep(env,run,lease,deadline){
+ const job=run.seal;
+ await DiscoveryAuthority.sealBegin(env,{programmeRunId:run.runId,jobId:job.jobId,sourceKey:job.sourceKey,sourceEtag:job.etag,itemTotal:job.itemTotal,startBytes:job.prefixBytes,lease});
+ let state=await DiscoveryAuthority.sealState(env);
+ if(state.phase==='items'&&state.cursorItems<state.itemTotal){
+  let batch=[],cursor=state.cursorItems;
+  const flush=async()=>{while(batch.length){const result=await DiscoveryAuthority.sealWrite(env,{jobId:job.jobId,expectedCursor:cursor,items:batch,lease});cursor=result.cursorItems;batch=batch.slice(result.written);if(Date.now()>=deadline&&batch.length)return false;}return true;};
+  await readSealedItems(env,job,state.cursorBytes,async(item,bytes)=>{
+   batch.push({item,bytes});
+   if(batch.length>=SEAL_FLUSH_ITEMS){if(!await flush())return false;if(Date.now()>=deadline)return false;}
+   return true;
+  });
+  // The read ended or was stopped: write what is held. A step always writes at least one batch; what the spent time
+  // leaves unwritten is read again next step from the cursor.
+  if(batch.length)await flush();
+  state=await DiscoveryAuthority.sealState(env);
+ }
+ if(state.phase==='items'&&state.cursorItems<state.itemTotal)return {done:false,state};
+ // At least one archive batch per step, so a step with its time already spent still moves.
+ for(;;){
+  const result=await DiscoveryAuthority.sealArchive(env,{jobId:job.jobId,lease,limit:500});
+  if(result.committed)return {done:true,state:await DiscoveryAuthority.sealState(env)};
+  if(Date.now()>=deadline)return {done:false,state:await DiscoveryAuthority.sealState(env)};
+ }
+}
+// The catalog is brought up to date by the difference to what D1 holds, a bounded part per step: a step writes what
+// differs and the next step finds what is left, so no cursor is needed.
+async function sealCatalogStep(env,run,lease,deadline){
+ const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());
+ const pinned=await pinEpg(env);
+ const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId);
+ const current=await loadJSON(env,'epg/discovered-films.json')||{};
+ const changed=Object.keys(next).filter(id=>JSON.stringify(next[id])!==JSON.stringify(current[id])).sort();
+ const stale=Object.keys(current).filter(id=>!Object.hasOwn(next,id));
+ let written=0;
+ // At least one batch per step, so a step with its time already spent still moves.
+ for(let at=0;at<changed.length;at+=19){
+  const slice=changed.slice(at,at+19);
+  const result=await DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(slice.map(id=>[id,next[id]])),{lease});
+  written+=result.written.length;
+  if(result.refused.length)throw new Error('admission_identity_conflict');
+  if(Date.now()>=deadline)break;
+ }
+ // Done only when a step finds nothing to write: the merge depends on what D1 holds, so the step that writes the last
+ // films is followed by one that confirms the difference is empty.
+ const left=changed.length-written;
+ if(!changed.length&&stale.length)await DiscoveryAuthority.supersedeAdmissions(env,stale,{lease});
+ return {done:!changed.length,remaining:left,stale:stale.length,written};
+}
+async function sealPublishStep(env,run,lease){
+ const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());
+ const report=payload.report;
+ const live=await PublishedEpg.currentGeneration(env);
+ const already=live?.programmeRunId===run.runId&&live.phase==='published';
+ if(!already){
+  if(!live||live.fence!==payload.fence)throw new Error('EPG generation changed during publish');
+  await saveJSON(env,epgGenerationKey(run.runId,'programme.json'),report);
+  const result=await PublishedEpg.publishGeneration(env,{programmeRunId:run.runId,phase:'published',publishedAt:report?.updatedAt||null,expectedProgrammeRunId:payload.expectedProgrammeRunId,programme:report,watchlist:payload.watchlist});
+  let mirrored=false;
+  try{mirrored=await PublishedEpg.writeMirrors(env,{programmeRunId:run.runId,programme:report,watchlist:payload.watchlist,phase:'published'});}catch{mirrored=false;}
+  try{await copyEpgGeneration(env,run.runId);}catch{}
+  payload.mirrored=mirrored;
+ }
+ await queueCommittedDiscovery(env,run);
+ if(!payload.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
+ await saveJSON(env,'uncertain.json',{updatedAt:report?.updatedAt,items:payload.uncertain});
+ delete run.seal;
+ const finished=await completeWithRatings(env,run,report);
+ try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
+ return finished;
+}
+// One bounded step of the staged publication. It never runs longer than SEAL_STEP_BUDGET_MS of work and answers
+// `nextAction: continue` until the run is complete.
+async function sealStep(env,run){
+ const deadline=Date.now()+SEAL_STEP_BUDGET_MS;
+ if(!run.seal?.jobId)throw new Error('seal_job_missing');
+ // The lease is taken without the published pointer's programme: once the ledger is committed the discovery authority
+ // is on the new run while the pointer still names the old one until the publish step, and the job's own fence (its id and
+ // cursor, checked in every batch) is what protects these steps.
+ const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:null});
+ const lease=taken?.lease||null;
+ if(lease)env.discoveryLease=lease;
+ if(!lease)return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy'});
+ try{
+  if(run.seal.phase==='ledger'){
+   const result=await tracedPhase(run.runId,'seal_ledger',()=>sealLedgerStep(env,run,lease,deadline),value=>({cursor:value.state.cursorItems,total:value.state.itemTotal,phase:value.state.phase,done:value.done}));
+   if(result.done){run.seal.phase='catalog';}
+   run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
+   return sealResponse(run,{},{seal:{cursor:result.state.cursorItems,itemTotal:result.state.itemTotal,ledgerPhase:result.state.phase}});
+  }
+  if(run.seal.phase==='catalog'){
+   const result=await tracedPhase(run.runId,'seal_catalog',()=>sealCatalogStep(env,run,lease,deadline),value=>({remaining:value.remaining,stale:value.stale,written:value.written}));
+   if(result.done)run.seal.phase='publish';
+   run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
+   return sealResponse(run,{},{seal:{catalogRemaining:result.remaining}});
+  }
+  if(run.seal.phase==='publish')return await tracedPhase(run.runId,'seal_publish',()=>sealPublishStep(env,run,lease));
+  throw new Error('seal_phase_unknown');
+ }finally{await releaseDiscoveryLease(env,lease);}
+}
 // ADR 0074: the ratings pipeline is permanently separate. It acts once ratings_storage_migrate has migrated the
 // queue and the Diary cursor. The EPG commit then hands the films its watchlist diff removed to the queue as
 // references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
@@ -940,6 +1092,7 @@ async function syncStep(env,pathname,body,step){
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
  if(run.stage==='complete'){step.branch='continuation';if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const executor=discoveryExecutorMode(env);if(executor==='invalid'){step.branch='executor_invalid';return json({error:'discovery_executor_invalid',executor:'invalid'},503);}if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
@@ -969,6 +1122,7 @@ async function epgSync(env,run){
  previous=null;
  const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId).catalog,'programme.json':report};
  cache=null;
+ if(await sealedPublishAvailable(env)){const publication=await PublishedEpg.currentGeneration(env);if(publication)return await tracedPhase(run.runId,'seal_stage',()=>stageSealedGeneration(env,run,{holder:discoveryHolder,meta:{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist,uncertain:result.uncertain,publication}));}
  let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  if(!published?.authoritative||!published.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);

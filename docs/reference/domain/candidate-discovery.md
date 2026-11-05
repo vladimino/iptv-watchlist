@@ -69,3 +69,13 @@ The D1 ledger handoff (publishing a new generation's active ledger into `discove
 | the active and generation ledger, observation pages and walks, the observation index, `epg/discovery-resolution.json`, the score preview, the workflow record, every write | `discovery_incomplete` |
 
 The exceptions apply only when the loading transfer is a ledger seal: previous observations are `retiring` (or the transfer names another programme) and no admission is `pending`. A catalog, decision or segment load that stopped half way keeps every key closed. A read fails with `discovery_fence` when the authority, the programme or the loading state changes while it runs. A consumer that ignores the marker still receives the consistent catalog. There is no R2 fallback.
+
+## Resumable ledger seal ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md), Proposed)
+
+With D1-authoritative discovery and migration `0012` applied, the EPG commit stages the generation instead of sealing inline. The run moves to stage `seal`; each `epg_sync_step` does one bounded part of the job (about 30 s, at least one atomic unit):
+
+1. `ledger`: reads the immutable generation ledger from R2 by byte offset and writes observation rows with the cursor in `discovery_seal` in the **same D1 batch** (compare-and-set on the previous cursor, lease and generation fence). The first step of a job flips the previous active ledger to `retiring` once; the same job never flips again. The retiring rows are then archived in batches of at most 500, and the last batch commits the transfer and the authority programme.
+2. `catalog`: updates the catalog by its difference to D1 in bounded parts; the phase is done when a step finds nothing to write. Departed films are superseded.
+3. `publish`: moves the published pointer, writes the mirrors, opens the discovery series, finishes the run.
+
+The previous generation stays published until `publish`. A discovery chunk during the window between the ledger commit and `publish` sees a programme mismatch and answers busy. Without the table the previous inline seal applies. Reads during the `loading` window follow the section above.

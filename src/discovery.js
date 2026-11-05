@@ -1020,10 +1020,10 @@ const CONTINUATION_DIAGNOSTICS_LIMIT=20;
 const DIAGNOSTIC_VOCABULARY={
  caller:['http','mcp','internal'],
  route:['/api/sync/metadata','/api/sync/epg','/api/enrichment/discovery/resolve'],
- runStage:['metadata','epg','complete'],
+ runStage:['metadata','epg','seal','complete'],
  stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
  nextAction:['continue','wait','stop'],
- reason:['epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted','delegated'],
+ reason:['ledger_seal','epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted','delegated'],
  errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
 };
 function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}

@@ -75,3 +75,7 @@ The D1 data came through a one-off path, not a live flow: a fenced read-only sna
 ## Reads during a loading ledger seal
 
 The D1 discovery ledger is published by a multi-batch handoff. While it is `loading`, discovery reads fail closed, except the catalog (`discovery_admission`), the status and the continuation: the handoff writes only the active ledger, the transfer row, the lease and the generation, so those three are exactly what they were before it began. They are served with a `transfer: loading` marker only when the loading transfer is a ledger seal and no admission is pending; a half-replaced catalog stays closed. The active ledger, the observation index, decisions, the score preview and every write stay closed, and nothing falls back to R2 ([ADR 0091](../adr/0091-selective-reads-during-a-loading-ledger-seal.md)). The diagrams above are unchanged: no component, store or arrow is added.
+
+## Resumable ledger seal
+
+Schema 12 adds `discovery_seal`, the durable cursor of the ledger seal job. A seal reads the immutable generation ledger in R2 by byte offset and writes observation rows and the cursor in one D1 batch; R2 keeps the document and a staging payload of the publication, and D1 owns the rows, the cursor and the transfer ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md)). Without the table the Worker keeps its previous behaviour. No new store and no new arrow is added to the diagrams above.
