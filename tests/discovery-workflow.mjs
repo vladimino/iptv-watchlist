@@ -343,6 +343,34 @@ assert.equal(loading.reason,'authority_loading');assert.equal(creates.length,0);
 context.DiscoveryAuthority={readAuthority:async()=>{throw Object.assign(new Error('unavailable'),{code:'discovery_unavailable'});}};
 const down=await call('reconcileDiscoveryWorkflow')(env);
 assert.equal(down.reason,'d1_unavailable');assert.equal(creates.length,0);
+function snapshotDiscoveryKeys(){
+ return JSON.stringify({
+  continuation:records.get('epg/resolver-continuation.json')||null,
+  workflow:records.get('epg/discovery-workflow.json')||null,
+  resolution:records.get('epg/discovery-resolution.json')||null,
+ });
+}
+async function assertNoWorkflowStart(name,gate,reason){
+ seed();
+ env.DISCOVERY_EXECUTOR='workflow';
+ context.DiscoveryAuthority={readAuthority:async()=>gate};
+ const before=snapshotDiscoveryKeys();
+ creates.length=0;puts.length=0;
+ const out=await call(name)(env);
+ assert.equal(out.started,false,name+' '+reason);
+ assert.equal(out.reason,reason,name+' '+JSON.stringify(out));
+ assert.equal(creates.length,0,name+' create');
+ assert.equal(snapshotDiscoveryKeys(),before,name+' records');
+ assert.equal(puts.filter(key=>key==='epg/resolver-continuation.json'||key==='epg/discovery-workflow.json'||key==='epg/discovery-resolution.json').length,0,name+' puts');
+}
+const closedGate={ready:false,held:false,tables:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};
+const schemaV10={...closedGate,version:10};
+const r2Open={ready:false,held:false,tables:true,mode:'r2',cutover:'open',version:11,generation:1,programmeRunId:GENERATION,publishedProgrammeRunId:GENERATION,transfer:'idle'};
+for(const name of ['ensureDiscoveryWorkflow','reconcileDiscoveryWorkflow']){
+ await assertNoWorkflowStart(name,closedGate,'authority_not_ready');
+ await assertNoWorkflowStart(name,schemaV10,'authority_not_ready');
+ await assertNoWorkflowStart(name,r2Open,'authority_not_ready');
+}
 delete context.DiscoveryAuthority;
 delete env.DISCOVERY_EXECUTOR;
 const rolledBack=await call('ensureDiscoveryWorkflow')(env);

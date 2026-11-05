@@ -186,6 +186,13 @@ async function discoveryWorkflowAdmission(env){
   catch{return {ok:false,reason:'d1_unavailable'};}
   if(gate?.held||gate?.cutover==='held')return {ok:false,reason:'authority_held'};
   if(gate?.transfer==='loading')return {ok:false,reason:'authority_loading'};
+  // closed() (no DB / schema < 11) and an r2 marker are ready:false. Do not reconstruct
+  // intent or create() against the R2 ledger (AIR-324 D1-first).
+  if(gate?.ready!==true||gate.mode!=='d1'||gate.cutover!=='open')return {ok:false,reason:'authority_not_ready'};
+  if(gate.transfer!=='idle'&&gate.transfer!=='committed')return {ok:false,reason:'authority_not_ready'};
+  const programmeRunId=gate.publishedProgrammeRunId||gate.programmeRunId||null;
+  if(!programmeRunId)return {ok:false,reason:'generation_unpublished'};
+  return {ok:true,programmeRunId};
  }
  const programmeRunId=publishedProgrammeRunId(await loadJSON(env,EPG_GENERATION_KEY));
  if(!programmeRunId)return {ok:false,reason:'generation_unpublished'};
