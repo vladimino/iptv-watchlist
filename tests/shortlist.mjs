@@ -19,7 +19,7 @@ ctx.sameDay = f('today-boundary', 4, 100, late + 2 * 60000);
 ctx.nextDay = f('tomorrow-boundary', 4, 100, late + 6 * 60000);
 
 vm.runInContext(
-  'CUTOFF=late;WINDOW_START=late-72*3600000;WINDOW_END=late+24*3600000',
+  'CUTOFF=late;viewClock=late;WINDOW_START=late-72*3600000;WINDOW_END=late+24*3600000',
   ctx
 );
 
