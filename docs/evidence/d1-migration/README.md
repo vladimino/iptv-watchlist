@@ -2,6 +2,7 @@
 
 | Report | Capture and scope | Verdict | Used by | Later / authority |
 | --- | --- | --- | --- | --- |
+| [AIR-355 stalled D1 ledger seal](air-355-incident-seal-loading-2026-11-05.md) | 5 Nov 2026 17:39–17:50 UTC, read-only `SELECT`s and telemetry on production plus offline sqlite stand-ins | **INCIDENT READING** — an EPG commit seal cancelled mid-handoff left `discovery_transfer` `loading`; no data lost; three independent reads opened by ADR 0091 (Proposed); seal not finished |
 | [AIR-352 paged chunk resolution and keyed writes](air-352-paged-write-path-2026-11-05.md) | 5 Nov 2026, offline sqlite stand-ins on `main` `33ba94d` | **OFFLINE ONLY** — the paged chunk resolves candidates and stores Films and decisions with keyed, fenced writes; no production chunk run |
 | [AIR-352 chunk lease, budget and timings](air-352-chunk-budget-2026-11-05.md) | 5 Nov 2026, offline sqlite stand-ins on `main` `e7a2a47` and read-only production telemetry and `SELECT`s from the RCA | **OFFLINE ONLY** — lease heartbeat, concurrent ledger read, 40 s budget and timings; no production chunk run; decisions still not persisted by the paged chunk |
 | [AIR-320 pipeline status D1 bind cap](air-320-pipeline-status-bind-cap-2026-11-04.md) | 4 Nov 2026 23:20 UTC, side-effect-free `epg_pipeline_status` on Worker `iptv` after #373 | **LIVE STATUS FAILED CLOSED** — `D1_ERROR: too many SQL variables` from 500-key `IN` binds. Rows not proven lost. D1 cap is 100 binds | [AIR-320](https://trello.com/c/4cA5GlJn) | Local SQLite did not enforce the cap |

@@ -185,6 +185,18 @@ A D1 chunk has three clocks that must all fit: the MCP client's timeout (about 6
 - **Preflight before any chunk.** Read the marker, the continuation record, the lease row and `epg_pipeline_status` fresh. A `running` record with an expired lease is an orphan; an `error` / `resolver lease lost` record writes nothing and ordinary steps may run a new chunk. Do not repeat a step to observe it.
 - **Evidence.** [Dated reproduction and timings](../evidence/d1-migration/air-352-chunk-budget-2026-11-05.md).
 
+## A stalled D1 ledger seal (`discovery_transfer` is `loading`)
+
+**Symptoms.** `epg_status` shows `stage: epg` with `error: discovery_incomplete`; `epg_pipeline_status` and every ledger reader fail with `discovery_incomplete`; no new EPG generation is published. Telemetry shows an EPG commit step (`generation_publish`) with outcome `canceled` after about two minutes and a high CPU time.
+
+**Read-only preflight (SELECT only).** `discovery_transfer` (`state`, `programme_run_id`, `batches`), `discovery_lease` (is it expired), `discovery_authority` (marker and programme), `discovery_observation` grouped by `residence` and `programme_run_id` (`retiring` against `active`), and the counts of decisions, admissions and history. A stalled seal has `retiring` rows of the previous run and a few `active` rows of the new one, and no decision, admission or history row changes.
+
+**What is open.** The catalog, the status and the continuation are readable and marked `transfer: loading` ([reference](../reference/domain/candidate-discovery.md#reads-while-a-ledger-seal-is-loading)), so predictions and the EPG input scan can read. Ledger reads and every write stay closed.
+
+**What not to do.** Do not repeat the EPG commit: a retry takes the expired lease and replays the seal from the first observation, so it is cancelled again and an interrupted attempt can leave less written than the one before. A killed attempt also holds its lease for the 90 s TTL. Do not reset the lease or the transfer, edit `discovery_observation`, or switch the marker. Each of those is a separate owner-approved operation, and none finishes the seal.
+
+**Recovery.** The seal must finish in explicit bounded steps; that handoff is a separate delivery, and its production steps (a read-only preflight, a bounded recovery, a readback, one EPG commit, a prediction check) each need their own approval. Evidence: [stalled seal](../evidence/d1-migration/air-355-incident-seal-loading-2026-11-05.md).
+
 ## Commit memory diagnostics (AIR-263)
 
 **Phase markers.** Every EPG commit logs one `{"event":"epg_phase"}` line per phase edge (`enter`, `exit` or `error`). Each line holds `runId`, `phase`, `at`, `elapsedMs` on exit, and only counts or byte sizes the step already holds. It never holds titles, film ids, slugs, HTML or payloads.
