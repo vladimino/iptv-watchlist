@@ -46,6 +46,7 @@ The programme status (`programmeStatus` in `public/app.js`) distinguishes:
 |---|---|---|
 | Fresh | Snapshot age at most 36 hours, future known | «Программа актуальна», known end and data age |
 | Stale | Snapshot older than 36 hours while shows are still ahead | «Данные устарели», data age and the remaining known coverage; the saved schedule of the last whole generation, with a note that later changes are not included |
+| No known future | The feed's last show (`stats.epgEnd`) has already started, even if the saved window still runs ahead | «Будущей программы нет»: the archive stays, the data age is kept, and the text says the schedule ahead is unknown. Nothing is extended to the retention edge |
 | Future ended | Window has no shows ahead, archive remains | «Будущее закончилось» |
 | None | Saved window over | «Нет актуального окна» |
 

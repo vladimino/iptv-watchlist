@@ -32,8 +32,25 @@ assert.match(status(t0,t0+60*hour).coverage,/Обновлено 2 дн наза�
 // Channels with a shallower feed: the known end is the feed's last show, never the window edge.
 const shallow=status(t0,t0+2*hour,{stats:{epgEnd:t0+30*hour}});
 assert.match(shallow.coverage,/осталось|до /);assert.doesNotMatch(shallow.coverage,/осталось 1[0-9]{2} ч/);
-const staleShallow=status(t0,t0+40*hour,{stats:{epgEnd:t0+30*hour}});
-assert.equal(staleShallow.level,'warning');assert.match(staleShallow.coverage,/осталось меньше часа/,'the last known show already started: nothing known remains, and it is not invented');
+// A feed whose last show already started: the saved window may still run ahead, but no future schedule is known.
+const feedBehind=status(t0,t0+1*hour,{stats:{epgEnd:t0-hour}});
+assert.equal(feedBehind.level,'warning');assert.equal(feedBehind.badge,'Будущей программы нет','a fresh snapshot with a shallow feed that ends before now');
+assert.match(feedBehind.coverage,/Лента закончилась/);assert.match(feedBehind.coverage,/расписание дальше неизвестно/);assert.doesNotMatch(feedBehind.coverage,/Программа до|известные показы до|осталось/);
+assert.match(feedBehind.coverage,/Архив с/,'the archive stays available');assert.match(feedBehind.coverage,/Обновлено 1 ч назад/);
+assert.match(feedBehind.title,/не додумывается/);
+const staleBehind=status(t0,t0+40*hour,{stats:{epgEnd:t0+30*hour}});
+assert.equal(staleBehind.badge,'Будущей программы нет','a stale snapshot whose feed end is behind now');
+assert.match(staleBehind.coverage,/Обновлено 40 ч назад/,'the age warning is kept');assert.doesNotMatch(staleBehind.coverage,/известные показы до/);
+// Feed end exactly at now: the last show has just started, nothing is ahead.
+assert.equal(status(t0,t0+30*hour,{stats:{epgEnd:t0+30*hour}}).badge,'Будущей программы нет');
+// A stale snapshot with a real future show keeps the stale warning and the remaining known coverage.
+const staleReal=status(t0,t0+40*hour,{stats:{epgEnd:t0+100*hour}});
+assert.equal(staleReal.badge,'Данные устарели');assert.match(staleReal.coverage,/осталось 2 дн/,'60 h remain of the known feed');assert.doesNotMatch(staleReal.coverage,/Лента закончилась/);
+// The retained edge is never used to invent coverage: a feed longer than the window still ends at the window.
+assert.match(status(t0,t0+2*hour,{stats:{epgEnd:t0+400*hour}}).coverage,/Программа до 12 нояб/);
+// A snapshot without a feed end (legacy) reads as before.
+const noEnd=JSON.parse(JSON.stringify(run(`(report=${snapshot(t0,{stats:{}})},programmeStatus(effectiveWindow(report,${t0+2*hour})))`)));
+assert.equal(noEnd.badge,'Программа актуальна');
 
 // Truly nothing known: the saved window is over.
 const over=status(t0,t0+250*hour);

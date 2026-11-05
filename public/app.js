@@ -1784,9 +1784,14 @@ function programmeStatus(model=viewingWindow()){
  // The retained future runs to the last show the feed really had (never past the saved window); a skipped refresh keeps it until
  // those shows start, with the data age said out loud so an old programme is never passed off as a fresh one.
  const savedAt=finiteTime(report?.updatedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
- const knownEnd=Number.isFinite(model.epgEnd)?Math.min(model.retained.to,Math.max(model.epgEnd,model.now)):model.retained.to;
+ const ageText=age===null?'':`Обновлено ${ageWords(age)} назад · `,stale=age!==null&&age>PROGRAMME_STALE_MS;
+ // Known future programming comes from the feed's real last show, never from the saved window's edge. When that show has already
+ // started the schedule ahead is unknown, whatever the window still allows; nothing is extended to the retention edge.
+ const feedEnd=model.epgEnd;
+ if(Number.isFinite(feedEnd)&&feedEnd<=model.now)return {level:'warning',badge:'Будущей программы нет',coverage:`${archive}${ageText}Лента закончилась ${endedPhrase(feedEnd,model.now)} · расписание дальше неизвестно`,title:'Последний показ в сохранённой ленте уже начался. Показов впереди нет, и расписание не додумывается: ждём нового обновления.'};
+ const knownEnd=Number.isFinite(feedEnd)?Math.min(model.retained.to,feedEnd):model.retained.to;
  const left=`осталось ${ageWords(Math.max(0,knownEnd-model.now))}`;
- if(age!==null&&age>PROGRAMME_STALE_MS)return {level:'warning',badge:'Данные устарели',coverage:`${archive}Обновлено ${ageWords(age)} назад · известные показы до ${madridStamp(knownEnd)} (${left})`,title:'Обновление программы пропущено. Показано расписание последней целостной публикации: изменения и отмены эфира после неё не учтены.'};
+ if(stale)return {level:'warning',badge:'Данные устарели',coverage:`${archive}Обновлено ${ageWords(age)} назад · известные показы до ${madridStamp(knownEnd)} (${left})`,title:'Обновление программы пропущено. Показано расписание последней целостной публикации: изменения и отмены эфира после неё не учтены.'};
  return {level:'ok',badge:'Программа актуальна',coverage:`${archive}Программа до ${madridStamp(knownEnd)}${age===null?'':' · обновлено '+ageWords(age)+' назад'}`,title};
 }
 const PROGRAMME_STALE_MS=36*3600000;

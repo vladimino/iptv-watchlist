@@ -20,6 +20,6 @@ Reading: the hot discovery work is identical, so days 2-7 add no discovery, reso
 
 Tests: `tests/epg-extended-future.mjs` (scan horizons and a two-generation cancel/reschedule fixture), `tests/programme-freshness.mjs` (reader states), `tests/programme-display-window.mjs` (rolling 72 h / 24 h reader window).
 
-Local browser QA at 1280 px and 390 px with a mocked programme snapshot: a film airing 5 days ahead is not listed on a fresh snapshot (2 h old) or a snapshot 40 h old, and is listed once the clock is 20 h before it (snapshot 4 days old, still marked «Данные устарели»); no horizontal overflow at either width; an 8-day-old snapshot shows «Будущее закончилось» with no films.
+Local browser QA at 1280 px and 390 px with a mocked programme snapshot: a film airing 5 days ahead is not listed on a fresh snapshot (2 h old) or a snapshot 40 h old, and is listed once the clock is 20 h before it (snapshot 4 days old, still marked «Данные устарели»); a snapshot whose feed ended 1 h after it was taken, read 3 h later, shows «Будущей программы нет» with the archive still listed; no horizontal overflow at either width; an 8-day-old snapshot shows «Будущее закончилось» with no films.
 
 Limitations: one synthetic feed on a development container; no production Worker CPU or memory was observed.
