@@ -24,7 +24,7 @@ This code change does not delete the Cloudflare binding. `keep_vars: true` leave
 2. After the binding is deleted, code from before ADR 0077 must not be deployed until `REMOVAL_RATING_LOOKUP=on` is restored and read back. That older code skips the lookup when the binding is absent.
 3. A code revert does not roll back R2 rating facts, the queue or removal events. After the deletion the lookup cannot be turned off by a flag. An emergency stop is a separately approved code revert or Task action. The 403/429 pause and the request budgets stay.
 
-A deploy does not start a ratings run. Each production change still needs its own owner approval.
+A deploy does not start a ratings run. Production changes follow [L0–L3 authorization](../process/authorization-and-escalation.md): verified L0 observation is standing-authorized; a pre-approved high-impact plan may cover its bounded steps and readbacks, but no additional writer or schedule change is granted by a documentation merge.
 
 ## Historical activation (AIR-51)
 
