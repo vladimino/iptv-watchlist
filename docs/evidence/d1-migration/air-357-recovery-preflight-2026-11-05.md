@@ -34,3 +34,7 @@ Unmeasured: the real D1 batch latency and the Worker CPU of a step. Code rollbac
 At about 20:55 UTC, after the owner's GO for exactly `migrations/0012_discovery_seal.sql`, the Cloudflare API connector re-read `schema_contract` (11) and the absence of `discovery_seal`, then sent the migration as one D1 `{sql}` body. Cloudflare refused it: HTTP 400, error 7500 "You do not have permission to perform this operation" (the connector's D1 permission is read-only). A readback right after showed `schema_contract` still 11 and no `discovery_seal` table: **nothing was applied**. The authority, transfer, observation and lease rows were not touched.
 
 No other credential was tried. The operator entry `scripts/discovery-production.mjs --apply` sends only `0011`, and the `D1_BACKFILL_*` token is scoped to the backfill scripts. Applying `0012` needs either an operator apply path for `0012` (a reviewed script change) or a D1 write permission the owner grants for this one statement set.
+
+### Second attempt with the backfill token (owner-approved single use)
+
+The owner then approved one use of the `D1_BACKFILL_*` token for this statement set. The pre-check read (`SELECT` of `schema_contract` and `sqlite_master`) was refused: HTTP 401, error 10000 "Authentication error", so the script aborted before any write. Nothing was applied and no further credential was tried; production remains schema 11 without `discovery_seal`.
