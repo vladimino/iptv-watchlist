@@ -412,7 +412,12 @@ async function setStarted(env,body){
  await writeEvent(env,event);return json({id:body.id,started:body.started});
 }
 async function beginSync(env){
- const current=await loadJSON(env,'sync.json');if(current&&['metadata','epg','seal'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
+ const current=await loadJSON(env,'sync.json');
+ // ADR 0092: an unfinished ledger seal is durable state, not a freshness question. Its run is returned whatever its age, so a cancelled step is resumed by the same runId and never replaced by a new run.
+ if(current?.stage==='seal')return {runId:current.runId,stage:current.stage,remaining:current.remaining,seal:current.seal?.phase||null};
+ if(current&&['metadata','epg'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
+ // A job in D1 that sync.json does not name cannot be continued by a new run and is never reset silently.
+ if(await sealedPublishAvailable(env)){const durable=await DiscoveryAuthority.sealState(env);if(durable.supported&&['items','archive'].includes(durable.phase))throw Object.assign(new Error('discovery_seal_unfinished'),{status:409,code:'discovery_seal_unfinished'});}
  try{
  const sources=sourceConfig(env),watchlistObservedAt=new Date().toISOString();let url=sources.watchlist,pages=0,total=null;const films=new Map();
  while(url){const p=parseWatchlist(await getHTML(url));pages++;if(pages>100)throw new Error('Watchlist pagination limit exceeded');if(!Number.isInteger(p.total))throw new Error('Watchlist total not found');if(total===null)total=p.total;if(total!==p.total)throw new Error('Watchlist changed during synchronization; retry');if(p.films.length===0&&total>0)throw new Error('Watchlist page has no films');for(const f of p.films){if(films.has(f.id))throw new Error('Duplicate film across pages; retry');films.set(f.id,f);}if(p.next&&!new RegExp('^/'+sources.letterboxdUsername+'/watchlist/page/\\d+/$').test(p.next))throw new Error('Unexpected pagination URL');url=p.next?'https://letterboxd.com'+p.next:null;}
