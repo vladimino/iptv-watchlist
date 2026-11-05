@@ -8,7 +8,7 @@ const FEATURE_FLAG_RAW_MAX=200;
 const FEATURE_FLAGS=[
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
  {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
- {name:'DISCOVERY_EXECUTOR',modes:['external','workflow'],default:'external',tokens:['external','workflow'],effective:env=>discoveryExecutorMode(env),note:'absent or empty is external; any other string is invalid and a discovery chunk fails closed. A deploy does not set this binding and does not start a Workflow'},
+ {name:'DISCOVERY_EXECUTOR',modes:['external','workflow'],default:'external',tokens:['external','workflow'],effective:env=>discoveryExecutorMode(env),note:'absent or empty is external; any other string is invalid and a discovery chunk fails closed. A deploy does not set this binding. Cron may call reconcileDiscoveryWorkflow and creates nothing while this is absent'},
  // Retired: a migrated ratings run's per-film removal lookup does not read this binding (ADR 0077).
  {name:'REMOVAL_RATING_LOOKUP',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  // Retired: Diary page 1 on a migrated ratings run does not read this binding (ADR 0075).

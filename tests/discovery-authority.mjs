@@ -35,7 +35,7 @@ assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/discovery-author
 assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeRead\(env,key\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeWrite\(env,key,value\)/);
 assert.doesNotMatch(fs.readFileSync('src/discovery-authority.js','utf8'),/ensureDiscoveryWorkflow|reconcileDiscoveryWorkflow|\.create\(/);
-assert.match(fs.readFileSync('src/discovery-workflow.js','utf8'),/if\(mode==='external'\)return \{started:false,reason:'external'\}/);
+assert.match(fs.readFileSync('src/discovery-workflow.js','utf8'),/if\(mode==='external'\)return \{ok:false,reason:'external'\}/);
 const discoverySql=fs.readFileSync('migrations/0011_discovery_authority.sql','utf8');
 const ratingsSql=fs.readFileSync('migrations/0010_ratings_authority.sql','utf8');
 assert.match(discoverySql,/version >= 10 AND version < 11/);

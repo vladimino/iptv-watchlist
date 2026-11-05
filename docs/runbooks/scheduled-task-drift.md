@@ -2,7 +2,7 @@
 
 > Operator runbook. The monitor and this page authorize no production write and no task change. Enabling, disabling, editing or running any Scheduled Task, and any EPG, discovery, ratings or prediction writer call, needs a separate action-specific owner approval.
 
-The expected configuration and checks of the `IPTV Scheduled Task Drift` automation are in the [Scheduled Task contract](../reference/scheduled-tasks.md#read-only-drift-monitor): daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, read-only. It reads the daily programme task, the hourly task and the Ratings Task, plus `epg_status` and read-only `ratings_sync_status`, and reports only anomalies. The live ChatGPT Scheduled Tasks registry, not this page, says what is configured now. This page does not edit the task.
+The expected configuration and checks of the `IPTV Scheduled Task Drift` automation are in the [Scheduled Task contract](../reference/scheduled-tasks.md#read-only-drift-monitor): daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, read-only. It reads the daily programme task, the hourly task and the Ratings Task, plus `epg_status` and read-only `ratings_sync_status`, and reports only anomalies. The live ChatGPT Scheduled Tasks registry, not this page, says what is configured now. Draft Daily/Hourly texts under `docs/reference/scheduled-task-prompts/` are not the live prompts. This page does not edit the task.
 
 ## Recovery cost and alert triage
 

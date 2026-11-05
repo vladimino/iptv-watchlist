@@ -2,7 +2,7 @@
 
 This section describes **currently implemented contracts**, not historical rollout verdicts or action approvals. Source and authorized runtime must be rechecked before operational claims.
 
-- [Production Scheduled Tasks](scheduled-tasks.md) — expected external task schedules, MCP permissions, sequencing and validation; check live registry for current settings.
+- [Production Scheduled Tasks](scheduled-tasks.md) — expected external task schedules, MCP permissions, sequencing and validation; check live registry for current settings. Draft post-cutover Daily and Hourly texts: [scheduled-task-prompts](scheduled-task-prompts/daily-epg-no-discovery.md) (not the live registry).
 - [Orchestration reliability](orchestration-reliability.md) — proposed shared contract for Cloudflare-executed EPG, Discovery and Ratings: failure classes, budgets, ownership elements, read model and negative tests; not implemented in production.
 - [Runtime feature flags](feature-flags.md) — effective modes, defaults, interactions and dated production evidence.
 - [API](api/README.md) — MCP, enrichment, prediction runner, diagnostics.

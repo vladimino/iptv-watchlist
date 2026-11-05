@@ -282,7 +282,7 @@ creates.length=0;
 const quarantined=await call('reconcileDiscoveryWorkflow')(env);
 assert.equal(quarantined.reason,'recovery_exhausted');assert.equal(creates.length,0);
 
-// 11. The production entry is inert: no flag, no schedule, and cron does not start discovery.
+// 11. The production entry stays inert: no flag, no Workflow schedule, cron may reconcile but does not run a chunk.
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
 assert.equal(wrangler.main,'dist/server/workflow-entry.js');
 assert.deepEqual(wrangler.triggers.crons,['37 * * * *']);
@@ -292,7 +292,8 @@ assert.equal(wrangler.workflows[0].binding,'DISCOVERY_WORKFLOW');
 assert.equal(wrangler.workflows[0].class_name,'DiscoveryWorkflow');
 assert.equal(wrangler.workflows[0].schedules,undefined);
 const scheduled=fs.readFileSync('src/worker.js','utf8').match(/async scheduled[\s\S]*?async fetch/)[0];
-assert.doesNotMatch(scheduled,/reconcileDiscoveryWorkflow|DISCOVERY_WORKFLOW|advanceDiscovery/);
+assert.match(scheduled,/reconcileDiscoveryWorkflow/);
+assert.doesNotMatch(scheduled,/advanceDiscovery/);
 const build=fs.readFileSync('build.mjs','utf8');
 const indexWrite=build.slice(build.indexOf("fs.writeFileSync('dist/server/index.js'"),build.indexOf("fs.writeFileSync('dist/server/workflow-entry.js'"));
 assert.match(indexWrite,/src\/discovery-workflow\.js/);
@@ -300,4 +301,51 @@ assert.doesNotMatch(indexWrite,/cloudflare:workers/);
 assert.match(build,/import \{ WorkflowEntrypoint \} from 'cloudflare:workers'/);
 assert.match(build,/export \{ runDiscoveryWorkflow, reconcileDiscoveryWorkflow(, runRatingsWorkflow)? \}/);
 
-console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery and an inert binding passed');
+async function fireCron(environment=env){
+ const pending=[];
+ await worker.scheduled({scheduledTime:Date.now()},environment,{waitUntil(p){pending.push(p);}});
+ await Promise.all(pending);
+}
+
+// 14. Cron reconcile is inert while the flag is absent, and self-starts only in workflow mode.
+seed();
+delete env.DISCOVERY_EXECUTOR;
+creates.length=0;puts.length=0;
+await fireCron();
+assert.equal(creates.length,0);
+assert.equal(decided(),0);
+env.DISCOVERY_EXECUTOR='workflow';
+await fireCron();
+assert.equal(creates.length,1);assert.equal(creates[0].id,INSTANCE);assert.equal(decided(),0);
+
+// Lost publication queue: ensure reconstructs the fenced intent from the published generation.
+seed();
+records.delete('epg/resolver-continuation.json');etags.delete('epg/resolver-continuation.json');
+creates.length=0;
+const reconstructed=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(reconstructed.started,true);assert.equal(reconstructed.instanceId,INSTANCE);
+assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);
+assert.equal(creates.length,1);assert.equal(decided(),0);
+
+// A terminal series is not re-queued. D1 held, loading or unavailable creates nothing.
+set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+creates.length=0;
+const terminal=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(terminal.started,false);assert.equal(terminal.reason,'stopped');assert.equal(creates.length,0);
+seed();
+creates.length=0;
+context.DiscoveryAuthority={readAuthority:async()=>({ready:false,held:true,cutover:'held',mode:'d1',transfer:'idle'})};
+const held=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(held.reason,'authority_held');assert.equal(creates.length,0);
+context.DiscoveryAuthority={readAuthority:async()=>({ready:true,held:false,cutover:'open',mode:'d1',transfer:'loading'})};
+const loading=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(loading.reason,'authority_loading');assert.equal(creates.length,0);
+context.DiscoveryAuthority={readAuthority:async()=>{throw Object.assign(new Error('unavailable'),{code:'discovery_unavailable'});}};
+const down=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(down.reason,'d1_unavailable');assert.equal(creates.length,0);
+delete context.DiscoveryAuthority;
+delete env.DISCOVERY_EXECUTOR;
+const rolledBack=await call('ensureDiscoveryWorkflow')(env);
+assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
+
+console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
