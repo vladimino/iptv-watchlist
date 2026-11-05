@@ -9,12 +9,19 @@ function filmIsHot(film,now=Date.now()){
 }
 function candidateIsHot(candidate,now=Date.now()){return Array.isArray(candidate.shows)?filmIsHot({shows:candidate.shows},now):filmIsHot({epgLastAiring:candidate.lastAiring},now);}
 const DISCOVERY_ATTEMPT_LIMIT=5;
-// The paged (D1) chunk. The wall budget sits inside the shortest known MCP client timeout (about 60 s); the renew
-// margin is half of the 90 s lease TTL, so a lease is renewed while it still has at least that long to live.
+// The paged (D1) chunk. The wall budget sits inside the shortest known MCP client timeout (about 60 s) and covers the
+// final status write and continuation checkpoint, which keep PAGED_COMMIT_RESERVE_MS of it; candidates, TMDB requests
+// and the ledger walk all stop before that reserve. The renew margin is half of the 90 s lease TTL, so a lease is
+// renewed while it still has at least that long to live. A single D1 query or TMDB request cannot be pre-empted:
+// the budget is checked between awaited steps, and a request's own timeout is cut to the time left.
 const PAGED_CHUNK_BUDGET_MS=40000;
+const PAGED_COMMIT_RESERVE_MS=8000;
+const PAGED_MIN_REQUEST_MS=2000;
+const PAGED_BUDGET_BACKOFF_MS=300000;
 const PAGED_TMDB_CALLS=16;
 const PAGED_WALK_CONCURRENCY=4;
 const DISCOVERY_LEASE_RENEW_MARGIN_MS=45000;
+const budgetExhaustedError=()=>Object.assign(new Error('chunk wall budget exhausted'),{name:'BudgetExhaustedError'});
 function candidateEvidence(candidate){const shows=[...(candidate.shows||[])].map(show=>`${show.channelId||''}:${show.start}`).sort(),durations=[...(candidate.durations||[])].filter(Number.isFinite).sort((a,b)=>a-b);return [candidate.normalizedTitle||'',candidate.year||'',durations.join(','),shows.join(',')].join('|');}
 function candidateActivity(candidate,now=Date.now()){
  const from=now-72*3600000,to=now+24*3600000,shows=Array.isArray(candidate.shows)?candidate.shows:null,inWindow=!!shows?.some(show=>Number(show.start)>=from&&Number(show.start)<to);
@@ -218,9 +225,9 @@ async function releaseDiscoveryLease(env,lease){
   if(released.handled)return;
  }
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY);if(!object)return;const current=await object.json();if(current.id===lease.id)await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify({...lease,expiresAt:0}),{onlyIf:{etagMatches:object.etag}});}
-async function tmdbRequest(env,path){
+async function tmdbRequest(env,path,options={}){
  if(env.TMDB_REQUEST_INTERVAL_MS!==0)await new Promise(resolve=>setTimeout(resolve,200));
- const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(12000)});
+ const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)});
  if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
 }
 function catalogFilmFromDetail(movie,candidate,old,programmeRunId,id){
@@ -574,7 +581,8 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // The D1 lease lives 90 s and cannot be renewed once it has expired, so the chunk renews it on every long phase
  // boundary instead of only before its final write. `timings` is the chunk's own wall clock: it is the evidence a
  // later reader needs to tell a slow read from a lost lease or a client that went away.
- const t0=Date.parse(startedAt)||Date.now(),timings={walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,tmdbMs:null,totalMs:null};
+ const t0=Date.parse(startedAt)||Date.now(),timings={walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,tmdbMs:null,preCommitMs:null,statusMs:null,checkpointMs:null,totalMs:null};
+ const candidateDeadline=t0+PAGED_CHUNK_BUDGET_MS-PAGED_COMMIT_RESERVE_MS,walkDeadline=candidateDeadline-PAGED_MIN_REQUEST_MS;
  const heartbeat=async()=>{
   if(!lease||lease.expiresAt-Date.now()>DISCOVERY_LEASE_RENEW_MARGIN_MS)return;
   try{await fence();}catch(e){if(e?.name==='LeaseLostError')e.timings={...timings,sinceStartMs:Date.now()-t0,failedAt:'heartbeat'};throw e;}
@@ -582,9 +590,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  };
  const decisions=(await loadJSON(env,'epg/discovery-resolution.json'))||{};
  const pending=[];
- let remaining=0,seen=0,maxPage=0;
+ let remaining=0,seen=0,maxPage=0,error=null,retryAt=null;
  const walkStarted=Date.now();
- const walked=await DiscoveryAuthority.walkObservationPages(env,{concurrency:PAGED_WALK_CONCURRENCY,beforeBatch:heartbeat,onPage:items=>{
+ const walked=await DiscoveryAuthority.walkObservationPages(env,{concurrency:PAGED_WALK_CONCURRENCY,shouldStop:()=>Date.now()>=walkDeadline,beforeBatch:heartbeat,onPage:items=>{
   maxPage=Math.max(maxPage,items.length);
   seen+=items.length;
   const now=Date.now();
@@ -597,21 +605,48 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   }
  }});
  timings.walkMs=Date.now()-walkStarted;timings.pages=walked.pages;
- if(seen!==source.itemCount)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
- let checked=0,tmdbCalls=0,error=null,retryAt=null;
- const query=async path=>{tmdbCalls++;return tmdbRequest(env,path);};
- const tmdbStarted=Date.now(),deadline=t0+PAGED_CHUNK_BUDGET_MS;
- for(const [index,candidate] of pending.entries()){
-  // Stop at the wall budget or the call cap, but always take the first candidate so a slow read cannot make a chunk that does nothing.
-  if(index>0&&(Date.now()>deadline||tmdbCalls>=PAGED_TMDB_CALLS))break;
+ // A walk that ran out of budget has not seen the whole ledger, so no candidate can be chosen and no count is exact.
+ // The chunk says so and backs off instead of repeating the same slow read: a bounded selection for a ledger this
+ // large needs a query-side selection, which this walk is not.
+ const walkComplete=walked.complete!==false;
+ if(walkComplete&&seen!==source.itemCount)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
+ if(!walkComplete){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
+ let checked=0,tmdbCalls=0;
+ // The call cap and the time left are enforced at the request boundary: a candidate that would need a request beyond
+ // either stops the loop. That is the budget running out, not a TMDB failure, so it sets no error and no retry time.
+ const query=async path=>{
+  const left=candidateDeadline-Date.now();
+  if(tmdbCalls>=PAGED_TMDB_CALLS||left<PAGED_MIN_REQUEST_MS)throw budgetExhaustedError();
+  tmdbCalls++;
+  try{return await tmdbRequest(env,path,{timeoutMs:left});}
+  catch(e){if(left<12000&&(e?.name==='TimeoutError'||e?.name==='AbortError'))throw budgetExhaustedError();throw e;}
+ };
+ const tmdbStarted=Date.now();
+ if(!error)for(const candidate of pending){
   try{await heartbeat();await scoredSearchCandidates(query,candidate);checked++;}
-  catch(e){if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'tmdb'};throw e;}error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;}
+  catch(e){
+   if(e?.name==='BudgetExhaustedError')break;
+   if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'tmdb'};throw e;}
+   error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;
+  }
  }
+ // Candidates were waiting and none could be taken before the budget ended: say so, and back off.
+ if(!error&&pending.length&&checked===0){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
  timings.tmdbMs=Date.now()-tmdbStarted;
- const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:Math.max(0,remaining-checked),error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,timings};
+ const summary={schemaVersion:2,stage:error||remaining>checked?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked,remaining:walkComplete?Math.max(0,remaining-checked):null,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,timings};
  try{await fence();}catch(e){if(e?.name==='LeaseLostError')e.timings={...timings,sinceStartMs:Date.now()-t0,failedAt:'final'};throw e;}
+ // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
+ // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
+ // summary and the step diagnostic, so a quick pre-write figure is never read as a finished checkpoint.
+ timings.preCommitMs=Date.now()-t0;
+ const statusStarted=Date.now();
+ await saveJSON(env,'epg/discovery-status.json',summary);
+ timings.statusMs=Date.now()-statusStarted;
+ const checkpointStarted=Date.now();
+ if(checkpoint)await checkpoint(summary);
+ timings.checkpointMs=Date.now()-checkpointStarted;
  timings.totalMs=Date.now()-t0;
- await saveJSON(env,'epg/discovery-status.json',summary);if(checkpoint)await checkpoint(summary);return summary;
+ return summary;
 }
 // AIR-342. The chunk's ledger is its own parse and is never written back. Its fields serve three readers:
 // - the cheap pass, the counts, the filters and the observation index read the key, titles, year, durations, shows,
@@ -855,7 +890,7 @@ function discoverySummary(contract){return contract&&typeof contract==='object'?
 function diagnosticTimings(timings){
  if(!timings||typeof timings!=='object')return null;
  const out={};
- for(const field of ['walkMs','pages','concurrency','renewals','firstRenewMs','tmdbMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
+ for(const field of ['walkMs','pages','concurrency','renewals','firstRenewMs','tmdbMs','preCommitMs','statusMs','checkpointMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
  if(['heartbeat','tmdb','final'].includes(timings.failedAt))out.failedAt=timings.failedAt;
  return Object.keys(out).length?out:null;
 }

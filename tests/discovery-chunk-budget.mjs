@@ -36,7 +36,7 @@ const HOT=[
 const hotItem=(spec)=>({key:spec.key,title:'Film '+spec.key,normalizedTitle:'film '+spec.key,year:spec.year,durations:[100],shows:[{channelId:'c',channel:'C',start:spec.lastAiring,end:spec.lastAiring+1000}],seenInLatestSnapshot:true,lastAiring:spec.lastAiring});
 
 // One migrated, opened, loaded database. `extraHot` adds more actionable candidates; `decisions` is the stored map.
-async function fixture({latencyMs=0,onQuery=null,extraHot=0,decisions={},decided=[]}={}){
+async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},decided=[]}={}){
  const file=migrated();
  const db=d1Standin(file,{latencyMs:0});
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
@@ -44,6 +44,8 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,decisions={},decided
  const lease=await Authority.acquireLease(setup,{programmeRunId:null});
  setup.discoveryLease=lease.lease;
  const hot=[...HOT.map(hotItem),...decided.map((key,index)=>hotItem({key,year:2005,lastAiring:hotStart+30000+index}))];
+ // `mixNN` titles carry no punctuation, so the stub can answer a search for exactly that title.
+ for(let index=0;index<mix;index++){const key='mix'+String(index).padStart(2,'0');hot.push({...hotItem({key,year:2000,lastAiring:hotStart+100000-index}),title:'Film '+key,normalizedTitle:'film '+key});}
  for(let index=0;index<extraHot;index++)hot.push(hotItem({key:'x-'+String(index).padStart(3,'0'),year:1980+index%10,lastAiring:hotStart+1000+index}));
  await Authority.ingestLedger(setup,{programmeRunId:RUN,handoff:true,lease:lease.lease,items:(async function*(){for(const item of hot)yield item;})()});
  const rows=[];
@@ -58,18 +60,19 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,decisions={},decided
 }
 
 // The discovery source as a vm context, with a controllable clock and a TMDB stub that records its queries.
-function chunkContext({clock,onFetch}){
+function chunkContext({clock,onFetch,respond=null}){
  const realNow=Date.now.bind(Date);
  const FakeDate=class extends Date{static now(){return realNow()+clock.offset;}};
- const searched=[];
- const context=vm.createContext({console,Date:FakeDate,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
-  fetch(url){const query=new URL(url).searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);return Promise.resolve(new Response(JSON.stringify({results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
+ const searched=[],timeouts=[];
+ const signals={timeout(ms){timeouts.push(ms);return AbortSignal.timeout(ms);}};
+ const context=vm.createContext({console,Date:FakeDate,Promise,URL,URLSearchParams,AbortSignal:signals,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
+  fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:Authority,pinEpg:async value=>value,
   loadJSON:async(target,key)=>{const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  vm.runInContext(fs.readFileSync('src/sources.js','utf8'),context);
  vm.runInContext(fs.readFileSync('src/discovery.js','utf8'),context);
- return {context,searched};
+ return {context,searched,timeouts};
 }
 const statusPayload=file=>sql(file,'SELECT payload_json FROM discovery_status')[0]?.payload_json??null;
 const decisionCount=file=>Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision')[0].n);
@@ -145,6 +148,12 @@ const leaseRow=file=>sql(file,'SELECT lease_id, expires_at FROM discovery_lease 
  assert.ok(Number(leaseRow(file).expires_at)>Number(before),'the renewal moved the lease expiry forward');
  const summary=JSON.parse(statusPayload(file));
  assert.equal(summary.timings.pages,result.timings.pages);
+ // The stored status carries only the time up to its own write; the finished checkpoint is measured after it.
+ assert.equal(typeof summary.timings.preCommitMs,'number');
+ assert.equal(summary.timings.totalMs,null);
+ assert.equal(summary.timings.checkpointMs,null);
+ for(const field of ['statusMs','checkpointMs','totalMs'])assert.equal(typeof result.timings[field],'number',field);
+ assert.ok(result.timings.totalMs>=result.timings.preCommitMs);
  assert.equal(summary.hopId,lease.lease.id);
  const trace=context.chunkSummary(result);
  assert.equal(trace.timings.renewals,result.timings.renewals);
@@ -152,20 +161,26 @@ const leaseRow=file=>sql(file,'SELECT lease_id, expires_at FROM discovery_lease 
  await Authority.releaseLease(env,lease.lease);
 }
 
-// 4. The chunk stops at its wall budget but always takes one candidate, and it stops at the TMDB call cap.
+// 4. The chunk stops at its wall budget. A chunk that cannot take any candidate before the budget ends says so and backs off.
 {
  const {file,env}=await fixture();
  const clock={offset:0};
  const {context,searched}=chunkContext({clock});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  clock.offset=41000;
- const slow=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
- assert.equal(slow.checked,1,'a chunk past its budget still takes the first candidate');
- assert.equal(slow.stage,'partial');
- assert.equal(slow.remaining,HOT.length-1);
- assert.equal(searched.length,2,'one candidate is a ru-RU and a uk-UA search');
- await Authority.releaseLease(env,lease.lease);
+ const spent=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(spent.checked,0,'no candidate is started past the budget');
+ assert.equal(searched.length,0,'and no TMDB request is made');
+ assert.equal(spent.error,'wall_budget');
+ assert.ok(Date.parse(spent.retryAt)>Date.now(),'a budget stop with candidates waiting backs off instead of repeating');
+ assert.equal(spent.stage,'partial');
  assert.ok(statusPayload(file));
+ // The next chunk sees the back-off and reads nothing.
+ clock.offset=0;
+ const again=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(again.stage,'backoff');
+ assert.equal(searched.length,0);
+ await Authority.releaseLease(env,lease.lease);
 }
 {
  const {env}=await fixture({extraHot:20});
@@ -220,6 +235,90 @@ async function lostLease({failAt,mutate}){
  const lost=await lostLease({failAt:'final',mutate:()=>false});
  assert.equal(lost.error.timings.failedAt,'final');
  assert.equal(Number(leaseRow(lost.file).expires_at),1);
+}
+
+// 7. The TMDB call cap is enforced at the request boundary: a candidate needing a request past it stops the loop.
+// Fifteen candidates match on their first locale (15 requests); the sixteenth misses twice and would make 17.
+{
+ const {env}=await fixture({mix:16});
+ const {context,searched}=chunkContext({clock:{offset:0},respond(url){
+  const title=url.searchParams.get('query'),first=url.searchParams.get('language')==='ru-RU',index=Number(title.slice(-2));
+  return {results:index<15&&first?[{id:1000+index,title,original_title:title,release_date:'2000-06-01'}]:[]};
+ }});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(searched.length,16,'exactly the cap, never 17');
+ assert.equal(result.tmdbCalls,16);
+ assert.equal(result.checked,15,'the candidate that would pass the cap is not counted');
+ assert.equal(result.error,null,'normal budget exhaustion is not a failure');
+ assert.equal(result.retryAt,null,'and sets no retry time');
+ assert.equal(result.stage,'partial');
+ assert.equal(result.remaining,16+HOT.length-15);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+// 8. A ledger walk on a slow D1 that would cross the client limit stops at its budget: no candidate, no TMDB request,
+// no exact count, a back-off, and the status and checkpoint still written.
+{
+ const clock={offset:0};
+ const base=await fixture();
+ // Each ledger query costs two virtual seconds, so 41 pages of two queries cannot finish inside the budget.
+ const env={...base.env,DB:d1Standin(base.file,{onQuery(text){if(/FROM discovery_observation/.test(text))clock.offset+=2000;}})};
+ const {context,searched}=chunkContext({clock});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ let checkpoints=0;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
+ assert.equal(result.error,'wall_budget');
+ assert.ok(Date.parse(result.retryAt)>Date.now());
+ assert.equal(result.remaining,null,'a partial walk gives no exact remaining');
+ assert.equal(result.checked,0);
+ assert.equal(searched.length,0);
+ assert.equal(checkpoints,1,'the checkpoint is still written');
+ assert.ok(statusPayload(base.file));
+ assert.ok(result.timings.walkMs>=0);
+ await Authority.releaseLease(env,lease.lease);
+}
+{
+ const {env}=await fixture();
+ let pages=0;
+ const stopped=await Authority.walkObservationPages(env,{shouldStop:()=>true,onPage(){pages++;}});
+ assert.equal(stopped.complete,false);
+ assert.equal(pages,0);
+ const whole=await Authority.walkObservationPages(env,{shouldStop:()=>false,onPage(){pages++;}});
+ assert.equal(whole.complete,true);
+ assert.equal(whole.items,WIDE);
+}
+
+// 9. A TMDB request is given only the time left: its own timeout is cut, and a request with less than the minimum left is not made.
+{
+ const base=await fixture();
+ const clock={offset:0};
+ const {context,searched,timeouts}=chunkContext({clock,onFetch(){clock.offset+=24000;}});
+ const lease=await Authority.acquireLease(base.env,{programmeRunId:RUN});base.env.discoveryLease=lease.lease;
+ const result=await context.resolveDiscoveryChunk(base.env,{films:[]},24,lease.lease);
+ assert.equal(searched.length,2,'one candidate, two locales; the next request has no time left');
+ assert.equal(result.checked,1);
+ assert.equal(result.error,null);
+ assert.equal(timeouts[0],12000);
+ assert.ok(timeouts.some(ms=>ms<12000&&ms>=2000),'the second request carries the shortened timeout: '+timeouts);
+ await Authority.releaseLease(base.env,lease.lease);
+}
+
+// 10. The durable checkpoint is measured separately: delayed status and continuation writes show in their own fields,
+// not in a total taken before them.
+{
+ const base=await fixture();
+ const env={...base.env,DB:d1Standin(base.file,{onBatch:async statements=>{if(statements.some(item=>/discovery_status/.test(item.text)))await new Promise(resolve=>setTimeout(resolve,120));}})};
+ const {context}=chunkContext({clock:{offset:0}});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{await new Promise(resolve=>setTimeout(resolve,150));});
+ assert.ok(result.timings.statusMs>=110,'status write '+result.timings.statusMs);
+ assert.ok(result.timings.checkpointMs>=140,'checkpoint '+result.timings.checkpointMs);
+ assert.ok(result.timings.totalMs>=result.timings.preCommitMs+result.timings.statusMs+result.timings.checkpointMs-5,'the total covers the writes');
+ const stored=JSON.parse(statusPayload(base.file)).timings;
+ assert.equal(stored.totalMs,null,'a stored status never claims a finished checkpoint');
+ assert.equal(stored.statusMs,null);
+ await Authority.releaseLease(env,lease.lease);
 }
 
 // 6. A lost lease reaches the diagnostics as a bounded timings object and no other candidate detail.
