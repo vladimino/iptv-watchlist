@@ -8,54 +8,37 @@ The sequences below are **independent scheduled or externally driven flows**, no
 
 ```mermaid
 sequenceDiagram
-    actor Daily as Daily EPG Task (17:00)
-    actor Hourly as Hourly Task (hourly)
-    participant Access as Cloudflare Access
+    actor Daily as Daily EPG Task
+    actor Hourly as Hourly Predictions Task
     participant MCP as Worker MCP
-    participant EPG as EPG and discovery
-    participant R2 as R2 discovery, sync and mirrors
-    participant D1 as D1 published EPG
-    Note over Daily,D1: External ChatGPT tasks, never Worker Cron
-    Daily->>Access: Authorize daily EPG workflow
-    Access->>MCP: JWT verified
-    Daily->>MCP: Preflight EPG status
-    Daily->>MCP: epg_sync_start once
-    MCP->>EPG: Start owned EPG run
-    loop Metadata, publication, and allowed discovery steps
-        Daily->>MCP: epg_sync_step(runId)
-        MCP->>EPG: One step or one chunk
-        EPG->>D1: Fenced atomic published generation and watchlist pin
-        EPG->>R2: Sync checkpoint and compatibility mirrors
+    participant EPG as EPG pipeline
+    participant D1 as D1 authority
+    participant R2 as R2 storage
+    participant WF as Discovery Workflow
+    Daily->>MCP: epg_sync_start
+    loop Until EPG publication completes or pauses
+        Daily->>MCP: epg_sync_step
+        MCP->>EPG: Advance one bounded step
+        EPG->>D1: Commit fenced generation
+        EPG->>R2: Store checkpoint and mirrors
         MCP-->>Daily: stage and nextAction
     end
-    Note over Daily,EPG: wait / stop / conflict ends current series
-    Hourly->>Access: Authorize hourly workflow
-    Access->>MCP: JWT verified
-    Hourly->>MCP: epg_status and epg_pipeline_status
-    MCP-->>Hourly: Published runId, continuation and health
-    alt Safe paused continuation of published generation
-        Hourly->>MCP: epg_sync_step(published runId)
-        MCP->>EPG: One discovery chunk
-        EPG->>R2: Fenced writes and checkpoint
-        MCP-->>Hourly: nextAction / nextCatchUpAt
-    else Running and Worker health proves orphaned
-        Note over Hourly,MCP: Expired lease, same generation, valid budget, no wait
-        Hourly->>MCP: epg_sync_step(published runId)
-        MCP->>EPG: CAS settle or resume, then at most one chunk
-        EPG->>R2: Fenced continuation and chunk writes
-        MCP-->>Hourly: nextAction / nextCatchUpAt
-    else Live, unknown or generation conflict
-        Note over Hourly,EPG: Fail closed and do not start a new EPG run
-    end
-    opt Server explicitly returns continue, same generation and safe budget
-        loop While safe nextAction is continue
-            Hourly->>MCP: epg_sync_step(published runId)
-            MCP->>EPG: One discovery chunk
-            MCP-->>Hourly: continue / wait / stop
+    alt External Discovery executor
+        Hourly->>MCP: Read published continuation
+        opt Eligible and safe to resume
+            Hourly->>MCP: epg_sync_step
+            MCP->>EPG: At most one Discovery chunk per call
+            EPG->>D1: Fenced Discovery writes
+            MCP-->>Hourly: continue, wait or stop
         end
-    end
-    opt DISCOVERY_EXECUTOR is workflow
-        Note over EPG,R2: Absent flag keeps the external path above. Workflow mode stores or reconstructs intent, runs no chunk in the request, and answers delegated or wait rather than complete while work remains. The binding has no schedule. The existing Worker cron may call reconcileDiscoveryWorkflow; that call creates at most one instance and never runs a chunk.
+    else Discovery Workflow executor
+        Note over MCP,WF: Old task requests are delegated, not executed
+        EPG->>WF: Enqueue intent for published generation
+        opt Existing Worker cron detects missing wakeup
+            MCP->>WF: Reconcile intent and create at most one instance
+        end
+        WF->>EPG: One Discovery chunk per durable step
+        EPG->>D1: Fenced Discovery writes
     end
 ```
 
