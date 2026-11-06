@@ -19,11 +19,11 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 
 ## `POST /api/monitor/test`
 
-Sends one synthetic message (`kind: test`, key `monitor_test`) through the configured webhook, writes only `lastTestAt` on the monitor's own state document, raises no incident and changes no domain state. Answers `{sent: true}` or `{sent: false, reason}` where the reason is `off`, `no_channel` (no HTTPS webhook), `recent` (another test inside ten minutes) or `delivery_failed`. Running it against production needs the owner's action-specific approval.
+Sends one synthetic message (`kind: test`, key `monitor_test`) through the configured webhook, writes only `lastTestAt` on the monitor's own state document, raises no incident and changes no domain state. Answers `{sent: true}` or `{sent: false, reason}` where the reason is `off`, `no_channel` (no HTTPS webhook), `recent` (another test inside ten minutes), `concurrent` (another request claimed the test first) or `delivery_failed`. The cooldown stamp is committed before the message is sent. Running it against production needs the owner's action-specific approval.
 
 ## Alert message
 
-A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-monitor`), `at`, `kind` (`alert`, `reminder`, `escalation`, `recovery`, `test`), `severity`, `stream`, `key`, `message`, `overall`. No titles, ratings, credentials or private records.
+A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-monitor`), `id` (a stable idempotency id, repeated on a retry of the same message), `at`, `kind` (`alert`, `reminder`, `escalation`, `recovery`, `test`), `severity`, `stream`, `key`, `message`, `overall`. No titles, ratings, credentials or private records.
 
 ## Issue keys
 
@@ -32,3 +32,5 @@ A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-m
 ## Thresholds
 
 EPG: delayed 2 hours and degraded 5 hours after the Madrid 17:00 due time without a new publication. Discovery: waiting inside its own `nextCatchUpAt`/`retryAt`, degraded after 3 hours without allowed progress. Ratings: the orchestration read model's own health (stalled two hours after 17:30 Madrid). Predictions: delayed after 3 hours and degraded after 6 hours with pending work and no model batch. Alerts: a degraded issue is confirmed by a second snapshot, a needs-owner issue alerts at once, cooldown 6 hours or 2 hours, at most eight messages per issue per day.
+
+Delivery is at-least-once. Receivers should drop a message whose `id` they have already handled.

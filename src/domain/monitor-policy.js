@@ -105,7 +105,9 @@ export function evaluateRatings(model, now) {
   return {stream: 'ratings', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {mode: model.mode ?? null, health: health ?? null}};
 }
 
-// ---- Prediction queue: an empty queue is healthy; pending work with no model activity for long is not, and growth makes it worse.
+// ---- Prediction queue: an empty queue is healthy; pending work with no real model progress for long is not, and growth makes it worse.
+// `lastProgressAt` is the last time the model really produced predictions (a productive run or a moved processed counter), never the time
+// a scheduled wake-up found nothing to do. Work that is all deferred by its own retry time is waiting by design.
 export function evaluatePredictions(facts, previous, now) {
   if (!facts || facts.error) return unreadable('predictions', 'prediction queue');
   if (!facts.present) return {stream: 'predictions', state: 'waiting', issues: [], facts: {present: false}};
@@ -113,15 +115,18 @@ export function evaluatePredictions(facts, previous, now) {
   const pending = Number.isInteger(facts.pendingCount) ? facts.pendingCount : 0;
   let state = 'healthy';
   if (pending > 0) {
-    const activity = Math.max(time(facts.lastBatchAt) ?? 0, 0);
-    const idle = activity ? now - activity : null;
+    const activity = time(facts.lastProgressAt);
+    const idle = activity !== null ? now - activity : null;
     const growing = Number.isInteger(previous?.pendingCount) && pending > previous.pendingCount;
-    if (idle === null || idle >= THRESHOLDS.predictionsDegradedMs) {
+    const deferredUntil = facts.eligibleNow === 0 ? time(facts.nextRetryAt) : null;
+    const why = facts.blockedReason === 'quota' ? ' (the model reported a quota limit)' : '';
+    if (deferredUntil !== null && deferredUntil > now) state = 'waiting';
+    else if (idle === null || idle >= THRESHOLDS.predictionsDegradedMs) {
       state = 'degraded';
-      issues.push(issue('predictions_stale', 'degraded', 'predictions', pending + ' predictions pending and no model batch for ' + (idle === null ? 'an unknown time' : hours(idle) + ' hours')));
+      issues.push(issue('predictions_stale', 'degraded', 'predictions', pending + ' predictions pending and no model progress for ' + (idle === null ? 'an unknown time' : hours(idle) + ' hours') + why));
     } else if (idle >= THRESHOLDS.predictionsDelayedMs) {
       state = 'delayed';
-      if (growing) { state = 'degraded'; issues.push(issue('predictions_backlog_growing', 'degraded', 'predictions', 'The prediction backlog grows while the model is idle')); }
+      if (growing) { state = 'degraded'; issues.push(issue('predictions_backlog_growing', 'degraded', 'predictions', 'The prediction backlog grows while the model makes no progress' + why)); }
     }
   }
   const all = worst(issues);

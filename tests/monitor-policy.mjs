@@ -88,15 +88,15 @@ const keys=result=>result.issues.map(item=>item.key);
 // 4. Prediction queue: empty is healthy, stale pending work is not, growth while idle is named, a missing queue waits.
 {
  const now=T('2026-11-06T18:00:00Z');
- const q=extra=>({present:true,pendingCount:5,lastBatchAt:at(now-30*MIN),...extra});
- assert.equal(P.evaluatePredictions(q({pendingCount:0,lastBatchAt:at(now-30*H)}),null,now).state,'healthy','an empty queue is healthy however old the last batch is');
+ const q=extra=>({present:true,pendingCount:5,lastProgressAt:at(now-30*MIN),...extra});
+ assert.equal(P.evaluatePredictions(q({pendingCount:0,lastProgressAt:at(now-30*H)}),null,now).state,'healthy','an empty queue is healthy however old the last batch is');
  assert.equal(P.evaluatePredictions(q(),null,now).state,'healthy');
- assert.equal(P.evaluatePredictions(q({lastBatchAt:at(now-4*H)}),null,now).state,'delayed');
- assert.equal(P.evaluatePredictions(q({lastBatchAt:at(now-4*H),pendingCount:9}),{pendingCount:5},now).state,'degraded','growing while idle');
- assert.ok(keys(P.evaluatePredictions(q({lastBatchAt:at(now-4*H),pendingCount:9}),{pendingCount:5},now)).includes('predictions_backlog_growing'));
- const stale=P.evaluatePredictions(q({lastBatchAt:at(now-8*H)}),null,now);
+ assert.equal(P.evaluatePredictions(q({lastProgressAt:at(now-4*H)}),null,now).state,'delayed');
+ assert.equal(P.evaluatePredictions(q({lastProgressAt:at(now-4*H),pendingCount:9}),{pendingCount:5},now).state,'degraded','growing while idle');
+ assert.ok(keys(P.evaluatePredictions(q({lastProgressAt:at(now-4*H),pendingCount:9}),{pendingCount:5},now)).includes('predictions_backlog_growing'));
+ const stale=P.evaluatePredictions(q({lastProgressAt:at(now-8*H)}),null,now);
  assert.equal(stale.state,'degraded');assert.deepEqual(keys(stale),['predictions_stale']);
- assert.equal(P.evaluatePredictions(q({lastBatchAt:null}),null,now).state,'degraded','pending work and no model batch ever recorded');
+ assert.equal(P.evaluatePredictions(q({lastProgressAt:null}),null,now).state,'degraded','pending work and no model batch ever recorded');
  assert.equal(P.evaluatePredictions({present:false},null,now).state,'waiting');
  assert.deepEqual(keys(P.evaluatePredictions({error:true},null,now)),['predictions_unreadable']);
 }

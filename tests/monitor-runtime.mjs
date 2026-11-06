@@ -63,7 +63,7 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  r=plain(await M.run(env,{now:T0+H}));assert.equal(r.sent,1);
  assert.equal(posts(calls).length,1);const message=posts(calls)[0].body;
  assert.deepEqual([message.source,message.kind,message.key,message.severity,message.stream],['iptv-monitor','alert','epg_stale','degraded','epg']);
- assert.deepEqual(Object.keys(message).sort(),['at','key','kind','message','overall','severity','source','stream']);
+ assert.deepEqual(Object.keys(message).sort(),['at','id','key','kind','message','overall','severity','source','stream']);
  await M.run(env,{now:T0+2*H});await M.run(env,{now:T0+3*H});assert.equal(posts(calls).length,1,'repeats inside the cooldown send nothing');
  assert.equal(plain(await M.status(env,T0+3*H)).openIssues[0].key,'epg_stale');
  // The generation is published: a recovery message once, then silence.
@@ -80,9 +80,9 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  ctx.model={mode:'cloudflare',health:'quarantined',quarantine:{reason:'budget_exhausted'}};
  setWebhook(false);
  let r=plain(await M.run(env,{now:T0}));assert.deepEqual([r.sent,r.failed],[0,1],'a 500 from the channel is a failed delivery');
- assert.equal(bucket.value(KEY).alerts.issues.ratings_quarantined,undefined,'not counted as sent');
+ assert.equal(bucket.value(KEY).outbox.length,1,'the claimed message stays queued until it is delivered');
  setWebhook(true);
- r=plain(await M.run(env,{now:T0+H}));assert.deepEqual([r.sent,r.failed],[1,0],'the next tick retries');
+ r=plain(await M.run(env,{now:T0+H}));assert.deepEqual([r.sent,r.failed],[1,0],'the next tick retries the queued message');assert.deepEqual(bucket.value(KEY).outbox,[]);
  assert.equal(bucket.value(KEY).alerts.issues.ratings_quarantined.sendCount,1);
  // One stream unreadable does not hide the others.
  ctx.RatingsOrchestration={async readModel(){throw new Error('boom');}};ctx.model=null;
@@ -102,15 +102,45 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  assert.deepEqual(writes(bucket).filter(key=>key!==KEY),[],'no domain record was written');
 }
 
-// 6. Prediction queue: an empty queue and a stale one.
+// 6. Prediction queue: an empty queue is healthy; scheduled zero-work wake-ups are not progress; real progress is; retry backoff waits.
 {
  const {bucket,env,M,calls}=setup();healthy(bucket);
- bucket.set('enrichment/prediction-queue.json',{pending:['a','b'],refreshedAt:at(T0-9*H),lastBatch:{startedAt:at(T0-9*H),finishedAt:at(T0-9*H)}});
- await M.run(env,{now:T0});await M.run(env,{now:T0+H});
- assert.equal(posts(calls).filter(item=>item.body.key==='predictions_stale').length,1);
- bucket.set('enrichment/prediction-queue.json',{pending:[],refreshedAt:at(T0-30*H),lastBatch:null});
+ const noop=ms=>bucket.set('enrichment/prediction-queue.json',{pending:['a','b'],hotPending:['a','b'],coldPending:[],retries:{},refreshedAt:at(ms),lastCheckAt:at(ms),metrics:{hotProcessedTotal:7},
+  lastBatch:{runId:null,batchSize:0,added:0,updated:0,stage:'blocked',startedAt:at(ms),finishedAt:at(ms)}});
+ // Every hour a scheduled batch finds nothing to do and rewrites lastBatch and lastCheckAt; the pending queue never moves.
+ let states=[];
+ for(let hour=0;hour<=9;hour++){noop(T0+hour*H);await M.run(env,{now:T0+hour*H});states.push(bucket.value(KEY).streams.find(item=>item.stream==='predictions').state);}
+ assert.deepEqual(states.slice(0,3),['healthy','healthy','healthy']);assert.ok(states.includes('delayed'),'zero-work batches become delayed');assert.equal(states.at(-1),'degraded','and then degraded');
+ assert.equal(posts(calls).filter(item=>item.body.key==='predictions_stale').length,1,'one alert, not one per wake-up');
+ // A moved processed counter is real progress and recovers the stream.
+ bucket.set('enrichment/prediction-queue.json',{...bucket.value('enrichment/prediction-queue.json'),metrics:{hotProcessedTotal:9}});
+ await M.run(env,{now:T0+10*H});assert.equal(bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'healthy');
+ // Work that is all deferred by its own retry time is waiting by design, however long it is idle.
+ const backoff=setup();healthy(backoff.bucket);
+ backoff.bucket.set('enrichment/prediction-queue.json',{pending:['a'],hotPending:['a'],coldPending:[],retries:{a:{retryAt:T0+30*H}},metrics:{hotProcessedTotal:1},lastBatch:null});
+ await backoff.M.run(backoff.env,{now:T0});await backoff.M.run(backoff.env,{now:T0+8*H});
+ assert.equal(backoff.bucket.value(KEY).streams.find(item=>item.stream==='predictions').state,'waiting');assert.equal(posts(backoff.calls).length,0);
  const quiet=setup();healthy(quiet.bucket);quiet.bucket.set('enrichment/prediction-queue.json',{pending:[],refreshedAt:at(T0-30*H),lastBatch:null});
  await quiet.M.run(quiet.env,{now:T0});assert.equal(quiet.bucket.value(KEY).overall,'healthy');
+}
+
+// 6b. Delivery is claimed before it is sent: concurrent ticks send once, a failed delivered-mark may repeat with the same id, a lost claim sends nothing.
+{
+ const stale=()=>{const t=setup();healthy(t.bucket,{publishedAt:at(T0-40*H)});t.bucket.set('sync.json',{runId:'run-a',stage:'complete',updatedAt:at(T0-40*H),failures:[]});return t;};
+ const t=stale();await t.M.run(t.env,{now:T0});
+ const both=await Promise.all([t.M.run(t.env,{now:T0+H}),t.M.run(t.env,{now:T0+H})]);
+ assert.equal(posts(t.calls).length,1,'two ticks that read the same snapshot send the message once');
+ assert.equal(plain(both).filter(item=>item.saved===false).length,1,'the loser reports that its claim was lost');
+ assert.deepEqual(t.bucket.value(KEY).outbox,[],'a delivered message leaves the outbox');
+ // Delivery failure: the claimed message stays queued and is retried with the same id.
+ const f=stale();await f.M.run(f.env,{now:T0});f.setWebhook(false);await f.M.run(f.env,{now:T0+H});
+ const queued=f.bucket.value(KEY).outbox;assert.equal(queued.length,1);f.setWebhook(true);
+ await f.M.run(f.env,{now:T0+2*H});const sentBodies=posts(f.calls).filter(item=>item.body.key==='epg_stale');
+ assert.equal(sentBodies.at(-1).body.id,queued[0].id,'the retry keeps the stable idempotency id');assert.deepEqual(f.bucket.value(KEY).outbox,[]);
+ // Concurrent synthetic tests: one message.
+ const c=setup();healthy(c.bucket);await c.M.run(c.env,{now:T0});
+ const tests=plain(await Promise.all([c.M.test(c.env,T0+MIN),c.M.test(c.env,T0+MIN)]));
+ assert.equal(tests.filter(item=>item.sent).length,1);assert.equal(posts(c.calls).length,1);assert.ok(tests.some(item=>item.reason==='concurrent'||item.reason==='recent'));
 }
 
 // 7. The status is a pure read and exposes the heartbeat age for an external dead-man check; the limitation is stated by the fields.

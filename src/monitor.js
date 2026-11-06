@@ -5,7 +5,7 @@
 // MONITOR: off (default) does nothing; dry evaluates and logs without writing or sending; on also keeps the state document
 // (`monitor/state.json`) and sends alerts when MONITOR_WEBHOOK_URL is set. Concatenated into the Worker: one global, no exports.
 const Monitor=(()=>{
- const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000;
+ const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000,OUTBOX_TTL_MS=24*3600000,OUTBOX_MAX=20;
  const policy=()=>MonitorPolicy;
  const iso=ms=>new Date(ms).toISOString();
  const mode=env=>env?.MONITOR==='on'?'on':env?.MONITOR==='dry'?'dry':'off';
@@ -20,7 +20,7 @@ const Monitor=(()=>{
  }
  async function writeState(env,object,doc){
   const saved=await env.BUCKET.put(STATE_KEY,JSON.stringify(doc),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
-  return saved!==null;
+  return saved||null;
  }
 
  // ---- facts: cheap reads only, each stream isolated so one unreadable source never hides the others.
@@ -50,14 +50,26 @@ const Monitor=(()=>{
   if(typeof RatingsOrchestration==='undefined')throw new Error('unavailable');
   return await RatingsOrchestration.readModel(env,now);
  });
- const predictionFacts=env=>guarded(async()=>{
+ // Prediction activity is real model progress only: a productive completed run (created or recalculated films) or a moved processed
+ // counter. A scheduled wake-up that found nothing to do rewrites `lastBatch` and `lastCheckAt` and is deliberately not progress.
+ const predictionFacts=(env,now,previous)=>guarded(async()=>{
   const queue=await loadJSON(env,predictionQueueKey);
   if(!queue)return {present:false};
-  return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,lastBatchAt:queue.lastBatch?.finishedAt||queue.lastBatch?.startedAt||null,refreshedAt:queue.refreshedAt||null};
+  const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json').catch(()=>null);
+  const productiveAt=Date.parse(latest?.completedAt||''),productive=Number.isFinite(productiveAt)&&((latest?.counts?.created||0)+(latest?.counts?.recalculated||0))>0?productiveAt:null;
+  const processedTotal=Number.isInteger(queue.metrics?.hotProcessedTotal)?queue.metrics.hotProcessedTotal:null;
+  const moved=Number.isInteger(processedTotal)&&Number.isInteger(previous?.processedTotal)&&processedTotal>previous.processedTotal;
+  const known=Date.parse(previous?.progressAt||'');
+  const candidates=[productive,moved?now:null,Number.isFinite(known)?known:null].filter(value=>value!==null);
+  const lastProgressAt=candidates.length?Math.max(...candidates):now;
+  const outstanding=[...new Set([...(queue.hotPending||[]),...(queue.coldPending||[])])];
+  const deferred=outstanding.map(id=>queue.retries?.[id]?.retryAt).filter(value=>typeof value==='number'&&value>now);
+  return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:iso(lastProgressAt),
+   eligibleNow:outstanding.length-deferred.length,nextRetryAt:deferred.length?iso(Math.min(...deferred)):null,blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};
  });
  async function collect(env,now,state){
   const epg=await epgFacts(env,now,state?.epgSeen||null);
-  const [discovery,ratings,predictions]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env)]);
+  const [discovery,ratings,predictions]=await Promise.all([discoveryFacts(env,now,epg?.publishedRunId||null),ratingsFacts(env,now),predictionFacts(env,now,state?.predictions||null)]);
   return {epg,discovery,ratings,predictions};
  }
 
@@ -67,7 +79,7 @@ const Monitor=(()=>{
   if(!url)return false;
   try{
    const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},signal:AbortSignal.timeout(SEND_TIMEOUT_MS),
-    body:JSON.stringify({source:'iptv-monitor',at:iso(now),kind:message.kind,severity:message.severity,stream:message.stream,key:message.key,message:message.message,overall})});
+    body:JSON.stringify({source:'iptv-monitor',id:message.id||null,at:iso(now),kind:message.kind,severity:message.severity,stream:message.stream,key:message.key,message:message.message,overall})});
    return response.ok;
   }catch{return false;}
  }
@@ -88,20 +100,25 @@ const Monitor=(()=>{
    const evaluation=policy().evaluateAll(facts,{predictions:doc?.predictions||null},now,{dailyDue:OrchestrationPolicy.dailyDue});
    const plan=policy().planAlerts(evaluation.issues,doc?.alerts||{issues:{}},now);
    if(current==='dry'){log({mode:'dry',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),wouldSend:plan.sends.length});return {ran:true,mode:'dry',overall:evaluation.overall,wouldSend:plan.sends.length};}
-   // A message that could not be delivered is not counted as sent: its entry goes back to the previous state and the next tick retries.
-   const failed=new Set();
-   for(const message of plan.sends){if(!await sendMessage(env,message,evaluation.overall,now))failed.add(message.key);}
-   const alerts=plan.state;
-   for(const key of failed){if(doc?.alerts?.issues?.[key])alerts.issues[key]=doc.alerts.issues[key];else delete alerts.issues[key];}
-   const publishedRunId=facts.epg?.publishedRunId||null;
+   // Claim before delivery. The planned messages are committed to `monitor/state.json` (as the plan's alert state and an outbox with stable
+   // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both
+   // send. A message that is not delivered stays in the outbox and is retried with the same id. Delivery is at-least-once: a crash after
+   // the claim, or a failed commit of the delivered mark, can repeat a message, and the stable `id` lets the receiver drop the repeat.
+   const queued=[...(doc?.outbox||[]).filter(item=>now-Date.parse(item.queuedAt||'')<OUTBOX_TTL_MS),...plan.sends.map(message=>({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now)}))].slice(-OUTBOX_MAX);
+   const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt}:doc?.predictions||null;
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
-    alerts,predictions:{pendingCount:Number.isInteger(facts.predictions?.pendingCount)?facts.predictions.pendingCount:null},
+    alerts:plan.state,outbox:queued,predictions,
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null};
-   const saved=await writeState(env,object,next);
-   if(saved)await heartbeat(env);
-   log({mode:'on',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),sent:plan.sends.length-failed.size,failed:failed.size,saved});
-   return {ran:true,mode:'on',overall:evaluation.overall,sent:plan.sends.length-failed.size,failed:failed.size,saved};
+   const claimed=await writeState(env,object,next);
+   if(!claimed){log({mode:'on',overall:evaluation.overall,claimed:false});return {ran:true,mode:'on',overall:evaluation.overall,sent:0,failed:0,saved:false};}
+   const delivered=new Set();
+   for(const message of queued){if(await sendMessage(env,message,evaluation.overall,now))delivered.add(message.id);}
+   let saved=true;
+   if(delivered.size){saved=!!await writeState(env,claimed,{...next,outbox:queued.filter(item=>!delivered.has(item.id))});}
+   await heartbeat(env);
+   log({mode:'on',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),sent:delivered.size,failed:queued.length-delivered.size,saved});
+   return {ran:true,mode:'on',overall:evaluation.overall,sent:delivered.size,failed:queued.length-delivered.size,saved};
   }catch(error){log({mode:current,error:String(error?.message||'error').slice(0,120)});return {ran:false,reason:'error'};}
  }
 
@@ -112,7 +129,7 @@ const Monitor=(()=>{
   try{doc=(await readState(env)).doc;}catch{doc=null;}
   const heartbeatAt=Date.parse(doc?.heartbeatAt||'');
   return {mode:current,readAt:iso(now),stored:!!doc,heartbeatAt:Number.isFinite(heartbeatAt)?iso(heartbeatAt):null,heartbeatAgeMs:Number.isFinite(heartbeatAt)?Math.max(0,now-heartbeatAt):null,
-   overall:doc?.overall??null,streams:doc?.streams??[],openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:entry.severity,firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
+   outbox:Array.isArray(doc?.outbox)?doc.outbox.length:0,overall:doc?.overall??null,streams:doc?.streams??[],openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:entry.severity,firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
    alerting:!!httpsUrl(env?.MONITOR_WEBHOOK_URL),deadman:!!httpsUrl(env?.MONITOR_HEARTBEAT_URL),sideEffects:'none'};
  }
 
@@ -123,10 +140,12 @@ const Monitor=(()=>{
   const {object,doc}=await readState(env);
   const last=Date.parse(doc?.lastTestAt||'');
   if(Number.isFinite(last)&&now-last<TEST_COOLDOWN_MS)return {sent:false,reason:'recent',lastTestAt:doc.lastTestAt};
-  const delivered=await sendMessage(env,{kind:'test',severity:'test',stream:'monitor',key:'monitor_test',message:'Test alert from the IPTV monitor. No incident.'},doc?.overall||'unknown',now);
-  if(!delivered)return {sent:false,reason:'delivery_failed'};
-  const base=doc||{schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:null,mode:mode(env),overall:null,streams:[],alerts:{issues:{}},predictions:{pendingCount:null},epgSeen:null};
-  await writeState(env,object,{...base,lastTestAt:iso(now)});
+  // Claim first: the cooldown stamp is committed before the message is sent, so concurrent requests cannot both send.
+  const base=doc||{schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:null,mode:mode(env),overall:null,streams:[],alerts:{issues:{}},outbox:[],predictions:null,epgSeen:null};
+  const claimed=await writeState(env,object,{...base,lastTestAt:iso(now)});
+  if(!claimed)return {sent:false,reason:'concurrent'};
+  const delivered=await sendMessage(env,{id:'monitor_test|'+iso(now),kind:'test',severity:'test',stream:'monitor',key:'monitor_test',message:'Test alert from the IPTV monitor. No incident.'},doc?.overall||'unknown',now);
+  if(!delivered){await writeState(env,claimed,{...base,lastTestAt:doc?.lastTestAt||null}).catch(()=>null);return {sent:false,reason:'delivery_failed'};}
   return {sent:true,at:iso(now)};
  }
  return {STATE_KEY,mode,run,status,test,collect};
