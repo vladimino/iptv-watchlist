@@ -92,3 +92,7 @@ When auditing, compare the live daily and hourly tasks with their expected enabl
 ## Ratings Task and the Cloudflare executor (AIR-347)
 
 Ratings production is Cloudflare-owned: `orchestration.mode=cloudflare`, epoch `1`; the first natural Workflow `ratings_20261105_0` completed on 2026-11-05 with Diary page 1 (50 rows, one new fact) and no pending removals. The previous ChatGPT Ratings Task was separately disabled on 2026-11-06 and verified in the live registry. The existing Worker cron (`37 * * * *`) calls `RatingsOrchestration.ensure` after the logical daily due of 17:30 Europe/Madrid; it creates a deterministic Workflow instance, not an inline cron writer. The external Ratings start/step path is fenced. Rollback to external requires its own owner-approved drain/mode switch and a separately authorized Task re-enable. For runtime status read `ratings_sync_status`, not the Task's old run history. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md) and [dated evidence](../evidence/orchestration/ratings-task-disabled-2026-11-06.md).
+
+## Worker monitor and the external drift Task (AIR-349)
+
+The Worker's own monitor ([ADR 0095](../adr/0095-cloudflare-native-production-monitor.md)) checks the stored result of each stream independently of ChatGPT and is inert until the owner sets `MONITOR`. The external «IPTV Scheduled Task Drift» Task is not replaced or changed by it. See the [monitor API](api/monitor.md).

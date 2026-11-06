@@ -14,6 +14,7 @@ const FEATURE_FLAGS=[
  // Retired: Diary page 1 on a migrated ratings run does not read this binding (ADR 0075).
  {name:'LETTERBOXD_DIARY_HISTORY',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  {name:'D1_ENRICHMENT_WRITE',modes:['off','dry','on'],default:'off',tokens:['off','dry','on'],effective:env=>d1EnrichmentMode(env),note:'AIR-275 phase 2: dry logs the D1 diff without writing; on writes changed Films and Persons from a cron trigger'},
+ {name:'MONITOR',modes:['off','dry','on'],default:'off',tokens:['off','dry','on'],effective:env=>env?.MONITOR==='on'?'on':env?.MONITOR==='dry'?'dry':'off',note:'AIR-349: the Cloudflare-native monitor. dry evaluates and logs without writing or sending; on keeps monitor/state.json and sends alerts when MONITOR_WEBHOOK_URL is set'},
  // Retired: the code ignores the binding whatever it holds. Reported so a stale binding is visible.
  {name:'RATINGS_PIPELINE',modes:[],default:null,tokens:['inline','separate'],retired:true,effective:()=>null},
  {name:'SCORED_RESOLUTION',modes:[],default:null,tokens:['off','shadow','on'],retired:true,effective:()=>null},
