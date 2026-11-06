@@ -9,7 +9,7 @@ The sequences below are **independent scheduled or externally driven flows**, no
 ```mermaid
 sequenceDiagram
     actor Daily as Daily EPG Task
-    actor Hourly as Hourly Predictions Task
+    actor Hourly as Hourly Task
     participant MCP as Worker MCP
     participant EPG as EPG pipeline
     participant D1 as D1 authority
@@ -19,7 +19,7 @@ sequenceDiagram
     loop Until EPG publication completes or pauses
         Daily->>MCP: epg_sync_step
         MCP->>EPG: Advance one bounded step
-        EPG->>D1: Commit fenced generation
+        EPG->>D1: Read or publish fenced generation
         EPG->>R2: Store checkpoint and mirrors
         MCP-->>Daily: stage and nextAction
     end
