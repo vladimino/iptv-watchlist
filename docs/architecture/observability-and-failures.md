@@ -50,3 +50,7 @@ No live operations are introduced by this page.
 ## Ratings orchestration read model (AIR-347)
 
 `ratings_sync_status.orchestration` is implemented and read-only: health idle/healthy/waiting/cooldown/stalled/quarantined/failed_permanent, stall threshold two hours after the 17:30 Madrid due time. A failed read yields `health: unknown` and does not break the status.
+
+## Ratings run result in the user Events Log (AIR-361)
+
+The user-facing «События» journal carries one `ratings` event per terminal Ratings run. It is a product view of the run record, separate from Cloudflare monitoring and alerting. The D1 terminal commit and the R2 event put are not atomic, so the event is reconciled from the record (written after the commit, repeated at the next look, carried bounded when the record is replaced) and is idempotent by run id. See the [events reference](../reference/domain/events.md#ratings-run-result-ratings).

@@ -20,6 +20,7 @@ const LetterboxdRatings=(()=>{
  const STEP_LOOKUPS=5,SETTLE_PER_STEP=100,RECENT=10;
  const MIGRATION_WRITER={runId:'ratings-storage-migrate',step:'migrate'};
  const DIARY_ERRORS=['failed','blocked','rate_limited'];
+ const MIN_MS=60000;
  const iso=ms=>new Date(ms).toISOString();
  const clone=value=>JSON.parse(JSON.stringify(value));
  class LeaseLost extends Error{constructor(){super('Ratings step lease lost');}}
@@ -80,6 +81,67 @@ const LetterboxdRatings=(()=>{
   return withRecent({...run,state:failed?'error':'finished',phase:'done',outcome:diaryOutcome,cause:failed?diaryOutcome:diaryOutcome?null:'diary_off',finishedAt:at,updatedAt:at,lease:{step:null,expiresAt:null}});
  }
 
+ // AIR-361: one aggregated `ratings` event per terminal run, in the shared Events Log (R2). The run record in D1 is the durable
+ // source: the event is built from the committed terminal state only, with an id derived from the runId (never the instance, the
+ // hour or the generation time) and the time the run really ended. D1 and R2 are not atomic, so delivery is reconciled: written
+ // right after the terminal commit, again whenever the record is looked at by a start, a terminal read of the executor or the
+ // next call, marked on the run once delivered, and carried (bounded) on the next run record when it cannot be delivered before
+ // that record is replaced. Delivery never reads Diary, never repeats a step and never changes the run's outcome.
+ const EVENT_STATES=['finished','error','unknown'],EVENT_CAUSES=['failed','blocked','rate_limited','interrupted','abandoned','diary_off'];
+ // Delivery is attempted at a bounded rate, never given up on: an undelivered event stays owed with a retry time (15 minutes doubling
+ // to a day). Only when more than EVENT_PENDING_MAX outcomes are owed at once (two months of daily runs with the Events Log
+ // unreachable) is the oldest discarded, and `eventsDropped` on the run record counts it, so the loss is visible.
+ const EVENT_PENDING_MAX=60,EVENT_RETRY_BASE_MS=15*MIN_MS,EVENT_RETRY_MAX_MS=24*60*MIN_MS;
+ function ratingsEventOf(run){
+  if(!run?.runId||!EVENT_STATES.includes(run.state))return null;
+  const ended=Date.parse(run.finishedAt||run.closedAt||'');if(!Number.isFinite(ended))return null;
+  const n=value=>Number.isInteger(value)&&value>=0?value:0,diary=run.diary||null,counts=diary?.counts||{},facts=diary?.facts||{},lookup=run.removal?.lookup||{};
+  const cause=EVENT_CAUSES.includes(run.cause)?run.cause:null;
+  // Removal counters do not overlap: `rated` counts removed films whose rating was found in this run (by Diary or by a member-page
+  // lookup), `resolved` counts removal references of the Events Log that were settled with a rating (including films rated earlier).
+  return {id:run.runId+'-ratings',type:'ratings',at:new Date(ended).toISOString(),runId:run.runId,trigger:run.trigger==='manual'?'manual':'scheduled',state:run.state,cause,
+   coverage:diary?.historicalCoverage==='incomplete'?'recent_window':null,
+   diary:diary?{pages:n(counts.pages),rows:n(counts.rows),added:n(counts.added),updated:n(counts.updated),written:n(facts.written),unchanged:n(facts.unchanged),skipped:n(facts.skipped),conflicts:n(facts.conflicts)}:null,
+   removal:{pending:n(run.pinned?.removalPending),checked:n(lookup.checked),rated:n(diary?.removalResolved)+n(lookup.rated),resolved:n(run.removal?.settled?.resolved)}};
+ }
+ async function deliverEvent(env,event){
+  if(!event||typeof writeRatingsEvent!=='function')return false;
+  try{await writeRatingsEvent(env,event);return true;}catch{return false;}
+ }
+ const retryDelay=attempts=>Math.min(EVENT_RETRY_MAX_MS,EVENT_RETRY_BASE_MS*2**Math.min(attempts,7));
+ // What a terminal record owes: the events already pending on it, plus its own when it is not marked delivered.
+ function owedEvents(run){
+  const list=(Array.isArray(run?.pendingEvents)?run.pendingEvents:[]).filter(item=>item?.event?.id);
+  const own=run&&!run.ratingsEventAt?ratingsEventOf(run):null;
+  if(own&&!list.some(item=>item.event.id===own.id))list.push({event:own,attempts:0,nextAt:0});
+  return list;
+ }
+ // The pending list for the record that replaces `base`, bounded; the discarded count stays on the record.
+ function carryOwed(base){
+  const owed=owedEvents(base),dropped=Math.max(0,owed.length-EVENT_PENDING_MAX);
+  return {pendingEvents:owed.slice(dropped),eventsDropped:(base?.eventsDropped||0)+dropped};
+ }
+ // Delivers what is due for the committed record as it stands and marks it. Never throws; a lost compare-and-swap only means a
+ // later look repeats the same idempotent puts.
+ async function reconcileEvent(env,now=Date.now()){
+  const {object,value:run}=await read(env,KEYS.run);
+  if(!run)return {written:0};
+  const pending=Array.isArray(run.pendingEvents)?run.pendingEvents:[],keep=[];let written=0,changed=false;
+  for(const item of pending){
+   if(!item?.event?.id)continue;
+   if(Number(item.nextAt||0)>now){keep.push(item);continue;}
+   if(await deliverEvent(env,item.event)){written++;changed=true;continue;}
+   keep.push({event:item.event,attempts:(item.attempts||0)+1,nextAt:now+retryDelay(item.attempts||0)});changed=true;
+  }
+  let marked=null;
+  if(!run.ratingsEventAt){const event=ratingsEventOf(run);if(event&&await deliverEvent(env,event)){written++;marked=iso(now);changed=true;}}
+  if(!changed)return {written:0};
+  const next={...run,...(marked?{ratingsEventAt:marked}:{})};
+  if(keep.length)next.pendingEvents=keep;else delete next.pendingEvents;
+  await put(env,KEYS.run,object,next).catch(()=>null);
+  return {written};
+ }
+
  // ratings_sync_start. `busy` never hands out the running id; a stale record is closed first.
  async function start(env,{trigger,clearIsolation=false}={},now=Date.now()){
   const reply=(runId,created,nextAction,reason,extra={})=>({runId,created,nextAction,reason,...extra});
@@ -98,10 +160,13 @@ const LetterboxdRatings=(()=>{
    if(base?.state==='running'){const stale=staleness(base,now);if(!stale)return reply(null,false,'stop','busy');base=closeStale(base,stale,now);}
    if(base?.isolation){if(clearIsolation&&trigger==='manual')base={...base,isolation:null,isolationClearedAt:iso(now)};else reason='isolated';}
    const at=iso(now);
+   const carried=reason==='started'?carryOwed(base):null;
    const next=reason==='started'?{schemaVersion:RUN_SCHEMA_VERSION,runId:crypto.randomUUID(),trigger,state:'running',phase:'diary',lease:{step:null,expiresAt:null},
     startedAt:at,updatedAt:at,lastStepAt:null,finishedAt:null,closedAt:null,checkpoint:{diaryPagesRead:0,diaryNextPage:1,diaryMode:'incremental',removalChecked:0,legacyPagesLinked:0},pinned,
-    outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:base?.isolation||null,...(base?.isolationClearedAt?{isolationClearedAt:base.isolationClearedAt}:{}),lastStartAt:at,recent:base?.recent||[]}:base!==stored?base:null;
+    outcome:null,cause:null,interruptedPhase:null,diary:null,removal:null,isolation:base?.isolation||null,...(base?.isolationClearedAt?{isolationClearedAt:base.isolationClearedAt}:{}),lastStartAt:at,recent:base?.recent||[],...(carried.pendingEvents.length?{pendingEvents:carried.pendingEvents}:{}),...(carried.eventsDropped?{eventsDropped:carried.eventsDropped}:{})}:base!==stored?base:null;
    if(next&&await put(env,KEYS.run,object,next)===null)continue;
+   // Only the committed record is reconciled: an event is never delivered for a close that this start has not committed.
+   if(next)await reconcileEvent(env,now).catch(()=>null);
    if(reason==='started')return reply(next.runId,true,'continue','started');
    return reply(null,false,'stop',reason,reason==='isolated'?{isolation:base.isolation}:{});
   }
@@ -123,7 +188,7 @@ const LetterboxdRatings=(()=>{
    if(run.state!=='running')return reply(run,'stop',run.state,{summary:{diary:run.diary,removal:run.removal}});
    if(leaseLive(run,now))return reply(run,'wait','busy',{nextCatchUpAt:run.lease.expiresAt});
    const stale=staleness(run,now);
-   if(stale){const closed=closeStale(run,stale,now);if(await put(env,KEYS.run,object,closed)===null)continue;return reply(closed,'stop','unknown',{cause:stale});}
+   if(stale){const closed=closeStale(run,stale,now);if(await put(env,KEYS.run,object,closed)===null)continue;await reconcileEvent(env).catch(()=>null);return reply(closed,'stop','unknown',{cause:stale});}
    const at=iso(now),next={...run,lease:{step:stepId,expiresAt:iso(now+LEASE_MS)},updatedAt:at,lastStepAt:at};
    const saved=await put(env,KEYS.run,object,next);if(saved===null)continue;
    owned={run:next,etag:saved.etag};
@@ -156,6 +221,7 @@ const LetterboxdRatings=(()=>{
    stepInfo.lookups=removal.lookup.checked;
    const merged=run=>({...run,removal:{settled:addCounts(run.removal?.settled,removal.settled),lookup:addCounts(run.removal?.lookup,removal.lookup),pausedUntil:removal.lookup.pausedUntil||run.removal?.pausedUntil||null}});
    const next=await own(run=>removal.more?released(merged(run)):finish(merged(run),clock()));
+   if(!removal.more)await reconcileEvent(env).catch(()=>null);
    return reply(next,removal.more?'continue':'stop',removal.more?'more_work':next.state,{step:stepInfo,summary:{diary:next.diary,removal:next.removal}});
   }catch(e){
    if(e instanceof LeaseLost)return reply(owned.run,'stop','lease_lost',{step:stepInfo});
@@ -239,7 +305,7 @@ const LetterboxdRatings=(()=>{
    let accepted=false;
    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{accepted=applyRemovalOutcome(q,id,result,error,at,t,token);return accepted?q:null;});
    const entry=queue.films[id];lookup.checked++;if(!accepted)lookup.refused++;
-   if(accepted&&entry?.state==='rated'){lookup.rated++;await settleRemovalRefs(env,{ids:[id]});}else if(accepted&&entry?.lastResult==='not_rated')lookup.notRated++;else if(error)lookup.failed++;
+   if(accepted&&entry?.state==='rated'){lookup.rated++;const inline=await settleRemovalRefs(env,{ids:[id]});for(const key of ['written','resolved','waiting','mismatched'])settled[key]+=inline[key];}else if(accepted&&entry?.lastResult==='not_rated')lookup.notRated++;else if(error)lookup.failed++;
    await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,removalChecked:(current.checkpoint.removalChecked||0)+1}}));
    if(accepted&&(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited')){lookup.stoppedBy=entry.lastResult;lookup.pausedUntil=queue.pausedUntil;break;}
   }
@@ -362,5 +428,5 @@ const LetterboxdRatings=(()=>{
   const fe=gated.fenceEnv;
   return {status:200,body:await (action==='start'?start(fe,body):action==='step'?step(fe,body):migrate(fe,body))};
  }
- return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

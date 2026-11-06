@@ -122,6 +122,10 @@ This is not a storage migration and it is not a reason to repeat the cutover abo
 2. Do not set `RATINGS_PIPELINE=inline` and do not delete the binding as a rollback. The Worker ignores the binding. After the leftover binding is deleted, code from before ADR 0074 must not be deployed until `RATINGS_PIPELINE=separate` is restored and read back: that older code treats a missing binding as `inline`.
 3. Once migrated (cutover step 3), a code revert is **not** a rollback of R2. Earlier code prunes the version 2 queue without its references and writes the cursor back as version 1. Undoing it needs a separate owner decision on the stored objects. A run left `running` stays until a later start closes it.
 
+## The run result event (AIR-361)
+
+Each terminal Ratings run writes one `ratings` event to the Events Log (`events/items/`). To confirm a natural run read-only, look at `ratings_sync_status` (pipeline, run record, `ratingsEventAt`) and, with a separate assessment, the Events page: `GET /api/events` can write when it recovers a prediction stop, so it is not a safe read-only probe. A missing event for a run that ended is repaired by the next start or executor terminal read; do not start a run, reset a lease or write an event by hand. A run that ended before AIR-361 has no event and none is created afterwards. See the [events reference](../reference/domain/events.md#ratings-run-result-ratings).
+
 ## Historical rollback (AIR-51)
 
 These steps described turning the gate off. They are not current. Current rollback is [above](#rollback-of-this-retirement).

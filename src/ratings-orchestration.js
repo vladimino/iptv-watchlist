@@ -197,7 +197,7 @@ const RatingsOrchestration=(()=>{
   let run=await ratings().readRun(fe);
   const today=run&&Number.isFinite(Date.parse(run.startedAt))&&dayOf(Date.parse(run.startedAt))===runKey?run:null;
   // Read-after-unknown: a run of this Madrid date that already finished is the success, whoever started it.
-  if(today?.state==='finished')return {finished:true,runId:today.runId,run:today};
+  if(today?.state==='finished'){await ratings().reconcileEvent(fe).catch(()=>null);return {finished:true,runId:today.runId,run:today};}
   let runId=today?.state==='running'?today.runId:null;
   if(!runId){
    const reply=await ratings().start(fe,{trigger:'scheduled'},now);
@@ -332,6 +332,8 @@ const RatingsOrchestration=(()=>{
   const authority=await authorityState(env);
   if(authority.error)return {started:false,reason:'d1_unavailable'};
   if(!authority.ready)return {started:false,reason:'authority_held'};
+  // AIR-361: the hourly tick also delivers a Ratings result event that an earlier terminal commit could not put (idempotent, bounded).
+  await ratings().reconcileEvent(fencedEnv(env,mode.etag),now).catch(()=>null);
   const {dayKey,due,dueAt}=policy().dailyDue(now);
   if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
   const stored=await readControl(env);
