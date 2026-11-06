@@ -6,6 +6,7 @@ The activity list reads objects under `events/items/`. The key is `events/items/
 | --- | --- | --- |
 | `epg` | A programme commit | Counts of films and broadcasts |
 | `watchlist` | A watchlist commit | Added and removed films |
+| `ratings` | A Ratings run that ended (finished, error or closed as unknown) | One compact result: Diary rows checked, new facts, removals handled, honest error or interruption |
 | `started`, `unstarted` | An owner mark on one film | The film title |
 | `enrichment` | A prediction run's start, progress, stop or completion | Queue progress, separate from profile publication |
 | `taste_profile` | One committed move of the taste-profile current pointer | Version transition, a short category and selective or global scope |
@@ -33,3 +34,21 @@ Contract of [AIR-359](https://trello.com/c/0IV9qKWR).
 - **Watchlist event.** Its diff (`added`, `removed`, `total`, `baseline`) is computed from the watchlist before the run and the run's watchlist, so a rescan yields the same delta. An event with no removal is rebuilt for the new scan and carries the published time. An event that reports removals keeps its key, and with it the time of the first scan of the run: the removal hand-over references the event by key (`events/items/<reverse-timestamp>-<id>.json`, derived from `at`), the commit hands the references to the removal queue **before** it publishes, and a queue entry cannot be re-pointed afterwards, so a rebuilt key would leave that reference dangling. For such an event `at` therefore denotes the watchlist observation (the first scan of the run that saw the removal), not the EPG publication. This is a contract decision that needs the owner's approval ([AIR-359](https://trello.com/c/0IV9qKWR) records the request); the alternative is to hand the references over only after the publication, which changes the commit order and needs its own card.
 - **Idempotency.** A repeated `finishSync`, a resumed committed run and an events refresh write the same keys; no second event is created. Events written by earlier code are not rewritten, and ordering and pagination by key are unchanged.
 - **Not covered.** A one-off correction of an event that was already written with a stale time (the 5 November 17:03 entry) is a separate owner-approved action: exact key, idempotency and readback. This contract changes code only.
+
+## Ratings run result (`ratings`)
+
+Contract of [AIR-361](https://trello.com/c/pKYwrxcZ). One immutable event per Ratings run that reached a terminal state in the run record (`finished`, `error`, or `unknown` when a stale or interrupted run is closed). Never one per film, per step or per heartbeat, and none for a run that never started or whose terminal state was not persisted.
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `runId` | `<runId>-ratings` and the run id. The Workflow instance id, the hour and the generation time play no part |
+| `at` | The run's real end (`finishedAt`, or `closedAt` for an unknown close); the key is `events/items/<reverse-timestamp>-<id>.json` as for every event |
+| `state`, `cause` | `finished` / `error` / `unknown`; `cause` is one of `failed`, `blocked`, `rate_limited`, `interrupted`, `abandoned`, `diary_off` or null |
+| `trigger` | `scheduled` or `manual` |
+| `coverage` | `recent_window` while only Diary page one was read; never «whole history checked» |
+| `diary` | Counts only: `pages`, `rows` (checked), `added` and `updated` (Diary entries), `written` (facts written), `unchanged`, `skipped` (already recorded), `conflicts` |
+| `removal` | `pending` at the start, `checked` lookups, `resolved` removals |
+
+Written, read and unchanged are different numbers: 50 rows checked with one new fact reads «записей проверено 50, новых фактов 1». The payload carries no titles, ids, URLs, rating lists or raw Letterboxd content.
+
+**Delivery.** The D1 run record is the source and R2 is a projection, and the two are not atomic. The event is built from the committed terminal state only and put with a create-only precondition, so a repeat finds the key and writes nothing. It is delivered right after the terminal commit, and again at the next look at the record: a start, a terminal read by the Cloudflare executor, the closing of a stale run, or an explicit reconcile. The run is marked `ratingsEventAt` once delivered. If the record is replaced before delivery, the event is carried on the new record (`pendingEvents`, at most three, five attempts each) and dropped after the bound with no further retry. A failed put never fails the run, never reads Diary again and never repeats a step; the status reads and writes nothing. Events for runs that ended before this change are not created.

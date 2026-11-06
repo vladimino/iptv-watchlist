@@ -197,7 +197,7 @@ const RatingsOrchestration=(()=>{
   let run=await ratings().readRun(fe);
   const today=run&&Number.isFinite(Date.parse(run.startedAt))&&dayOf(Date.parse(run.startedAt))===runKey?run:null;
   // Read-after-unknown: a run of this Madrid date that already finished is the success, whoever started it.
-  if(today?.state==='finished')return {finished:true,runId:today.runId,run:today};
+  if(today?.state==='finished'){await ratings().reconcileEvent(fe).catch(()=>null);return {finished:true,runId:today.runId,run:today};}
   let runId=today?.state==='running'?today.runId:null;
   if(!runId){
    const reply=await ratings().start(fe,{trigger:'scheduled'},now);

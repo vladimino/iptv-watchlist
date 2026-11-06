@@ -163,6 +163,10 @@ When migration is complete, the `letterboxd_ratings` source of the integration f
 
 The retirement deletes nothing. `enrichment/ratings/status.json`, `published.json`, `pending.json`, `lease.json` and `generations/<id>.json` stay in R2 as written. The view index keeps every `actualRating` already projected from a generation. A leftover `pending.json` is no longer finished by anyone; `status` reports its id as `pendingGenerationId` and the view index is unaffected by it.
 
+## Run result in the Events Log (AIR-361)
+
+Every run that reaches a terminal state writes one compact `ratings` event (see the [events reference](../domain/events.md#ratings-run-result-ratings)). Delivery is reconciled from the D1 run record (`ratingsEventAt`, `pendingEvents`) and never repeats a step or a Diary read.
+
 ## Cloudflare executor (AIR-347, inert)
 
 The status adds a read-only `orchestration` object (`mode` external/switching/cloudflare, `epoch`, `runKey`, `health`, `failure`, caps, `cooldownUntil`, `quarantine`, `nextWakeAt`, `oldestPendingAt`). While the mode is `switching` or `cloudflare`, `start`, `step` and `ratings_storage_migrate` with `mode: apply` answer `nextAction: stop` with `switch_in_progress` or `external_writer_fenced` (HTTP and MCP share `LetterboxdRatings.handle`); reads and `dry_run` stay open. Admitted external commits assert the mode document's etag in the same D1 batch, and the executor's records are D1-only for reads and writes (no R2 fallback). When ownership cannot be read from D1 (held, non-`d1` or unavailable authority) `start`, `step` and `migrate apply` answer `evidence_unreadable`, and the status reports `health: unknown`. The owner route `POST /api/letterboxd/ratings/executor` takes `close_admission`, `complete` or `clear_quarantine`. Default and absent mode is `external`: the Task path is unchanged. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md).
