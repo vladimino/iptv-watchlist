@@ -33,3 +33,19 @@ The Node tests run the instance with stubbed steps. A local Workflows runtime wa
 ## Result of the change
 
 `tests/discovery-workflow.mjs` shows an instance of 650-statement chunks handing over after ten chunks (6,520 statements) with a successor create, the plan under the budget, the counting proxy, a log made of fixed classes that holds none of an adversarial message, a failing first read of the chunk step that is logged and rethrown, and a sleep and replay in which the rebuilt count stops the instance at ten chunks in all (fifteen without it). Production acceptance is separate in AIR-324.
+
+## Addendum, 2026-11-06 14:58 UTC: a third instance
+
+Method as above, read-only. Instance `discovery_5744…_2` was created at 14:37:36 UTC by the hourly cron on the Worker version before the AIR-360 deploy (deployment 14:40:51 UTC), so it ran the old code.
+
+| Item | Instance 2 |
+| --- | --- |
+| Progress chunks | 19 (27–30 s each) |
+| Sleeps | none (no `stall-sleep`) |
+| Failing step | `progress-78-1`, 6 attempts, each 13–15 ms, every one `discovery_unavailable`; instance errored at 14:52:20 UTC |
+| D1 statements, instance lifetime | 12,328 |
+| D1 rows read | 3.28 million |
+
+- The three totals (12,287, 12,192, 12,328) agree within about one percent although the instances ran 22, 14 and 14.7 minutes, read 6.87, 1.94 and 3.28 million rows, and failed at different steps: `owner` after `stall-sleep` twice, `progress` once. This instance never slept. So the `stall-sleep` to `owner` sequence of the first two instances was only the step on which the count happened to run out; it is not the cause, and the reading above, a count reached after a fixed amount of work, is supported by a third observation.
+- The change of [ADR 0094](../../adr/0094-discovery-workflow-invocation-budget.md) is unchanged by this: it counts statements and hands over at 6,000, about half of the observed total.
+- Not yet observed: an instance created after the deploy. The next hourly cron firing (15:37 UTC) can only arm the recovery of this errored instance; a successor on the new code follows at the next firing.
