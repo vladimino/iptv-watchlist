@@ -1,7 +1,7 @@
 # AIR-324 Discovery Workflow handover — offline evidence
 
 **Captured:** 2026-11-05, Europe/Madrid (code only)  
-**Related work:** [AIR-324](https://trello.com/c/kNtaEbm8), [ADR 0091](../../adr/0091-discovery-workflow-cron-reconcile.md) (Proposed)  
+**Related work:** [AIR-324](https://trello.com/c/kNtaEbm8), [ADR 0093](../../adr/0093-discovery-workflow-cron-reconcile.md) (Proposed)  
 **Scope:** local `npm test` / `npm run build` against the AIR-324 branch. No production Worker, Cloudflare setting, D1, R2, MCP writer, flag or Scheduled Task was read or changed.
 
 ## What was exercised

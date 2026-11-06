@@ -1,4 +1,4 @@
-# ADR 0091: The existing Worker cron may reconcile an inert Discovery Workflow
+# ADR 0093: The existing Worker cron may reconcile an inert Discovery Workflow
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-05  

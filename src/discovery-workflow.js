@@ -1,4 +1,4 @@
-// AIR-323 / ADR 0083, AIR-324 / ADR 0091. Durable Discovery continuation. One bounded chunk per step.
+// AIR-323 / ADR 0083, AIR-324 / ADR 0093. Durable Discovery continuation. One bounded chunk per step.
 // Only DISCOVERY_EXECUTOR=workflow calls create(). The existing Worker cron may call reconcileDiscoveryWorkflow;
 // that path is a no-op while the mode is external. No workflows[].schedules. The executor record follows the
 // discovery marker: D1 when it is d1, otherwise R2 (AIR-320).

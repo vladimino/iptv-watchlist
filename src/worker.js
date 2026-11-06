@@ -976,7 +976,7 @@ async function epgSync(env,run){
 export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
 // AIR-347 (ADR 0090): the same firing also calls the ratings executor's `ensure`; with the executor mode external it reads one document and returns.
-// AIR-324 (ADR 0091): the same firing also calls reconcileDiscoveryWorkflow; with DISCOVERY_EXECUTOR absent it returns without create().
+// AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; with DISCOVERY_EXECUTOR absent it returns without create().
 async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env):Promise.resolve()]));},
 async fetch(request,env,execution){
  const url=new URL(request.url);
