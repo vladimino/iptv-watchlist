@@ -16,4 +16,4 @@ Rebuild the events for the scan being published when the saved `epg` event is fo
 
 ## Limitations
 
-The sealed (D1) publication path is covered by the same rebuild-on-rescan rule and the `finishSync` guard, but the fixture exercises the R2 publication path. A watchlist event whose removal was already handed over keeps the first scan's time. No production event was inspected or corrected.
+The sealed (D1) publication path is covered by the same rebuild-on-rescan rule and the `finishSync` guard, but the fixture exercises the R2 publication path. A watchlist event that reports a removal keeps the first scan's time (its key is referenced by the removal hand-over). No production event was inspected or corrected.

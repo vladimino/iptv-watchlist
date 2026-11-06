@@ -124,9 +124,9 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
  const retry=await post('/api/sync/epg',{runId:runB});assert.equal(retry.status,200,JSON.stringify(retry.data));
  const watch=watchlistEvents().filter(event=>event.id===runB+'-watchlist');
  assert.equal(watch.length,1,'one watchlist event for the run');
- // The removal was already handed over to the queue (ratings are migrated in this fixture), and the queue references this event by key:
- // the event keeps its key (and so its first-scan time) rather than leaving the reference dangling. Its content is the same delta.
- assert.equal(watch[0].at,early.at,'a handed-over removal event keeps the key the queue references');
+ // The removal hand-over references this event by key, whether it is still pending on the run or already in the queue: the event keeps
+ // its key (and so its first-scan time) rather than leaving the reference dangling. A rescan yields the same delta.
+ assert.equal(watch[0].at,early.at,'a watchlist event that reports a removal keeps the key its hand-over references');
  assert.deepEqual(watch[0].removed.map(film=>film.id),['gone']);assert.equal(watch[0].added.length,0);
  const refs=records.get('sync.json').removalRefs;
  if(refs){const list=Array.isArray(refs)?refs:[refs];assert.ok(list.every(item=>item.ref.eventKey===key(watch[0])),'every removal reference names the written event');}
