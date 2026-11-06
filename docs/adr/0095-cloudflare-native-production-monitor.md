@@ -1,9 +1,9 @@
 # ADR 0095: An inert Cloudflare-native monitor diagnoses the four production streams and alerts through an owner-approved webhook
 
-**Status:** Proposed  
-**Original decision date:** 2026-11-06 (implementation choice inside the AIR-349 card)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-06 (owner-approved architecture during AIR-349 PR review)  
 **Recorded at:** 2026-11-06  
-**Approval source:** not documented (Proposed; the owner decides when reviewing the AIR-349 pull request)  
+**Approval source:** explicit Product Owner acceptance on 2026-11-06 in the AIR-349 PR #392 review conversation; acceptance applies to ADR 0095 architecture only, not production activation  
 **Related work:** [AIR-349](https://trello.com/c/VUyampoh); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0090](0090-ratings-cloudflare-workflow-executor.md); [AIR-344](https://trello.com/c/8TV5soDb)  
 **Supersedes:** None  
 **Superseded by:** None
