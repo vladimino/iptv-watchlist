@@ -1,9 +1,9 @@
 # ADR 0093: The existing Worker cron may reconcile an inert Discovery Workflow
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-05  
 **Recorded at:** 2026-11-05  
-**Approval source:** pending owner ADR decision on [AIR-324](https://trello.com/c/kNtaEbm8) after independent review  
+**Approval source:** explicit owner acceptance in AIR-324 PR #380 conversation on 2026-11-06, after independent review and Mermaid visual acceptance. This approves architecture, not production activation.  
 **Related work:** [AIR-324](https://trello.com/c/kNtaEbm8); [ADR 0083](0083-inert-discovery-workflow.md); [ADR 0085](0085-d1-authoritative-discovery.md); [ADR 0089](0089-shared-orchestration-reliability-contract.md)  
 **Supersedes:** [ADR 0083](0083-inert-discovery-workflow.md) decisions 7 and 8 in part (the reconciler is no longer unscheduled; the cron may call it)  
 **Superseded by:** None
