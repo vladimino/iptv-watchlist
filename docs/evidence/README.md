@@ -51,5 +51,6 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-188 extended future EPG fixture measurements | [epg-extended-future-air-188-2026-11-05.md](epg-extended-future-air-188-2026-11-05.md) |
 | AIR-359 EPG event versus published generation | [epg-event-publication-air-359-2026-11-06.md](epg-event-publication-air-359-2026-11-06.md) |
 | AIR-361 Ratings run result event | [ratings-event-air-361-2026-11-06.md](ratings-event-air-361-2026-11-06.md) |
+| AIR-349 monitor offline evidence | [monitoring/monitor-air-349-2026-11-06.md](monitoring/monitor-air-349-2026-11-06.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

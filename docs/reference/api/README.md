@@ -3,6 +3,7 @@
 Current interface contracts, not a grant of production writer access:
 
 - [MCP transport, tools and authorization](mcp.md)
+- [Monitor status and synthetic test](monitor.md)
 - [Enrichment endpoints, taste profile, EPG pipeline, and mood vocabulary](enrichment.md)
 - [Events log objects](../domain/events.md) — stored activity events, including the taste-profile publication event
 - [Catalog of available films outside the watchlist (read-only)](catalog.md)

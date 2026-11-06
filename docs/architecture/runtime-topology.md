@@ -63,3 +63,7 @@ See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract]
 ## Ratings Workflow binding (AIR-347)
 
 `wrangler.jsonc` declares Workflow `iptv-ratings` (`RATINGS_WORKFLOW`, class `RatingsWorkflow`). Deployment creates the resource only; no instance exists until `ensure` runs in `cloudflare` mode.
+
+## Monitor (AIR-349)
+
+One more tick on the existing hourly cron, one R2 key (`monitor/state.json`) and, once the owner configures it, one outbound HTTPS webhook and one dead-man ping. No new Worker, Workflow, trigger or binding. See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md).

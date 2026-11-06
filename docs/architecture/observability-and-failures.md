@@ -54,3 +54,7 @@ No live operations are introduced by this page.
 ## Ratings run result in the user Events Log (AIR-361)
 
 The user-facing «События» journal carries one `ratings` event per terminal Ratings run. It is a product view of the run record, separate from Cloudflare monitoring and alerting. The D1 terminal commit and the R2 event put are not atomic, so the event is reconciled from the record (written after the commit, repeated at the next look, carried bounded when the record is replaced) and is idempotent by run id. See the [events reference](../reference/domain/events.md#ratings-run-result-ratings).
+
+## Cloudflare-native monitor (AIR-349)
+
+An inert monitor reads the stored status of EPG, Discovery, Ratings and the prediction queue on the hourly cron, judges it with a pure policy and alerts the owner through one webhook. It diagnoses and reports only and does not observe a Cloudflare-wide outage unless an external dead-man service receives its heartbeat. See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md), the [monitor API](../reference/api/monitor.md) and the [runbook](../runbooks/monitoring.md).
