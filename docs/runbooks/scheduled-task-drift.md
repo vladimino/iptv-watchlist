@@ -2,7 +2,7 @@
 
 > Under [authorization policy](../process/authorization-and-escalation.md), verified read-only task-registry and MCP diagnostics are standing-authorized L0. The monitor does not mutate tasks, invoke producers or repair state. Enable/disable/edit/manual run of Scheduled Tasks and out-of-plan EPG/discovery/ratings/prediction writes remain owner-controlled L3 or governed by an existing specific approved producer plan.
 
-The expected configuration and checks of the `IPTV Scheduled Task Drift` automation are in the [Scheduled Task contract](../reference/scheduled-tasks.md#read-only-drift-monitor): daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, read-only. It reads the daily programme task, the hourly task and the Ratings Task, plus `epg_status` and read-only `ratings_sync_status`, and reports only anomalies. The live ChatGPT Scheduled Tasks registry, not this page, says what is configured now. This page does not edit the task.
+The expected configuration and checks of the `IPTV Scheduled Task Drift` automation are in the [Scheduled Task contract](../reference/scheduled-tasks.md#read-only-drift-monitor): daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, read-only. It reads the daily programme task, the hourly task and the Ratings Task, plus `epg_status` and read-only `ratings_sync_status`, and reports only anomalies. The live ChatGPT Scheduled Tasks registry, not this page, says what is configured now. Draft Daily/Hourly texts under `docs/reference/scheduled-task-prompts/` are not the live prompts. This page does not edit the task.
 
 ## Recovery cost and alert triage
 

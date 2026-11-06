@@ -1,6 +1,7 @@
-// AIR-323 / ADR 0083. Durable Discovery continuation. One bounded chunk per step.
-// The binding creates nothing by itself: only DISCOVERY_EXECUTOR=workflow calls create(), and nothing in this
-// file is scheduled. The executor record follows the discovery marker: D1 when it is d1, otherwise R2 (AIR-320).
+// AIR-323 / ADR 0083, AIR-324 / ADR 0093. Durable Discovery continuation. One bounded chunk per step.
+// Only DISCOVERY_EXECUTOR=workflow calls create(). The existing Worker cron may call reconcileDiscoveryWorkflow;
+// that path is a no-op while the mode is external. No workflows[].schedules. The executor record follows the
+// discovery marker: D1 when it is d1, otherwise R2 (AIR-320).
 const DISCOVERY_WORKFLOW_STATE_KEY='epg/discovery-workflow.json';
 const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
 const DISCOVERY_WORKFLOW_STALL_LIMIT=3;
@@ -174,52 +175,92 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
   return {started:false,uncertain:!failure.quarantined,reason:failure.quarantined?'recovery_exhausted':'start_uncertain',programmeRunId,instanceId,series,dueAt:failure.dueAt};
  }
 }
-async function ensureDiscoveryWorkflow(env){
+async function discoveryWorkflowAdmission(env){
  const mode=discoveryExecutorMode(env);
- if(mode==='external')return {started:false,reason:'external'};
- if(mode!=='workflow')return {started:false,reason:'invalid'};
- if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable'};
- const programmeRunId=publishedProgrammeRunId(await loadJSON(env,EPG_GENERATION_KEY));
- if(!programmeRunId)return {started:false,reason:'generation_unpublished'};
- const continuation=(await readContinuation(env)).record;
- if(continuation?.programmeRunId&&continuation.programmeRunId!==programmeRunId)return {started:false,reason:'stale_generation',programmeRunId};
- if(continuation&&discoveryContract(continuation).nextAction==='stop')return {started:false,reason:'stopped',programmeRunId};
- const state=await readWorkflowState(env),current=state.record;
- const same=current?.programmeRunId===programmeRunId;
- if(same&&current.instanceId&&['starting','running','waiting'].includes(current.phase))return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
- if(same&&current.instanceId&&current.phase==='uncertain'){
-  const due=Date.parse(current.recovery?.dueAt||'');
-  if(current.recovery?.quarantined)return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
-  if(Number.isFinite(due)&&due>Date.now())return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:current.recovery.dueAt};
-  return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
+ if(mode==='external')return {ok:false,reason:'external'};
+ if(mode!=='workflow')return {ok:false,reason:'invalid'};
+ if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return {ok:false,reason:'workflow_unavailable'};
+ if(typeof DiscoveryAuthority==='undefined')return {ok:false,reason:'authority_not_ready'};
+ let gate;
+ try{gate=await DiscoveryAuthority.readAuthority(env);}
+ catch{return {ok:false,reason:'d1_unavailable'};}
+ if(gate?.held||gate?.cutover==='held')return {ok:false,reason:'authority_held'};
+ if(gate?.transfer==='loading')return {ok:false,reason:'authority_loading'};
+ if(gate?.ready!==true||gate.mode!=='d1'||gate.cutover!=='open')return {ok:false,reason:'authority_not_ready'};
+ if(gate.transfer!=='idle'&&gate.transfer!=='committed')return {ok:false,reason:'authority_not_ready'};
+ if(typeof PublishedEpg==='undefined'||typeof PublishedEpg.currentGeneration!=='function')return {ok:false,reason:'generation_unpublished'};
+ let live;
+ try{live=await PublishedEpg.currentGeneration(env);}
+ catch{return {ok:false,reason:'d1_unavailable'};}
+ const published=live?.programmeRunId||null;
+ if(!published)return {ok:false,reason:'generation_unpublished'};
+ const discoveryPin=gate.publishedProgrammeRunId||null;
+ if(!discoveryPin||discoveryPin!==published)return {ok:false,reason:'generation_handoff',programmeRunId:published};
+ return {ok:true,programmeRunId:published};
+}
+async function ensurePublishedDiscoveryIntent(env,programmeRunId){
+ const before=(await readContinuation(env)).record;
+ const same=before?.programmeRunId===programmeRunId;
+ // Same-generation programme_changed is the publication-copy artefact queueDiscovery replaces.
+ if(same&&before.reason!=='programme_changed'){
+  if(discoveryContract(before).nextAction==='stop')return {ok:false,reason:'stopped'};
+  return {ok:true,reconstructed:false};
  }
- if(same&&current?.phase==='stopped'){
-  const gate=workflowRecoveryGate(current,Date.now());
-  if(gate.action==='exhausted')return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
-  if(gate.action==='stopped')return {started:false,reason:'stopped',programmeRunId,instanceId:current.instanceId,series:current.series??0};
-  if(gate.action==='waiting')return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:gate.dueAt};
-  if(gate.action==='arm'){
-   const failure=workflowFailure(current.recovery,current.reason||'stopped',Date.now());
-   const next={...current,reason:failure.quarantined?'recovery_exhausted':current.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
-   if(!await writeWorkflowState(env,next,state.etag))return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};
-   return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
+ try{await queueDiscovery(env,'epg_committed',programmeRunId);}
+ catch{return {ok:false,reason:'intent_uncertain'};}
+ const after=(await readContinuation(env)).record;
+ if(!after||after.programmeRunId!==programmeRunId)return {ok:false,reason:after?.programmeRunId?'stale_generation':'intent_unconfirmed'};
+ if(after.reason==='programme_changed'||discoveryContract(after).nextAction==='stop')return {ok:false,reason:'stopped'};
+ return {ok:true,reconstructed:!same||before.reason==='programme_changed'};
+}
+function workflowAdmissionError(error){
+ const code=error?.code||error?.reason||'';
+ if(code==='discovery_fence'||code==='authority_held')return 'authority_held';
+ if(code==='discovery_incomplete'||code==='authority_loading')return 'authority_loading';
+ return 'd1_unavailable';
+}
+async function ensureDiscoveryWorkflow(env){
+ try{
+  const admitted=await discoveryWorkflowAdmission(env);
+  if(!admitted.ok)return {started:false,reason:admitted.reason};
+  const programmeRunId=admitted.programmeRunId;
+  const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
+  if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
+  const state=await readWorkflowState(env),current=state.record;
+  const same=current?.programmeRunId===programmeRunId;
+  if(same&&current.instanceId&&['starting','running','waiting'].includes(current.phase))return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
+  if(same&&current.instanceId&&current.phase==='uncertain'){
+   const due=Date.parse(current.recovery?.dueAt||'');
+   if(current.recovery?.quarantined)return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+   if(Number.isFinite(due)&&due>Date.now())return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:current.recovery.dueAt};
+   return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
   }
-  const series=(current.series||0)+1;
-  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,current.recovery||null,current);
- }
- const series=0;
- return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null);
+  if(same&&current?.phase==='stopped'){
+   const gate=workflowRecoveryGate(current,Date.now());
+   if(gate.action==='exhausted')return {started:false,reason:'recovery_exhausted',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+   if(gate.action==='stopped')return {started:false,reason:'stopped',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+   if(gate.action==='waiting')return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:gate.dueAt};
+   if(gate.action==='arm'){
+    const failure=workflowFailure(current.recovery,current.reason||'stopped',Date.now());
+    const next={...current,reason:failure.quarantined?'recovery_exhausted':current.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
+    if(!await writeWorkflowState(env,next,state.etag))return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};
+    return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
+   }
+   const series=(current.series||0)+1;
+   return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,current.recovery||null,current);
+  }
+  const series=0;
+  return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null);
+ }catch(error){return {started:false,reason:workflowAdmissionError(error)};}
 }
 async function reconcileDiscoveryWorkflow(env){
- const mode=discoveryExecutorMode(env);
- if(mode!=='workflow')return {started:false,reason:mode==='invalid'?'invalid':'external'};
- const binding=env?.DISCOVERY_WORKFLOW;
- if(typeof binding?.create!=='function')return {started:false,reason:'workflow_unavailable'};
- const programmeRunId=publishedProgrammeRunId(await loadJSON(env,EPG_GENERATION_KEY));
- if(!programmeRunId)return {started:false,reason:'generation_unpublished'};
- const continuation=(await readContinuation(env)).record;
- if(!continuation||continuation.programmeRunId!==programmeRunId)return {started:false,reason:'stale_generation',programmeRunId};
- if(discoveryContract(continuation).nextAction==='stop')return {started:false,reason:'stopped',programmeRunId};
+ try{
+ const admitted=await discoveryWorkflowAdmission(env);
+ if(!admitted.ok)return {started:false,reason:admitted.reason};
+ const programmeRunId=admitted.programmeRunId;
+ const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
+ if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
+ const binding=env.DISCOVERY_WORKFLOW;
  const state=await readWorkflowState(env),current=state.record;
  const same=current?.programmeRunId===programmeRunId&&current.instanceId;
  const active=same&&['starting','running','waiting','uncertain'].includes(current.phase);
@@ -240,6 +281,7 @@ async function reconcileDiscoveryWorkflow(env){
   return {started:false,reason:'in_progress',programmeRunId,instanceId:current.instanceId,series:current.series??0};
  }
  return ensureDiscoveryWorkflow(env);
+ }catch(error){return {started:false,reason:workflowAdmissionError(error)};}
 }
 async function rolloverDiscoveryWorkflow(env,pinned,ownSeries){
  const state=await readWorkflowState(env);

@@ -1,6 +1,6 @@
 # Scheduling and orchestration
 
-Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker's one cron trigger runs only the D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md)), shown last in the diagram: it reads R2, writes only D1, and stays inert while `D1_ENRICHMENT_WRITE` is unset. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
+Scheduling is performed by **external ChatGPT Scheduled Tasks**, not Worker Cron. The Worker's one cron trigger (`37 * * * *`) runs the D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md)), the ratings executor's inert `ensure` ([ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md)), and `reconcileDiscoveryWorkflow` ([ADR 0093](../adr/0093-discovery-workflow-cron-reconcile.md), Accepted). The projector stays inert while `D1_ENRICHMENT_WRITE` is unset. The Discovery reconcile creates nothing while `DISCOVERY_EXECUTOR` is absent. The Worker exposes owner-only MCP tools that perform work only when invoked. Expected task behavior: [Scheduled Task contract](../reference/scheduled-tasks.md). Sources: [scheduling ADR](../adr/0005-external-chatgpt-tasks.md), [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP contract](../reference/api/mcp.md) and [prediction operations](../runbooks/prediction-operations.md).
 
 The sequences below are **independent scheduled or externally driven flows**, not a single sequential execution. They are split for legibility; each uses the same existing Worker, Access, R2 and D1 boundaries. External tasks and the cron expression do not change. The publication path currently uses D1 because `published_epg_authority.mode=d1` and `cutover=open` ([ADR 0079](../adr/0079-d1-authoritative-published-epg.md), Accepted). R2 holds compatibility mirrors. The first post-cutover D1 publication succeeded on 3 November on a daily-task-created run completed by one explicitly owner-authorized manual `epg_sync_step`; unattended scheduled-task completion and direct R2/D1 parity remain unverified. Discovery continuation writes stay R2. The changed label was [visually approved by the owner on 2026-11-01](https://trello.com/c/pQL8NUTC#comment-6ae7b1d91923578e9aaaca44). The workflow `opt` in the daily and hourly sequence is accepted but inactive ([ADR 0083](../adr/0083-inert-discovery-workflow.md), Accepted). Its diagrams were separately visually approved by the owner on 2 November 2026; neither that decision nor this documentation deploy activates it. While `DISCOVERY_EXECUTOR` is absent, the sequence stays the external tasks. An interrupted discovery series is not one of the safe paused continuations in the hourly alt below: the hourly task does not call `epg_sync_step` for `reason: interrupted`. After a gated confirm has stored an ordinary checkpoint for the same published generation ([ADR 0088](../adr/0088-guarded-interrupted-discovery-recovery.md), Proposed), the next hourly invocation follows the existing stage A rule. The diagram is unchanged.
 
@@ -8,54 +8,37 @@ The sequences below are **independent scheduled or externally driven flows**, no
 
 ```mermaid
 sequenceDiagram
-    actor Daily as Daily EPG Task (17:00)
-    actor Hourly as Hourly Task (hourly)
-    participant Access as Cloudflare Access
+    actor Daily as Daily EPG Task
+    actor Hourly as Hourly Task
     participant MCP as Worker MCP
-    participant EPG as EPG and discovery
-    participant R2 as R2 discovery, sync and mirrors
-    participant D1 as D1 published EPG
-    Note over Daily,D1: External ChatGPT tasks, never Worker Cron
-    Daily->>Access: Authorize daily EPG workflow
-    Access->>MCP: JWT verified
-    Daily->>MCP: Preflight EPG status
-    Daily->>MCP: epg_sync_start once
-    MCP->>EPG: Start owned EPG run
-    loop Metadata, publication, and allowed discovery steps
-        Daily->>MCP: epg_sync_step(runId)
-        MCP->>EPG: One step or one chunk
-        EPG->>D1: Fenced atomic published generation and watchlist pin
-        EPG->>R2: Sync checkpoint and compatibility mirrors
+    participant EPG as EPG pipeline
+    participant D1 as D1 authority
+    participant R2 as R2 storage
+    participant WF as Discovery Workflow
+    Daily->>MCP: epg_sync_start
+    loop Until EPG publication completes or pauses
+        Daily->>MCP: epg_sync_step
+        MCP->>EPG: Advance one bounded step
+        EPG->>D1: Read or publish fenced generation
+        EPG->>R2: Store checkpoint and mirrors
         MCP-->>Daily: stage and nextAction
     end
-    Note over Daily,EPG: wait / stop / conflict ends current series
-    Hourly->>Access: Authorize hourly workflow
-    Access->>MCP: JWT verified
-    Hourly->>MCP: epg_status and epg_pipeline_status
-    MCP-->>Hourly: Published runId, continuation and health
-    alt Safe paused continuation of published generation
-        Hourly->>MCP: epg_sync_step(published runId)
-        MCP->>EPG: One discovery chunk
-        EPG->>R2: Fenced writes and checkpoint
-        MCP-->>Hourly: nextAction / nextCatchUpAt
-    else Running and Worker health proves orphaned
-        Note over Hourly,MCP: Expired lease, same generation, valid budget, no wait
-        Hourly->>MCP: epg_sync_step(published runId)
-        MCP->>EPG: CAS settle or resume, then at most one chunk
-        EPG->>R2: Fenced continuation and chunk writes
-        MCP-->>Hourly: nextAction / nextCatchUpAt
-    else Live, unknown or generation conflict
-        Note over Hourly,EPG: Fail closed and do not start a new EPG run
-    end
-    opt Server explicitly returns continue, same generation and safe budget
-        loop While safe nextAction is continue
-            Hourly->>MCP: epg_sync_step(published runId)
-            MCP->>EPG: One discovery chunk
-            MCP-->>Hourly: continue / wait / stop
+    alt External Discovery executor
+        Hourly->>MCP: Read published continuation
+        opt Eligible and safe to resume
+            Hourly->>MCP: epg_sync_step
+            MCP->>EPG: At most one Discovery chunk per call
+            EPG->>D1: Fenced Discovery writes
+            MCP-->>Hourly: continue, wait or stop
         end
-    end
-    opt DISCOVERY_EXECUTOR is workflow
-        Note over EPG,R2: Absent flag keeps the external path above. Workflow mode stores intent, runs no chunk in the request, and answers delegated or wait rather than complete while work remains. The binding has no schedule.
+    else Discovery Workflow executor
+        Note over MCP,WF: Old task requests are delegated, not executed
+        EPG->>WF: Enqueue intent for published generation
+        opt Existing Worker cron detects missing wakeup
+            MCP->>WF: Reconcile intent and create at most one instance
+        end
+        WF->>EPG: One Discovery chunk per durable step
+        EPG->>D1: Fenced Discovery writes
     end
 ```
 
@@ -140,9 +123,13 @@ sequenceDiagram
             Worker->>D1: Write metadata sync clocks with checkpoint
         end
     end
+    opt DISCOVERY_EXECUTOR is workflow
+        Cron->>Worker: reconcileDiscoveryWorkflow
+        Note over Worker,D1: Reads only unless a missing intent or a dead instance needs one create. No chunk, no TMDB.
+    end
 ```
 
-The cron expression is `37 * * * *`. When `D1_ENRICHMENT_WRITE` is unset, the trigger performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. That schema is applied. At schema v6, the same clocks are written, and when the metadata cache marker is `d1` the metadata records come from D1. Schema v7 and v8 keep those clocks and cache reads; the projector writes neither the prediction nor the published EPG domain. A partial prediction domain, or a complete one without a valid marker, fails the run before a write. None of the prediction tables on a later contract does not: prediction stays on the objects. `PREDICTION_DB_REQUIRED=on` makes a missing `DB` binding, or a bound database without `schema_contract`, fail the same way. The variable is not a new cron and not a new operational flag. The projector still does not write R2 or the cache. A code deploy does not apply migration `0006` or `0007`. Production has applied `0006` and that marker is `d1` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md), [cutover](../evidence/d1-migration/air-313-metadata-cache-cutover-2026-11-01.md)). Production applied `0007` and activated the prediction marker on 3 November 2026 ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)).
+The cron expression is `37 * * * *`. The same firing also calls the ratings `ensure` and `reconcileDiscoveryWorkflow`; both return without a Workflow `create()` while their modes are external. When `D1_ENRICHMENT_WRITE` is unset, the projector performs no R2 reads or D1 writes. With `dry`, it reads the source and change keys but never writes. With `on`, the projector writes changed Films and Persons in existing fenced batches. At schema v5, `film_sync_state` uses that same writer: sync clocks for an already-changing Film share its batch, while a clock-only change uses its own fenced batch. That schema is applied. At schema v6, the same clocks are written, and when the metadata cache marker is `d1` the metadata records come from D1. Schema v7 and v8 keep those clocks and cache reads; the projector writes neither the prediction nor the published EPG domain. A partial prediction domain, or a complete one without a valid marker, fails the run before a write. None of the prediction tables on a later contract does not: prediction stays on the objects. `PREDICTION_DB_REQUIRED=on` makes a missing `DB` binding, or a bound database without `schema_contract`, fail the same way. The variable is not a new cron and not a new operational flag. The projector still does not write R2 or the cache. A code deploy does not apply migration `0006` or `0007`. Production has applied `0006` and that marker is `d1` ([ADR 0073](../adr/0073-metadata-cache-d1-authority.md), [cutover](../evidence/d1-migration/air-313-metadata-cache-cutover-2026-11-01.md)). Production applied `0007` and activated the prediction marker on 3 November 2026 ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)).
 
 The drift monitor is a read-only automation in the same registry. Its expected recurrence, after the owner-approved registry change recorded on 2026-10-31, is daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, enabled. It reads the live entries of the daily EPG task, the hourly task and the Ratings Task, then `epg_status` and read-only `ratings_sync_status` through the same Access-protected MCP, and only notifies the owner. It cannot edit a task or start a run, and it can itself stop or run late, so it is not a guaranteed alert. The Ratings Task's own run is drawn in the next diagram. The daily commit does not read Diary. `RATINGS_PIPELINE` is retired ([ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md), Accepted 2026-11-01): an incomplete migration fails closed, and a migrated one stays on the separate pipeline whatever the leftover binding holds. This page does not edit the monitor or any task.
 
@@ -215,7 +202,7 @@ The run record is one D1 document. It admits one running run and one active step
 
 ## Proposed Cloudflare executors and shared recovery
 
-**Accepted architecture, not live.** Both diagrams below show the future implementation of [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Accepted; both diagrams visually approved by the owner on 2026-11-04). Nothing in this section is deployed as drawn: today EPG, Discovery and Ratings are driven by the external tasks above, the Discovery Workflow is inert, and the cron runs only the enrichment projector. Each domain moves to its executor only through its own owner-approved switch; the field-level contract is the [orchestration reliability reference](../reference/orchestration-reliability.md).
+**Accepted architecture, not live.** Both diagrams below show the future implementation of [ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md) (Accepted; both diagrams visually approved by the owner on 2026-11-04). Nothing in this section is deployed as drawn: today EPG, Discovery and Ratings are driven by the external tasks above, the Discovery Workflow is inert, and the cron runs the enrichment projector plus inert ratings `ensure` and Discovery `reconcile`. Each domain moves to its executor only through its own owner-approved switch; the field-level contract is the [orchestration reliability reference](../reference/orchestration-reliability.md).
 
 ```mermaid
 flowchart TD

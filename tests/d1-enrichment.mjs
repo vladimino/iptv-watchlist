@@ -16,7 +16,7 @@ import {seedProjection} from '../scripts/d1-projection-seed.mjs';
 
 const source=fs.readFileSync('src/d1-enrichment.js','utf8');
 assert.doesNotMatch(source,/\bBUCKET\.(put|delete)\b/,'the projector never writes R2');
-assert.match(fs.readFileSync('src/worker.js','utf8'),/async scheduled\(controller,env,execution\)\{execution\.waitUntil\(Promise\.allSettled\(\[runD1EnrichmentProjection\(/);
+assert.match(fs.readFileSync('src/worker.js','utf8'),/async scheduled\(controller,env,execution\)\{execution\.waitUntil\(Promise\.allSettled\(\[typeof runD1EnrichmentProjection==='function'\?runD1EnrichmentProjection\(/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\([^)]*\)[^\n]*metadataSync|metadataSync[^\n]*runD1EnrichmentProjection/,'no sync step runs the projector');
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["37 \* \* \* \*"\]/);
 
