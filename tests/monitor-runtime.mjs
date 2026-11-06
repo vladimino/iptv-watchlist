@@ -148,8 +148,24 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  // More than twenty pending notifications are all kept and delivered after the provider recovers.
  const many=setup();healthy(many.bucket);await many.M.run(many.env,{now:T0});
  const seeded=many.bucket.value(KEY);seeded.outbox=Array.from({length:30},(_,index)=>({id:'seed_'+index+'|recovery|x',kind:'recovery',severity:'healthy',stream:'epg',key:'seed_'+index,message:'Recovered',queuedAt:at(T0-30*H)}));many.bucket.set(KEY,seeded);
- many.setWebhook(false);await many.M.run(many.env,{now:T0+H});assert.equal(many.bucket.value(KEY).outbox.length,30,'nothing is evicted during the outage');
- many.setWebhook(true);await many.M.run(many.env,{now:T0+2*H});assert.deepEqual(many.bucket.value(KEY).outbox,[]);assert.equal(new Set(posts(many.calls).filter(item=>item.body.kind==='recovery'&&item.body.key.startsWith('seed_')).map(item=>item.body.id)).size,30,'all thirty ids were delivered');
+ many.setWebhook(false);const before=posts(many.calls).length;const down=plain(await many.M.run(many.env,{now:T0+H}));
+ assert.equal(many.bucket.value(KEY).outbox.length,30,'nothing is evicted during the outage');
+ assert.equal(posts(many.calls).length-before,2,'an outage costs two attempts per tick, not thirty timeouts');assert.equal(down.ran,true);
+ many.setWebhook(true);let hour=2;
+ for(;many.bucket.value(KEY).outbox.length&&hour<20;hour++)await many.M.run(many.env,{now:T0+hour*H});
+ assert.deepEqual(many.bucket.value(KEY).outbox,[]);assert.equal(hour,2+6,'drained at five per tick over six ticks');
+ assert.equal(new Set(posts(many.calls).filter(item=>item.body.kind==='recovery'&&item.body.key.startsWith('seed_')).map(item=>item.body.id)).size,30,'all thirty ids were delivered');
+ // A failing head does not starve the rest: failed messages move to the tail.
+ const rot=setup();healthy(rot.bucket);await rot.M.run(rot.env,{now:T0});
+ const doc2=rot.bucket.value(KEY);doc2.outbox=Array.from({length:8},(_,index)=>({id:'r'+index+'|recovery|x',kind:'recovery',severity:'healthy',stream:'epg',key:'r'+index,message:'Recovered',queuedAt:at(T0)}));rot.bucket.set(KEY,doc2);
+ rot.setWebhook(false);await rot.M.run(rot.env,{now:T0+H});assert.deepEqual(rot.bucket.value(KEY).outbox.slice(0,6).map(item=>item.id.slice(0,2)),['r2','r3','r4','r5','r6','r7'],'the two failed heads moved behind the untried messages');
+ // A recovery that could not be delivered is superseded when the issue is active again; the obsolete "Recovered" is never sent.
+ const sup=stale();await sup.M.run(sup.env,{now:T0});await sup.M.run(sup.env,{now:T0+H});assert.equal(sup.bucket.value(KEY).alerts.issues.epg_stale.sendCount,1);
+ sup.setWebhook(false);healthy(sup.bucket,{publishedAt:at(T0+2*H),runId:'run-b'});await sup.M.run(sup.env,{now:T0+3*H});
+ assert.deepEqual(sup.bucket.value(KEY).outbox.map(item=>item.kind),['recovery'],'the recovery is queued while the webhook is down');
+ sup.bucket.set('sync.json',{runId:'run-b',stage:'complete',updatedAt:at(T0-40*H),failures:[]});sup.bucket.set('epg/published-generation.json',{programmeRunId:'run-b',phase:'published'});
+ await sup.M.run(sup.env,{now:T0+4*H});
+ assert.deepEqual(sup.bucket.value(KEY).outbox.map(item=>item.kind),[],'the pending recovery is superseded when the issue is active again');
  // The issue clears before its first alert was ever delivered: the alert is cancelled and counted, and no recovery is sent for it.
  const r=stale();await r.M.run(r.env,{now:T0});r.setWebhook(false);await r.M.run(r.env,{now:T0+H});assert.equal(r.bucket.value(KEY).outbox.length,1);
  healthy(r.bucket,{publishedAt:at(T0+2*H),runId:'run-b'});await r.M.run(r.env,{now:T0+3*H});

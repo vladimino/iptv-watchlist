@@ -5,7 +5,7 @@
 // MONITOR: off (default) does nothing; dry evaluates and logs without writing or sending; on also keeps the state document
 // (`monitor/state.json`) and sends alerts when MONITOR_WEBHOOK_URL is set. Concatenated into the Worker: one global, no exports.
 const Monitor=(()=>{
- const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000;
+ const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000,SEND_BUDGET=5,SEND_FAIL_STOP=2;
  const policy=()=>MonitorPolicy;
  const iso=ms=>new Date(ms).toISOString();
  const mode=env=>env?.MONITOR==='on'?'on':env?.MONITOR==='dry'?'dry':'off';
@@ -111,7 +111,13 @@ const Monitor=(()=>{
    const alerts=plan.state,prior=doc?.alerts?.issues||{},day=iso(now).slice(0,10);
    const outbox=(doc?.outbox||[]).map(item=>({...item}));
    let cancelled=doc?.cancelledUndelivered||0;
-   for(let index=outbox.length-1;index>=0;index--){if(outbox[index].kind!=='recovery'&&!alerts.issues[outbox[index].key]){outbox.splice(index,1);cancelled++;}}
+   // Reconcile the queue with the current issues: a pending alert of a cleared issue is cancelled (counted), and a pending recovery of an issue
+   // that is active again is superseded (the new alert replaces it), so an obsolete "Recovered" is never sent.
+   for(let index=outbox.length-1;index>=0;index--){
+    const item=outbox[index];
+    if(item.kind==='recovery'){if(alerts.issues[item.key])outbox.splice(index,1);}
+    else if(!alerts.issues[item.key]){outbox.splice(index,1);cancelled++;}
+   }
    for(const message of plan.sends){
     if(message.kind==='recovery'){outbox.push({...message,id:message.key+'|recovery|'+iso(now),queuedAt:iso(now)});continue;}
     const entry=alerts.issues[message.key],before=prior[message.key]||null;
@@ -129,17 +135,27 @@ const Monitor=(()=>{
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null};
    const claimed=await writeState(env,object,next);
    if(!claimed){log({mode:'on',overall:evaluation.overall,claimed:false});return {ran:true,mode:'on',overall:evaluation.overall,sent:0,failed:0,saved:false};}
-   const delivered=new Set();
-   for(const message of queued){if(await sendMessage(env,message,evaluation.overall,now))delivered.add(message.id);}
+   // Delivery is budgeted per tick: at most SEND_BUDGET attempts, and the tick stops after SEND_FAIL_STOP consecutive failures (the channel is
+   // evidently down), so a long outage costs a bounded number of HTTP timeouts and never holds the cron or the other monitor work hostage.
+   // The outbox is the durable queue: it is FIFO, an attempted-but-failed message moves to the tail so one bad message cannot starve the rest,
+   // and whatever is not attempted waits for the next tick.
+   const delivered=new Set(),failedIds=new Set();
+   let attempts=0,streak=0;
+   for(const message of queued){
+    if(attempts>=SEND_BUDGET||streak>=SEND_FAIL_STOP)break;
+    attempts++;
+    if(await sendMessage(env,message,evaluation.overall,now)){delivered.add(message.id);streak=0;}else{failedIds.add(message.id);streak++;}
+   }
    let saved=true;
-   if(delivered.size){
+   if(attempts){
     const settled=JSON.parse(JSON.stringify(next.alerts));
     for(const item of queued){if(!delivered.has(item.id)||!item.after)continue;const entry=settled.issues[item.key];if(!entry)continue;entry.lastSentAt=item.after.lastSentAt;entry.sendCount=Math.max(entry.sendCount,item.after.sendCount);entry.sendDay=item.after.sendDay;entry.sendsToday=item.after.sendsToday;}
-    saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:queued.filter(item=>!delivered.has(item.id))});
+    const remaining=queued.filter(item=>!delivered.has(item.id)),reordered=[...remaining.filter(item=>!failedIds.has(item.id)),...remaining.filter(item=>failedIds.has(item.id))];
+    saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:reordered});
    }
    await heartbeat(env);
-   log({mode:'on',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),sent:delivered.size,failed:queued.length-delivered.size,saved});
-   return {ran:true,mode:'on',overall:evaluation.overall,sent:delivered.size,failed:queued.length-delivered.size,saved};
+   log({mode:'on',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),sent:delivered.size,failed:failedIds.size,pending:queued.length-delivered.size,attempts,saved});
+   return {ran:true,mode:'on',overall:evaluation.overall,sent:delivered.size,failed:failedIds.size,pending:queued.length-delivered.size,saved};
   }catch(error){log({mode:current,error:String(error?.message||'error').slice(0,120)});return {ran:false,reason:'error'};}
  }
 
