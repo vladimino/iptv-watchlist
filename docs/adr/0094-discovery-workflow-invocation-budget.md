@@ -16,10 +16,10 @@ The existing recovery works: the hourly cron found the errored instance, stored 
 
 ## Decision
 
-1. **The wall is treated as a per-invocation budget that D1 statements consume.** The evidence fits a count that is reached after a fixed amount of work, not time, rows or a transient outage. The exact platform limit is not established and this record does not name one.
-2. **The instance counts the statements it issues.** `runDiscoveryWorkflow` wraps the `DB` binding in a counting proxy. It counts statements prepared and batches issued, passes native statements to a batch untouched, and changes nothing else.
-3. **At 6,000 statements the instance hands over.** The plan returns `rollover` with reason `invocation_budget` when the count reaches 6,000 and work remains, in addition to the existing 20 chunk limit. The successor is a new instance, hence a new invocation. This is about half of the level at which both instances failed. A rollover keeps the ADR 0083 fence: the owner check, the executor record and the successor create are unchanged.
-4. **A failing step says why.** The owner, plan and chunk steps log one bounded, secret-free line (`discovery_workflow_step_failed`: step, error code and class, a 200 character message and cause, the statement and batch counts) and rethrow the same error. The progress record carries `invocation.statements` and `invocation.batches`.
+1. **The wall is treated as a count that D1 statements consume, bounded for the whole instance.** The evidence fits a count reached after a fixed amount of work, not time, rows or a transient outage. It does **not** tell whether the platform counts one Worker invocation or the whole instance: neither failing instance slept before the failure, so its single invocation and its lifetime coincide (12,287 and 12,192 statements). The decision therefore bounds the larger quantity, the instance lifetime, which also bounds every invocation. The exact platform limit is not established and this record does not name one.
+2. **The instance counts the statements it issues, across replays.** `runDiscoveryWorkflow` wraps the `DB` binding in a counting proxy that counts statements prepared and batches issued and passes native statements to a batch untouched. The counter lives in memory, and a replay after a sleep starts a new invocation with a new counter. So every durable step also returns what it spent, and the loop re-adds those cached outputs: the total is rebuilt identically on every replay. A step output written before this change carries no count and adds nothing. A failing step's own statements are not counted (they are few).
+3. **At 6,000 statements the instance hands over.** The plan returns `rollover` with reason `invocation_budget` when the instance total reaches 6,000 and work remains, in addition to the existing 20 chunk limit. The successor is a new instance, hence a new invocation. This is about half of the level at which both instances failed. A rollover keeps the ADR 0083 fence: the owner check, the executor record and the successor create are unchanged.
+4. **A failing step says why, without its text.** Every durable step, the whole chunk step included (its owner check and the first read of the continuation as well as the chunk), logs one line `discovery_workflow_step_failed` and rethrows the same error. The line holds the step name, the error `code` and `name` when they are on fixed lists (anything else is `other`), a `class` and a `causeClass` from a fixed list (`network_connection_lost`, `timeout`, `limit_exceeded`, `overloaded`, `d1_reset`, `sql_error`, `memory`, `d1_error`, `code`, `unclassified`) and the statement, batch and instance counts. The text of the exception is never logged, because a D1, R2 or fetch message can carry SQL, identifiers, query strings or credentials of any length. A retry of a step that threw before the chunk started is safe; a chunk that may have committed is still reported by its checkpoint and not retried as a fresh write. The progress record carries `invocation` and `instance` counts.
 5. **Nothing else changes.** `discovery_unavailable` still stops the owner gate, no retry budget grows, no error is swallowed, and the owner compare-and-swap, the published-generation fence, the D1 lease and the 20 chunk rollover stay.
 
 ## Alternatives considered
@@ -31,7 +31,7 @@ The existing recovery works: the hourly cron found the errored instance, stored 
 
 ## Consequences
 
-An instance now ends after about ten chunks and a successor starts at once, so the series continues without the hourly gap. Every handover costs one create. The 6,000 figure is an estimate with a margin, not a measured limit. If the platform limit is smaller than the observed total the instance can still fail; the logged cause then names it.
+An instance now ends after about nine to ten chunks of work, whether or not it slept, and a successor starts at once, so the series continues without the hourly gap. Every handover costs one create. The 6,000 figure is an estimate with a margin, not a measured limit. If the platform limit is smaller than the observed total the instance can still fail; the logged cause then names it.
 
 ## Recovery and migration boundary
 
@@ -40,5 +40,5 @@ Code only. No migration, flag, schedule, cron or Task changes. A rollback of the
 ## Evidence
 
 - **Dated measurement and incident reading:** [AIR-360 evidence](../evidence/discovery/discovery-workflow-invocation-budget-air-360-2026-11-06.md)
-- **Tests:** `tests/discovery-workflow.mjs` sections 11 and 12 (the instance hands over at the budget, the plan, the meter, the logged cause)
+- **Tests:** `tests/discovery-workflow.mjs` sections 11 to 14 (the instance hands over at the budget, the plan, the meter, the logged classes with adversarial text, a failing first read of the chunk step, a sleep and replay that must not reset the count, and outputs from before the count)
 - **Uncertainty:** the platform limit and the exact failing call are not observed. A real Workflows runtime reproduction was not available (see the evidence note).

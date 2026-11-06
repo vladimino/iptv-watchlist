@@ -494,6 +494,7 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  bucket.put=originalPut;
  const progress=savedRecords.filter(record=>record.invocation).at(-1);
  assert.ok(progress.invocation.statements>=6000&&progress.invocation.statements<8000);assert.ok(progress.invocation.batches>=10);
+ assert.ok(progress.instance.statements>=6000&&progress.instance.statements<8000,'the instance total follows the step outputs');
  // The plan: a spent invocation rolls over; a fresh one does not; a stopped or waiting series is not rolled over.
  const same=(actual,expected)=>assert.equal(JSON.stringify(actual),JSON.stringify(expected));
  const plan=input=>call('workflowPlan')({mode:'workflow',published:GENERATION,pinned:GENERATION,record:{stage:'paused',reason:null,remainingChunks:5,programmeRunId:GENERATION,at:iso},lease:null,now:Date.now(),chunks:3,chunkLimit:20,last:null,uncertainWrites:0,...input});
@@ -517,25 +518,98 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  delete env.DB;
 }
 
-// 12. AIR-360. The reason a step fails is logged, bounded and free of secrets, and the failure is rethrown unchanged.
+// 12. AIR-360. A failing step logs classes from fixed lists, never the text of the exception, and the failure is
+// rethrown unchanged.
 {
  seed({count:12});
  Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
  elect();
- const logged=[];const originalError=context.console.error;context.console.error=message=>logged.push(String(message));
- const cause=Object.assign(new Error('D1_ERROR: Network connection lost Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCDEF '+'x'.repeat(400)),{name:'D1Error'});
+ const secrets=['SHORTKEY','abc123','hunter2','members','34600111222','secret_col','x.example','Bearer','sk-live','AKIAABCDEFGHIJKLMNOP'];
+ const hostile=new Error('D1_ERROR: Network connection lost at https://x.example/?key=SHORTKEY&token=abc123 password=hunter2 SELECT secret_col FROM members WHERE phone=\'34600111222\' Bearer sk-live AKIAABCDEFGHIJKLMNOP\n'+'y'.repeat(500));
+ hostile.name='D1Error with a secret in the name sk-live';
+ const cause=Object.assign(new Error('too many subrequests secret_col'),{name:'TypeError'});
+ const failing=(error)=>({...context.DiscoveryAuthority,readWorkflow:async()=>{throw error;}});
  const original=context.DiscoveryAuthority;
- armDiscoveryAuthority(GENERATION);
- context.DiscoveryAuthority={...context.DiscoveryAuthority,readWorkflow:async()=>{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';error.cause=cause;throw error;}};
- await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{do:async(name,fn)=>fn(),sleepUntil:async()=>{}}),error=>error.message==='discovery_unavailable'&&error.code==='discovery_unavailable');
- context.console.error=originalError;
+ const capture=async error=>{
+  const logged=[];const originalError=context.console.error;context.console.error=message=>logged.push(String(message));
+  armDiscoveryAuthority(GENERATION);
+  context.DiscoveryAuthority=failing(error);
+  try{await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{do:async(name,fn)=>fn(),sleepUntil:async()=>{}}),thrown=>thrown===error);}
+  finally{context.console.error=originalError;context.DiscoveryAuthority=original;}
+  return logged;
+ };
+ // A wrapper with a code and a cause whose text is hostile.
+ const wrapper=Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable',cause:hostile});
+ let logged=await capture(wrapper);
  assert.equal(logged.length,1);
- const entry=JSON.parse(logged[0]);
+ let entry=JSON.parse(logged[0]);
  assert.equal(entry.event,'discovery_workflow_step_failed');assert.equal(entry.step,'owner');assert.equal(entry.code,'discovery_unavailable');
- assert.equal(entry.causeName,'D1Error');assert.ok(entry.causeMessage.length<=200);
- assert.ok(!/abcdefghijklmnopqrstuvwxyz0123456789ABCDEF/.test(logged[0]),'a long token is redacted');
- assert.ok(!/Bearer\s+abc/.test(logged[0]));
- context.DiscoveryAuthority=original;
+ assert.equal(entry.name,'Error');assert.equal(entry.class,'code');assert.equal(entry.causeName,'other');assert.equal(entry.causeClass,'network_connection_lost');
+ assert.equal(entry.statements,0);assert.equal(entry.instanceStatements,0);
+ for(const secret of secrets)assert.ok(!logged[0].includes(secret),'the log must not contain '+secret);
+ assert.ok(logged[0].length<400);
+ // A cause class from a fixed list, and nothing from an unknown message.
+ const limited=Object.assign(new Error('x'),{cause});
+ entry=JSON.parse((await capture(limited))[0]);assert.equal(entry.causeClass,'limit_exceeded');assert.equal(entry.causeName,'TypeError');assert.equal(entry.code,null);
+ entry=JSON.parse((await capture(new RangeError('password=hunter2 unknown text')))[0]);assert.equal(entry.class,'unclassified');assert.equal(entry.name,'RangeError');
+ // A code outside the list, a string and a hostile object that throws on every read.
+ const odd=Object.assign(new Error('boom'),{code:'SECRET_CODE_hunter2'});
+ logged=await capture(odd);entry=JSON.parse(logged[0]);assert.equal(entry.code,'other');assert.ok(!logged[0].includes('hunter2'));
+ logged=await capture('raw secret=hunter2');entry=JSON.parse(logged[0]);assert.equal(entry.class,'unclassified');assert.equal(entry.name,'none');assert.ok(!logged[0].includes('hunter2'));
+ const throwing={get message(){throw new Error('hostile getter');},get name(){throw new Error('hostile getter');},get code(){throw new Error('hostile getter');},get cause(){throw new Error('hostile getter');}};
+ logged=await capture(throwing);assert.ok(logged.length<=1);
+ clearWorkflowAdmission();
+}
+
+// 13. AIR-360. The whole chunk step is covered, not only the chunk call: a failing initial read of the continuation
+// is logged under `chunk`, is rethrown (nothing was committed, so a retry is safe) and starts no chunk.
+{
+ seed({count:12});
+ Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
+ elect();
+ context.calls=0;
+ vm.runInContext(`advanceDiscovery=async()=>{calls++;throw new Error("a chunk must not start");}`,context);
+ vm.runInContext(`globalThis.realReadContinuation=readContinuation;globalThis.readCalls=0;readContinuation=async(...args)=>{readCalls++;if(readCalls===2){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';error.cause=new Error('Network connection lost');throw error;}return realReadContinuation(...args);}`,context);
+ const logged=[];const originalError=context.console.error;context.console.error=message=>logged.push(String(message));
+ try{await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{do:async(name,fn)=>fn(),sleepUntil:async()=>{}}),error=>error.code==='discovery_unavailable');}
+ finally{context.console.error=originalError;vm.runInContext('readContinuation=realReadContinuation',context);}
+ assert.equal(context.calls,0);assert.equal(logged.length,1);
+ const entry=JSON.parse(logged[0]);assert.equal(entry.step,'chunk');assert.equal(entry.code,'discovery_unavailable');assert.equal(entry.causeClass,'network_connection_lost');
+}
+
+// 14. AIR-360. After a sleep the instance resumes in a new invocation with a new meter. Each step returns what it
+// spent and the loop re-adds the cached outputs, so the budget bounds the whole instance, not one invocation.
+{
+ class NativeStatement{}
+ const fakeDb={prepare(){return new NativeStatement();},async batch(){return [];},async exec(){return {};}};
+ seed({count:60});
+ Object.assign(env,{DISCOVERY_EXECUTOR:'workflow',DB:fakeDb});
+ elect();
+ context.calls=0;
+ vm.runInContext(`advanceDiscovery=async env=>{calls++;for(let i=0;i<650;i++)env.DB.prepare('SELECT 1');await env.DB.batch([env.DB.prepare('SELECT 2'),env.DB.prepare('SELECT 3')]);const stored=await readContinuation(env);const at=new Date().toISOString();const programmeRunId=${JSON.stringify(GENERATION)};const record={stage:'paused',reason:null,at,hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId};if(calls===5)return {stage:'paused',checked:0,remaining:500,discovery:discoveryContract(stored.record),diagnostic:{saved:{owned:false,write:'none'}}};if(!await replaceContinuation(env,record,stored.etag))throw new Error('stub lost the continuation');await saveJSON(env,'epg/discovery-status.json',{programmeRunId,remaining:500,finishedAt:at});return {stage:'paused',checked:1,remaining:500,discovery:discoveryContract(record),diagnostic:{saved:{owned:true,write:'saved'}}};}`,context);
+ creates.length=0;
+ binding.create=async request=>{creates.push(request);return {id:request.id};};
+ const cache=new Map();let hibernations=0;
+ const memoStep={
+  async do(name,fn){if(cache.has(name))return structuredClone(cache.get(name));const value=await fn();cache.set(name,structuredClone(value));return value;},
+  async sleepUntil(name){if(!cache.has('slept:'+name)){cache.set('slept:'+name,true);hibernations++;throw new Error('hibernate');}}
+ };
+ // The first invocation ends in the sleep after the fifth, stalled chunk. The next one replays the cached steps.
+ await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},memoStep),/hibernate/);
+ assert.equal(context.calls,5);assert.equal(hibernations,1);
+ const callsBeforeResume=context.calls;
+ const resumed=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},memoStep);
+ // The replay issues no statement for the cached steps and does not run those chunks again.
+ assert.equal(resumed.reason,'rollover');assert.equal(creates.length,1);
+ // Without the cached counts the new meter would start at zero and allow about fifteen chunks in all.
+ assert.ok(context.calls>=9&&context.calls<=10,'the instance stopped after '+context.calls+' chunks in all');
+ assert.ok(context.calls>callsBeforeResume);
+ // Outputs written before the count existed carry none: they add nothing and do not break the loop.
+ seed({count:60});elect();creates.length=0;context.calls=0;
+ vm.runInContext(`advanceDiscovery=async env=>{calls++;const stored=await readContinuation(env);const at=new Date().toISOString();const programmeRunId=${JSON.stringify(GENERATION)};const record={stage:'paused',reason:null,at,hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId};if(!await replaceContinuation(env,record,stored.etag))throw new Error('stub lost the continuation');await saveJSON(env,'epg/discovery-status.json',{programmeRunId,remaining:500,finishedAt:at});return {stage:'paused',checked:1,remaining:500,discovery:discoveryContract(record),diagnostic:{saved:{owned:true,write:'saved'}}};}`,context);
+ const legacy=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0,chunkLimit:1},{do:async(name,fn)=>name.startsWith('owner')?{owned:true}:name.startsWith('plan')?{action:context.calls>=1?'rollover':'continue',reason:'instance_limit'}:(await fn()),sleepUntil:async()=>{}});
+ assert.equal(legacy.reason,'rollover');
+ delete env.DB;
  clearWorkflowAdmission();
 }
 

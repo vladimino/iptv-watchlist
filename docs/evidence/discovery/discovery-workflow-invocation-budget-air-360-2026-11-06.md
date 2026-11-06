@@ -23,6 +23,7 @@
 
 - The two failures reproduce at the same step pattern and at almost the same D1 statement total whatever the duration and rows read. That fits a count reached after a fixed amount of work. It does not fit a time limit, a rows-read quota or a random outage.
 - A failure that returns in about 10 ms, repeats on every retry and reaches no D1 query points at a client-side refusal inside the invocation. `discovery_unavailable` is the generic wrapper of `readAuthority` and `readWorkflow` for any D1 exception, so the original error text was lost.
+- Neither instance slept before the failure (the one `stall-sleep` follows the failing chunk), so each ran in one Worker invocation and its instance lifetime equals that invocation: the data cannot tell a per-invocation count from a per-instance count. The change bounds the instance total, which bounds both.
 - Not established: which platform limit it is, and why the first failing chunk is the twentieth in both cases (the chunk call count of the 20 chunk series limit is a coincidence that was not ruled out).
 
 ## What was and was not reproduced
@@ -31,4 +32,4 @@ The Node tests run the instance with stubbed steps. A local Workflows runtime wa
 
 ## Result of the change
 
-`tests/discovery-workflow.mjs` shows an instance of 650-statement chunks handing over after ten chunks (6,508 statements) with a successor create, the plan under the budget, the counting proxy, and a logged, redacted cause. Production acceptance is separate in AIR-324.
+`tests/discovery-workflow.mjs` shows an instance of 650-statement chunks handing over after ten chunks (6,520 statements) with a successor create, the plan under the budget, the counting proxy, a log made of fixed classes that holds none of an adversarial message, a failing first read of the chunk step that is logged and rethrown, and a sleep and replay in which the rebuilt count stops the instance at ten chunks in all (fifteen without it). Production acceptance is separate in AIR-324.
