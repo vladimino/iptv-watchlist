@@ -1,9 +1,9 @@
 # ADR 0094: A Discovery Workflow instance hands over before its D1 statement total nears the failure level
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-06  
 **Recorded at:** 2026-11-06  
-**Approval source:** not yet decided; the owner decides `Accepted` or `Declined` before this record merges ([workflow](../process/agent-workflow.md)). The owner chose to fix, not roll back, on 2026-11-06.  
+**Approval source:** explicit owner approval in the AIR-360 conversation on 2026-11-06, after technical re-review of PR #388 at `4f0d098`. This approves ADR 0094 as an architectural decision, not an independent production operation.  
 **Related work:** [AIR-360](https://trello.com/c/MjT1458Q), [AIR-324](https://trello.com/c/kNtaEbm8), [ADR 0083](0083-inert-discovery-workflow.md), [ADR 0093](0093-discovery-workflow-cron-reconcile.md), [dated evidence](../evidence/discovery/discovery-workflow-invocation-budget-air-360-2026-11-06.md)  
 **Supersedes:** None. It adds a second handover trigger beside the 20 chunk instance limit of [ADR 0083](0083-inert-discovery-workflow.md) decision 5.  
 **Superseded by:** None
