@@ -57,3 +57,25 @@ A historical hit was kept when its year was within one of the observation, and i
 If no historical hit matched, up to three year-compatible rows were ordered by year distance, then runtime distance, then shared title tokens. Each was read for translations and alternative titles while the chunk cap remained. A matching title was recorded as `tmdb_alias` and was not given to the scorer. The id was a proposal. `Мортал Комбат` stayed `no_confident_match` even when it was not the first search row. A longer title such as `Чудо-женщина: 1984` was a proposal for `Чудо-женщина`, not an acceptance.
 
 An exact title at the neighbouring year, such as `Ирония судьбы` in 1976, was a scorer candidate of that experiment: when the detail card repeated the id, the year and the runtime, that writer verified it and created the catalog row. The current writer does not search the neighbouring year, so that path does not verify the observation or create the row.
+
+## Reads while a ledger seal is loading
+
+The D1 ledger handoff (publishing a new generation's active ledger into `discovery_observation`) is a multi-batch write. While its `discovery_transfer` is `loading`, discovery reads fail closed with `discovery_incomplete`, with three exceptions that the handoff never writes ([ADR 0091](../../adr/0091-selective-reads-during-a-loading-ledger-seal.md)):
+
+| Key | While a ledger seal is loading |
+| --- | --- |
+| `epg/discovered-films.json` and the generation copy of the authoritative run | readable; the answer carries `transfer: 'loading'`; a generation copy of another run is empty |
+| `epg/discovery-status.json`, `epg/resolver-continuation.json` | readable with the same marker |
+| the active and generation ledger, observation pages and walks, the observation index, `epg/discovery-resolution.json`, the score preview, the workflow record, every write | `discovery_incomplete` |
+
+The exceptions apply only when the loading transfer is a ledger seal: previous observations are `retiring` (or the transfer names another programme) and no admission is `pending`. A catalog, decision or segment load that stopped half way keeps every key closed. A read fails with `discovery_fence` when the authority, the programme or the loading state changes while it runs. A consumer that ignores the marker still receives the consistent catalog. There is no R2 fallback.
+
+## Resumable ledger seal ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md), Proposed)
+
+With D1-authoritative discovery and migration `0012` applied, the EPG commit stages the generation instead of sealing inline. The run moves to stage `seal`; each `epg_sync_step` does one bounded part of the job (about 30 s, at least one atomic unit):
+
+1. `ledger`: reads the immutable generation ledger from R2 by byte offset and writes observation rows with the cursor in `discovery_seal` in the **same D1 batch** (compare-and-set on the previous cursor, lease and generation fence). The first step of a job flips the previous active ledger to `retiring` once; the same job never flips again. The retiring rows are then archived in batches of at most 500, and the last batch commits the transfer and the authority programme.
+2. `catalog`: updates the catalog by its difference to D1 in bounded parts; the phase is done when a step finds nothing to write. Departed films are superseded.
+3. `publish`: moves the published pointer, writes the mirrors, opens the discovery series, finishes the run.
+
+The previous generation stays published until `publish`. A discovery chunk during the window between the ledger commit and `publish` sees a programme mismatch and answers busy. Without the table the previous inline seal applies. Reads during the `loading` window follow the section above.
