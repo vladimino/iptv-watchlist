@@ -131,7 +131,7 @@ const LetterboxdRatings=(()=>{
    if(!item?.event?.id)continue;
    if(Number(item.nextAt||0)>now){keep.push(item);continue;}
    if(await deliverEvent(env,item.event)){written++;changed=true;continue;}
-   keep.push({event:item.event,attempts:(item.attempts||0)+1,nextAt:now+retryDelay((item.attempts||0)+1)});changed=true;
+   keep.push({event:item.event,attempts:(item.attempts||0)+1,nextAt:now+retryDelay(item.attempts||0)});changed=true;
   }
   let marked=null;
   if(!run.ratingsEventAt){const event=ratingsEventOf(run);if(event&&await deliverEvent(env,event)){written++;marked=iso(now);changed=true;}}
