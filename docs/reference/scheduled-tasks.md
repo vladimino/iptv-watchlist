@@ -78,7 +78,7 @@ When auditing, compare the live daily and hourly tasks with their expected enabl
 - **Notifies the owner only on an anomaly (desired contract):** a disabled daily or hourly task, an *enabled* legacy Ratings Task, missing or stalled Cloudflare Ratings progress, a failed latest active producer run, material drift from this reference, unavailable live evidence, or no EPG publication after the run window. A ratings failure on a run whose `epg_status.stage` is `complete` is not a missing or failed EPG. Normal readings produce no notification.
 - **Limits:** the monitor runs on the same automation platform as the tasks it watches and can itself be late, fail or be disabled, so the absence of a notification does not prove health. The registry can show `next_run_time: null` for an enabled recurring task; that alone is not evidence of a missed run. Triage: [drift monitor runbook](../runbooks/scheduled-task-drift.md).
 
-**Live drift-monitor caveat:** its existing registry prompt still assumes that the Ratings Task should be enabled. This reference correction does not edit that prompt; until a separately approved prompt change, a disabled-Ratings warning from the monitor is expected drift, not a failure of Cloudflare Ratings. Do not suppress unrelated alerts.
+**Drift-monitor registry:** the owner separately approved and activated the Cloudflare-aware prompt on 2026-11-06. It expects the legacy Ratings Task to be disabled and verifies the Cloudflare Workflow's real daily freshness, health and durable progress. A missed nominal tick within the normal delay/grace is not by itself a failure. The live registry remains authoritative; [dated readback](../evidence/orchestration/ratings-task-disabled-2026-11-06.md).
 
 ### Ratings Task
 
