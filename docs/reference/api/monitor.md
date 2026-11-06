@@ -14,6 +14,8 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 | `overall` | The worst stream state: `healthy`, `waiting`, `delayed`, `degraded` or `needs_owner` |
 | `streams[]` | `epg`, `discovery`, `ratings`, `predictions`, each with `state`, a few non-private `facts` and its issue keys |
 | `openIssues[]` | Alertable issues with `key`, `severity`, `firstSeenAt`, `sendCount` |
+| `outbox`, `outboxOldestAt` | Number of undelivered notifications and the queue time of the oldest; a growing value means the channel is failing |
+| `cancelledUndelivered` | Alerts cancelled because their issue cleared before they were ever delivered |
 | `alerting`, `deadman` | Whether a webhook and a heartbeat URL are configured (never the URLs) |
 | `sideEffects` | Always `none` |
 

@@ -5,7 +5,7 @@
 // MONITOR: off (default) does nothing; dry evaluates and logs without writing or sending; on also keeps the state document
 // (`monitor/state.json`) and sends alerts when MONITOR_WEBHOOK_URL is set. Concatenated into the Worker: one global, no exports.
 const Monitor=(()=>{
- const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000,OUTBOX_TTL_MS=24*3600000,OUTBOX_MAX=20;
+ const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000;
  const policy=()=>MonitorPolicy;
  const iso=ms=>new Date(ms).toISOString();
  const mode=env=>env?.MONITOR==='on'?'on':env?.MONITOR==='dry'?'dry':'off';
@@ -104,18 +104,39 @@ const Monitor=(()=>{
    // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both
    // send. A message that is not delivered stays in the outbox and is retried with the same id. Delivery is at-least-once: a crash after
    // the claim, or a failed commit of the delivered mark, can repeat a message, and the stable `id` lets the receiver drop the repeat.
-   const queued=[...(doc?.outbox||[]).filter(item=>now-Date.parse(item.queuedAt||'')<OUTBOX_TTL_MS),...plan.sends.map(message=>({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now)}))].slice(-OUTBOX_MAX);
+   // The outbox keeps an undelivered notification until it is delivered; nothing is aged out or evicted. It is bounded by construction: at most
+   // one pending alert-type message per issue key (a newer message for the same key replaces the pending one in place) plus recoveries.
+   // Alert accounting (lastSentAt, sendCount, sendsToday) moves only when delivery succeeds, so a failed send never spends the cooldown or the
+   // daily quota, and an alert that was never delivered raises no recovery: if its issue clears first it is cancelled and counted.
+   const alerts=plan.state,prior=doc?.alerts?.issues||{},day=iso(now).slice(0,10);
+   const outbox=(doc?.outbox||[]).map(item=>({...item}));
+   let cancelled=doc?.cancelledUndelivered||0;
+   for(let index=outbox.length-1;index>=0;index--){if(outbox[index].kind!=='recovery'&&!alerts.issues[outbox[index].key]){outbox.splice(index,1);cancelled++;}}
+   for(const message of plan.sends){
+    if(message.kind==='recovery'){outbox.push({...message,id:message.key+'|recovery|'+iso(now),queuedAt:iso(now)});continue;}
+    const entry=alerts.issues[message.key],before=prior[message.key]||null;
+    const after={lastSentAt:entry.lastSentAt,sendCount:entry.sendCount,sendDay:entry.sendDay,sendsToday:entry.sendsToday};
+    entry.lastSentAt=before?.lastSentAt||null;entry.sendCount=before?.sendCount||0;entry.sendsToday=before?.sendDay===day?before.sendsToday||0:0;
+    const pending=outbox.find(item=>item.key===message.key&&item.kind!=='recovery');
+    if(pending){pending.severity=message.severity;pending.message=message.message;pending.after=after;if(pending.kind!=='alert')pending.kind=message.kind;}
+    else outbox.push({...message,id:message.key+'|'+message.kind+'|'+iso(now),queuedAt:iso(now),after});
+   }
+   const queued=outbox;
    const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt}:doc?.predictions||null;
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
-    alerts:plan.state,outbox:queued,predictions,
+    alerts,outbox:queued,cancelledUndelivered:cancelled,predictions,
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null};
    const claimed=await writeState(env,object,next);
    if(!claimed){log({mode:'on',overall:evaluation.overall,claimed:false});return {ran:true,mode:'on',overall:evaluation.overall,sent:0,failed:0,saved:false};}
    const delivered=new Set();
    for(const message of queued){if(await sendMessage(env,message,evaluation.overall,now))delivered.add(message.id);}
    let saved=true;
-   if(delivered.size){saved=!!await writeState(env,claimed,{...next,outbox:queued.filter(item=>!delivered.has(item.id))});}
+   if(delivered.size){
+    const settled=JSON.parse(JSON.stringify(next.alerts));
+    for(const item of queued){if(!delivered.has(item.id)||!item.after)continue;const entry=settled.issues[item.key];if(!entry)continue;entry.lastSentAt=item.after.lastSentAt;entry.sendCount=Math.max(entry.sendCount,item.after.sendCount);entry.sendDay=item.after.sendDay;entry.sendsToday=item.after.sendsToday;}
+    saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:queued.filter(item=>!delivered.has(item.id))});
+   }
    await heartbeat(env);
    log({mode:'on',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),sent:delivered.size,failed:queued.length-delivered.size,saved});
    return {ran:true,mode:'on',overall:evaluation.overall,sent:delivered.size,failed:queued.length-delivered.size,saved};
@@ -129,7 +150,7 @@ const Monitor=(()=>{
   try{doc=(await readState(env)).doc;}catch{doc=null;}
   const heartbeatAt=Date.parse(doc?.heartbeatAt||'');
   return {mode:current,readAt:iso(now),stored:!!doc,heartbeatAt:Number.isFinite(heartbeatAt)?iso(heartbeatAt):null,heartbeatAgeMs:Number.isFinite(heartbeatAt)?Math.max(0,now-heartbeatAt):null,
-   outbox:Array.isArray(doc?.outbox)?doc.outbox.length:0,overall:doc?.overall??null,streams:doc?.streams??[],openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:entry.severity,firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
+   outbox:Array.isArray(doc?.outbox)?doc.outbox.length:0,outboxOldestAt:(doc?.outbox||[]).map(item=>item.queuedAt).sort()[0]||null,cancelledUndelivered:doc?.cancelledUndelivered||0,overall:doc?.overall??null,streams:doc?.streams??[],openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:entry.severity,firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
    alerting:!!httpsUrl(env?.MONITOR_WEBHOOK_URL),deadman:!!httpsUrl(env?.MONITOR_HEARTBEAT_URL),sideEffects:'none'};
  }
 

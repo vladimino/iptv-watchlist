@@ -137,6 +137,25 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  const queued=f.bucket.value(KEY).outbox;assert.equal(queued.length,1);f.setWebhook(true);
  await f.M.run(f.env,{now:T0+2*H});const sentBodies=posts(f.calls).filter(item=>item.body.key==='epg_stale');
  assert.equal(sentBodies.at(-1).body.id,queued[0].id,'the retry keeps the stable idempotency id');assert.deepEqual(f.bucket.value(KEY).outbox,[]);
+ // A webhook outage longer than a day: the alert is never dropped, does not spend the cooldown or the daily quota, and is delivered on recovery.
+ const o=stale();await o.M.run(o.env,{now:T0});o.setWebhook(false);
+ for(let hour=1;hour<=27;hour++)await o.M.run(o.env,{now:T0+hour*H});
+ let doc=o.bucket.value(KEY);assert.equal(doc.outbox.length,1,'one pending alert after 27 hours of outage');assert.equal(doc.outbox[0].kind,'alert');
+ assert.deepEqual([doc.alerts.issues.epg_stale.sendCount,doc.alerts.issues.epg_stale.lastSentAt],[0,null],'failed sends are not counted');
+ o.setWebhook(true);await o.M.run(o.env,{now:T0+28*H});doc=o.bucket.value(KEY);
+ assert.deepEqual(doc.outbox,[]);assert.equal(doc.alerts.issues.epg_stale.sendCount,1);assert.equal(doc.alerts.issues.epg_stale.lastSentAt,at(T0+28*H),'accounting moves on delivery');
+ assert.equal(posts(o.calls).filter(item=>item.body.key==='epg_stale').at(-1).body.kind,'alert');
+ // More than twenty pending notifications are all kept and delivered after the provider recovers.
+ const many=setup();healthy(many.bucket);await many.M.run(many.env,{now:T0});
+ const seeded=many.bucket.value(KEY);seeded.outbox=Array.from({length:30},(_,index)=>({id:'seed_'+index+'|recovery|x',kind:'recovery',severity:'healthy',stream:'epg',key:'seed_'+index,message:'Recovered',queuedAt:at(T0-30*H)}));many.bucket.set(KEY,seeded);
+ many.setWebhook(false);await many.M.run(many.env,{now:T0+H});assert.equal(many.bucket.value(KEY).outbox.length,30,'nothing is evicted during the outage');
+ many.setWebhook(true);await many.M.run(many.env,{now:T0+2*H});assert.deepEqual(many.bucket.value(KEY).outbox,[]);assert.equal(new Set(posts(many.calls).filter(item=>item.body.kind==='recovery'&&item.body.key.startsWith('seed_')).map(item=>item.body.id)).size,30,'all thirty ids were delivered');
+ // The issue clears before its first alert was ever delivered: the alert is cancelled and counted, and no recovery is sent for it.
+ const r=stale();await r.M.run(r.env,{now:T0});r.setWebhook(false);await r.M.run(r.env,{now:T0+H});assert.equal(r.bucket.value(KEY).outbox.length,1);
+ healthy(r.bucket,{publishedAt:at(T0+2*H),runId:'run-b'});await r.M.run(r.env,{now:T0+3*H});
+ doc=r.bucket.value(KEY);assert.deepEqual(doc.outbox,[]);assert.equal(doc.cancelledUndelivered,1,'the cancelled alert is visible');
+ assert.equal(posts(r.calls).filter(item=>item.body.kind==='recovery').length,0,'no recovery for an alert the owner never received');
+ assert.equal(plain(await r.M.status(r.env,T0+3*H)).cancelledUndelivered,1);
  // Concurrent synthetic tests: one message.
  const c=setup();healthy(c.bucket);await c.M.run(c.env,{now:T0});
  const tests=plain(await Promise.all([c.M.test(c.env,T0+MIN),c.M.test(c.env,T0+MIN)]));

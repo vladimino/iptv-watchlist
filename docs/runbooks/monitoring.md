@@ -27,7 +27,8 @@ Read `GET /api/monitor/status` first (a pure read), then the domain's own status
 | `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch` | `epg_pipeline_status` | A backlog without allowed progress. Check the executor mode and the Workflow before any resolver call |
 | `discovery_quarantined`, `discovery_executor_invalid` | `feature_flags`, the Workflow readout | The retry budget is exhausted or the flag value is invalid: owner |
 | `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open` | `ratings_sync_status` (`orchestration`) | See the Ratings integration reference; clearing a quarantine is an owner action |
-| `predictions_stale`, `predictions_backlog_growing` | `prediction_queue_overview` | Pending predictions and no model batch: the hourly ChatGPT task, its quota or the model |
+| `predictions_stale`, `predictions_backlog_growing` | `prediction_queue_overview` | Pending predictions and no real model progress (empty scheduled batches do not count): the hourly ChatGPT task, its quota or the model |
+| `outbox` growing in `/api/monitor/status` | `outboxOldestAt`, the webhook provider | Notifications are queued because the channel fails. They are kept and retried every tick with the same id; fix the channel (owner), nothing is lost |
 | `*_resource_limit` | Workers Observability | Repeated Worker 1102 or memory limits |
 | `<stream>_unreadable` | the named status | A source could not be read; confirm whether the authority marker is held or loading |
 
