@@ -8,7 +8,7 @@ Captured 2026-11-06 (UTC) from the repository only. **No production read or writ
 
 ## Reproduction (fixture)
 
-`tests/epg-event-publication.mjs` runs the real Worker against an in-memory bucket: the first scan fails at the generation copy (pointer unmoved, no event written), the feed then carries three shows instead of one, and the retry in the same run publishes. Before the fix the `epg` event carried the first scan's `at` and counts; after it the event matches the published report.
+`tests/epg-event-publication.mjs` (R2 publication) and `tests/epg-event-publication-d1.mjs` (sealed D1 publication: staging interrupted before any pointer move, a retry that rescans, stages, seals in bounded steps and publishes through the real `finishSync`) run the real Worker code against in-memory stores and local sqlite stand-ins. The R2 fixture: the first scan fails at the generation copy (pointer unmoved, no event written), the feed then carries three shows instead of one, and the retry in the same run publishes. Before the fix the `epg` event carried the first scan's `at` and counts; after it the event matches the published report.
 
 ## Fix
 
@@ -16,4 +16,4 @@ Rebuild the events for the scan being published when the saved `epg` event is fo
 
 ## Limitations
 
-The sealed (D1) publication path is covered by the same rebuild-on-rescan rule and the `finishSync` guard, but the fixture exercises the R2 publication path. A watchlist event that reports a removal keeps the first scan's time (its key is referenced by the removal hand-over). No production event was inspected or corrected.
+The D1 fixture stubs the published-EPG module (`currentGeneration`, `publishGeneration`, document reads) and the ledger plan; the sealed ledger transfer, the stage and `sealStep` are real. A watchlist event that reports a removal keeps the first scan's time (its key is referenced by the removal hand-over). No production event was inspected or corrected.
