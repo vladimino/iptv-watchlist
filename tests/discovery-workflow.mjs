@@ -470,4 +470,73 @@ delete env.DISCOVERY_EXECUTOR;
 const rolledBack=await call('ensureDiscoveryWorkflow')(env);
 assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
 
+
+// 11. AIR-360. A Workflow instance hands over to a successor before its D1 statement total nears the level at which
+// both production instances failed (12,287 and 12,192 statements after 19 chunks). The meter counts statements and
+// batches, and passes native statements to a batch untouched.
+{
+ class NativeStatement{}
+ const fakeDb={prepare(){return new NativeStatement();},async batch(statements){if(!statements.every(item=>item instanceof NativeStatement))throw new Error('not native');return statements.map(()=>({}));},async exec(){return {};}};
+ seed({count:60});
+ Object.assign(env,{DISCOVERY_EXECUTOR:'workflow',DB:fakeDb});
+ elect();
+ context.calls=0;
+ // Every chunk issues 650 statements and leaves 12 chunks of backlog, so only the statement meter can end the instance.
+ vm.runInContext(`advanceDiscovery=async env=>{calls++;for(let i=0;i<650;i++)env.DB.prepare('SELECT 1');await env.DB.batch([env.DB.prepare('SELECT 2'),env.DB.prepare('SELECT 3')]);const stored=await readContinuation(env);const at=new Date().toISOString();const programmeRunId=${JSON.stringify(GENERATION)};const record={stage:'paused',reason:null,at,hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId};if(!await replaceContinuation(env,record,stored.etag))throw new Error('stub lost the continuation');await saveJSON(env,'epg/discovery-status.json',{programmeRunId,remaining:500,finishedAt:at});return {stage:'paused',checked:1,remaining:500,discovery:discoveryContract(record),diagnostic:{saved:{owned:true,write:'saved'}}};}`,context);
+ step.retried=0;creates.length=0;
+ binding.create=async request=>{creates.push(request);return {id:request.id};};
+ const savedRecords=[],originalPut=bucket.put;bucket.put=async(key,value,options)=>{if(key==='epg/discovery-workflow.json')savedRecords.push(JSON.parse(value));return originalPut.call(bucket,key,value,options);};
+ const budgeted=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+ assert.equal(budgeted.reason,'rollover');assert.equal(budgeted.successor.series,1);
+ assert.equal(creates.length,1);assert.equal(creates[0].id,`discovery_${GENERATION.replace(/-/g,'')}_1`);
+ // 6,000 statements are spent after ten chunks of 652; the instance stops there, far below 19 chunks.
+ assert.equal(context.calls,10);assert.equal(budgeted.chunks,10);
+ bucket.put=originalPut;
+ const progress=savedRecords.filter(record=>record.invocation).at(-1);
+ assert.ok(progress.invocation.statements>=6000&&progress.invocation.statements<8000);assert.ok(progress.invocation.batches>=10);
+ // The plan: a spent invocation rolls over; a fresh one does not; a stopped or waiting series is not rolled over.
+ const same=(actual,expected)=>assert.equal(JSON.stringify(actual),JSON.stringify(expected));
+ const plan=input=>call('workflowPlan')({mode:'workflow',published:GENERATION,pinned:GENERATION,record:{stage:'paused',reason:null,remainingChunks:5,programmeRunId:GENERATION,at:iso},lease:null,now:Date.now(),chunks:3,chunkLimit:20,last:null,uncertainWrites:0,...input});
+ same(plan({used:5999}),{action:'continue',reason:null});
+ same(plan({used:6000}),{action:'rollover',reason:'invocation_budget'});
+ assert.equal(plan({used:6000,mode:'external'}).action,'stop');
+ assert.equal(plan({used:6000,published:OTHER}).action,'stop');
+ assert.equal(plan({used:6000,record:{stage:'paused',reason:'backoff',remainingChunks:4,programmeRunId:GENERATION,at:iso,retryAt:new Date(Date.now()+60000).toISOString(),nextCatchUpAt:new Date(Date.now()+60000).toISOString()}}).action,'wait');
+ same(plan({used:6000,record:{stage:'paused',reason:'chunk_budget',remainingChunks:0,programmeRunId:GENERATION,at:iso,nextCatchUpAt:new Date(Date.now()+3600000).toISOString()},last:{programmeRunId:GENERATION,remaining:40}}),{action:'rollover',reason:'invocation_budget'});
+ // The meter counts what the instance issues and leaves bindings usable.
+ const meter={statements:0,batches:0};
+ const wrapped=call('meterD1')(fakeDb,meter);
+ const first=wrapped.prepare('a'),second=wrapped.prepare('b');
+ await wrapped.batch([first,second]);await wrapped.exec('x');
+ assert.equal(meter.statements,3);assert.equal(meter.batches,1);
+ assert.equal(call('meterD1')(null,meter),null);
+ const noDbEnv={BUCKET:bucket};assert.equal(call('meteredEnv')(noDbEnv,meter),noDbEnv);
+ const metered=call('meteredEnv')({BUCKET:bucket,DB:fakeDb,OTHER:'kept'},meter);
+ assert.equal(metered.OTHER,'kept');assert.equal(metered.BUCKET,bucket);assert.notEqual(metered.DB,fakeDb);
+ assert.equal({...metered}.OTHER,'kept');
+ delete env.DB;
+}
+
+// 12. AIR-360. The reason a step fails is logged, bounded and free of secrets, and the failure is rethrown unchanged.
+{
+ seed({count:12});
+ Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
+ elect();
+ const logged=[];const originalError=context.console.error;context.console.error=message=>logged.push(String(message));
+ const cause=Object.assign(new Error('D1_ERROR: Network connection lost Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCDEF '+'x'.repeat(400)),{name:'D1Error'});
+ const original=context.DiscoveryAuthority;
+ armDiscoveryAuthority(GENERATION);
+ context.DiscoveryAuthority={...context.DiscoveryAuthority,readWorkflow:async()=>{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';error.cause=cause;throw error;}};
+ await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{do:async(name,fn)=>fn(),sleepUntil:async()=>{}}),error=>error.message==='discovery_unavailable'&&error.code==='discovery_unavailable');
+ context.console.error=originalError;
+ assert.equal(logged.length,1);
+ const entry=JSON.parse(logged[0]);
+ assert.equal(entry.event,'discovery_workflow_step_failed');assert.equal(entry.step,'owner');assert.equal(entry.code,'discovery_unavailable');
+ assert.equal(entry.causeName,'D1Error');assert.ok(entry.causeMessage.length<=200);
+ assert.ok(!/abcdefghijklmnopqrstuvwxyz0123456789ABCDEF/.test(logged[0]),'a long token is redacted');
+ assert.ok(!/Bearer\s+abc/.test(logged[0]));
+ context.DiscoveryAuthority=original;
+ clearWorkflowAdmission();
+}
+
 console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');

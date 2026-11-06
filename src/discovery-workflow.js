@@ -7,12 +7,41 @@ const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
 const DISCOVERY_WORKFLOW_STALL_LIMIT=3;
 const DISCOVERY_WORKFLOW_WRITE_LIMIT=3;
 const DISCOVERY_WORKFLOW_STEP_CAP=160;
+// AIR-360. A Workflow instance runs its steps inside one Worker invocation, and every D1 statement it issues is
+// counted against that invocation. On 6 November 2026 both instances failed after 19 chunks with D1 statement
+// totals of 12,287 and 12,192 (D1 analytics), whatever their duration or rows read: each next step then failed
+// in about 10 ms with `discovery_unavailable` and no query reached D1. The instance hands over to a successor
+// (a new invocation) well before that total. The exact platform limit is not established; see ADR 0094.
+const DISCOVERY_WORKFLOW_INVOCATION_BUDGET=6000;
 const DISCOVERY_WORKFLOW_RECOVERY_LIMIT=4;
 const DISCOVERY_WORKFLOW_RECOVERY_BACKOFF_MS=[60000,300000,900000,3600000];
 const DISCOVERY_WORKFLOW_FRESH_MS=15*60*1000;
 const DISCOVERY_WORKFLOW_TERMINAL=new Set(['complete','backlog_empty','stale_generation','executor_not_workflow','recovery_exhausted']);
 const DISCOVERY_WORKFLOW_RECOVERABLE=new Set(['no_progress','write_uncertain','step_cap','rollover_uncertain','no_continuation']);
 function discoveryWorkflowChunkLimit(){return DISCOVERY_WORKFLOW_CHUNK_LIMIT;}
+// Counts the statements prepared through env.DB. Statements and batches are passed through untouched, because a
+// native D1 batch only accepts native prepared statements.
+function meterD1(db,meter){
+ if(!db||typeof db.prepare!=='function')return db;
+ return new Proxy(db,{get(target,prop){
+  if(prop==='prepare')return sql=>{meter.statements++;return target.prepare(sql);};
+  if(prop==='batch')return statements=>{meter.batches++;return target.batch(statements);};
+  if(prop==='exec')return (...args)=>{meter.statements++;return target.exec(...args);};
+  if(prop==='withSession')return (...args)=>meterD1(target.withSession(...args),meter);
+  const value=Reflect.get(target,prop,target);
+  return typeof value==='function'?value.bind(target):value;
+ }});
+}
+function meteredEnv(env,meter){
+ if(!env||!env.DB||typeof env.DB.prepare!=='function')return env;
+ const db=meterD1(env.DB,meter);
+ return new Proxy(env,{get(target,prop){return prop==='DB'?db:Reflect.get(target,prop,target);}});
+}
+const cleanDiagnostic=text=>String(text??'').replace(/Bearer\s+\S+/gi,'Bearer [redacted]').replace(/[A-Za-z0-9_-]{40,}/g,'[redacted]').replace(/\s+/g,' ').slice(0,200);
+// A bounded, secret-free record of why a step failed. The platform keeps only the wrapper message.
+function logWorkflowFailure(step,error,meter){
+ try{console.error(JSON.stringify({event:'discovery_workflow_step_failed',step,code:error?.code||null,name:cleanDiagnostic(error?.name),message:cleanDiagnostic(error?.message),causeName:cleanDiagnostic(error?.cause?.name),causeMessage:cleanDiagnostic(error?.cause?.message),statements:meter?.statements??null,batches:meter?.batches??null}));}catch{}
+}
 function discoveryInstanceId(programmeRunId,series){
  const compact=String(programmeRunId||'').replace(/[^0-9A-Za-z]/g,'').slice(0,32)||'none';
  const n=Number.isInteger(series)&&series>=0?series:0;
@@ -73,7 +102,8 @@ function workflowReadoutFacts(stored,liveness,now){
 // Pure. The external hourly contract stays in continuationDecision; a future chunk_budget is renewed here only
 // when the saved status proves this generation still has work.
 function workflowPlan(input){
- const {mode,published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites}=input||{};
+ const {mode,published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites,used}=input||{};
+ const spent=(used||0)>=DISCOVERY_WORKFLOW_INVOCATION_BUDGET;
  if(mode!=='workflow')return {action:'stop',reason:'executor_not_workflow'};
  if((uncertainWrites||0)>=DISCOVERY_WORKFLOW_WRITE_LIMIT)return {action:'stop',reason:'write_uncertain'};
  if(!pinned||!published||pinned!==published||(record&&record.programmeRunId!==pinned))return {action:'stop',reason:'stale_generation'};
@@ -82,7 +112,7 @@ function workflowPlan(input){
  const due=Date.parse(record.retryAt||record.nextCatchUpAt||0);
  const known=last&&last.programmeRunId===pinned&&Number.isInteger(last.remaining)?last.remaining:null;
  if(record.reason==='chunk_budget'&&due>now){
-  if(known>0)return (chunks||0)>=(chunkLimit||DISCOVERY_WORKFLOW_CHUNK_LIMIT)?{action:'rollover',reason:'instance_limit'}:{action:'renew',reason:'chunk_budget'};
+  if(known>0)return spent?{action:'rollover',reason:'invocation_budget'}:(chunks||0)>=(chunkLimit||DISCOVERY_WORKFLOW_CHUNK_LIMIT)?{action:'rollover',reason:'instance_limit'}:{action:'renew',reason:'chunk_budget'};
   if(known===0)return {action:'stop',reason:'backlog_empty'};
   return {action:'wait',until:due,reason:'unknown_remaining'};
  }
@@ -92,16 +122,17 @@ function workflowPlan(input){
   const until=Date.parse(decision.contract.retryAt||decision.contract.nextCatchUpAt||0);
   return {action:waiting?'wait':'stop',until:Number.isFinite(until)?until:now,reason:decision.contract.reason||decision.contract.state||'stop'};
  }
+ if(spent)return {action:'rollover',reason:'invocation_budget'};
  if((chunks||0)>=(chunkLimit||DISCOVERY_WORKFLOW_CHUNK_LIMIT))return {action:'rollover',reason:'instance_limit'};
  return {action:'continue',reason:null};
 }
-async function workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites){
+async function workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,used){
  const generation=await loadJSON(env,EPG_GENERATION_KEY);
  const published=publishedProgrammeRunId(generation);
  const stored=await readContinuation(env);
  const lease=await loadJSON(env,'epg/resolver-lease.json');
  const last=await loadJSON(env,'epg/discovery-status.json');
- return {mode:discoveryExecutorMode(env),published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites};
+ return {mode:discoveryExecutorMode(env),published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
 }
 async function settleWorkflowIfOwner(env,ownId,patch){
  let state=await readWorkflowState(env);
@@ -126,7 +157,7 @@ async function renewDiscoverySeries(env,pinned){
  return {renewed:false,reason:'write_uncertain',uncertain:true};
 }
 // A thrown step is retried by the platform, so this must not throw after a chunk may have committed.
-async function runWorkflowChunk(env){
+async function runWorkflowChunk(env,meter){
  const before=await readContinuation(env);
  try{
   const outcome=await advanceDiscovery(env,{caller:'internal'});
@@ -134,6 +165,7 @@ async function runWorkflowChunk(env){
   const busy=outcome?.stage==='busy'||outcome?.discovery?.reason==='busy';
   return {threw:false,progress:saved,busy,until:outcome?.discovery?.nextCatchUpAt||null,summary:chunkSummary(outcome),saved};
  }catch(e){
+  logWorkflowFailure('chunk',e,meter);
   let after=null;
   try{after=await readContinuation(env);}catch{}
   // An unsaved checkpoint stays `running` or keeps the etag we read. Another writer's commit is not this step's progress.
@@ -301,7 +333,10 @@ async function stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks){
  await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery});
  return {stopped:true,reason:finalReason,chunks,instanceId:ownId};
 }
-async function runDiscoveryWorkflow(env,payload,step){
+async function runDiscoveryWorkflow(rawEnv,payload,step){
+ const meter={statements:0,batches:0};
+ const env=meteredEnv(rawEnv,meter);
+ const observed=(name,fn)=>async()=>{try{return await fn();}catch(error){logWorkflowFailure(name,error,meter);throw error;}};
  const pinned=payload?.programmeRunId||null;
  const series=Number.isInteger(payload?.series)&&payload.series>=0?payload.series:0;
  const ownId=discoveryInstanceId(pinned,series);
@@ -310,12 +345,12 @@ async function runDiscoveryWorkflow(env,payload,step){
  let chunks=0,stalls=0,uncertainWrites=0,steps=0;
  const stepName=prefix=>prefix+'-'+(steps++);
  for(;;){
-  const gate=await step.do(stepName('owner'),()=>workflowOwnerGate(env,ownId,series));
+  const gate=await step.do(stepName('owner'),observed('owner',()=>workflowOwnerGate(env,ownId,series)));
   if(!gate.owned)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
   if(steps>=DISCOVERY_WORKFLOW_STEP_CAP){
    return step.do(stepName('cap'),()=>stopOwnedWorkflow(env,ownId,'step_cap',pinned,series,chunks));
   }
-  const plan=await step.do(stepName('plan'),async()=>workflowPlan(await workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites)));
+  const plan=await step.do(stepName('plan'),observed('plan',async()=>workflowPlan(await workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,meter.statements))));
   if(plan.action==='stop')return step.do(stepName('stop'),()=>stopOwnedWorkflow(env,ownId,plan.reason,pinned,series,chunks));
   if(plan.action==='wait'){
    const until=Number.isFinite(plan.until)?plan.until:Date.now()+1000;
@@ -338,7 +373,7 @@ async function runDiscoveryWorkflow(env,payload,step){
    if(!rolled.started)await step.do(stepName('rollover-stop'),()=>stopOwnedWorkflow(env,ownId,'rollover_uncertain',pinned,series,chunks));
    return {stopped:true,reason:rolled.started?'rollover':'rollover_uncertain',chunks,instanceId:ownId,successor:rolled};
   }
-  const outcome=await step.do(stepName('chunk'),async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {notOwner:true,progress:false,busy:false};return runWorkflowChunk(env);});
+  const outcome=await step.do(stepName('chunk'),async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {notOwner:true,progress:false,busy:false};return runWorkflowChunk(env,meter);});
   if(outcome.notOwner)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
   if(outcome.busy){
    const until=Date.parse(outcome.until||'')||Date.now()+1000;
@@ -353,6 +388,6 @@ async function runDiscoveryWorkflow(env,payload,step){
    continue;
   }
   stalls=0;uncertainWrites=0;chunks++;
-  await step.do(stepName('progress'),()=>settleWorkflowIfOwner(env,ownId,{phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,waitingUntil:null,recovery:null}));
+  await step.do(stepName('progress'),()=>settleWorkflowIfOwner(env,ownId,{phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},waitingUntil:null,recovery:null}));
  }
 }
