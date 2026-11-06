@@ -96,3 +96,7 @@ This is the operational Cloudflare runbook. Historical Sites exports and imports
 ## Ratings executor switch (AIR-347)
 
 The Ratings owner switch is a high-impact L3 operation requiring an owner-approved scoped plan and all explicit holdpoints. The state transitions remain separate, but safe preflight/readback inside the plan do not require repeated owner prompts: (1) `close_admission` with target `cloudflare` (epoch+1, both writers refused); (2) verify the drain, then `complete`; (3) disable the external Ratings Task. Rollback is the same protocol with target `external`. The switch needs D1 ratings authority open; with a held or non-`d1` marker it is refused and writes nothing. `ratings_storage_migrate apply` is refused while the mode is not `external`. Code deploy and Workflow resource creation start nothing. `clear_quarantine` runs no step.
+
+## A Discovery Workflow instance that errors (AIR-360)
+
+Read-only: `epg_pipeline_status` (`discoveryExecutor`), the instance steps in Cloudflare (`owner`, `plan` and `chunk` step outputs and attempts) and the Worker log line `discovery_workflow_step_failed`, which carries the bounded cause and the statement count of the instance. An errored instance is replaced by the hourly cron through `recovery.dueAt`; do not start, terminate or reset anything by hand without an owner decision. An instance that ends near 6,000 statements is the planned handover ([ADR 0094](../adr/0094-discovery-workflow-invocation-budget.md)), not an error.

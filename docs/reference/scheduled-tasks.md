@@ -16,6 +16,8 @@ EPG and Discovery retain their separately verified execution modes. Ratings has 
 
 ## Hourly discovery catch-up and predictions
 
+**Workflow instance budget ([ADR 0094](../adr/0094-discovery-workflow-invocation-budget.md), Accepted).** While `DISCOVERY_EXECUTOR=workflow`, an instance counts the D1 statements it issues and hands over to a successor at 6,000, besides the 20 chunk limit. A failing step logs one `discovery_workflow_step_failed` line (step, code, bounded cause, statement and batch counts) and the executor record carries `invocation.statements` and `invocation.batches`. The external executor below is unchanged.
+
 The bullets below are the external executor. They are unchanged while `DISCOVERY_EXECUTOR` is absent, and this page does not edit a task prompt, an enabled flag, or a schedule. A spent series of 12 chunks still waits for the next hour in that mode. A Workflow executor renews that series without the hour wait only when the binding is exactly `workflow` ([ADR 0083](../adr/0083-inert-discovery-workflow.md), Accepted 2026-11-02; [ADR 0093](../adr/0093-discovery-workflow-cron-reconcile.md), Proposed). A deploy does not set that binding. The existing Worker cron may call `reconcileDiscoveryWorkflow`; that is a no-op while the flag is absent. Draft prompts that drop Stage A from Daily/Hourly live in [scheduled-task-prompts](scheduled-task-prompts/daily-epg-no-discovery.md) and are not the live registry. The real production switch is [AIR-324](https://trello.com/c/kNtaEbm8).
 
 - **Task:** `Почасовые прогнозы «В эфире»`. **Expected:** enabled; **hourly, nominally :20 Europe/Madrid**; `default_timezone: Europe/Madrid`. The scheduler may execute late; nominal time is not an SLA.
