@@ -260,6 +260,23 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  assert.equal(model.oldestPendingAt,null);
  // The run was started by the executor as a scheduled run, never as a manual one.
  assert.equal(plain(w.bucket.value(RUN)).trigger,'scheduled');
+ // AIR-361: the executor's terminal commit produced exactly one Ratings result event, tied to the run id (not the instance id).
+ const resultEvents=[...w.bucket.records.keys()].filter(key=>key.startsWith('events/items/')).map(key=>w.bucket.records.get(key)).filter(event=>event.type==='ratings');
+ assert.equal(resultEvents.length,1);assert.equal(resultEvents[0].runId,plain(w.bucket.value(RUN)).runId);assert.equal(resultEvents[0].state,'finished');
+ assert.ok(!JSON.stringify(resultEvents[0]).includes('ratings_2026'),'the instance id is not part of the event');
+ assert.equal(plain(w.bucket.value(RUN)).ratingsEventAt!==undefined,true);
+}
+// AIR-361: the Events Log is unreachable at the terminal commit; the run still completes and the hourly tick delivers the event once.
+{
+ const w=setup();const payload=await started(w);
+ let failing=true;w.bucket.hooks.beforePut=async key=>{if(failing&&key.startsWith('events/items/'))throw new Error('R2 unavailable');};
+ const outcome=plain(await w.RO.run(w.env,payload,w.step,w.hooks));eq(outcome.reason,'complete','a failed event put does not fail the run');
+ const listed=()=>[...w.bucket.records.keys()].filter(key=>key.startsWith('events/items/'));
+ assert.equal(listed().length,0);assert.equal(plain(w.bucket.value(RUN)).ratingsEventAt,undefined);
+ const fetches=w.net.fetches.length;failing=false;
+ const tick=plain(await w.RO.ensure(w.env,{now:w.clock.now+H}));eq(tick.reason,'complete');
+ assert.equal(listed().length,1,'the hourly tick delivered the event');assert.equal(w.net.fetches.length,fetches,'no Letterboxd request');
+ await w.RO.ensure(w.env,{now:w.clock.now+2*H});assert.equal(listed().length,1,'and only once');
 }
 
 // 7. Read-after-unknown (T02, T04): a run of this date that already finished is the success, whoever wrote the checkpoint.

@@ -165,7 +165,7 @@ The retirement deletes nothing. `enrichment/ratings/status.json`, `published.jso
 
 ## Run result in the Events Log (AIR-361)
 
-Every run that reaches a terminal state writes one compact `ratings` event (see the [events reference](../domain/events.md#ratings-run-result-ratings)). Delivery is reconciled from the D1 run record (`ratingsEventAt`, `pendingEvents`) and never repeats a step or a Diary read.
+Every run that reaches a terminal state writes one compact `ratings` event (see the [events reference](../domain/events.md#ratings-run-result-ratings)). Delivery is reconciled from the committed D1 run record (`ratingsEventAt`, `pendingEvents`, `eventsDropped`), also by the hourly executor tick, and never repeats a step or a Diary read.
 
 ## Cloudflare executor (AIR-347, inert)
 

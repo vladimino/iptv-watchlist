@@ -332,6 +332,8 @@ const RatingsOrchestration=(()=>{
   const authority=await authorityState(env);
   if(authority.error)return {started:false,reason:'d1_unavailable'};
   if(!authority.ready)return {started:false,reason:'authority_held'};
+  // AIR-361: the hourly tick also delivers a Ratings result event that an earlier terminal commit could not put (idempotent, bounded).
+  await ratings().reconcileEvent(fencedEnv(env,mode.etag),now).catch(()=>null);
   const {dayKey,due,dueAt}=policy().dailyDue(now);
   if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
   const stored=await readControl(env);
