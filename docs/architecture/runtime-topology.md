@@ -66,4 +66,4 @@ See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract]
 
 ## Monitor (AIR-349)
 
-One more tick on the existing hourly cron, one R2 key (`monitor/state.json`) and, once the owner configures it, one outbound HTTPS webhook and one dead-man ping. No new Worker, Workflow, trigger or binding. See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md).
+One more tick on the existing hourly cron, one R2 key (`monitor/state.json`) and, once the owner configures it, one outbound alert channel (the generic HTTPS webhook, or the fixed Telegram Bot API endpoint chosen by `MONITOR_TRANSPORT`) and one dead-man ping. No new Worker, Workflow, trigger or binding. See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md) and [ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md).
