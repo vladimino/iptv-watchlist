@@ -880,10 +880,15 @@ const SEAL_BUSY_MARGIN_MS=3000;
 const SEAL_BUSY_LOST_RACE_MS=5000;
 function sealBusyResponse(run,taken,now=Date.now()){
  const kind=taken?.busy?.kind||'lease_held';
- const expiresAt=Number(taken?.busy?.expiresAt);
- const bounded=kind==='lease_held'&&Number.isFinite(expiresAt)?Math.min(expiresAt,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
+ // A different programme is a hard conflict, not contention: stop, and promise no retry time.
+ if(kind==='generation_mismatch')return sealResponse(run,{state:'error',nextAction:'stop',reason:'programme_changed',busyKind:kind,nextCatchUpAt:null,retryAfterSec:null});
+ // Only a finite, positive expiry is evidence for a lease-based wait; anything else is treated as a lost race.
+ const raw=taken?.busy?.expiresAt;
+ const expiresAt=typeof raw==='number'&&Number.isFinite(raw)&&raw>0?raw:null;
+ const held=kind==='lease_held'&&expiresAt!==null;
+ const bounded=held?Math.min(expiresAt,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
  const until=Math.max(bounded,now+1000);
- return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:kind,nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+ return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
 }
 async function sealedPublishAvailable(env){
  if(typeof DiscoveryAuthority==='undefined'||typeof PublishedEpg==='undefined')return false;

@@ -66,8 +66,25 @@ try{
   clock=Math.max(clock+1000,t.busy.expiresAt+3000);
  }
  assert.ok(clock-start<=TTL+3000);
- // 8. A different programme is a hard conflict, not a wait.
- const other=await Authority.acquireLease(envOf(file),{programmeRunId:'some-other-run'});
- assert.equal(other.lease,null);assert.ok(['generation_mismatch','lease_held'].includes(other.busy.kind));
+ // 8. A different programme is a hard conflict, exactly: the authority names `generation_mismatch`, never a held lease.
+ sql(file,'UPDATE discovery_lease SET expires_at=0 WHERE id=1');
+ sql(file,"UPDATE discovery_authority SET programme_run_id='run-a' WHERE id=1");
+ const other=await Authority.acquireLease(envOf(file),{programmeRunId:'run-b'});
+ assert.equal(other.lease,null);assert.equal(other.busy.kind,'generation_mismatch');assert.equal(other.busy.expiresAt,null);
+ // 9. A hard conflict never becomes a wait: through the helper and through the real step path, with no retry time.
+ for(const answer of [await call('sealBusyResponse')(run,{busy:{kind:'generation_mismatch',expiresAt:null}},clock)]){
+  assert.equal(answer.discovery.nextAction,'stop');assert.equal(answer.discovery.nextCatchUpAt,null);assert.equal(answer.discovery.retryAfterSec,null);assert.notEqual(answer.discovery.state,'busy');
+ }
+ const original=context.DiscoveryAuthority;
+ context.DiscoveryAuthority={...Authority,acquireLease:async()=>({handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}})};
+ try{
+  const stopped=await call('sealStep')(envOf(file),run);
+  assert.equal(stopped.discovery.nextAction,'stop');assert.equal(stopped.discovery.nextCatchUpAt,null);assert.equal(stopped.discovery.busyKind,'generation_mismatch');
+ }finally{context.DiscoveryAuthority=original;}
+ // 10. A holder whose expiry is unknown or invalid is not promised a lease-based catch-up.
+ for(const expiresAt of [null,undefined,0,NaN,'x']){
+  const answer=await call('sealBusyResponse')(run,{busy:{kind:'lease_held',expiresAt}},clock);
+  assert.equal(answer.discovery.busyKind,'lost_race');assert.equal(answer.discovery.retryAfterSec,5);
+ }
  console.log('discovery seal busy ok');
 }finally{Date.now=realNow;}

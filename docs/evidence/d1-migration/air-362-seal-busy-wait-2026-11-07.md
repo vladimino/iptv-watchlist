@@ -16,6 +16,8 @@ On 6 November the Daily run `307a3e1d…` stopped at `seal/catalog` after one ca
 | Past or missing expiry | At least 1 s |
 | Row expired between the failed take and the read | `lost_race`, 5 s |
 | Bounded client loop | The lease is taken within 3 calls and within 93 s |
-| Different programme | No lease, not a wait |
+| Different programme (authority programme set, other requested) | `generation_mismatch`; through `sealStep` the answer is `stop`, `nextCatchUpAt: null`, never `wait` |
+| Unknown, zero or invalid holder expiry | Treated as `lost_race`, 5 s; no lease-based promise |
+| Cancelled `seal_catalog` end to end (`tests/discovery-seal-publish.mjs`) | Two calls before expiry wait for `expires_at` + 3 s and move nothing; the holder row is untouched; after expiry the run goes through publish, finalize and queue to `complete` |
 
 Removing the Worker change makes the test fail. No production step was run; the wall behaviour on a real cancelled request is not measured.
