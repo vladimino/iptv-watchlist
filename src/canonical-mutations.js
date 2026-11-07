@@ -28,6 +28,9 @@ function text(value){if(typeof value!=='string'||!value)throw failed('film_perso
 const json=value=>value===undefined||value===null?null:JSON.stringify(value);
 function trustedFlag(item){return item?.trusted&&!item?.conflicting?1:0;}
 
+// AIR-368: the automatic localization source table exists from schema 14. A merge adopts the retired Film's rows only where it can.
+async function hasSourceTable(db){return !!(await one(db,"SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='film_localization_source'"));}
+
 async function current(db,kind,id){return Number((await one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',[kind,id]))?.revision??0);}
 
 // Runs the statements as one batch and names the failure. After a failed batch the marker and the revisions are read again, so the
@@ -55,6 +58,9 @@ async function commit(env,gate,statements,entities){
   throw failed('film_person_unavailable',error);
  }
 }
+
+// The pieces the other fenced writers of the canonical domain reuse (the localization source writer); not a second API.
+export const fenced={assertSql,FENCE,REVISION,BUMP,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities)=>commit(env,gate,statements,entities),filmId,personId,revisionOf,text,json};
 
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
@@ -155,11 +161,15 @@ export async function mergeFilms(env,input){
  s.push(["INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) SELECT 'film:'||?||':'||json_object('reason',reason,'value',value,'source',source),'film',?,value,source,provenance_json,authority,reason,at FROM localization_conflict WHERE entity_kind='film' AND entity_id=? ON CONFLICT(id) DO NOTHING",[to,to,from]]);
  s.push(['INSERT INTO watchlist_film (film_id,updated_at) SELECT ?,updated_at FROM watchlist_film WHERE film_id=? ON CONFLICT(film_id) DO NOTHING',[to,from]]);
  s.push(['UPDATE film_redirect SET to_film_id=? WHERE to_film_id=? AND from_id<>?',[to,from,to]]);
+ // Automatic localization sources (schema 14): the survivor keeps its own row per source unless the retired Film observed that source later.
+ const sources=await hasSourceTable(db);
+ if(sources)s.push(['INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) SELECT ?,source,value,source_version,provenance_json,request_id,observed_at,? FROM film_localization_source WHERE film_id=? ON CONFLICT(film_id,source) DO UPDATE SET value=excluded.value,source_version=excluded.source_version,provenance_json=excluded.provenance_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_localization_source.observed_at',[to,at,from]]);
  const discarded=[];
  for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded))s.push(item);
  for(const sql of [
   'DELETE FROM film_person_credit WHERE film_id=?',
   'DELETE FROM film_alias WHERE film_id=?',
+  ...(sources?['DELETE FROM film_localization_source WHERE film_id=?']:[]),
   'DELETE FROM film_metadata WHERE film_id=?',
   'DELETE FROM film_dimension WHERE film_id=?',
   'DELETE FROM film_sync_state WHERE film_id=?',

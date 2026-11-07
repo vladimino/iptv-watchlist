@@ -74,7 +74,7 @@ The D1 data came through a one-off path, not a live flow: a fenced read-only sna
 
 ## Planned canonical Film/Person marker (ADR 0099, not applied)
 
-Migration `0013` ([schema reference](../reference/data/d1-schema.md#canonical-filmperson-authority-schema-v13)) is in the repository only. It adds the `film_person_authority` marker (inserted as `r2`), its fence, a per-entity revision and a baseline gate, and moves no authority: R2 stays the source and the projector the only writer of Film and Person. Applying it is a separate owner-approved operation. No diagram changes.
+Migration `0013` ([schema reference](../reference/data/d1-schema.md#canonical-filmperson-authority-schema-v13)) is in the repository only. It adds the `film_person_authority` marker (inserted as `r2`), its fence, a per-entity revision and a baseline gate, and moves no authority: R2 stays the source and the projector the only writer of Film and Person. Applying it is a separate owner-approved operation. Migration `0014` ([schema reference](../reference/data/d1-schema.md#automatic-localization-sources-schema-v14), [AIR-368](https://trello.com/c/RxZ3aOQB)) is likewise in the repository only: it adds two empty automatic-localization source tables after a complete version 13 and moves no authority. No diagram changes.
 
 ## Reads during a loading ledger seal
 
