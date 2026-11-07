@@ -55,18 +55,17 @@
         <button type="button" class="search-scope" data-search-scope="people" aria-pressed="false" aria-label="Люди: режиссёры и актёры">Люди</button>
         <button type="button" class="search-scope" data-search-scope="plot" aria-pressed="false" aria-label="Сюжет: описание, жанры, механика и настроение">Сюжет</button>
       </div>
-      <p class="search-scope-note">По умолчанию ищутся только названия. Люди и сюжет включаются отдельно и сочетаются между собой.</p>
     </div>
     <div class="workspace">
       <button class="filter-toggle" id="filter-toggle" aria-expanded="false" aria-controls="filters">Фильтры <span id="filter-summary">Все фильмы</span></button>
       <aside class="filters" id="filters" aria-label="Фильтры фильмов">
         <div class="filter-title"><h2>Фильтры</h2><button class="reset" id="reset">Сбросить</button></div>
         <section class="presets" aria-labelledby="presets-title">
-          <div class="presets-head"><h2 id="presets-title">Сценарии</h2><button type="button" id="preset-save">Сохранить текущий</button></div>
-          <p id="presets-empty" class="hint">Пока нет сохранённых сценариев. Сохрани текущие фильтры под именем.</p>
+          <div class="presets-head"><h2 id="presets-title">Сценарии</h2><button type="button" id="preset-save" class="preset-add" aria-label="Сохранить текущие фильтры как сценарий">+ Сохранить</button></div>
+          <p id="presets-empty" class="presets-empty">Нет сценариев</p>
           <ul id="preset-list" class="preset-list"></ul>
-          <form id="preset-editor" hidden><input id="preset-name" maxlength="80" aria-label="Название сценария" placeholder="Название" autocomplete="off" required><button type="submit" id="preset-confirm">Сохранить</button><button type="button" id="preset-cancel">Отмена</button></form>
-          <p id="preset-status" class="hint" role="status"></p>
+          <form id="preset-editor" hidden><input id="preset-name" maxlength="80" aria-label="Название сценария" placeholder="Название" autocomplete="off"><button type="submit" id="preset-confirm" class="preset-primary">Сохранить</button><button type="button" id="preset-cancel" class="preset-cancel" aria-label="Отмена">Отмена</button></form>
+          <p id="preset-status" class="preset-status" role="status"></p>
         </section>
         <label class="started-filter"><input id="started-only" type="checkbox" disabled><span>Только начатые</span></label>
         <label class="started-filter"><input id="last-chance-only" type="checkbox"><span>Последний шанс</span></label>
@@ -153,14 +152,14 @@
               <div data-integration="resolver"><dt>Распознавание</dt><dd id="integration-resolver">—</dd></div>
               <div data-integration="predictions"><dt>Прогнозы</dt><dd id="integration-predictions">—</dd></div>
               <div data-integration="metadata" hidden><dt>Метаданные</dt><dd id="integration-metadata">—</dd></div>
-            </dl><a class="status-events-link" id="status-integrations-events" href="#activity-title">История в событиях</a></section>
+            </dl><a class="status-events-link" id="status-integrations-events" href="/events">История в событиях</a></section>
             <section aria-labelledby="status-run-title"><h3 id="status-run-title">Последний запуск</h3><dl>
               <div><dt>Начат</dt><dd id="detail-run-started">—</dd></div>
               <div><dt>Добавлено</dt><dd id="detail-run-added">—</dd></div>
               <div><dt>Ошибки</dt><dd id="detail-run-failed">—</dd></div>
               <div><dt>Результат</dt><dd id="detail-run-reason">—</dd></div>
               <div><dt>По расписанию</dt><dd id="detail-run-next">—</dd></div>
-            </dl><a class="status-events-link" id="status-events-link" href="#activity-title">Смотреть события</a></section>
+            </dl><a class="status-events-link" id="status-events-link" href="/events">Смотреть события</a></section>
             <section aria-labelledby="status-profile-title"><h3 id="status-profile-title">Модель вкуса</h3><dl>
               <div><dt>Версия</dt><dd id="detail-profile-version">—</dd></div>
               <div><dt>Обновлена</dt><dd id="detail-profile-updated">—</dd></div>
