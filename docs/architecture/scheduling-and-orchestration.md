@@ -85,15 +85,15 @@ sequenceDiagram
     actor Owner as Owner
     participant Registry as ChatGPT Task registry
     participant Docs as GitHub main contract
-    Note over Monitor,Registry: Registry-only; no Worker, MCP or production status reads
+    Note over Monitor,Registry: Registry-only without Worker or MCP status reads
     Monitor->>Registry: Peek Daily EPG Task by ID
-    Registry-->>Monitor: Enabled, recurrence, prompt, last run
+    Registry-->>Monitor: Configuration and last run
     Monitor->>Registry: Peek Hourly Predictions Task by ID
-    Registry-->>Monitor: Enabled, recurrence, prompt, last run
+    Registry-->>Monitor: Configuration and last run
     Monitor->>Docs: Read expected Task configuration
     Docs-->>Monitor: Semantic scope and permission boundaries
-    opt Confirmed registry drift, explicit failed run, or unavailable evidence
-        Monitor->>Owner: Notify with exact Task and observed discrepancy
+    opt Confirmed drift or failed run or unavailable registry
+        Monitor->>Owner: Notify with Task ID and mismatch
     end
 ```
 
