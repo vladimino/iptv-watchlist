@@ -55,7 +55,7 @@ function d1EnrichmentAdapter(binding){
 //   catalog and the resolution are updated in place, so the same programmeRunId does not prove the same content. Any change
 //   defers the run before any D1 write; the next hourly run reads again.
 class D1EnrichmentInputError extends Error{constructor(reason,key){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;}}
-const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed'];
+const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
 async function d1EnrichmentRead(env,etags,key,shape,required=true){
@@ -84,6 +84,14 @@ async function d1EnrichmentStore(env){
   const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
   runId=pointer.programmeRunId;
+ }
+ // AIR-363: between the D1 ledger seal and the publish step the discovery authority already names the new run while the pointer still
+ // names the old one, and the old generation's R2 catalog copy may be absent. That window is not an input failure: the run is deferred
+ // before any read or write, never reads another generation's catalog, and the next hourly run reads again once the pointer moved.
+ if(typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.readAuthority==='function'){
+  let gate=null;
+  try{gate=await DiscoveryAuthority.readAuthority(env);}catch{gate=null;}
+  if(gate?.ready&&gate.programmeRunId&&gate.programmeRunId!==runId)throw new D1EnrichmentInputError('generation_pending','discovery_authority');
  }
  const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
