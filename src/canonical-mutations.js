@@ -14,10 +14,12 @@ const FILM_ID=/^film:.+/;
 const PERSON_ID=/^person:.+/;
 const ROLES=new Set(['director','actor']);
 
-const FENCE='UPDATE film_person_cas SET ok=(CASE WHEN EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=?) THEN 1 ELSE 0 END) WHERE id=1';
-const REVISION='UPDATE film_person_cas SET ok=(CASE WHEN COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0)=? THEN 1 ELSE 0 END) WHERE id=1';
+// An assertion is an upsert of ok = 1 or 0. Its value also requires the fence row to exist when the statement runs: a deleted row gives
+// ok = 0 and the CHECK fails, where a zero-row UPDATE would pass silently and let the batch commit without any proven assertion.
+const assertSql=(condition)=>'INSERT INTO film_person_cas (id,ok) VALUES (1,(SELECT CASE WHEN EXISTS (SELECT 1 FROM film_person_cas WHERE id=1) AND ('+condition+') THEN 1 ELSE 0 END)) ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
+const FENCE=assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode='d1' AND cutover='open' AND generation=?)");
+const REVISION=assertSql('COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0)=?');
 const BUMP='INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES (?,?,1,?) ON CONFLICT(kind,id) DO UPDATE SET revision=revision+1, updated_at=excluded.updated_at';
-const assertSql=(condition)=>'UPDATE film_person_cas SET ok=(CASE WHEN '+condition+' THEN 1 ELSE 0 END) WHERE id=1';
 
 function filmId(value){if(typeof value!=='string'||!FILM_ID.test(value))throw failed('film_person_invalid');return value;}
 function personId(value){if(typeof value!=='string'||!PERSON_ID.test(value))throw failed('film_person_invalid');return value;}
@@ -111,11 +113,13 @@ export async function mutatePerson(env,input){
  return {id,revision:expected+1};
 }
 
-// A merge of one Film into another: a redirect from the retired id to the survivor, with the retired Film's aliases, credits, external ids
-// and membership adopted by the survivor. It touches two entities and proves both revisions, that the survivor is not itself a redirect
+// A merge of one Film into another: a redirect from the retired id to the survivor, with the retired Film's aliases, credits, external ids,
+// membership, metadata, dimensions and sync clocks adopted by the survivor or refused, never silently dropped (see `reconcile` below). It touches two entities and proves both revisions, that the survivor is not itself a redirect
 // (no chain grows, no cycle forms), that the retired Film is not already redirected and has no generation or EPG history, all in the same
 // batch. Different trusted values of one scheme need `evidence.verified === true` (ADR 0009); `tmdb` and `tmdb_tv` are different schemes.
-// input: {from, to, expected:{from, to}, at, evidence?:{verified?}}. A repeated merge of an already redirected id is a no-op.
+// input: {from, to, expected:{from, to}, at, evidence?:{verified?}, resolve?:{metadata?, localization?, fingerprint?, prediction?}} where a value
+// is 'survivor' or 'retired': the caller's explicit choice when both Films hold different data of that kind. A repeated merge of an already
+// redirected id is a no-op.
 export async function mergeFilms(env,input){
  const from=filmId(input?.from),to=filmId(input?.to),at=text(input?.at);
  if(from===to)throw failed('film_person_invalid');
@@ -150,10 +154,12 @@ export async function mergeFilms(env,input){
  s.push(["INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) SELECT 'film:'||?||':'||json_object('reason',reason,'value',value,'source',source),'film',?,value,source,provenance_json,authority,reason,at FROM localization_conflict WHERE entity_kind='film' AND entity_id=? ON CONFLICT(id) DO NOTHING",[to,to,from]]);
  s.push(['INSERT INTO watchlist_film (film_id,updated_at) SELECT ?,updated_at FROM watchlist_film WHERE film_id=? ON CONFLICT(film_id) DO NOTHING',[to,from]]);
  s.push(['UPDATE film_redirect SET to_film_id=? WHERE to_film_id=? AND from_id<>?',[to,from,to]]);
+ const discarded=[];
+ for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded))s.push(item);
  for(const sql of [
   'DELETE FROM film_person_credit WHERE film_id=?',
-  'DELETE FROM film_metadata WHERE film_id=?',
   'DELETE FROM film_alias WHERE film_id=?',
+  'DELETE FROM film_metadata WHERE film_id=?',
   'DELETE FROM film_dimension WHERE film_id=?',
   'DELETE FROM film_sync_state WHERE film_id=?',
   'DELETE FROM watchlist_film WHERE film_id=?',
@@ -164,5 +170,55 @@ export async function mergeFilms(env,input){
  s.push([BUMP,['film',to,at]]);
  s.push([BUMP,['film',from,at]]);
  await commit(env,gate,s,entities);
- return {merged:true,from,to,revisions:{from:expectedFrom+1,to:expectedTo+1}};
+ return {merged:true,from,to,revisions:{from:expectedFrom+1,to:expectedTo+1},discarded};
+}
+
+// What the retired Film holds that the survivor would lose. Nothing is dropped silently:
+// - film_metadata: moved when the survivor has none; dropped when identical; otherwise the batch is refused unless the caller chose
+//   `resolve.metadata` ('survivor' drops the retired body and says so in `discarded`, 'retired' replaces the survivor's).
+// - film_dimension: identity and metadata (derived lifecycle state) are the survivor's when it has one and moved otherwise. A localization is
+//   moved when the survivor has none, dropped when identical, and when different the survivor keeps its own with a localization_conflict row
+//   for the other value, except that a reviewed or owner value of the retired Film that the survivor would not keep is refused unless
+//   `resolve.localization` chose.
+//   fingerprint and prediction rows are moved, dropped when identical, otherwise refused unless chosen with `resolve.fingerprint` / `.prediction`.
+// - film_sync_state (a freshness clock): moved when the survivor has none, otherwise the survivor's stays.
+async function reconcile(db,from,to,resolve,at,discarded){
+ const out=[];
+ const [fromMeta,toMeta]=await Promise.all([one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[from]),one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[to])]);
+ const choice=(kind)=>{const value=resolve?.[kind];if(value!==undefined&&value!=='survivor'&&value!=='retired')throw failed('film_person_invalid');return value;};
+ if(fromMeta){
+  if(!toMeta)out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);
+  else if(fromMeta.payload_json!==toMeta.payload_json||fromMeta.content_sha256!==toMeta.content_sha256){
+   const pick=choice('metadata');
+   if(!pick)throw failed('film_person_data_conflict');
+   if(pick==='retired'){out.push(['DELETE FROM film_metadata WHERE film_id=?',[to]]);out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);discarded.push('metadata:survivor');}
+   else discarded.push('metadata:retired');
+  }
+ }
+ const [fromDims,toDims]=await Promise.all([many(db,'SELECT * FROM film_dimension WHERE film_id=?',[from]),many(db,'SELECT * FROM film_dimension WHERE film_id=?',[to])]);
+ const held=new Map(toDims.map(row=>[row.dimension,row]));
+ const same=(left,right)=>['status','source','source_version','provenance_json','value','authority'].every(key=>(left[key]??null)===(right[key]??null));
+ const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
+ for(const row of fromDims){
+  const other=held.get(row.dimension);
+  const move=()=>out.push(['UPDATE film_dimension SET film_id=? WHERE film_id=? AND dimension=?',[to,from,row.dimension]]);
+  if(!other){move();continue;}
+  if(same(row,other))continue;
+  if(row.dimension==='identity'||row.dimension==='metadata')continue;
+  if(row.dimension==='localization'){
+   const pick=choice('localization');
+   const conflict=(value,source,provenance,authority,reason)=>out.push(["INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) VALUES (?,'film',?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",['film-merge:'+to+':'+from+':'+reason,to,value??null,source??null,provenance??null,authority??null,reason,at]]);
+   if(pick==='retired'){out.push(['DELETE FROM film_dimension WHERE film_id=? AND dimension=?',[to,'localization']]);move();conflict(other.value,other.source,other.provenance_json,other.authority,'merge_kept_retired');discarded.push('localization:survivor');continue;}
+   // Without a choice the survivor keeps its own value and the other is recorded as a conflict, unless the retired Film's value is reviewed or owner: then it would be lost and the batch is refused.
+   if(pick==='survivor'||(!pick&&!strong(row))){conflict(row.value,row.source,row.provenance_json,row.authority,'merge_kept_survivor');if(pick==='survivor')discarded.push('localization:retired');continue;}
+   throw failed('film_person_data_conflict');
+  }
+  const pick=choice(row.dimension);
+  if(!pick)throw failed('film_person_data_conflict');
+  if(pick==='retired'){out.push(['DELETE FROM film_dimension WHERE film_id=? AND dimension=?',[to,row.dimension]]);move();discarded.push(row.dimension+':survivor');}
+  else discarded.push(row.dimension+':retired');
+ }
+ const [fromSync,toSync]=await Promise.all([one(db,'SELECT film_id FROM film_sync_state WHERE film_id=?',[from]),one(db,'SELECT film_id FROM film_sync_state WHERE film_id=?',[to])]);
+ if(fromSync&&!toSync)out.push(['UPDATE film_sync_state SET film_id=? WHERE film_id=?',[to,from]]);
+ return out;
 }

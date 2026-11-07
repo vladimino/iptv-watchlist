@@ -84,7 +84,8 @@ export async function transitionAuthority(env,{from,to,expectedGeneration}){
  const [mode,cutover]=MARKER[to],[fromMode,fromCutover]=MARKER[from];
  const statements=[
   ['UPDATE film_person_authority SET mode=?, cutover=?, generation=generation+1 WHERE id=1 AND mode=? AND cutover=? AND generation=?',[mode,cutover,fromMode,fromCutover,expectedGeneration]],
-  ['UPDATE film_person_cas SET ok=changes() WHERE id=1',[]],
+  // The fence must hold even if the fence row vanished: it is an upsert that fails its CHECK unless the row exists and the move changed one row.
+  ['INSERT INTO film_person_cas (id,ok) VALUES (1,(SELECT CASE WHEN EXISTS (SELECT 1 FROM film_person_cas WHERE id=1) AND changes()>=1 THEN 1 ELSE 0 END)) ON CONFLICT(id) DO UPDATE SET ok=excluded.ok',[]],
  ];
  try{await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
  catch(error){

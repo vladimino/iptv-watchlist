@@ -108,7 +108,8 @@ const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.
  };
  await broken(f=>sqlite(f,'DROP TABLE canonical_revision'),'missing table');
  await broken(f=>sqlite(f,'DROP TRIGGER film_person_authority_no_delete;DELETE FROM film_person_authority'),'missing marker row');
- await broken(f=>sqlite(f,'DELETE FROM film_person_cas'),'missing fence row');
+ refused(database(),'DELETE FROM film_person_cas',/film_person_cas_delete/);
+ await broken(f=>sqlite(f,'DROP TRIGGER film_person_cas_no_delete;DELETE FROM film_person_cas'),'missing fence row');
  await broken(f=>sqlite(f,'DELETE FROM film_person_baseline'),'missing baseline row');
  const reads={DB:{prepare(text){return {bind(){return {first:async()=>{if(/film_person_authority/.test(text))throw new Error('D1_ERROR: network');return {version:13};},all:async()=>({results:[{name:'film_person_authority'},{name:'film_person_cas'},{name:'film_person_baseline'},{name:'canonical_revision'}]})};}};}}};
  await assert.rejects(()=>Authority.readAuthority(reads),error=>error.code==='film_person_unavailable','read error');
@@ -274,7 +275,7 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
  await makeFilm('film:to','tmdb:1b',[{scheme:'letterboxd',value:'lid1',trusted:true}],[{personId:'person:actor/a3',role:'actor'}]);
  sqlite(file,"INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:from','x')");
  const merged=await mergeFilms(env,{from:'film:from',to:'film:to',expected:{from:1,to:1},at:AT,evidence:{verified:true}});
- assert.deepEqual(merged,{merged:true,from:'film:from',to:'film:to',revisions:{from:2,to:2}});
+ assert.deepEqual(merged,{merged:true,from:'film:from',to:'film:to',revisions:{from:2,to:2},discarded:[]});
  assert.equal(one(file,"SELECT to_film_id FROM film_redirect WHERE from_id='film:from'"),'film:to');
  assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:from'"),0);
  assert.deepEqual(rows(file,"SELECT person_id,ordinal FROM film_person_credit WHERE film_id='film:to' AND role='actor' ORDER BY ordinal"),[{person_id:'person:actor/a3',ordinal:0},{person_id:'person:actor/a1',ordinal:1},{person_id:'person:actor/a2',ordinal:2}]);
@@ -332,13 +333,111 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
  assert.deepEqual({credits:rows(file,'SELECT * FROM film_person_credit ORDER BY film_id,person_id,role'),ids:rows(file,'SELECT * FROM film_external_id ORDER BY film_id,scheme,value'),aliases:rows(file,'SELECT * FROM film_alias ORDER BY film_id,value'),redirects:rows(file,'SELECT * FROM film_redirect ORDER BY from_id'),revisions:rows(file,'SELECT * FROM canonical_revision ORDER BY kind,id')},snapshot,'a failed merge changes nothing');
 }
 
+// 10b. The merge never drops the retired Film's metadata, dimensions or sync clock silently: moved, identical, refused, or an explicit choice.
+{
+ const file=open();const db=d1Standin(file),env={DB:db};
+ const make=async(id,identity,value)=>mutateFilm(env,filmInput(id,0,{film:{canonicalIdentity:identity,externalIds:[{scheme:'tmdb',value,trusted:true}],aliases:[]}}));
+ const meta=(film,payload)=>`INSERT INTO film_metadata (film_id,schema_version,genres_json,payload_json,content_sha256,updated_at) VALUES ('${film}',1,'[]','${payload}','sha-${payload}','x')`;
+ const dim=(film,dimension,status,value,authority='dictionary')=>`INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,updated_at) VALUES ('${film}','${dimension}','${status}','src','1','{}',${value===null?'NULL':"'"+value+"'"},'${authority}',0,'x')`;
+ const merge=(from,to,extra={})=>mergeFilms(env,{from,to,expected:{from:1,to:1},at:AT,evidence:{verified:true},...extra});
+ const snap=()=>({meta:rows(file,'SELECT film_id,payload_json FROM film_metadata ORDER BY film_id'),dims:rows(file,'SELECT film_id,dimension,status,value,authority FROM film_dimension ORDER BY film_id,dimension'),sync:rows(file,'SELECT film_id FROM film_sync_state ORDER BY film_id'),films:rows(file,'SELECT id FROM film ORDER BY id'),conflicts:rows(file,'SELECT id FROM localization_conflict ORDER BY id'),revisions:rows(file,'SELECT * FROM canonical_revision ORDER BY kind,id')});
+ // Retired-only data moves to the survivor.
+ await make('film:a1','tmdb:101',101);await make('film:a2','tmdb:102',102);
+ sqlite(file,[meta('film:a1','body-a1'),dim('film:a1','localization','reviewed','Название','owner'),dim('film:a1','fingerprint','present','fp-1'),dim('film:a1','prediction','present','p-1'),dim('film:a1','identity','resolved',null),"INSERT INTO film_sync_state (film_id,metadata_at) VALUES ('film:a1','2026-11-01')"].join(';'));
+ const first=await merge('film:a1','film:a2');
+ assert.deepEqual(first.discarded,[]);
+ assert.deepEqual(rows(file,"SELECT film_id,payload_json FROM film_metadata"),[{film_id:'film:a2',payload_json:'body-a1'}]);
+ assert.deepEqual(rows(file,"SELECT dimension,value,authority FROM film_dimension WHERE film_id='film:a2' ORDER BY dimension"),[{dimension:'fingerprint',value:'fp-1',authority:'dictionary'},{dimension:'identity',value:null,authority:'dictionary'},{dimension:'localization',value:'Название',authority:'owner'},{dimension:'prediction',value:'p-1',authority:'dictionary'}]);
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_dimension WHERE film_id='film:a1'"),0);
+ assert.equal(one(file,"SELECT film_id FROM film_sync_state"),'film:a2','the sync clock moves');
+ // Identical data on both sides is dropped without a trace; the survivor's identity and sync clock stay.
+ await make('film:b1','tmdb:111',111);await make('film:b2','tmdb:112',112);
+ sqlite(file,[meta('film:b1','same'),meta('film:b2','same'),dim('film:b1','localization','reviewed','Одно','owner'),dim('film:b2','localization','reviewed','Одно','owner'),dim('film:b1','identity','resolved','retired-identity'),dim('film:b2','identity','resolved','survivor-identity'),"INSERT INTO film_sync_state (film_id,metadata_at) VALUES ('film:b1','old'),('film:b2','new')"].join(';'));
+ assert.deepEqual((await merge('film:b1','film:b2')).discarded,[]);
+ assert.equal(one(file,"SELECT value FROM film_dimension WHERE film_id='film:b2' AND dimension='identity'"),'survivor-identity');
+ assert.equal(one(file,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:b2'"),'new');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_sync_state WHERE film_id='film:b1'"),0);
+ // Different metadata: refused whole without a choice, nothing persisted.
+ await make('film:c1','tmdb:121',121);await make('film:c2','tmdb:122',122);
+ sqlite(file,[meta('film:c1','retired-body'),meta('film:c2','survivor-body')].join(';'));
+ let before=snap();
+ await assert.rejects(()=>merge('film:c1','film:c2'),error=>error.code==='film_person_data_conflict');
+ assert.deepEqual(snap(),before,'a refused merge changes nothing');
+ await assert.rejects(()=>merge('film:c1','film:c2',{resolve:{metadata:'both'}}),error=>error.code==='film_person_invalid');
+ const kept=await merge('film:c1','film:c2',{resolve:{metadata:'survivor'}});
+ assert.deepEqual(kept.discarded,['metadata:retired']);assert.equal(one(file,"SELECT payload_json FROM film_metadata WHERE film_id='film:c2'"),'survivor-body');
+ await make('film:d1','tmdb:131',131);await make('film:d2','tmdb:132',132);
+ sqlite(file,[meta('film:d1','retired-body'),meta('film:d2','survivor-body')].join(';'));
+ const swapped=await merge('film:d1','film:d2',{resolve:{metadata:'retired'}});
+ assert.deepEqual(swapped.discarded,['metadata:survivor']);assert.equal(one(file,"SELECT payload_json FROM film_metadata WHERE film_id='film:d2'"),'retired-body');
+ // Localization: an automatic retired value loses to the survivor and is recorded; a reviewed or owner retired value is refused unless chosen.
+ await make('film:e1','tmdb:141',141);await make('film:e2','tmdb:142',142);
+ sqlite(file,[dim('film:e1','localization','provisional','Авто','automatic'),dim('film:e2','localization','reviewed','Владелец','owner')].join(';'));
+ await merge('film:e1','film:e2');
+ assert.equal(one(file,"SELECT value FROM film_dimension WHERE film_id='film:e2' AND dimension='localization'"),'Владелец');
+ assert.deepEqual(rows(file,"SELECT reason,value,entity_id FROM localization_conflict WHERE entity_id='film:e2'"),[{reason:'merge_kept_survivor',value:'Авто',entity_id:'film:e2'}]);
+ await make('film:f1','tmdb:151',151);await make('film:f2','tmdb:152',152);
+ sqlite(file,[dim('film:f1','localization','reviewed','Владелец ушедший','owner'),dim('film:f2','localization','provisional','Авто','automatic')].join(';'));
+ before=snap();
+ await assert.rejects(()=>merge('film:f1','film:f2'),error=>error.code==='film_person_data_conflict','an owner value the survivor would not keep');
+ assert.deepEqual(snap(),before);
+ const owner=await merge('film:f1','film:f2',{resolve:{localization:'retired'}});
+ assert.deepEqual(owner.discarded,['localization:survivor']);
+ assert.deepEqual(rows(file,"SELECT value,authority FROM film_dimension WHERE film_id='film:f2' AND dimension='localization'"),[{value:'Владелец ушедший',authority:'owner'}]);
+ assert.equal(one(file,"SELECT COUNT(*) FROM localization_conflict WHERE reason='merge_kept_retired'"),1);
+ await make('film:g1','tmdb:161',161);await make('film:g2','tmdb:162',162);
+ sqlite(file,[dim('film:g1','localization','reviewed','Один','owner'),dim('film:g2','localization','reviewed','Другой','owner')].join(';'));
+ await assert.rejects(()=>merge('film:g1','film:g2'),error=>error.code==='film_person_data_conflict','two different owner values');
+ const both=await merge('film:g1','film:g2',{resolve:{localization:'survivor'}});
+ assert.deepEqual(both.discarded,['localization:retired']);
+ // Fingerprint and prediction rows: refused when different unless chosen.
+ await make('film:h1','tmdb:171',171);await make('film:h2','tmdb:172',172);
+ sqlite(file,[dim('film:h1','prediction','present','p-retired'),dim('film:h2','prediction','present','p-survivor')].join(';'));
+ await assert.rejects(()=>merge('film:h1','film:h2'),error=>error.code==='film_person_data_conflict');
+ assert.deepEqual((await merge('film:h1','film:h2',{resolve:{prediction:'survivor'}})).discarded,['prediction:retired']);
+}
+
+// 10c. The fence row cannot be bypassed: if it (or the marker) vanishes between the read and the write, every assertion fails inside the batch.
+{
+ const attempt=async(label,prepare,run)=>{
+  const file=open();people(file);
+  let armed=false;
+  const db=d1Standin(file,{onBatch:async()=>{if(armed){armed=false;sqlite(file,prepare);}}}),env={DB:db};
+  await mutateFilm(env,filmInput('film:tmdb:603',0));
+  await mutateFilm(env,filmInput('film:tmdb:700',0,{film:{canonicalIdentity:'tmdb:700',externalIds:[{scheme:'tmdb',value:700,trusted:true}],aliases:[]}}));
+  const before={films:rows(file,'SELECT id FROM film ORDER BY id'),aliases:rows(file,'SELECT * FROM film_alias ORDER BY film_id,value'),revisions:rows(file,'SELECT * FROM canonical_revision ORDER BY kind,id'),redirects:rows(file,'SELECT * FROM film_redirect')};
+  armed=true;
+  await assert.rejects(()=>run(env),error=>['film_person_fence','film_person_unavailable','film_person_precondition'].includes(error.code),label);
+  assert.deepEqual({films:rows(file,'SELECT id FROM film ORDER BY id'),aliases:rows(file,'SELECT * FROM film_alias ORDER BY film_id,value'),revisions:rows(file,'SELECT * FROM canonical_revision ORDER BY kind,id'),redirects:rows(file,'SELECT * FROM film_redirect')},before,label+': nothing persisted');
+ };
+ const drop='DROP TRIGGER film_person_cas_no_delete;DELETE FROM film_person_cas';
+ await attempt('fence row deleted before a film mutation',drop,env=>mutateFilm(env,filmInput('film:tmdb:603',1,{film:{aliases:[{kind:'title',value:'Late alias'}]}})));
+ await attempt('fence row deleted before a person mutation',drop,env=>mutatePerson(env,{id:'person:actor/a1',expectedRevision:0,at:AT,person:{roleId:'actor/a1',contractVersion:1,aliases:[{kind:'name',value:'Late'}]}}));
+ await attempt('fence row deleted before a merge',drop,env=>mergeFilms(env,{from:'film:tmdb:603',to:'film:tmdb:700',expected:{from:1,to:1},at:AT,evidence:{verified:true}}));
+ await attempt('marker row deleted before a film mutation','DROP TRIGGER film_person_authority_no_delete;DELETE FROM film_person_authority',env=>mutateFilm(env,filmInput('film:tmdb:603',1,{film:{aliases:[{kind:'title',value:'Late alias'}]}})));
+ // The marker move has the same property.
+ const file=database();sqlite(file,"UPDATE film_person_baseline SET state='loading' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1");
+ let armed=true;
+ const env={DB:d1Standin(file,{onBatch:async()=>{if(armed){armed=false;sqlite(file,drop);}}})};
+ await assert.rejects(()=>Authority.transitionAuthority(env,{from:'r2',to:'prepared',expectedGeneration:0}),error=>['film_person_fence','film_person_unavailable'].includes(error.code));
+ assert.deepEqual(rows(file,'SELECT mode,generation FROM film_person_authority'),[{mode:'r2',generation:0}],'the marker did not move without a fence');
+ // And a generation that moved under the caller refuses the move, with the fence row intact.
+ const file2=database();sqlite(file2,"UPDATE film_person_baseline SET state='loading' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1");
+ let moved=true;
+ const env2={DB:d1Standin(file2,{onBatch:async()=>{if(moved){moved=false;sqlite(file2,"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1");}}})};
+ await assert.rejects(()=>Authority.transitionAuthority(env2,{from:'r2',to:'prepared',expectedGeneration:0}),error=>error.code==='film_person_fence');
+ assert.equal(one(file2,'SELECT generation FROM film_person_authority'),1);
+}
+
 // 11. The foundation stays inactive: it is not bundled, not imported by the Worker, and writes nothing it does not own.
 {
  const mutations=fs.readFileSync('src/canonical-mutations.js','utf8'),authority=fs.readFileSync('src/film-person-authority.js','utf8');
  assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/canonical-mutations|film-person-authority/);
  for(const file of ['src/worker.js','src/d1-enrichment.js','src/canonical-repository.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/canonical-mutations|film-person-authority/,file);
  assert.doesNotMatch(mutations+authority,/\bBUCKET\b|\bfetch\b|wrangler/);
- assert.doesNotMatch(mutations,/INSERT INTO film_dimension|UPDATE film_dimension|INSERT INTO person_dimension|INSERT INTO film_metadata|UPDATE watchlist_film/,'no localization, dimension, metadata or prediction write');
+ const roster=mutations.slice(0,mutations.indexOf('export async function mergeFilms'));
+ assert.doesNotMatch(roster,/INSERT INTO film_dimension|UPDATE film_dimension|INSERT INTO person_dimension|INSERT INTO film_metadata|UPDATE film_metadata|UPDATE watchlist_film/,'a film or person write touches no localization, dimension, metadata or prediction');
+ assert.doesNotMatch(mutations,/INSERT INTO film_dimension|INSERT INTO person_dimension|INSERT INTO film_metadata/,'nothing is created: a merge only moves what exists');
  assert.doesNotMatch(mutations,/DELETE FROM film_person_credit WHERE film_id=\?'\s*,\s*\[id\]/,'no roster delete-and-reinsert');
  assert.match(fs.readFileSync('migrations/README.md','utf8'),/0013_film_person_authority/);
 }

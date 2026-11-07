@@ -14,7 +14,9 @@
 -- Allowed moves, each by one generation: r2 -> prepared, prepared -> r2, prepared -> d1, d1 -> d1/held and
 -- d1/held -> d1. A move out of r2 needs a verified baseline, and a verified baseline cannot be reopened while the marker is prepared or d1, so prepared and d1 always stand on a verified one. There is deliberately no move out of d1 or
 -- d1/held to r2: a recovery after activation is a separately approved reverse reconciliation, not a flag flip.
--- film_person_cas is the batch fence (a statement that sets ok to 0 fails the CHECK and rolls the batch back).
+-- film_person_cas is the batch fence. Every assertion is an upsert of ok = 1 or 0 whose value also requires the fence row to
+-- exist when the statement runs, so a deleted row makes the statement fail its CHECK and roll the batch back (a zero-row UPDATE
+-- would pass silently). The row cannot be deleted by a trigger; the assertions do not rely on that.
 -- canonical_revision is the per-entity revision: an entity without a row has revision 0 and every fenced mutation
 -- moves it by exactly one. The projector does not write it.
 -- film_person_baseline is the gate a partial load cannot pass: the state is empty, loading or verified.
@@ -104,6 +106,13 @@ BEFORE DELETE ON film_person_authority
 FOR EACH ROW
 BEGIN
  SELECT RAISE(ABORT, 'film_person_authority_delete');
+END;
+
+CREATE TRIGGER film_person_cas_no_delete
+BEFORE DELETE ON film_person_cas
+FOR EACH ROW
+BEGIN
+ SELECT RAISE(ABORT, 'film_person_cas_delete');
 END;
 
 CREATE TRIGGER film_person_baseline_transition
