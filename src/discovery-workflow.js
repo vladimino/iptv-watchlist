@@ -17,7 +17,7 @@ const DISCOVERY_WORKFLOW_RECOVERY_LIMIT=4;
 const DISCOVERY_WORKFLOW_RECOVERY_BACKOFF_MS=[60000,300000,900000,3600000];
 const DISCOVERY_WORKFLOW_FRESH_MS=15*60*1000;
 const DISCOVERY_WORKFLOW_TERMINAL=new Set(['complete','backlog_empty','stale_generation','executor_not_workflow','recovery_exhausted']);
-const DISCOVERY_WORKFLOW_RECOVERABLE=new Set(['no_progress','write_uncertain','step_cap','rollover_uncertain','no_continuation']);
+const DISCOVERY_WORKFLOW_RECOVERABLE=new Set(['no_progress','write_uncertain','step_cap','rollover_uncertain','no_continuation','step_failure']);
 function discoveryWorkflowChunkLimit(){return DISCOVERY_WORKFLOW_CHUNK_LIMIT;}
 // Counts the statements prepared through env.DB. Statements and batches are passed through untouched, because a
 // native D1 batch only accepts native prepared statements.
@@ -50,6 +50,27 @@ function workflowFailureClass(error){
 }
 function workflowFailureName(error){let name='';try{name=typeof error==='object'&&error?String(error.name??''):'';}catch{}return WORKFLOW_FAILURE_NAMES.has(name)?name:(name?'other':'none');}
 function workflowFailureCode(error){let code='';try{code=error&&typeof error==='object'?String(error.code??''):'';}catch{}return WORKFLOW_FAILURE_CODES.has(code)?code:(code?'other':null);}
+// AIR-364 (ADR 0097). A step that fails after the platform's own retries may be handled by the instance itself, but only
+// when the failure is positively recognised as transient infrastructure: the `discovery_unavailable` code, or a transient
+// class of the error or of its cause. Hard authority and fence codes, an unclassified or empty error and a non-error are
+// never recovered here; they end the instance as before and the hourly reconcile decides.
+const WORKFLOW_TRANSIENT_CLASSES=new Set(['network_connection_lost','timeout','limit_exceeded','overloaded','d1_reset']);
+const WORKFLOW_HARD_CODES=new Set(['discovery_fence','discovery_incomplete','discovery_not_authoritative','discovery_conflict','discovery_lease','discovery_bounded']);
+function workflowStepRecoverable(error,hint){
+ const probe=value=>{
+  if(!value||typeof value!=='object')return null;
+  const code=workflowFailureCode(value);
+  if(code&&WORKFLOW_HARD_CODES.has(code))return false;
+  if(code==='discovery_unavailable')return true;
+  return WORKFLOW_TRANSIENT_CLASSES.has(workflowFailureClass(value))?true:null;
+ };
+ try{
+  const own=probe(error),cause=probe(error?.cause);
+  if(own===false||cause===false)return false;
+  if(own===true||cause===true)return true;
+  return hint===true;
+ }catch{return false;}
+}
 // One secret-free record of why a step failed. The platform keeps only the wrapper message of the last attempt.
 function logWorkflowFailure(step,error,meter,total){
  try{console.error(JSON.stringify({event:'discovery_workflow_step_failed',step:String(step).replace(/[^a-z-]/g,'').slice(0,24),code:workflowFailureCode(error),name:workflowFailureName(error),class:workflowFailureClass(error),causeName:workflowFailureName(error?.cause),causeClass:workflowFailureClass(error?.cause),statements:meter?.statements??null,batches:meter?.batches??null,instanceStatements:Number.isFinite(total)?total:null}));}catch{}
@@ -351,11 +372,12 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
  // Outputs written before this change carry no count and add nothing.
  const meter={statements:0,batches:0};
  const tally={total:0};
+ const failure={recoverable:false};
  const env=meteredEnv(rawEnv,meter);
  const accounted=(name,fn)=>async()=>{
   const before=meter.statements;
   try{const value=await fn();return {__counted:1,value,spent:meter.statements-before};}
-  catch(error){logWorkflowFailure(name,error,meter,tally.total);throw error;}
+  catch(error){logWorkflowFailure(name,error,meter,tally.total);failure.recoverable=workflowStepRecoverable(error,false);throw error;}
  };
  const pinned=payload?.programmeRunId||null;
  const series=Number.isInteger(payload?.series)&&payload.series>=0?payload.series:0;
@@ -369,50 +391,87 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
   if(result&&result.__counted===1){tally.total+=Number(result.spent)||0;return result.value;}
   return result;
  };
- for(;;){
-  const gate=await doStep('owner',()=>workflowOwnerGate(env,ownId,series));
-  if(!gate.owned)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
-  if(steps>=DISCOVERY_WORKFLOW_STEP_CAP){
-   return doStep('cap',()=>stopOwnedWorkflow(env,ownId,'step_cap',pinned,series,chunks));
+ // AIR-364 (ADR 0097). A recoverable step failure, after the platform's retries, is armed once through the same owner CAS and
+ // `workflowFailure` backoff as every other recovery, then the instance sleeps durably until `dueAt` and asks the existing
+ // `ensureDiscoveryWorkflow` for the successor, which re-reads authority, generation, executor record and the recovery gate. The
+ // hourly reconcile stays the fallback. A failure of the arming step itself is not caught here: the instance ends as before.
+ const recoverAfterStepFailure=async()=>{
+  const armed=await doStep('recover-arm',async()=>{
+   const owned=await workflowOwnerGate(env,ownId,series);
+   if(!owned.owned)return {armed:false,reason:'not_owner'};
+   await stopOwnedWorkflow(env,ownId,'step_failure',pinned,series,chunks);
+   const record=(await readWorkflowState(env)).record;
+   if(record?.instanceId!==ownId||record.series!==series)return {armed:false,reason:'not_owner'};
+   return {armed:true,quarantined:record.recovery?.quarantined===true||record.reason==='recovery_exhausted',dueAt:record.recovery?.dueAt||null};
+  });
+  if(!armed.armed)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+  if(armed.quarantined||!Number.isFinite(Date.parse(armed.dueAt||'')))return {stopped:true,reason:'recovery_exhausted',chunks,instanceId:ownId};
+  for(let attempt=0;attempt<3;attempt++){
+   await step.sleepUntil(stepName('recover-sleep'),new Date(armed.dueAt));
+   const woke=await doStep('recover-successor',async()=>{
+    const owned=await workflowOwnerGate(env,ownId,series);
+    if(!owned.owned)return {done:true,started:false,reason:'not_owner'};
+    // A successor is only ever opened for the generation this instance was pinned to. A newer generation is started by its own
+    // commit and the reconcile, never by a stale instance.
+    const admitted=await discoveryWorkflowAdmission(env);
+    if(!admitted.ok)return {done:true,started:false,reason:admitted.reason};
+    if(admitted.programmeRunId!==pinned)return {done:true,started:false,reason:'stale_generation'};
+    const outcome=await ensureDiscoveryWorkflow(env);
+    return {done:outcome.reason!=='recovery_waiting',started:outcome.started===true,reason:outcome.reason||null};
+   });
+   if(woke.done)return {stopped:true,reason:woke.started?'recovered':(woke.reason||'recovery_stopped'),chunks,instanceId:ownId};
   }
-  const plan=await doStep('plan',async()=>workflowPlan(await workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,tally.total)));
-  if(plan.action==='stop')return doStep('stop',()=>stopOwnedWorkflow(env,ownId,plan.reason,pinned,series,chunks));
-  if(plan.action==='wait'){
-   const until=Number.isFinite(plan.until)?plan.until:Date.now()+1000;
-   await doStep('wait',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:plan.reason,waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
-   await step.sleepUntil(stepName('sleep'),new Date(until));
-   continue;
-  }
-  if(plan.action==='renew'){
-   const renewed=await doStep('renew',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {renewed:false,reason:'not_owner'};return renewDiscoverySeries(env,pinned);});
-   if(renewed.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
-   if(renewed.renewed){uncertainWrites=0;continue;}
-   if(renewed.reason==='unknown_remaining'||renewed.reason==='backlog_empty'||renewed.reason==='stale_generation')continue;
-   uncertainWrites++;
-   await step.sleepUntil(stepName('renew-sleep'),new Date(Date.now()+1000));
-   continue;
-  }
-  if(plan.action==='rollover'){
-   const rolled=await doStep('rollover',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {started:false,reason:'not_owner'};return rolloverDiscoveryWorkflow(env,pinned,series);});
-   if(rolled.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
-   if(!rolled.started)await doStep('rollover-stop',()=>stopOwnedWorkflow(env,ownId,'rollover_uncertain',pinned,series,chunks));
-   return {stopped:true,reason:rolled.started?'rollover':'rollover_uncertain',chunks,instanceId:ownId,successor:rolled};
-  }
-  const outcome=await doStep('chunk',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {notOwner:true,progress:false,busy:false};return runWorkflowChunk(env,meter);});
-  if(outcome.notOwner)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
-  if(outcome.busy){
-   const until=Date.parse(outcome.until||'')||Date.now()+1000;
-   await doStep('busy',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
-   await step.sleepUntil(stepName('busy-sleep'),new Date(until));
-   continue;
-  }
-  if(!outcome.progress){
-   stalls++;
-   if(stalls>=DISCOVERY_WORKFLOW_STALL_LIMIT)return doStep('stall',()=>stopOwnedWorkflow(env,ownId,'no_progress',pinned,series,chunks));
-   await step.sleepUntil(stepName('stall-sleep'),new Date(Date.now()+1000));
-   continue;
-  }
-  stalls=0;uncertainWrites=0;chunks++;
-  await doStep('progress',()=>settleWorkflowIfOwner(env,ownId,{phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null}));
+  return {stopped:true,reason:'recovery_waiting',chunks,instanceId:ownId};
+ };
+ try{
+   for(;;){
+    const gate=await doStep('owner',()=>workflowOwnerGate(env,ownId,series));
+    if(!gate.owned)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+    if(steps>=DISCOVERY_WORKFLOW_STEP_CAP){
+     return doStep('cap',()=>stopOwnedWorkflow(env,ownId,'step_cap',pinned,series,chunks));
+    }
+    const plan=await doStep('plan',async()=>workflowPlan(await workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,tally.total)));
+    if(plan.action==='stop')return doStep('stop',()=>stopOwnedWorkflow(env,ownId,plan.reason,pinned,series,chunks));
+    if(plan.action==='wait'){
+     const until=Number.isFinite(plan.until)?plan.until:Date.now()+1000;
+     await doStep('wait',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:plan.reason,waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
+     await step.sleepUntil(stepName('sleep'),new Date(until));
+     continue;
+    }
+    if(plan.action==='renew'){
+     const renewed=await doStep('renew',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {renewed:false,reason:'not_owner'};return renewDiscoverySeries(env,pinned);});
+     if(renewed.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+     if(renewed.renewed){uncertainWrites=0;continue;}
+     if(renewed.reason==='unknown_remaining'||renewed.reason==='backlog_empty'||renewed.reason==='stale_generation')continue;
+     uncertainWrites++;
+     await step.sleepUntil(stepName('renew-sleep'),new Date(Date.now()+1000));
+     continue;
+    }
+    if(plan.action==='rollover'){
+     const rolled=await doStep('rollover',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {started:false,reason:'not_owner'};return rolloverDiscoveryWorkflow(env,pinned,series);});
+     if(rolled.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+     if(!rolled.started)await doStep('rollover-stop',()=>stopOwnedWorkflow(env,ownId,'rollover_uncertain',pinned,series,chunks));
+     return {stopped:true,reason:rolled.started?'rollover':'rollover_uncertain',chunks,instanceId:ownId,successor:rolled};
+    }
+    const outcome=await doStep('chunk',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {notOwner:true,progress:false,busy:false};return runWorkflowChunk(env,meter);});
+    if(outcome.notOwner)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+    if(outcome.busy){
+     const until=Date.parse(outcome.until||'')||Date.now()+1000;
+     await doStep('busy',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
+     await step.sleepUntil(stepName('busy-sleep'),new Date(until));
+     continue;
+    }
+    if(!outcome.progress){
+     stalls++;
+     if(stalls>=DISCOVERY_WORKFLOW_STALL_LIMIT)return doStep('stall',()=>stopOwnedWorkflow(env,ownId,'no_progress',pinned,series,chunks));
+     await step.sleepUntil(stepName('stall-sleep'),new Date(Date.now()+1000));
+     continue;
+    }
+    stalls=0;uncertainWrites=0;chunks++;
+    await doStep('progress',()=>settleWorkflowIfOwner(env,ownId,{phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null}));
+   }
+ }catch(error){
+  if(!workflowStepRecoverable(error,failure.recoverable))throw error;
+  return recoverAfterStepFailure();
  }
 }
