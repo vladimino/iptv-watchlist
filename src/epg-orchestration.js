@@ -1,0 +1,417 @@
+// AIR-348 / ADR 0100 (on the contract of ADR 0089). The Cloudflare executor of the daily EPG publication, inert until the owner
+// switches the mode. Two D1-owned documents (table epg_orchestration_document, migration 0015) hold everything:
+//  - `mode`: external | switching | cloudflare, the target, the epoch and the drain state. Only the owner's mode switch writes it.
+//    Absent (or the table not applied) means external, epoch 0.
+//  - `control`: the control record (run key, instance, checkpoint, retry budget, cooldown, quarantine, last durable progress).
+//    Only the executor and the owner's quarantine clear write it, and only under the mode revision it was admitted with.
+// Every authoritative published-EPG commit carries `epgFence` (the mode document's revision at admission), asserted in the same
+// D1 batch by src/published-epg.js, so a commit admitted before the owner closed admission cannot land after it.
+// The executor reuses the existing pipeline: one action is one `/api/sync/start` or one `/api/sync/metadata|epg` step, called
+// in-process through postSync with the caller `internal`. It never fetches a source itself and never repeats a publication
+// blind: after an unknown outcome the next action reads sync.json and the D1 pointer first. The cron `ensure` only reads a
+// document and creates at most one Workflow instance per Madrid day and series; it does not download, step or publish.
+// Discovery gets its intent from the existing commit-time handoff (queueDiscovery inside the completing step). Read model:
+// readModel(). Contract: docs/reference/orchestration-reliability.md.
+// Concatenated into the Worker like the other server modules: one global.
+const EpgOrchestration=(()=>{
+ const TABLE='epg_orchestration_document';
+ const MODES=['external','switching','cloudflare'];
+ const STEP_CAP=400,SLEEP_FLOOR_MS=1000,EXTERNAL_FRESH_MS=15*60000,PAUSE_MS=6*3600000,CONTROL_ATTEMPTS=4,ALIVE=['running','waiting','queued','paused'],ENDED=['complete','errored','terminated','absent'];
+ const STAGE_RANK={metadata:1,epg:2,seal:3,complete:4},SEAL_RANK={ledger:1,catalog:2,publish:3,finalize:4,queue:5};
+ const iso=ms=>new Date(ms).toISOString();
+ const policy=()=>OrchestrationPolicy;
+ const schedule=()=>policy().EPG_SCHEDULE;
+ const dayOf=ms=>policy().madridDayKey(ms);
+ const instanceId=(runKey,series)=>'epg_'+String(runKey).replace(/-/g,'')+'_'+series;
+ const emptyControl=()=>({schemaVersion:1,runKey:null,series:0,instanceId:null,epoch:null,phase:'idle',runId:null,checkpoint:null,budget:policy().emptyBudget(),cooldownUntil:null,quarantine:null,failure:null,lastDurableProgressAt:null,nextWakeAt:null,lastStep:null,publishedRunId:null,doneAt:null,updatedAt:null});
+ const defaultMode=()=>({schemaVersion:1,mode:'external',target:null,epoch:0,drain:null});
+
+ // ---- the two D1 documents ------------------------------------------------------------------------------------
+ const noTable=error=>/no such table/i.test(String(error?.message||error));
+ async function readDoc(env,key){
+  if(typeof env?.DB?.prepare!=='function')return {schema:false,value:null,revision:null,stored:false,malformed:false};
+  let row;
+  try{row=await env.DB.prepare('SELECT body, revision FROM '+TABLE+' WHERE key=?').bind(key).first();}
+  catch(error){if(noTable(error))return {schema:false,value:null,revision:null,stored:false,malformed:false};throw error;}
+  if(!row)return {schema:true,value:null,revision:null,stored:false,malformed:false};
+  try{return {schema:true,value:JSON.parse(row.body),revision:Number(row.revision),stored:true,malformed:false};}
+  catch{return {schema:true,value:null,revision:Number(row.revision),stored:true,malformed:true};}
+ }
+ // One compare-and-set. `revision` null creates (refused if the key exists); a number replaces that revision only. `modeRevision`
+ // (undefined: no condition) additionally requires the mode document to still be at that revision, null meaning absent.
+ async function casDoc(env,key,revision,value,modeRevision){
+  // Every write carries its own id, so the read-back below can tell this writer's document from an identical one of a competitor.
+  const body=JSON.stringify({...value,writeId:crypto.randomUUID()}),now=iso(Date.now());
+  const cond=modeRevision===undefined?['',[]]:modeRevision===null?[' AND NOT EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='mode')",[]]:[' AND EXISTS (SELECT 1 FROM '+TABLE+" WHERE key='mode' AND revision=?)",[modeRevision]];
+  const statement=revision===null
+   ?env.DB.prepare('INSERT INTO '+TABLE+' (key, body, revision, updated_at) SELECT ?, ?, 1, ? WHERE NOT EXISTS (SELECT 1 FROM '+TABLE+' WHERE key=?)'+cond[0]).bind(key,body,now,key,...cond[1])
+   :env.DB.prepare('UPDATE '+TABLE+' SET body=?, revision=revision+1, updated_at=? WHERE key=? AND revision=?'+cond[0]).bind(body,now,key,revision,...cond[1]);
+  await statement.run();
+  // The write is judged by reading it back, one path for D1 and for the stand-in: the document is ours only if it now holds our
+  // body at the next revision. A lost compare-and-set leaves the other writer's revision and body, and reports false.
+  const row=await env.DB.prepare('SELECT body, revision FROM '+TABLE+' WHERE key=?').bind(key).first();
+  return !!row&&row.body===body&&Number(row.revision)===(revision===null?1:revision+1);
+ }
+ async function readMode(env){
+  const doc=await readDoc(env,'mode');
+  if(!doc.schema)return {record:defaultMode(),revision:null,stored:false,schema:false,malformed:false};
+  if(doc.value==null&&!doc.malformed)return {record:defaultMode(),revision:null,stored:false,schema:true,malformed:false};
+  const v=doc.value;
+  const ok=!doc.malformed&&v&&typeof v==='object'&&!Array.isArray(v)&&MODES.includes(v.mode)&&Number.isInteger(v.epoch)&&v.epoch>=0&&(v.mode!=='switching'||MODES.includes(v.target));
+  return {record:ok?v:null,revision:doc.revision,stored:true,schema:true,malformed:!ok};
+ }
+ async function readControl(env){
+  const doc=await readDoc(env,'control');
+  if(doc.value==null&&!doc.malformed)return {record:emptyControl(),revision:doc.revision,stored:doc.stored,malformed:false};
+  const v=doc.value;
+  const ok=!doc.malformed&&v&&typeof v==='object'&&!Array.isArray(v)&&v.schemaVersion===1&&v.budget&&Number.isInteger(v.budget.consecutive)&&Number.isInteger(v.budget.total);
+  return {record:ok?v:null,revision:doc.revision,stored:true,malformed:!ok};
+ }
+ const fencedEnv=(env,revision)=>({...env,epgFence:{revision}});
+ async function authorityState(env){
+  if(typeof PublishedEpg==='undefined')return {ready:false,error:false};
+  try{const a=await PublishedEpg.readAuthority(env);return {ready:a.ready===true,error:false};}
+  catch{return {ready:false,error:true};}
+ }
+ async function instanceStatus(binding,id){
+  if(!binding||typeof binding.get!=='function')return 'unknown';
+  try{
+   const instance=await binding.get(id);
+   const status=typeof instance?.status==='function'?await instance.status():instance?.status;
+   const name=typeof status==='string'?status:status?.status;
+   return typeof name==='string'?name:'unknown';
+  }catch(e){return /not found|does not exist|unknown instance/i.test(String(e?.message||''))?'absent':'unknown';}
+ }
+ const createError=error=>/already exists|already_exists|duplicate/i.test(String(error?.name||'')+' '+String(error?.message||''))?'exists':'uncertain';
+ // An error thrown by a step, by class only: its message is never copied into a record.
+ function classifyThrown(error){
+  const code=String(error?.code||''),message=String(error?.message||'');
+  if(code==='published_epg_fence')return 'epoch_mismatch';
+  if(code==='discovery_seal_unfinished')return 'evidence_contradictory';
+  if(code==='published_epg_unavailable'||code==='write_contention')return 'd1_unavailable';
+  if(code==='published_epg_not_authoritative')return 'authority_held';
+  if(/abort|timed? ?out|timeout/i.test(String(error?.name||'')+' '+message))return 'timeout';
+  if(/\b429\b|rate limit/i.test(message))return 'rate_limited';
+  if(/\b5\d\d\b/.test(message)&&/(http|status|fetch|upstream)/i.test(message))return 'upstream_5xx';
+  if(/exceeded (cpu|memory)/i.test(message))return /memory/i.test(message)?'exceeded_memory':'exceeded_cpu';
+  if(/watchlist|letterboxd|epg source|fetch|network/i.test(message))return 'network_error';
+  return 'step_failed';
+ }
+
+ // ---- the owner's mode switch (ADR 0100 decision 3) ----------------------------------------------------------
+ // Drain: the previous owner has no step in flight and no unfinished seal. Verified, not assumed.
+ async function drainState(env,now){
+  let run;
+  try{run=await loadJSON(env,'sync.json');}catch{return 'unreadable';}
+  if(run?.stage==='seal')return 'seal_unfinished';
+  if(run&&['metadata','epg'].includes(run.stage)){
+   const updated=Date.parse(run.updatedAt||'');
+   if(!Number.isFinite(updated))return 'unreadable';
+   if(updated+EXTERNAL_FRESH_MS>now)return 'step_recent';
+  }
+  let control;
+  try{control=await readControl(env);}catch{return 'unreadable';}
+  if(control.malformed)return 'unreadable';
+  if(control.record.instanceId&&['starting','running','waiting'].includes(control.record.phase)){
+   const status=await instanceStatus(env.EPG_WORKFLOW,control.record.instanceId);
+   if(status==='unknown')return 'unreadable';
+   if(!ENDED.includes(status))return 'instance_live';
+  }
+  return 'verified';
+ }
+ async function switchMode(env,{action,target}={},now=Date.now()){
+  for(let attempt=0;attempt<CONTROL_ATTEMPTS;attempt++){
+   const mode=await readMode(env);
+   if(!mode.schema)return {action,refused:'not_available'};
+   if(mode.malformed)return {action,refused:'evidence_unreadable'};
+   const current=mode.record;
+   const write=record=>casDoc(env,'mode',mode.revision,record);
+   if(action==='close_admission'){
+    if(current.mode==='switching')return {action,refused:'switch_open',mode:current.mode,target:current.target,epoch:current.epoch};
+    if(current.mode===target)return {action,refused:'already_in_mode',mode:current.mode,epoch:current.epoch};
+    const next={schemaVersion:1,mode:'switching',from:current.mode,target,epoch:current.epoch+1,drain:null,changedAt:iso(now)};
+    if(await write(next))return {action,closed:true,mode:'switching',target,epoch:next.epoch};
+    continue;
+   }
+   if(action==='complete'){
+    if(current.mode!=='switching')return {action,refused:'not_switching',mode:current.mode,epoch:current.epoch};
+    const drain=await drainState(env,now);
+    if(drain!=='verified'){
+     if(current.drain!==drain)await write({...current,drain,drainCheckedAt:iso(now)});
+     return {action,refused:'drain_not_verified',drain,mode:'switching',target:current.target,epoch:current.epoch};
+    }
+    const next={schemaVersion:1,mode:current.target,from:current.from,target:null,epoch:current.epoch,drain:'verified',changedAt:current.changedAt,completedAt:iso(now)};
+    if(await write(next))return {action,completed:true,mode:next.mode,epoch:next.epoch,drain:'verified'};
+    continue;
+   }
+   return {action,refused:'unknown_action'};
+  }
+  return {action,refused:'write_contention'};
+ }
+ async function clearQuarantine(env,now=Date.now()){
+  const mode=await readMode(env);
+  if(!mode.schema)return {action:'clear_quarantine',refused:'not_available'};
+  if(mode.malformed)return {action:'clear_quarantine',refused:'evidence_unreadable'};
+  if(mode.record.mode==='switching')return {action:'clear_quarantine',refused:'switch_in_progress'};
+  for(let attempt=0;attempt<CONTROL_ATTEMPTS;attempt++){
+   const control=await readControl(env);
+   if(control.malformed)return {action:'clear_quarantine',refused:'evidence_unreadable'};
+   if(!control.record.quarantine)return {action:'clear_quarantine',cleared:{control:false}};
+   const next={...control.record,quarantine:null,failure:null,cooldownUntil:null,budget:policy().emptyBudget(),updatedAt:iso(now)};
+   if(await casDoc(env,'control',control.stored?control.revision:null,next,mode.revision))return {action:'clear_quarantine',cleared:{control:true}};
+  }
+  return {action:'clear_quarantine',refused:'write_contention'};
+ }
+ const ACTIONS={close_admission:{target:value=>value==='cloudflare'||value==='external'},complete:{},clear_quarantine:{}};
+ function validate(body){
+  if(!body||typeof body!=='object'||Array.isArray(body))return 'Invalid request';
+  const fields=ACTIONS[body.action];
+  if(!fields)return 'Unknown action';
+  for(const key of Object.keys(body))if(key!=='action'&&!Object.hasOwn(fields,key))return 'Unknown field';
+  if(body.action==='close_admission'&&body.target===undefined)return 'Missing target';
+  for(const [key,check] of Object.entries(fields))if(body[key]!==undefined&&!check(body[key]))return 'Invalid '+key;
+  return null;
+ }
+ async function handle(env,body){
+  const error=validate(body);if(error)return {status:400,body:{error}};
+  try{
+   if(body.action==='clear_quarantine')return {status:200,body:await clearQuarantine(env)};
+   return {status:200,body:await switchMode(env,body)};
+  }catch(error){return {status:200,body:{action:body.action,refused:classifyThrown(error)==='step_failed'?'d1_unavailable':classifyThrown(error)}};}
+ }
+ // The external path's gate for /api/sync/start|metadata|epg and the MCP tools epg_sync_start and epg_sync_step: `switch_in_progress`
+ // while admission is closed, `external_writer_fenced` once the switch to Cloudflare has completed, whatever an old Task prompt
+ // sends. The table not applied means the executor does not exist: the external path is unchanged and carries no fence.
+ async function externalGate(env){
+  let mode;
+  try{mode=await readMode(env);}catch{return {reason:'evidence_unreadable',fence:null};}
+  if(!mode.schema)return {reason:null,fence:null};
+  if(mode.malformed)return {reason:'evidence_unreadable',fence:null};
+  if(mode.record.mode==='switching')return {reason:'switch_in_progress',fence:null};
+  if(mode.record.mode==='cloudflare')return {reason:'external_writer_fenced',fence:null};
+  return {reason:null,fence:{revision:mode.revision}};
+ }
+
+ // ---- admission and one executor action -----------------------------------------------------------------------
+ async function admit(env,{runKey,series,epoch,id}){
+  let mode;
+  try{mode=await readMode(env);}catch(error){const code=classifyThrown(error);return {ok:false,reason:code==='step_failed'?'d1_unavailable':code,transient:true};}
+  if(!mode.schema)return {ok:false,reason:'not_cloudflare'};
+  if(mode.malformed)return {ok:false,reason:'evidence_unreadable',unsafe:true};
+  if(mode.record.mode==='switching')return {ok:false,reason:'switch_in_progress'};
+  if(mode.record.mode!=='cloudflare')return {ok:false,reason:'not_cloudflare'};
+  if(mode.record.epoch!==epoch)return {ok:false,reason:'epoch_mismatch'};
+  const authority=await authorityState(env);
+  if(authority.error)return {ok:false,reason:'d1_unavailable',transient:true};
+  if(!authority.ready)return {ok:false,reason:'authority_held',unsafe:true};
+  let control;
+  try{control=await readControl(env);}catch{return {ok:false,reason:'d1_unavailable',transient:true};}
+  if(control.malformed)return {ok:false,reason:'checkpoint_malformed',unsafe:true};
+  if(control.record.instanceId!==id||control.record.series!==series||control.record.runKey!==runKey)return {ok:false,reason:'not_owner'};
+  return {ok:true,modeRevision:mode.revision,control:control.record,controlRevision:control.revision,controlStored:control.stored};
+ }
+ // The checkpoint of a sync run, as one comparable number: the stage, the metadata cursor and the seal phase only move forward.
+ const checkpointKey=run=>run?[run.runId,run.stage,run.cursor??0,run.remaining??0,run.seal?.phase??''].join('|'):null;
+ const progressCount=run=>run?(STAGE_RANK[run.stage]??0)*1000000+(run.stage==='metadata'?(run.cursor??0):0)+(run.stage==='seal'?(SEAL_RANK[run.seal?.phase]??0)*1000:0):0;
+ const advanced=(run,previous)=>!!run&&!!previous&&previous.runId===run.runId&&progressCount(run)>(previous.count??0);
+ async function body(response){try{return await response.json();}catch{return {};}}
+
+ // The EPG work of one action: a start, or one existing step. Returns what happened and never swallows a write it may have made.
+ async function drive(fe,control,{now}){
+  const runKey=control.runKey;
+  let run=await loadJSON(fe,'sync.json');
+  const started=run&&Number.isFinite(Date.parse(run.startedAt))?dayOf(Date.parse(run.startedAt)):null;
+  // Read-after-unknown: a run of this Madrid date that already completed is the success, whoever drove it.
+  if(run?.stage==='complete'&&started===runKey&&!run.error)return {finished:true,runId:run.runId,run,published:run.runId};
+  const usable=run&&(run.stage==='seal'||(['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<EXTERNAL_FRESH_MS));
+  if(!usable){
+   const reply=await body(await postSync(fe,null,'/api/sync/start',{},'internal'));
+   if(!reply.runId)return {failure:{code:'evidence_contradictory'}};
+   return {runId:reply.runId,started:true,run:await loadJSON(fe,'sync.json')};
+  }
+  const path=run.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg';
+  const response=await postSync(fe,null,path,{runId:run.runId},'internal');
+  const reply=await body(response);
+  const after=await loadJSON(fe,'sync.json');
+  const base={runId:run.runId,run:after,reply};
+  if(response.status===409)return {...base,failure:{code:'owner_conflict'}};
+  if(response.status>=400)return {...base,failure:{code:response.status===429?'rate_limited':response.status>=500?'upstream_5xx':'step_failed'}};
+  const wait=reply.discovery?.state==='busy'||reply.state==='busy';
+  if(wait){
+   const until=Date.parse(reply.discovery?.nextCatchUpAt||reply.nextCatchUpAt||'');
+   return {...base,wake:Number.isFinite(until)?until:now+SLEEP_FLOOR_MS*5,note:'busy'};
+  }
+  if(reply.reason==='programme_changed'||reply.discovery?.reason==='programme_changed')return {...base,failure:{code:'stale_generation_write'}};
+  if(reply.state==='error'||reply.discovery?.state==='error')return {...base,failure:{code:'step_failed'}};
+  if(reply.stage==='complete'||after?.stage==='complete')return {...base,finished:true,published:after?.runId||run.runId};
+  return base;
+ }
+ async function writeControl(env,adm,next){
+  return casDoc(env,'control',adm.controlStored?adm.controlRevision:null,next,adm.modeRevision);
+ }
+ // One executor action: admit, plan, drive, commit the control record. Always returns a plain result.
+ async function act(env,ctx){
+  const {runKey,series,epoch,id}=ctx,now=ctx.now();
+  const adm=await admit(env,{runKey,series,epoch,id});
+  if(!adm.ok){
+   if(adm.transient)return {kind:'sleep',until:now+policy().COOLDOWNS_MS[0],reason:adm.reason};
+   return {kind:'stop',reason:adm.reason};
+  }
+  const control=adm.control;
+  if(control.doneAt)return {kind:'stop',reason:'complete'};
+  if(control.quarantine)return {kind:'stop',reason:'quarantined'};
+  if(dayOf(now)!==runKey)return {kind:'stop',reason:'day_rolled'};
+  const cooling=Date.parse(control.cooldownUntil||'');
+  if(Number.isFinite(cooling)&&cooling>now)return {kind:'sleep',until:cooling,reason:'cooldown'};
+  const fe=fencedEnv(env,adm.modeRevision),clock=ctx.clock||(()=>Date.now()),began=clock();
+  let outcome;
+  try{outcome=await drive(fe,control,{now});}
+  catch(error){outcome={failure:{code:classifyThrown(error)}};}
+  if(outcome.failure?.code==='epoch_mismatch')return {kind:'stop',reason:'epoch_mismatch'};
+  // Commit. A thrown commit is not retried blind: the next action reads the control record and sync.json first.
+  const key=outcome.run?checkpointKey(outcome.run):control.checkpoint?.key??null;
+  const next={...control,runId:outcome.runId??control.runId,updatedAt:iso(now),nextWakeAt:outcome.wake?iso(outcome.wake):null,lastStep:{latencyMs:Math.max(0,clock()-began),started:outcome.started===true,note:outcome.note||null}};
+  let result;
+  if(outcome.failure){
+   const {code,retryAfterAt}=outcome.failure,applied=policy().applyFailure(control.budget,{code},{now,phase:outcome.run?.stage??control.checkpoint?.phase??null,checkpoint:key,retryAfterAt:code==='rate_limited'?(retryAfterAt??now+PAUSE_MS):retryAfterAt,random:ctx.random});
+   next.budget=applied.budget;next.cooldownUntil=applied.cooldownUntil;next.failure={class:policy().failureClass(code),code};
+   next.checkpoint={key,phase:outcome.run?.stage??null,runId:outcome.run?.runId??null,count:progressCount(outcome.run)};
+   if(applied.quarantine)next.quarantine={...applied.quarantine,at:iso(now)};
+   result=applied.quarantine?{kind:'stop',reason:applied.quarantine.reason}:policy().failureClass(code)==='permanent'?{kind:'stop',reason:code}:{kind:'sleep',until:Date.parse(applied.cooldownUntil),reason:'cooldown'};
+  }else{
+   // Starting a run, an HTTP answer or a lease is not progress; a forward checkpoint or a completed run is.
+   const progressed=outcome.finished===true||(outcome.started!==true&&advanced(outcome.run,control.checkpoint));
+   if(progressed){next.budget=policy().applyProgress(control.budget);next.lastDurableProgressAt=iso(now);next.cooldownUntil=null;next.failure=null;}
+   next.checkpoint={key,phase:outcome.run?.stage??null,runId:outcome.run?.runId??null,count:progressCount(outcome.run)};
+   if(outcome.finished){next.doneAt=iso(now);next.phase='done';next.publishedRunId=outcome.published??null;}else next.phase=outcome.wake?'waiting':'running';
+   result=outcome.finished?{kind:'stop',reason:'complete'}:outcome.wake?{kind:'sleep',until:outcome.wake,reason:outcome.note||'wait'}:{kind:'continue',reason:null};
+  }
+  let committed;
+  try{committed=await writeControl(env,adm,next);}
+  catch(error){return {kind:'sleep',until:now+policy().cooldownMs(1,ctx.random),reason:'d1_unavailable'};}
+  if(!committed){
+   const again=await admit(env,{runKey,series,epoch,id});
+   if(!again.ok&&['epoch_mismatch','switch_in_progress','not_cloudflare'].includes(again.reason))return {kind:'stop',reason:again.reason};
+   return {kind:'sleep',until:now+SLEEP_FLOOR_MS,reason:'write_conflict'};
+  }
+  return result;
+ }
+
+ // ---- the Workflow instance -----------------------------------------------------------------------------------
+ async function run(env,payload,step,hooks={}){
+  const runKey=typeof payload?.runKey==='string'?payload.runKey:null,series=Number.isInteger(payload?.series)?payload.series:0,epoch=Number.isInteger(payload?.epoch)?payload.epoch:-1;
+  if(!runKey)return {stopped:true,reason:'invalid_payload'};
+  const id=instanceId(runKey,series),ctx={runKey,series,epoch,id,now:hooks.now||(()=>Date.now()),clock:hooks.clock,random:hooks.random||Math.random};
+  let steps=0;
+  const name=prefix=>prefix+'-'+(steps++);
+  for(;;){
+   if(steps>=STEP_CAP){
+    await step.do(name('cap'),()=>stopInstance(env,ctx,'step_cap'));
+    return {stopped:true,reason:'step_cap',instanceId:id};
+   }
+   const result=await step.do(name('act'),()=>act(env,ctx).catch(()=>({kind:'sleep',until:ctx.now()+60000,reason:'act_failed'})));
+   if(result.kind==='stop'){
+    await step.do(name('stopped'),()=>stopInstance(env,ctx,result.reason));
+    return {stopped:true,reason:result.reason,instanceId:id};
+   }
+   if(result.kind==='sleep')await step.sleepUntil(name('sleep'),new Date(Math.max(result.until,ctx.now()+SLEEP_FLOOR_MS)));
+  }
+ }
+ async function stopInstance(env,ctx,reason){
+  try{
+   const adm=await admit(env,ctx);
+   if(!adm.ok)return {recorded:false,reason:adm.reason};
+   if(adm.control.doneAt||adm.control.quarantine)return {recorded:false,reason};
+   const next={...adm.control,phase:'stopped',stopReason:reason,updatedAt:iso(ctx.now())};
+   return {recorded:await writeControl(env,adm,next),reason};
+  }catch{return {recorded:false,reason};}
+ }
+
+ // ---- the cron `ensure` ---------------------------------------------------------------------------------------
+ // At most a few reads, at most one create. Safe under duplicate and overlapping firings: the control record is claimed by
+ // compare-and-swap on the run key and series before the create, and a second create attaches to the same instance id.
+ async function ensure(env,{now=Date.now(),random=Math.random}={}){
+  let mode;
+  try{mode=await readMode(env);}catch{return {started:false,reason:'mode_unreadable'};}
+  if(!mode.schema)return {started:false,reason:'external'};
+  if(mode.malformed)return {started:false,reason:'evidence_unreadable'};
+  if(mode.record.mode==='switching')return {started:false,reason:'switch_in_progress'};
+  if(mode.record.mode!=='cloudflare')return {started:false,reason:'external'};
+  if(typeof env?.EPG_WORKFLOW?.create!=='function')return {started:false,reason:'workflow_unavailable'};
+  const authority=await authorityState(env);
+  if(authority.error)return {started:false,reason:'d1_unavailable'};
+  if(!authority.ready)return {started:false,reason:'authority_held'};
+  const {dayKey,due,dueAt}=policy().dailyDue(now,schedule());
+  if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
+  let stored;
+  try{stored=await readControl(env);}catch{return {started:false,reason:'d1_unavailable'};}
+  if(stored.malformed)return {started:false,reason:'checkpoint_malformed'};
+  let control=stored.record;
+  if(control.quarantine?.scope==='domain')return {started:false,reason:'quarantined',scope:'domain'};
+  let series=0,budget=policy().emptyBudget(),carry={};
+  const write=(record)=>casDoc(env,'control',stored.stored?stored.revision:null,record,mode.revision);
+  if(control.runKey===dayKey){
+   if(control.doneAt)return {started:false,reason:'complete'};
+   if(control.quarantine)return {started:false,reason:'quarantined',scope:'run'};
+   const cooling=Date.parse(control.cooldownUntil||'');
+   if(control.instanceId&&['starting','running','waiting'].includes(control.phase)){
+    const status=await instanceStatus(env.EPG_WORKFLOW,control.instanceId);
+    if(ALIVE.includes(status))return {started:false,reason:'in_progress',instanceId:control.instanceId};
+    if(status==='unknown')return {started:false,reason:'status_unknown',instanceId:control.instanceId};
+    const code=status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
+    const applied=policy().applyFailure(control.budget,{code},{now,phase:control.checkpoint?.phase??null,checkpoint:control.checkpoint?.key??null,random});
+    control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,phase:'stopped',stopReason:code,updatedAt:iso(now)};
+    if(!await write(control))return {started:false,reason:'write_conflict'};
+    if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
+    return {started:false,reason:'cooldown',until:applied.cooldownUntil,recorded:code};
+   }
+   if(Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
+   series=(control.series??0)+1;budget=control.budget;carry={failure:control.failure,lastDurableProgressAt:control.lastDurableProgressAt,runId:control.runId,checkpoint:control.checkpoint};
+  }
+  const id=instanceId(dayKey,series);
+  const next={...emptyControl(),...carry,schemaVersion:1,runKey:dayKey,series,instanceId:id,epoch:mode.record.epoch,phase:'starting',budget,updatedAt:iso(now)};
+  if(!await write(next))return {started:false,reason:'write_conflict'};
+  try{
+   await env.EPG_WORKFLOW.create({id,params:{runKey:dayKey,series,epoch:mode.record.epoch}});
+   return {started:true,attached:false,instanceId:id,runKey:dayKey,series};
+  }catch(error){
+   if(createError(error)==='exists')return {started:true,attached:true,instanceId:id,runKey:dayKey,series};
+   const status=await instanceStatus(env.EPG_WORKFLOW,id);
+   if(ALIVE.includes(status)||status==='complete')return {started:true,attached:true,instanceId:id,runKey:dayKey,series};
+   const applied=policy().applyFailure(budget,{code:'create_uncertain'},{now,random});
+   const failed={...next,phase:'stopped',stopReason:'create_uncertain',budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code:'create_uncertain'},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null};
+   const reread=await readControl(env);
+   if(reread.record?.instanceId===id)await casDoc(env,'control',reread.revision,failed,mode.revision);
+   return {started:false,reason:'create_uncertain',instanceId:id};
+  }
+ }
+
+ // ---- the read model. Reads only; never creates or repairs. ----------------------------------------------------
+ async function readModel(env,now=Date.now()){
+  const mode=await readMode(env);
+  if(!mode.schema)return {mode:'external',available:false,epoch:0,runKey:null,published:null,phase:'idle',health:'external',sideEffects:'none'};
+  if(mode.malformed)return {mode:null,available:true,health:'quarantined',failure:{class:'unsafe',code:'evidence_unreadable'},sideEffects:'none'};
+  const control=await readControl(env);
+  const m=mode.record,c=control.malformed?emptyControl():control.record;
+  const {dayKey,dueAt}=policy().dailyDue(now,schedule());
+  let run=null;
+  try{run=await loadJSON(env,'sync.json');}catch{run=null;}
+  const started=run&&Number.isFinite(Date.parse(run.startedAt))?dayOf(Date.parse(run.startedAt)):null;
+  const doneToday=(c.runKey===dayKey&&!!c.doneAt)||(started===dayKey&&run?.stage==='complete'&&!run.error);
+  let liveness=null;
+  if(m.mode==='cloudflare'&&c.instanceId&&['starting','running','waiting'].includes(c.phase)&&typeof env?.EPG_WORKFLOW?.get==='function'){
+   const status=await instanceStatus(env.EPG_WORKFLOW,c.instanceId);
+   liveness=ALIVE.includes(status)?'alive':status==='complete'?'finished':status==='absent'?'absent':'unknown';
+  }
+  const sameKey=c.runKey===dayKey;
+  const lastProgress=sameKey?c.lastDurableProgressAt:(run?.updatedAt||null);
+  const health=control.malformed?'quarantined':policy().deriveHealth({now,dueAt,done:doneToday,quarantine:c.quarantine,permanent:c.failure?.class==='permanent'&&sameKey,cooldownUntil:sameKey?c.cooldownUntil:null,nextWakeAt:sameKey?c.nextWakeAt:null,lastDurableProgressAt:lastProgress});
+  return {mode:m.mode,available:true,epoch:m.epoch,...(m.mode==='switching'?{target:m.target,drain:m.drain||null}:{}),runKey:c.runKey,published:c.publishedRunId??null,phase:c.phase,
+   owner:{kind:'workflow',instanceId:c.instanceId,liveness},lastDurableProgressAt:c.lastDurableProgressAt,dueAt:iso(dueAt),nextWakeAt:c.nextWakeAt||(now>=dueAt?null:iso(dueAt)),
+   syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null}:null,
+   failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
+   cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,health,sideEffects:'none'};
+ }
+ return {TABLE,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,readModel,drainState,classifyThrown,checkpointKey,progressCount};
+})();
+async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}

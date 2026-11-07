@@ -5,6 +5,8 @@
 
 export const MADRID_ZONE = 'Europe/Madrid';
 export const RATINGS_SCHEDULE = Object.freeze({hour: 17, minute: 30});
+// AIR-348 / ADR 0100: the daily EPG publication is due at 17:00 Europe/Madrid, the monitor's EPG due time.
+export const EPG_SCHEDULE = Object.freeze({hour: 17, minute: 0});
 export const COOLDOWNS_MS = Object.freeze([60000, 300000, 900000, 3600000]);
 export const BUDGET_CAPS = Object.freeze({consecutive: 5, total: 12});
 export const JITTER = Object.freeze({low: 0.8, high: 1.2});

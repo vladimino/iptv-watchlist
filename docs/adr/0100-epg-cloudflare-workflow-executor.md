@@ -1,0 +1,55 @@
+# ADR 0100: The daily EPG publication may be executed by an inert Cloudflare Workflow with D1-owned mode and control documents
+
+**Status:** Proposed  
+**Original decision date:** 2026-11-07 (design approved by the owner on the AIR-348 card; the storage form below is an implementation choice inside it)  
+**Recorded at:** 2026-11-07  
+**Approval source:** owner approval on the [AIR-348 card](https://trello.com/c/PUrlzMuH), 2026-11-07 (Madrid): implementation of the described design (Workflow, D1 control state with `external | switching | cloudflare`, monotonic epoch, single-writer fence, no shared lease, no new Cron Trigger) and delivery as one PR, with no production action authorized. The choice of two documents in one new table (decision 3) and the fence statement inside the publication batch (decision 4) are implementation details the independent review and the owner are asked to confirm before this ADR becomes Accepted  
+**Related work:** [AIR-348](https://trello.com/c/PUrlzMuH); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0090](0090-ratings-cloudflare-workflow-executor.md); [ADR 0092](0092-resumable-bounded-ledger-seal.md); [ADR 0096](0096-bounded-seal-publication-steps.md); [ADR 0079](0079-d1-authoritative-published-epg.md)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+The daily EPG publication is the last deterministic daily producer that still runs from a ChatGPT Scheduled Task: the Task calls the MCP tools `epg_sync_start` and `epg_sync_step` in a loop and follows the server's `nextAction`. Every stage (watchlist ingest, metadata, EPG commit, the bounded seal phases, the prediction-queue refresh) is deterministic Worker code; none needs a model. The pipeline is already resumable and idempotent per `runId`, and the published generation is D1-authoritative with a fenced pointer switch. What is missing is an autonomous driver and a server-side single-writer fence between that driver and the old Task: nothing fences `sync.json` against two drivers today.
+
+[ADR 0089](0089-shared-orchestration-reliability-contract.md) fixed the shared contract (Madrid day key, failure classes, bounded retries, a three-step mode switch with an epoch fence); [ADR 0090](0090-ratings-cloudflare-workflow-executor.md) applied it to Ratings with a Workflow and two D1-owned documents. EPG needs the same, with one difference: Ratings' documents live in the ratings D1 domain, and there is no equivalent domain for the EPG executor's control state.
+
+## Decision
+
+1. **Workflow, reusing the pipeline.** A Workflow binding `EPG_WORKFLOW` (`EpgWorkflow`) runs a loop of `step.do` actions separated by `step.sleepUntil`. One action is one existing `/api/sync/start` or `/api/sync/metadata|epg` step, called in-process through `postSync` with the caller `internal` (no HTTP self-call, no OAuth). The executor adds no EPG stage, fetches no source and writes no R2 object itself. After an unknown outcome the next action reads `sync.json` before anything else; a run of the same Madrid date that already completed is the success whoever drove it, and nothing is started or published again. A seal `busy` answer sleeps until its own `nextCatchUpAt`. Discovery gets its intent from the existing commit-time handoff inside the completing step (`queueDiscovery`); EPG executes no resolver or TMDB chunk and does not wait for one. Ratings and Predictions are not called inline.
+2. **Inert by default.** The mode document says `external` when it is absent or when its table has not been applied. `ensure` then reads at most one row and returns. Deployment registers the Workflow class and binding but creates no instance, changes no cron, flag or Task, and writes nothing.
+3. **State: two documents in one new D1 table.** Migration `0015_epg_orchestration.sql` adds `epg_orchestration_document(key, body, revision, updated_at)` with the keys `mode` (written only by the owner's mode switch) and `control` (written only by the executor and the owner's quarantine clear). Every write is a compare-and-set on `revision`; the control write additionally requires the mode document to still be at the revision the action was admitted with; a write is judged by reading it back, and carries a write id so that an identical competitor cannot be mistaken for it. The migration follows a complete schema 14, writes no row and is applied only by a separate owner-approved operation.
+4. **Epoch fence inside the publication batch.** An executor's env, and the external path's env, carry `epgFence: {revision}`: the mode document's revision at admission (`null`: no document, the default external mode). `src/published-epg.js` adds one statement to the pointer-switch batch and to the programme/watchlist replacement batch asserting that the mode document is still at that revision; a mismatch trips the same `published_epg_fence` refusal as a lost generation, and the whole batch is refused with its data. No fence is added when none is passed, so behaviour before activation is unchanged.
+5. **External writer gate.** `postSync` (HTTP `/api/sync/*` and the MCP tools `epg_sync_start` and `epg_sync_step`) answers HTTP 409 with `reason` `switch_in_progress` while admission is closed and `external_writer_fenced` once the mode is `cloudflare`, with `nextAction: stop`, whatever an old Task prompt sends, before it records or writes anything. Read-only status stays open. With the table absent the gate passes and adds no fence.
+6. **Mode switch.** Three owner-approved steps on `POST /api/epg/executor`: `close_admission {target}` (mode `switching`, epoch + 1), then `complete` only after a verified drain (no unfinished seal, no external step newer than the 15-minute freshness window of `beginSync`, no live Workflow instance of the previous series, sync state readable), then the natural run. Rollback is the same protocol toward `external`. `clear_quarantine` is an explicit owner action that runs no step.
+7. **Schedule.** The EPG logical due time is 17:00 Europe/Madrid (the monitor's EPG due time already is; the executor reads the same constant, `EPG_SCHEDULE`). The Worker cron stays `37 * * * *` in this change. Moving it to `0 * * * *`, with every tick calling the light `ensure` functions independently and no shared lease or mega-Workflow, is a separate operation-specific owner approval. The Ratings logical due time (17:30 in ADR 0090) is **not** changed here: its supersession is a separate small record and change.
+8. **Read model.** `GET /api/status` (MCP `epg_status`) gains the read-only `orchestration` object: mode, epoch, run key, phase, owner liveness, the sync run's stage and seal phase, last durable progress, failure class and code, budget, cooldown, quarantine, `nextWakeAt`, health. The monitor's existing EPG policy already alerts on a missed day; this adds the diagnosis, not a second alert.
+9. **No new failure codes.** The existing transient, permanent and unsafe codes cover every outcome (`stale_generation_write` for a generation that changed under the run, `owner_conflict` for a run-id conflict, `evidence_contradictory` for an unfinished seal that `sync.json` does not name).
+
+Not decided: activation. Applying the migration, the mode switch, the cron change, any Workflow instance, disabling the Daily Task and the first natural run each need a separate action-specific owner approval.
+
+## Alternatives considered
+
+- **Documents in an existing D1 domain table (for example the ratings documents):** rejected; it would put EPG control state under another domain's authority marker and fence.
+- **R2 documents with etags:** rejected; the fence must be asserted in the same D1 batch as the pointer switch, which R2 cannot join.
+- **A new Cron Trigger or Workflow schedule per domain:** rejected by the approved design; the single existing cron calls independent light `ensure` functions.
+- **HTTP self-call of the existing routes:** rejected; it needs Access/OAuth credentials inside the Worker.
+
+## Consequences
+
+One more Workflow resource is registered on deploy, and the cron handler calls one more inert `ensure`. The Daily Task keeps working until the owner closes admission. The first activation needs migrations `0012` to `0014` applied before `0015` (the chain is ordered). Rolling back code does not revert D1 documents, the epoch or an existing instance.
+
+## Recovery and migration boundary
+
+Reversible: code. Not reverted by code rollback: the table and its documents, the epoch, a running Workflow instance, the published generation, R2 mirrors. The switch back uses the same three steps with a verified drain. This ADR authorizes no migration, flag, Task, cron, Workflow instance, D1/R2 write or cutover.
+
+## Evidence
+
+- **Original decision:** [AIR-348](https://trello.com/c/PUrlzMuH)
+- **Implementation:** the AIR-348 pull request
+- **Dated verification:** [offline evidence 2026-11-07](../evidence/orchestration/epg-executor-air-348-2026-11-07.md); no production observation
+- **Uncertainty:** real Workflow instance behaviour, the CPU and memory of a live EPG step inside a Workflow, Cloudflare's wakeup timing and the interaction with the hourly projector and monitor when the cron moves to minute 0 are unobserved until an authorized acceptance run.
+
+## Follow-ups
+
+Ratings logical due time to 17:00 (separate record); cron move to `0 * * * *` with a coexistence check against the projector, Ratings and the monitor; activation and production acceptance on [AIR-348](https://trello.com/c/PUrlzMuH).

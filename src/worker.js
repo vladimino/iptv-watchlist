@@ -1183,13 +1183,26 @@ async function completeWithRatings(env,run,report){
  const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
  return {...result,ratingsPipeline:'blocked',ratingsMigration:gate.migration};
 }
+async function epgOrchestrationOf(env){
+ // AIR-348: the executor's read model. A pure read; an unreadable record is reported, never repaired.
+ if(typeof EpgOrchestration==='undefined')return null;
+ try{return await EpgOrchestration.readModel(env,Date.now());}catch{return {mode:null,health:'unknown',failure:{class:null,code:'evidence_unreadable'},sideEffects:'none'};}
+}
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
- return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),...(run.diaryHistory?{diaryHistory:run.diaryHistory}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
+ const orchestration=await epgOrchestrationOf(env);
+ return run?{orchestration,runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),...(run.diaryHistory?{diaryHistory:run.diaryHistory}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started',orchestration};
 }
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
 async function postSync(env,execution,pathname,body,caller='http'){
+ // AIR-348 / ADR 0100: the external writer path (HTTP, the MCP tools, an old Task prompt) is fenced once the owner has closed
+ // admission or switched the EPG executor to Cloudflare. The executor's own calls (caller `internal`) carry their fence already.
+ if(caller!=='internal'&&typeof EpgOrchestration!=='undefined'){
+  const gate=await EpgOrchestration.externalGate(env);
+  if(gate.reason)return json({runId:body?.runId??null,stage:null,nextAction:'stop',reason:gate.reason,error:gate.reason},409);
+  if(gate.fence)env={...env,epgFence:gate.fence};
+ }
  if(pathname==='/api/sync/start')return json(await beginSync(env));
  const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
  await openContinuationStep(env,step,persisted());
@@ -1248,7 +1261,7 @@ export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
 // AIR-347 (ADR 0090): the same firing also calls the ratings executor's `ensure`; with the executor mode external it reads one document and returns.
 // AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; with DISCOVERY_EXECUTOR absent it returns without create().
-async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env):Promise.resolve(),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]));},
+async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env):Promise.resolve(),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]));},
 async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
@@ -1275,6 +1288,7 @@ async fetch(request,env,execution){
   // AIR-349: the monitor's stored result is a pure read; the synthetic test message changes only the monitor's own document.
   if(url.pathname==='/api/monitor/status'&&request.method==='GET')return json(await Monitor.status(env));
   if(url.pathname==='/api/monitor/test'&&request.method==='POST')return json(await Monitor.test(env));
+  if(url.pathname==='/api/epg/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await EpgOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step','/api/letterboxd/ratings/migrate'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}

@@ -62,7 +62,7 @@ See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract]
 
 ## Ratings Workflow binding (AIR-347)
 
-`wrangler.jsonc` declares Workflow `iptv-ratings` (`RATINGS_WORKFLOW`, class `RatingsWorkflow`). Deployment creates the resource only; no instance exists until `ensure` runs in `cloudflare` mode.
+`wrangler.jsonc` declares Workflow `iptv-ratings` (`RATINGS_WORKFLOW`, class `RatingsWorkflow`). Deployment creates the resource only; no instance exists until `ensure` runs in `cloudflare` mode. It also declares Workflow `iptv-epg` (`EPG_WORKFLOW`, class `EpgWorkflow`, [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md), Proposed): inert, its mode is `external` until the owner's switch and its D1 table (migration `0015`) is not applied by a deploy.
 
 ## Monitor (AIR-349)
 
