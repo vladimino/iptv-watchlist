@@ -67,6 +67,20 @@ try {
     assert.doesNotMatch(result.stdout, /Passed \d+ self-contained/, 'no false green');
   }
 
+  // 2b. A noisy failing file keeps the beginning and the END of each stream (the assertion that matters is last) and says what was omitted.
+  {
+    const noisy = (stream, marker) => `{ const line = 'x'.repeat(99) + '\\n'; let out = '${marker}-first\\n';
+for (let i = 0; i < 70000; i++) out += line; // about 7 MB, well over the capture limit
+process.${stream}.write(out + '${marker}-LAST-LINE\\n'); }`;
+    const dir = suite({'a-noisy.mjs': noisy('stdout', 'OUT') + '\n' + noisy('stderr', 'ERR') + '\nprocess.exitCode = 1; // not process.exit(): that would cut the output still in the pipe'});
+    const result = await run(['--dir', dir, '--jobs', '2']);
+    assert.equal(result.code, 1);
+    for (const marker of ['OUT-first', 'OUT-LAST-LINE', 'ERR-first', 'ERR-LAST-LINE']) assert.ok(result.stderr.includes(marker), marker + ' is shown');
+    assert.match(result.stderr, /characters omitted\] \.\.\./, 'the cut is marked inside the stream');
+    assert.match(result.stderr, /characters from the middle of the output of a-noisy\.mjs were omitted; the beginning and the end are shown/);
+    assert.ok(result.stderr.length < 9 * 1024 * 1024, 'the report itself stays bounded');
+  }
+
   // 3. After the first failure no new file is started and the skipped ones are counted.
   {
     const dir = suite({

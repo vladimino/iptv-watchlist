@@ -43,7 +43,10 @@ const START_FIRST=[
  'd1-backfill.mjs',
  'offline-importer.mjs',
 ];
-const OUTPUT_LIMIT=4*1024*1024;
+// Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
+// dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
+const HEAD_LIMIT=1024*1024;
+const TAIL_LIMIT=3*1024*1024;
 const KILL_GRACE_MS=3000;
 
 function option(args,name,env,fallback){
@@ -58,6 +61,28 @@ function positive(value,label,fallback){
  return number;
 }
 const seconds=ms=>(ms/1000).toFixed(1)+'s';
+
+// Bounded capture of one stream: the first HEAD_LIMIT characters, then a rolling window of the last TAIL_LIMIT characters.
+function capture(){
+ let head='',tail='',dropped=0;
+ return {
+  push(chunk){
+   if(head.length<HEAD_LIMIT){
+    const room=HEAD_LIMIT-head.length;
+    head+=chunk.slice(0,room);
+    chunk=chunk.slice(room);
+    if(!chunk)return;
+   }
+   tail+=chunk;
+   if(tail.length>2*TAIL_LIMIT){dropped+=tail.length-TAIL_LIMIT;tail=tail.slice(-TAIL_LIMIT);}
+  },
+  text(){
+   if(tail.length<=TAIL_LIMIT)return head+tail;
+   return head+`\n... [${dropped+tail.length-TAIL_LIMIT} characters omitted] ...\n`+tail.slice(-TAIL_LIMIT);
+  },
+  omitted(){return tail.length>TAIL_LIMIT?dropped+tail.length-TAIL_LIMIT:dropped;},
+ };
+}
 
 export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY}={}){
  const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
@@ -84,14 +109,13 @@ async function main(){
   return new Promise(resolve=>{
    const began=Date.now();
    const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true});
-   const record={file,stdout:'',stderr:'',truncated:false};
+   const record={file,stdout:'',stderr:'',omitted:0};
+   const captures={stdout:capture(),stderr:capture()};
    let timedOut=false,settled=false,killTimer=null;
-   const collect=name=>chunk=>{
-    if(record[name].length<OUTPUT_LIMIT)record[name]+=chunk.toString();
-    else record.truncated=true;
-   };
-   child.stdout.on('data',collect('stdout'));
-   child.stderr.on('data',collect('stderr'));
+   child.stdout.setEncoding('utf8');
+   child.stderr.setEncoding('utf8');
+   child.stdout.on('data',chunk=>captures.stdout.push(chunk));
+   child.stderr.on('data',chunk=>captures.stderr.push(chunk));
    const killGroup=signal=>{try{process.kill(-child.pid,signal);}catch{try{child.kill(signal);}catch{}}};
    const timer=setTimeout(()=>{timedOut=true;killGroup('SIGTERM');killTimer=setTimeout(()=>killGroup('SIGKILL'),KILL_GRACE_MS);},timeoutMs);
    const entry={child,kill:killGroup};
@@ -105,7 +129,7 @@ async function main(){
     try{process.kill(-child.pid,'SIGKILL');}catch{}
     const ms=Date.now()-began;
     const ok=!timedOut&&!error&&code===0&&!signal;
-    Object.assign(record,{ms,code,signal,timedOut,error:error?String(error.message||error):null,ok});
+    Object.assign(record,{stdout:captures.stdout.text(),stderr:captures.stderr.text(),omitted:captures.stdout.omitted()+captures.stderr.omitted(),ms,code,signal,timedOut,error:error?String(error.message||error):null,ok});
     resolve(record);
    };
    child.on('error',error=>finish(null,null,error));
@@ -126,7 +150,7 @@ async function main(){
   process.stderr.write(`\nFAIL ${record.file} (${seconds(record.ms)}): ${why}\n`);
   if(record.stdout)process.stderr.write('--- stdout ---\n'+(record.stdout.endsWith('\n')?record.stdout:record.stdout+'\n'));
   if(record.stderr)process.stderr.write('--- stderr ---\n'+(record.stderr.endsWith('\n')?record.stderr:record.stderr+'\n'));
-  if(record.truncated)process.stderr.write(`(output of ${record.file} was cut at ${OUTPUT_LIMIT} bytes)\n`);
+  if(record.omitted)process.stderr.write(`(${record.omitted} characters from the middle of the output of ${record.file} were omitted; the beginning and the end are shown)\n`);
   process.stderr.write(`--- end ${record.file} ---\n\n`);
  }
 
@@ -165,10 +189,12 @@ async function main(){
   const lines=[`### Test runner`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
   try{appendFileSync(process.env.GITHUB_STEP_SUMMARY,lines.join('\n')+'\n');}catch{}
  }
- if(interrupted){console.error(`Interrupted by ${interrupted}.`);process.exit(interrupted==='SIGINT'?130:143);}
+ // Exit through exitCode, not process.exit(): when stdout or stderr is a pipe (as in CI) process.exit() can cut the report still being written.
+ if(interrupted){console.error(`Interrupted by ${interrupted}.`);process.exitCode=interrupted==='SIGINT'?130:143;return;}
  if(failures.length){
   console.error(`FAILED ${failures.length} of ${plan.total} files: ${failures.map(record=>record.file).join(', ')}${notStarted.length?`; ${notStarted.length} not started after the first failure`:''}.`);
-  process.exit(1);
+  process.exitCode=1;
+  return;
  }
  console.log(`Passed ${results.length} self-contained test files.`);
 }
