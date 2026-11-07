@@ -552,12 +552,13 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  // A wrapper with a code and a cause whose text is hostile.
  const wrapper=Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable',cause:hostile});
  let logged=await capture(wrapper);
- assert.equal(logged.length,1);
+ // AIR-364: a recoverable failure also tries to arm the recovery; its own step fails on the same broken read and is logged next.
+ assert.deepEqual(logged.map(line=>JSON.parse(line).step),['owner','recover-arm']);
  let entry=JSON.parse(logged[0]);
  assert.equal(entry.event,'discovery_workflow_step_failed');assert.equal(entry.step,'owner');assert.equal(entry.code,'discovery_unavailable');
  assert.equal(entry.name,'Error');assert.equal(entry.class,'code');assert.equal(entry.causeName,'other');assert.equal(entry.causeClass,'network_connection_lost');
  assert.equal(entry.statements,0);assert.equal(entry.instanceStatements,0);
- for(const secret of secrets)assert.ok(!logged[0].includes(secret),'the log must not contain '+secret);
+ for(const secret of secrets)for(const line of logged)assert.ok(!line.includes(secret),'the log must not contain '+secret);
  assert.ok(logged[0].length<400);
  // A cause class from a fixed list, and nothing from an unknown message.
  const limited=Object.assign(new Error('x'),{cause});
@@ -582,8 +583,13 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  vm.runInContext(`advanceDiscovery=async()=>{calls++;throw new Error("a chunk must not start");}`,context);
  vm.runInContext(`globalThis.realReadContinuation=readContinuation;globalThis.readCalls=0;readContinuation=async(...args)=>{readCalls++;if(readCalls===2){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';error.cause=new Error('Network connection lost');throw error;}return realReadContinuation(...args);}`,context);
  const logged=[];const originalError=context.console.error;context.console.error=message=>logged.push(String(message));
- try{await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{do:async(name,fn)=>fn(),sleepUntil:async()=>{}}),error=>error.code==='discovery_unavailable');}
+ let ended;
+ // AIR-364: the failure is recoverable, so the instance arms the recovery and waits for `dueAt` (the stand-in sleep returns at once)
+ // instead of ending errored; it still starts no chunk and the failure is logged once.
+ try{ended=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{do:async(name,fn)=>fn(),sleepUntil:async()=>{}});}
  finally{context.console.error=originalError;vm.runInContext('readContinuation=realReadContinuation',context);}
+ // The stand-in has no armed D1 authority here, so the wake finds admission refused and stops quietly without a successor.
+ assert.equal(ended.stopped,true);assert.equal(ended.reason,'authority_not_ready');
  assert.equal(context.calls,0);assert.equal(logged.length,1);
  const entry=JSON.parse(logged[0]);assert.equal(entry.step,'chunk');assert.equal(entry.code,'discovery_unavailable');assert.equal(entry.causeClass,'network_connection_lost');
 }
@@ -622,6 +628,185 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  assert.equal(legacy.reason,'rollover');
  delete env.DB;
  clearWorkflowAdmission();
+}
+
+// 15. AIR-364 / ADR 0098. A step that fails after the platform's retries is recovered by the instance itself: armed once through the
+// same CAS and backoff, a durable sleep until `dueAt`, then the existing ensure opens the one successor. Nothing is created before
+// `dueAt`, and every uncertain or unsafe outcome leaves the hourly reconcile as the only recovery. The clock is controlled.
+{
+ const realNow=Date.now;let skew=0;Date.now=()=>realNow()+skew;
+ const transient=()=>Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable'});
+ const record=()=>records.get('epg/discovery-workflow.json');
+ const startRun=({fails=name=>name.startsWith('chunk'),error=transient(),onSleep,mode='workflow'}={})=>{
+  const sleeps=[];
+  const stepDouble={
+   async do(name,fn){if(fails(name))throw error;return fn();},
+   async sleepUntil(name,date){sleeps.push({name,at:date.getTime(),now:Date.now()});if(onSleep)await onSleep(date);},
+  };
+  const runEnv=workflowEnv(mode);
+  return {sleeps,stepDouble,env:runEnv,run:()=>call('runDiscoveryWorkflow')(runEnv,{programmeRunId:GENERATION,series:0},stepDouble)};
+ };
+ const fresh=()=>{skew=0;seed({remaining:12});armWorkflowAdmission();elect();Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});};
+ const advanceTo=date=>{skew=Math.max(skew,date.getTime()-realNow()+1);};
+ const createTimes=[];
+ binding.create=async request=>{createTimes.push(Date.now());creates.push(request);const prior=creates.filter(item=>item.id===request.id).length;if(prior>1)throw new Error('Instance already exists');return {id:request.id};};
+ try{
+  // Due not yet elapsed: armed once, no successor, no early create.
+  fresh();let t=startRun();
+  let ended=await t.run();
+  assert.equal(ended.reason,'recovery_waiting');assert.equal(creates.length,0,'nothing is created before dueAt');
+  assert.equal(record().phase,'stopped');assert.equal(record().reason,'step_failure');assert.equal(record().recovery.attempts,1);
+  const armedAt=Date.parse(record().recovery.at),dueAt=Date.parse(record().recovery.dueAt);
+  assert.equal(dueAt-armedAt,60000,'the first backoff is 60 s');
+  assert.ok(t.sleeps.length>=1&&t.sleeps.every(item=>item.at===dueAt),'the sleep is until dueAt');
+  // The hourly reconcile is still the fallback: once dueAt has passed it opens the successor.
+  skew=dueAt-realNow()+1000;
+  const cron=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(cron.started,true);assert.equal(creates.length,1);assert.equal(creates[0].id,INSTANCE.replace(/_0$/,'_1'));
+  assert.equal(record().recovery.attempts,1,'one failure counted once');
+
+  // After the sleep: one successor with no second cron, never before dueAt.
+  fresh();createTimes.length=0;
+  t=startRun({onSleep:advanceTo});
+  ended=await t.run();
+  assert.equal(ended.reason,'recovered');assert.equal(creates.length,1);assert.equal(creates[0].id,INSTANCE.replace(/_0$/,'_1'));
+  const due2=t.sleeps[0].at;
+  assert.ok(createTimes[0]>=due2,'the successor is created at or after dueAt');
+  assert.equal(record().instanceId,creates[0].id);assert.equal(record().recovery.attempts,1);
+
+  // Duplicate wakeups: the instance and the cron after dueAt open the same one deterministic successor.
+  fresh();
+  t=startRun({onSleep:async date=>{advanceTo(date);}});
+  const both=await Promise.all([t.run(),call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'))]);
+  assert.ok(creates.length>=1);assert.equal(new Set(creates.map(item=>item.id)).size,1,'one successor id');
+  assert.equal(record().recovery.attempts,1,'the counter is not bumped by the race');
+
+  // Superseded while sleeping (another instance owns the record): quiet stop, no create.
+  fresh();
+  t=startRun({onSleep:async date=>{advanceTo(date);elect(1);}});
+  ended=await t.run();
+  assert.equal(ended.reason,'not_owner');assert.equal(creates.length,0);
+
+  // An unknown create result keeps the identity and the recovery counts it; the next attempt reuses the same id.
+  fresh();
+  const failingCreate=binding.create;
+  binding.create=async request=>{creates.push(request);throw new Error('network connection lost');};
+  t=startRun({onSleep:advanceTo});
+  ended=await t.run();
+  binding.create=failingCreate;
+  assert.equal(ended.reason,'start_uncertain');assert.equal(creates.length,1);
+  assert.equal(record().phase,'uncertain');assert.equal(record().recovery.attempts,2);
+  const uncertainId=creates[0].id;
+  skew=Date.parse(record().recovery.dueAt)-realNow()+1000;
+  creates.length=0;
+  const retry=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(retry.started,true);assert.equal(creates.length,1);assert.equal(creates[0].id,uncertainId,'the same identity is retried');
+
+  // Progressive backoff and quarantine.
+  for(const [previous,delay] of [[1,300000],[2,900000],[3,3600000]]){
+   fresh();
+   set('epg/discovery-workflow.json',{...record(),recovery:{attempts:previous,reason:'step_failure',at:iso,dueAt:iso,quarantined:false}});
+   t=startRun();
+   await t.run();
+   assert.equal(record().recovery.attempts,previous+1);
+   assert.equal(Date.parse(record().recovery.dueAt)-Date.parse(record().recovery.at),delay);
+  }
+  fresh();creates.length=0;
+  set('epg/discovery-workflow.json',{...record(),recovery:{attempts:4,reason:'step_failure',at:iso,dueAt:iso,quarantined:false}});
+  t=startRun({onSleep:advanceTo});
+  ended=await t.run();
+  assert.equal(ended.reason,'recovery_exhausted');assert.equal(creates.length,0);assert.equal(t.sleeps.length,0,'a quarantined recovery does not sleep');
+  assert.equal(record().recovery.quarantined,true);
+
+  // A new generation published while sleeping, and the external mode: the wake stops without a successor.
+  fresh();creates.length=0;
+  t=startRun({onSleep:async date=>{advanceTo(date);armWorkflowAdmission(OTHER);}});
+  ended=await t.run();
+  assert.equal(creates.length,0);assert.equal(ended.reason,'stale_generation','a newer generation is not opened by the stale instance');
+  fresh();creates.length=0;
+  t=startRun({onSleep:async date=>{advanceTo(date);t.env.DISCOVERY_EXECUTOR='external';}});
+  ended=await t.run();
+  assert.equal(creates.length,0);assert.equal(ended.reason,'external');
+  Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
+
+  // D1 failure while arming: the arming step is not caught, the instance ends as before and nothing is created.
+  fresh();creates.length=0;
+  t=startRun({fails:name=>name.startsWith('chunk')||name.startsWith('recover-arm')});
+  await assert.rejects(t.run(),thrown=>thrown.code==='discovery_unavailable');
+  assert.equal(record().phase,'running');assert.equal(creates.length,0);
+
+  // Failures that are not positively recognised as transient are never recovered here.
+  for(const error of [Object.assign(new Error('discovery_fence'),{code:'discovery_fence'}),Object.assign(new Error('discovery_incomplete'),{code:'discovery_incomplete'}),new Error('boom unknown text'),new RangeError('x'),'raw']){
+   fresh();creates.length=0;
+   t=startRun({error});
+   await assert.rejects(t.run(),thrown=>thrown===error);
+   assert.equal(record().phase,'running');assert.equal(record().recovery,null);assert.equal(t.sleeps.length,0);assert.equal(creates.length,0);
+  }
+  // A hard code wins over a transient cause.
+  fresh();
+  const hardWithCause=Object.assign(new Error('discovery_fence'),{code:'discovery_fence',cause:new Error('network connection lost')});
+  t=startRun({error:hardWithCause});
+  await assert.rejects(t.run(),thrown=>thrown===hardWithCause);
+  assert.equal(record().recovery,null);
+  // AIR-364 review: the arming write is a proven CAS. A concurrent write to the same record (same instance and series, an old
+  // recovery with an old dueAt still in it) makes the stop CAS lose: the arm re-reads and recomputes, counts the failure once and
+  // sleeps until the new due time, never the retained old one.
+  const workflowKey='epg/discovery-workflow.json';
+  const originalPut=bucket.put;
+  let lose=0,losses=0;
+  bucket.put=async(key,value,options)=>{
+   if(key===workflowKey&&lose>0&&options?.onlyIf){
+    lose--;losses++;
+    await originalPut.call(bucket,key,JSON.stringify({...record(),touchedByAnotherWriter:losses}));
+    return null;
+   }
+   return originalPut.call(bucket,key,value,options);
+  };
+  try{
+   const oldDue=new Date(realNow()+skew-5000).toISOString();
+   const withOldRecovery=()=>{fresh();set(workflowKey,{...record(),recovery:{attempts:1,reason:'step_failure',at:iso,dueAt:oldDue,quarantined:false}});};
+   withOldRecovery();creates.length=0;lose=1;losses=0;
+   t=startRun({onSleep:async date=>{assert.ok(date.getTime()>Date.parse(oldDue)+200000,'not the retained old dueAt');assert.equal(record().touchedByAnotherWriter,1,'the concurrent write is kept');assert.equal(record().recovery.attempts,2,'the failure is counted once');assert.equal(Date.parse(record().recovery.dueAt),date.getTime());advanceTo(date);}});
+   ended=await t.run();
+   assert.equal(losses,1,'the stop CAS lost once');
+   assert.equal(ended.reason,'recovered');assert.equal(creates.length,1);
+   assert.equal(t.sleeps.length>=1&&t.sleeps.every(item=>item.at-Date.parse(oldDue)>=299000),true,'the new 5 min backoff, not the old due');
+   // Three lost CAS in a row: no proof of arming, so no sleep and no create; the cron stays the fallback and the record is untouched.
+   withOldRecovery();creates.length=0;lose=3;losses=0;
+   t=startRun({onSleep:advanceTo});
+   ended=await t.run();
+   assert.equal(ended.reason,'recovery_write_conflict');assert.equal(t.sleeps.length,0);assert.equal(creates.length,0);
+   assert.equal(record().recovery.attempts,1);assert.equal(record().recovery.dueAt,oldDue);assert.equal(record().phase,'running');
+   // A retry of the arming step after its write landed counts the failure once.
+   withOldRecovery();creates.length=0;lose=0;
+   t=startRun();
+   const baseDo=t.stepDouble.do.bind(t.stepDouble);
+   t.stepDouble.do=async(name,fn)=>{if(name.startsWith('recover-arm')){await fn();return fn();}return baseDo(name,fn);};
+   ended=await t.run();
+   assert.equal(record().recovery.attempts,2,'one failure counted once across a step retry');
+   assert.equal(ended.reason,'recovery_waiting');
+   // The arming write itself failing (an error, not a lost CAS) ends the instance as before and creates nothing.
+   withOldRecovery();creates.length=0;
+   bucket.put=async(key,value,options)=>{if(key===workflowKey&&options?.onlyIf)throw Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable'});return originalPut.call(bucket,key,value,options);};
+   t=startRun();
+   await assert.rejects(t.run(),thrown=>thrown.code==='discovery_unavailable');
+   assert.equal(record().recovery.attempts,1);assert.equal(creates.length,0);
+  }finally{bucket.put=originalPut;}
+  // The classifier itself: a hostile object whose every read throws is never recoverable; the hint of the last attempt only decides
+  // an error that says nothing; a hard code wins over the hint.
+  const hostile={get message(){throw new Error('x');},get name(){throw new Error('x');},get code(){throw new Error('x');},get cause(){throw new Error('x');}};
+  const classify=call('workflowStepRecoverable');
+  assert.equal(classify(hostile,true),false);assert.equal(classify(hostile,false),false);
+  assert.equal(classify(new Error('says nothing'),true),true);assert.equal(classify(new Error('says nothing'),false),false);
+  assert.equal(classify(Object.assign(new Error('x'),{code:'discovery_fence'}),true),false);
+  assert.equal(classify(Object.assign(new Error('x'),{code:'discovery_unavailable'}),false),true);
+  assert.equal(classify(null,false),false);assert.equal(classify('discovery_unavailable',false),false);
+  // A transient cause alone (the wrapper text is lost by the platform) is recovered.
+  fresh();
+  t=startRun({error:Object.assign(new Error('wrapper'),{cause:new Error('Network connection lost.')})});
+  ended=await t.run();
+  assert.equal(ended.reason,'recovery_waiting');assert.equal(record().recovery.attempts,1);
+ }finally{Date.now=realNow;delete env.DISCOVERY_EXECUTOR;clearWorkflowAdmission();}
 }
 
 console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
