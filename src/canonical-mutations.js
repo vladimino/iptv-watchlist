@@ -148,8 +148,12 @@ export async function mergeFilms(env,input){
  for(const left of fromIds)for(const right of toIds){
   if(left.scheme===right.scheme&&String(left.value)!==String(right.value)&&input?.evidence?.verified!==true)throw failed('film_person_identity_conflict');
  }
+ // AIR-370: a Film with an owner TMDB retirement decision (schema 16) is not merged away silently; its history outlives it.
+ const decisions=!!(await one(db,"SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='tmdb_retirement_decision'"));
+ if(decisions&&await one(db,'SELECT 1 AS present FROM tmdb_retirement_decision WHERE film_id=? LIMIT 1',[from]))throw failed('film_person_retirement_history');
  const entities=[{kind:'film',id:from,expected:expectedFrom},{kind:'film',id:to,expected:expectedTo}];
  const s=head(gate,entities);
+ if(decisions)s.push([assertSql('NOT EXISTS (SELECT 1 FROM tmdb_retirement_decision WHERE film_id=?)'),[from]]);
  s.push([assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[to]]);
  s.push([assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[from]]);
  s.push([assertSql('NOT EXISTS (SELECT 1 FROM film_generation WHERE film_id=?) AND NOT EXISTS (SELECT 1 FROM film_epg_last_airing WHERE film_id=?)'),[from,from]]);
