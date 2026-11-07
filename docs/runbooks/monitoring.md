@@ -8,7 +8,7 @@ A tick on the existing hourly cron that reads the stored status of EPG, Discover
 
 ## Activation order (each needs an owner GO)
 
-1. Choose the channel and the dead-man service. For the generic webhook set `MONITOR_WEBHOOK_URL`; for Telegram ([ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md)) set `MONITOR_TELEGRAM_BOT_TOKEN` and `MONITOR_TELEGRAM_CHAT_ID` and then `MONITOR_TRANSPORT=telegram`. Optionally set `MONITOR_HEARTBEAT_URL`. The secrets are Worker secrets, never in git, GitHub, Trello or logs; `GET /api/monitor/status` shows `transport` and `alerting` without them.
+1. Choose the channel and the dead-man service. For the generic webhook set `MONITOR_WEBHOOK_URL`; for Telegram ([ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md)) set `MONITOR_TELEGRAM_BOT_TOKEN` and `MONITOR_TELEGRAM_CHAT_ID` and then `MONITOR_TRANSPORT=telegram`. Optionally set `MONITOR_HEARTBEAT_URL`. The bot token is a Worker secret and, like `MONITOR_WEBHOOK_URL`, never in git, GitHub, Trello or logs. By the owner's decision of 2026-11-07 `MONITOR_TELEGRAM_CHAT_ID` may be a plain Worker variable (it identifies the destination and is not a credential), so it is visible in the Cloudflare Dashboard; `GET /api/monitor/status` shows `transport` and `alerting` without them.
 2. Set `MONITOR=dry` and read one tick in Workers Observability (`event: monitor`): the overall state and issue keys, nothing written or sent.
 3. Set `MONITOR=on`. Read `GET /api/monitor/status`: one healthy snapshot with a fresh `heartbeatAt`.
 4. Send one synthetic message with `POST /api/monitor/test` (only with `MONITOR=on`; `dry` and `off` refuse it without a write or a request), confirm the owner received it, and that a second call inside ten minutes is refused.
@@ -42,7 +42,7 @@ When `on`, one tick is a handful of small R2 reads, one conditional R2 write and
 
 | `lastDeliveryFailure.reason` | Meaning and next step |
 | --- | --- |
-| `config_invalid` | A token or chat id is missing or malformed (status shows `alerting: false`); nothing was sent and the queue is kept. Owner: set a valid secret |
+| `config_invalid` | A token or chat id is missing or malformed (status shows `alerting: false`); nothing was sent and the queue is kept. Owner: set a valid token (secret) or chat id |
 | `http_401`, `http_403` | The token is wrong or revoked, or the bot was removed from the chat. Owner: fix the bot or the secret |
 | `telegram_not_ok`, `http_400` | Telegram refused the request, for example a wrong chat id. Owner: check the chat binding |
 | `rate_limited` | Telegram answered 429; `holdUntil` shows when sending resumes. Nothing is lost |
