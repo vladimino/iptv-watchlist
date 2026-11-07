@@ -41,24 +41,29 @@ export function verifiedAdmission(key,item){
  return {ok:true,admission:{receiptFilmKey:key,tmdb:match[1],sourceCode:item.sourceCode,archiveSha256:item.archiveSha256,title:typeof item.title==='string'&&item.title.trim()?item.title.trim():null,year,verifiedAt}};
 }
 
-// The Film an admission belongs to: the existing Film that holds this movie id as a trusted `tmdb` external id (a typed id; `tmdb_tv` is another
-// scheme and never matches), else the new id film:tmdb:<n>. A Letterboxd Film that already carries the movie id therefore stays one Film.
+// The Film an admission belongs to, and whether the typed movie id is held. ALL rows for the typed id (`tmdb`; `tmdb_tv` is another scheme and
+// never matches) are read: the Film that holds it as a trusted, non-conflicting external id is the owner and the target (so a Letterboxd Film
+// that already carries the movie id stays one Film), else the target is the new id film:tmdb:<n>. Any row for the id that is not that owner's
+// own trusted row (an untrusted or conflicting claim on this or another Film, even beside a trusted owner) leaves the id `held`: it is
+// ambiguous identity evidence, and a verified receipt proves the incoming observation but does not erase an earlier explicit classification.
 export async function resolveAdmissionFilm(env,tmdb){
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');
- const owner=await one(db,"SELECT film_id FROM film_external_id WHERE scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0",[String(tmdb)]);
- const id=owner?.film_id||'film:tmdb:'+tmdb;
+ const claims=await many(db,"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[String(tmdb)]);
+ const owner=claims.find(row=>row.trusted===1&&row.conflicting===0)?.film_id??null;
+ const held=claims.some(row=>!(row.trusted===1&&row.conflicting===0&&row.film_id===owner))?'untrusted_or_conflicting_claim':null;
+ const id=owner||'film:tmdb:'+tmdb;
  const [film,revision,redirect]=await Promise.all([one(db,'SELECT id FROM film WHERE id=?',[id]),one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',['film',id]),one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id])]);
- return {id,exists:!!film,revision:Number(revision?.revision??0),redirected:!!redirect,owner:owner?.film_id??null};
+ return {id,exists:!!film,revision:Number(revision?.revision??0),redirected:!!redirect,owner,held,claims:claims.length};
 }
 
 const unavailable=error=>error?.code==='film_person_unavailable'&&/no such table/i.test(String(error.cause?.message||''));
 
 // The fenced admission of ONE verified rated-only Film (a later card calls it; nothing does today). One atomic batch proves the marker
-// generation (`open` only), the revision of the resolved Film and that the movie id still resolves to that Film, upserts the Film row and its
-// trusted `tmdb` external id (a collision with another owner refuses the batch), keeps the verified short code as a historical alias and the
+// generation (`open` only), the revision of the resolved Film and that the typed movie id is still unclaimed or held only by that Film's own trusted row, upserts the Film row and its
+// trusted `tmdb` external id (inserted only when no row exists: a trusted row keeps its provenance, an untrusted or conflicting one is never upgraded), keeps the verified short code as a historical alias and the
 // verified admission row, and bumps the revision. A replay (same content) opens no batch; a different movie id or short code for an admitted
-// Film, or a short code already verified for another Film, is refused. Owner and reviewed values, credits, metadata, localization,
+// Film, or a short code already verified for another Film, is refused, and so is a movie id with an untrusted or conflicting claim (`admission_identity_held`; nothing is written until a separate, explicit resolution). Owner and reviewed values, credits, metadata, localization,
 // watchlist membership and the rating are never touched: the rating link stays the ratings domain's, keyed by the same tmdb_<n>.
 // input: {receiptKey:'tmdb_<n>', receipt:{...entry}, filmId?, expectedRevision, at, requestId}
 export async function admitRatedFilm(env,input){
@@ -76,6 +81,7 @@ export async function admitRatedFilm(env,input){
  }catch(error){if(unavailable(error)||/no such table/i.test(String(error?.message||'')))throw failed('admission_unavailable',error);throw error;}
  if(input.filmId!==undefined&&input.filmId!==target.id)throw failed('admission_target_changed');
  if(target.redirected)throw failed('film_person_redirect');
+ if(target.held){const error=failed('admission_identity_held');error.reason=target.held;throw error;}
  if(holder&&holder.film_id!==target.id)throw failed('admission_conflict');
  if(prior){
   if(prior.tmdb!==admission.tmdb||prior.source_code!==admission.sourceCode)throw failed('admission_conflict');
@@ -85,10 +91,12 @@ export async function admitRatedFilm(env,input){
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
- // The movie id must still resolve to this Film when the batch runs (another Film may have claimed it after the read).
- statements.push([fenced.assertSql("(SELECT film_id FROM film_external_id WHERE scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0) IS ?"),[admission.tmdb,target.owner]]);
+ // The identity rows are re-asserted INSIDE the batch (they can change after the read): no row for the typed id may exist except the owner's own
+ // trusted one, and exactly that one must exist when an owner was found. An untrusted or conflicting claim that appears, or a row that changes, fails the batch.
+ statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE scheme='tmdb' AND value=? AND NOT (film_id IS ? AND trusted=1 AND conflicting=0))"),[admission.tmdb,target.owner]]);
+ statements.push([fenced.assertSql("(SELECT COUNT(*) FROM film_external_id WHERE scheme='tmdb' AND value=?)=?"),[admission.tmdb,target.owner?1:0]]);
  statements.push(["INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET canonical_identity=COALESCE(film.canonical_identity,excluded.canonical_identity),original_title=COALESCE(film.original_title,excluded.original_title),updated_at=excluded.updated_at",[id,'tmdb:'+admission.tmdb,admission.title,at]]);
- statements.push(["INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,'tmdb',?,1,0,?) ON CONFLICT(film_id,scheme,value) DO UPDATE SET trusted=1,conflicting=0",[id,admission.tmdb,stable({source:'letterboxd_rated_admission',receiptKey:RATED_RECEIPT_KEY,archiveSha256:admission.archiveSha256})]]);
+ statements.push(["INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,'tmdb',?,1,0,?) ON CONFLICT(film_id,scheme,value) DO NOTHING",[id,admission.tmdb,stable({source:'letterboxd_rated_admission',receiptKey:RATED_RECEIPT_KEY,archiveSha256:admission.archiveSha256})]]);
  statements.push(["INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,'letterboxd_short_code',?,?) ON CONFLICT(film_id,kind,value) DO NOTHING",[id,admission.sourceCode,stable({source:'letterboxd_rated_admission',archiveSha256:admission.archiveSha256})]]);
  statements.push(["INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET archive_sha256=excluded.archive_sha256,title=COALESCE(excluded.title,film_rated_admission.title),year=COALESCE(excluded.year,film_rated_admission.year),request_id=excluded.request_id,updated_at=excluded.updated_at WHERE film_rated_admission.tmdb=excluded.tmdb AND film_rated_admission.source_code=excluded.source_code",[id,admission.tmdb,admission.sourceCode,admission.archiveSha256,admission.title,admission.year,RATED_RECEIPT_KEY,admission.receiptFilmKey,admission.verifiedAt,requestId,at]]);
  statements.push([fenced.BUMP,['film',id,at]]);

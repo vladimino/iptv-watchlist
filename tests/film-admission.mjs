@@ -130,7 +130,7 @@ async function seedFilm(env,id,externalIds=[]){return mutateFilm(env,{id,expecte
  assert.equal(env.DB.calls.batches,before,'a candidate opens no batch');
  assert.equal(one(file,'SELECT COUNT(*) FROM film'),0,'no unverified candidate becomes a Film');
  // A verified rated-only entry becomes film:tmdb:<n> with its typed id, the short code as a historical alias, the receipt facts and no more.
- assert.deepEqual(await resolveAdmissionFilm(env,'603'),{id:'film:tmdb:603',exists:false,revision:0,redirected:false,owner:null});
+ assert.deepEqual(await resolveAdmissionFilm(env,'603'),{id:'film:tmdb:603',exists:false,revision:0,redirected:false,owner:null,held:null,claims:0});
  const first=await admit(env,603);
  assert.deepEqual([first.id,first.revision,first.admitted],['film:tmdb:603',1,true]);
  assert.deepEqual(rows(file,"SELECT canonical_identity,original_title FROM film WHERE id='film:tmdb:603'"),[{canonical_identity:'tmdb:603',original_title:'Film 603'}]);
@@ -160,7 +160,7 @@ async function seedFilm(env,id,externalIds=[]){return mutateFilm(env,{id,expecte
  // A Letterboxd Film that already holds the trusted movie id stays ONE Film: the admission goes onto it, no duplicate identity.
  await seedFilm(env,'film:lb-7',[{scheme:'letterboxd',value:'lid7',trusted:true},{scheme:'tmdb',value:'77',trusted:true}]);
  const target=await resolveAdmissionFilm(env,'77');
- assert.deepEqual([target.id,target.exists,target.revision],['film:lb-7',true,1]);
+ assert.deepEqual([target.id,target.exists,target.revision,target.held],['film:lb-7',true,1,null]);
  const joined=await admit(env,77,{expectedRevision:1,filmId:'film:lb-7'});
  assert.deepEqual([joined.id,joined.revision],['film:lb-7',2]);
  assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE canonical_identity='tmdb:77' OR id='film:tmdb:77'"),1,'one Film');
@@ -190,6 +190,64 @@ async function seedFilm(env,id,externalIds=[]){return mutateFilm(env,{id,expecte
  const dup={DB:d1Standin(file,{onBatch:async()=>{sqlite(file,`INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:holder','820','sc830','${SHA}','${RATED_RECEIPT_KEY}','tmdb_820','2026-11-01T09:00:00.000Z','r','t')`);}})};
  await assert.rejects(()=>admit(dup,830),code('admission_conflict'));
  assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:830'"),0,'nothing partial');
+}
+
+// 5b. Existing identity evidence is never promoted or bypassed: an untrusted or conflicting claim on the typed movie id holds the admission, in the
+// preflight and again inside the batch. A refusal changes no Film, admission, external id, trust flag, provenance or revision.
+{
+ const file=database({open:true});
+ const env=state(file);
+ const snapshot=()=>JSON.stringify([rows(file,'SELECT id FROM film ORDER BY id'),rows(file,'SELECT film_id,scheme,value,trusted,conflicting,provenance_json FROM film_external_id ORDER BY film_id,scheme,value'),rows(file,'SELECT * FROM film_rated_admission'),rows(file,'SELECT kind,id,revision FROM canonical_revision ORDER BY kind,id'),rows(file,'SELECT film_id,kind,value FROM film_alias ORDER BY film_id,kind,value')]);
+ const held=async(tmdb,over={},label='')=>{
+  const before=snapshot();
+  await assert.rejects(()=>admit(env,tmdb,over),error=>error.code==='admission_identity_held'&&error.reason==='untrusted_or_conflicting_claim',label+' is held');
+  assert.equal(snapshot(),before,label+': a refusal changes nothing');
+ };
+ // (1) Another Film holds the typed id untrusted, or conflicting: the new film:tmdb:<n> is not admitted beside it.
+ await seedFilm(env,'film:claim-untrusted',[{scheme:'tmdb',value:'100',trusted:false}]);
+ await held(100,{},'untrusted claim on another Film');
+ await seedFilm(env,'film:claim-conflicting',[{scheme:'tmdb',value:'101',trusted:false,conflicting:true}]);
+ await held(101,{},'conflicting claim on another Film');
+ assert.deepEqual(await resolveAdmissionFilm(env,'101'),{id:'film:tmdb:101',exists:false,revision:0,redirected:false,owner:null,held:'untrusted_or_conflicting_claim',claims:1});
+ // (2) The target Film itself holds the id untrusted/conflicting: the row is not upgraded and its provenance is kept.
+ await seedFilm(env,'film:tmdb:300',[{scheme:'tmdb',value:'300',trusted:false,conflicting:true,provenance:{note:'disputed'}}]);
+ await held(300,{},'a conflicting row on the same Film');
+ assert.deepEqual(rows(file,"SELECT trusted,conflicting FROM film_external_id WHERE film_id='film:tmdb:300'"),[{trusted:0,conflicting:1}],'never promoted');
+ await seedFilm(env,'film:tmdb:301',[{scheme:'tmdb',value:'301',trusted:false}]);
+ await held(301,{expectedRevision:1},'an untrusted row on the same Film');
+ // (3) A trusted owner with another Film's untrusted claim on the same id is ambiguous too.
+ await seedFilm(env,'film:owner-400',[{scheme:'tmdb',value:'400',trusted:true}]);
+ await seedFilm(env,'film:rival-400',[{scheme:'tmdb',value:'400',trusted:false,conflicting:true}]);
+ await held(400,{expectedRevision:1},'a trusted owner with a rival claim');
+ // (4) tmdb_tv stays distinct: a claim of the other scheme never holds the id, and an untrusted tmdb_tv row is untouched.
+ await seedFilm(env,'film:tv-500',[{scheme:'tmdb_tv',value:'500',trusted:false,conflicting:true}]);
+ const tvBefore=rows(file,"SELECT trusted,conflicting FROM film_external_id WHERE scheme='tmdb_tv'");
+ assert.equal((await admit(env,500)).id,'film:tmdb:500');
+ assert.deepEqual(rows(file,"SELECT trusted,conflicting FROM film_external_id WHERE scheme='tmdb_tv'"),tvBefore);
+ // (5) A trusted own row keeps its provenance when the admission is refreshed (the row is not rewritten).
+ await seedFilm(env,'film:own-600',[{scheme:'tmdb',value:'600',trusted:true,provenance:{keep:'me'}}]);
+ await admit(env,600,{expectedRevision:1});
+ await admit(env,600,{expectedRevision:2,requestId:'r600b',receipt:receipt(600,{archiveSha256:SHA2})});
+ assert.deepEqual(rows(file,"SELECT trusted,provenance_json FROM film_external_id WHERE film_id='film:own-600'"),[{trusted:1,provenance_json:'{"keep":"me"}'}]);
+ // (6) Races between the read and the batch: a claim appearing, the owner row changing or vanishing. The in-batch assertions refuse and nothing is written.
+ const race=async(tmdb,mutate,over={},label='')=>{
+  const before=snapshot();
+  const racing={DB:d1Standin(file,{onBatch:async()=>{sqlite(file,mutate);}})};
+  await assert.rejects(()=>admit(racing,tmdb,over),code('film_person_precondition'),label);
+  const after=JSON.parse(snapshot()),was=JSON.parse(before);
+  assert.deepEqual(after[2],was[2],label+': no admission written');
+  assert.deepEqual(after[3],was[3],label+': no revision moved');
+ };
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:racer',1,'t')");
+ await race(700,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:racer','tmdb','700',0,1)",{},'an untrusted claim appears for a new Film');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:700'"),0,'no Film was created');
+ await seedFilm(env,'film:own-710',[{scheme:'tmdb',value:'710',trusted:true}]);
+ await race(710,"UPDATE film_external_id SET conflicting=1 WHERE film_id='film:own-710' AND scheme='tmdb'",{expectedRevision:1},'the owner row turns conflicting');
+ assert.deepEqual(rows(file,"SELECT trusted,conflicting FROM film_external_id WHERE film_id='film:own-710'"),[{trusted:1,conflicting:1}],'the race left the disputed row as it found it');
+ await seedFilm(env,'film:own-720',[{scheme:'tmdb',value:'720',trusted:true}]);
+ await race(720,"DELETE FROM film_external_id WHERE film_id='film:own-720' AND scheme='tmdb'",{expectedRevision:1},'the owner row vanishes');
+ await seedFilm(env,'film:own-730',[{scheme:'tmdb',value:'730',trusted:true}]);
+ await race(730,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:rival-730',1,'t');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:rival-730','tmdb','730',0,0)",{expectedRevision:1},'a rival untrusted claim appears beside the owner');
 }
 
 // 6. retainFilm: a Film that left the watchlist persists; membership is not touched; the fact is monotonic and replay-safe; no R2.
