@@ -159,7 +159,9 @@ for(const mode of ['document','emit']){
  };
  context.ratingsGate=async()=>({active:true,migration:'complete'});
  context.flushRemovalHandover=async()=>false;
- context.finishSyncPersist=async()=>{events.push(['persist',run.stage]);};
+ context.persistWatchlist=async()=>{events.push(['persist',run.stage]);};
+ context.persistScan=async()=>{};
+ context.persistEvents=async()=>{};
  context.refreshPredictionQueue=async()=>{events.push(['refresh',run.stage]);if(mode==='emit')throw new Error('queue refresh failed with a long secret message '+'x'.repeat(300));};
  context.queueCommittedDiscovery=async()=>{events.push(['queue']);};
  context.copyEpgGeneration=async()=>{events.push(['copy']);};
@@ -232,7 +234,9 @@ for(const mode of ['document','emit']){
  const env={BUCKET:bkt};
  const calls=[];let failPersist=true;
  context.ratingsGate=async()=>({active:false,migration:'none'});
- context.finishSyncPersist=async()=>{calls.push('persist');if(failPersist){failPersist=false;throw new Error('persist failed');}};
+ context.persistWatchlist=async()=>{calls.push('persist');if(failPersist){failPersist=false;throw new Error('persist failed');}};
+ context.persistScan=async()=>{};
+ context.persistEvents=async()=>{};
  context.refreshPredictionQueue=async()=>{calls.push('refresh');};
  const run={runId:'run-x',stage:'seal',seal:{jobId:'j',phase:'finalize'},events:[],watchlist:[{id:1}],pending:{}};
  await assert.rejects(()=>context.sealFinalizeStep(env,run),/persist failed/);
@@ -293,5 +297,79 @@ for(const mode of ['document','emit']){
  assert.equal(calls,4,'pointer, mirrors, copy, then the intent: '+stored.join(' '));
  assert.deepEqual(ev,['pointer','mirrors','copy','intent']);assert.equal(run.seal.phase,'finalize');
  assert.ok(JSON.parse(await (await bkt.get('sync.json')).text()).seal.phase==='finalize','the checkpoint is saved');
+}
+
+// AIR-353 review: a failed mirror write or copy is never recorded as done. It is retried, bounded, then reported as
+// degraded; a deadline stops every phase between units, and the saved checkpoint survives a lost answer and a restart.
+{
+ const same=(actual,expected)=>assert.equal(JSON.stringify(actual),JSON.stringify(expected));
+ const bkt=bucket(11);
+ const report={runId:'run-q',updatedAt:'2026-11-06T10:00:00.000Z',films:[],watchlistCount:0,stats:{}};
+ const writePayload=()=>bkt.put('epg/seal/run-q/payload.json',JSON.stringify({report,watchlist:{films:[{id:'w1'}]},uncertain:[],fence:'f0',expectedProgrammeRunId:'run-old'}));
+ await writePayload();
+ let ev=[],published=false,mirrorsOk=0,copyFails=0,slowMs=0;
+ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+ context.PublishedEpg={
+  async currentGeneration(){return published?{programmeRunId:'run-q',phase:'published',fence:'f1'}:{programmeRunId:'run-old',phase:'published',fence:'f0'};},
+  async publishGeneration(){if(slowMs)await sleep(slowMs);published=true;ev.push('pointer');return {ok:true};},
+  async writeMirrors(){ev.push('mirrors');return mirrorsOk-->0?true:false;},
+ };
+ context.copyEpgGeneration=async()=>{ev.push('copy');if(copyFails-->0)throw new Error('copy failed');};
+ context.queueCommittedDiscovery=async()=>{ev.push('intent');};
+ const env={BUCKET:bkt};
+ const fresh=()=>({runId:'run-q',stage:'seal',seal:{jobId:'j',phase:'publish'},watchlist:[]});
+ const count=name=>ev.filter(item=>item===name).length;
+ const readRun=async()=>JSON.parse(await (await bkt.get('sync.json')).text());
+ // A mirror write that fails twice is retried on the next calls and is not marked done; the third try succeeds.
+ mirrorsOk=0;let run=fresh();let calls=0;const mirrorState=[];
+ // Fails on the first two tries, succeeds on the third.
+ let tries=0;context.PublishedEpg.writeMirrors=async()=>{ev.push('mirrors');return ++tries>=3;};
+ let answer=await context.sealPublishStep(env,run,null);
+ assert.equal(run.seal.phase,'publish');assert.equal(answer.seal.retry,'mirrors');assert.equal(answer.seal.attempts,1);assert.equal(run.seal.units.mirrors,undefined,'a failed unit is not recorded as done');
+ answer=await context.sealPublishStep(env,run,null);
+ assert.equal(answer.seal.retry,'mirrors');assert.equal(answer.seal.attempts,2);assert.equal(run.seal.phase,'publish');
+ answer=await context.sealPublishStep(env,run,null);
+ assert.equal(run.seal.phase,'finalize');assert.equal(count('pointer'),1,'the pointer moved once through the retries');assert.equal(count('mirrors'),3);assert.equal(run.sealDegraded,undefined);
+ // Mirrors that never succeed: three tries, then recorded as gave_up and degraded, with the watchlist fallback written.
+ ev=[];published=false;tries=-100;run=fresh();
+ for(let i=0;i<3;i++)answer=await context.sealPublishStep(env,run,null);
+ assert.equal(run.seal.phase,'finalize');same(run.sealDegraded,['mirrors']);assert.equal(answer.seal.degraded[0],'mirrors');
+ assert.equal(count('mirrors'),3);assert.equal(count('pointer'),1);assert.equal(count('intent'),1);
+ assert.ok(await bkt.head('watchlist.json'),'the watchlist fallback is written when the mirrors failed');
+ // A copy that fails is retried the same way and reported as degraded after three tries.
+ ev=[];published=false;copyFails=100;tries=100;run=fresh();
+ for(let i=0;i<3;i++)answer=await context.sealPublishStep(env,run,null);
+ assert.equal(run.seal.phase,'finalize');same(run.sealDegraded,['copy']);assert.equal(count('copy'),3);assert.equal(count('pointer'),1);
+ copyFails=0;
+ // The degraded names reach the final answer.
+ context.ratingsGate=async()=>({active:true,migration:'complete'});context.flushRemovalHandover=async()=>false;
+ context.persistWatchlist=async()=>{};context.persistScan=async()=>{};context.persistEvents=async()=>{};context.refreshPredictionQueue=async()=>{};
+ await context.sealFinalizeStep(env,run);await writePayload();
+ const finished=await context.sealQueueStep(env,run);
+ assert.equal(finished.stage,'complete');same(finished.degraded,['copy']);
+ // A slow pointer passes the deadline: the first unit still ran, nothing else started, and the checkpoint is durable.
+ ev=[];published=false;tries=100;slowMs=40;run=fresh();await writePayload();
+ const slow=await context.sealPublishStep(env,run,null,Date.now()+10);
+ assert.deepEqual(ev,['pointer'],'no unit starts after the deadline');assert.equal(run.seal.phase,'publish');same(slow.seal.units,['pointer']);
+ // The answer is lost; the process restarts and reads the run back from storage: the saved units hold.
+ const restarted=await readRun();
+ assert.equal(restarted.seal.units.pointer,'ok');
+ slowMs=0;
+ await context.sealPublishStep(env,restarted,null);
+ assert.equal(restarted.seal.phase,'finalize');assert.equal(count('pointer'),1,'the repeat after the lost answer does not publish again');assert.equal(count('intent'),1);
+ // The deadline bounds the finalize and queue phases between their units as well.
+ ev=[];const evs=[];
+ context.ratingsGate=async()=>{evs.push('handover');return {active:true,migration:'complete'};};
+ context.persistWatchlist=async()=>{evs.push('watchlist');};context.persistScan=async()=>{evs.push('scan');};context.persistEvents=async()=>{evs.push('events');};
+ const fin=fresh();fin.seal.phase='finalize';await writePayload();
+ let finCalls=0;do{finCalls++;await context.sealFinalizeStep(env,fin,0);}while(fin.seal.phase==='finalize'&&finCalls<8);
+ assert.equal(finCalls,4,'one unit per call once the deadline has passed');assert.deepEqual(evs,['handover','watchlist','scan','events']);assert.equal(fin.seal.phase,'queue');
+ // A failing unit keeps the units that finished: the next call resumes after them.
+ evs.length=0;let failScan=true;context.persistScan=async()=>{evs.push('scan');if(failScan){failScan=false;throw new Error('scan failed');}};
+ const resume=fresh();resume.seal.phase='finalize';
+ await assert.rejects(()=>context.sealFinalizeStep(env,resume),/scan failed/);
+ assert.equal(resume.seal.phase,'finalize');
+ await context.sealFinalizeStep(env,resume);
+ assert.equal(resume.seal.phase,'queue');same(evs,['handover','watchlist','scan','scan','events']);
 }
 console.log('discovery seal publish ok');
