@@ -1,0 +1,25 @@
+# AIR-369: offline evidence of D1 verified rated admission and watchlist retention
+
+**Captured:** 2026-11-07 (UTC). **Method:** offline tests on a D1 stand-in over the sqlite3 CLI (`tests/film-admission.mjs`), the full `npm test` and `npm run build`. No production read or write, no schema apply, no flag, no R2, ZIP, Discovery or TMDB access. Nothing here measures production behavior, row counts, latency or parity.
+
+## What was verified
+
+- **Migration `0015`.** It refuses a database below a complete version 14 (versions 13, 12 and 9 tested) before it creates a table, creates two empty tables, writes no row and leaves the `0013` marker at `r2` / `open` / generation 0. The tables refuse a non-numeric or zero movie id, a bad archive digest, a receipt key that is not `tmdb_<tmdb>`, a non-normalized verification or observation time, an empty short code, a retention basis or flag outside the contract, malformed evidence JSON and a missing Film; a movie id and a short code are each unique.
+- **Only a verified entry is a Film.** `verifiedAdmission` refuses a short-code key, a `tmdb_tv_<n>` key, a queue candidate (`pending`, `admitting`), an entry without a verification time, short code or archive digest, an entry with a `watchlist` field and a `tmdb` that differs from the key; a refused entry opens no batch and creates no Film.
+- **Admission.** A verified entry becomes `film:tmdb:<n>` with a trusted `tmdb` external id, the short code as a `letterboxd_short_code` alias (never a lid), the receipt facts and a revision; it writes no metadata, credit, localization, dimension, membership or rating. A replay opens no batch even with a stale expected revision; a later archive digest refreshes the row and keeps the first verification time. One short code for two movie ids, one movie id with two short codes and a short code verified for another Film are `admission_conflict`.
+- **Typed identity.** A `tmdb_tv` holder of the same number is not the owner of the movie id; a Letterboxd Film that already holds the trusted `tmdb` id receives the admission and stays one Film; a changed target is `admission_target_changed`; a Film claimed by another owner between the read and the batch fails the in-batch assertion with nothing written; the owner value of the Film survives.
+- **Retention.** A Film that left the watchlist persists on its retention fact; membership (`watchlist_film`) is not written; the fact is monotonic by instant (older and equal observations skipped, a concurrent newer write is not overwritten, also in SQL), replay-safe and refuses a different payload under the same request id; it never creates a Film and takes no redirect. No R2 binding is touched.
+- **Fences.** Both writers refuse in legacy, `r2`, `prepared` and `held` (zero rows written), answer unavailable at schema 14, fail the fence when the marker moves to `held` between the read and the batch, and report a lost revision as `film_person_revision_conflict`.
+- **Merge.** A retired admission moves to a survivor without one, two different admissions refuse the merge with nothing written, the later retention observation wins, and before schema 15 a merge is unchanged.
+- **Reads and compare.** `readAdmissions` needs the marker `open` (held fails closed, prepared is not authoritative); reads are chunked by 80 ids with two queries per chunk. `compareAdmissions` reports missing, mismatched, extra, unverified and retention differences, capped at 200 per list, and writes nothing.
+- **Inactive.** No source file imports `film-admission`, the build and package files do not name it, and the projector, the repository and the R2 writers do not touch the new tables.
+
+Mutation checks (each removal makes the test fail): the verification-time check, the `watchlist` field refusal, the typed `tmdb` scheme of the owner lookup, the in-batch owner assertion, the retention SQL monotonic guard (and the same guard in the merge), the existing-admission conflict check, the retention stale check, the reader gate, the merge refusal and the `receipt_film_key` CHECK. The short-code holder pre-check is also covered by the unique index (same error), so removing it alone does not fail the test.
+
+## Scenarios available now and later
+
+Available now: all of the above. To repeat later: producers calling the writers with generation fencing, competing producers and unknown commit results (AIR-371); the bulk read model reading retained and admitted Films (AIR-372); counts and parity of the receipt object and the view index against the D1 rows, with the ratings link by `tmdb_<n>` (AIR-373); the handoff with a natural admission surviving refresh and cron (AIR-374). The inbound boundary stays: the D1 ratings domain links by `tmdb_<n>` and the pre-Film queue stays with AIR-343; no ZIP import, Discovery or TMDB run is part of this card.
+
+## Not verified
+
+Production behavior, receipt and view-index counts, how many Films exist only through the retention flag, and whether any receipt entry fails the verification check in production. A production `SELECT` or a read of the R2 objects needs separate permission, and no GET with a possible write is used.
