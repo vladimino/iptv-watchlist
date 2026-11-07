@@ -137,8 +137,11 @@ if(process.env.CHUNK_BUDGET_ONLY_WALK){console.log('walk report done');process.e
  // Less than the renew margin left on the lease the chunk holds.
  lease.lease.expiresAt=Date.now()+30000;
  const before=leaseRow(file).expires_at;
- const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,null,Date.now()-4000);
  assert.equal(result.paged,true);
+ // AIR-353: the gap between the start of the request's preflight and the chunk's own clock is reported.
+ assert.ok(result.timings.preChunkMs>=4000&&result.timings.preChunkMs<60000,'preChunkMs '+result.timings.preChunkMs);
+ assert.equal(context.chunkSummary(result).timings.preChunkMs,result.timings.preChunkMs);
  assert.equal(result.stage,'complete');
  assert.equal(result.checked,HOT.length);
  assert.equal(result.remaining,0);
@@ -520,6 +523,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  }});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(result.timings.preChunkMs,null,'a chunk started without a request entry time reports none');
  const decisions=Number(sql(base.file,'SELECT COUNT(*) AS n FROM discovery_decision')[0].n);
  assert.ok(result.checked>0&&result.checked<6+HOT.length,'some candidates are resolved, not all: '+result.checked);
  assert.equal(decisions,result.checked,'every counted candidate has its decision');

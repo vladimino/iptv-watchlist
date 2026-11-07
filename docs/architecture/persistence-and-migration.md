@@ -79,3 +79,5 @@ The D1 discovery ledger is published by a multi-batch handoff. While it is `load
 ## Resumable ledger seal
 
 Schema 12 adds `discovery_seal`, the durable cursor of the ledger seal job. A seal reads the immutable generation ledger in R2 by byte offset and writes observation rows and the cursor in one D1 batch; R2 keeps the document and a staging payload of the publication, and D1 owns the rows, the cursor and the transfer ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md)). Without the table the Worker keeps its previous behaviour. No new store and no new arrow is added to the diagrams above.
+
+The publication after the catalog is three bounded steps (`publish`, `finalize`, `queue`, [ADR 0096](../adr/0096-bounded-seal-publication-steps.md)) so that no step exceeds the shortest MCP client wait; the stores and arrows above are unchanged.

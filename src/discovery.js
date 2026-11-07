@@ -585,13 +585,13 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 // very next durable write after the status; see advanceDiscovery.
 // A ledger above the in-memory cap is a cursor, not an array. One page is resident at a time, and only the
 // next `limit` actionable observations are kept for the TMDB calls.
-async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned){
+async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt=null){
  const last=await loadJSON(env,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
  // The D1 lease lives 90 s and cannot be renewed once it has expired, so the chunk renews it on every long phase
  // boundary instead of only before its final write. `timings` is the chunk's own wall clock: it is the evidence a
  // later reader needs to tell a slow read from a lost lease or a client that went away.
- const t0=Date.parse(startedAt)||Date.now(),timings={walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,cheapMs:null,tmdbMs:null,writeMaxMs:null,preCommitMs:null,statusMs:null,checkpointMs:null,totalMs:null};
+ const t0=Date.parse(startedAt)||Date.now(),timings={preChunkMs:Number.isFinite(entryAt)?Math.max(0,t0-entryAt):null,walkMs:null,pages:0,concurrency:PAGED_WALK_CONCURRENCY,renewals:0,firstRenewMs:null,cheapMs:null,tmdbMs:null,writeMaxMs:null,preCommitMs:null,statusMs:null,checkpointMs:null,totalMs:null};
  // Three deadlines inside the budget. No unit of work (a cheap-pass write, a TMDB request, a candidate) starts after
  // `candidateDeadline`; no durable write other than the final status and checkpoint starts after `persistLimit`; the
  // last PAGED_CHECKPOINT_RESERVE_MS are the final renewal, status and checkpoint. A D1 write batch cannot be pre-empted, so
@@ -836,7 +836,9 @@ async function ledgerDescription(pinned,key){
  await loadJSON(pinned,'epg/discovery-latest.json',{item:item=>{if(item?.key===key&&typeof item.description==='string')found=item.description;return null;}});
  return found;
 }
-async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null){
+// AIR-353: `entryAt` is when advanceDiscovery began. The gap to the chunk's own clock is `preChunkMs`: the preflight reads
+// (continuation, lease, generation, programme) that `totalMs` does not cover.
+async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null,entryAt=null){
  const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
@@ -850,7 +852,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
   if(e?.message!=='Discovery ledger JSON is incomplete')throw e;
   streamed=false;source=await loadJSON(pinned,'epg/discovery-latest.json');
  }
- if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned);
+ if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const last=await loadJSON(pinned,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
@@ -1051,7 +1053,7 @@ function discoverySummary(contract){return contract&&typeof contract==='object'?
 function diagnosticTimings(timings){
  if(!timings||typeof timings!=='object')return null;
  const out={};
- for(const field of ['walkMs','pages','concurrency','renewals','firstRenewMs','cheapMs','tmdbMs','writeMaxMs','preCommitMs','statusMs','checkpointMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
+ for(const field of ['preChunkMs','walkMs','pages','concurrency','renewals','firstRenewMs','cheapMs','tmdbMs','writeMaxMs','preCommitMs','statusMs','checkpointMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
  if(['heartbeat','tmdb','final','write','cheap_pass','preview'].includes(timings.failedAt))out.failedAt=timings.failedAt;
  return Object.keys(out).length?out:null;
 }
@@ -1438,7 +1440,7 @@ async function advanceDiscovery(env,body={}){
  const checkpoint=async summary=>{const record=continuationAfterChunk(summary,budget,hopId,new Date().toISOString(),programmeRunId);committed={summary,record,outcome:await saveOwnedContinuation(env,hopId,record)};if(body.onCheckpoint)await body.onCheckpoint(committed);};
  const release=async()=>{try{await releaseDiscoveryLease(env,acquired);trace.leaseReleased=true;}catch{trace.leaseReleased=false;}};
  try{
-  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
+  result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint,now):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){
   if(committed){result=committed.summary;trace.trailingError=diagnosticErrorCode(e);}
   else result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
