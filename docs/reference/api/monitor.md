@@ -16,12 +16,12 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 | `openIssues[]` | Alertable issues with `key`, `severity`, `firstSeenAt`, `sendCount` |
 | `outbox`, `outboxOldestAt` | Number of undelivered notifications and the queue time of the oldest; a growing value means the channel is failing |
 | `cancelledUndelivered` | Alerts cancelled because their issue cleared before they were ever delivered |
-| `alerting`, `deadman` | Whether a webhook and a heartbeat URL are configured (never the URLs) |
+| `alerting`, `deadman` | Whether the selected transport (webhook or Telegram) is configured and well-formed, and whether a heartbeat URL is set (never the URLs, token or chat id) |
 | `sideEffects` | Always `none` |
 
 ## `POST /api/monitor/test`
 
-Sends one synthetic message (`kind: test`, key `monitor_test`) through the configured webhook, writes only `lastTestAt` on the monitor's own state document, raises no incident and changes no domain state. Answers `{sent: true}` or `{sent: false, reason}` where the reason is `off`, `no_channel` (no HTTPS webhook), `recent` (another test inside ten minutes), `rate_limited` (a Telegram retry hold is active), `concurrent` (another request claimed the test first) or `delivery_failed`. The cooldown stamp is committed before the message is sent. Running it against production needs the owner's action-specific approval.
+Sends one synthetic message (`kind: test`, key `monitor_test`) through the configured transport (the generic webhook or Telegram, per `MONITOR_TRANSPORT`), only when `MONITOR=on`; writes only `lastTestAt` on the monitor's own state document, raises no incident and changes no domain state. Answers `{sent: true}` or `{sent: false, reason}` where the reason is `off`, `dry` (`MONITOR=dry` sends and writes nothing, so a synthetic test is refused before any state read or request), `no_channel` (the selected transport is not configured and well-formed), `recent` (another test inside ten minutes), `rate_limited` (a Telegram retry hold is active), `concurrent` (another request claimed the test first) or `delivery_failed`. The cooldown stamp is committed before the message is sent. Running it against production needs the owner's action-specific approval.
 
 ## Transports
 

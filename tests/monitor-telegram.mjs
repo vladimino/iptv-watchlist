@@ -152,7 +152,15 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
 {
  const t=setup();healthy(t.bucket);owner(t);
  assert.equal(plain(await t.M.run({...t.env,MONITOR:undefined},{now:T0})).ran,false);const dry=plain(await t.M.run({...t.env,MONITOR:'dry'},{now:T0}));assert.equal(dry.mode,'dry');
- assert.equal(t.calls.length,0);assert.equal(t.bucket.writes().length,0);assert.equal(plain(await t.M.test({...t.env,MONITOR:undefined})).reason,'off');
+ assert.equal(t.calls.length,0);assert.equal(t.bucket.writes().length,0);
+ // The synthetic test is an outward send and a write: neither off nor dry may do it, for Telegram and for the generic webhook.
+ for(const extra of [{},{MONITOR_TRANSPORT:'webhook',MONITOR_WEBHOOK_URL:'https://hooks.example/alert'}]){
+  const x=setup(extra);healthy(x.bucket);
+  for(const [value,reason] of [[undefined,'off'],['off','off'],['dry','dry'],['garbage','off']]){
+   const answer=plain(await x.M.test({...x.env,...extra,MONITOR:value},T0));assert.deepEqual([answer.sent,answer.reason],[false,reason],String(value));
+  }
+  assert.equal(x.calls.length,0,'no outbound request from test() in off or dry');assert.equal(x.bucket.writes().length,0,'no bucket write from test() in off or dry');
+ }
 }
 
 // 9. The AIR-349 budget holds over Telegram: two attempts per tick on a failing channel, five per tick on a working one, FIFO with rotation, no loss.

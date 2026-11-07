@@ -216,7 +216,9 @@ const Monitor=(()=>{
 
  // A synthetic test message through the real channel. It writes only `lastTestAt` on the monitor's own document and changes no domain state.
  async function test(env,now=Date.now()){
+  // A synthetic message is an outward send and a write: only MONITOR=on may do it (dry sends and writes nothing, whatever the route).
   if(mode(env)==='off')return {sent:false,reason:'off'};
+  if(mode(env)!=='on')return {sent:false,reason:'dry'};
   if(!channelReady(env))return {sent:false,reason:'no_channel'};
   const {object,doc}=await readState(env);
   const hold=Date.parse(doc?.holdUntil||'');
