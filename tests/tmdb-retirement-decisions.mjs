@@ -18,15 +18,12 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-retirement-decisions-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 const NEW='0016_tmdb_retirement_decision';
 assert.ok(names.includes(NEW),'0016 is a migration file');
+// 0016 follows a COMPLETE schema v15 (migrations are contiguous): the test applies the real chain 0001..0015, then 0016. `chain` is the chain
+// up to 0014; the real migrations/0015_film_admission.sql (AIR-369) takes it to v15.
 const chain=names.filter(name=>name<'0015');
-// 0016 follows a COMPLETE schema v15 (migrations are contiguous). The real 0015 is migrations/0015_film_admission.sql (AIR-369, a sibling PR);
-// when that file is in the tree the test applies it, otherwise it applies this minimal FIXTURE of the same contract (the two 0015 tables by
-// name, version 14 -> 15), so the test does not depend on the merge order. Keep both consistent if 0015 changes before merge.
 const real15=names.find(name=>name.startsWith('0015_'));
-const V15_FIXTURE=`CREATE TABLE film_rated_admission (film_id TEXT PRIMARY KEY REFERENCES film(id)) STRICT;
-CREATE TABLE film_retention (film_id TEXT PRIMARY KEY REFERENCES film(id)) STRICT;
-UPDATE schema_contract SET version = 15 WHERE id = 1 AND version = 14;`;
-const v15=()=>real15?sql(real15):V15_FIXTURE;
+assert.equal(real15,'0015_film_admission','the real 0015 is in the tree');
+const v15=()=>sql(real15);
 assert.ok(chain.includes('0014_localization_source')&&chain.includes('0013_film_person_authority'));
 let n=0;
 const sqlite=(file,text)=>spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
@@ -86,6 +83,7 @@ async function seedFilm(env,confirmed,{tmdb=confirmed.movieId,trusted=true}={}){
  // A complete v15 advances 15 -> 16 and only that.
  const v15file=database({apply:false});
  assert.equal(one(v15file,'SELECT version FROM schema_contract'),15);
+ assert.deepEqual(rows(v15file,"SELECT name FROM sqlite_master WHERE name IN ('film_rated_admission','film_retention') ORDER BY name").map(item=>item.name),['film_rated_admission','film_retention'],'the real 0015 creates the tables the 0016 guard names');
  assert.equal(sqlite(v15file,sql(NEW)).status,0);
  assert.equal(one(v15file,'SELECT version FROM schema_contract'),16);
  // A database already at 16 (or higher) refuses it again.

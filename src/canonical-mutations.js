@@ -31,6 +31,9 @@ function trustedFlag(item){return item?.trusted&&!item?.conflicting?1:0;}
 // AIR-368: the automatic localization source table exists from schema 14. A merge adopts the retired Film's rows only where it can.
 async function hasSourceTable(db){return !!(await one(db,"SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='film_localization_source'"));}
 
+// AIR-369: the admission and retention tables exist from schema 15; a merge moves or drops the retired Film's rows only where they exist.
+async function hasTable(db,name){return !!(await one(db,"SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name=?",[name]));}
+
 async function current(db,kind,id){return Number((await one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',[kind,id]))?.revision??0);}
 
 // Runs the statements as one batch and names the failure. After a failed batch the marker and the revisions are read again, so the
@@ -168,12 +171,22 @@ export async function mergeFilms(env,input){
  // Automatic localization sources (schema 14): the survivor keeps its own row per source unless the retired Film observed that source later.
  const sources=await hasSourceTable(db);
  if(sources)s.push(['INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) SELECT ?,source,value,source_version,provenance_json,request_id,observed_at,? FROM film_localization_source WHERE film_id=? ON CONFLICT(film_id,source) DO UPDATE SET value=excluded.value,source_version=excluded.source_version,provenance_json=excluded.provenance_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_localization_source.observed_at',[to,at,from]]);
+ // Verified rated admission (schema 15): one row per Film. The survivor keeps its own; an identical retired one is dropped, a retired one the
+ // survivor lacks moves, and two different movie ids or short codes refuse the merge. The retention fact keeps the later observation.
+ const admissions=await hasTable(db,'film_rated_admission');
+ if(admissions){
+  const [left,right]=await Promise.all([one(db,'SELECT tmdb,source_code FROM film_rated_admission WHERE film_id=?',[from]),one(db,'SELECT tmdb,source_code FROM film_rated_admission WHERE film_id=?',[to])]);
+  if(left&&right&&(left.tmdb!==right.tmdb||left.source_code!==right.source_code))throw failed('film_person_data_conflict');
+  if(left&&!right)s.push(['UPDATE film_rated_admission SET film_id=? WHERE film_id=?',[to,from]]);
+  s.push(['INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) SELECT ?,basis,watchlist,evidence_json,request_id,observed_at,? FROM film_retention WHERE film_id=? ON CONFLICT(film_id) DO UPDATE SET watchlist=excluded.watchlist,evidence_json=excluded.evidence_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_retention.observed_at',[to,at,from]]);
+ }
  const discarded=[];
  for(const item of await reconcile(db,from,to,input?.resolve||{},at,discarded))s.push(item);
  for(const sql of [
   'DELETE FROM film_person_credit WHERE film_id=?',
   'DELETE FROM film_alias WHERE film_id=?',
   ...(sources?['DELETE FROM film_localization_source WHERE film_id=?']:[]),
+  ...(admissions?['DELETE FROM film_rated_admission WHERE film_id=?','DELETE FROM film_retention WHERE film_id=?']:[]),
   'DELETE FROM film_metadata WHERE film_id=?',
   'DELETE FROM film_dimension WHERE film_id=?',
   'DELETE FROM film_sync_state WHERE film_id=?',
