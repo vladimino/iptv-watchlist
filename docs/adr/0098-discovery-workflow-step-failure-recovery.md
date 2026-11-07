@@ -1,4 +1,4 @@
-# ADR 0097: A Discovery Workflow instance recovers from a transient step failure itself
+# ADR 0098: A Discovery Workflow instance recovers from a transient step failure itself
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-07  

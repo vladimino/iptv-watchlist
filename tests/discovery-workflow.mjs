@@ -630,7 +630,7 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  clearWorkflowAdmission();
 }
 
-// 15. AIR-364 / ADR 0097. A step that fails after the platform's retries is recovered by the instance itself: armed once through the
+// 15. AIR-364 / ADR 0098. A step that fails after the platform's retries is recovered by the instance itself: armed once through the
 // same CAS and backoff, a durable sleep until `dueAt`, then the existing ensure opens the one successor. Nothing is created before
 // `dueAt`, and every uncertain or unsafe outcome leaves the hourly reconcile as the only recovery. The clock is controlled.
 {

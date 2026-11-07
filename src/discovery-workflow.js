@@ -50,7 +50,7 @@ function workflowFailureClass(error){
 }
 function workflowFailureName(error){let name='';try{name=typeof error==='object'&&error?String(error.name??''):'';}catch{}return WORKFLOW_FAILURE_NAMES.has(name)?name:(name?'other':'none');}
 function workflowFailureCode(error){let code='';try{code=error&&typeof error==='object'?String(error.code??''):'';}catch{}return WORKFLOW_FAILURE_CODES.has(code)?code:(code?'other':null);}
-// AIR-364 (ADR 0097). A step that fails after the platform's own retries may be handled by the instance itself, but only
+// AIR-364 (ADR 0098). A step that fails after the platform's own retries may be handled by the instance itself, but only
 // when the failure is positively recognised as transient infrastructure: the `discovery_unavailable` code, or a transient
 // class of the error or of its cause. Hard authority and fence codes, an unclassified or empty error and a non-error are
 // never recovered here; they end the instance as before and the hourly reconcile decides.
@@ -391,7 +391,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
   if(result&&result.__counted===1){tally.total+=Number(result.spent)||0;return result.value;}
   return result;
  };
- // AIR-364 (ADR 0097). A recoverable step failure, after the platform's retries, is armed once through the same owner CAS and
+ // AIR-364 (ADR 0098). A recoverable step failure, after the platform's retries, is armed once through the same owner CAS and
  // `workflowFailure` backoff as every other recovery, then the instance sleeps durably until `dueAt` and asks the existing
  // `ensureDiscoveryWorkflow` for the successor, which re-reads authority, generation, executor record and the recovery gate. The
  // hourly reconcile stays the fallback. A failure of the arming step itself is not caught here: the instance ends as before.
