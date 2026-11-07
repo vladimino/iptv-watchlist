@@ -1,10 +1,10 @@
--- Schema v15: the D1-owned control state of the Cloudflare EPG executor (ADR 0100, AIR-348).
+-- Schema v17: the D1-owned control state of the Cloudflare EPG executor (ADR 0100, AIR-348).
 -- Additive. A deploy does not apply this file, and applying it writes no row: the table starts empty, an empty table means
 -- the executor mode `external` with epoch 0, and no Worker code creates a Workflow instance until the owner has switched the
 -- mode. The code treats an absent table as "executor not available" (mode external, no fence), so deploying the code before
 -- this file is applied changes nothing.
--- It follows a complete version 14 (0012 to 0014 applied in order) and refuses anything else before a table is created: the
--- first statement inserts a second schema_contract row and so aborts the file. The version becomes 15 and never goes down.
+-- It follows a complete version 16 (0012 to 0016 applied in order) and refuses anything else before a table is created: the
+-- first statement inserts a second schema_contract row and so aborts the file. The version becomes 17 and never goes down.
 -- epg_orchestration_document holds three small JSON documents, by key: `mode` (external | switching | cloudflare, the target, the
 -- epoch and the drain state; written only by the owner's mode switch) and `control` (the run key, the Workflow instance, the
 -- checkpoint, the retry budget, the cooldown, the quarantine and the last durable progress; written only by the executor and
@@ -18,7 +18,7 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version >= 14 AND version < 15
+ WHERE id = 1 AND version >= 16 AND version < 17
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'table' AND name IN (
@@ -26,9 +26,11 @@ WHERE NOT EXISTS (
    'published_epg_cas',
    'discovery_seal',
    'film_person_authority',
-   'film_localization_source'
+   'film_localization_source',
+   'film_rated_admission',
+   'tmdb_retirement_decision'
   )
- ) = 5
+ ) = 7
 );
 
 CREATE TABLE epg_orchestration_document (
@@ -47,6 +49,6 @@ BEGIN
 END;
 
 UPDATE schema_contract
-SET version = 15,
-    note = 'Schema v15: the D1-owned control state of the Cloudflare EPG executor (mode and control documents). Follows a complete version 14.'
-WHERE id = 1 AND version >= 14 AND version < 15;
+SET version = 17,
+    note = 'Schema v17: the D1-owned control state of the Cloudflare EPG executor (mode and control documents). Follows a complete version 16.'
+WHERE id = 1 AND version >= 16 AND version < 17;

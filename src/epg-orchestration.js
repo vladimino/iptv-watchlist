@@ -1,5 +1,5 @@
 // AIR-348 / ADR 0100 (on the contract of ADR 0089). The Cloudflare executor of the daily EPG publication, inert until the owner
-// switches the mode. Two D1-owned documents (table epg_orchestration_document, migration 0015) hold everything:
+// switches the mode. Three D1-owned documents (table epg_orchestration_document, migration 0017) hold everything:
 //  - `mode`: external | switching | cloudflare, the target, the epoch and the drain state. Only the owner's mode switch writes it.
 //    Absent (or the table not applied) means external, epoch 0.
 //  - `control`: the control record (run key, instance, checkpoint, retry budget, cooldown, quarantine, last durable progress).

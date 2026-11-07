@@ -39,9 +39,9 @@ let databases=0;
  assert.match(worker,/EpgOrchestration\.ensure\(env,/);assert.match(worker,/EpgOrchestration\.beginExternalStep\(env\)/);
 }
 
-// 2. The migration: refused below a complete version 14, applied on one, writes no row, and the version never goes down.
-const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority','0012_discovery_seal','0013_film_person_authority','0014_localization_source'];
-const migration=fs.readFileSync('migrations/0015_epg_orchestration.sql','utf8');
+// 2. The migration: refused below a complete version 16, applied on one, writes no row, and the version never goes down.
+const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority','0012_discovery_seal','0013_film_person_authority','0014_localization_source','0015_film_admission','0016_tmdb_retirement_decision'];
+const migration=fs.readFileSync('migrations/0017_epg_orchestration.sql','utf8');
 function database(upTo=chain.length,{apply=true}={}){
  const file=path.join(root,'e-'+(databases++)+'.sqlite');
  const db=d1Standin(file);
@@ -52,15 +52,15 @@ function database(upTo=chain.length,{apply=true}={}){
 const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
 {
  const full=database();
- assert.equal(one(full,'SELECT version FROM schema_contract'),15);
+ assert.equal(one(full,'SELECT version FROM schema_contract'),17);
  assert.equal(one(full,'SELECT COUNT(*) FROM epg_orchestration_document'),0,'applying the migration writes no row');
  assert.equal(one(full,"SELECT COUNT(*) FROM published_epg_authority WHERE mode='r2'"),1,'the marker is untouched');
  assert.throws(()=>full.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('other','{}',1,'x')"),/CHECK/,'only the two documents exist');
  assert.throws(()=>full.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','not json',1,'x')"),/CHECK/);
- assert.throws(()=>full.sql("UPDATE schema_contract SET version=14 WHERE id=1"),/schema_contract_downgrade/,'the version never goes down');
- for(const upTo of [11,12,13]){
+ assert.throws(()=>full.sql("UPDATE schema_contract SET version=16 WHERE id=1"),/schema_contract_downgrade/,'the version never goes down');
+ for(const upTo of [11,12,13,14,15]){
   const early=database(upTo,{apply:false});
-  assert.throws(()=>early.sql(migration),/./,'refused below a complete version 14 (chain '+upTo+')');
+  assert.throws(()=>early.sql(migration),/./,'refused below a complete version 16 (chain '+upTo+')');
   assert.equal(one(early,"SELECT COUNT(*) FROM sqlite_master WHERE name='epg_orchestration_document'"),0,'no table is created by a refused file');
  }
 }

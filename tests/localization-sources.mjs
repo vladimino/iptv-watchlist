@@ -11,13 +11,10 @@ import {mutateFilm,mutatePerson,mergeFilms} from '../src/canonical-mutations.js'
 import {resolveLocalization,loadLocalizationInputs,readLocalization,compareLocalization,recordLocalizationSources,AUTOMATIC_SOURCE_ORDER} from '../src/localization-sources.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-localization-sources-'));
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 const NEW='0014_localization_source';
-const everyName=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
-assert.ok(everyName.includes(NEW),'0014 exists');
-// This test covers the chain up to 0014; a later migration (0015 and on) has its own test and is not part of this chain.
-const names=everyName.slice(0,everyName.indexOf(NEW)+1);
-assert.equal(names[names.length-1],NEW,'0014 closes the chain this test applies');
-const chain=names.slice(0,-1);
+assert.ok(names.includes(NEW),'0014 exists');
+const chain=names.filter(name=>name<NEW);
 let n=0;
 const sqlite=(file,text)=>spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
 const rows=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};

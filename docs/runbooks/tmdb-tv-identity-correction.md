@@ -87,6 +87,14 @@ This procedure describes future corrections; it does not retroactively change th
 - Code rollback restores neither R2 nor D1. The retired movie ids are never deleted, so no rollback needs them back.
 - A code rollback to a release whose projection does not read the object, while the object exists, is a D1 rollback too. That projector ignores the object, so its next run writes the four Films' movie identity back. The object stays in R2, and redeploying the runtime reapplies it on the next run.
 
+## D1 decision history (prepared, inactive)
+
+[AIR-370](https://trello.com/c/wZmtK9tS) prepares the D1-owned, owner-only, append-only history of these decisions ([schema reference](../reference/data/d1-schema.md#owner-tmdb-retirement-decisions-schema-v16), [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md) decision 7). It changes nothing in this procedure: the R2 object `identity/tmdb-retirements.json` is still written once by the owner and read by the projector, and the history table, its migration `0016` and its prepare-only loader are not applied, bundled or called.
+
+- **Un-retirement.** Today the only inverse is the rollback above. In the D1 model the inverse is an explicit owner `restore` decision that names the retirement it reverses; removing a row or an entry is never an implicit un-retirement, and a `restore` is refused unless it reverses the Film's latest `retire` with the same ids.
+- **Load.** Loading the four historical Films from the R2 object into the history is a separate owner-approved step of the baseline card ([AIR-373](https://trello.com/c/ugu3sQmp)), run as fenced `retire` decisions with deterministic request ids, so repeating it is a replay. A potentially destructive identity correction stays an L3 owner gate.
+- **Held.** A decision is held, not written, when another Film trusts the TV entry or the retired movie id, or the Film does not carry the retired movie id; the owner reviews it as with `held` above.
+
 ## Credits replay
 
 `scripts/tmdb-watchlist-credits.mjs` reads a Film with a trusted `tmdb_tv` from its TV entry. After a D1 reload (and the reapplied correction), the four Films replay their AIR-286 credits from the saved `tv-<id>.json` answers, without asking the retired movie endpoints or Letterboxd. Until the correction is in D1, the script reaches the same TV entries through the saved Letterboxd links ([runbook](tmdb-watchlist-credits.md)).

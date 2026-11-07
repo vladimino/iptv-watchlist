@@ -8,7 +8,7 @@ Captured 2026-11-07 (UTC) from the repository only. **No production read or writ
 
 | Area | Result |
 | --- | --- |
-| Migration `0015` | Applied on a complete schema 14 chain: version becomes 15, the table is empty, the published-EPG marker is untouched; refused on chains stopped at 11, 12 and 13 with no table created; only the keys `mode` and `control` are accepted and a non-JSON body is refused; the version cannot go down |
+| Migration `0017` | Applied on a complete schema 16 chain: version becomes 17, the table is empty, the published-EPG marker is untouched; refused on chains stopped at 11 to 15 with no table created; only the keys `mode` and `control` are accepted and a non-JSON body is refused; the version cannot go down |
 | Schedule | 17:00 Madrid is 16:00Z in winter and 15:00Z in summer; both change days (2026-10-25, 2026-03-29) and the second before and at the due time; `nextDailyDue` across them; the executor and the monitor read the same 17:00 constant |
 | Inert | No database, a database without the table, and the table with no mode document: `ensure` answers `external` and creates nothing, the external gate lets the path through (with no fence when the table is absent), reads write no row |
 | Mode switch | `close_admission` then `complete`: a recent external step, an unfinished seal, a live previous instance and an unreadable `sync.json` each refuse with their own drain reason; a verified drain completes; a second close, a close in the target mode and a bad request are refused; rollback toward `external` raises the epoch again |
@@ -31,5 +31,5 @@ Captured 2026-11-07 (UTC) from the repository only. **No production read or writ
 ## Decisions for the reviewer and the owner
 
 1. The storage form of ADR 0100 decision 3 (one new table with two documents) and the fence statement of decision 4.
-2. The activation order in the [deployment runbook](../../runbooks/deployment.md) requires migrations `0013` and `0014` before `0015` because the chain is ordered.
+2. The activation order in the [deployment runbook](../../runbooks/deployment.md) requires migrations `0013` to `0016` before `0017` because the chain is ordered.
 3. Whether the Ratings due-time supersession (17:30 to 17:00) is a small separate PR, as proposed.
