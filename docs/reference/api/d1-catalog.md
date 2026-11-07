@@ -24,6 +24,7 @@ Errors: `405` for any method but GET, `503` when the Worker has no `DB` binding,
 
 ## Limits
 
+- These routes stay read-only, `authoritative:false` and unchanged. A marker-gated canonical bulk read model that would back them under an `open` Film/Person authority is prepared offline in `src/canonical-read-model.js` ([AIR-372](https://trello.com/c/weKsBJdQ), [Film/Person reference](../domain/film-person.md)); it is not wired into any route.
 - Name matching uses SQLite `lower()`, which folds ASCII only; Cyrillic names compare as stored.
 - Cross-source evidence follows [ADR 0009](../../adr/0009-canonical-film-person-identity.md) and [ADR 0058](../../adr/0058-canonical-person-grouping.md): only a shared verified Film with the same role and name is evidence; a name alone is a candidate. The filmography and the review queues do not compute the [person identity projection](../domain/person-identity-projection.md). The [identity route](#person-identity) does. None of these routes link, merge or edit a person.
 
