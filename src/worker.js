@@ -444,9 +444,12 @@ async function metadataSync(env,run){
  await saveJSON(env,'people.json',people);
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
-async function finishSync(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);if(saved===false)throw new Error('published_epg_fence');if(!saved)await saveJSON(env,'watchlist.json',next);}
+// AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so
+// the staged publication can run it as a separate bounded step. It leaves the run's stage alone and is idempotent.
+async function finishSyncPersist(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);if(saved===false)throw new Error('published_epg_fence');if(!saved)await saveJSON(env,'watchlist.json',next);}
  // A complete watchlist is one observation of every listed film (ADR-0024).
- if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});run.events=run.events.map(event=>event?.type==='epg'&&event.at!==report.updatedAt?epgEvent(report,event.id):event);for(const event of run.events)await writeEvent(env,event);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+ if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});run.events=run.events.map(event=>event?.type==='epg'&&event.at!==report.updatedAt?epgEvent(report,event.id):event);for(const event of run.events)await writeEvent(env,event);}
+async function finishSync(env,run,report){await finishSyncPersist(env,run,report);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -957,8 +960,14 @@ async function sealCatalogStep(env,run,lease,deadline){
  if(!changed.length&&stale.length)await DiscoveryAuthority.supersedeAdmissions(env,stale,{lease});
  return {done:!changed.length,remaining:left,stale:stale.length,written};
 }
+// AIR-353: the publication is three bounded steps. On 6 November 2026 one combined step took 83.7 s of wall time
+// (2.4 s entry, 31.4 s pointer, mirrors, copy and discovery intent, 44.0 s commit tail of which the prediction queue
+// refresh was 26.8 s, 6.8 s reply), longer than the 60 s the shortest MCP client waits. Each step below does one of
+// those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
+async function sealPayload(env,run){return JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());}
+// `publish`: the published pointer, the mirrors, the generation copy and the discovery intent.
 async function sealPublishStep(env,run,lease){
- const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());
+ const payload=await sealPayload(env,run);
  const report=payload.report;
  const live=await PublishedEpg.currentGeneration(env);
  const already=live?.programmeRunId===run.runId&&live.phase==='published';
@@ -974,10 +983,29 @@ async function sealPublishStep(env,run,lease){
  await queueCommittedDiscovery(env,run);
  if(!payload.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
  await saveJSON(env,'uncertain.json',{updatedAt:report?.updatedAt,items:payload.uncertain});
- delete run.seal;
- const finished=await completeWithRatings(env,run,report);
+ run.seal.phase='finalize';run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
+ return sealResponse(run,{},{seal:{published:true}});
+}
+// `finalize`: the ratings hand-over, the watchlist, the scan observation and the events.
+async function sealFinalizeStep(env,run){
+ const payload=await sealPayload(env,run);
+ const report=payload.report;
+ const gate=await ratingsGate(env);
+ if(gate.active){await flushRemovalHandover(env,run);delete run.ratingPending;run.ratingsPipeline='separate';}
+ else{delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsMigration=gate.migration;}
+ await tracedPhase(run.runId,'finish_sync',()=>finishSyncPersist(env,run,report),()=>({films:report.films?.length??0}));
+ run.seal.phase='queue';run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
+ return sealResponse(run,{},{seal:{persisted:true}});
+}
+// `queue`: the prediction queue refresh, then the run is complete. A failed refresh is recorded and does not hold the run.
+async function sealQueueStep(env,run){
+ const payload=await sealPayload(env,run);
+ const report=payload.report;
+ try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);}
+ run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
+ await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
- return finished;
+ return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{})};
 }
 // One bounded step of the staged publication. It never runs longer than SEAL_STEP_BUDGET_MS of work and answers
 // `nextAction: continue` until the run is complete.
@@ -1005,6 +1033,8 @@ async function sealStep(env,run){
    return sealResponse(run,{},{seal:{catalogRemaining:result.remaining}});
   }
   if(run.seal.phase==='publish')return await tracedPhase(run.runId,'seal_publish',()=>sealPublishStep(env,run,lease));
+  if(run.seal.phase==='finalize')return await tracedPhase(run.runId,'seal_finalize',()=>sealFinalizeStep(env,run));
+  if(run.seal.phase==='queue')return await tracedPhase(run.runId,'seal_queue',()=>sealQueueStep(env,run));
   throw new Error('seal_phase_unknown');
  }finally{await releaseDiscoveryLease(env,lease);}
 }

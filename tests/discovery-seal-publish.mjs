@@ -157,7 +157,10 @@ for(const mode of ['document','emit']){
   async publishGeneration(env,input){events.push(['publish',sql(file,'SELECT state FROM discovery_transfer')[0].state,sql(file,"SELECT phase FROM discovery_seal")[0].phase]);return {ok:true,programmeRunId:input.programmeRunId};},
   async writeMirrors(){return true;},
  };
- context.completeWithRatings=async(env,run)=>{run.stage='complete';run.updatedAt=new Date().toISOString();await call('saveJSON')(env,'sync.json',run);return {runId:run.runId,stage:'complete'};};
+ context.ratingsGate=async()=>({active:true,migration:'complete'});
+ context.flushRemovalHandover=async()=>false;
+ context.finishSyncPersist=async()=>{events.push(['persist',run.stage]);};
+ context.refreshPredictionQueue=async()=>{events.push(['refresh',run.stage]);if(mode==='emit')throw new Error('queue refresh failed with a long secret message '+'x'.repeat(300));};
  context.queueCommittedDiscovery=async()=>{events.push(['queue']);};
  context.copyEpgGeneration=async()=>{events.push(['copy']);};
  context.planDiscoveryLedger=async()=>{
@@ -190,9 +193,9 @@ for(const mode of ['document','emit']){
   const mismatch=await context.syncStep(env,'/api/sync/epg',{runId:'other-run'},{});
   assert.equal(mismatch.status,409);
  }
- let steps=0,result;
+ let steps=0,result;const phases=[];
  do{
-  steps++;
+  steps++;phases.push(run.seal?.phase);
   const env={DB:d1Standin(file),BUCKET:bkt,discoveryLease:null};
   sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');
   result=await context.sealStep(env,run);
@@ -200,6 +203,15 @@ for(const mode of ['document','emit']){
  }while(result.stage!=='complete'&&steps<40);
  assert.equal(result.stage,'complete');
  assert.ok(steps>=3&&steps<40,'steps: '+steps);
+ // AIR-353: the publication is three separate steps after the catalog, each answering `continue` until the last.
+ assert.deepEqual(phases.slice(-3),['publish','finalize','queue'],'phases: '+phases.join(','));
+ assert.equal(phases.filter(phase=>phase==='publish').length,1);
+ const order=events.map(e=>e[0]);
+ assert.ok(order.indexOf('publish')<order.indexOf('queue')&&order.indexOf('queue')<order.indexOf('persist')&&order.indexOf('persist')<order.indexOf('refresh'),'event order: '+order.join(','));
+ assert.equal(events.find(e=>e[0]==='persist')[1],'seal','the commit tail persists while the run is still sealing');
+ assert.equal(events.find(e=>e[0]==='refresh')[1],'seal','the queue refresh runs before the run is complete');
+ if(mode==='emit'){assert.ok(run.enrichmentQueueError&&run.enrichmentQueueError.length<=160,'a failed refresh is recorded, bounded, and does not hold the run');}
+ assert.equal(result.ratingsPipeline,'separate');
  const published=events.filter(e=>e[0]==='publish');
  assert.equal(published.length,1);
  assert.equal(published[0][1],'committed','the pointer moves after the ledger transfer is committed');
@@ -209,5 +221,33 @@ for(const mode of ['document','emit']){
  assert.equal(count(file,"source_key='active' AND residence='active' AND programme_run_id='run-new'"),NEW.length);
  assert.equal(Object.keys((await Authority.routeRead({DB:d1Standin(file),BUCKET:bkt,discoveryLease:null},'epg/discovered-films.json')).value).length,45);
  assert.equal(await bkt.head('epg/seal/run-new/payload.json'),null,'the staging payload is removed');
+}
+
+// AIR-353: each publication step after the pointer is idempotent and a failing step leaves the phase where it was, so
+// the next call repeats it. The blocked ratings pipeline is carried to the final answer.
+{
+ const bkt=bucket(11);
+ const report={runId:'run-x',updatedAt:'2026-11-06T10:00:00.000Z',watchlistCount:0,films:[],stats:{a:1}};
+ await bkt.put('epg/seal/run-x/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
+ const env={BUCKET:bkt};
+ const calls=[];let failPersist=true;
+ context.ratingsGate=async()=>({active:false,migration:'none'});
+ context.finishSyncPersist=async()=>{calls.push('persist');if(failPersist){failPersist=false;throw new Error('persist failed');}};
+ context.refreshPredictionQueue=async()=>{calls.push('refresh');};
+ const run={runId:'run-x',stage:'seal',seal:{jobId:'j',phase:'finalize'},events:[],watchlist:[{id:1}],pending:{}};
+ await assert.rejects(()=>context.sealFinalizeStep(env,run),/persist failed/);
+ assert.equal(run.seal.phase,'finalize','a failing step leaves its phase');
+ const second=await context.sealFinalizeStep(env,run);
+ assert.equal(second.stage,'seal');assert.equal(run.seal.phase,'queue');assert.equal(run.ratingsPipeline,'blocked');assert.equal(run.ratingsMigration,'none');
+ assert.deepEqual(calls,['persist','persist']);
+ const done=await context.sealQueueStep(env,run);
+ assert.equal(done.stage,'complete');assert.equal(done.ratingsPipeline,'blocked');assert.equal(done.ratingsMigration,'none');
+ assert.equal(run.seal,undefined);assert.equal(run.watchlist,undefined);assert.equal(run.stage,'complete');
+ assert.equal(await bkt.head('epg/seal/run-x/payload.json'),null);
+ // A repeated queue step after a lost answer still completes the run and leaves nothing behind.
+ const again={runId:'run-x',stage:'seal',seal:{jobId:'j',phase:'queue'},ratingsPipeline:'separate'};
+ await bkt.put('epg/seal/run-x/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
+ const repeated=await context.sealQueueStep(env,again);
+ assert.equal(repeated.stage,'complete');assert.equal(repeated.ratingsPipeline,'separate');assert.equal(repeated.ratingsMigration,undefined);
 }
 console.log('discovery seal publish ok');
