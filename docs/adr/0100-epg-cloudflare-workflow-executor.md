@@ -1,9 +1,9 @@
-# ADR 0100: The daily EPG publication may be executed by an inert Cloudflare Workflow with D1-owned mode and control documents
+# ADR 0100: The daily EPG publication may be executed by an inert Cloudflare Workflow with D1-owned orchestration documents
 
-**Status:** Proposed  
-**Original decision date:** 2026-11-07 (design approved by the owner on the AIR-348 card; the storage form below is an implementation choice inside it)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-07 (design approved on AIR-348; final three-document storage and mutation-boundary fencing explicitly accepted by the owner on 2026-11-07)  
 **Recorded at:** 2026-11-07  
-**Approval source:** owner approval on the [AIR-348 card](https://trello.com/c/PUrlzMuH), 2026-11-07 (Madrid): implementation of the described design (Workflow, D1 control state with `external | switching | cloudflare`, monotonic epoch, single-writer fence, no shared lease, no new Cron Trigger) and delivery as one PR, with no production action authorized. The choice of two documents in one new table (decision 3) and the fence statement inside the publication batch (decision 4) are implementation details the independent review and the owner are asked to confirm before this ADR becomes Accepted  
+**Approval source:** original design approval on the [AIR-348 card](https://trello.com/c/PUrlzMuH) and explicit owner acceptance in the IPTV Ratings conversation on 2026-11-07 (Madrid), following independent review of [PR #413](https://github.com/vladimino/iptv-watchlist/pull/413) at HEAD `98399f5bfd1c443bf0db9017466dc57aeda049bd`. Accepted: one D1 table with three documents (`mode`, `control`, `lease`), a same-batch D1 publication fence, a durable lease and R2 mutation-boundary guards with verified drain. This is architecture approval, **not** authorization for any migration, cron/Task edit, Workflow instance, or production cutover.  
 **Related work:** [AIR-348](https://trello.com/c/PUrlzMuH); [ADR 0089](0089-shared-orchestration-reliability-contract.md); [ADR 0090](0090-ratings-cloudflare-workflow-executor.md); [ADR 0092](0092-resumable-bounded-ledger-seal.md); [ADR 0096](0096-bounded-seal-publication-steps.md); [ADR 0079](0079-d1-authoritative-published-epg.md)  
 **Supersedes:** None  
 **Superseded by:** None
