@@ -1,42 +1,21 @@
-# Scheduled Task drift monitor: autonomous triage and escalation
+# Scheduled Task registry drift: read-only triage
 
-> Under [authorization policy](../process/authorization-and-escalation.md), verified read-only task-registry and MCP diagnostics are standing-authorized L0. The monitor does not mutate tasks, invoke producers or repair state. Enable/disable/edit/manual run of Scheduled Tasks and out-of-plan EPG/discovery/ratings/prediction writes remain owner-controlled L3 or governed by an existing specific approved producer plan.
+The `IPTV Scheduled Task Drift` automation is a registry-only check. It runs daily at 18:15 Europe/Madrid and examines the two active ChatGPT Scheduled Tasks, not the health of their production streams. Its [expected configuration and stable IDs](../reference/scheduled-tasks.md#read-only-drift-monitor) are maintained in the Scheduled Task contract; the **live registry** is the source of actual settings and execution records.
 
-The expected configuration and checks of the `IPTV Scheduled Task Drift` automation are in the [Scheduled Task contract](../reference/scheduled-tasks.md#read-only-drift-monitor): daily at 18:15 Europe/Madrid, DTSTART 2026-10-31, read-only. It reads the daily programme task, the hourly task and the Ratings Task, plus `epg_status` and read-only `ratings_sync_status`, and reports only anomalies. The live ChatGPT Scheduled Tasks registry, not this page, says what is configured now. Draft Daily/Hourly texts under `docs/reference/scheduled-task-prompts/` are not the live prompts. This page does not edit the task.
+The independent Cloudflare-native monitor watches EPG, Discovery, Ratings and Predictions progress and sends operational alerts. See the [production monitor runbook](monitoring.md). Do not diagnose EPG freshness, prediction backlog or Ratings Workflow progress from a registry drift notification.
 
-## Recovery cost and alert triage
+## When the drift monitor reports an anomaly
 
-A delayed Task, stale footer, or one transient failure is not an outage requiring a full EPG replay, immediate schedule edit or multi-tool forensic audit. First compare the task's last run with the single relevant Worker status; if the ordinary next scheduled execution can replay the missing work without harmful side effects, record the delay and observe that next execution. Escalate when the source repeatedly fails, the EPG publication is genuinely stale past the accepted window, or pending work cannot make progress. This is an L0 automatic diagnostic/triage rule, **not** permission to invoke a Task, skip validation, change recurrence or add a production write. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
+1. Read `Automations.peek` for the reported Daily EPG or Hourly Predictions Task by its exact stable ID. Compare `is_enabled`, `timing_mode`, `schedule` (including IANA timezone), `default_timezone` and the relevant prompt permission boundaries with the [maintained contract](../reference/scheduled-tasks.md). A semantic disagreement may mean the **documentation** is stale, not the live Task.
+2. Inspect `run_details.last_run`: `recorded_status`, `scheduled_for`, `started_at`, `completed_at` and the saved result if present. `last_run_time` and `next_run_time` are not reliable proof of execution. A `no_update` result, scheduler delay or isolated missing saved result is not automatically a failure.
+3. Report a confirmed disabled Task, incorrect recurrence/timezone, unsafe prompt permissions, explicit failed run, repeated evidenced failure or unavailable registry. Include the exact field, expected/actual value, Task ID, Europe/Madrid time and the recommended safe investigation. For actual stream progress, use the separate Cloudflare monitor's incident procedure, not this audit.
 
-## Reading a notification
+A disabled legacy Ratings Task is intentional and is **not** checked by the registry-only drift automation. Its Cloudflare Workflow is observed by the Worker monitor.
 
-Re-read the live evidence before acting; a notification is the monitor's observation at its run time, and the state can have changed since.
+## Safety and operations
 
-1. **Registry.** Read the live entries of the daily EPG task, the hourly task and the Ratings Task: `is_enabled`, recurrence (`DTSTART;TZID=…` and `RRULE`), `default_timezone`, the prompt and `run_details.last_run`. Compare them with the [contract on `main`](../reference/scheduled-tasks.md), not with a conversation summary or an older evidence report.
-2. **Worker.** Read `epg_status` and `ratings_sync_status` through the connected owner-only IPTV MCP. Both are read tools. `epg_status` returns `stage`, `runId`, `updatedAt`, `ratingsPending`, `ratingAttempt` and `ratingError`. `ratings_sync_status` returns the ratings pipeline and writes nothing, including no recovery. Do not use an HTTP route as a substitute probe: some GET routes write ([side-effect tests](../../tests/get-side-effects.mjs)). Do not call `ratings_sync_start` or `ratings_sync_step`.
-3. **Day.** Work in Europe/Madrid civil time. The daily EPG task triggers nominally at 17:00 and the scheduler can run late, so a missing publication is an anomaly only after the run window, and there is no success SLA.
+Only read the two Tasks using `Automations.peek` and compare them with GitHub `main` documentation. Never call IPTV MCP, Worker status, production APIs, or write-capable GET from this automation. Never start, retry, enable, disable, create, modify or reschedule any Task, nor start or repair EPG, Discovery, Predictions, Ratings, Cloudflare, Access, R2 or D1. Any Scheduled Task change or out-of-plan production operation needs a separate owner authorization under the [authorization policy](../process/authorization-and-escalation.md).
 
-## Distinguishing real anomalies from false positives
+This monitor shares the same ChatGPT scheduler as the two Tasks. It may itself run late, fail or be disabled silently. No notification does not prove healthy execution or availability. The live registry, not the saved documentation or a prior chat, defines the actual Task state.
 
-| Observation | Meaning |
-| --- | --- |
-| A production task has `is_enabled=false` | Real anomaly. Report it; do not re-enable it. The owner decides, and the cause (owner, platform or another actor) is not visible from the registry alone. |
-| The latest run of a task failed | Real anomaly. Correlate the run time with `epg_status.runId` and `updatedAt` before concluding which stage failed. |
-| `epg_status.stage` is not `complete` for today after the run window | EPG not published today. Distinguish no task run, an interrupted commit (`stage` still `epg`) and a Worker failure before suggesting anything. |
-| `stage` is `complete`, but `ratingAttempt` ended `error` or `unknown`, or `ratingError` is set | A ratings or Diary problem on a published programme, not an EPG failure. A Worker memory-limit kill in the ratings stage and a published `complete` can coexist. See [Diary history](letterboxd-diary-history.md). |
-| An enabled task shows `next_run_time: null` or a lagging `last_run_time` | Not by itself a missed run. Use `run_details.last_run` and the Worker's `updatedAt`. |
-| The Ratings Task is disabled, or its latest run failed | Anomaly. Report it. Do not enable the task, clear an isolation or start a ratings run. |
-| The prompt or recurrence differs from the contract | Drift. Report the exact difference; the registry may be right and the contract stale, or the reverse. Either way an owner decision is needed. |
-
-## What the operator may and may not do
-
-- **May:** re-read the registry entries and `epg_status`, and read Workers Observability events when that read is separately authorized.
-- **Not permitted without an applicable approved L3 plan or separately approved bounded producer contract:** `run_now`, enable or disable a task, edit a prompt or schedule, call `epg_sync_start` or `epg_sync_step`, reset a lease, start predictions or ratings, or change flags, Access, R2 or D1.
-
-Report to the owner the task identity, observed fields, `runId`, `stage`, `updatedAt` and times in Europe/Madrid (UTC where logs need it), what could not be verified, and the recommended manual check.
-
-## Limits of the monitor
-
-The monitor runs on the same automation platform as the tasks it watches. It can be late, fail or be disabled without notice, so a quiet day does not prove health. If its expected run is missing, the owner can inspect its registry entry directly; restarting or reconfiguring it is a task change and needs approval. Reverting this documentation does not change any live schedule.
-
-The Ratings Task is enabled (live read-only check on 2026-10-31). This monitor's expected scope, after the owner-approved registry change the same day, includes that task and read-only `ratings_sync_status`. A disabled or failed Ratings Task is an anomaly. Reading the status does not authorize a ratings start, a step, or clearing an isolation.
+If the owner authorizes rollback of the **monitor's prompt alone**, restore the prior prompt in the existing Task and record a new live readback. Do not infer permission to re-enable legacy Ratings, to create a replacement Scheduled Task or to change the Daily/Hourly producers. Reverting these documentation files does not change the live Scheduled Task.
