@@ -35,10 +35,12 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  const {bucket,env,M,calls}=setup();healthy(bucket);
  const off=plain(await M.run({...env,MONITOR:undefined},{now:T0}));assert.equal(off.ran,false);
  assert.equal(plain(await M.run({...env,MONITOR:'garbage'},{now:T0})).ran,false,'an unknown value is off');
+ // AIR-366: dry is retired. The old token is no longer a mode: the tick does not run, writes nothing, sends nothing and pings nothing.
+ assert.deepEqual(plain(await M.run({...env,MONITOR:'dry'},{now:T0})),{ran:false,reason:'off'},'the retired dry token fails closed to off');
+ assert.equal(plain(await M.status({...env,MONITOR:'dry'},T0)).mode,'off','status reads the retired token as off');
  assert.equal(bucket.writes().length,0);assert.equal(calls.length,0);
  const before=JSON.stringify(docs(bucket));
- const dry=plain(await M.run({...env,MONITOR:'dry'},{now:T0}));
- assert.equal(dry.mode,'dry');assert.equal(bucket.writes().length,0,'dry writes nothing');assert.equal(calls.length,0,'dry sends nothing and pings nothing');assert.equal(JSON.stringify(docs(bucket)),before);
+ assert.equal(JSON.stringify(docs(bucket)),before,'off and the retired dry leave the monitor document untouched');
  assert.equal(plain(await M.test({...env,MONITOR:undefined})).reason,'off');
 }
 
@@ -207,7 +209,8 @@ const posts=calls=>calls.filter(item=>item.method==='POST');
  assert.match(worker,/typeof Monitor==='undefined'\?Promise\.resolve\(\):Monitor\.run\(env,\{now:controller\.scheduledTime\|\|Date\.now\(\)\}\)/);
  assert.match(worker,/\/api\/monitor\/status'&&request\.method==='GET'\)return json\(await Monitor\.status\(env\)\)/);
  assert.match(worker,/\/api\/monitor\/test'&&request\.method==='POST'\)return json\(await Monitor\.test\(env\)\)/);
- assert.match(fs.readFileSync('src/feature-flags.js','utf8'),/name:'MONITOR',modes:\['off','dry','on'\],default:'off'/);
+ assert.match(fs.readFileSync('src/feature-flags.js','utf8'),/name:'MONITOR',modes:\['off','on'\],default:'off'/);
+ assert.doesNotMatch(fs.readFileSync('src/monitor.js','utf8'),/dry/,'no dry code path or comment remains in the monitor');
  assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/MONITOR/,'no binding, secret or trigger is added by this change');
 }
-console.log('Monitor runtime: off and dry write nothing, healthy snapshot writes only its own document, one alert and one recovery, retried delivery, isolated failing source, discovery and queue, pure status and a deduplicated synthetic test passed');
+console.log('Monitor runtime: off and the retired dry token write nothing, healthy snapshot writes only its own document, one alert and one recovery, retried delivery, isolated failing source, discovery and queue, pure status and a deduplicated synthetic test passed');

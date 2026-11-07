@@ -8,7 +8,7 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 
 | Field | Meaning |
 | --- | --- |
-| `mode` | `off`, `dry` or `on` (the `MONITOR` flag as the Worker sees it) |
+| `mode` | `off` or `on` (the `MONITOR` flag as the Worker sees it; any value other than `on` is `off`) |
 | `stored` | Whether a snapshot document exists |
 | `heartbeatAt`, `heartbeatAgeMs` | Time of the last saved snapshot and its age at read time. An external dead-man check can poll this |
 | `overall` | The worst stream state: `healthy`, `waiting`, `delayed`, `degraded` or `needs_owner` |
@@ -21,7 +21,7 @@ A pure read of the stored monitor result: nothing is evaluated, written or sent.
 
 ## `POST /api/monitor/test`
 
-Sends one synthetic message (`kind: test`, key `monitor_test`) through the configured transport (the generic webhook or Telegram, per `MONITOR_TRANSPORT`), only when `MONITOR=on`; writes only `lastTestAt` on the monitor's own state document, raises no incident and changes no domain state. Answers `{sent: true}` or `{sent: false, reason}` where the reason is `off`, `dry` (`MONITOR=dry` sends and writes nothing, so a synthetic test is refused before any state read or request), `no_channel` (the selected transport is not configured and well-formed), `recent` (another test inside ten minutes), `rate_limited` (a Telegram retry hold is active), `concurrent` (another request claimed the test first) or `delivery_failed`. The cooldown stamp is committed before the message is sent. Running it against production needs the owner's action-specific approval.
+Sends one synthetic message (`kind: test`, key `monitor_test`) through the configured transport (the generic webhook or Telegram, per `MONITOR_TRANSPORT`), only when `MONITOR=on`; writes only `lastTestAt` on the monitor's own state document, raises no incident and changes no domain state. Answers `{sent: true}` or `{sent: false, reason}` where the reason is `off` (`MONITOR` is not `on`, including the retired `dry` token: a synthetic test is refused before any state read or request), `no_channel` (the selected transport is not configured and well-formed), `recent` (another test inside ten minutes), `rate_limited` (a Telegram retry hold is active), `concurrent` (another request claimed the test first) or `delivery_failed`. The cooldown stamp is committed before the message is sent. Running it against production needs the owner's action-specific approval.
 
 ## Transports
 

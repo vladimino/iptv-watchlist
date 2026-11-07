@@ -9,10 +9,9 @@ A tick on the existing hourly cron that reads the stored status of EPG, Discover
 ## Activation order (each needs an owner GO)
 
 1. Choose the channel and the dead-man service. For the generic webhook set `MONITOR_WEBHOOK_URL`; for Telegram ([ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md)) set `MONITOR_TELEGRAM_BOT_TOKEN` and `MONITOR_TELEGRAM_CHAT_ID` and then `MONITOR_TRANSPORT=telegram`. Optionally set `MONITOR_HEARTBEAT_URL`. The bot token must be a Worker secret and, like `MONITOR_WEBHOOK_URL`, is never in git, GitHub, Trello or logs. `MONITOR_TELEGRAM_CHAT_ID` is a destination identifier held as a plain Worker variable (it is visible in the Cloudflare Dashboard and is still kept out of logs and public reports; see ADR 0097 decision 3); `GET /api/monitor/status` shows `transport` and `alerting` without them.
-2. Set `MONITOR=dry` and read one tick in Workers Observability (`event: monitor`): the overall state and issue keys, nothing written or sent.
-3. Set `MONITOR=on`. Read `GET /api/monitor/status`: one healthy snapshot with a fresh `heartbeatAt`.
-4. Send one synthetic message with `POST /api/monitor/test` (only with `MONITOR=on`; `dry` and `off` refuse it without a write or a request), confirm the owner received it, and that a second call inside ten minutes is refused.
-5. Confirm the dead-man service sees the pings and alerts when they stop (disable the pings briefly only with the owner's approval).
+2. Set `MONITOR=on`. Read `GET /api/monitor/status`: one healthy snapshot with a fresh `heartbeatAt`. There is no observe-only mode: `MONITOR` is `off` or `on`, and while the selected channel is not configured `on` keeps the snapshot and sends nothing.
+3. Send one synthetic message with `POST /api/monitor/test` (only with `MONITOR=on`; `off` and any other value refuse it without a write or a request), confirm the owner received it, and that a second call inside ten minutes is refused.
+4. Confirm the dead-man service sees the pings and alerts when they stop (disable the pings briefly only with the owner's approval).
 
 Roll back by setting `MONITOR` to `off` or removing it. Alerts already sent stay sent.
 
