@@ -1,9 +1,9 @@
 # ADR 0097: The monitor can deliver directly to the Telegram Bot API through a deliberately selected, fail-closed transport
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-07  
 **Recorded at:** 2026-11-07  
-**Approval source:** the owner's choice of a direct Telegram Bot API integration without Make or intermediaries, recorded in the [AIR-365](https://trello.com/c/7lLwNBbI) card; acceptance of this ADR is still to be recorded by the Product Owner  
+**Approval source:** the Product Owner explicitly accepted ADR 0097 on 2026-11-07 in the [AIR-365 decision record](https://trello.com/c/7lLwNBbI#comment-6aef0b430718456551e4e3b2), confirming the direct Bot API outbound trust boundary, secret-only configuration and at-least-once duplicate risk. This is architecture approval only, not production activation.  
 **Related work:** [AIR-365](https://trello.com/c/7lLwNBbI); [AIR-349](https://trello.com/c/VUyampoh); [ADR 0095](0095-cloudflare-native-production-monitor.md)  
 **Supersedes:** None (extends ADR 0095 decision 7; ADR 0095 stays Accepted and unchanged)  
 **Superseded by:** None
@@ -40,6 +40,7 @@ Reversible: set `MONITOR` to `off`, or remove `MONITOR_TRANSPORT` to return to t
 ## Evidence
 
 - **Original decision:** the owner's direct-Telegram choice in [AIR-365](https://trello.com/c/7lLwNBbI)
+- **Owner acceptance:** [2026-11-07 explicit approval of ADR 0097](https://trello.com/c/7lLwNBbI#comment-6aef0b430718456551e4e3b2)
 - **Implementation:** the AIR-365 pull request
 - **Dated verification:** [offline evidence 2026-11-07](../evidence/monitoring/telegram-air-365-2026-11-07.md); no production observation and no live Telegram call
 - **Uncertainty:** Telegram's real rate-limit behavior, delivery latency and the owner's receipt are unobserved until an authorized activation.
