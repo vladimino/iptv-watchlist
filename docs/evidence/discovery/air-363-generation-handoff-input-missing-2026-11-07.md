@@ -16,7 +16,7 @@ Already fail-closed (ADR 0093): the pin B differs from the published A, so it an
 
 ## Change
 
-The projector reads the discovery authority before its reads. When the authority names another run than the published pointer it defers as `generation_pending` (`inputKey: discovery_authority`) before any catalog read or D1 write. An unreadable authority leaves the previous behaviour. Outside the window a missing copy is still `failed`/`input_missing`.
+The projector reads the discovery authority before its reads. When the authority names another run than the published pointer it defers as `generation_pending` (`inputKey: discovery_authority`) before any catalog read or D1 write. An unreadable or held D1 authority defers as `authority_unavailable` before catalog reads or D1 writes. An R2 authority continues the previous R2 catalog path. Outside the handoff window, when the authoritative discovery run matches the published run, a missing catalog copy is still `failed`/`input_missing`.
 
 The guard repeats right before the D1 write, so an authority that moves to the next run while the plan is built defers the run with nothing written (offline race test; removing the second check fails it). A D1 authority that cannot be read or is held defers as `authority_unavailable` instead of guessing; an authority that is not D1 has no window and the R2 catalog stays the source. The remaining gap between the second check and the write is milliseconds, and a projection of the still-published run A is correct data for the pointer that is still A, so it does no harm.
 
