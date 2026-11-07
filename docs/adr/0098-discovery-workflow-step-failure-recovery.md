@@ -1,9 +1,9 @@
 # ADR 0098: A Discovery Workflow instance recovers from a transient step failure itself
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-07  
 **Recorded at:** 2026-11-07  
-**Approval source:** Option A approved for implementation by the owner/coordinator account in the [PR #399 decision comment](https://github.com/vladimino/iptv-watchlist/pull/399#issuecomment-6708109263) on 2026-11-07; the ADR becomes Accepted on the owner's acceptance of the implementing PR.  
+**Approval source:** Option A approved for implementation in the [PR #399 design decision](https://github.com/vladimino/iptv-watchlist/pull/399#issuecomment-6708109263) on 2026-11-07. The owner explicitly accepted ADR 0098 on 2026-11-07 after the independent implementation [review PASS](https://github.com/vladimino/iptv-watchlist/pull/399#issuecomment-6708954045) and [PR #399 merge](https://github.com/vladimino/iptv-watchlist/pull/399). The owner expressly authorized this status-only direct commit to `main` without a PR as a one-off exception. Acceptance of the ADR does not authorize production operations.  
 **Related work:** [AIR-364](https://trello.com/c/QSu1SDvS), [AIR-324](https://trello.com/c/kNtaEbm8), AIR-360, [ADR 0083](0083-inert-discovery-workflow.md), [ADR 0089](0089-shared-orchestration-reliability-contract.md), [ADR 0093](0093-discovery-workflow-cron-reconcile.md), [ADR 0094](0094-discovery-workflow-invocation-budget.md), [options record](../evidence/orchestration/discovery-workflow-recovery-latency-air-364-2026-11-07.md)  
 **Supersedes:** None. It adds to [ADR 0093](0093-discovery-workflow-cron-reconcile.md) decision 3 (who may open a successor).  
 **Superseded by:** None
