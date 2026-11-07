@@ -132,7 +132,7 @@ function decisionFailure(error){
 // generation and the Film's revision in one batch, requires the Film to exist and not to be a redirect, and appends exactly one row. A replay
 // (the same request id with the same content) opens no batch; the same id with other content is refused. A retire is held, not written, when
 // the typed identity on the Film or on another Film conflicts (another Film trusting this TV entry or this retired movie id, this Film trusting
-// another TMDB id of either scheme, or no `tmdb` row for the retired movie id).
+// another TMDB id of either scheme, or no `tmdb` row for the retired movie id); all of these are asserted again inside the batch.
 // input: {requestId, kind:'retire'|'restore', filmId, lid, movieId, tvId, expectedRevision, at, evidence, confirmation, supersedesSeq?, origin?, inputSha256?}
 export async function recordRetirementDecision(env,input){
  const decision=normalizeDecision(input);
@@ -162,7 +162,10 @@ export async function recordRetirementDecision(env,input){
   if(!mine.some(row=>row.scheme==='tmdb'&&row.value===decision.movieId&&!row.conflicting))throw failed('retirement_movie_missing');
   if(mine.some(row=>row.scheme==='tmdb'&&row.value!==decision.movieId&&trusted(row)))throw failed('retirement_identity_mismatch');
   if(mine.some(row=>row.scheme==='tmdb_tv'&&row.value!==decision.tvId&&trusted(row)))throw failed('retirement_identity_mismatch');
-  // The same checks inside the batch, so a Film that changed after the read fails the whole batch.
+  // The same checks inside the batch, so a Film that changed after the read fails the whole batch: the Film still carries this retired movie
+  // id (not conflicting) and trusts no other TMDB id of either scheme, and no other Film trusts the TV entry or the retired movie id.
+  statements.push([fenced.assertSql("EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND scheme='tmdb' AND value=? AND conflicting=0)"),[decision.filmId,decision.movieId]]);
+  statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE film_id=? AND trusted=1 AND conflicting=0 AND ((scheme='tmdb' AND value<>?) OR (scheme='tmdb_tv' AND value<>?)))"),[decision.filmId,decision.movieId,decision.tvId]]);
   statements.push([fenced.assertSql("NOT EXISTS (SELECT 1 FROM film_external_id WHERE film_id<>? AND trusted=1 AND conflicting=0 AND ((scheme='tmdb_tv' AND value=?) OR (scheme='tmdb' AND value=?)))"),[decision.filmId,decision.tvId,decision.movieId]]);
  }
  statements.push(['INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,input_sha256,supersedes_seq,payload_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',[decision.requestId,decision.filmId,decision.kind,decision.lid,decision.movieId,decision.tvId,stable(decision.evidence),stable(decision.confirmation),decision.origin,decision.inputSha256,decision.supersedesSeq,decision.payload,at]]);

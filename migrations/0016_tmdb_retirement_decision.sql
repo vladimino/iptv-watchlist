@@ -1,7 +1,9 @@
 -- Schema v16: the owner-only, append-only TMDB retirement decision history for canonical Film/Person (ADR 0099, Accepted, decision 7;
--- AIR-370). It follows a complete version 14 or 15 and refuses anything else before a table is created: the first statement inserts a
--- second schema_contract row and so aborts the file. The version becomes 16 and never goes down. The number leaves room for 0015 (a
--- parallel card); if the two merge in the other order the file only needs its number and its version guard adjusted.
+-- AIR-370). It follows a COMPLETE version 15 (the 0015 tables film_rated_admission and film_retention included) and refuses anything
+-- else before a table is created: the first statement inserts a second schema_contract row and so aborts the file. The version moves
+-- 15 -> 16 only and never goes down; versioned migrations are contiguous, so a database at 14 refuses this file and changes nothing.
+-- While this file is numbered 0016 it is applied only after 0015 (AIR-369). If the merge order changes, only its number and its
+-- guard need adjusting.
 -- A deploy does not apply this file and applying it writes no row: the table starts empty, no Worker code calls it, and the
 -- identity/tmdb-retirements.json object in R2 (ADR 0057, AIR-291) stays the input of the enrichment projector.
 -- tmdb_retirement_decision is APPEND-ONLY: a decision is never updated or deleted (triggers refuse both). One row records one owner decision
@@ -17,7 +19,7 @@ INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
 WHERE NOT EXISTS (
  SELECT 1 FROM schema_contract
- WHERE id = 1 AND version >= 14 AND version < 16
+ WHERE id = 1 AND version = 15
  AND (
   SELECT COUNT(*) FROM sqlite_master
   WHERE type = 'table' AND name IN (
@@ -26,9 +28,11 @@ WHERE NOT EXISTS (
    'film_person_authority',
    'film_person_cas',
    'film_person_baseline',
-   'canonical_revision'
+   'canonical_revision',
+   'film_rated_admission',
+   'film_retention'
   )
- ) = 6
+ ) = 8
 );
 
 CREATE TABLE tmdb_retirement_decision (
@@ -121,5 +125,5 @@ END;
 
 UPDATE schema_contract
 SET version = 16,
-    note = 'Schema v16: owner-only append-only TMDB retirement decision history for canonical Film/Person. Follows a complete version 14 or 15.'
-WHERE id = 1 AND version >= 14 AND version < 16;
+    note = 'Schema v16: owner-only append-only TMDB retirement decision history for canonical Film/Person. Follows a complete version 15.'
+WHERE id = 1 AND version = 15;

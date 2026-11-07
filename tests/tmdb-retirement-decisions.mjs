@@ -18,7 +18,15 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-retirement-decisions-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 const NEW='0016_tmdb_retirement_decision';
 assert.ok(names.includes(NEW),'0016 is a migration file');
-const chain=names.filter(name=>name<NEW&&name!=='0015');
+const chain=names.filter(name=>name<'0015');
+// 0016 follows a COMPLETE schema v15 (migrations are contiguous). The real 0015 is migrations/0015_film_admission.sql (AIR-369, a sibling PR);
+// when that file is in the tree the test applies it, otherwise it applies this minimal FIXTURE of the same contract (the two 0015 tables by
+// name, version 14 -> 15), so the test does not depend on the merge order. Keep both consistent if 0015 changes before merge.
+const real15=names.find(name=>name.startsWith('0015_'));
+const V15_FIXTURE=`CREATE TABLE film_rated_admission (film_id TEXT PRIMARY KEY REFERENCES film(id)) STRICT;
+CREATE TABLE film_retention (film_id TEXT PRIMARY KEY REFERENCES film(id)) STRICT;
+UPDATE schema_contract SET version = 15 WHERE id = 1 AND version = 14;`;
+const v15=()=>real15?sql(real15):V15_FIXTURE;
 assert.ok(chain.includes('0014_localization_source')&&chain.includes('0013_film_person_authority'));
 let n=0;
 const sqlite=(file,text)=>spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
@@ -26,9 +34,9 @@ const rows=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{inp
 const sql=name=>fs.readFileSync('migrations/'+name+'.sql','utf8');
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.status,0,'expected a refusal: '+text);if(pattern)assert.match(r.stderr,pattern);};
-function database({upTo=chain.length,apply=true,open=false}={}){
+function database({upTo=chain.length,apply=true,open=false,at15=true}={}){
  const file=path.join(root,'rd-'+(n++)+'.sqlite');
- const r=sqlite(file,chain.slice(0,upTo).map(sql).join('\n'));assert.equal(r.status,0,r.stderr);
+ const r=sqlite(file,chain.slice(0,upTo).map(sql).join('\n')+(upTo===chain.length&&at15?'\n'+v15():''));assert.equal(r.status,0,r.stderr);
  if(apply){const r2=sqlite(file,sql(NEW));assert.equal(r2.status,0,r2.stderr);}
  if(open)assert.equal(sqlite(file,"UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
  return file;
@@ -49,14 +57,38 @@ async function seedFilm(env,confirmed,{tmdb=confirmed.movieId,trusted=true}={}){
  return mutateFilm(env,{id:confirmed.filmId,expectedRevision:0,at:AT,film:{contractVersion:1,originalTitle:confirmed.lid,externalIds:tmdb?[{scheme:'tmdb',value:tmdb,trusted}]:[]}});
 }
 
-// 1. The migration: it refuses anything but a complete v14/v15, creates nothing then, and creates one empty append-only table.
+// 1. The migration: it refuses anything but a complete v15, creates nothing then, and creates one empty append-only table.
 {
- for(const upTo of [chain.indexOf('0013_film_person_authority')+1,chain.indexOf('0013_film_person_authority'),9]){
-  const file=database({upTo,apply:false});
-  const before=one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type='table'");
+ // A database at v14 refuses 0016 and changes nothing (no contiguous skip over 0015); so do versions below it and a v15 without the 0015 tables.
+ const snapshot=file=>JSON.stringify([rows(file,"SELECT name FROM sqlite_master ORDER BY name"),rows(file,'SELECT version,note FROM schema_contract')]);
+ for(const upTo of [chain.length,chain.indexOf('0013_film_person_authority')+1,chain.indexOf('0013_film_person_authority'),9]){
+  const file=database({upTo,apply:false,at15:false});
+  const before=snapshot(file);
   refused(file,sql(NEW));
-  assert.equal(one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type='table'"),before,'a refused file creates nothing (chain '+upTo+')');
+  assert.equal(snapshot(file),before,'a refused file changes nothing (chain '+upTo+')');
  }
+ assert.equal(one(database({apply:false,at15:false}),'SELECT version FROM schema_contract'),14,'the v14 case is really v14');
+ const hollow=database({apply:false,at15:false});
+ sqlite(hollow,'UPDATE schema_contract SET version=15');
+ const hollowBefore=snapshot(hollow);
+ refused(hollow,sql(NEW));
+ assert.equal(snapshot(hollow),hollowBefore,'a version 15 without the 0015 tables is refused and changes nothing');
+ // Version 14 with the 0015 tables already present (a half-done or hand-made state) is still not v15: refused, nothing changed.
+ const mixed=database({apply:false});
+ sqlite(mixed,'DROP TRIGGER schema_contract_no_downgrade;UPDATE schema_contract SET version=14;');
+ const mixedBefore=snapshot(mixed);
+ refused(mixed,sql(NEW));
+ assert.equal(snapshot(mixed),mixedBefore,'version 14 with the 0015 tables present is refused and changes nothing');
+ const partial=database({apply:false});
+ sqlite(partial,'DROP TABLE film_retention');
+ refused(partial,sql(NEW));
+ assert.equal(one(partial,'SELECT version FROM schema_contract'),15,'a v15 missing one 0015 table is refused');
+ // A complete v15 advances 15 -> 16 and only that.
+ const v15file=database({apply:false});
+ assert.equal(one(v15file,'SELECT version FROM schema_contract'),15);
+ assert.equal(sqlite(v15file,sql(NEW)).status,0);
+ assert.equal(one(v15file,'SELECT version FROM schema_contract'),16);
+ // A database already at 16 (or higher) refuses it again.
  const file=database();
  assert.equal(one(file,'SELECT version FROM schema_contract'),16);
  assert.equal(one(file,'SELECT COUNT(*) FROM tmdb_retirement_decision'),0,'no row is written');
@@ -231,6 +263,26 @@ async function seedFilm(env,confirmed,{tmdb=confirmed.movieId,trusted=true}={}){
  await assert.rejects(()=>recordRetirementDecision(racing("INSERT INTO film (id,contract_version,updated_at) VALUES ('film:late',1,'t');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:late','tmdb_tv','"+ODYSSEY.tvId+"',1,0)"),{...decisionFor(ODYSSEY),expectedRevision:2}),code('film_person_precondition'));
  sqlite(file,"DELETE FROM film_external_id WHERE film_id='film:late'");
  assert.equal(one(file,'SELECT COUNT(*) FROM tmdb_retirement_decision'),0,'every raced attempt wrote nothing');
+ // The Film's OWN typed ids change between the read and the batch: the decision is not appended on stale identity evidence.
+ const own=(label,change,restore)=>async()=>{
+  await assert.rejects(()=>recordRetirementDecision(racing(change),{...decisionFor(ODYSSEY),expectedRevision:Number(one(file,"SELECT COALESCE((SELECT revision FROM canonical_revision WHERE kind='film' AND id='film:1IUo'),0)"))}),code('film_person_precondition'),label);
+  assert.equal(one(file,'SELECT COUNT(*) FROM tmdb_retirement_decision'),0,label+': no decision row');
+  assert.equal(one(file,'SELECT COUNT(*) FROM tmdb_retirement_current'),0,label+': no history state');
+  sqlite(file,restore);
+ };
+ const FILM="film:1IUo";
+ await own('the own tmdb row removed',"DELETE FROM film_external_id WHERE film_id='"+FILM+"' AND scheme='tmdb'","INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+FILM+"','tmdb','"+ODYSSEY.movieId+"',1,0)")();
+ await own('the own tmdb row became conflicting',"UPDATE film_external_id SET conflicting=1 WHERE film_id='"+FILM+"' AND scheme='tmdb'","UPDATE film_external_id SET conflicting=0 WHERE film_id='"+FILM+"' AND scheme='tmdb'")();
+ await own('the own tmdb row now names another movie id',"UPDATE film_external_id SET value='999' WHERE film_id='"+FILM+"' AND scheme='tmdb'","UPDATE film_external_id SET value='"+ODYSSEY.movieId+"' WHERE film_id='"+FILM+"' AND scheme='tmdb'")();
+ await own('another trusted movie id appeared on the Film',"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+FILM+"','tmdb','888',1,0)","DELETE FROM film_external_id WHERE film_id='"+FILM+"' AND value='888'")();
+ await own('another trusted TV id appeared on the Film',"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+FILM+"','tmdb_tv','777',1,0)","DELETE FROM film_external_id WHERE film_id='"+FILM+"' AND value='777'")();
+ // Control: a Film with the same shape and nothing changing gets exactly one decision (the assertions do not refuse a valid decision), and an
+ // untrusted extra id of the Film is not an identity conflict.
+ const ctlFile=database({open:true}),ctlEnv=state(ctlFile),ctl=CONFIRMED_RETIREMENTS[2];
+ await seedFilm(ctlEnv,ctl);
+ sqlite(ctlFile,"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('"+ctl.filmId+"','tmdb_tv','4242',0,0)");
+ assert.equal((await recordRetirementDecision(ctlEnv,decisionFor(ctl))).replayed,false);
+ assert.equal(one(ctlFile,'SELECT COUNT(*) FROM tmdb_retirement_decision'),1);
  // The same request written by a concurrent writer between the read and the batch: the same content is a replay, other content is a mismatch.
  const insertSame=(over='')=>"INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,input_sha256,supersedes_seq,payload_json,recorded_at) VALUES ('same','film:3tCe','retire','3tCe','101915','8042','{}','{\"by\":\"owner\",\"at\":\"t\",\"source\":\"s\"}','owner_request',NULL,NULL,'"+over+"','t')";
  const input=decisionFor(TESS,{requestId:'same',expectedRevision:1});
@@ -295,4 +347,4 @@ async function seedFilm(env,confirmed,{tmdb=confirmed.movieId,trusted=true}={}){
  assert.ok(fs.readFileSync('migrations/README.md','utf8').includes(NEW),'migrations/README.md lists 0016');
 }
 
-console.log('tmdb-retirement-decisions: migration 0016 refuses below v14 and creates one empty append-only table; invalid input stops before any SQL and the prepare-only loader validates exactly like tmdbRetirementSet; the writer refuses unless the marker is open, is fenced and revision-checked, replay-safe, holds typed collisions, and only an explicit owner restore reverses a retirement; the history is kept; the module is inactive');
+console.log('tmdb-retirement-decisions: migration 0016 refuses anything but a complete v15 (a v14, a hollow v15 and a v14 carrying the 0015 tables change nothing) and creates one empty append-only table; invalid input stops before any SQL and the prepare-only loader validates exactly like tmdbRetirementSet; the writer refuses unless the marker is open, is fenced and revision-checked, replay-safe, holds typed collisions, and only an explicit owner restore reverses a retirement; the history is kept; the module is inactive');
