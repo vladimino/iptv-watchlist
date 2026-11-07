@@ -14,6 +14,8 @@ import {loadLocalizationInputs,resolveLocalization} from './localization-sources
 export const CANONICAL_READ_MAX_IDS=200;
 export const CANONICAL_REDIRECT_DEPTH=8;
 export const CANONICAL_FILMOGRAPHY_CAP=500;
+// The total number of retired ids (redirect ancestors) one read call may collect to find owner decisions; more fails closed (canonical_read_owner_fanin).
+export const CANONICAL_OWNER_ANCESTOR_CAP=300;
 export const CANONICAL_READ_CHUNK=80;
 const FILM=/^film:.+/,PERSON=/^person:[a-z_]+\/.+/;
 
@@ -88,10 +90,19 @@ async function ownerEntries(db,kind,links){
 async function retiredIds(db,survivors){
  const links=new Map(survivors.map(id=>[id,[id]]));
  const owner=new Map(survivors.map(id=>[id,id]));
- let frontier=[...survivors];
+ let frontier=[...survivors],used=0,usedBefore=0;
  for(let round=0;frontier.length;round++){
   if(round>=CANONICAL_REDIRECT_DEPTH)throw failed('canonical_read_owner_redirect');
-  const rows=await chunked(db,'SELECT from_id,to_film_id FROM film_redirect WHERE to_film_id IN (/*ids*/) ORDER BY from_id',frontier);
+  // The budget is enforced before a result set is consumed: each chunk reads at most (remaining + 1) rows, so one more than the cap is the most that is ever read.
+  const rows=[];
+  for(let at=0;at<frontier.length;at+=CANONICAL_READ_CHUNK){
+   const chunk=frontier.slice(at,at+CANONICAL_READ_CHUNK),room=CANONICAL_OWNER_ANCESTOR_CAP-used+1;
+   try{rows.push(...await many(db,'SELECT from_id,to_film_id FROM film_redirect WHERE to_film_id IN ('+chunk.map(()=>'?').join(',')+') ORDER BY from_id LIMIT ?',[...chunk,room]));}
+   catch(error){throw failed('canonical_read_unavailable',error);}
+   used=rows.length+usedBefore;
+   if(used>CANONICAL_OWNER_ANCESTOR_CAP)throw failed('canonical_read_owner_fanin');
+  }
+  usedBefore=used;
   frontier=[];
   for(const row of rows){
    const survivor=owner.get(row.to_film_id);

@@ -9,7 +9,7 @@ import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {mutateFilm,mutatePerson} from '../src/canonical-mutations.js';
 import {recordLocalizationSources} from '../src/localization-sources.js';
-import {canonicalReaderMode,readFilms,readPersons,resolveRedirects,ownerCandidatesFromEntries,CANONICAL_READ_MAX_IDS,CANONICAL_FILMOGRAPHY_CAP} from '../src/canonical-read-model.js';
+import {canonicalReaderMode,readFilms,readPersons,resolveRedirects,ownerCandidatesFromEntries,CANONICAL_READ_MAX_IDS,CANONICAL_OWNER_ANCESTOR_CAP,CANONICAL_FILMOGRAPHY_CAP} from '../src/canonical-read-model.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-read-model-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
@@ -191,6 +191,46 @@ const run=(file,sql)=>sqlite(file,sql);
   // A chain deeper than the cap that ends at the survivor: the owner links of its tail cannot be proven complete.
   run(file,"PRAGMA foreign_keys=OFF;"+Array.from({length:10},(_,i)=>`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:far:${i}','${i===0?'film:keep':'film:far:'+(i-1)}','t');`).join(''));
   await assert.rejects(()=>readFilms(e,['film:keep']),code('canonical_read_owner_redirect'),'too deep');
+ }
+ // 4. Fan-in: the number of retired ids collected for one read is capped and enforced before the rows are consumed.
+ {
+  const fan=async(count,{second=0,ownerOn=null}={})=>{
+   const {file,e}=mk();
+   await film(e,'film:keep');
+   const inserts=[];
+   for(let block=0;block<count;block+=100)inserts.push("INSERT INTO film_redirect (from_id,to_film_id,at) VALUES "+Array.from({length:Math.min(100,count-block)},(_,i)=>`('film:anc:${block+i}','film:keep','t')`).join(',')+';');
+   for(let block=0;block<second;block+=100)inserts.push("INSERT INTO film_redirect (from_id,to_film_id,at) VALUES "+Array.from({length:Math.min(100,second-block)},(_,i)=>`('film:sub:${block+i}','film:anc:${block+i}','t')`).join(',')+';');
+   run(file,"PRAGMA foreign_keys=OFF;"+inserts.join(''));
+   if(ownerOn)run(file,entry('k-owner',ownerOn,'Выбор владельца'));
+   let redirectRows=0;
+   const standin=d1Standin(file);
+   const counting={DB:{batch:standin.batch,calls:standin.calls,prepare(sql){const prepared=standin.prepare(sql);return {...prepared,bind(...args){const statement=prepared.bind(...args);return {...statement,async all(){const result=await statement.all();if(/FROM film_redirect WHERE to_film_id IN/.test(sql))redirectRows+=result.results.length;return result;}};}};}}};
+   const before=standin.calls.queries;
+   const outcome=await readFilms(counting,['film:keep']).then(result=>({ok:result}),error=>({error}));
+   return {outcome,redirectRows,queries:standin.calls.queries-before};
+  };
+  const cap=CANONICAL_OWNER_ANCESTOR_CAP;
+  assert.equal(cap,300,'the documented cap');
+  // At exactly the cap the read works and the owner decision of the last ancestor still wins.
+  const atCap=await fan(cap,{ownerOn:`film:anc:${cap-1}`});
+  assert.ok(atCap.outcome.ok,'a survivor at exactly the cap works');
+  assert.deepEqual([atCap.outcome.ok.items.get('film:keep').title.tier,atCap.outcome.ok.items.get('film:keep').title.value],['owner','Выбор владельца']);
+  assert.equal(atCap.redirectRows,cap+0,'exactly the cap of ancestor rows were read');
+  // One more than the cap fails closed with the dedicated outcome and reads at most cap + 1 rows in a bounded number of queries.
+  const over=await fan(cap+1,{ownerOn:'film:anc:0'});
+  assert.equal(over.outcome.error?.code,'canonical_read_owner_fanin','no partial result and no lower-tier fallback');
+  assert.ok(over.redirectRows<=cap+1,'at most cap + 1 rows are read: '+over.redirectRows);
+  assert.ok(over.queries<=40,'a bounded number of queries: '+over.queries);
+  // A large fan-in is not read in full: ten times the cap still reads at most cap + 1 rows and issues the same bounded number of queries.
+  const huge=await fan(cap*10);
+  assert.equal(huge.outcome.error?.code,'canonical_read_owner_fanin');
+  assert.ok(huge.redirectRows<=cap+1&&huge.queries<=over.queries+4,'the cap, not the table size, bounds the read: '+huge.redirectRows+' rows, '+huge.queries+' queries');
+  // The budget accumulates across rounds: cap/2+10 direct ancestors and as many second-level ones exceed the cap together.
+  const deep=await fan(Math.floor(cap/2)+10,{second:Math.floor(cap/2)+10});
+  assert.equal(deep.outcome.error?.code,'canonical_read_owner_fanin','depth 2 rows count against the same budget');
+  // Half the cap at each level (a total below the cap) still resolves.
+  const fits=await fan(Math.floor(cap/2),{second:Math.floor(cap/2)-10,ownerOn:'film:sub:3'});
+  assert.equal(fits.outcome.ok?.items.get('film:keep').title.value,'Выбор владельца','a total below the cap through two levels works with owner precedence');
  }
  {
   // A loop that includes the survivor: the survivor redirects, so it is not a survivor; the requested id answers cycle and no owner value is invented.
