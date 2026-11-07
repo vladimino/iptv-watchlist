@@ -366,6 +366,22 @@ async function stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks){
  await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery});
  return {stopped:true,reason:finalReason,chunks,instanceId:ownId};
 }
+// AIR-364 (ADR 0098). Arms the recovery of a recognised step failure and proves what was persisted. The write is one expected-etag CAS
+// of the whole record; a lost CAS re-reads and recomputes from the fresh record (at most three times), so the attempt counter moves
+// once and the due time is the one just computed, never a retained older one. `armedFor` marks the record this instance armed: a
+// retry of the step after the write landed finds it and reuses it instead of counting the failure again. Without a proven write the
+// result is `armed: false` and the caller creates nothing.
+async function armStepFailureRecovery(env,ownId,series,pinned,chunks){
+ for(let attempt=0;attempt<3;attempt++){
+  const state=await readWorkflowState(env),record=state.record;
+  if(record?.instanceId!==ownId||record.series!==series)return {armed:false,reason:'not_owner'};
+  if(record.phase==='stopped'&&record.recovery?.armedFor===ownId)return {armed:true,quarantined:record.recovery.quarantined===true,dueAt:record.recovery.dueAt||null,attempts:record.recovery.attempts||0};
+  const failure={...workflowFailure(record.recovery,'step_failure',Date.now()),armedFor:ownId};
+  const next={schemaVersion:1,...record,programmeRunId:pinned,series,instanceId:ownId,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':'step_failure',chunksThisInstance:chunks,waitingUntil:failure.dueAt,recovery:failure,updatedAt:new Date().toISOString()};
+  if(await writeWorkflowState(env,next,state.etag))return {armed:true,quarantined:failure.quarantined===true,dueAt:failure.dueAt,attempts:failure.attempts};
+ }
+ return {armed:false,reason:'write_conflict'};
+}
 async function runDiscoveryWorkflow(rawEnv,payload,step){
  // `meter` counts this invocation. A replay after a sleep starts a new invocation and a new meter, so each step also
  // returns what it spent and `tally.total` re-adds those cached outputs: it is the count of the whole instance.
@@ -396,15 +412,8 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
  // `ensureDiscoveryWorkflow` for the successor, which re-reads authority, generation, executor record and the recovery gate. The
  // hourly reconcile stays the fallback. A failure of the arming step itself is not caught here: the instance ends as before.
  const recoverAfterStepFailure=async()=>{
-  const armed=await doStep('recover-arm',async()=>{
-   const owned=await workflowOwnerGate(env,ownId,series);
-   if(!owned.owned)return {armed:false,reason:'not_owner'};
-   await stopOwnedWorkflow(env,ownId,'step_failure',pinned,series,chunks);
-   const record=(await readWorkflowState(env)).record;
-   if(record?.instanceId!==ownId||record.series!==series)return {armed:false,reason:'not_owner'};
-   return {armed:true,quarantined:record.recovery?.quarantined===true||record.reason==='recovery_exhausted',dueAt:record.recovery?.dueAt||null};
-  });
-  if(!armed.armed)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+  const armed=await doStep('recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks));
+  if(!armed.armed)return {stopped:true,reason:armed.reason==='write_conflict'?'recovery_write_conflict':'not_owner',chunks,instanceId:ownId};
   if(armed.quarantined||!Number.isFinite(Date.parse(armed.dueAt||'')))return {stopped:true,reason:'recovery_exhausted',chunks,instanceId:ownId};
   for(let attempt=0;attempt<3;attempt++){
    await step.sleepUntil(stepName('recover-sleep'),new Date(armed.dueAt));
