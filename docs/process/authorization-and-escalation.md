@@ -28,6 +28,12 @@ Classify by **effect and reversibility**, not API method, record count, apparent
 
 Some GET endpoints write: `GET /api/programme` and `GET /api/watchlist` may run `repairMirrors`; they are not L0. An authorized scheduled production task may run on its existing schedule; its authorization does not permit a new manual run. Underlying Access/JWT, D1/R2 authority fencing, CAS/leases, idempotency and identity safeguards remain in force.
 
+## ChatGPT Scheduled Task authorization
+
+**Owner approval is mandatory for every mutation or manual execution of ChatGPT Scheduled Tasks**, including creating an ephemeral or one-time task, enabling/disabling one, editing its prompt or schedule, and invoking an immediate run. Authorization must explicitly identify the proposed operation and the intended task or purpose; a previously approved operation does not authorize additional or replacement tasks. Generic requests to complete delivery, wait for CI, monitor a PR, follow up later or reduce owner interruptions are **not** consent to create an automation. Neither L0/L1 routine delivery nor any generic L2 standing authorization overrides this owner gate. Treat schedule/task changes as L3 owner-controlled actions unless a narrowly scoped, explicit owner-approved plan covers the exact operation.
+
+When a CI/deploy job is slow, agents should use in-session observation or record the remaining status and next check in the existing PR/Trello card. Do not create a Scheduled Task as a workaround for the inability to keep a chat alive. Registry reads alone are not task mutations, subject to the normal L0 side-effect verification. An accidental unauthorized task creation must be reported immediately and its status handled transparently; **do not silently change or delete tasks to hide it**.
+
 ## Standing authorizations
 
 Every operation-specific L2 authorization must state: exact actor/capability and production domain; input identity and allowed side effects; maximum duration, batch count, attempts and spend; generation/lease/authority preconditions; concurrent-writer protection; idempotency key and outcome reconciliation; evidence/readback; escalation/stop triggers; authorizing scope and revocation mechanism. The actual runtime/tool must enforce or reliably check those conditions.
