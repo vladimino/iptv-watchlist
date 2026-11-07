@@ -27,3 +27,10 @@ A Workflow chunk step of 27.4 s carried a summary `totalMs` of 22.3 s (instance 
 ## Limits
 
 No production run through the new steps exists yet. The estimates assume the parts keep their sizes; a larger programme or a slow D1 day moves them. The first natural publication after deploy is the measurement.
+
+## Offline checks of the change
+
+- Production-sized volume (`SEAL_FULL=39920 node tests/discovery-seal-resume.mjs`, local SQLite stand-in): the ledger seal of 39,920 observations took 1,331 batches of 30 and 40.9 s of stand-in time, and every kill point resumed. This is the ledger step; the publication does not scale with the observation count.
+- `publish` as four units around one pointer (`tests/discovery-seal-publish.mjs`): a changed fence refuses the step and publishes nothing; a cancellation before the pointer leaves the previous generation and the repeat publishes once; a cancellation after the pointer and before the intent leaves the pointer moved exactly once and the repeat queues the intent once; a passed deadline stops the step after the pointer and after each unit with a saved checkpoint and four calls finish the phase with one pointer, one mirror write, one copy and one intent.
+- The request budget is counted from the request's entry (32 s before a unit may start), not from the step's start.
+- Not measured offline: the wall time of the new steps on production data; the stand-ins do not reproduce D1 and R2 latency. The first natural publication after deploy is that measurement.

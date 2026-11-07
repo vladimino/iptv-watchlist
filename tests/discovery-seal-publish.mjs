@@ -250,4 +250,48 @@ for(const mode of ['document','emit']){
  const repeated=await context.sealQueueStep(env,again);
  assert.equal(repeated.stage,'complete');assert.equal(repeated.ratingsPipeline,'separate');assert.equal(repeated.ratingsMigration,undefined);
 }
+
+// AIR-353: the `publish` step is four units around one atomic pointer. A cancellation before the pointer changes nothing; a
+// cancellation after it leaves the generation published exactly once and the repeat finishes the rest without a second
+// pointer; a deadline between units stops the step with a checkpoint and the next calls resume where it stopped.
+{
+ const bkt=bucket(11);
+ const report={runId:'run-p',updatedAt:'2026-11-06T10:00:00.000Z',films:[],watchlistCount:0,stats:{}};
+ const payload=JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'f0',expectedProgrammeRunId:'run-old'});
+ await bkt.put('epg/seal/run-p/payload.json',payload);
+ let ev=[],published=false,failPointer=0,failIntent=0,otherFence=false;
+ context.PublishedEpg={
+  async currentGeneration(){return published?{programmeRunId:'run-p',phase:'published',fence:'f1'}:{programmeRunId:'run-old',phase:'published',fence:otherFence?'f9':'f0'};},
+  async publishGeneration(){if(failPointer-->0)throw new Error('cancelled before the pointer');published=true;ev.push('pointer');return {ok:true};},
+  async writeMirrors(){ev.push('mirrors');return true;},
+ };
+ context.copyEpgGeneration=async()=>{ev.push('copy');};
+ context.queueCommittedDiscovery=async()=>{if(failIntent-->0)throw new Error('cancelled after the pointer');ev.push('intent');};
+ const env={BUCKET:bkt};
+ const fresh=()=>({runId:'run-p',stage:'seal',seal:{jobId:'j',phase:'publish'},watchlist:[]});
+ const count=name=>ev.filter(item=>item===name).length;
+ // Another generation published since the staging: the fence refuses, nothing moves.
+ otherFence=true;let run=fresh();
+ await assert.rejects(()=>context.sealPublishStep(env,run,null),/generation changed/);
+ assert.equal(published,false);assert.equal(ev.length,0);otherFence=false;
+ // Cancelled before the pointer: the previous generation is untouched and the repeat publishes once.
+ failPointer=1;run=fresh();
+ await assert.rejects(()=>context.sealPublishStep(env,run,null),/before the pointer/);
+ assert.equal(published,false);assert.equal(ev.length,0);assert.equal(run.seal.phase,'publish');
+ const done=await context.sealPublishStep(env,run,null);
+ assert.equal(run.seal.phase,'finalize');assert.equal(done.stage,'seal');assert.equal(run.seal.units,undefined);
+ assert.deepEqual(ev,['pointer','mirrors','copy','intent']);
+ // Cancelled after the pointer, before the discovery intent: the repeat does not publish again and queues the intent once.
+ ev=[];published=false;failIntent=1;run=fresh();
+ await assert.rejects(()=>context.sealPublishStep(env,run,null),/after the pointer/);
+ assert.equal(count('pointer'),1);assert.equal(count('intent'),0);assert.equal(run.seal.phase,'publish');
+ await context.sealPublishStep(env,run,null);
+ assert.equal(count('pointer'),1,'the pointer moved exactly once');assert.equal(count('intent'),1);assert.equal(run.seal.phase,'finalize');
+ // A deadline that has passed stops the step after the pointer and after each unit, with a checkpoint.
+ ev=[];published=false;run=fresh();let calls=0;const stored=[];
+ do{calls++;const out=await context.sealPublishStep(env,run,null,0);stored.push(JSON.stringify(out.seal));}while(run.seal.phase==='publish'&&calls<8);
+ assert.equal(calls,4,'pointer, mirrors, copy, then the intent: '+stored.join(' '));
+ assert.deepEqual(ev,['pointer','mirrors','copy','intent']);assert.equal(run.seal.phase,'finalize');
+ assert.ok(JSON.parse(await (await bkt.get('sync.json')).text()).seal.phase==='finalize','the checkpoint is saved');
+}
 console.log('discovery seal publish ok');

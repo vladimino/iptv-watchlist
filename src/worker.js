@@ -864,7 +864,9 @@ async function publishGenerationWithLedger(env,runId,discovery,meta,files,watchl
 // publication needs (the immutable generation ledger in R2, a staging payload) and moves the run to stage `seal`. Bounded
 // steps then seal the ledger (`ledger`), bring the catalog up to date (`catalog`) and publish (`publish`); the published
 // pointer moves only after the ledger is sealed and committed.
-const SEAL_STEP_BUDGET_MS=30000;
+// AIR-353: the budget is counted from the request's entry, not from the start of the step, and no unit of work starts
+// after it. The shortest MCP client waits about 60 s; the units in flight at the deadline are the margin.
+const SEAL_REQUEST_BUDGET_MS=32000;
 const SEAL_FLUSH_ITEMS=60;
 async function sealedPublishAvailable(env){
  if(typeof DiscoveryAuthority==='undefined'||typeof PublishedEpg==='undefined')return false;
@@ -965,25 +967,42 @@ async function sealCatalogStep(env,run,lease,deadline){
 // refresh was 26.8 s, 6.8 s reply), longer than the 60 s the shortest MCP client waits. Each step below does one of
 // those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
 async function sealPayload(env,run){return JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());}
-// `publish`: the published pointer, the mirrors, the generation copy and the discovery intent.
-async function sealPublishStep(env,run,lease){
+// `publish`: the published pointer, the mirrors, the generation copy and the discovery intent, as four units. A unit
+// starts only before the deadline; when the deadline has passed after a unit, the step saves what is done in
+// `run.seal.units` and answers `continue` in the same phase. The pointer is the one atomic unit: before it the previous
+// generation stays published and its fence is checked, and a repeat after it finds the generation published and skips it.
+async function sealPublishStep(env,run,lease,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;
- const live=await PublishedEpg.currentGeneration(env);
- const already=live?.programmeRunId===run.runId&&live.phase==='published';
- if(!already){
-  if(!live||live.fence!==payload.fence)throw new Error('EPG generation changed during publish');
-  await saveJSON(env,epgGenerationKey(run.runId,'programme.json'),report);
-  const result=await PublishedEpg.publishGeneration(env,{programmeRunId:run.runId,phase:'published',publishedAt:report?.updatedAt||null,expectedProgrammeRunId:payload.expectedProgrammeRunId,programme:report,watchlist:payload.watchlist});
-  let mirrored=false;
-  try{mirrored=await PublishedEpg.writeMirrors(env,{programmeRunId:run.runId,programme:report,watchlist:payload.watchlist,phase:'published'});}catch{mirrored=false;}
-  try{await copyEpgGeneration(env,run.runId);}catch{}
-  payload.mirrored=mirrored;
+ const units=run.seal.units||(run.seal.units={});
+ const checkpoint=async()=>{run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);return sealResponse(run,{},{seal:{published:!!units.pointer,units:Object.keys(units).filter(key=>units[key])}});};
+ if(!units.pointer){
+  const live=await PublishedEpg.currentGeneration(env);
+  const already=live?.programmeRunId===run.runId&&live.phase==='published';
+  if(!already){
+   if(!live||live.fence!==payload.fence)throw new Error('EPG generation changed during publish');
+   await tracedPhase(run.runId,'seal_publish_pointer',async()=>{
+    await saveJSON(env,epgGenerationKey(run.runId,'programme.json'),report);
+    await PublishedEpg.publishGeneration(env,{programmeRunId:run.runId,phase:'published',publishedAt:report?.updatedAt||null,expectedProgrammeRunId:payload.expectedProgrammeRunId,programme:report,watchlist:payload.watchlist});
+   });
+  }
+  units.pointer=true;
+  if(Date.now()>=deadline)return await checkpoint();
  }
- await queueCommittedDiscovery(env,run);
- if(!payload.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
- await saveJSON(env,'uncertain.json',{updatedAt:report?.updatedAt,items:payload.uncertain});
- run.seal.phase='finalize';run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
+ if(!units.mirrors){
+  units.mirrors=await tracedPhase(run.runId,'seal_publish_mirrors',async()=>{try{return (await PublishedEpg.writeMirrors(env,{programmeRunId:run.runId,programme:report,watchlist:payload.watchlist,phase:'published'}))?'ok':'failed';}catch{return 'failed';}});
+  if(Date.now()>=deadline)return await checkpoint();
+ }
+ if(!units.copy){
+  units.copy=await tracedPhase(run.runId,'seal_publish_copy',async()=>{try{await copyEpgGeneration(env,run.runId);return 'ok';}catch{return 'failed';}});
+  if(Date.now()>=deadline)return await checkpoint();
+ }
+ await tracedPhase(run.runId,'seal_publish_intent',async()=>{
+  await queueCommittedDiscovery(env,run);
+  if(units.mirrors!=='ok')await saveJSON(env,'watchlist.json',{updatedAt:report?.updatedAt,films:payload.watchlist?.films||run.watchlist});
+  await saveJSON(env,'uncertain.json',{updatedAt:report?.updatedAt,items:payload.uncertain});
+ });
+ delete run.seal.units;run.seal.phase='finalize';run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
  return sealResponse(run,{},{seal:{published:true}});
 }
 // `finalize`: the ratings hand-over, the watchlist, the scan observation and the events.
@@ -1007,10 +1026,10 @@ async function sealQueueStep(env,run){
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{})};
 }
-// One bounded step of the staged publication. It never runs longer than SEAL_STEP_BUDGET_MS of work and answers
+// One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
 // `nextAction: continue` until the run is complete.
-async function sealStep(env,run){
- const deadline=Date.now()+SEAL_STEP_BUDGET_MS;
+async function sealStep(env,run,entryAt=Date.now()){
+ const deadline=entryAt+SEAL_REQUEST_BUDGET_MS;
  if(!run.seal?.jobId)throw new Error('seal_job_missing');
  // The lease is taken without the published pointer's programme: once the ledger is committed the discovery authority
  // is on the new run while the pointer still names the old one until the publish step, and the job's own fence (its id and
@@ -1032,7 +1051,7 @@ async function sealStep(env,run){
    run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
    return sealResponse(run,{},{seal:{catalogRemaining:result.remaining}});
   }
-  if(run.seal.phase==='publish')return await tracedPhase(run.runId,'seal_publish',()=>sealPublishStep(env,run,lease));
+  if(run.seal.phase==='publish')return await tracedPhase(run.runId,'seal_publish',()=>sealPublishStep(env,run,lease,deadline));
   if(run.seal.phase==='finalize')return await tracedPhase(run.runId,'seal_finalize',()=>sealFinalizeStep(env,run));
   if(run.seal.phase==='queue')return await tracedPhase(run.runId,'seal_queue',()=>sealQueueStep(env,run));
   throw new Error('seal_phase_unknown');
@@ -1118,18 +1137,18 @@ async function postSync(env,execution,pathname,body,caller='http'){
  const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
  await openContinuationStep(env,step,persisted());
  let response;
- try{response=await syncStep(env,pathname,body,step);}
+ try{response=await syncStep(env,pathname,body,step,started);}
  catch(e){await closeContinuationStep(env,step,started,null,e,persisted());throw e;}
  await closeContinuationStep(env,step,started,response,null,persisted());
  return response;
 }
-async function syncStep(env,pathname,body,step){
+async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  const run=await loadJSON(env,'sync.json');step.runStage=diagnosticCode(DIAGNOSTIC_VOCABULARY.runStage,run?.stage??null);
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
  if(run.stage==='complete'){step.branch='continuation';if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const executor=discoveryExecutorMode(env);if(executor==='invalid'){step.branch='executor_invalid';return json({error:'discovery_executor_invalid',executor:'invalid'},503);}if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
- if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
+ if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run,entryAt);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
