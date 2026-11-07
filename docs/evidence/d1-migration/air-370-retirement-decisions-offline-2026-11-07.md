@@ -1,0 +1,25 @@
+# AIR-370: offline evidence of the owner TMDB retirement decision history
+
+**Captured:** 2026-11-07 (UTC). **Method:** offline tests on a D1 stand-in over the sqlite3 CLI (`tests/tmdb-retirement-decisions.mjs`), the full `npm test` and `npm run build`. No production read or write, no schema apply, no flag, no R2 access; the four historical Films come from the committed constants of `scripts/tmdb-tv-identity-plan.mjs` with synthetic evidence timestamps. Nothing here measures production behavior or the content of the real R2 object.
+
+## What was verified
+
+- **Migration `0016`.** It refuses a database below a complete version 14 (the chain stopped at 0013 and earlier tested) before it creates a table, creates one empty table, writes no row and leaves the marker at `r2` / `open` / generation 0. The table itself refuses malformed ids (a leading zero, non-digits, over ten digits, empty), a non-owner or incomplete confirmation, invalid JSON, an unknown kind or origin, an import without a digest and a repeated request id; the control row of the same shape is accepted.
+- **Append-only and state machine in SQL.** No `UPDATE` or `DELETE` of any column; a second active `retire` of a Film, a TV entry active on two Films, and a `restore` that is not the inverse of the latest `retire` (other ids, other Film, an unknown or already reversed one) are refused; the explicit `restore` and a later new `retire` are accepted; `tmdb_retirement_current` gives the latest decision.
+- **Prepare-only loader.** `prepareRetirementImport` and the real `tmdbRetirementSet` (loaded from `src/domain/tmdb-tv-identity.js` in a vm) agree on 18 valid and invalid objects, with identical reasons. The four historical Films prepare four `retire` decisions with deterministic request ids and the input digest; a missing digest prepares nothing.
+- **Writer.** Invalid input throws `retirement_invalid` before any SQL (no marker read). Refuses in legacy, `r2`, `prepared` and `held`. When `open`: one batch, revision moved by one, a replay opens no batch, the same request id with other content is `retirement_replay_mismatch`, a stale revision is `film_person_revision_conflict`, a second active retire and a non-inverse restore are refused, and only an explicit owner `restore` moves a Film back. The full history is kept in order with its evidence and confirmations. No `film_external_id`, canonical identity or dimension row moves.
+- **Held cases.** Another Film trusting the TV entry or the retired movie id, the Film missing the retired movie id, or trusting another TMDB id are refused with nothing written; the same number as a movie id on another Film is not a collision (separate namespaces). A missing Film is refused.
+- **Races.** A marker moved to `held` between the read and the batch, a revision moved, another Film taking the TV entry after the read, and the same request written concurrently (same content is a replay, other content is a mismatch) leave nothing written.
+- **Compare-only.** Loading the four prepared decisions is replay-safe (the second load is all replays); an owner `restore` after the load stands and the comparison reports `restored`; differences and extras are reported.
+- **Merge.** A Film with a decision is not merged away (`film_person_retirement_history`); other merges and merges before schema 16 are unchanged.
+- **Inactive.** No source file imports the module, the build does not name it, it contains no R2, fetch or identity write, and the projector's path does not write the table.
+
+Mutation checks (each removal makes the test fail, none survived): the open-only gate, the replay content check, the TV collision hold, the in-batch collision assertion, the supersedes requirement, the owner confirmation check, the retired-movie-present hold, the no-update and no-delete triggers, the restore, collision and active triggers, the owner CHECK and the merge refusal.
+
+## Scenarios available now and later
+
+Available now: all of the above. To repeat later: applying a decision through the fenced identity mutation and competing producers (AIR-371); the owner-gated load of the real object, counts and hashes against the four Films and the parity ledger (AIR-373); a natural owner decision after activation, with read-after-write (AIR-374).
+
+## Not verified
+
+Production behavior, the byte content of the real `identity/tmdb-retirements.json`, the real D1 identity rows of the four Films, and numbering against a parallel migration 0015, which does not exist in this branch (the file keeps room for it and needs only its number and guard adjusted if the order changes).
