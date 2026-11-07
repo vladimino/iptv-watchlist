@@ -196,11 +196,31 @@ for(const mode of ['document','emit']){
   assert.equal(mismatch.status,409);
  }
  let steps=0,result;const phases=[];
+ let cancelledCatalog=false;
  do{
   steps++;phases.push(run.seal?.phase);
   const env={DB:d1Standin(file),BUCKET:bkt,discoveryLease:null};
-  sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');
-  result=await context.sealStep(env,run);
+  if(run.seal?.phase==='catalog'&&!cancelledCatalog){
+   // AIR-362: a catalog step cancelled by the client keeps its 90 s lease. Calls before expiry wait for the holder's real
+   // expiry and move nothing; the first call after it takes the lease by CAS and the run still ends complete.
+   cancelledCatalog=true;
+   const expiresAt=Date.now()+90000;
+   sql(file,"UPDATE discovery_lease SET lease_id='cancelled-step', expires_at="+expiresAt+", programme_run_id=NULL WHERE id=1");
+   const before=run.seal.phase;
+   for(let attempt=0;attempt<2;attempt++){
+    const busy=await context.sealStep(env,run);
+    assert.equal(busy.stage,'seal');assert.equal(busy.discovery.state,'busy');assert.equal(busy.discovery.nextAction,'wait');
+    assert.equal(busy.discovery.busyKind,'lease_held');assert.equal(Date.parse(busy.discovery.nextCatchUpAt),expiresAt+3000);
+    assert.equal(run.seal.phase,before,'a waiting call moves nothing');
+    assert.equal(sql(file,'SELECT lease_id FROM discovery_lease WHERE id=1')[0].lease_id,'cancelled-step','the holder is not reset');
+   }
+   const realNow=Date.now,skew=expiresAt+3000-realNow()+1;
+   Date.now=()=>realNow()+skew;
+   try{result=await context.sealStep(env,run);}finally{Date.now=realNow;}
+  }else{
+   sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');
+   result=await context.sealStep(env,run);
+  }
   if(result.stage!=='complete'){assert.equal(result.discovery.nextAction,'continue');assert.equal(result.stage,'seal');}
  }while(result.stage!=='complete'&&steps<40);
  assert.equal(result.stage,'complete');

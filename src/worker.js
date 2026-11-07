@@ -874,6 +874,22 @@ const SEAL_REQUEST_BUDGET_MS=32000;
 // shorter budget: the worst case of a step is this budget plus the longest unit that started before it.
 const SEAL_PUBLICATION_BUDGET_MS=20000;
 const SEAL_FLUSH_ITEMS=60;
+// AIR-362: a seal step that finds the lease held answers `wait` with the holder's real expiry plus this margin, never more
+// than one lease TTL from now. A cancelled step keeps its lease until it expires; the caller waits for that, once.
+const SEAL_BUSY_MARGIN_MS=3000;
+const SEAL_BUSY_LOST_RACE_MS=5000;
+function sealBusyResponse(run,taken,now=Date.now()){
+ const kind=taken?.busy?.kind||'lease_held';
+ // A different programme is a hard conflict, not contention: stop, and promise no retry time.
+ if(kind==='generation_mismatch')return sealResponse(run,{state:'error',nextAction:'stop',reason:'programme_changed',busyKind:kind,nextCatchUpAt:null,retryAfterSec:null});
+ // Only a finite, positive expiry is evidence for a lease-based wait; anything else is treated as a lost race.
+ const raw=taken?.busy?.expiresAt;
+ const expiresAt=typeof raw==='number'&&Number.isFinite(raw)&&raw>0?raw:null;
+ const held=kind==='lease_held'&&expiresAt!==null;
+ const bounded=held?Math.min(expiresAt,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
+ const until=Math.max(bounded,now+1000);
+ return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:held?'lease_held':'lost_race',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+}
 async function sealedPublishAvailable(env){
  if(typeof DiscoveryAuthority==='undefined'||typeof PublishedEpg==='undefined')return false;
  if(!await discoveryLedgerAuthoritative(env))return false;
@@ -1077,7 +1093,7 @@ async function sealStep(env,run,entryAt=Date.now()){
  const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:null});
  const lease=taken?.lease||null;
  if(lease)env.discoveryLease=lease;
- if(!lease)return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy'});
+ if(!lease)return sealBusyResponse(run,taken);
  try{
   if(run.seal.phase==='ledger'){
    const result=await tracedPhase(run.runId,'seal_ledger',()=>sealLedgerStep(env,run,lease,deadline),value=>({cursor:value.state.cursorItems,total:value.state.itemTotal,phase:value.state.phase,done:value.done}));
