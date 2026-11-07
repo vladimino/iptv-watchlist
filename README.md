@@ -55,6 +55,8 @@ npm run build
 npm run dev
 ```
 
+`npm test` runs each self-contained test file in its own Node process, at most `min(4, CPUs)` at a time, and names every failing file with its exit code or signal and its output. `npm test -- --serial` runs one file at a time in name order, `--jobs N` (or `TEST_JOBS`) sets the number of workers and `--timeout-ms N` (or `TEST_TIMEOUT_MS`) the per-file limit, 300000 ms by default. See the [test runner evidence](docs/evidence/ci/test-runner-air-378-2026-11-07.md).
+
 The development server starts at `http://127.0.0.1:8787`. For fixture behavior, watch mode, private snapshot isolation and safe reset instructions, follow [local setup](docs/runbooks/local-setup.md). Keep credentials in the appropriate local or Cloudflare environment; never commit them.
 
 ## Repository and documentation
