@@ -1,6 +1,6 @@
 # Test runner: profile and bounded parallel execution (AIR-378)
 
-Dated 2026-11-07 (UTC). Offline measurements on the repository only. **No production read or write, no Cloudflare setting and no network call was made.** The CI baseline is quoted from the GitHub Actions job steps cited on the card; the CI "after" numbers are added below once the PR run exists.
+Dated 2026-11-07 (UTC). Offline measurements on the repository only. **No production read or write, no Cloudflare setting and no network call was made.** The CI baseline is quoted from the GitHub Actions job steps cited on the card; the CI "after" numbers are read from the job steps and logs of the PR's own runs (section "Result on GitHub Actions").
 
 ## Baseline
 
@@ -69,11 +69,26 @@ Pre-existing, unchanged and out of scope: some tests leave directories behind in
 
 The 240th file is the new `tests/run-tests-runner.mjs`. Summed file time rose from 401.6 s to 488 to 513 s at four workers (CPU contention, about +20 to +28%), which the wall time absorbs. After every full run `git status` showed no change outside the two files of this change. The default is `min(4, CPUs)`: a 2-CPU runner gets 2 workers, which the 2-worker row shows is still -46.5%.
 
+## Result on GitHub Actions
+
+Three green runs of this PR on `ubuntu-latest` (Node 20 for the tests). Each used 4 workers (the runner reports 4 CPUs) and ran all 242 files (239 of the first measurement plus the files that arrived on `main` and the new runner test); no file failed in any of them.
+
+| Head | `Run tests` | `Test and build` | Summed file time | Slowest file |
+| --- | ---: | ---: | ---: | ---: |
+| `26cf846` ([run](https://github.com/vladimino/iptv-watchlist/actions/runs/42415281141)) | 201 s | 228 s | 773.9 s | `generation-stage.mjs` 160.7 s |
+| `24cb838` ([run](https://github.com/vladimino/iptv-watchlist/actions/runs/42415801278)) | 166 s | 190 s | 632.8 s | `generation-stage.mjs` 120.3 s |
+| `306c261` ([run](https://github.com/vladimino/iptv-watchlist/actions/runs/42416112214)) | 181 s | 204 s | 686.9 s | `generation-stage.mjs` 129.9 s |
+| Median | 181 s | 204 s | | |
+| Baseline (11 runs, 2026-11-07) | 410 to 478 s, median about 454 s | 434 to 501 s | | |
+
+The median `Run tests` is 181 s against about 454 s, a 60% reduction (the three runs range from -56% to -63%), below the card's target of about 270 s or less. The whole job, 190 to 228 s, now uses about a third of the 600 s job limit instead of 73 to 84%. A hosted runner is slower per file than the local machine (summed file time 633 to 774 s against 470 s locally), and `generation-stage.mjs` alone takes 120 to 161 s there, so it is the critical path: the wall time cannot go below it. Optimizing that file's own work is the next lever and was not needed to meet the target, so it is left out of this change.
+
 ## Limits of this evidence
 
-- Local timing is on Node 22 and a 4-CPU machine; CI uses Node 20 and a runner whose CPU count depends on the repository's runner type. The CI "after" figures are the comparable ones and are recorded below.
-- Four parallel and one 2-worker run are a small sample. No flake was seen, and the file with a wall-clock assertion passed every time.
-- The target of the card (median `Run tests` down at least 40%, about 270 s or less) is judged on the CI figures, not on these.
+- Local timing is on Node 22 and a 4-CPU machine; the comparable figures are the CI ones above. Both the local and the CI runs had 4 CPUs: on a runner with 2 CPUs the default is 2 workers, and the local 2-worker run (-46.5%) is the indication for that case, not a CI measurement.
+- Four local parallel runs, one 2-worker run and three CI runs are a small sample. No flake was seen, and the file with a wall-clock assertion passed every time.
+- The baseline CI figures were read by the card's author from earlier runs; the 11 baseline runs and the 3 runs above ran on different heads of `main` and of this PR, so small differences in the number of files (239 to 242) are not removed from the comparison.
+- The target of the card (median `Run tests` down at least 40%, about 270 s or less) is judged on the CI figures: it is met.
 
 ## Failure behaviour (covered by `tests/run-tests-runner.mjs`)
 
