@@ -56,6 +56,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-361 Ratings run result event | [ratings-event-air-361-2026-11-06.md](ratings-event-air-361-2026-11-06.md) |
 | AIR-349 monitor offline evidence | [monitoring/monitor-air-349-2026-11-06.md](monitoring/monitor-air-349-2026-11-06.md) |
 | AIR-365 monitor Telegram transport offline evidence | [monitoring/telegram-air-365-2026-11-07.md](monitoring/telegram-air-365-2026-11-07.md) |
+| AIR-375 D1 enrichment projector `input_missing` under D1 discovery authority (RCA and fix) | [d1-migration/air-375-projector-input-missing-2026-11-07.md](d1-migration/air-375-projector-input-missing-2026-11-07.md) |
 | AIR-349 monitor production activation (steps 4 to 6) | [monitoring/monitor-activation-air-349-2026-11-07.md](monitoring/monitor-activation-air-349-2026-11-07.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

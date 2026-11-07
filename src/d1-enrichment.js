@@ -73,12 +73,41 @@ async function d1EnrichmentRead(env,etags,key,shape,required=true){
 // An authority that is not D1 (absent module, `ready` false: no D1 discovery marker, or the R2 marker) has no handoff window and the R2
 // catalog stays the source, as before. A D1 authority that cannot be read, or is held, is unknown: the run defers (`authority_unavailable`)
 // instead of guessing. The guard runs before the reads and again right before the D1 write.
-async function d1EnrichmentHandoffGuard(env,runId){
- if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.readAuthority!=='function')return;
+async function d1EnrichmentHandoffGuard(env,runId,expectedGeneration=null){
+ if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.readAuthority!=='function')return null;
  let gate;
  try{gate=await DiscoveryAuthority.readAuthority(env);}catch{throw new D1EnrichmentInputError('authority_unavailable','discovery_authority');}
  if(gate?.held)throw new D1EnrichmentInputError('authority_unavailable','discovery_authority');
  if(gate?.ready&&gate.programmeRunId&&gate.programmeRunId!==runId)throw new D1EnrichmentInputError('generation_pending','discovery_authority');
+ // The D1 counterpart of the etag check on an R2 input: a fenced discovery write bumps the authority generation, so a generation that is not
+ // the one read together with the catalog and the decisions means those inputs may have changed since. Nothing is written; the next run reads again.
+ if(gate?.ready&&Number.isFinite(expectedGeneration)&&gate.generation!==expectedGeneration)throw new D1EnrichmentInputError('input_changed','discovery_authority');
+ return gate||null;
+}
+// AIR-375: under a D1 discovery authority the catalog of a generation is not an R2 object. A write of
+// `epg/generations/<run>/discovered-films.json` is routed to the D1 catalog and no R2 copy is made (the published-EPG mirrors cover the
+// programme and the watchlist only), so reading that key straight from R2 failed `input_missing` on every run once a generation was
+// published under D1 authority. The shared decisions (`epg/discovery-resolution.json`) are read the same way: their R2 object is a copy frozen at the
+// cutover, so reading it directly would silently project stale decisions. Both are read through the same authority route every other reader uses (`loadJSON`). Only an
+// authority that is not D1 (absent module, not ready) keeps the R2 copy as the source, and then a missing copy is still a failed input.
+// A catalog read the authority cannot answer for now (fence, ledger seal in progress) defers like the handoff window; an answer that cannot
+// be used (bounded, unreadable payload) fails closed as input_invalid. The authority generation is recorded with the read and checked
+// again before the write, which is the D1 counterpart of the etag check on an R2 object.
+const D1_ENRICHMENT_DISCOVERY_DEFER=['discovery_fence','discovery_incomplete'];
+// `missing` names what an authority answer of null means: for the catalog of a generation the authority no longer names it is a handoff
+// (`generation_pending`); for the shared decisions a D1 authority always answers, so null is an absent input.
+async function d1EnrichmentDiscoveryRead(env,etags,key,gate,missing){
+ if(gate?.ready&&typeof DiscoveryAuthority.routeRead==='function'){
+  let routed;
+  try{routed=await DiscoveryAuthority.routeRead(env,key);}
+  catch(error){const defer=D1_ENRICHMENT_DISCOVERY_DEFER.includes(error?.code);throw new D1EnrichmentInputError(defer?'authority_unavailable':'input_invalid',defer?'discovery_authority':key);}
+  if(routed?.handled){
+   if(routed.value==null)throw new D1EnrichmentInputError(missing,missing==='generation_pending'?'discovery_authority':key);
+   if(!d1EnrichmentRecord(routed.value))throw new D1EnrichmentInputError('input_invalid',key);
+   return routed.value;
+  }
+ }
+ return d1EnrichmentRead(env,etags,key,d1EnrichmentRecord);
 }
 async function d1EnrichmentWritersIdle(env,now=Date.now()){
  const [lease,sync]=await Promise.all([DISCOVERY_LEASE_KEY,'sync.json'].map(async key=>{const object=await env.BUCKET.get(key);try{return object?await object.json():null;}catch{return null;}}));
@@ -98,15 +127,15 @@ async function d1EnrichmentStore(env){
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
   runId=pointer.programmeRunId;
  }
- await d1EnrichmentHandoffGuard(env,runId);
+ const authority=await d1EnrichmentHandoffGuard(env,runId);
  const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'titles.json',d1EnrichmentRecord),
   d1EnrichmentRead(env,etags,'people.json',d1EnrichmentRecord),
-  d1EnrichmentRead(env,etags,epgGenerationKey(runId,'discovered-films.json'),d1EnrichmentRecord),
-  d1EnrichmentRead(env,etags,'epg/discovery-resolution.json',d1EnrichmentRecord),
+  d1EnrichmentDiscoveryRead(env,etags,epgGenerationKey(runId,'discovered-films.json'),authority,'generation_pending'),
+  d1EnrichmentDiscoveryRead(env,etags,'epg/discovery-resolution.json',authority,'input_missing'),
   d1EnrichmentRead(env,etags,'letterboxd/diary/history.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,'enrichment/view-index.json',d1EnrichmentRecord,false),
@@ -136,7 +165,7 @@ async function d1EnrichmentStore(env){
  }
  const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),archiveAdmissions:archiveDocument?EnrichmentProjection.archiveAdmissionsFromDocument(archiveDocument):null,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
  if(ownerDocument)store.ownerReviews=ownerDocument;
- return {store,programmeRunId:runId};
+ return {store,programmeRunId:runId,discoveryGeneration:authority?.ready&&Number.isFinite(authority.generation)?authority.generation:null};
 }
 function plainOwner(value){return !!value.films&&typeof value.films==='object'&&!Array.isArray(value.films)&&!!value.people&&typeof value.people==='object'&&!Array.isArray(value.people);}
 
@@ -179,7 +208,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   const guard=d1EnrichmentGuard(plan,summary);
   if(guard){summary.outcome=guard;return summary;}
   if(mode==='dry'){summary.outcome='dry';return summary;}
-  await d1EnrichmentHandoffGuard(env,summary.programmeRunId);
+  await d1EnrichmentHandoffGuard(env,summary.programmeRunId,summary.discoveryGeneration);
   const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs});
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   return summary;
@@ -198,8 +227,8 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
 // so the write phase does not hold the whole view (about 50 MB of heap on the 2026-10-29 snapshot, ADR 0056).
 async function d1EnrichmentDiff(env,db,now,summary){
  const started=Date.now(),nowIso=new Date(now).toISOString();
- const {store,programmeRunId}=await d1EnrichmentStore(env);
- summary.programmeRunId=programmeRunId;
+ const {store,programmeRunId,discoveryGeneration}=await d1EnrichmentStore(env);
+ summary.programmeRunId=programmeRunId;summary.discoveryGeneration=discoveryGeneration;
  summary.loadMs=Date.now()-started;
  // Schema v6 and every later version can name a D1 metadata cache. v4 and v5 keep the R2 object
  // and do not query the cache tables. Mode d1 replaces that object before the view is built.
