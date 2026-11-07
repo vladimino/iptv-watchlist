@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
+import {capture, HEAD_LIMIT, TAIL_LIMIT} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -31,6 +32,53 @@ const alive = pid => {
   try {return fs.readFileSync('/proc/' + pid + '/stat', 'utf8').split(') ')[1].split(' ')[0] !== 'Z';} catch {return true;}
 };
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// 0. The bounded capture, directly, at its exact boundaries. Nothing is cut up to HEAD_LIMIT + TAIL_LIMIT characters; one more character
+// (however the stream was chunked, and also when it ends right after the tail was trimmed) keeps the beginning and the end and says how much
+// is missing.
+{
+  const notice = /\n\.\.\. \[(\d+) characters omitted\] \.\.\.\n/;
+  const text = (chunks) => {const c = capture(); for (const chunk of chunks) c.push(chunk); return c;};
+  const at = (n) => 'a'.repeat(n);
+  // exactly full: no notice, nothing omitted
+  let c = text([at(HEAD_LIMIT + TAIL_LIMIT)]);
+  assert.equal(c.omitted(), 0);
+  assert.equal(c.text().length, HEAD_LIMIT + TAIL_LIMIT);
+  assert.doesNotMatch(c.text(), notice);
+  // one character over: the notice appears with the right count
+  c = text([at(HEAD_LIMIT + TAIL_LIMIT + 1)]);
+  assert.equal(c.omitted(), 1);
+  assert.equal(notice.exec(c.text())[1], '1');
+  // the trim boundary: the tail reaches 2 * TAIL_LIMIT + 1, is cut to exactly TAIL_LIMIT, and the stream ends right there
+  c = text([at(HEAD_LIMIT), at(2 * TAIL_LIMIT + 1)]);
+  assert.equal(c.omitted(), TAIL_LIMIT + 1, 'the dropped characters are counted although the tail is exactly TAIL_LIMIT');
+  assert.equal(notice.exec(c.text())[1], String(TAIL_LIMIT + 1), 'the separator is present right after a trim');
+  assert.equal(c.text().length, HEAD_LIMIT + TAIL_LIMIT + c.text().match(notice)[0].length);
+  // exactly 2 * TAIL_LIMIT in the tail does not trim yet: omitted is TAIL_LIMIT and the notice says so
+  c = text([at(HEAD_LIMIT), at(2 * TAIL_LIMIT)]);
+  assert.equal(c.omitted(), TAIL_LIMIT);
+  assert.equal(notice.exec(c.text())[1], String(TAIL_LIMIT));
+  // property: for any chunking, head + notice + tail covers the stream, the head is its start and the tail is its end
+  let seed = 12345;
+  const random = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (const total of [10, HEAD_LIMIT - 1, HEAD_LIMIT, HEAD_LIMIT + 1, HEAD_LIMIT + TAIL_LIMIT - 1, HEAD_LIMIT + TAIL_LIMIT, HEAD_LIMIT + TAIL_LIMIT + 1, HEAD_LIMIT + 2 * TAIL_LIMIT, HEAD_LIMIT + 2 * TAIL_LIMIT + 1, HEAD_LIMIT + 5 * TAIL_LIMIT + 7]) {
+    const stream = Array.from({length: total}, (_, i) => String.fromCharCode(97 + (i * 7 + (i >> 11)) % 26)).join('');
+    for (const sizes of [[total], [1 << 16], [4097], [1 + Math.floor(random() * 3000000)]]) {
+      const parts = []; let offset = 0, k = 0;
+      while (offset < total) {const size = Math.max(1, sizes[k++ % sizes.length]); parts.push(stream.slice(offset, offset + size)); offset += size;}
+      const result = text(parts), out = result.text(), lost = result.omitted();
+      const label = `total ${total}, chunks ${sizes[0]}`;
+      assert.equal(lost, Math.max(0, total - HEAD_LIMIT - TAIL_LIMIT), label);
+      if (lost === 0) {assert.equal(out, stream, label); continue;}
+      const found = notice.exec(out);
+      assert.ok(found, label + ': the cut is marked');
+      assert.equal(Number(found[1]), lost, label);
+      assert.equal(out.slice(0, HEAD_LIMIT), stream.slice(0, HEAD_LIMIT), label + ': the beginning is kept');
+      assert.equal(out.slice(-TAIL_LIMIT), stream.slice(-TAIL_LIMIT), label + ': the end is kept');
+      assert.equal(HEAD_LIMIT + lost + TAIL_LIMIT, total, label + ': kept plus omitted is the whole stream');
+    }
+  }
+}
 
 try {
   // 1. Everything passes: every file runs once, its own output is kept, the summary counts files, exit 0.

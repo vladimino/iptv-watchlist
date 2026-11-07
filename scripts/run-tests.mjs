@@ -45,8 +45,8 @@ const START_FIRST=[
 ];
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
-const HEAD_LIMIT=1024*1024;
-const TAIL_LIMIT=3*1024*1024;
+export const HEAD_LIMIT=1024*1024;
+export const TAIL_LIMIT=3*1024*1024;
 const KILL_GRACE_MS=3000;
 
 function option(args,name,env,fallback){
@@ -63,7 +63,7 @@ function positive(value,label,fallback){
 const seconds=ms=>(ms/1000).toFixed(1)+'s';
 
 // Bounded capture of one stream: the first HEAD_LIMIT characters, then a rolling window of the last TAIL_LIMIT characters.
-function capture(){
+export function capture(){
  let head='',tail='',dropped=0;
  return {
   push(chunk){
@@ -76,11 +76,14 @@ function capture(){
    tail+=chunk;
    if(tail.length>2*TAIL_LIMIT){dropped+=tail.length-TAIL_LIMIT;tail=tail.slice(-TAIL_LIMIT);}
   },
+  // Characters that are in neither the head nor the kept tail. Counted from `dropped` as well as from the tail's length: a trim leaves the tail
+  // at exactly TAIL_LIMIT, so the length alone does not say that anything was dropped.
+  omitted(){return dropped+Math.max(0,tail.length-TAIL_LIMIT);},
   text(){
-   if(tail.length<=TAIL_LIMIT)return head+tail;
-   return head+`\n... [${dropped+tail.length-TAIL_LIMIT} characters omitted] ...\n`+tail.slice(-TAIL_LIMIT);
+   const lost=dropped+Math.max(0,tail.length-TAIL_LIMIT);
+   if(lost===0)return head+tail;
+   return head+`\n... [${lost} characters omitted] ...\n`+tail.slice(-TAIL_LIMIT);
   },
-  omitted(){return tail.length>TAIL_LIMIT?dropped+tail.length-TAIL_LIMIT:dropped;},
  };
 }
 
