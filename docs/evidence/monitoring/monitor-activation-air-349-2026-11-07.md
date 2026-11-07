@@ -26,6 +26,15 @@ Captured 2026-11-07 (UTC). Times are UTC with Europe/Madrid in parentheses where
 - **Clean test, counted.** The owner created a separate temporary check (period 5 minutes, grace 1 minute), pinged it once by hand and then did nothing. The genuine absence of a ping turned it `down` and Healthchecks sent a Telegram notification at 15:21 UTC: `The check IPTV Monitor Heartbeat TEST is DOWN (success signal did not arrive on time, grace time passed). Period: 5 minutes. Total Pings: 1. Last Ping: Success, 6 minutes ago`. The owner then deleted the temporary check.
 - **Recovery of the real check.** The real check stayed `down` after its schedule was restored (a status returns to `up` only on a ping) until the next natural heartbeat; see the section below.
 
+## Recovery of the real check and the second natural heartbeat
+
+At the next natural tick the Worker pinged the real check again, without any action by the owner:
+
+- Healthchecks Ping `#9` at 16:37:35 UTC (17:37 Madrid): an HTTPS `GET` from the Cloudflare network, `OK`; the event list shows `down → up` for the check at 16:37:35 UTC after the `up → down` of 14:55 UTC (downtime 42 minutes 10 seconds, as reported by Healthchecks).
+- Healthchecks delivered the `up` notice to **both Telegram and Email** at 17:37 Madrid (owner screenshots: `The check IPTV Watchlist - Monitor Heartbeat is now UP`, `Period: 1 hour`, `Total Pings: 9`, `Last Ping: Success, now`).
+- Worker side: scheduled event at 16:37:35 UTC (`outcome: ok`), log `{"saved":true,"event":"monitor","mode":"on","overall":"waiting","sent":0,"failed":0,"pending":0,"attempts":0}`; status at 16:44 UTC: `heartbeatAt` 16:37:30, `overall: waiting`, `openIssues` empty, `outbox: 0`, `lastDeliveryFailure: null`, `holdUntil: null`, `deadman: true`. Two natural heartbeats (`#8` at 15:37 and `#9` at 16:37 UTC) now exist, one hour apart, matching the hourly cron.
+- Streams at 16:44 UTC: Ratings and Predictions `healthy`; Discovery `waiting` (11 chunks remaining); **EPG `waiting`**: the daily due time (16:00 UTC, 17:00 Madrid) of 2026-11-07 had passed at 16:37 UTC and the generation published on 2026-11-06 (17:57 UTC) was the latest (`publishedSinceDue: false`). By the policy this is not an alert state: `delayed` begins two hours after the due time (18:00 UTC) and `degraded` five hours after (21:00 UTC), and a degraded issue is confirmed by a second consecutive snapshot before it alerts.
+
 ## Observations and deviations
 
 - `MONITOR_TELEGRAM_CHAT_ID` is a plain Worker variable by the owner's decision (documented in ADR 0097 decision 3); the bot token is a Worker secret.
@@ -38,6 +47,6 @@ Captured 2026-11-07 (UTC). Times are UTC with Europe/Madrid in parentheses where
 - The repeat of the synthetic test inside ten minutes (`reason: recent`, no second message) was **not run** on production, by the owner's decision. It is covered offline by `tests/monitor-telegram.mjs` and `tests/monitor-runtime.mjs`.
 - A real alert, reminder or recovery message from the monitor was not produced: every observed snapshot was `healthy` or `waiting`, and no incident was provoked.
 - The Worker's own heartbeat was never stopped, and neither the Worker nor the cron was disabled. The dead-man test was run against a separate check on the Healthchecks side only.
-- The Email and Trello channels were not shown to deliver a `down` notification; Trello has never delivered; only Telegram was shown to do so.
+- The Email and Trello channels were not shown to deliver a `down` notification: only Telegram did so (Email delivered `up` notices; Trello has never delivered).
 - The Telegram rate-limit path (`429`) and a revoked token were not exercised on production.
 - A `MONITOR=off` rollback was not exercised.
