@@ -409,10 +409,27 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  const {db:after}=migrated();
  const done=await runWith({DB:after,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
  assert.equal(done.outcome,'complete',JSON.stringify(done));
- // An unreadable authority leaves the existing behaviour (no guess): the missing copy is reported as before.
- const down=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>{throw new Error('discovery_unavailable');}}}});
- const outage=await down.runD1EnrichmentProjection({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:'dry'});
- assert.deepEqual([outage.outcome,outage.reason],['failed','input_missing']);
+ // An unreadable or held D1 authority is unknown: the run defers before any read or write and guesses nothing.
+ const batchesBefore=window.calls.batches;
+ for(const readAuthority of [async()=>{throw new Error('discovery_unavailable');},async()=>({ready:false,held:true})]){
+  const down=projectorContext({globals:{DiscoveryAuthority:{readAuthority}}});
+  const outage=await down.runD1EnrichmentProjection({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([outage.outcome,outage.reason,outage.inputKey],['deferred','authority_unavailable','discovery_authority']);
+ }
+ assert.equal(window.calls.batches,batchesBefore);
+ // An authority that is not D1 (not ready) has no handoff window: the R2 catalog stays the source and projects as before.
+ const notD1=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>({ready:false,held:false,programmeRunId:null})}}});
+ const {db:plain}=migrated();
+ assert.equal((await notD1.runD1EnrichmentProjection({DB:plain,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'})).outcome,'complete');
+ // The authority moves to the next run after the first guard, while the plan is built: the guard repeats right before the D1 write,
+ // so nothing is written and the run defers.
+ let reads=0;
+ const racing=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>({ready:true,programmeRunId:++reads>1?'run-2':'run-1'})}}});
+ const {db:race}=migrated();
+ const raced=await racing.runD1EnrichmentProjection({DB:race,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
+ assert.deepEqual([raced.outcome,raced.reason],['deferred','generation_pending']);
+ assert.equal(reads,2,'checked before the reads and again before the write');
+ assert.equal(one(race,'SELECT COUNT(*) FROM film'),0,'stale run-1 projection is not written');
 }
 
 console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed, a missing rated-archive object admits nobody');

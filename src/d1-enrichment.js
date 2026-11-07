@@ -55,7 +55,7 @@ function d1EnrichmentAdapter(binding){
 //   catalog and the resolution are updated in place, so the same programmeRunId does not prove the same content. Any change
 //   defers the run before any D1 write; the next hourly run reads again.
 class D1EnrichmentInputError extends Error{constructor(reason,key){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;}}
-const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending'];
+const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
 async function d1EnrichmentRead(env,etags,key,shape,required=true){
@@ -66,6 +66,19 @@ async function d1EnrichmentRead(env,etags,key,shape,required=true){
  try{value=await object.json();}catch{throw new D1EnrichmentInputError('input_invalid',key);}
  if(!shape(value))throw new D1EnrichmentInputError('input_invalid',key);
  return value;
+}
+// AIR-363: between the D1 ledger seal and the publish step the discovery authority already names the new run while the pointer still
+// names the old one, and the old generation's R2 catalog copy may be absent. That window is not an input failure: the run is deferred
+// before any read or write, never reads another generation's catalog, and the next hourly run reads again once the pointer moved.
+// An authority that is not D1 (absent module, `ready` false: no D1 discovery marker, or the R2 marker) has no handoff window and the R2
+// catalog stays the source, as before. A D1 authority that cannot be read, or is held, is unknown: the run defers (`authority_unavailable`)
+// instead of guessing. The guard runs before the reads and again right before the D1 write.
+async function d1EnrichmentHandoffGuard(env,runId){
+ if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.readAuthority!=='function')return;
+ let gate;
+ try{gate=await DiscoveryAuthority.readAuthority(env);}catch{throw new D1EnrichmentInputError('authority_unavailable','discovery_authority');}
+ if(gate?.held)throw new D1EnrichmentInputError('authority_unavailable','discovery_authority');
+ if(gate?.ready&&gate.programmeRunId&&gate.programmeRunId!==runId)throw new D1EnrichmentInputError('generation_pending','discovery_authority');
 }
 async function d1EnrichmentWritersIdle(env,now=Date.now()){
  const [lease,sync]=await Promise.all([DISCOVERY_LEASE_KEY,'sync.json'].map(async key=>{const object=await env.BUCKET.get(key);try{return object?await object.json():null;}catch{return null;}}));
@@ -85,14 +98,7 @@ async function d1EnrichmentStore(env){
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
   runId=pointer.programmeRunId;
  }
- // AIR-363: between the D1 ledger seal and the publish step the discovery authority already names the new run while the pointer still
- // names the old one, and the old generation's R2 catalog copy may be absent. That window is not an input failure: the run is deferred
- // before any read or write, never reads another generation's catalog, and the next hourly run reads again once the pointer moved.
- if(typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.readAuthority==='function'){
-  let gate=null;
-  try{gate=await DiscoveryAuthority.readAuthority(env);}catch{gate=null;}
-  if(gate?.ready&&gate.programmeRunId&&gate.programmeRunId!==runId)throw new D1EnrichmentInputError('generation_pending','discovery_authority');
- }
+ await d1EnrichmentHandoffGuard(env,runId);
  const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
@@ -173,6 +179,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   const guard=d1EnrichmentGuard(plan,summary);
   if(guard){summary.outcome=guard;return summary;}
   if(mode==='dry'){summary.outcome='dry';return summary;}
+  await d1EnrichmentHandoffGuard(env,summary.programmeRunId);
   const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs});
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   return summary;
