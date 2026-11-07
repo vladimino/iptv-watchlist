@@ -136,22 +136,26 @@ const EpgOrchestration=(()=>{
   const step=env?.epgStep;
   if(!step)return;
   const fenced=()=>Object.assign(new Error('epg_step_fenced'),{code:'epg_step_fenced'});
-  let row;
-  try{row=await env.DB.prepare('SELECT (SELECT revision FROM '+TABLE+" WHERE key='mode') AS mode_revision, (SELECT body FROM "+TABLE+" WHERE key='lease') AS lease, (SELECT revision FROM "+TABLE+" WHERE key='lease') AS lease_revision").bind().first();}
-  catch{throw fenced();}
-  let lease=null;try{lease=row?.lease?JSON.parse(row.lease):null;}catch{throw fenced();}
-  const modeRevision=row?.mode_revision==null?null:Number(row.mode_revision);
-  if(modeRevision!==(step.modeRevision??null))throw fenced();
-  if(!lease||lease.holder!==step.holder||lease.released===true)throw fenced();
-  const expires=Date.parse(lease.expiresAt||'');
-  if(!Number.isFinite(expires)||now>=expires-BOUNDARY_MARGIN_MS)throw fenced();
-  if(expires-now<LEASE_MS/2){
-   const renewed=await casDoc(env,'lease',Number(row.lease_revision),{...lease,expiresAt:iso(now+LEASE_MS)},step.modeRevision??null).catch(()=>false);
-   if(!renewed){
-    // A lost compare-and-set is not a fence by itself: read again, and stop only if the lease is no longer ours.
-    const again=await readLease(env);
-    if(again.malformed||again.record?.holder!==step.holder||again.record.released===true)throw fenced();
-   }
+  // One read of the mode revision and the lease, judged completely: the mode revision, the holder, the release flag and the expiry
+  // with its margin. Used for the first look and, if a renewal loses its compare-and-set, again for the second: never a partial check.
+  async function look(){
+   let row;
+   try{row=await env.DB.prepare('SELECT (SELECT revision FROM '+TABLE+" WHERE key='mode') AS mode_revision, (SELECT body FROM "+TABLE+" WHERE key='lease') AS lease, (SELECT revision FROM "+TABLE+" WHERE key='lease') AS lease_revision").bind().first();}
+   catch{throw fenced();}
+   let lease=null;try{lease=row?.lease?JSON.parse(row.lease):null;}catch{throw fenced();}
+   const modeRevision=row?.mode_revision==null?null:Number(row.mode_revision);
+   if(modeRevision!==(step.modeRevision??null))throw fenced();
+   if(!lease||lease.holder!==step.holder||lease.released===true)throw fenced();
+   const expires=Date.parse(lease.expiresAt||'');
+   if(!Number.isFinite(expires)||now>=expires-BOUNDARY_MARGIN_MS)throw fenced();
+   return {lease,expires,leaseRevision:Number(row.lease_revision)};
+  }
+  const seen=await look();
+  if(seen.expires-now<LEASE_MS/2){
+   // The renewal is conditioned on the mode revision in the same statement. If it does not land (the owner closed admission, another
+   // writer touched the lease, a D1 error), the step re-judges everything from a fresh read and proceeds only if all of it still holds.
+   const renewed=await casDoc(env,'lease',seen.leaseRevision,{...seen.lease,expiresAt:iso(now+LEASE_MS)},step.modeRevision??null).catch(()=>false);
+   if(!renewed)await look();
   }
  }
  // The external path's admission: the gate and, when it passes, the lease. Returns the env the step must run with.

@@ -594,6 +594,62 @@ function runner(h,{startAt}){
   assert.ok(h.state.calls.every(c=>c.fence&&c.fence.revision===1));
   const after=(await h.epg.readLease(h.env)).record;assert.equal(after.released,true,'the executor releases its lease after the action');
  }
+ // (h) Review of 9cdb66a: a renewal that loses to close_admission must not let the old holder through. The mode revision moves between the
+ // first read and the renewal while the holder and the release flag stay intact; an expired lease in the fallback read fails too; a
+ // fallback that still holds everything lets the step proceed.
+ {
+  const racing=(h,between)=>{
+   const real=h.env.DB;let first=true;
+   return {...h.env,DB:{prepare:sql=>{
+    const statement=real.prepare(sql);
+    if(first&&String(sql).startsWith('SELECT (SELECT revision')){
+     first=false;
+     return {bind:(...args)=>{const bound=statement.bind(...args);return {first:async()=>{const row=await bound.first();await between(h,real);return row;}};}};
+    }
+    return statement;
+   }}};
+  };
+  // 1. The mode revision moves during renewal, holder untouched: fenced.
+  {
+   const h=fresh();const {epg,env}=h;
+   const ext=await epg.beginExternalStep(env,t0);
+   const raced={...racing(h,async()=>{await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0+3*MIN);}),epgStep:ext.env.epgStep};
+   await assert.rejects(epg.assertStep(raced,t0+3*MIN),/epg_step_fenced/,'a lost renewal after close_admission fails closed');
+   const lease=(await epg.readLease(env)).record;
+   assert.equal(lease.holder,ext.step.holder);assert.equal(lease.released,false,'the holder and the release flag were intact: only the mode revision moved');
+  }
+  // 2. The lease expires in the window between the two reads (a competing write bumps its revision and ends it): fenced by the expiry.
+  {
+   const h=fresh();const {epg,env,db}=h;
+   const ext=await epg.beginExternalStep(env,t0);
+   const now=t0+3*MIN;
+   const raced={...racing(h,async()=>{
+    const stored=(await epg.readLease(env));
+    db.sql("UPDATE epg_orchestration_document SET body='"+JSON.stringify({...stored.record,expiresAt:at(now-1)})+"', revision=revision+1 WHERE key='lease'");
+   }),epgStep:ext.env.epgStep};
+   await assert.rejects(epg.assertStep(raced,now),/epg_step_fenced/,'an expired lease in the fallback read fails closed');
+  }
+  // 3. A renewal that loses to a harmless concurrent touch (the lease revision moved, everything else holds) lets the step proceed.
+  {
+   const h=fresh();const {epg,env,db}=h;
+   const ext=await epg.beginExternalStep(env,t0);
+   const now=t0+3*MIN;
+   const raced={...racing(h,async()=>{
+    const stored=(await epg.readLease(env));
+    db.sql("UPDATE epg_orchestration_document SET body='"+JSON.stringify({...stored.record,note:'touched'})+"', revision=revision+1 WHERE key='lease'");
+   }),epgStep:ext.env.epgStep};
+   await epg.assertStep(raced,now);
+  }
+  // 4. The mode revision moves in the window and the fallback read is unreadable: fenced.
+  {
+   const h=fresh();const {epg,env}=h;
+   const ext=await epg.beginExternalStep(env,t0);
+   let calls=0;
+   const flaky={...racing(h,async()=>{await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0+3*MIN);}),epgStep:ext.env.epgStep};
+   const inner=flaky.DB.prepare;flaky.DB={prepare:sql=>{if(String(sql).startsWith('SELECT (SELECT revision')&&++calls>=2)throw new Error('d1 down');return inner(sql);}};
+   await assert.rejects(epg.assertStep(flaky,t0+3*MIN),/epg_step_fenced/);
+  }
+ }
  // (g) The Worker's own mutation boundaries call the guard: the real saveJSON, copyEpgGeneration, sealStep, sealUnits, stageSealedGeneration
  // and epgSync, and a pre-switch step's saveJSON writes nothing after close_admission.
  {
