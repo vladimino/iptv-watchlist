@@ -20,6 +20,9 @@ const TABLE={film:{table:'film_localization_source',column:'film_id',dimension:'
 
 const parse=value=>{if(value==null)return null;if(typeof value==='object')return value;try{return JSON.parse(value);}catch{return undefined;}};
 const clock=value=>{const ms=Date.parse(value);return Number.isFinite(ms)?ms:NaN;};
+// observedAt is accepted as ISO 8601 with an explicit offset and stored as normalized UTC, so the text order in SQL is the chronological order.
+const ISO=/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+const instant=value=>{if(typeof value!=='string'||!ISO.test(value))return null;const ms=Date.parse(value);return Number.isFinite(ms)?new Date(ms).toISOString():null;};
 const present=value=>typeof value==='string'&&value.trim().length>0;
 const storedProvenance=text=>{if(text==null)return null;const value=parse(text);return value===undefined?'{bad':value;};
 const stable=value=>JSON.stringify(value===undefined?null:value);
@@ -140,7 +143,7 @@ export async function recordLocalizationSources(env,input){
  if(!list.length||list.length>LOCALIZATION_SOURCE_CAP)throw failed('localization_invalid');
  const seen=new Set();
  for(const item of list){
-  if(checkAutomatic(item)||!present(item.sourceVersion)||!Number.isFinite(clock(item.observedAt))||seen.has(item.source))throw failed('localization_invalid');
+  if(checkAutomatic(item)||!present(item.sourceVersion)||instant(item.observedAt)===null||seen.has(item.source))throw failed('localization_invalid');
   seen.add(item.source);
  }
  const gate=assertWritable(await readAuthority(env));
@@ -151,13 +154,13 @@ export async function recordLocalizationSources(env,input){
  const known=new Map(stored.map(row=>[row.source,row]));
  const write=[],skipped=[];
  for(const item of list){
-  const row=known.get(item.source),value=item.value.trim(),provenance=stable(parse(item.provenance));
+  const row=known.get(item.source),value=item.value.trim(),provenance=stable(parse(item.provenance)),observed=instant(item.observedAt);
   if(row&&row.request_id===requestId){
-   if(row.value!==value||row.source_version!==item.sourceVersion||stable(parse(row.provenance_json))!==provenance||row.observed_at!==item.observedAt)throw failed('localization_replay_mismatch');
+   if(row.value!==value||row.source_version!==item.sourceVersion||stable(parse(row.provenance_json))!==provenance||row.observed_at!==observed)throw failed('localization_replay_mismatch');
    skipped.push({source:item.source,reason:'replay'});continue;
   }
-  if(row&&!(clock(item.observedAt)>clock(row.observed_at))){skipped.push({source:item.source,reason:'stale'});continue;}
-  write.push({...item,value,provenance});
+  if(row&&!(observed>row.observed_at)){skipped.push({source:item.source,reason:'stale'});continue;}
+  write.push({...item,value,provenance,observedAt:observed});
  }
  if(!write.length)return {id,revision:expected,written:[],skipped};
  const exists=spec.entity==='film'?'EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)':'EXISTS (SELECT 1 FROM person WHERE id=?)';

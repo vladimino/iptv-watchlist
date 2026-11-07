@@ -51,12 +51,13 @@ const code=expected=>error=>error.code===expected;
  refused(file,'UPDATE schema_contract SET version=13',/schema_contract_downgrade/);
  // The tables refuse an owner/reviewed/dictionary source, an empty value and malformed provenance, and need a real entity.
  sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:x',1,'t')");
- const insert=(extra)=>`INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:x',${extra},'v1','{}','r','t','t')`;
+ const insert=(extra)=>`INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:x',${extra},'v1','{}','r','2026-11-07T00:00:00.000Z','t')`;
  assert.equal(sqlite(file,insert("'wikidata','Название'")).status,0);
  for(const bad of ["'owner','Название'","'dictionary','Название'","'reviewed','Название'","'Wiki','Название'","'wikidata',''"])refused(file,insert(bad));
- refused(file,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:x','tmdb','v','v','{bad','r','t','t')",/CHECK/);
- refused(file,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:none','tmdb','v','v','{}','r','t','t')",/FOREIGN KEY/);
- refused(file,"INSERT INTO person_localization_source (person_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('person:none','tmdb','v','v','{}','r','t','t')",/FOREIGN KEY/);
+ refused(file,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:x','tmdb','v','v','{bad','r','2026-11-07T00:00:00.000Z','t')",/CHECK/);
+ for(const bad of ['2026-11-07T12:00:00+02:00','2026-11-07T11:00:00Z','2026-11-07','t'])refused(file,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:x','tmdb','v','v','{}','r','"+bad+"','t')",/CHECK/);
+ refused(file,"INSERT INTO film_localization_source (film_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('film:none','tmdb','v','v','{}','r','2026-11-07T00:00:00.000Z','t')",/FOREIGN KEY/);
+ refused(file,"INSERT INTO person_localization_source (person_id,source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES ('person:none','tmdb','v','v','{}','r','2026-11-07T00:00:00.000Z','t')",/FOREIGN KEY/);
 }
 
 // 2. The pure precedence contract: owner > reviewed dictionary > automatic, whatever the clocks say.
@@ -164,6 +165,46 @@ const code=expected=>error=>error.code===expected;
  const racing={DB:d1Standin(file,{onBatch:async()=>{sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");}})};
  await assert.rejects(()=>recordLocalizationSources(racing,{kind:'person',id:'person:director/1',expectedRevision:2,at:AT,requestId:'p-2',sources:[source({observedAt:'2026-11-08T00:00:00.000Z',value:'Поздно'})]}),code('film_person_fence'));
  assert.equal(one(file,"SELECT value FROM person_localization_source WHERE person_id='person:director/1'"),'Режиссёр');
+}
+
+// 5b. One instant ordering for the writer and the merge: equivalent instants with other offsets, lexically greater but older, and lexically
+// smaller but newer observations, with a concurrent update between the preflight and the batch.
+{
+ const file=database({open:true});
+ const env=state(file);
+ await seedFilm(env,'film:tmdb:1');await seedFilm(env,'film:tmdb:2');
+ const put=(id,rev,request,observedAt,value)=>recordLocalizationSources(env,{kind:'film',id,expectedRevision:rev,at:AT,requestId:request,sources:[source({observedAt,value})]});
+ const stored=id=>rows(file,"SELECT value,observed_at FROM film_localization_source WHERE film_id='"+id+"' AND source='wikidata'")[0];
+ await put('film:tmdb:1',1,'o1','2026-11-07T11:00:00Z','Базовое');
+ assert.equal(stored('film:tmdb:1').observed_at,'2026-11-07T11:00:00.000Z','stored as normalized UTC');
+ // 12:00+02:00 is 10:00 UTC: older, though its text is lexically greater.
+ const older=await put('film:tmdb:1',2,'o2','2026-11-07T12:00:00+02:00','Старше');
+ assert.deepEqual([older.written,older.skipped.map(item=>item.reason)],[[],['stale']]);
+ assert.equal(stored('film:tmdb:1').value,'Базовое');
+ // 11:30-02:00 is 13:30 UTC: newer, though its text is lexically smaller than 12.
+ const newer=await put('film:tmdb:1',2,'o3','2026-11-07T11:30:00-02:00','Новее');
+ assert.deepEqual([newer.written,stored('film:tmdb:1')],[['wikidata'],{value:'Новее',observed_at:'2026-11-07T13:30:00.000Z'}]);
+ // The same instant with another offset is not newer and replays as stale; equivalent text under the same request id is a replay.
+ assert.deepEqual((await put('film:tmdb:1',3,'o4','2026-11-07T15:30:00+02:00','Тот же момент')).skipped.map(item=>item.reason),['stale']);
+ assert.deepEqual((await put('film:tmdb:1',3,'o3','2026-11-07T15:30:00+02:00','Новее')).skipped.map(item=>item.reason),['replay'],'the same instant written with another offset is the same request');
+ // A concurrent writer lands a newer instant (offset form already normalized by the CHECK) between the preflight and the batch: the older one loses in SQL.
+ const racing={DB:d1Standin(file,{onBatch:async()=>{sqlite(file,"UPDATE film_localization_source SET value='Гонка',observed_at='2026-11-07T20:00:00.000Z' WHERE film_id='film:tmdb:1' AND source='wikidata'");}})};
+ await recordLocalizationSources(racing,{kind:'film',id:'film:tmdb:1',expectedRevision:3,at:AT,requestId:'o5',sources:[source({observedAt:'2026-11-07T23:00:00+04:00',value:'Проигравший'})]});
+ assert.equal(stored('film:tmdb:1').value,'Гонка','19:00 UTC loses to 20:00 UTC even though its text is lexically greater than 2026-11-07T20');
+ // Input shapes that are not an ISO instant with an offset are refused.
+ for(const bad of ['2026-11-07','2026-11-07T10:00:00','Nov 7 2026','2026-11-07 10:00:00Z',1,null])await assert.rejects(()=>put('film:tmdb:1',4,'bad',bad,'x'),error=>/^(localization_invalid|film_person_invalid)$/.test(error.code));
+ // The merge uses the same ordering: the survivor keeps the later instant whichever way the offsets read.
+ await put('film:tmdb:2',1,'m1','2026-11-07T10:00:00Z','Выжившего');
+ const before=stored('film:tmdb:1');
+ await mergeFilms(env,{from:'film:tmdb:1',to:'film:tmdb:2',expected:{from:4,to:2},at:AT,evidence:{verified:true}});
+ assert.deepEqual(stored('film:tmdb:2'),{value:before.value,observed_at:before.observed_at},'20:00 UTC beats 10:00 UTC');
+ const file2=database({open:true});const env2=state(file2);
+ await seedFilm(env2,'film:tmdb:1');await seedFilm(env2,'film:tmdb:2');
+ const put2=(id,request,observedAt,value)=>recordLocalizationSources(env2,{kind:'film',id,expectedRevision:1,at:AT,requestId:request,sources:[source({observedAt,value})]});
+ await put2('film:tmdb:1','a','2026-11-07T12:00:00+02:00','Старше (10:00 UTC)');
+ await put2('film:tmdb:2','b','2026-11-07T11:00:00Z','Новее (11:00 UTC)');
+ await mergeFilms(env2,{from:'film:tmdb:1',to:'film:tmdb:2',expected:{from:2,to:2},at:AT,evidence:{verified:true}});
+ assert.equal(one(file2,"SELECT value FROM film_localization_source WHERE film_id='film:tmdb:2'"),'Новее (11:00 UTC)','a lexically greater but older retired observation does not replace the survivor');
 }
 
 // 6. A redirected Film takes no source rows; a merge adopts the retired Film's sources (newer observation wins per source) and leaves none behind.

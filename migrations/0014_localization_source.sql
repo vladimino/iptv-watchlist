@@ -9,6 +9,8 @@
 -- domain, a reviewed dictionary value lives in the dimension. The effective value is resolved at read as
 -- owner > reviewed dictionary > automatic (src/localization-sources.js). Rows are written only by the fenced
 -- recordLocalizationSources call, whose batch also proves the marker generation and the entity revision of 0013.
+-- observed_at is always normalized UTC (YYYY-MM-DDTHH:MM:SS.mmmZ, enforced by a CHECK), so text order is chronological order and the SQL
+-- monotonic guards of the writer and of a Film merge agree with the instants the code compares.
 -- request_id is the replay key of the writer: the same request id with the same content is a no-op, the same id with other content is refused.
 
 INSERT INTO schema_contract (id, version, note)
@@ -36,7 +38,7 @@ CREATE TABLE film_localization_source (
  source_version TEXT NOT NULL CHECK (length(source_version) > 0),
  provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json)),
  request_id TEXT NOT NULL CHECK (length(request_id) > 0),
- observed_at TEXT NOT NULL,
+ observed_at TEXT NOT NULL CHECK (observed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
  updated_at TEXT NOT NULL,
  PRIMARY KEY (film_id, source)
 ) STRICT;
@@ -48,7 +50,7 @@ CREATE TABLE person_localization_source (
  source_version TEXT NOT NULL CHECK (length(source_version) > 0),
  provenance_json TEXT NOT NULL CHECK (json_valid(provenance_json)),
  request_id TEXT NOT NULL CHECK (length(request_id) > 0),
- observed_at TEXT NOT NULL,
+ observed_at TEXT NOT NULL CHECK (observed_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
  updated_at TEXT NOT NULL,
  PRIMARY KEY (person_id, source)
 ) STRICT;
