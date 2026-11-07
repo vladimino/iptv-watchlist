@@ -148,18 +148,18 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.equal(plain(await chosen.M.status(chosen.env,T0)).transport,'telegram');
 }
 
-// 8. MONITOR off and dry: no request, no write, whatever the configuration.
+// 8. MONITOR off (and the retired dry token, which is off): no request, no write, whatever the configuration.
 {
  const t=setup();healthy(t.bucket);owner(t);
- assert.equal(plain(await t.M.run({...t.env,MONITOR:undefined},{now:T0})).ran,false);const dry=plain(await t.M.run({...t.env,MONITOR:'dry'},{now:T0}));assert.equal(dry.mode,'dry');
+ assert.equal(plain(await t.M.run({...t.env,MONITOR:undefined},{now:T0})).ran,false);assert.equal(plain(await t.M.run({...t.env,MONITOR:'dry'},{now:T0})).ran,false,'the retired dry token is off');
  assert.equal(t.calls.length,0);assert.equal(t.bucket.writes().length,0);
- // The synthetic test is an outward send and a write: neither off nor dry may do it, for Telegram and for the generic webhook.
+ // The synthetic test is an outward send and a write: only MONITOR=on may do it; off, the retired dry and unknown values refuse, for Telegram and for the generic webhook.
  for(const extra of [{},{MONITOR_TRANSPORT:'webhook',MONITOR_WEBHOOK_URL:'https://hooks.example/alert'}]){
   const x=setup(extra);healthy(x.bucket);
-  for(const [value,reason] of [[undefined,'off'],['off','off'],['dry','dry'],['garbage','off']]){
+  for(const [value,reason] of [[undefined,'off'],['off','off'],['dry','off'],['garbage','off']]){
    const answer=plain(await x.M.test({...x.env,...extra,MONITOR:value},T0));assert.deepEqual([answer.sent,answer.reason],[false,reason],String(value));
   }
-  assert.equal(x.calls.length,0,'no outbound request from test() in off or dry');assert.equal(x.bucket.writes().length,0,'no bucket write from test() in off or dry');
+  assert.equal(x.calls.length,0,'no outbound request from test() in a non-on mode');assert.equal(x.bucket.writes().length,0,'no bucket write from test() in a non-on mode');
  }
 }
 
@@ -209,4 +209,4 @@ const seedRecoveries=(t,count)=>{const doc=t.bucket.value(KEY);doc.outbox=Array.
  assert.equal((source.match(/api\.telegram\.org/g)||[]).length,1,'one fixed Bot API host');assert.doesNotMatch(source,/getUpdates|setWebhook|parse_mode/,'outbound sendMessage only, plain text');
 }
 
-console.log('Monitor Telegram: fixed endpoint and plain text, ok:false/401/403/429/timeout/malformed/network never count as delivered, retry_after hold without sleeping, fail-closed configuration, no leak, transport choice, off/dry no-op, AIR-349 outbox budget and CAS over Telegram passed');
+console.log('Monitor Telegram: fixed endpoint and plain text, ok:false/401/403/429/timeout/malformed/network never count as delivered, retry_after hold without sleeping, fail-closed configuration, no leak, transport choice, off no-op (the retired dry token included), AIR-349 outbox budget and CAS over Telegram passed');

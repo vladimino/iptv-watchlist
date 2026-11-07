@@ -140,6 +140,14 @@ assert.equal(leaky.report.summary.redacted,5);
 const padded=entry((await flags({D1_ENRICHMENT_WRITE:' on '})).report,'D1_ENRICHMENT_WRITE');
 assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective],[' on ',false,'case_or_whitespace','off']);
 
+// AIR-366: MONITOR is a permanent on/off gate. The retired dry token is not a mode: it is reported invalid and the effective mode is off.
+{
+ const retiredDry=entry((await flags({MONITOR:'dry'})).report,'MONITOR');
+ assert.deepEqual([retiredDry.raw,retiredDry.redacted,retiredDry.valid,retiredDry.issue,retiredDry.effective,retiredDry.modes],[null,true,false,'unrecognized','off',['off','on']],'dry is not a MONITOR mode any more and fails closed to off');
+ for(const [value,mode] of [['on','on'],['off','off']]){const item=entry((await flags({MONITOR:value})).report,'MONITOR');assert.deepEqual([item.valid,item.effective],[true,mode],value);}
+ assert.deepEqual([entry((await flags({})).report,'MONITOR').effective,entry((await flags({MONITOR:'On'})).report,'MONITOR').effective],['off','off'],'absent and a near miss are off');
+}
+
 // 4. Requirements on other flags.
 const unmet=await flags({LETTERBOXD_BASELINE_IMPORT:'on',PREDICTION_MATERIALIZATION:'on'});
 // The retired materialization switch reports no requirement and no mode (ADR 0050).

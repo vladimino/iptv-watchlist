@@ -2,13 +2,13 @@
 // ChatGPT Task. It reads bounded status facts that the domains already keep (never the Discovery ledger, never programme.json), judges
 // them with the pure MonitorPolicy, keeps one small state document and sends actionable alerts to an owner-approved webhook.
 // It only diagnoses and reports: no recovery, no force, no reset, no write to any domain record.
-// MONITOR: off (default) does nothing; dry evaluates and logs without writing or sending; on also keeps the state document
-// (`monitor/state.json`) and sends alerts when MONITOR_WEBHOOK_URL is set. Concatenated into the Worker: one global, no exports.
+// MONITOR is a permanent emergency gate: off (default; any other value is off too) does nothing, no tick, no alert, no dead-man ping; on keeps the
+// state document (`monitor/state.json`) and sends alerts through the channel MONITOR_TRANSPORT selects. Concatenated into the Worker: one global, no exports.
 const Monitor=(()=>{
  const STATE_KEY='monitor/state.json',SCHEMA_VERSION=1,SEND_TIMEOUT_MS=10000,TEST_COOLDOWN_MS=10*60000,SEND_BUDGET=5,SEND_FAIL_STOP=2;
  const policy=()=>MonitorPolicy;
  const iso=ms=>new Date(ms).toISOString();
- const mode=env=>env?.MONITOR==='on'?'on':env?.MONITOR==='dry'?'dry':'off';
+ const mode=env=>env?.MONITOR==='on'?'on':'off';
  const httpsUrl=value=>{try{const url=new URL(String(value||''));return url.protocol==='https:'?url.toString():null;}catch{return null;}};
  const guarded=async work=>{try{return await work();}catch{return {error:true};}};
  const log=fields=>{try{console.log(JSON.stringify({event:'monitor',...fields}));}catch{}};
@@ -135,11 +135,10 @@ const Monitor=(()=>{
   const current=mode(env);
   if(current==='off')return {ran:false,reason:'off'};
   try{
-   const {object,doc}=current==='on'?await readState(env):{object:null,doc:null};
+   const {object,doc}=await readState(env);
    const facts=await collect(env,now,doc);
    const evaluation=policy().evaluateAll(facts,{predictions:doc?.predictions||null},now,{dailyDue:OrchestrationPolicy.dailyDue});
    const plan=policy().planAlerts(evaluation.issues,doc?.alerts||{issues:{}},now);
-   if(current==='dry'){log({mode:'dry',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),wouldSend:plan.sends.length});return {ran:true,mode:'dry',overall:evaluation.overall,wouldSend:plan.sends.length};}
    // Claim before delivery. The planned messages are committed to `monitor/state.json` (as the plan's alert state and an outbox with stable
    // ids) with a compare-and-swap first; only the tick that wins that commit sends them, so ticks reading the same snapshot never both
    // send. A message that is not delivered stays in the outbox and is retried with the same id. Delivery is at-least-once: a crash after
@@ -216,9 +215,8 @@ const Monitor=(()=>{
 
  // A synthetic test message through the real channel. It writes only `lastTestAt` on the monitor's own document and changes no domain state.
  async function test(env,now=Date.now()){
-  // A synthetic message is an outward send and a write: only MONITOR=on may do it (dry sends and writes nothing, whatever the route).
-  if(mode(env)==='off')return {sent:false,reason:'off'};
-  if(mode(env)!=='on')return {sent:false,reason:'dry'};
+  // A synthetic message is an outward send and a write: only MONITOR=on may do it.
+  if(mode(env)!=='on')return {sent:false,reason:'off'};
   if(!channelReady(env))return {sent:false,reason:'no_channel'};
   const {object,doc}=await readState(env);
   const hold=Date.parse(doc?.holdUntil||'');
