@@ -55,36 +55,70 @@ async function chunked(db,sql,list,extra=[]){
 const flag=value=>value===1||value===true;
 const group=(rows,key)=>{const out=new Map();for(const row of rows){const id=row[key];if(!out.has(id))out.set(id,[]);out.get(id).push(row);}return out;};
 
-// The owner value of an entity, read from owner_review_entry (verified links only). A missing table or a read error fails closed: without the
-// owner domain the precedence cannot be proven. Pure shape: payload.localization reviewed with provenance.authority owner.
-export function ownerValuesFromEntries(entries){
- const out={};
+// Owner values, read from owner_review_entry (verified links only; the owner-review store is never written here). A missing table or a read error
+// fails closed: without the owner domain the precedence cannot be proven. An entry counts when payload.localization is reviewed with provenance
+// authority owner. identity_link is a verified snapshot of a source-key mapping (ADR 0081) that a Film merge does not rewrite, so a Film's owner
+// values are those of every link in the redirect chain that ends at it, and several source keys may link one Film. The result per link is the
+// list of distinct candidates in a fixed order (value, then source key); the caller decides, never SQL row order.
+export function ownerCandidatesFromEntries(entries){
+ const out=new Map();
  for(const entry of entries||[]){
   if(entry.identity_state!=='verified'||!entry.identity_link)continue;
   let payload;try{payload=typeof entry.payload_json==='string'?JSON.parse(entry.payload_json):entry.payload_json;}catch{continue;}
   const localization=payload?.localization;
-  if(localization&&localization.status==='reviewed'&&localization.provenance?.authority==='owner'&&typeof localization.value==='string'&&localization.value.trim())out[entry.identity_link]={value:localization.value,at:localization.updatedAt??null};
+  if(!(localization&&localization.status==='reviewed'&&localization.provenance?.authority==='owner'&&typeof localization.value==='string'&&localization.value.trim()))continue;
+  if(!out.has(entry.identity_link))out.set(entry.identity_link,[]);
+  out.get(entry.identity_link).push({value:localization.value.trim(),at:localization.updatedAt??null,sourceKey:entry.source_key??null,link:entry.identity_link});
+ }
+ for(const list of out.values())list.sort((x,y)=>x.value<y.value?-1:x.value>y.value?1:(x.sourceKey||'')<(y.sourceKey||'')?-1:(x.sourceKey||'')>(y.sourceKey||'')?1:0);
+ return out;
+}
+async function ownerEntries(db,kind,links){
+ if(!links.length)return [];
+ const out=[];
+ for(let at=0;at<links.length;at+=CANONICAL_READ_CHUNK){
+  const chunk=links.slice(at,at+CANONICAL_READ_CHUNK);
+  try{out.push(...await many(db,"SELECT kind,source_key,identity_link,identity_state,payload_json FROM owner_review_entry WHERE kind=? AND identity_state='verified' AND identity_link IN ("+chunk.map(()=>'?').join(',')+') ORDER BY source_key',[kind,...chunk]));}
+  catch(error){throw failed('canonical_read_owner_unavailable',error);}
  }
  return out;
 }
-async function ownerValuesFor(db,kind,list){
- if(!list.length)return {};
- const out=[];
- for(let at=0;at<list.length;at+=CANONICAL_READ_CHUNK){
-  const chunk=list.slice(at,at+CANONICAL_READ_CHUNK);
-  try{out.push(...await many(db,"SELECT identity_link,identity_state,payload_json FROM owner_review_entry WHERE kind=? AND identity_state='verified' AND identity_link IN ("+chunk.map(()=>'?').join(',')+')',[kind,...chunk]));}
-  catch(error){throw failed('canonical_read_owner_unavailable',error);}
+// Every id that redirects, through any chain, to one of the survivors (bounded rounds, one query per chunk per round). A chain that loops back or
+// is deeper than the cap is ambiguous and fails closed: the owner decisions of the retired ids cannot be proven complete.
+async function retiredIds(db,survivors){
+ const links=new Map(survivors.map(id=>[id,[id]]));
+ const owner=new Map(survivors.map(id=>[id,id]));
+ let frontier=[...survivors];
+ for(let round=0;frontier.length;round++){
+  if(round>=CANONICAL_REDIRECT_DEPTH)throw failed('canonical_read_owner_redirect');
+  const rows=await chunked(db,'SELECT from_id,to_film_id FROM film_redirect WHERE to_film_id IN (/*ids*/) ORDER BY from_id',frontier);
+  frontier=[];
+  for(const row of rows){
+   const survivor=owner.get(row.to_film_id);
+   if(survivor===undefined)continue;
+   if(owner.has(row.from_id))throw failed('canonical_read_owner_redirect');
+   owner.set(row.from_id,survivor);links.get(survivor).push(row.from_id);frontier.push(row.from_id);
+  }
  }
- return ownerValuesFromEntries(out);
+ return links;
 }
 
 async function resolved(env,db,kind,list){
  if(!list.length)return new Map();
- const [inputs,owners]=await Promise.all([loadLocalizationInputs(env,kind,list),ownerValuesFor(db,kind,list)]);
+ const links=kind==='film'?await retiredIds(db,list):new Map(list.map(id=>[id,[id]]));
+ const [inputs,entries]=await Promise.all([loadLocalizationInputs(env,kind,list),ownerEntries(db,kind,[...new Set([...links.values()].flat())])]);
+ const candidates=ownerCandidatesFromEntries(entries);
  const out=new Map();
  for(const id of list){
+  const owned=links.get(id).flatMap(link=>candidates.get(link)||[]);
+  const distinct=[...new Set(owned.map(item=>item.value))];
+  if(distinct.length>1){
+   // Conflicting owner values on one entity: no value is chosen and no lower tier replaces them; the conflict is the visible outcome.
+   out.set(id,{value:null,tier:'owner_conflict',source:null,held:[],rejected:[],ownerConflict:owned.map(item=>({value:item.value,sourceKey:item.sourceKey,link:item.link,at:item.at}))});
+   continue;
+  }
   const input=inputs.get(id);
-  if(owners[id])input.owner=owners[id];
+  if(owned.length)input.owner={value:owned[0].value,at:owned.map(item=>item.at).filter(Boolean).sort().at(-1)??null};
   const value=resolveLocalization(input);
   out.set(id,{value:value.value,tier:value.tier,source:value.source,held:value.held,rejected:value.rejected});
  }

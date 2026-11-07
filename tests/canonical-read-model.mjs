@@ -9,7 +9,7 @@ import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {mutateFilm,mutatePerson} from '../src/canonical-mutations.js';
 import {recordLocalizationSources} from '../src/localization-sources.js';
-import {canonicalReaderMode,readFilms,readPersons,resolveRedirects,ownerValuesFromEntries,CANONICAL_READ_MAX_IDS,CANONICAL_FILMOGRAPHY_CAP} from '../src/canonical-read-model.js';
+import {canonicalReaderMode,readFilms,readPersons,resolveRedirects,ownerCandidatesFromEntries,CANONICAL_READ_MAX_IDS,CANONICAL_FILMOGRAPHY_CAP} from '../src/canonical-read-model.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-read-model-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
@@ -126,7 +126,81 @@ const run=(file,sql)=>sqlite(file,sql);
  run(file,'DROP INDEX owner_review_entry_identity;DROP TABLE owner_review_entry');
  await assert.rejects(()=>readFilms(e,['film:tmdb:1']),code('canonical_read_owner_unavailable'));
  // The pure mapping.
- assert.deepEqual(ownerValuesFromEntries([{identity_state:'verified',identity_link:'film:x',payload_json:JSON.stringify({localization:owner})},{identity_state:'verified',identity_link:'film:y',payload_json:'{bad'},{identity_state:'verified',identity_link:'film:z',payload_json:JSON.stringify({localization:{...owner,provenance:{authority:'dictionary'}}})},{identity_state:'held',identity_link:'film:w',payload_json:JSON.stringify({localization:owner})}]),{'film:x':{value:'Владелец',at:AT}});
+ assert.deepEqual([...ownerCandidatesFromEntries([{identity_state:'verified',identity_link:'film:x',source_key:'b',payload_json:JSON.stringify({localization:owner})},{identity_state:'verified',identity_link:'film:x',source_key:'a',payload_json:JSON.stringify({localization:{...owner,value:'Другой'}})},{identity_state:'verified',identity_link:'film:y',payload_json:'{bad'},{identity_state:'verified',identity_link:'film:z',payload_json:JSON.stringify({localization:{...owner,provenance:{authority:'dictionary'}}})},{identity_state:'held',identity_link:'film:w',payload_json:JSON.stringify({localization:owner})}])],[['film:x',[{value:'Владелец',at:AT,sourceKey:'b',link:'film:x'},{value:'Другой',at:AT,sourceKey:'a',link:'film:x'}].sort((x,y)=>x.value<y.value?-1:1)]]);
+}
+
+// 3b. Owner decisions survive a Film merge (the owner-review store is not rewritten by it) and a conflict between source keys is visible, never order-dependent.
+{
+ const mk=()=>{const file=database();const e=env(file);return {file,e};};
+ const owner=(value)=>({status:'reviewed',value,provenance:{authority:'owner'},updatedAt:AT});
+ const entry=(key,link,value,state='verified')=>`INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','${key}','${JSON.stringify({localization:owner(value)}).replace(/'/g,"''")}','${link}','${state}',1)`;
+ const redirect=(file,from,to)=>run(file,`PRAGMA foreign_keys=OFF;INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('${from}','${to}','t');`);
+ const title=async(e,id)=>{const item=(await readFilms(e,[id])).items.get(id);return [item.title.tier,item.title.value];};
+ // 1. An owner review linked to the retired Film still wins, whether the old or the surviving id is read, over a dictionary and a late automatic value.
+ {
+  const {file,e}=mk();
+  await film(e,'film:keep');
+  run(file,"INSERT INTO film_dimension (film_id,dimension,status,source,provenance_json,value,authority,attempts,updated_at) VALUES ('film:keep','localization','reviewed','dictionary','{}','Словарь','dictionary',0,'t')");
+  await auto(e,'film','film:keep','Поздний автомат',1);
+  run(file,entry('k-old','film:old','Выбор владельца'));
+  redirect(file,'film:old','film:keep');
+  assert.deepEqual(await title(e,'film:keep'),['owner','Выбор владельца'],'read by the survivor');
+  assert.deepEqual(await title(e,'film:old'),['owner','Выбор владельца'],'read by the retired id');
+  const both=await readFilms(e,['film:old','film:keep']);
+  assert.deepEqual([both.items.get('film:old').title.value,both.items.get('film:keep').title.value],['Выбор владельца','Выбор владельца']);
+  // A chain old2 -> old -> keep: a link on any id of the chain counts.
+  run(file,entry('k-old2','film:old2','Выбор владельца'));
+  redirect(file,'film:old2','film:old');
+  assert.deepEqual(await title(e,'film:keep'),['owner','Выбор владельца']);
+  // The owner-review store is untouched by the read.
+  assert.equal(rows(file,'SELECT COUNT(*) c FROM owner_review_entry')[0].c,2);
+ }
+ // The same title behind two source keys, or on the survivor and a retired id, is safe.
+ {
+  const {file,e}=mk();
+  await film(e,'film:keep');
+  run(file,[entry('letterboxd-a','film:keep','Один'),entry('tmdb_9','film:keep','Один'),entry('k-old','film:old','Один')].join(';\n'));
+  redirect(file,'film:old','film:keep');
+  assert.deepEqual(await title(e,'film:keep'),['owner','Один']);
+ }
+ // 2. Two verified source keys on one Film with different owner titles: an explicit conflict, the same whichever order the rows were written in.
+ for(const order of [['a','b'],['b','a']]){
+  const {file,e}=mk();
+  await film(e,'film:keep');
+  await auto(e,'film','film:keep','Автомат',1);
+  run(file,order.map(key=>entry(key==='a'?'letterboxd-a':'tmdb_9','film:keep',key==='a'?'Название A':'Название B')).join(';\n'));
+  const item=(await readFilms(e,['film:keep'])).items.get('film:keep');
+  assert.deepEqual([item.title.tier,item.title.value],['owner_conflict',null],'no value is chosen and the automatic value does not replace it');
+  assert.deepEqual(item.title.ownerConflict.map(row=>[row.sourceKey,row.value]).sort(),[['letterboxd-a','Название A'],['tmdb_9','Название B']],'the conflict names both candidates');
+ }
+ // A conflict across a retired id and the survivor is the same outcome.
+ {
+  const {file,e}=mk();
+  await film(e,'film:keep');
+  run(file,[entry('k-old','film:old','Старое'),entry('k-new','film:keep','Новое')].join(';\n'));
+  redirect(file,'film:old','film:keep');
+  assert.equal((await readFilms(e,['film:old'])).items.get('film:old').title.tier,'owner_conflict');
+ }
+ // 3. A held or non-owner entry on the retired id is not an owner value; an ambiguous redirect set fails closed.
+ {
+  const {file,e}=mk();
+  await film(e,'film:keep');
+  run(file,entry('k-held','film:old','Не владелец','held'));
+  redirect(file,'film:old','film:keep');
+  assert.deepEqual(await title(e,'film:keep'),['none',null]);
+  // A chain deeper than the cap that ends at the survivor: the owner links of its tail cannot be proven complete.
+  run(file,"PRAGMA foreign_keys=OFF;"+Array.from({length:10},(_,i)=>`INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:far:${i}','${i===0?'film:keep':'film:far:'+(i-1)}','t');`).join(''));
+  await assert.rejects(()=>readFilms(e,['film:keep']),code('canonical_read_owner_redirect'),'too deep');
+ }
+ {
+  // A loop that includes the survivor: the survivor redirects, so it is not a survivor; the requested id answers cycle and no owner value is invented.
+  const {file,e}=mk();
+  await film(e,'film:a');
+  run(file,entry('k-a','film:b','Из цикла'));
+  redirect(file,'film:a','film:b');redirect(file,'film:b','film:a');
+  const item=(await readFilms(e,['film:a'])).items.get('film:a');
+  assert.equal(item.state,'cycle');
+ }
 }
 
 // 4. Persons: role-specific records, typed ids, aliases, a bounded filmography with resolved film titles, no merge by name.
