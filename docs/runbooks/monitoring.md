@@ -8,7 +8,7 @@ A tick on the existing hourly cron that reads the stored status of EPG, Discover
 
 ## Activation order (each needs an owner GO)
 
-1. Choose the channel and the dead-man service. For the generic webhook set `MONITOR_WEBHOOK_URL`; for Telegram ([ADR 0096](../adr/0096-monitor-telegram-bot-api-transport.md)) set `MONITOR_TELEGRAM_BOT_TOKEN` and `MONITOR_TELEGRAM_CHAT_ID` and then `MONITOR_TRANSPORT=telegram`. Optionally set `MONITOR_HEARTBEAT_URL`. The secrets are Worker secrets, never in git, GitHub, Trello or logs; `GET /api/monitor/status` shows `transport` and `alerting` without them.
+1. Choose the channel and the dead-man service. For the generic webhook set `MONITOR_WEBHOOK_URL`; for Telegram ([ADR 0097](../adr/0097-monitor-telegram-bot-api-transport.md)) set `MONITOR_TELEGRAM_BOT_TOKEN` and `MONITOR_TELEGRAM_CHAT_ID` and then `MONITOR_TRANSPORT=telegram`. Optionally set `MONITOR_HEARTBEAT_URL`. The secrets are Worker secrets, never in git, GitHub, Trello or logs; `GET /api/monitor/status` shows `transport` and `alerting` without them.
 2. Set `MONITOR=dry` and read one tick in Workers Observability (`event: monitor`): the overall state and issue keys, nothing written or sent.
 3. Set `MONITOR=on`. Read `GET /api/monitor/status`: one healthy snapshot with a fresh `heartbeatAt`.
 4. Send one synthetic message with `POST /api/monitor/test`, confirm the owner received it, and that a second call inside ten minutes is refused.

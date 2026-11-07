@@ -1,4 +1,4 @@
-# ADR 0096: The monitor can deliver directly to the Telegram Bot API through a deliberately selected, fail-closed transport
+# ADR 0097: The monitor can deliver directly to the Telegram Bot API through a deliberately selected, fail-closed transport
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-07  

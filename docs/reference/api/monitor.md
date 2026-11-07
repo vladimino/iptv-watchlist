@@ -25,7 +25,7 @@ Sends one synthetic message (`kind: test`, key `monitor_test`) through the confi
 
 ## Transports
 
-`MONITOR_TRANSPORT` chooses the channel: absent, empty or `webhook` is the generic webhook, `telegram` is the Telegram Bot API (ADR 0096), anything else is invalid and nothing is sent. A chosen transport never falls back to the other. `GET /api/monitor/status` reports `transport` (`webhook`, `telegram` or `invalid`) and `alerting` (whether that transport is configured and well-formed), never a URL, token or chat id.
+`MONITOR_TRANSPORT` chooses the channel: absent, empty or `webhook` is the generic webhook, `telegram` is the Telegram Bot API (ADR 0097), anything else is invalid and nothing is sent. A chosen transport never falls back to the other. `GET /api/monitor/status` reports `transport` (`webhook`, `telegram` or `invalid`) and `alerting` (whether that transport is configured and well-formed), never a URL, token or chat id.
 
 ## Alert message (webhook transport)
 
