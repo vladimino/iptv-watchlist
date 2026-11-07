@@ -73,15 +73,55 @@ const Monitor=(()=>{
   return {epg,discovery,ratings,predictions};
  }
 
- // ---- delivery: a single owner-approved HTTPS webhook; the payload carries no titles, ratings, credentials or private data.
- async function sendMessage(env,message,overall,now){
+ // ---- delivery: one transport chosen by deliberate configuration. `MONITOR_TRANSPORT` absent or `webhook` is the generic JSON webhook
+ // (MONITOR_WEBHOOK_URL); `telegram` is the Telegram Bot API `sendMessage` (AIR-365); any other value is invalid and fails closed.
+ // Neither payload carries titles, ratings, credentials or private data. A transport answers {ok, reason, retryAfterMs?}: reasons are fixed
+ // codes, never response bodies, URLs or configuration values.
+ const transportName=env=>{const value=env?.MONITOR_TRANSPORT;return value===undefined||value===null||value===''||value==='webhook'?'webhook':value==='telegram'?'telegram':'invalid';};
+ // The token and chat id come only from Cloudflare secrets/bindings and are shape-checked; the destination is the fixed Bot API endpoint.
+ const TELEGRAM_TOKEN=/^\d{5,15}:[A-Za-z0-9_-]{30,60}$/,TELEGRAM_CHAT=/^(-?\d{1,20}|@[A-Za-z][A-Za-z0-9_]{4,31})$/;
+ const telegramConfig=env=>{const token=typeof env?.MONITOR_TELEGRAM_BOT_TOKEN==='string'?env.MONITOR_TELEGRAM_BOT_TOKEN.trim():'',chat=typeof env?.MONITOR_TELEGRAM_CHAT_ID==='string'?env.MONITOR_TELEGRAM_CHAT_ID.trim():'';return TELEGRAM_TOKEN.test(token)&&TELEGRAM_CHAT.test(chat)?{token,chat}:null;};
+ const channelReady=env=>{const name=transportName(env);return name==='telegram'?!!telegramConfig(env):name==='webhook'?!!httpsUrl(env?.MONITOR_WEBHOOK_URL):false;};
+ const TELEGRAM_KIND={alert:'ALERT',reminder:'REMINDER',escalation:'ESCALATION',recovery:'RECOVERED',test:'TEST'};
+ const plain=(value,max)=>String(value??'').replace(/[^\x20-\x7E]+/g,' ').replace(/\s+/g,' ').trim().slice(0,max);
+ // Plain text only (no markup mode is requested), so nothing is interpreted; fields are ASCII-limited and bounded well under Telegram's 4096 characters.
+ const telegramText=(message,overall,now)=>[
+  'IPTV monitor: '+(TELEGRAM_KIND[message.kind]||'MESSAGE')+' ('+plain(message.severity,16)+')',
+  'Stream: '+plain(message.stream,32),'Issue: '+plain(message.key,64),plain(message.message,300),
+  'Overall: '+plain(overall||'unknown',16),'At: '+iso(now),'Ref: '+plain(message.id,120)].join('\n');
+ const HOLD_MAX_MS=3600000,HOLD_DEFAULT_MS=60000;
+ async function sendTelegram(env,message,overall,now){
+  const config=telegramConfig(env);
+  if(!config)return {ok:false,reason:'config_invalid'};
+  let response;
+  try{
+   response=await fetch('https://api.telegram.org/bot'+config.token+'/sendMessage',{method:'POST',headers:{'content-type':'application/json'},signal:AbortSignal.timeout(SEND_TIMEOUT_MS),
+    body:JSON.stringify({chat_id:config.chat,text:telegramText(message,overall,now),disable_web_page_preview:true})});
+  }catch(error){return {ok:false,reason:error?.name==='TimeoutError'||error?.name==='AbortError'?'timeout':'network'};}
+  let body=null;
+  try{body=await response.json();}catch{body=null;}
+  if(response.ok&&body&&body.ok===true)return {ok:true,reason:null};
+  if(response.status===429){
+   const seconds=Number(body?.parameters?.retry_after)||Number(response.headers?.get?.('retry-after'))||0;
+   return {ok:false,reason:'rate_limited',retryAfterMs:Math.min(HOLD_MAX_MS,seconds>0?seconds*1000:HOLD_DEFAULT_MS)};
+  }
+  if(!body)return {ok:false,reason:response.ok?'malformed_response':'http_'+response.status};
+  return {ok:false,reason:response.ok?'telegram_not_ok':'http_'+response.status};
+ }
+ async function sendWebhook(env,message,overall,now){
   const url=httpsUrl(env?.MONITOR_WEBHOOK_URL);
-  if(!url)return false;
+  if(!url)return {ok:false,reason:'config_invalid'};
   try{
    const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},signal:AbortSignal.timeout(SEND_TIMEOUT_MS),
     body:JSON.stringify({source:'iptv-monitor',id:message.id||null,at:iso(now),kind:message.kind,severity:message.severity,stream:message.stream,key:message.key,message:message.message,overall})});
-   return response.ok;
-  }catch{return false;}
+   return response.ok?{ok:true,reason:null}:{ok:false,reason:'http_'+response.status};
+  }catch(error){return {ok:false,reason:error?.name==='TimeoutError'||error?.name==='AbortError'?'timeout':'network'};}
+ }
+ async function sendMessage(env,message,overall,now){
+  const name=transportName(env);
+  if(name==='telegram')return sendTelegram(env,message,overall,now);
+  if(name==='webhook')return sendWebhook(env,message,overall,now);
+  return {ok:false,reason:'transport_invalid'};
  }
  // The external dead-man ping: an HTTPS GET to a service that alerts when it stops arriving. A Worker cannot observe its own total outage.
  async function heartbeat(env){
@@ -131,7 +171,7 @@ const Monitor=(()=>{
    const publishedRunId=facts.epg?.publishedRunId||null,predictions=facts.predictions?.present?{pendingCount:facts.predictions.pendingCount,processedTotal:facts.predictions.processedTotal,progressAt:facts.predictions.lastProgressAt}:doc?.predictions||null;
    const next={schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:iso(now),mode:current,overall:evaluation.overall,
     streams:evaluation.streams.map(stream=>({stream:stream.stream,state:stream.state,facts:stream.facts,issues:stream.issues.map(item=>({key:item.key,severity:item.severity}))})),
-    alerts,outbox:queued,cancelledUndelivered:cancelled,predictions,
+    alerts,outbox:queued,cancelledUndelivered:cancelled,holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,predictions,
     epgSeen:publishedRunId&&doc?.epgSeen?.runId!==publishedRunId?{runId:publishedRunId,at:iso(now)}:doc?.epgSeen||null,lastTestAt:doc?.lastTestAt||null};
    const claimed=await writeState(env,object,next);
    if(!claimed){log({mode:'on',overall:evaluation.overall,claimed:false});return {ran:true,mode:'on',overall:evaluation.overall,sent:0,failed:0,saved:false};}
@@ -139,19 +179,23 @@ const Monitor=(()=>{
    // evidently down), so a long outage costs a bounded number of HTTP timeouts and never holds the cron or the other monitor work hostage.
    // The outbox is the durable queue: it is FIFO, an attempted-but-failed message moves to the tail so one bad message cannot starve the rest,
    // and whatever is not attempted waits for the next tick.
+   // A rate limit (Telegram 429) is not slept on: its retry_after becomes a persisted hold, and ticks before it make no attempt.
    const delivered=new Set(),failedIds=new Set();
-   let attempts=0,streak=0;
-   for(const message of queued){
+   let attempts=0,streak=0,holdUntil=Date.parse(doc?.holdUntil||''),lastFailure=doc?.lastDeliveryFailure||null,succeeded=false;
+   const held=Number.isFinite(holdUntil)&&holdUntil>now;
+   for(const message of held?[]:queued){
     if(attempts>=SEND_BUDGET||streak>=SEND_FAIL_STOP)break;
     attempts++;
-    if(await sendMessage(env,message,evaluation.overall,now)){delivered.add(message.id);streak=0;}else{failedIds.add(message.id);streak++;}
+    const result=await sendMessage(env,message,evaluation.overall,now);
+    if(result.ok){delivered.add(message.id);streak=0;succeeded=true;}
+    else{failedIds.add(message.id);streak++;lastFailure={at:iso(now),reason:result.reason};if(result.retryAfterMs){holdUntil=now+result.retryAfterMs;break;}}
    }
    let saved=true;
    if(attempts){
     const settled=JSON.parse(JSON.stringify(next.alerts));
     for(const item of queued){if(!delivered.has(item.id)||!item.after)continue;const entry=settled.issues[item.key];if(!entry)continue;entry.lastSentAt=item.after.lastSentAt;entry.sendCount=Math.max(entry.sendCount,item.after.sendCount);entry.sendDay=item.after.sendDay;entry.sendsToday=item.after.sendsToday;}
     const remaining=queued.filter(item=>!delivered.has(item.id)),reordered=[...remaining.filter(item=>!failedIds.has(item.id)),...remaining.filter(item=>failedIds.has(item.id))];
-    saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:reordered});
+    saved=!!await writeState(env,claimed,{...next,alerts:settled,outbox:reordered,holdUntil:Number.isFinite(holdUntil)&&holdUntil>now?iso(holdUntil):null,lastDeliveryFailure:succeeded&&!failedIds.size?null:lastFailure});
    }
    await heartbeat(env);
    log({mode:'on',overall:evaluation.overall,issues:evaluation.issues.map(item=>item.key),sent:delivered.size,failed:failedIds.size,pending:queued.length-delivered.size,attempts,saved});
@@ -167,23 +211,25 @@ const Monitor=(()=>{
   const heartbeatAt=Date.parse(doc?.heartbeatAt||'');
   return {mode:current,readAt:iso(now),stored:!!doc,heartbeatAt:Number.isFinite(heartbeatAt)?iso(heartbeatAt):null,heartbeatAgeMs:Number.isFinite(heartbeatAt)?Math.max(0,now-heartbeatAt):null,
    outbox:Array.isArray(doc?.outbox)?doc.outbox.length:0,outboxOldestAt:(doc?.outbox||[]).map(item=>item.queuedAt).sort()[0]||null,cancelledUndelivered:doc?.cancelledUndelivered||0,overall:doc?.overall??null,streams:doc?.streams??[],openIssues:Object.entries(doc?.alerts?.issues||{}).map(([key,entry])=>({key,severity:entry.severity,firstSeenAt:entry.firstSeenAt,sendCount:entry.sendCount})),
-   alerting:!!httpsUrl(env?.MONITOR_WEBHOOK_URL),deadman:!!httpsUrl(env?.MONITOR_HEARTBEAT_URL),sideEffects:'none'};
+   transport:transportName(env),alerting:channelReady(env),holdUntil:doc?.holdUntil||null,lastDeliveryFailure:doc?.lastDeliveryFailure||null,deadman:!!httpsUrl(env?.MONITOR_HEARTBEAT_URL),sideEffects:'none'};
  }
 
  // A synthetic test message through the real channel. It writes only `lastTestAt` on the monitor's own document and changes no domain state.
  async function test(env,now=Date.now()){
   if(mode(env)==='off')return {sent:false,reason:'off'};
-  if(!httpsUrl(env?.MONITOR_WEBHOOK_URL))return {sent:false,reason:'no_channel'};
+  if(!channelReady(env))return {sent:false,reason:'no_channel'};
   const {object,doc}=await readState(env);
+  const hold=Date.parse(doc?.holdUntil||'');
+  if(Number.isFinite(hold)&&hold>now)return {sent:false,reason:'rate_limited',holdUntil:doc.holdUntil};
   const last=Date.parse(doc?.lastTestAt||'');
   if(Number.isFinite(last)&&now-last<TEST_COOLDOWN_MS)return {sent:false,reason:'recent',lastTestAt:doc.lastTestAt};
   // Claim first: the cooldown stamp is committed before the message is sent, so concurrent requests cannot both send.
   const base=doc||{schemaVersion:SCHEMA_VERSION,updatedAt:iso(now),heartbeatAt:null,mode:mode(env),overall:null,streams:[],alerts:{issues:{}},outbox:[],predictions:null,epgSeen:null};
   const claimed=await writeState(env,object,{...base,lastTestAt:iso(now)});
   if(!claimed)return {sent:false,reason:'concurrent'};
-  const delivered=await sendMessage(env,{id:'monitor_test|'+iso(now),kind:'test',severity:'test',stream:'monitor',key:'monitor_test',message:'Test alert from the IPTV monitor. No incident.'},doc?.overall||'unknown',now);
-  if(!delivered){await writeState(env,claimed,{...base,lastTestAt:doc?.lastTestAt||null}).catch(()=>null);return {sent:false,reason:'delivery_failed'};}
+  const result=await sendMessage(env,{id:'monitor_test|'+iso(now),kind:'test',severity:'test',stream:'monitor',key:'monitor_test',message:'Test alert from the IPTV monitor. No incident.'},doc?.overall||'unknown',now);
+  if(!result.ok){await writeState(env,claimed,{...base,lastTestAt:doc?.lastTestAt||null,holdUntil:result.retryAfterMs?iso(now+result.retryAfterMs):base.holdUntil||null}).catch(()=>null);return {sent:false,reason:'delivery_failed'};}
   return {sent:true,at:iso(now)};
  }
- return {STATE_KEY,mode,run,status,test,collect};
+ return {STATE_KEY,mode,run,status,test,collect,internals:{telegramText}};
 })();
