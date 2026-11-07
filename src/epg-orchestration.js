@@ -4,6 +4,10 @@
 //    Absent (or the table not applied) means external, epoch 0.
 //  - `control`: the control record (run key, instance, checkpoint, retry budget, cooldown, quarantine, last durable progress).
 //    Only the executor and the owner's quarantine clear write it, and only under the mode revision it was admitted with.
+// A durable step lease (the `lease` row) makes an in-flight step provable: every external or executor step takes it, renews it at
+// each mutation boundary, and the owner's drain waits for it. Every mutation boundary (saveJSON, the seal units, the staging and
+// the generation copy) asserts that the step still holds the lease under the mode revision it was admitted with, so a step admitted
+// before `close_admission` fails at its next boundary and cannot persist R2 state against the Cloudflare driver.
 // Every authoritative published-EPG commit carries `epgFence` (the mode document's revision at admission), asserted in the same
 // D1 batch by src/published-epg.js, so a commit admitted before the owner closed admission cannot land after it.
 // The executor reuses the existing pipeline: one action is one `/api/sync/start` or one `/api/sync/metadata|epg` step, called
@@ -16,7 +20,7 @@
 const EpgOrchestration=(()=>{
  const TABLE='epg_orchestration_document';
  const MODES=['external','switching','cloudflare'];
- const STEP_CAP=400,SLEEP_FLOOR_MS=1000,EXTERNAL_FRESH_MS=15*60000,PAUSE_MS=6*3600000,CONTROL_ATTEMPTS=4,ALIVE=['running','waiting','queued','paused'],ENDED=['complete','errored','terminated','absent'];
+ const STEP_CAP=400,SLEEP_FLOOR_MS=1000,EXTERNAL_FRESH_MS=15*60000,LEASE_MS=5*60000,BOUNDARY_MARGIN_MS=15000,PAUSE_MS=6*3600000,CONTROL_ATTEMPTS=4,ALIVE=['running','waiting','queued','paused'],ENDED=['complete','errored','terminated','absent'];
  const STAGE_RANK={metadata:1,epg:2,seal:3,complete:4},SEAL_RANK={ledger:1,catalog:2,publish:3,finalize:4,queue:5};
  const iso=ms=>new Date(ms).toISOString();
  const policy=()=>OrchestrationPolicy;
@@ -67,7 +71,7 @@ const EpgOrchestration=(()=>{
   const ok=!doc.malformed&&v&&typeof v==='object'&&!Array.isArray(v)&&v.schemaVersion===1&&v.budget&&Number.isInteger(v.budget.consecutive)&&Number.isInteger(v.budget.total);
   return {record:ok?v:null,revision:doc.revision,stored:true,malformed:!ok};
  }
- const fencedEnv=(env,revision)=>({...env,epgFence:{revision}});
+ const fencedEnv=(env,revision,step=null)=>({...env,epgFence:{revision},...(step?{epgStep:step}:{})});
  async function authorityState(env){
   if(typeof PublishedEpg==='undefined')return {ready:false,error:false};
   try{const a=await PublishedEpg.readAuthority(env);return {ready:a.ready===true,error:false};}
@@ -86,7 +90,7 @@ const EpgOrchestration=(()=>{
  // An error thrown by a step, by class only: its message is never copied into a record.
  function classifyThrown(error){
   const code=String(error?.code||''),message=String(error?.message||'');
-  if(code==='published_epg_fence')return 'epoch_mismatch';
+  if(code==='published_epg_fence'||code==='epg_step_fenced')return 'epoch_mismatch';
   if(code==='discovery_seal_unfinished')return 'evidence_contradictory';
   if(code==='published_epg_unavailable'||code==='write_contention')return 'd1_unavailable';
   if(code==='published_epg_not_authoritative')return 'authority_held';
@@ -98,17 +102,80 @@ const EpgOrchestration=(()=>{
   return 'step_failed';
  }
 
+
+ // ---- the durable step lease ----------------------------------------------------------------------------------
+ // One row, `lease`: {holder, kind, modeRevision, acquiredAt, expiresAt, released}. A step takes it before its first mutation, renews
+ // it at each boundary while it is still the holder under the same mode revision, and releases it when it ends. The drain of the mode
+ // switch refuses while it is live (or within the margin after its expiry), and an unreadable lease fails the drain closed.
+ const leaseLive=(lease,now)=>!!lease&&lease.released!==true&&Number.isFinite(Date.parse(lease.expiresAt||''))&&Date.parse(lease.expiresAt)+BOUNDARY_MARGIN_MS>now;
+ async function readLease(env){
+  const doc=await readDoc(env,'lease');
+  const v=doc.value;
+  const ok=doc.value==null&&!doc.malformed?true:!doc.malformed&&v&&typeof v==='object'&&typeof v.holder==='string'&&Number.isFinite(Date.parse(v.expiresAt||''));
+  return {record:doc.value==null?null:ok?v:null,revision:doc.revision,stored:doc.stored,malformed:!ok};
+ }
+ // The step takes the lease under the mode revision it was admitted with. Busy while another holder is live; a lost race is busy too.
+ async function acquireStep(env,{kind,modeRevision,now=Date.now()}){
+  const held=await readLease(env);
+  if(held.malformed)return {busy:false,reason:'evidence_unreadable'};
+  if(leaseLive(held.record,now))return {busy:true,until:Date.parse(held.record.expiresAt)+BOUNDARY_MARGIN_MS};
+  const holder=crypto.randomUUID();
+  const record={schemaVersion:1,holder,kind,modeRevision,acquiredAt:iso(now),expiresAt:iso(now+LEASE_MS),released:false};
+  if(!await casDoc(env,'lease',held.stored?held.revision:null,record,modeRevision))return {busy:true,until:now+SLEEP_FLOOR_MS*5};
+  return {step:{holder,kind,modeRevision}};
+ }
+ async function endStep(env,step){
+  if(!step)return false;
+  const held=await readLease(env);
+  if(held.malformed||held.record?.holder!==step.holder)return false;
+  return casDoc(env,'lease',held.revision,{...held.record,released:true,releasedAt:iso(Date.now())});
+ }
+ // The mutation boundary. A step that is not the holder, whose lease has run out, or whose mode revision has moved (the owner closed
+ // admission) throws and the write does not happen. A live holder renews its lease when half of it is spent.
+ async function assertStep(env,now=Date.now()){
+  const step=env?.epgStep;
+  if(!step)return;
+  const fenced=()=>Object.assign(new Error('epg_step_fenced'),{code:'epg_step_fenced'});
+  let row;
+  try{row=await env.DB.prepare('SELECT (SELECT revision FROM '+TABLE+" WHERE key='mode') AS mode_revision, (SELECT body FROM "+TABLE+" WHERE key='lease') AS lease, (SELECT revision FROM "+TABLE+" WHERE key='lease') AS lease_revision").bind().first();}
+  catch{throw fenced();}
+  let lease=null;try{lease=row?.lease?JSON.parse(row.lease):null;}catch{throw fenced();}
+  const modeRevision=row?.mode_revision==null?null:Number(row.mode_revision);
+  if(modeRevision!==(step.modeRevision??null))throw fenced();
+  if(!lease||lease.holder!==step.holder||lease.released===true)throw fenced();
+  const expires=Date.parse(lease.expiresAt||'');
+  if(!Number.isFinite(expires)||now>=expires-BOUNDARY_MARGIN_MS)throw fenced();
+  if(expires-now<LEASE_MS/2){
+   const renewed=await casDoc(env,'lease',Number(row.lease_revision),{...lease,expiresAt:iso(now+LEASE_MS)},step.modeRevision??null).catch(()=>false);
+   if(!renewed){
+    // A lost compare-and-set is not a fence by itself: read again, and stop only if the lease is no longer ours.
+    const again=await readLease(env);
+    if(again.malformed||again.record?.holder!==step.holder||again.record.released===true)throw fenced();
+   }
+  }
+ }
+ // The external path's admission: the gate and, when it passes, the lease. Returns the env the step must run with.
+ async function beginExternalStep(env,now=Date.now()){
+  const gate=await externalGate(env);
+  if(gate.reason)return {reason:gate.reason};
+  if(!gate.fence)return {env};
+  const taken=await acquireStep(env,{kind:'external',modeRevision:gate.fence.revision,now});
+  if(taken.reason)return {reason:taken.reason};
+  if(taken.busy)return {reason:'step_in_progress',nextCatchUpAt:iso(taken.until)};
+  return {env:{...env,epgFence:gate.fence,epgStep:taken.step},step:taken.step};
+ }
+
  // ---- the owner's mode switch (ADR 0100 decision 3) ----------------------------------------------------------
  // Drain: the previous owner has no step in flight and no unfinished seal. Verified, not assumed.
  async function drainState(env,now){
   let run;
   try{run=await loadJSON(env,'sync.json');}catch{return 'unreadable';}
   if(run?.stage==='seal')return 'seal_unfinished';
-  if(run&&['metadata','epg'].includes(run.stage)){
-   const updated=Date.parse(run.updatedAt||'');
-   if(!Number.isFinite(updated))return 'unreadable';
-   if(updated+EXTERNAL_FRESH_MS>now)return 'step_recent';
-  }
+  // The durable lease is the proof of an in-flight step; the age of sync.json is not (an unknown-outcome request can outlive it).
+  let lease;
+  try{lease=await readLease(env);}catch{return 'unreadable';}
+  if(lease.malformed)return 'unreadable';
+  if(leaseLive(lease.record,now))return 'step_lease_live';
   let control;
   try{control=await readControl(env);}catch{return 'unreadable';}
   if(control.malformed)return 'unreadable';
@@ -263,10 +330,17 @@ const EpgOrchestration=(()=>{
   if(dayOf(now)!==runKey)return {kind:'stop',reason:'day_rolled'};
   const cooling=Date.parse(control.cooldownUntil||'');
   if(Number.isFinite(cooling)&&cooling>now)return {kind:'sleep',until:cooling,reason:'cooldown'};
-  const fe=fencedEnv(env,adm.modeRevision),clock=ctx.clock||(()=>Date.now()),began=clock();
+  const clock=ctx.clock||(()=>Date.now()),began=clock();
+  // The action takes the step lease first: a step of another holder that is still live (a previous instance, an external step admitted
+  // before the switch) is waited for, never raced.
+  const taken=await acquireStep(env,{kind:'executor',modeRevision:adm.modeRevision,now}).catch(()=>({busy:true,until:now+policy().COOLDOWNS_MS[0]}));
+  if(taken.reason)return {kind:'stop',reason:taken.reason};
+  if(taken.busy)return {kind:'sleep',until:Math.max(taken.until,now+SLEEP_FLOOR_MS),reason:'step_lease_held'};
+  const fe=fencedEnv(env,adm.modeRevision,taken.step);
   let outcome;
   try{outcome=await drive(fe,control,{now});}
   catch(error){outcome={failure:{code:classifyThrown(error)}};}
+  finally{await endStep(env,taken.step).catch(()=>false);}
   if(outcome.failure?.code==='epoch_mismatch')return {kind:'stop',reason:'epoch_mismatch'};
   // Commit. A thrown commit is not retried blind: the next action reads the control record and sync.json first.
   const key=outcome.run?checkpointKey(outcome.run):control.checkpoint?.key??null;
@@ -412,6 +486,6 @@ const EpgOrchestration=(()=>{
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,health,sideEffects:'none'};
  }
- return {TABLE,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,readModel,drainState,classifyThrown,checkpointKey,progressCount};
+ return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,readModel,drainState,classifyThrown,checkpointKey,progressCount};
 })();
 async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}

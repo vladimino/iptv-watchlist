@@ -5,10 +5,11 @@
 -- this file is applied changes nothing.
 -- It follows a complete version 14 (0012 to 0014 applied in order) and refuses anything else before a table is created: the
 -- first statement inserts a second schema_contract row and so aborts the file. The version becomes 15 and never goes down.
--- epg_orchestration_document holds two small JSON documents, by key: `mode` (external | switching | cloudflare, the target, the
+-- epg_orchestration_document holds three small JSON documents, by key: `mode` (external | switching | cloudflare, the target, the
 -- epoch and the drain state; written only by the owner's mode switch) and `control` (the run key, the Workflow instance, the
 -- checkpoint, the retry budget, the cooldown, the quarantine and the last durable progress; written only by the executor and
--- the owner's quarantine clear). `revision` is the compare-and-set token: every write names the revision it read.
+-- the owner's quarantine clear) and `lease` (the durable step lease: which step may mutate EPG state, until when; taken by
+-- every external or executor step and waited for by the owner's drain). `revision` is the compare-and-set token: every write names the revision it read.
 -- Every authoritative published-EPG commit made through an executor or through the external path asserts, in its own D1 batch,
 -- that the `mode` document is still at the revision it had at admission (src/published-epg.js), so a commit admitted before
 -- the owner closed admission cannot land after it.
@@ -31,7 +32,7 @@ WHERE NOT EXISTS (
 );
 
 CREATE TABLE epg_orchestration_document (
- key TEXT PRIMARY KEY CHECK (key IN ('mode', 'control')),
+ key TEXT PRIMARY KEY CHECK (key IN ('mode', 'control', 'lease')),
  body TEXT NOT NULL CHECK (json_valid(body)),
  revision INTEGER NOT NULL CHECK (revision >= 1),
  updated_at TEXT NOT NULL

@@ -36,7 +36,7 @@ let databases=0;
  assert.doesNotMatch(source,/\bfetch\(|BUCKET|TOKEN|SECRET/,'the executor fetches no source and holds no secret');
  assert.doesNotMatch(source,/\.put\(|\.delete\(/,'the executor writes no R2 object itself');
  const worker=fs.readFileSync('src/worker.js','utf8');
- assert.match(worker,/EpgOrchestration\.ensure\(env,/);assert.match(worker,/EpgOrchestration\.externalGate\(env\)/);
+ assert.match(worker,/EpgOrchestration\.ensure\(env,/);assert.match(worker,/EpgOrchestration\.beginExternalStep\(env\)/);
 }
 
 // 2. The migration: refused below a complete version 14, applied on one, writes no row, and the version never goes down.
@@ -136,14 +136,18 @@ const idle=()=>({body:{}});
  const db=database();
  const wf=binding();
  const t0=Date.parse('2026-11-07T12:00:00Z');
- // A recent external step: the drain is not verified.
- const harness=load({pipeline:idle,workflow:wf,db,sync:{runId:'old',stage:'epg',updatedAt:at(t0-5*MIN),startedAt:at(t0-10*MIN)}});
+ const harness=load({pipeline:idle,workflow:wf,db,sync:{runId:'old',stage:'epg',updatedAt:at(t0-90*MIN),startedAt:at(t0-100*MIN)}});
  const {epg,env,state}=harness;
+ // An external step admitted before the owner closes admission holds the durable lease: the drain is not verified while it is live,
+ // however old sync.json looks.
+ const external=await epg.beginExternalStep(env,t0);
+ assert.ok(external.step,'an external step is admitted in external mode');
  eq(await epg.switchMode(env,{action:'complete'},t0),{action:'complete',refused:'not_switching',mode:'external',epoch:0});
  eq(await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0),{action:'close_admission',closed:true,mode:'switching',target:'cloudflare',epoch:1});
  eq(await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0),{action:'close_admission',refused:'switch_open',mode:'switching',target:'cloudflare',epoch:1});
  eq(await epg.externalGate(env),{reason:'switch_in_progress',fence:null});
- eq(await epg.switchMode(env,{action:'complete'},t0),{action:'complete',refused:'drain_not_verified',drain:'step_recent',mode:'switching',target:'cloudflare',epoch:1});
+ eq(await epg.switchMode(env,{action:'complete'},t0),{action:'complete',refused:'drain_not_verified',drain:'step_lease_live',mode:'switching',target:'cloudflare',epoch:1});
+ assert.equal(await epg.endStep(env,external.step),true,'the step releases its lease when it ends');
  // An unfinished seal is never handed over mid-way.
  state.sync={runId:'old',stage:'seal',updatedAt:at(t0-5*H),startedAt:at(t0-6*H),seal:{phase:'ledger'}};
  assert.equal((await epg.switchMode(env,{action:'complete'},t0)).drain,'seal_unfinished');
@@ -477,9 +481,11 @@ function runner(h,{startAt}){
  const worker=fs.readFileSync('src/worker.js','utf8');
  const guard=worker.slice(worker.indexOf("async function postSync("),worker.indexOf("async function syncStep("));
  assert.match(guard,/caller!=='internal'&&typeof EpgOrchestration!=='undefined'/);
- assert.match(guard,/if\(gate\.reason\)return json\(\{[^}]*nextAction:'stop'[^}]*\},409\)/);
- assert.ok(guard.indexOf('externalGate')<guard.indexOf("beginSync(env)"),'the gate runs before the first write of a start');
- assert.ok(guard.indexOf('externalGate')<guard.indexOf('openContinuationStep'),'and before a step records anything');
+ assert.match(guard,/if\(gate\.reason\)return json\(\{[^}]*nextAction:[^}]*reason:gate\.reason[^}]*\},409\)/);
+ assert.match(guard,/finally\{if\(lease\)await EpgOrchestration\.endStep\(env,lease\)/,'the lease is released whatever the step does');
+ assert.ok(guard.indexOf('beginExternalStep')<guard.indexOf('postSyncRun(env'),'admission runs before any step code');
+ const run=worker.slice(worker.indexOf('async function postSyncRun('),worker.indexOf('async function syncStep('));
+ assert.ok(run.indexOf("beginSync(env)")>=0&&run.indexOf('openContinuationStep')>=0);
 }
 
 // 13. Cron coexistence: the executor's ensure, the projector, Ratings and the monitor are independent calls in one scheduled
@@ -494,5 +500,127 @@ function runner(h,{startAt}){
  const settled=await Promise.allSettled([h.epg.ensure(h.env,{now:Date.parse('2026-11-07T16:00:00Z')}),Promise.resolve('projector'),Promise.resolve('monitor')]);
  assert.equal(settled[0].status,'fulfilled','a failing create is reported by value, never thrown into the tick');
  assert.equal(settled[1].value,'projector');assert.equal(settled[2].value,'monitor');
+}
+
+// 14. The cross-storage single-writer race (review of PR #413). An external step admitted just before `close_admission` holds the
+// durable lease; the drain waits for it and never reads sync.json's age as proof; the step fails at its next mutation boundary
+// because the mode revision moved; a zombie past its lease cannot write either; and the real saveJSON, seal-unit and copy
+// boundaries of the Worker call the guard.
+{
+ const t0=Date.parse('2026-11-07T12:00:00Z');
+ const fresh=()=>{const db=database();const wf=binding();const h=load({pipeline:idle,workflow:wf,db,sync:{runId:'r',stage:'epg',updatedAt:at(t0-60*MIN),startedAt:at(t0-70*MIN)}});return {db,wf,...h};};
+ // (a) Admitted before close_admission: the drain waits for it, the step stops at its next boundary, nothing is written after.
+ {
+  const h=fresh();const {epg,env}=h;
+  const ext=await epg.beginExternalStep(env,t0);
+  assert.ok(ext.step);eq(ext.env.epgFence,{revision:null});assert.equal(ext.env.epgStep.holder,ext.step.holder);
+  await epg.assertStep(ext.env,t0+1000);
+  await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0+2000);
+  eq(await epg.switchMode(env,{action:'complete'},t0+3000),{action:'complete',refused:'drain_not_verified',drain:'step_lease_live',mode:'switching',target:'cloudflare',epoch:1});
+  await assert.rejects(epg.assertStep(ext.env,t0+4000),/epg_step_fenced/,'the pre-switch step is fenced at its next mutation boundary');
+  // A new external step is refused while admission is closed, with the reason and nothing taken.
+  eq(await epg.beginExternalStep(env,t0+5000),{reason:'switch_in_progress'});
+  assert.equal(await epg.endStep(env,ext.step),true);
+  eq(await epg.switchMode(env,{action:'complete'},t0+6000),{action:'complete',completed:true,mode:'cloudflare',epoch:1,drain:'verified'});
+  await assert.rejects(epg.assertStep(ext.env,t0+7000),/epg_step_fenced/,'and still after the switch completed');
+  eq(await epg.beginExternalStep(env,t0+8000),{reason:'external_writer_fenced'});
+ }
+ // (b) The step that is old by the 15-minute rule (sync.json untouched for an hour) but alive: renewing at its boundaries keeps the
+ // drain refused, so age is never the evidence.
+ {
+  const h=fresh();const {epg,env}=h;
+  const ext=await epg.beginExternalStep(env,t0);
+  await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0);
+  for(let minute=1;minute<=20;minute++){
+   const now=t0+minute*MIN;
+   // The holder's own fence has moved: it cannot renew a lease under the old revision, and the lease runs out on its own.
+   await assert.rejects(epg.assertStep(ext.env,now),/epg_step_fenced/);
+  }
+  const lease=(await epg.readLease(env)).record;
+  assert.equal(lease.released,false);
+  const live=Date.parse(lease.expiresAt)+epg.BOUNDARY_MARGIN_MS;
+  assert.equal((await epg.drainState(env,live-1)),'step_lease_live','live until its expiry plus the margin, whatever the age of sync.json');
+  assert.equal((await epg.drainState(env,live+1)),'verified','a zombie past its lease is drained, and it cannot write (the next check)');
+  await assert.rejects(epg.assertStep(ext.env,live+2),/epg_step_fenced/);
+ }
+ // (c) A live step that is not fenced renews its lease at the boundaries, so a long step keeps its proof; a lease that runs out first
+ // stops it. The mode revision never moved in this case.
+ {
+  const h=fresh();const {epg,env}=h;
+  const ext=await epg.beginExternalStep(env,t0);
+  let now=t0;
+  for(let i=0;i<8;i++){now+=3*MIN;await epg.assertStep(ext.env,now);}
+  const lease=(await epg.readLease(env)).record;
+  assert.ok(Date.parse(lease.expiresAt)>now,'renewed while the step is alive');
+  assert.equal(await epg.drainState(env,now),'step_lease_live');
+  await assert.rejects(epg.assertStep(ext.env,Date.parse(lease.expiresAt)+60000),/epg_step_fenced/,'an expired lease stops a step that stopped checking in');
+  // Another holder after expiry takes over; the old holder is fenced even if the mode revision did not move.
+  const other=await epg.acquireStep(env,{kind:'executor',modeRevision:null,now:Date.parse(lease.expiresAt)+60000});
+  assert.ok(other.step);
+  await assert.rejects(epg.assertStep(ext.env,Date.parse(lease.expiresAt)+61000),/epg_step_fenced/,'the old holder is not the holder');
+ }
+ // (d) One live step at a time: a second external step is busy until the first ends, with its own catch-up time.
+ {
+  const h=fresh();const {epg,env}=h;
+  const first=await epg.beginExternalStep(env,t0);
+  const second=await epg.beginExternalStep(env,t0+1000);
+  assert.equal(second.reason,'step_in_progress');assert.ok(Date.parse(second.nextCatchUpAt)>t0);
+  await epg.endStep(env,first.step);
+  assert.ok((await epg.beginExternalStep(env,t0+2000)).step,'free again after release');
+  assert.equal(await epg.endStep(env,{holder:'someone-else'}),false,'a step cannot release another holder');
+ }
+ // (e) Unreadable evidence fails closed: a malformed lease refuses the drain and an admission; an unreadable database fences a step.
+ {
+  const h=fresh();const {epg,env,db}=h;
+  await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0);
+  db.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"holder\":5}',1,'x')");
+  assert.equal(await epg.drainState(env,t0),'unreadable');
+  const broken={...env,DB:{prepare:()=>{throw new Error('d1 down');}},epgStep:{holder:'h',modeRevision:1}};
+  await assert.rejects(epg.assertStep(broken,t0),/epg_step_fenced/);
+ }
+ // (f) The executor waits for a live lease instead of racing it, and holds and releases its own around each action.
+ {
+  const due=Date.parse('2026-11-07T16:00:00Z');
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  await h.epg.ensure(h.env,{now:due});
+  const ext=await h.epg.acquireStep(h.env,{kind:'external',modeRevision:1,now:due});
+  assert.ok(ext.step);
+  const ctx={runKey:'2026-11-07',series:0,epoch:1,id:'epg_20261107_0',now:()=>due+1000,random:()=>0.5};
+  const waited=await h.epg.act(h.env,ctx);
+  assert.equal(waited.kind,'sleep');assert.equal(waited.reason,'step_lease_held');assert.equal(h.state.calls.length,0,'no pipeline call while another step is live');
+  await h.epg.endStep(h.env,ext.step);
+  const ran=await h.epg.act(h.env,{...ctx,now:()=>due+2000});
+  assert.notEqual(ran.reason,'step_lease_held');assert.ok(h.state.calls.length>=1);
+  assert.ok(h.state.calls.every(c=>c.fence&&c.fence.revision===1));
+  const after=(await h.epg.readLease(h.env)).record;assert.equal(after.released,true,'the executor releases its lease after the action');
+ }
+ // (g) The Worker's own mutation boundaries call the guard: the real saveJSON, copyEpgGeneration, sealStep, sealUnits, stageSealedGeneration
+ // and epgSync, and a pre-switch step's saveJSON writes nothing after close_admission.
+ {
+  const worker=fs.readFileSync('src/worker.js','utf8');
+  for(const fn of ['copyEpgGeneration','stageSealedGeneration','sealStep','epgSync']){
+   const at0=worker.indexOf('async function '+fn+'(');assert.ok(at0>=0,fn);
+   assert.match(worker.slice(at0,at0+200),/await epgStepGuard\(env\)/,fn+' guards its first mutation');
+  }
+  assert.match(worker.slice(worker.indexOf('async function sealUnits('),worker.indexOf('async function sealUnits(')+700),/await epgStepGuard\(env\);\s*const outcome=await tracedPhase/,'each seal unit is guarded');
+  const {loadWorker}=await import('../scripts/discovery-ledger-offline.mjs');
+  const {MemoryBucket}=await import('./memory-bucket.mjs');
+  const context=loadWorker();
+  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
+  vm.runInContext(source,context);
+  const epg=vm.runInContext('EpgOrchestration',context);
+  const db=database();
+  const bucket=new MemoryBucket();
+  const env={DB:db,BUCKET:bucket};
+  const ext=await epg.beginExternalStep(env);
+  const saveJSON=vm.runInContext('saveJSON',context);
+  await saveJSON(ext.env,'sync.json',{runId:'r',stage:'epg',n:1});
+  assert.equal(JSON.parse(await (await bucket.get('sync.json')).text()).n,1,'the admitted step writes');
+  await epg.switchMode(env,{action:'close_admission',target:'cloudflare'});
+  await assert.rejects(saveJSON(ext.env,'sync.json',{runId:'r',stage:'metadata',n:2}),/epg_step_fenced/);
+  assert.equal(JSON.parse(await (await bucket.get('sync.json')).text()).n,1,'nothing is written after close_admission');
+  await saveJSON(env,'unrelated.json',{ok:true});
+  assert.ok(await bucket.get('unrelated.json'),'a write outside an EPG step is unchanged');
+ }
 }
 console.log('epg-orchestration: ok');

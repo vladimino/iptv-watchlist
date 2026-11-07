@@ -334,7 +334,11 @@ async function updatePublishedFiles(env,files){
  for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);
  return publication.programmeRunId;
 }
+// AIR-348 / ADR 0100: a mutation boundary of an EPG step. A step that no longer holds its lease under the mode revision it was admitted
+// with (the owner closed admission, or the lease ran out) stops here and the write does not happen. A no-op outside such a step.
+async function epgStepGuard(env){if(env?.epgStep&&typeof EpgOrchestration!=='undefined')await EpgOrchestration.assertStep(env);}
 const saveJSON=async(env,key,value)=>{
+ await epgStepGuard(env);
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeWrite(env,key,value);
   if(routed.handled)return;
@@ -464,6 +468,7 @@ async function queueCommittedDiscovery(env,run){
  try{await noteDiscoveryWorkflow(env);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
 }
 async function copyEpgGeneration(env,runId){
+ await epgStepGuard(env);
  for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){
   const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(!staged)continue;
   const dest=name==='programme.json'?name:'epg/'+name,meta={httpMetadata:{contentType:'application/json'}};
@@ -902,6 +907,7 @@ function sealResponse(run,discovery,extra={}){
 // Stores the generation ledger (R2 only, streamed with a known length) and the staging payload, then moves the run to
 // `seal`. It writes nothing to the D1 ledger and does not touch the lease row beyond holding it for the duration.
 async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,uncertain,publication}){
+ await epgStepGuard(env);
  const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
  let planned=null;
  try{
@@ -1001,6 +1007,7 @@ async function sealUnits(env,run,deadline,list){
  for(const unit of list){
   if(units[unit.name])continue;
   if(ran>0&&Date.now()>=deadline)return {done:false};
+  await epgStepGuard(env);
   const outcome=await tracedPhase(run.runId,'seal_'+unit.phase,unit.work);
   ran++;
   if(outcome==='failed'){
@@ -1085,6 +1092,7 @@ async function sealQueueStep(env,run,deadline=Infinity){
 // One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
 // `nextAction: continue` until the run is complete.
 async function sealStep(env,run,entryAt=Date.now()){
+ await epgStepGuard(env);
  const deadline=entryAt+SEAL_REQUEST_BUDGET_MS;
  if(!run.seal?.jobId)throw new Error('seal_job_missing');
  // The lease is taken without the published pointer's programme: once the ledger is committed the discovery authority
@@ -1197,12 +1205,18 @@ async function syncStatus(env){
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
 async function postSync(env,execution,pathname,body,caller='http'){
  // AIR-348 / ADR 0100: the external writer path (HTTP, the MCP tools, an old Task prompt) is fenced once the owner has closed
- // admission or switched the EPG executor to Cloudflare. The executor's own calls (caller `internal`) carry their fence already.
+ // admission or switched the EPG executor to Cloudflare, and a step it is admitted for holds the durable step lease until it ends,
+ // so the owner's drain can prove no step is in flight. The executor's own calls (caller `internal`) hold their lease already.
+ let lease=null;
  if(caller!=='internal'&&typeof EpgOrchestration!=='undefined'){
-  const gate=await EpgOrchestration.externalGate(env);
-  if(gate.reason)return json({runId:body?.runId??null,stage:null,nextAction:'stop',reason:gate.reason,error:gate.reason},409);
-  if(gate.fence)env={...env,epgFence:gate.fence};
+  const gate=await EpgOrchestration.beginExternalStep(env);
+  if(gate.reason)return json({runId:body?.runId??null,stage:null,nextAction:gate.nextCatchUpAt?'wait':'stop',reason:gate.reason,error:gate.reason,nextCatchUpAt:gate.nextCatchUpAt??null},409);
+  env=gate.env;lease=gate.step||null;
  }
+ try{return await postSyncRun(env,execution,pathname,body,caller);}
+ finally{if(lease)await EpgOrchestration.endStep(env,lease).catch(()=>false);}
+}
+async function postSyncRun(env,execution,pathname,body,caller){
  if(pathname==='/api/sync/start')return json(await beginSync(env));
  const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
  await openContinuationStep(env,step,persisted());
@@ -1224,6 +1238,7 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
+ await epgStepGuard(env);
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await tracedPhase(run.runId,'generation_copy',()=>copyEpgGeneration(env,run.runId));await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}
  const titles=await loadJSON(env,'titles.json')||{};
  try{await localizeFilmTitles(run.watchlist,titles,'on');await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
