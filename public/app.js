@@ -192,6 +192,8 @@ function applyEventsScreen(on){
 }
 function openEventsScreen(trigger){
  eventsTrigger=trigger||$('#activity-expand');
+ // The film screen hides the workspace with !important, so events opened over it would stay invisible. Leave it first.
+ if(filmScreen)applyFilmScreen(null);
  if(!eventsRequested()){rememberFilmList();window.history.pushState({iptvEvents:true},'','/events');}
  else if(new URL(window.location.href).searchParams.get('screen')==='events'){writeFilmQuery(filmSearchFrom(window.location.href));window.history.replaceState(window.history.state,'','/events');}
  applyEventsScreen(true);
@@ -278,7 +280,7 @@ function closeEventsScreen(){
 function onHistoryNavigation(){
  const filmId=filmIdFromLocation();
  const leavingFilm=!!filmScreen&&!filmId,returnId=filmReturnId,filtersChanged=leavingFilm&&filmFiltersChanged();
- if(filmId){applyFilmScreen(filmId);return;}
+ if(filmId){if(eventsScreen)applyEventsScreen(false);applyFilmScreen(filmId);return;}
  if(filmScreen)applyFilmScreen(null);
  const onEvents=eventsRequested();
  if(!onEvents){const next=readUrlState(new URL(window.location.href));if(leavingFilm&&filtersChanged)render();else if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
@@ -293,6 +295,7 @@ function syncUrl(){
  const target=next.pathname+next.search+next.hash,current=window.location.pathname+window.location.search+window.location.hash;
  if(target!==current)window.history.replaceState(window.history.state,'',target);
  writeFilmQuery(next.search);
+ markCurrentPreset();
 }
 function restoreUrl(){
  urlRestoring=true;
@@ -1470,16 +1473,37 @@ function applyPresetQuery(query){
  restoreUrl();
  syncUrl();
 }
+// A saved scenario is "current" only when its canonical app parameters equal the filters on screen. A manual change drops the mark.
+function presetKey(query){const keys=new Set(APP_QUERY_KEYS);return [...new URLSearchParams(String(query||''))].filter(([key])=>keys.has(key)).map(([key,value])=>key+'='+value).sort().join('&');}
+function presetIsCurrent(preset,key){return !!preset&&key!==null&&presetKey(preset.query)===key;}
+function currentPresetKey(){try{return presetKey(presetQuery());}catch{return null;}}
+function markCurrentPreset(){
+ const list=$('#preset-list');if(!list||!presets.length)return;
+ const key=currentPresetKey();
+ for(const row of list.querySelectorAll?.('.preset-row')||[]){
+  const apply=row.querySelector('[data-preset-apply]'),on=presetIsCurrent(presets.find(item=>item.id===apply?.dataset?.presetApply),key);
+  row.classList.toggle('is-current',on);
+  if(on)apply.setAttribute('aria-current','true');else apply.removeAttribute?.('aria-current');
+ }
+}
+function focusPreset(selector){const node=$(selector);if(node&&node.focus)node.focus();}
+function closePresetEditor(returnTo){
+ presetEditor=null;presetStatus='';renderPresets();
+ focusPreset(returnTo==='save'?'#preset-save':'#preset-list [data-preset-apply="'+String(returnTo).replace(/"/g,'')+'"]');
+}
 function renderPresets(){
- const list=$('#preset-list'),empty=$('#presets-empty'),status=$('#preset-status'),editor=$('#preset-editor');
+ const list=$('#preset-list'),empty=$('#presets-empty'),status=$('#preset-status'),editor=$('#preset-editor'),add=$('#preset-save');
  if(!list||!empty||!status)return;
  empty.hidden=presets.length>0;
  status.textContent=presetStatus;
  if(editor)editor.hidden=!presetEditor;
+ // One "save" call to action at a time: the head button gives way to the editor's own primary button.
+ if(add)add.hidden=!!presetEditor;
+ const key=currentPresetKey();
  list.innerHTML=presets.map(preset=>{
-  const prompt=presetPrompt?.id===preset.id;
+  const prompt=presetPrompt?.id===preset.id,current=presetIsCurrent(preset,key);
   const actions=prompt?`<p class="preset-confirm">${presetPrompt.action==='delete'?'Удалить этот сценарий?':'Заменить сохранённые условия текущими?'}</p><button type="button" data-preset-confirm="${presetPrompt.action}">Да</button><button type="button" data-preset-dismiss>Нет</button>`:`<button type="button" data-preset-rename>Переименовать</button><button type="button" data-preset-update>Обновить</button><button type="button" data-preset-delete>Удалить</button>`;
-  return `<li class="preset-row"><button type="button" class="preset-apply" data-preset-apply="${escapeHTML(preset.id)}">${escapeHTML(preset.name)}</button><details class="preset-actions"${prompt?' open':''}><summary aria-label="Действия: ${escapeHTML(preset.name)}">⋯</summary><div>${actions}</div></details></li>`;
+  return `<li class="preset-row${current?' is-current':''}"><button type="button" class="preset-apply" data-preset-apply="${escapeHTML(preset.id)}" title="${escapeHTML(preset.name)}"${current?' aria-current="true"':''}>${escapeHTML(preset.name)}</button><details class="preset-actions"${prompt?' open':''}><summary aria-label="Действия: ${escapeHTML(preset.name)}">⋯</summary><div>${actions}</div></details></li>`;
  }).join('');
 }
 async function loadPresets(){
@@ -1590,18 +1614,28 @@ function bindControls(){
  document.querySelectorAll('[data-runtime-max]').forEach(b=>b.addEventListener('click',()=>applyFilters({maxRuntime:b.dataset.runtimeMax==='any'?null:Number(b.dataset.runtimeMax)})));
  $('#filter-toggle').addEventListener('click',()=>{const b=$('#filter-toggle');const open=b.getAttribute('aria-expanded')!=='true';b.setAttribute('aria-expanded',String(open));$('#filters').dataset.open=String(open);});
  const statusDetails=$('#status-details');statusDetails.addEventListener('toggle',()=>{$('#status-details-label').textContent=statusDetails.open?'Скрыть детали':'Показать детали';});
- $('#status-events-link').addEventListener('click',event=>{event.preventDefault();openEventsScreen($('#status-events-link'));});
- const integrationEvents=$('#status-integrations-events');if(integrationEvents)integrationEvents.addEventListener('click',event=>{event.preventDefault();openEventsScreen(integrationEvents);});
+ // Both footer links are real /events links. A plain click opens the in-page screen; a modified or non-primary click (new tab, copy) keeps native navigation.
+ for(const link of [$('#status-events-link'),$('#status-integrations-events')])if(link)link.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();openEventsScreen(link);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
  const activityBack=$('#activity-back');if(activityBack)activityBack.addEventListener('click',closeEventsScreen);
  const filmBack=$('#film-back');if(filmBack)filmBack.addEventListener('click',closeFilm);
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
- const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
- const presetEditorForm=$('#preset-editor');if(presetEditorForm)presetEditorForm.addEventListener('submit',event=>{event.preventDefault();const name=$('#preset-name').value;if(presetEditor?.mode==='rename')renamePreset(presetEditor.id,name);else createPreset(name);});
- const presetCancel=$('#preset-cancel');if(presetCancel)presetCancel.addEventListener('click',()=>{presetEditor=null;renderPresets();});
+ const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;presetStatus='';renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
+ const presetEditorForm=$('#preset-editor');if(presetEditorForm){
+  presetEditorForm.addEventListener('submit',async event=>{
+   event.preventDefault();
+   const input=$('#preset-name'),name=String(input?.value||'').trim(),mode=presetEditor?.mode,id=presetEditor?.id;
+   if(!name){presetStatus='Введи название сценария.';renderPresets();if(input)input.focus();return;}
+   const saved=mode==='rename'?await renamePreset(id,name):await createPreset(name);
+   if(saved)focusPreset(mode==='rename'?'#preset-list [data-preset-apply="'+String(id).replace(/"/g,'')+'"]':'#preset-save');
+   else if(input)input.focus();
+  });
+  presetEditorForm.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();closePresetEditor(presetEditor?.mode==='rename'?presetEditor.id:'save');}});
+ }
+ const presetCancel=$('#preset-cancel');if(presetCancel)presetCancel.addEventListener('click',()=>closePresetEditor(presetEditor?.mode==='rename'?presetEditor.id:'save'));
  const presetList=$('#preset-list');if(presetList)presetList.addEventListener('click',event=>{
   const apply=event.target.closest?.('[data-preset-apply]');
-  if(apply){const preset=presets.find(item=>item.id===apply.dataset.presetApply);if(preset)applyPresetQuery(preset.query);return;}
+  if(apply){const preset=presets.find(item=>item.id===apply.dataset.presetApply);if(preset){applyPresetQuery(preset.query);markCurrentPreset();}return;}
   const id=event.target.closest?.('.preset-row')?.querySelector('[data-preset-apply]')?.dataset.presetApply;
   if(event.target.closest?.('[data-preset-rename]')){presetEditor={mode:'rename',id};presetPrompt=null;renderPresets();const input=$('#preset-name');if(input){input.value=presets.find(item=>item.id===id)?.name||'';input.focus();}}
   else if(event.target.closest?.('[data-preset-update]')){presetPrompt={id,action:'update'};renderPresets();}
