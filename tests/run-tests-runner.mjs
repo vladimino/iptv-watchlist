@@ -52,7 +52,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   // the trim boundary: the tail reaches 2 * TAIL_LIMIT + 1, is cut to exactly TAIL_LIMIT, and the stream ends right there
   c = text([at(HEAD_LIMIT), at(2 * TAIL_LIMIT + 1)]);
   assert.equal(c.omitted(), TAIL_LIMIT + 1, 'the dropped characters are counted although the tail is exactly TAIL_LIMIT');
-  assert.equal(notice.exec(c.text())[1], String(TAIL_LIMIT + 1), 'the separator is present right after a trim');
+  assert.ok(notice.test(c.text()), 'the separator is present right after a trim, although the tail is exactly TAIL_LIMIT');
+  assert.equal(notice.exec(c.text())[1], String(TAIL_LIMIT + 1));
   assert.equal(c.text().length, HEAD_LIMIT + TAIL_LIMIT + c.text().match(notice)[0].length);
   // exactly 2 * TAIL_LIMIT in the tail does not trim yet: omitted is TAIL_LIMIT and the notice says so
   c = text([at(HEAD_LIMIT), at(2 * TAIL_LIMIT)]);
