@@ -380,8 +380,8 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
 // names the old one, and the old generation's R2 catalog copy may be absent. The run is deferred as generation_pending before any
 // read of that catalog or any write; outside the window a missing copy is still a failed input. After the handoff it projects.
 {
- const state={ready:true,programmeRunId:'run-2'};
- const handoff=projectorContext({log:line=>logs.push(JSON.parse(line)),globals:{DiscoveryAuthority:{readAuthority:async()=>({...state})}}});
+ const state={ready:true,mode:'d1',cutover:'open',generation:5,programmeRunId:'run-2'};
+ const handoff=projectorContext({log:line=>logs.push(JSON.parse(line)),globals:{DiscoveryAuthority:{readAuthority:async()=>({...state}),routeRead:async(env,key)=>{const object=await env.BUCKET.get(key);return {handled:true,value:object?await object.json():null};}}}});
  const runWith=(env,options={})=>handoff.runD1EnrichmentProjection(env,options);
  const {db:window}=migrated();
  const missing=r2();missing.objects.delete('epg/generations/run-1/discovered-films.json');
@@ -402,9 +402,11 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  assert.equal(catalogReads.length,0);
  await missing.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-1'}));
  // Without the window (authority on the published run) a missing copy is still a failed input: the fail-closed rule is unchanged.
- state.programmeRunId='run-1';
+ state.ready=false;state.programmeRunId=null;
  const broken=await runWith({DB:window,BUCKET:missing,D1_ENRICHMENT_WRITE:'on'});
  assert.deepEqual([broken.outcome,broken.reason,broken.inputKey],['failed','input_missing','epg/generations/run-1/discovered-films.json']);
+ // A D1 authority that names the published run answers for the catalog itself; there is no R2 copy to be missing (AIR-375, block 16).
+ state.ready=true;state.programmeRunId='run-1';
  // After the publish the generation and the authority agree and the copy exists: the next run projects.
  const {db:after}=migrated();
  const done=await runWith({DB:after,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
@@ -424,12 +426,142 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  // The authority moves to the next run after the first guard, while the plan is built: the guard repeats right before the D1 write,
  // so nothing is written and the run defers.
  let reads=0;
- const racing=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>({ready:true,programmeRunId:++reads>1?'run-2':'run-1'})}}});
+ const racing=projectorContext({globals:{DiscoveryAuthority:{readAuthority:async()=>({ready:true,mode:'d1',cutover:'open',generation:5,programmeRunId:++reads>1?'run-2':'run-1'}),routeRead:async(env,key)=>{const object=await env.BUCKET.get(key);return {handled:true,value:object?await object.json():null};}}}});
  const {db:race}=migrated();
  const raced=await racing.runD1EnrichmentProjection({DB:race,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
  assert.deepEqual([raced.outcome,raced.reason],['deferred','generation_pending']);
  assert.equal(reads,2,'checked before the reads and again before the write');
  assert.equal(one(race,'SELECT COUNT(*) FROM film'),0,'stale run-1 projection is not written');
+}
+
+// 16. AIR-375: under a D1 discovery authority a generation's catalog is not an R2 object (a write of its key goes to the D1 catalog and
+// no R2 copy is made), and the R2 copy of the shared decisions is frozen at the cutover. The projector read both straight from R2: it
+// failed `input_missing` on every run once a generation was published under D1 authority (production: every hourly run from the first
+// tick after generation 5744aef7 was published), and the decisions it could have read were stale. It now reads both through the
+// authority route; an authority that is not D1 keeps the R2 objects and a missing copy there stays a failed input.
+{
+ const base=r2();
+ const catalog=await (await base.get('epg/generations/run-1/discovered-films.json')).json();
+ const decisions=await (await base.get('epg/discovery-resolution.json')).json();
+ // The D1 authority world: no R2 copy of the generation catalog, and a stale R2 copy of the decisions that must never be used.
+ const d1World=()=>{const bucket=r2();bucket.objects.delete('epg/generations/run-1/discovered-films.json');bucket.objects.set('epg/discovery-resolution.json',base.objects.get('epg/discovery-resolution.json'));bucket.put('epg/discovery-resolution.json',JSON.stringify({stale:{decision:'frozen-at-cutover'}}));return bucket;};
+ const authority=(over={})=>{const calls=[];const state={ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:7,...over.state};return {calls,state,api:{
+  readAuthority:over.readAuthority||(async()=>({...state})),
+  routeRead:over.routeRead||(async (env,key)=>{calls.push(key);if(key==='epg/generations/run-1/discovered-films.json')return {handled:true,value:catalog};if(key==='epg/discovery-resolution.json')return {handled:true,value:decisions};return {handled:false};}),
+ }};};
+ const spy=bucket=>{const keys=[];const get=bucket.get.bind(bucket);bucket.get=async key=>{keys.push(key);return get(key);};return keys;};
+ const withAuthority=api=>projectorContext({log:line=>logs.push(JSON.parse(line)),globals:{DiscoveryAuthority:api}});
+ // Baseline: the same data from R2 under an R2 authority.
+ const {db:baseline}=migrated();
+ assert.equal((await run({DB:baseline,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'})).outcome,'complete');
+ const baselineFilms=one(baseline,'SELECT COUNT(*) FROM film');
+
+ // (a) D1 authority, the R2 catalog copy absent: the run projects from the authority's catalog and decisions; neither R2 object is read.
+ {
+  const a=authority(),bucket=d1World(),keys=spy(bucket),{db}=migrated();
+  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+  assert.equal(summary.outcome,'complete',JSON.stringify(summary));
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),baselineFilms,'the same Films as the R2 catalog yields');
+  assert.deepEqual(a.calls.sort(),['epg/discovery-resolution.json','epg/generations/run-1/discovered-films.json']);
+  assert.ok(!keys.includes('epg/generations/run-1/discovered-films.json')&&!keys.includes('epg/discovery-resolution.json'),'no R2 read of the routed keys, so no stale decisions');
+  assert.equal(summary.discoveryGeneration,7);
+  // A natural retry converges and does not duplicate anything.
+  const again=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+  assert.equal(again.outcome,'complete');assert.equal(one(db,'SELECT COUNT(*) FROM film'),baselineFilms);
+ }
+ // (b) Fail closed is unchanged where the authority is not D1: the R2 copy is the source and a missing copy is a failed input.
+ {
+  const bucket=d1World(),{db}=migrated();
+  const notD1=withAuthority({readAuthority:async()=>({ready:false,held:false,programmeRunId:null}),routeRead:async()=>{throw new Error('must not be routed');}});
+  const summary=await notD1.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['failed','input_missing','epg/generations/run-1/discovered-films.json']);
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'nothing is written');
+ }
+ // (c) The authority cannot answer for now (fence, ledger seal in progress): deferred, nothing written, projection clocks untouched.
+ for(const code of ['discovery_fence','discovery_incomplete']){
+  const a=authority({routeRead:async()=>{const error=new Error(code);error.code=code;throw error;}}),{db}=migrated(),before=db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),batches=db.calls.batches;
+  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','authority_unavailable','discovery_authority'],code);
+  assert.equal(db.calls.batches,batches);assert.deepEqual(db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),before);
+ }
+ // (d) An answer that cannot be used fails closed with the key, never silently: a bounded or unreadable catalog, a non-object value.
+ for(const [label,routeRead] of [['bounded',async()=>{const error=new Error('discovery_bounded');error.code='discovery_bounded';throw error;}],['unreadable',async()=>{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}],['not an object',async()=>({handled:true,value:[1,2,3]})]]){
+  const a=authority({routeRead}),{db}=migrated();
+  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([summary.outcome,summary.reason],['failed','input_invalid'],label);
+  assert.match(summary.inputKey,/discovered-films\.json$|discovery-resolution\.json$/,label);
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,label);
+ }
+ // (e) The authority no longer names the generation (null answer): a handoff, deferred before any write; the decisions answer null: absent.
+ {
+  const gone=authority({routeRead:async (env,key)=>({handled:true,value:key.endsWith('discovered-films.json')?null:decisions})}),{db}=migrated();
+  const summary=await withAuthority(gone.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','generation_pending','discovery_authority']);
+  const noDecisions=authority({routeRead:async (env,key)=>({handled:true,value:key.endsWith('discovered-films.json')?catalog:null})});
+  const missing=await withAuthority(noDecisions.api).runD1EnrichmentProjection({DB:migrated().db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([missing.outcome,missing.reason,missing.inputKey],['failed','input_missing','epg/discovery-resolution.json']);
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
+ }
+ // (f) A fenced discovery write moves the authority generation between the reads and the write: the inputs may have changed, so nothing is
+ // written and the run defers; the next run, on a stable generation, projects.
+ {
+  let reads=0;const a=authority({readAuthority:async()=>({ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:++reads>1?8:7})}),{db}=migrated();
+  const moved=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([moved.outcome,moved.reason,moved.inputKey],['deferred','input_changed','discovery_authority']);
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'nothing is written when the authority generation moved');
+  const stable=authority(),retry=await withAuthority(stable.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.equal(retry.outcome,'complete');assert.equal(one(db,'SELECT COUNT(*) FROM film'),baselineFilms);
+ }
+ // (g) A present, empty routed catalog is a real empty dataset, never a missing input; a failing run returns its summary and never throws,
+ // so the other hourly work (monitor, Ratings, Discovery) in the same firing is unaffected (they run under Promise.allSettled).
+ {
+  const empty=authority({routeRead:async (env,key)=>({handled:true,value:key.endsWith('discovered-films.json')?{}:decisions})}),{db}=migrated();
+  const summary=await withAuthority(empty.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.notEqual(summary.reason,'input_missing',JSON.stringify(summary));
+ }
+ // (h) The read was D1-owned and the authority moved away from D1 between the first read and the route (the route answers handled:false): the
+ // run defers and never falls back to the R2 copy, even though a stale R2 catalog and stale R2 decisions exist. Nothing is written.
+ {
+  const stale=r2(),staleKeys=spy(stale),{db}=migrated();
+  const a=authority({routeRead:async()=>({handled:false})});
+  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:stale,D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred','authority_unavailable','discovery_authority']);
+  assert.ok(!staleKeys.includes('epg/generations/run-1/discovered-films.json')&&!staleKeys.includes('epg/discovery-resolution.json'),'no R2 fallback for a D1-owned read');
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,'nothing is written');
+  // A D1 authority without a route at all cannot be read through: deferred, no R2 fallback either.
+  const noRoute=withAuthority({readAuthority:async()=>({ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:7})});
+  const bare=await noRoute.runD1EnrichmentProjection({DB:db,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([bare.outcome,bare.reason],['deferred','authority_unavailable']);
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
+  // A D1 authority without a finite generation cannot prove the inputs unchanged: deferred before any read.
+  const noGeneration=withAuthority({readAuthority:async()=>({ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1'}),routeRead:async()=>{throw new Error('must not be read');}});
+  const unproven=await noGeneration.runD1EnrichmentProjection({DB:db,BUCKET:r2(),D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([unproven.outcome,unproven.reason],['deferred','authority_unavailable']);
+ }
+ // (i) The authority changes between the input reads and the write, with stale R2 decisions and catalog present: every kind of change defers
+ // before any D1 write: away from D1 (not ready), held, another mode or cutover, another run, another generation, an unreadable authority.
+ for(const [label,later,reason] of [
+  ['away from D1',{ready:false,held:false,mode:'r2',cutover:'open',programmeRunId:null,generation:7},'input_changed'],
+  ['held',{ready:false,held:true,mode:'d1',cutover:'held',programmeRunId:'run-1',generation:7},'authority_unavailable'],
+  ['another mode',{ready:true,held:false,mode:'r2',cutover:'open',programmeRunId:'run-1',generation:7},'input_changed'],
+  ['another cutover',{ready:true,held:false,mode:'d1',cutover:'held',programmeRunId:'run-1',generation:7},'input_changed'],
+  ['another run',{ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-2',generation:7},'generation_pending'],
+  ['another generation',{ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:9},'input_changed'],
+  ['no generation',{ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1'},'authority_unavailable'],
+  ['unreadable',null,'authority_unavailable']]){
+  let reads=0;const stale=r2(),{db}=migrated();
+  const a=authority({readAuthority:async()=>{if(++reads===1)return {ready:true,held:false,mode:'d1',cutover:'open',programmeRunId:'run-1',generation:7};if(later===null)throw new Error('discovery_unavailable');return {...later};}});
+  const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:stale,D1_ENRICHMENT_WRITE:'on'});
+  assert.deepEqual([summary.outcome,summary.reason,summary.inputKey],['deferred',reason,'discovery_authority'],label);
+  assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,label+': nothing is written');
+  assert.equal(reads,2,label+': checked before the reads and again right before the write');
+ }
+ // The snapshot guarding the write is not part of the logged summary.
+ {
+  const a=authority(),{db}=migrated(),summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
+  assert.equal(summary.outcome,'complete');assert.equal(Object.keys(summary).includes('discoveryGate'),false);assert.equal(summary.discoveryGeneration,7);
+ }
+ assert.match(fs.readFileSync('src/worker.js','utf8'),/Promise\.allSettled\(\[[^\]]*runD1EnrichmentProjection[^\]]*Monitor\.run/,'the projector and the monitor run under one allSettled');
 }
 
 console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed, a missing rated-archive object admits nobody');
