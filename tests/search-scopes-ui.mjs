@@ -58,7 +58,7 @@ const window={
  },
 };
 const ctx=vm.createContext({Date,Intl,Set,Map,URL,URLSearchParams,JSON,document,window});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 const now=Date.parse('2026-10-24T12:00:00Z');
 run(`viewClock=${now};report={updatedAt:'2026-10-24T12:00:00Z',window:{from:${now}-72*3600000,to:${now}+24*3600000},films:[]};films=[

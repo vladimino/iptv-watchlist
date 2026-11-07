@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-const source=fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
+const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const nodes=new Map();
 const focused=[];
 function element(selector){
@@ -75,7 +75,11 @@ assert.doesNotMatch(query('#film-screen-title').textContent+query('#film-screen-
 assert.equal(classes.has('film-screen'),true);
 assert.equal(window.scrollY,0);
 assert.equal(run('movieScrollY'),720);
-assert.equal(session.get('iptv-film-list-query'),listSearch);
+// AIR-380: the way home is carried in the film's own URL, not remembered in storage.
+const homeTargetOfList='/'+listSearch+'#films';
+assert.equal(run('ReturnHome.fromSearch(new URL(window.location.href).search)'),homeTargetOfList,'the film URL names the exact programme state it was opened from');
+assert.equal(run('window.history.state.iptvHome'),homeTargetOfList,'an entry opened from the programme remembers that it follows it directly');
+assert.equal(session.has('iptv-film-list-query')||local.has('iptv-film-list-query'),false,'nothing is remembered in storage any more');
 assert.equal(run('state.period'),'archive');
 assert.equal(run('state.sort'),'personal');
 assert.equal(run('state.query'),'жара');
@@ -150,18 +154,21 @@ assert.equal(new URL(window.location.href).pathname,'/film/tmdb_0','a title is n
 
 window.history.replaceState(null,'','https://iptv.example/film/tmdb_42');
 run(`filmScreen='tmdb_42'`);
-session.set('iptv-film-list-query',listSearch);
+// A deep link that carries its target returns to exactly that target.
+window.history.replaceState(null,'','https://iptv.example/film/tmdb_42?return='+encodeURIComponent('/'+listSearch));
 fetches.length=0;
-run('closeFilm()');
-assert.equal(new URL(window.location.href).pathname+new URL(window.location.href).search,'/'+listSearch,'a direct film open returns to the remembered list');
+run('returnHome()');
+assert.equal(new URL(window.location.href).pathname+new URL(window.location.href).search,'/'+listSearch,'a deep link with a return target goes to that target');
 assert.equal(classes.has('film-screen'),false);
 assert.equal(fetches.length,0);
-session.set('iptv-film-list-query','');
-local.set('iptv-film-list-query','');
-window.history.replaceState(null,'','https://iptv.example/film/heat-1995');
-run(`filmScreen='heat-1995';closeFilm()`);
-assert.equal(new URL(window.location.href).pathname,'/');
-assert.equal(new URL(window.location.href).search,'');
+// Without a target (bookmark) or with a rejected one the way home is the canonical home, whatever an old session left in storage.
+session.set('iptv-film-list-query','?stale=1');
+for(const bad of ['https://iptv.example/film/heat-1995','https://iptv.example/film/heat-1995?return='+encodeURIComponent('//evil.example/'),'https://iptv.example/film/heat-1995?return='+encodeURIComponent('https://evil.example/'),'https://iptv.example/film/heat-1995?return='+encodeURIComponent('javascript:alert(1)')]){
+ window.history.replaceState(null,'',bad);
+ run(`filmScreen='heat-1995';returnHome()`);
+ assert.equal(new URL(window.location.href).origin+new URL(window.location.href).pathname,'https://iptv.example/',bad);
+ assert.equal(new URL(window.location.href).search,'',bad+' goes to the canonical home with no query');
+}
 
 const cardHtml=run('card(film)');
 const openAt=cardHtml.indexOf('class="film-open"');
@@ -204,28 +211,25 @@ assert.equal(new URL(window.location.href).pathname,'/');
 focused.length=0;
 run(`filmReturnId='missing-id';filmScreen='missing-id'`);
 window.history.replaceState(null,'','https://iptv.example/film/missing-id');
-run('closeFilm()');
+run('returnHome()');
 assert.equal(focused.at(-1),'#search','a missing card falls back to search');
 assert.equal(new URL(window.location.href).pathname,'/');
 
 const prior='https://iptv.example/before';
-stack.splice(0,stack.length,{href:prior,state:null},{href:'https://iptv.example/film/heat-1995',state:null});
+stack.splice(0,stack.length,{href:prior,state:null},{href:'https://iptv.example/film/heat-1995?return='+encodeURIComponent('/'+listSearch),state:null});
 index=1;
 window.location.href=stack[1].href;
-session.set('iptv-film-list-query',listSearch);
 run(`filmScreen='heat-1995';filmReturnId='heat-1995'`);
 const lengthBeforeClose=stack.length;
-run('closeFilm()');
-assert.equal(stack.length,lengthBeforeClose,'a direct open replaces the film entry instead of pushing another one');
-assert.equal(index,1);
+run('returnHome()');
+assert.equal(stack.length,lengthBeforeClose+1,'a deep link has no earlier programme entry: the way home is a normal navigation');
+assert.equal(index,2);
 assert.equal(new URL(window.location.href).pathname,'/');
 assert.equal(new URL(window.location.href).search,listSearch);
 window.history.back();
-assert.equal(window.location.href,prior);
-assert.notEqual(new URL(window.location.href).pathname,'/film/heat-1995');
+assert.equal(new URL(window.location.href).pathname,'/film/heat-1995','Back returns to the film that was left');
 window.history.forward();
 assert.equal(new URL(window.location.href).pathname,'/');
-assert.equal(stack.filter(entry=>entry.href.includes('/film/')).length,0,'Back and Forward do not restore the replaced film address');
 
 const worker=fs.readFileSync('src/worker.js','utf8');
 assert.match(worker,/pathname==='\/events'\?'\/'/);
@@ -235,7 +239,8 @@ const css=fs.readFileSync('public/styles.css','utf8');
 assert.match(html,/href="\/styles\.css"/);
 assert.match(html,/src="\/app\.js"/);
 assert.match(html,/id="film-screen"/);
-assert.match(html,/id="film-back">К списку/);
+assert.match(html,/<a class="return-home" id="return-home" data-return-home href="\/" hidden>На главную<\/a>/,'one return link, label «На главную»');
+assert.doesNotMatch(html,/film-back|К списку|К фильмам|activity-back/,'the old return controls are gone');
 assert.match(css,/html\.film-screen \.workspace\{display:none!important\}/);
 assert.match(css,/\.movie-card\{[^}]*cursor:pointer/);
 assert.match(css,/\.film-open::after\{content:"";position:absolute;inset:0\}/);

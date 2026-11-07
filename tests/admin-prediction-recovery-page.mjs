@@ -136,7 +136,7 @@ assert.match(V.recoveryErrorHtml('<b>x</b>'), /Разбор не получен\
 assert.doesNotMatch(V.recoveryErrorHtml('<b>x</b>'), /<b>/);
 
 // 4. The page over the Worker bundle.
-const page = fs.readFileSync('public/admin-limbo.js', 'utf8');
+const page = fs.readFileSync('public/return-home.js', 'utf8') + '\n' + fs.readFileSync('public/admin-limbo.js', 'utf8');
 const bundle = bundleAdmin([fs.readFileSync('src/admin/client.js', 'utf8'), fs.readFileSync('src/admin/limbo-client.js', 'utf8'), viewSource, fs.readFileSync('src/admin/discovery-recovery-view.js', 'utf8'), page]);
 assert.equal([...bundle.matchAll(/method:\s*['"]POST/g)].length, 2, 'the writes are the two discovery actions');
 assert.doesNotMatch(page.slice(page.indexOf('function limboRecoveryLoad'), page.indexOf('function limboRecoveryObservation')), /DiscoveryRecovery\(|DiscoveryReconsider\(|discoveryActionPost/, 'the prediction panel calls no action');

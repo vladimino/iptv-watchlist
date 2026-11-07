@@ -25,7 +25,7 @@ assert.doesNotMatch(css,/\.film-screen\{[^}]*max-width/,'the film route sets thi
 assert.match(css,/\.film-read\{max-width:760px\}/);
 assert.match(css,/\.film-similar-card\{[^}]*max-width:none;justify-self:stretch\}/);
 const readOpen=html.indexOf('<div class="film-read">'),similarAt=html.indexOf('id="film-similar"'),readSlice=html.slice(readOpen,similarAt);
-assert(readOpen>0&&readOpen<html.indexOf('id="film-back"')&&similarAt>readOpen,'the readable column opens before the film body and closes before similar films');
+assert(readOpen>0&&readOpen<html.indexOf('class="film-hero"')&&similarAt>readOpen,'the readable column opens before the film body and closes before similar films');
 assert.equal((readSlice.match(/<div\b/g)||[]).length,(readSlice.match(/<\/div>/g)||[]).length,'the readable column is closed before similar films');
 assert.match(css,/color-scheme:dark/);
 assert.doesNotMatch(css,/prefers-color-scheme:\s*light/);
@@ -56,7 +56,7 @@ const ui=vm.createContext({
  },
  fetch(url){fetches.push(String(url));throw new Error('similar films must not fetch');},
 });
-vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+'\n'+app.replace(/init\(\);\s*$/,''),ui);
 ui.now=now;
 vm.runInContext(`viewClock=${now};urlReady=true`,ui);
 const run=(expression,input)=>{ui.input=input;return vm.runInContext(expression,ui);};

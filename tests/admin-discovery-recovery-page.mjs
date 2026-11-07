@@ -80,7 +80,7 @@ assert.match(V.obsRecoveryErrorHtml('http_500'), /ошибкой 500/);
 assert.doesNotMatch(V.obsRecoveryErrorHtml('<b>x</b>'), /<b>/);
 
 // 2. The page over the Worker bundle and an R2 stand-in.
-const page = fs.readFileSync('public/admin-limbo.js', 'utf8');
+const page = fs.readFileSync('public/return-home.js', 'utf8') + '\n' + fs.readFileSync('public/admin-limbo.js', 'utf8');
 const bundle = bundleAdmin([fs.readFileSync('src/admin/client.js', 'utf8'), fs.readFileSync('src/admin/limbo-client.js', 'utf8'), fs.readFileSync('src/admin/prediction-recovery-view.js', 'utf8'), viewSource, page]);
 assert.doesNotMatch(page, /\bfetch\(/, 'the page reaches the API only through the client');
 const css = fs.readFileSync('public/admin.css', 'utf8');

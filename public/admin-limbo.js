@@ -171,7 +171,7 @@ function limboUrl(state) {
   if (state.attention === 'all' && !filtered) params.set('attention', 'all');
   if (state.attention !== 'all' && filtered) params.set('attention', 'now');
   const query = params.toString();
-  return query ? '/admin/limb?' + query : '/admin/limb';
+  return ReturnHome.keep(query ? '/admin/limb?' + query : '/admin/limb', window.location.search);
 }
 
 function limboFiltered(state) {

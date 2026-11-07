@@ -24,7 +24,7 @@ const ui=vm.createContext({Date,Intl,Set,Map,URL,URLSearchParams,JSON,Promise,
  window:{scrollY:0,scrollTo(){},location:{href:'https://iptv.example/film/dia'},history:{state:null,pushState(){},replaceState(){},back(){}}},
  document:{documentElement:{classList:{toggle(){},add(){},remove(){}}},querySelector:query,querySelectorAll(){return [];},addEventListener(){}},
  async fetch(url){requests.push(String(url));if(scripted)return scripted(String(url));return server.worker.fetch(new Request('https://iptv.example'+url),env,{waitUntil(){throw new Error('no background work');}});}});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
 const run=code=>vm.runInContext(code,ui);
 const html=()=>query('#film-screen-history').innerHTML;
 const text=()=>html().replace(/<[^>]+>/g,' ').replace(/\s+/g,' ');

@@ -2,7 +2,7 @@
 // probabilities are hidden; an actual rating alone never shows one. Synthetic data only.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
 const ctx=vm.createContext({Date,Intl,Set,Map,document:{querySelector:()=>({})}});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 ctx.film={id:'one',title:'Фильм',original:'Film',year:2020,runtime:120,genres:['Драма'],shows:[],directors:[],actors:[]};
 const card=item=>{ctx.input={profile:null,films:{one:item}};vm.runInContext('enrichment=input',ctx);return vm.runInContext('card(film)',ctx);};
 const badge=html=>html.match(/<div class="score-badge score-predicted[^]*?<\/div>/)?.[0]||'';

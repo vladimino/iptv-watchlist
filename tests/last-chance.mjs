@@ -18,7 +18,7 @@ source.watchlist={films:[{id:'one',title:'Первый'},{id:'two',title:'Вто
 assert.equal(vm.runInContext('programmeWithWatchlist(report,watchlist).films[1].availableUntil',source),null);
 
 const ui=vm.createContext({Date,Intl,Set,Map,console});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
 ui.now=now;
 ui.items=[
  {id:'two',title:'Б',availableUntil:new Date(now+2*hour).toISOString()},

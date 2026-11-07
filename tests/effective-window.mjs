@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 const hour=3600000;
 const t0=Date.parse('2026-06-15T10:00:00Z');
 const ctx=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,JSON,console,document:{querySelector(){return null;},querySelectorAll(){return [];},documentElement:{classList:{toggle(){}}}},window:{history:{state:null,pushState(){},replaceState(){}},location:{href:'https://iptv.example/'}}});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 const film=(id,starts,extra={})=>{ctx[id]={id,title:id,original:id,year:2020,genres:['Драма'],runtime:100,directors:[],actors:[],shows:starts.map(start=>({start,end:start+2*hour,channel:'One'})),...extra};return id;};
 

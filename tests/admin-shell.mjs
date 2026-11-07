@@ -9,7 +9,7 @@ import {bundleAdmin} from '../src/admin/bundle.js';
 import {scoped} from '../scripts/bundle-scope.mjs';
 
 const html = fs.readFileSync('public/admin.html', 'utf8');
-const page = fs.readFileSync('public/admin.js', 'utf8');
+const page = fs.readFileSync('public/return-home.js', 'utf8') + '\n' + fs.readFileSync('public/admin.js', 'utf8');
 const client = fs.readFileSync('src/admin/client.js', 'utf8');
 const titleClient = fs.readFileSync('src/admin/film-title-client.js', 'utf8');
 const css = fs.readFileSync('public/admin.css', 'utf8');

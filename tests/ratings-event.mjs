@@ -184,7 +184,7 @@ async function removalRun({entry,eventPresent,member}){
 // 7. The Events UI: compact Russian text, counts as numbers, honest errors, escaping, legacy types unchanged.
 {
  const ctx=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,JSON,console,document:{querySelector(){return null;},querySelectorAll(){return [];},documentElement:{classList:{toggle(){}}}},window:{history:{state:null,pushState(){},replaceState(){}},location:{href:'https://iptv.local/',pathname:'/',search:'',hash:''},matchMedia:()=>({matches:false}),addEventListener(){},scrollY:0,scrollTo(){}},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>Promise.reject(new Error('no network'))});
- vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+ vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
  ctx.ev=(over={})=>({id:'r-ratings',type:'ratings',at:'2026-11-05T16:38:00.000Z',runId:'r',trigger:'scheduled',state:'finished',cause:null,coverage:'recent_window',diary:{pages:1,rows:50,added:1,updated:0,written:1,unchanged:49,skipped:0,conflicts:0},removal:{pending:0,checked:0,rated:0,resolved:0},...over});
  const html=over=>vm.runInContext('eventHTML(ev('+JSON.stringify(over||{})+'))',ctx);
  let text=html();

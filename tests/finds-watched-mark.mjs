@@ -187,7 +187,7 @@ assert.doesNotMatch(fs.readFileSync('src/mcp.js','utf8'),/catalog\/watched|recor
  const calls=[];let reply=async()=>({ok:true,json:async()=>({outcome:'saved',watched:true})});
  const ctx=vm.createContext({Date,Intl,Set,Map,JSON,Promise,setTimeout,document:doc,fetch:async(url,init)=>{calls.push({url,init});if(url==='/api/catalog/available')return {ok:true,json:async()=>catalogAnswer};return reply(url,init);}});
  let catalogAnswer=null;
- vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+ vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
  const run=code=>vm.runInContext(code,ctx);
  const clientFilm=n=>({...film(n,'Film '+n),prediction:{predictedRating:4.5,probability4Plus:.9,confidence:'high',moodIds:[]},fingerprint:null});
  ctx.answer={programmeRunId:'run-1',watchedMarkEnabled:true,films:[clientFilm(10),clientFilm(11)]};
