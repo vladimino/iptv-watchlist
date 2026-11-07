@@ -32,6 +32,19 @@ assert.match(presets, /<form id="preset-editor" hidden>/, 'the editor is closed 
 assert.match(css, /#preset-editor\[hidden\]\{display:none\}/);
 assert.match(css, /\.preset-apply\{[^}]*overflow:hidden;text-overflow:ellipsis;white-space:nowrap/, 'a long name cannot break the layout');
 assert.match(css, /\.preset-row\.is-current \.preset-apply/, 'the matching scenario is visibly marked');
+// Review fix: the feedback line must stay visible on mobile. The ≤760px rule hides every `.filters .hint`, so the status must not be a hint.
+assert.match(presets, /<p id="preset-status" class="preset-status" role="status"><\/p>/, 'the status line has its own class');
+assert.doesNotMatch(presets, /id="preset-status"[^>]*class="[^"]*\bhint\b/, 'the status line is not a .hint');
+assert.match(css, /\.preset-status\{[^}]*color:#ffb6a3[^}]*\}\.preset-status:empty\{display:none\}/, 'visible with text, hidden only when empty');
+{
+  const open = css.indexOf('@media(max-width:760px){.masthead') + '@media(max-width:760px){'.length;
+  let depth = 1, end = open;
+  while (depth > 0 && end < css.length) {const ch = css[end++]; if (ch === '{') depth++; else if (ch === '}') depth--;}
+  const narrow = css.slice(open, end - 1);
+  const hiders = [...narrow.matchAll(/([^{}]+)\{[^{}]*display:none[^{}]*\}/g)].map(match => match[1]);
+  for (const selector of hiders) assert.doesNotMatch(selector, /preset-status|#preset-status|\.presets(?![-\w])(?! \.hint)/, 'no ≤760px rule hides the scenario feedback: ' + selector);
+  assert.ok(hiders.some(selector => /\.filters \.hint/.test(selector)), 'the rule that hid the old status is still there for real hints, which is why the status left that class');
+}
 
 // Behaviour over the real app.js with a recording DOM.
 const nodes = new Map(), focused = [];
