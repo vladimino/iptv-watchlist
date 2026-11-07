@@ -96,4 +96,4 @@ Ratings production is Cloudflare-owned: `orchestration.mode=cloudflare`, epoch `
 
 ## Worker monitor and the external drift Task (AIR-349)
 
-The Worker's own monitor ([ADR 0095](../adr/0095-cloudflare-native-production-monitor.md)) checks the stored result of each stream independently of ChatGPT and is inert until the owner sets `MONITOR`. The external «IPTV Scheduled Task Drift» Task is not replaced or changed by it. See the [monitor API](api/monitor.md).
+The Worker's own monitor ([ADR 0095](../adr/0095-cloudflare-native-production-monitor.md)) checks the stored result of each stream independently of ChatGPT and is inert unless `MONITOR` is `on`. The external «IPTV Scheduled Task Drift» Task is not replaced or changed by it. See the [monitor API](api/monitor.md).

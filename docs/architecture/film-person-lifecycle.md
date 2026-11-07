@@ -54,6 +54,10 @@ flowchart LR
   catalog -->|typed tmdb movie identity| finds
 ```
 
+## Planned canonical authority (ADR 0099, not deployed)
+
+[ADR 0099](../adr/0099-canonical-film-person-d1-authority.md) (Accepted) plans a D1 authority for canonical Film and Person under a marker (`r2`, `prepared`, `open`, `held`). The first step, schema `0013` with the marker, a per-entity revision, a baseline gate and a fenced mutation API, is in the repository and changes no authority: the enrichment projector remains the only writer in `r2` and `prepared`, and no reader changes. No diagram changes here; the sequence is drawn when a later card changes the real flow.
+
 ## Owner name confirmation
 
 **Visual review: owner approved on 2026-11-01** ([owner decision](https://trello.com/c/yKtj1ahy#comment-6ae70775d9cef4bee9fb0090)) after reviewing PR #294 HEAD `adc7768ee25b41ae04af878569e35d4fd09090c9`. The store follows the independently accepted [ADR 0072](../adr/0072-owner-reviewed-localization-overlay.md). Neither approval authorizes a production data write. It is not the identity diagram above. The owner adds one name variant on a Person card. The same POST writes the `people` map of one R2 object and copies `films`, then reads that object back before it reports success. «Добавить вариант» leaves the current name and adds the alias. «Сделать предпочтительным» overlays the new preferred name, and the previous preferred name stays selectable. A dictionary or automatic name is held once and is not applied. The identity GET does not read the object, and a saved role link does not replace a role id. The figure keeps the approved label **Сохранить вариант** and the approved arrows. The live catalogue sends the same POST from the two buttons above.
