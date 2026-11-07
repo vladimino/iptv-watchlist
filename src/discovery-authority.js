@@ -954,12 +954,18 @@ export async function acquireLease(env,context={}){
   const live=await one(database(env),'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND expires_at>?',[nowMs()]);
   if(live?.lease_id||!await ledgerSealLoading(env))throw failed('discovery_incomplete');
  }
- if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId)return {handled:true,lease:null};
+ if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId)return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
  const id=crypto.randomUUID(),expiresAt=nowMs()+LEASE_TTL_MS;
  const db=database(env);
  await commit(db,[['UPDATE discovery_lease SET lease_id=?, expires_at=?, programme_run_id=? WHERE id=1 AND (lease_id IS NULL OR expires_at<=?)',[id,expiresAt,context.programmeRunId??gate.programmeRunId??null,nowMs()]]]);
  const row=await one(db,'SELECT lease_id, expires_at, programme_run_id FROM discovery_lease WHERE id=1');
- if(row?.lease_id!==id)return {handled:true,lease:null};
+ if(row?.lease_id!==id){
+  // AIR-362: say why, and until when, so a caller can wait for the holder instead of guessing. A lease row that is already
+  // expired or released (the holder finished between the failed update and this read) is `lost_race`, with no expiry.
+  const expiresAt=Number(row?.expires_at);
+  const live=!!row?.lease_id&&Number.isFinite(expiresAt)&&expiresAt>nowMs();
+  return {handled:true,lease:null,busy:{kind:live?'lease_held':'lost_race',expiresAt:live?expiresAt:null}};
+ }
  return {handled:true,lease:{id,expiresAt:Number(row.expires_at)}};
 }
 export async function renewLease(env,lease,context={}){
