@@ -449,6 +449,9 @@ for(const name of ['ensureDiscoveryWorkflow','reconcileDiscoveryWorkflow']){
  const lagged=await call(name)(env);
  assert.equal(lagged.started,false,name);assert.equal(lagged.reason,'generation_handoff',name);
 }
+// AIR-363: concurrent crons in the handoff window (published A, discovery pin B): every one answers generation_handoff, none creates or writes.
+const concurrent=await Promise.all(['reconcileDiscoveryWorkflow','ensureDiscoveryWorkflow','reconcileDiscoveryWorkflow'].map(name=>call(name)(env)));
+assert.deepEqual(concurrent.map(item=>[item.started,item.reason]),[[false,'generation_handoff'],[false,'generation_handoff'],[false,'generation_handoff']]);
 assert.equal(creates.length,0);assert.equal(snapshotDiscoveryKeys(),beforeHandoff);
 assert.equal(puts.filter(key=>key==='epg/resolver-continuation.json'||key==='epg/discovery-workflow.json').length,0);
 context.PublishedEpg={currentGeneration:async()=>null};
@@ -464,6 +467,14 @@ context.DiscoveryAuthority={...context.DiscoveryAuthority,readAuthority:async()=
 creates.length=0;puts.length=0;
 const mismatchedPin=await call('ensureDiscoveryWorkflow')(env);
 assert.equal(mismatchedPin.reason,'generation_handoff');assert.equal(creates.length,0);
+// AIR-363: once the new generation is published and the discovery pin agrees, the next reconcile opens its one successor and a repeat adds none.
+context.PublishedEpg={currentGeneration:async()=>({authority:'d1',programmeRunId:OTHER,phase:'published',generation:2,fence:'d1:2:'+OTHER})};
+creates.length=0;puts.length=0;
+const afterHandoff=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(afterHandoff.started,true,JSON.stringify(afterHandoff));assert.equal(afterHandoff.programmeRunId,OTHER);assert.equal(creates.length,1);
+const repeated=await call('reconcileDiscoveryWorkflow')(env);
+assert.equal(creates.length,1,'a repeated reconcile creates nothing more: '+JSON.stringify(repeated));
+creates.length=0;
 delete context.DiscoveryAuthority;
 delete context.PublishedEpg;
 delete env.DISCOVERY_EXECUTOR;
