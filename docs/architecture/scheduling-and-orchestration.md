@@ -257,6 +257,10 @@ stateDiagram-v2
 
 `Due` includes a known future wake (`retryAt`, `Retry-After`, a pause or a lease), which the read model reports as `waiting`. `Unknown` means a timeout, a lost response or a killed step, resolved only by reading back. A duplicate firing while a run is `Due` or `Running` attaches to it. `Quarantined` returns to `Due` on the next run key only after a budget exhaustion; after unsafe evidence only an owner-approved clear does. Only a read-back checkpoint that moved forward resets the consecutive failure count; a create, an HTTP 200 or a lease does not. The executor never forces a step, never resets a lease and never clears its own quarantine. Predictions are outside both diagrams and stay on the hourly ChatGPT task.
 
+## Canonical Film/Person writer routing ([AIR-371](https://trello.com/c/gt1afd0C), inactive)
+
+The hourly cron still runs only the D1 enrichment projector for canonical Film/Person. `src/canonical-producers.js` is not imported by the Worker, no cron, route or Task calls it, and the projector is unchanged. When the marker is `open` (AIR-374, a separate owner-gated handoff) the projector becomes compare-only and the fenced adapters are the only writers; a projector batch built before the move carries a fence assertion on the marker generation and fails whole, so the two writers never overlap, and a handoff readiness check (read-only) lists what must be drained or built first: the marker and baseline state, the live projector lease and the producer writes that no fenced mutation covers yet. No timing, lease or schedule changes.
+
 ## Timing and authority
 
 The timetable and enabled status belong to the external automation registry. The Worker states only the expected hourly trigger (`:20` Europe/Madrid) for display and keeps it apart from its own discovery wait gate; see [Scheduled Task timing](../reference/scheduled-tasks.md#timing-nominal-trigger-versus-server-gate). Historical records of successful scheduling are not a live status check; production task changes or manual invocations require separate owner approval. A GitHub deployment does not trigger any of these workflows.

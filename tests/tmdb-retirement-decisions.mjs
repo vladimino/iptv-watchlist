@@ -337,7 +337,7 @@ async function seedFilm(env,confirmed,{tmdb=confirmed.movieId,trusted=true}={}){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('tmdb-retirement-decisions'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.filter(file=>!file.endsWith('tmdb-retirement-decisions.js')),[],'no source file imports it');
+ assert.deepEqual(importers.filter(file=>!file.endsWith('tmdb-retirement-decisions.js')&&!file.endsWith('canonical-producers.js')),[],'no source file imports it');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('tmdb-retirement-decisions'),file+' does not bundle or name it');
  const module=fs.readFileSync('src/tmdb-retirement-decisions.js','utf8');
  assert.doesNotMatch(module,/\bfetch\(|\.put\(|env\.R2|\.BUCKET|\.get\(RETIREMENTS_KEY|INSERT INTO film_external_id|UPDATE film_external_id|DELETE FROM film_external_id|UPDATE film\b|INSERT INTO film_dimension/,'no R2 access and no identity write');
