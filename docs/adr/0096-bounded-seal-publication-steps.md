@@ -1,9 +1,9 @@
 # ADR 0096: The staged publication after the catalog is three bounded steps
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-07  
 **Recorded at:** 2026-11-07  
-**Approval source:** not yet decided; the owner decides `Accepted` or `Declined` before this record merges ([workflow](../process/agent-workflow.md))  
+**Approval source:** Product Owner accepted ADR 0096 on 2026-11-07 in the [AIR-353 Trello decision record](https://trello.com/c/Hqq2JhnH); technical review of PR #393 at `4e21c13` accepted the implementation subject to exact-head CI and delivery gates.  
 **Related work:** [AIR-353](https://trello.com/c/Hqq2JhnH), [AIR-356](https://trello.com/c/JJI9O5I5), [AIR-324](https://trello.com/c/kNtaEbm8), [ADR 0092](0092-resumable-bounded-ledger-seal.md), [dated evidence](../evidence/d1-migration/air-353-seal-publish-wall-2026-11-07.md)  
 **Supersedes:** [ADR 0092](0092-resumable-bounded-ledger-seal.md) decision 3 in part: its single `publish` step becomes three steps. The job, the cursor, the fences and every other decision of that record stay.  
 **Superseded by:** None
