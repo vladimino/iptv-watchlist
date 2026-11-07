@@ -28,6 +28,21 @@ const FIXTURE_DEPENDENT=new Set([
 const SERIAL_ONLY=new Set([
  'local-dev-smoke.mjs',
 ]);
+// Scheduling hint only: the slowest files (measured sequentially, docs/evidence/ci/test-runner-air-378-2026-11-07.md) start first so the
+// long ones do not end up alone at the tail. A name that no longer exists, or a new slow file that is missing here, changes the wall time and
+// nothing else: every file still runs exactly once.
+const START_FIRST=[
+ 'generation-stage.mjs',
+ 'discovery-chunk-budget.mjs',
+ 'discovery-production.mjs',
+ 'd1-enrichment.mjs',
+ 'epg-r2-known-length.mjs',
+ 'discovery-authority.mjs',
+ 'prediction-domain-production.mjs',
+ 'film-person-authority.mjs',
+ 'd1-backfill.mjs',
+ 'offline-importer.mjs',
+];
 const OUTPUT_LIMIT=4*1024*1024;
 const KILL_GRACE_MS=3000;
 
@@ -46,7 +61,9 @@ const seconds=ms=>(ms/1000).toFixed(1)+'s';
 
 export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY}={}){
  const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
- return {parallel:all.filter(file=>!serialOnly.has(file)),serial:all.filter(file=>serialOnly.has(file)),total:all.length};
+ const parallel=all.filter(file=>!serialOnly.has(file));
+ const early=START_FIRST.filter(file=>parallel.includes(file));
+ return {parallel:[...early,...parallel.filter(file=>!early.includes(file))],serial:all.filter(file=>serialOnly.has(file)),total:all.length};
 }
 
 async function main(){
@@ -57,6 +74,8 @@ async function main(){
  const jobs=requestedSerial?1:positive(option(args,'jobs','TEST_JOBS',undefined),'--jobs',Math.max(1,Math.min(4,availableParallelism())));
  const timeoutMs=positive(option(args,'timeout-ms','TEST_TIMEOUT_MS',undefined),'--timeout-ms',300000);
  const plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY});
+ // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.
+ if(jobs===1){plan.parallel=[...plan.parallel,...plan.serial].sort();plan.serial=[];}
  const running=new Set(),results=[],failures=[];
  let stopping=false,interrupted=null;
  const started=Date.now();
