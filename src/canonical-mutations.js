@@ -117,8 +117,9 @@ export async function mutatePerson(env,input){
 // membership, metadata, dimensions and sync clocks adopted by the survivor or refused, never silently dropped (see `reconcile` below). It touches two entities and proves both revisions, that the survivor is not itself a redirect
 // (no chain grows, no cycle forms), that the retired Film is not already redirected and has no generation or EPG history, all in the same
 // batch. Different trusted values of one scheme need `evidence.verified === true` (ADR 0009); `tmdb` and `tmdb_tv` are different schemes.
-// input: {from, to, expected:{from, to}, at, evidence?:{verified?}, resolve?:{metadata?, localization?, fingerprint?, prediction?}} where a value
-// is 'survivor' or 'retired': the caller's explicit choice when both Films hold different data of that kind. A repeated merge of an already
+// input: {from, to, expected:{from, to}, at, evidence?:{verified?}, resolve?:{metadata?, identity?, metadataState?, localization?, fingerprint?,
+// prediction?, sync?}} where a value is 'survivor' or 'retired' (and 'newest' for sync): the caller's explicit choice when both Films hold
+// different data of that kind. A repeated merge of an already
 // redirected id is a no-op.
 export async function mergeFilms(env,input){
  const from=filmId(input?.from),to=filmId(input?.to),at=text(input?.at);
@@ -173,25 +174,41 @@ export async function mergeFilms(env,input){
  return {merged:true,from,to,revisions:{from:expectedFrom+1,to:expectedTo+1},discarded};
 }
 
-// What the retired Film holds that the survivor would lose. Nothing is dropped silently:
-// - film_metadata: moved when the survivor has none; dropped when identical; otherwise the batch is refused unless the caller chose
-//   `resolve.metadata` ('survivor' drops the retired body and says so in `discarded`, 'retired' replaces the survivor's).
-// - film_dimension: identity and metadata (derived lifecycle state) are the survivor's when it has one and moved otherwise. A localization is
-//   moved when the survivor has none, dropped when identical, and when different the survivor keeps its own with a localization_conflict row
-//   for the other value, except that a reviewed or owner value of the retired Film that the survivor would not keep is refused unless
-//   `resolve.localization` chose.
-//   fingerprint and prediction rows are moved, dropped when identical, otherwise refused unless chosen with `resolve.fingerprint` / `.prediction`.
-// - film_sync_state (a freshness clock): moved when the survivor has none, otherwise the survivor's stays.
+// What the retired Film holds that the survivor would lose. Nothing is dropped silently: a difference is moved, shown to be covered, or refused
+// until the caller names a side, and a chosen side that discards data is reported in `discarded`.
+// - film_metadata: moved when the survivor has none; dropped when identical; otherwise refused unless `resolve.metadata` is 'survivor' or 'retired'.
+// - film_dimension: a row the survivor lacks is moved; an identical one is dropped. A different identity, metadata (lifecycle), fingerprint or
+//   prediction row is refused unless `resolve.identity`, `.metadataState`, `.fingerprint` or `.prediction` is 'survivor' or 'retired' (the identity
+//   row carries the source version and provenance of corrections). A different localization: the survivor keeps its own and a
+//   localization_conflict row records the other, except that a reviewed or owner value of the retired Film that the survivor would not keep is
+//   refused unless `resolve.localization` chose.
+// - film_sync_state: moved when the survivor has none. When both exist and differ the retired row is dropped only if it adds nothing: every one of
+//   its clocks is null or covered by the survivor's (equal, or older with the survivor holding one), and the survivor's metadata body stands. A clock
+//   the retired row holds that the survivor does not cover (newer, or the survivor's is null), or a body that came from the retired Film, is refused
+//   unless `resolve.sync` is 'survivor', 'retired' or 'newest' (the field-wise newest non-null value). A missing row and null clocks differ (ADR 0070).
+const SYNC_FIELDS=['metadata_at','synopsis_fetched_at','people_names_version','people_localized_at'];
+const SYNC_SELECT='SELECT metadata_at,synopsis_fetched_at,people_names_version,people_localized_at FROM film_sync_state WHERE film_id=?';
+function covers(survivor,retired){
+ if(retired===null||retired===undefined)return true;
+ if(survivor===null||survivor===undefined)return false;
+ return survivor>=retired;
+}
+function newest(left,right){
+ if(left===null||left===undefined)return right??null;
+ if(right===null||right===undefined)return left;
+ return left>=right?left:right;
+}
 async function reconcile(db,from,to,resolve,at,discarded){
  const out=[];
+ const choice=(kind,allowed=['survivor','retired'])=>{const value=resolve?.[kind];if(value!==undefined&&!allowed.includes(value))throw failed('film_person_invalid');return value;};
  const [fromMeta,toMeta]=await Promise.all([one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[from]),one(db,'SELECT payload_json,content_sha256 FROM film_metadata WHERE film_id=?',[to])]);
- const choice=(kind)=>{const value=resolve?.[kind];if(value!==undefined&&value!=='survivor'&&value!=='retired')throw failed('film_person_invalid');return value;};
+ let bodyFromRetired=false;
  if(fromMeta){
-  if(!toMeta)out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);
+  if(!toMeta){out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);bodyFromRetired=true;}
   else if(fromMeta.payload_json!==toMeta.payload_json||fromMeta.content_sha256!==toMeta.content_sha256){
    const pick=choice('metadata');
    if(!pick)throw failed('film_person_data_conflict');
-   if(pick==='retired'){out.push(['DELETE FROM film_metadata WHERE film_id=?',[to]]);out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);discarded.push('metadata:survivor');}
+   if(pick==='retired'){out.push(['DELETE FROM film_metadata WHERE film_id=?',[to]]);out.push(['UPDATE film_metadata SET film_id=? WHERE film_id=?',[to,from]]);discarded.push('metadata:survivor');bodyFromRetired=true;}
    else discarded.push('metadata:retired');
   }
  }
@@ -199,12 +216,12 @@ async function reconcile(db,from,to,resolve,at,discarded){
  const held=new Map(toDims.map(row=>[row.dimension,row]));
  const same=(left,right)=>['status','source','source_version','provenance_json','value','authority'].every(key=>(left[key]??null)===(right[key]??null));
  const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
+ const KEY={identity:'identity',metadata:'metadataState',fingerprint:'fingerprint',prediction:'prediction'};
  for(const row of fromDims){
   const other=held.get(row.dimension);
   const move=()=>out.push(['UPDATE film_dimension SET film_id=? WHERE film_id=? AND dimension=?',[to,from,row.dimension]]);
   if(!other){move();continue;}
   if(same(row,other))continue;
-  if(row.dimension==='identity'||row.dimension==='metadata')continue;
   if(row.dimension==='localization'){
    const pick=choice('localization');
    const conflict=(value,source,provenance,authority,reason)=>out.push(["INSERT INTO localization_conflict (id,entity_kind,entity_id,value,source,provenance_json,authority,reason,at) VALUES (?,'film',?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING",['film-merge:'+to+':'+from+':'+reason,to,value??null,source??null,provenance??null,authority??null,reason,at]]);
@@ -213,12 +230,26 @@ async function reconcile(db,from,to,resolve,at,discarded){
    if(pick==='survivor'||(!pick&&!strong(row))){conflict(row.value,row.source,row.provenance_json,row.authority,'merge_kept_survivor');if(pick==='survivor')discarded.push('localization:retired');continue;}
    throw failed('film_person_data_conflict');
   }
-  const pick=choice(row.dimension);
+  const kind=KEY[row.dimension];
+  if(!kind)throw failed('film_person_data_conflict');
+  const pick=choice(kind);
   if(!pick)throw failed('film_person_data_conflict');
   if(pick==='retired'){out.push(['DELETE FROM film_dimension WHERE film_id=? AND dimension=?',[to,row.dimension]]);move();discarded.push(row.dimension+':survivor');}
   else discarded.push(row.dimension+':retired');
  }
- const [fromSync,toSync]=await Promise.all([one(db,'SELECT film_id FROM film_sync_state WHERE film_id=?',[from]),one(db,'SELECT film_id FROM film_sync_state WHERE film_id=?',[to])]);
- if(fromSync&&!toSync)out.push(['UPDATE film_sync_state SET film_id=? WHERE film_id=?',[to,from]]);
+ const [fromSync,toSync]=await Promise.all([one(db,SYNC_SELECT,[from]),one(db,SYNC_SELECT,[to])]);
+ if(fromSync){
+  if(!toSync)out.push(['UPDATE film_sync_state SET film_id=? WHERE film_id=?',[to,from]]);
+  else if(!SYNC_FIELDS.every(key=>(fromSync[key]??null)===(toSync[key]??null))){
+   const covered=!bodyFromRetired&&SYNC_FIELDS.every(key=>covers(toSync[key],fromSync[key]));
+   if(!covered){
+    const pick=choice('sync',['survivor','retired','newest']);
+    if(!pick)throw failed('film_person_data_conflict');
+    if(pick==='retired'){out.push(['DELETE FROM film_sync_state WHERE film_id=?',[to]]);out.push(['UPDATE film_sync_state SET film_id=? WHERE film_id=?',[to,from]]);discarded.push('sync:survivor');}
+    else if(pick==='newest'){out.push(['UPDATE film_sync_state SET metadata_at=?,synopsis_fetched_at=?,people_names_version=?,people_localized_at=? WHERE film_id=?',[...SYNC_FIELDS.map(key=>newest(toSync[key],fromSync[key])),to]]);discarded.push('sync:merged');}
+    else discarded.push('sync:retired');
+   }
+  }
+ }
  return out;
 }

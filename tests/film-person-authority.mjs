@@ -352,10 +352,10 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
  assert.equal(one(file,"SELECT film_id FROM film_sync_state"),'film:a2','the sync clock moves');
  // Identical data on both sides is dropped without a trace; the survivor's identity and sync clock stay.
  await make('film:b1','tmdb:111',111);await make('film:b2','tmdb:112',112);
- sqlite(file,[meta('film:b1','same'),meta('film:b2','same'),dim('film:b1','localization','reviewed','Одно','owner'),dim('film:b2','localization','reviewed','Одно','owner'),dim('film:b1','identity','resolved','retired-identity'),dim('film:b2','identity','resolved','survivor-identity'),"INSERT INTO film_sync_state (film_id,metadata_at) VALUES ('film:b1','old'),('film:b2','new')"].join(';'));
+ sqlite(file,[meta('film:b1','same'),meta('film:b2','same'),dim('film:b1','localization','reviewed','Одно','owner'),dim('film:b2','localization','reviewed','Одно','owner'),dim('film:b1','identity','resolved','same-identity'),dim('film:b2','identity','resolved','same-identity'),"INSERT INTO film_sync_state (film_id,metadata_at) VALUES ('film:b1','2026-10-01T00:00:00.000Z'),('film:b2','2026-11-01T00:00:00.000Z')"].join(';'));
  assert.deepEqual((await merge('film:b1','film:b2')).discarded,[]);
- assert.equal(one(file,"SELECT value FROM film_dimension WHERE film_id='film:b2' AND dimension='identity'"),'survivor-identity');
- assert.equal(one(file,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:b2'"),'new');
+ assert.equal(one(file,"SELECT value FROM film_dimension WHERE film_id='film:b2' AND dimension='identity'"),'same-identity');
+ assert.equal(one(file,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:b2'"),'2026-11-01T00:00:00.000Z','an older retired clock is covered by the survivor');
  assert.equal(one(file,"SELECT COUNT(*) FROM film_sync_state WHERE film_id='film:b1'"),0);
  // Different metadata: refused whole without a choice, nothing persisted.
  await make('film:c1','tmdb:121',121);await make('film:c2','tmdb:122',122);
@@ -395,6 +395,55 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
  sqlite(file,[dim('film:h1','prediction','present','p-retired'),dim('film:h2','prediction','present','p-survivor')].join(';'));
  await assert.rejects(()=>merge('film:h1','film:h2'),error=>error.code==='film_person_data_conflict');
  assert.deepEqual((await merge('film:h1','film:h2',{resolve:{prediction:'survivor'}})).discarded,['prediction:retired']);
+
+ // Identity and metadata lifecycle rows carry source versions and provenance: different ones are refused until a side is named.
+ await make('film:i1','tmdb:181',181);await make('film:i2','tmdb:182',182);
+ sqlite(file,[dim('film:i1','identity','resolved','retired-identity'),dim('film:i2','identity','resolved','survivor-identity'),dim('film:i1','metadata','present','retired-state'),dim('film:i2','metadata','present','survivor-state')].join(';'));
+ before=snap();
+ await assert.rejects(()=>merge('film:i1','film:i2'),error=>error.code==='film_person_data_conflict','different identity provenance');
+ await assert.rejects(()=>merge('film:i1','film:i2',{resolve:{identity:'survivor'}}),error=>error.code==='film_person_data_conflict','the metadata lifecycle row still differs');
+ assert.deepEqual(snap(),before);
+ const lifecycle=await merge('film:i1','film:i2',{resolve:{identity:'survivor',metadataState:'retired'}});
+ assert.deepEqual(lifecycle.discarded,['identity:retired','metadata:survivor']);
+ assert.deepEqual(rows(file,"SELECT dimension,value FROM film_dimension WHERE film_id='film:i2' AND dimension IN ('identity','metadata') ORDER BY dimension"),[{dimension:'identity',value:'survivor-identity'},{dimension:'metadata',value:'retired-state'}]);
+ // Sync clocks: only a retired row that adds nothing is dropped. A newer, complementary or non-null retired clock against a null one is refused.
+ const clocks=(film,fields)=>`INSERT INTO film_sync_state (film_id,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at) VALUES ('${film}',${fields.map(value=>value===null?'NULL':typeof value==='number'?value:"'"+value+"'").join(',')})`;
+ const T1='2026-10-01T00:00:00.000Z',T2='2026-11-01T00:00:00.000Z';
+ const syncCase=async(label,retired,survivor,{resolve,expect})=>{
+  await make('film:'+label+'1','tmdb:'+label+'1',label+'1');await make('film:'+label+'2','tmdb:'+label+'2',label+'2');
+  sqlite(file,[clocks('film:'+label+'1',retired),clocks('film:'+label+'2',survivor)].join(';'));
+  const state=()=>rows(file,"SELECT film_id,metadata_at,synopsis_fetched_at,people_names_version,people_localized_at FROM film_sync_state WHERE film_id LIKE 'film:"+label+"%' ORDER BY film_id");
+  const before=state();
+  if(expect==='refuse'&&!resolve){
+   await assert.rejects(()=>merge('film:'+label+'1','film:'+label+'2'),error=>error.code==='film_person_data_conflict',label);
+   assert.deepEqual(state(),before,label+': nothing persisted');
+   return null;
+  }
+  return merge('film:'+label+'1','film:'+label+'2',resolve?{resolve:{sync:resolve}}:{});
+ };
+ // Covered: the survivor is newer, the retired row is all null, equal values.
+ assert.deepEqual((await syncCase('s1',[T1,T1,1,T1],[T2,T2,2,T2],{expect:'drop'})).discarded,[]);
+ assert.deepEqual((await syncCase('s2',[null,null,null,null],[T2,null,2,null],{expect:'drop'})).discarded,[]);
+ assert.equal(one(file,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:s22'"),T2);
+ // Refused: the retired clock is newer, complementary, or the survivor's row holds only nulls (a missing row and null clocks differ, ADR 0070).
+ await syncCase('s3',[T2,T2,2,T2],[T1,T1,1,T1],{expect:'refuse'});
+ await syncCase('s4',[null,T2,null,null],[T1,null,null,null],{expect:'refuse'});
+ await syncCase('s5',[T1,null,null,null],[null,null,null,null],{expect:'refuse'});
+ assert.deepEqual((await syncCase('s6',[T2,T2,2,T2],[T1,T1,1,T1],{resolve:'survivor'})).discarded,['sync:retired']);
+ assert.equal(one(file,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:s62'"),T1);
+ assert.deepEqual((await syncCase('s7',[T2,T2,2,T2],[T1,T1,1,T1],{resolve:'retired'})).discarded,['sync:survivor']);
+ assert.equal(one(file,"SELECT metadata_at FROM film_sync_state WHERE film_id='film:s72'"),T2);
+ assert.deepEqual((await syncCase('s8',[null,T2,null,null],[T1,null,3,null],{resolve:'newest'})).discarded,['sync:merged']);
+ assert.deepEqual(rows(file,"SELECT metadata_at,synopsis_fetched_at,people_names_version,people_localized_at FROM film_sync_state WHERE film_id='film:s82'"),[{metadata_at:T1,synopsis_fetched_at:T2,people_names_version:3,people_localized_at:null}]);
+ await assert.rejects(()=>merge('film:s91','film:s92',{resolve:{sync:'both'}}),error=>['film_person_invalid','film_person_reference'].includes(error.code));
+ // A body that comes from the retired Film cannot keep the survivor's clocks silently: both clock rows differ, so a side must be named.
+ await make('film:m1','tmdb:191',191);await make('film:m2','tmdb:192',192);
+ sqlite(file,[meta('film:m1','moved-body'),clocks('film:m1',[T1,T1,1,T1]),clocks('film:m2',[T2,T2,2,T2])].join(';'));
+ before=snap();
+ await assert.rejects(()=>merge('film:m1','film:m2'),error=>error.code==='film_person_data_conflict','a retired body with different clocks');
+ assert.deepEqual(snap(),before);
+ assert.deepEqual((await merge('film:m1','film:m2',{resolve:{sync:'retired'}})).discarded,['sync:survivor']);
+ assert.equal(one(file,"SELECT payload_json FROM film_metadata WHERE film_id='film:m2'"),'moved-body');
 }
 
 // 10c. The fence row cannot be bypassed: if it (or the marker) vanishes between the read and the write, every assertion fails inside the batch.
