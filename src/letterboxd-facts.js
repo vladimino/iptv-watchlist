@@ -462,6 +462,14 @@ function recordRatingChange(record,incoming,effective){
    if(item.tmdb!=null&&!TMDB.test(String(item.tmdb)))fail('Invalid TMDB id');
    if(item.identity!==undefined&&item.identity!=='inferred')fail('Invalid identity kind');
    if(item.identity==='inferred'&&item.tmdb==null)fail('An inferred identity needs a TMDB id');
+   // `admit` (ADR 0105) names the Film to create for a TMDB movie the catalog does not hold: only an inferred item may carry it.
+   let admit=null;
+   if(item.admit!==undefined){
+    if(item.identity!=='inferred')fail('Only an inferred identity can admit a Film');
+    const a=item.admit;
+    if(!a||typeof a!=='object'||Array.isArray(a)||typeof a.title!=='string'||!a.title.trim()||a.title.length>300||!Number.isInteger(a.year)||a.year<1888||a.year>2100)fail('Invalid admit');
+    admit={title:a.title.trim(),year:a.year};
+   }
    const facts=item.facts||{},keys=Object.keys(facts);
    if(!keys.length||keys.some(key=>!FACT_NAMES.includes(key)))fail('Unknown or missing facts');
    if('watched' in facts&&facts.watched!==true)fail('An export can only show watched: true');
@@ -470,7 +478,7 @@ function recordRatingChange(record,incoming,effective){
    if('rating' in facts&&facts.watched!==true)fail('A rating or "not rated" row is also watched');
    const effectiveOn={};for(const [fact,day] of Object.entries(item.effectiveOn||{})){if(!FACT_NAMES.includes(fact)||!DAY.test(String(day)))fail('Invalid effectiveOn');effectiveOn[fact]=day;}
    // A verified item keeps the exact shape (and chunk hash) it always had; only an inferred one carries its kind.
-   return {lid:String(item.lid),tmdb:item.tmdb!=null?String(item.tmdb):null,facts,effectiveOn,...(item.identity==='inferred'?{identity:'inferred'}:{})};
+   return {lid:String(item.lid),tmdb:item.tmdb!=null?String(item.tmdb):null,facts,effectiveOn,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admit?{admit}:{})};
   });
   return {origin,chunk:body.chunk,items};
  }
@@ -508,6 +516,23 @@ function recordRatingChange(record,incoming,effective){
   return {chunk,films,outcomes:counts};
  }
 
+ const ADMISSIONS_KEY='letterboxd/admissions/verified-films.json';
+ // ADR 0105: the Film behind a search-found inferred TMDB movie is admitted through the existing admissions receipt, written before the
+ // facts (the Film exists before its rating), and the existing enrichment projector upserts it: this is not a second Film writer. An
+ // entry that already holds the movie is kept as it is; a source code already bound to another movie is a conflict and writes nothing.
+ // `identity: "inferred"` marks the entry; the projector reads only the fields it knows, so the mark changes nothing for it.
+ async function admitInferredFilm(env,item,origin){
+  const key='tmdb_'+item.tmdb;let outcome='present';
+  await casJSON(env,ADMISSIONS_KEY,{schemaVersion:1,films:{}},current=>{
+   const films=current.films&&typeof current.films==='object'&&!Array.isArray(current.films)?current.films:(current.films={});
+   for(const other of Object.values(films))if(other&&other.sourceCode===item.lid&&String(other.tmdb)!==item.tmdb){outcome='conflict';return null;}
+   if(films[key]){outcome='present';return null;}
+   films[key]={tmdb:item.tmdb,sourceCode:item.lid,archiveSha256:origin.archiveSha256,title:item.admit.title,year:item.admit.year,filmPath:null,verifiedAt:new Date().toISOString(),identity:'inferred'};
+   outcome='admitted';return current;
+  });
+  return outcome;
+ }
+
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
  async function commitBaselineChunk(env,body){
   const {origin,chunk,items}=validateBaselineRequest(body),hash=await itemsHash(items),sha=origin.archiveSha256;
@@ -522,11 +547,14 @@ function recordRatingChange(record,incoming,effective){
   });
   const counts={},films=[],records=[];let conflicts=0;
   for(const item of items){
-   const links={letterboxd:item.lid,tmdb:item.tmdb},factKey=await linkOrNote(env,links);
+   const links={letterboxd:item.lid,tmdb:item.tmdb};
+   let admitted=null;
+   if(item.admit){admitted=await admitInferredFilm(env,item,origin);if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}}
+   const factKey=await linkOrNote(env,links);
    if(!factKey){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
    const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null});
    tally(counts,result.outcomes);records.push(result.record);
-   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
+   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
   }
   await projectRecords(env,records);
   // Read back: every fact this import made current is still current, or a greater observation replaced it.
