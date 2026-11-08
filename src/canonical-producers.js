@@ -57,25 +57,34 @@ export function projectorFence(gate){
 }
 
 // EPG identity and the aliases, trusted ids and credits of the projector's Film entity. The credits are upserts only: no removal, no
-// ordinal renumbering, so the D1-only TMDB credits survive. `revisions` maps an entity id to the revision the caller read (absent = 0).
-// input: {at, epgGeneration, revisions:{id:n}, film:{id, contractVersion?, canonicalIdentity?, originalTitle?, externalIds?, aliases?, localization?},
+// ordinal renumbering, so the D1-only TMDB credits survive. `revisions` maps an entity id to the revision the caller read (absent = 0; use
+// readRevisions). A credit's Person must be created by this plan (`persons`) or already exist in D1 (`knownPersons`), otherwise the plan is
+// refused (`credit_person_unresolved`): film_person_credit references person, so the calls run PERSONS FIRST, then the Film. The plan is NOT
+// one atomic batch (`atomic:false`): each call is its own fenced batch, so a later failure leaves the earlier calls applied. Every call is
+// idempotent in content (aliases and ids upsert, a credit that exists is kept), so after a partial outcome the caller re-reads the revisions
+// (readRevisions), re-plans and dispatches again; the replay converges and never duplicates.
+// input: {at, epgGeneration, revisions:{id:n}, knownPersons?:[id], film:{id, contractVersion?, canonicalIdentity?, originalTitle?, externalIds?, aliases?, localization?},
 //   credits?:[{personId, role}], persons?:[{id, roleId, contractVersion?, externalIds?, aliases?, localization?}]}
 export function planEpgIdentity(input){
  const film=input?.film;
  if(!plain(film)||typeof film.id!=='string'||!film.id.startsWith('film:')||typeof input.at!=='string')return skipped('epg_identity','invalid_input');
  const revisions=plain(input.revisions)?input.revisions:{};
  const rev=id=>Number.isInteger(revisions[id])&&revisions[id]>=0?revisions[id]:0;
+ const persons=[];
+ for(const person of input.persons||[]){
+  if(!plain(person)||typeof person.id!=='string'||typeof person.roleId!=='string')return skipped('epg_identity','invalid_person');
+  persons.push(person);
+ }
+ const resolvable=new Set([...persons.map(person=>person.id),...(Array.isArray(input.knownPersons)?input.knownPersons:[])]);
  const credits=[];
  for(const credit of input.credits||[]){
   if(!credit||!ROLES.has(credit.role)||typeof credit.personId!=='string')return skipped('epg_identity','invalid_credit');
+  if(!resolvable.has(credit.personId))return skipped('epg_identity','credit_person_unresolved');
   credits.push({personId:credit.personId,role:credit.role});
  }
- const calls=[{fn:'mutateFilm',input:{id:film.id,expectedRevision:rev(film.id),at:input.at,film:{contractVersion:Number.isInteger(film.contractVersion)?film.contractVersion:1,canonicalIdentity:film.canonicalIdentity??undefined,originalTitle:film.originalTitle??undefined,externalIds:film.externalIds||[],aliases:film.aliases||[]},credits:credits.length?{upsert:credits}:undefined}}];
- for(const person of input.persons||[]){
-  if(!plain(person)||typeof person.id!=='string'||typeof person.roleId!=='string')return skipped('epg_identity','invalid_person');
-  calls.push({fn:'mutatePerson',input:{id:person.id,expectedRevision:rev(person.id),at:input.at,person:{roleId:person.roleId,contractVersion:Number.isInteger(person.contractVersion)?person.contractVersion:1,externalIds:person.externalIds||[],aliases:person.aliases||[]}}});
- }
- return {producer:'epg_identity',epgGeneration:input.epgGeneration??null,calls,skipped:[]};
+ const calls=persons.map(person=>({fn:'mutatePerson',input:{id:person.id,expectedRevision:rev(person.id),at:input.at,person:{roleId:person.roleId,contractVersion:Number.isInteger(person.contractVersion)?person.contractVersion:1,externalIds:person.externalIds||[],aliases:person.aliases||[]}}}));
+ calls.push({fn:'mutateFilm',input:{id:film.id,expectedRevision:rev(film.id),at:input.at,film:{contractVersion:Number.isInteger(film.contractVersion)?film.contractVersion:1,canonicalIdentity:film.canonicalIdentity??undefined,originalTitle:film.originalTitle??undefined,externalIds:film.externalIds||[],aliases:film.aliases||[]},credits:credits.length?{upsert:credits}:undefined}});
+ return {producer:'epg_identity',atomic:false,epgGeneration:input.epgGeneration??null,calls,skipped:[]};
 }
 
 // Automatic localization candidates only: a reviewed or owner value, an empty one or an inconsistent one never becomes a source write.
@@ -126,7 +135,6 @@ export function planBatch(plans){
 }
 
 const CALLS={mutateFilm,mutatePerson,recordLocalizationSources,admitRatedFilm,retainFilm,recordRetirementDecision};
-const KIND={mutateFilm:'film',admitRatedFilm:'film',retainFilm:'film',recordRetirementDecision:'film',mutatePerson:'person'};
 
 // Executes a plan only when the route is canonical. In legacy, r2 and prepared nothing runs and no statement reaches the database; held and
 // unreadable markers throw. Each call is one fenced batch. A thrown unknown outcome (film_person_unavailable) is returned as `unknown` and is
@@ -146,19 +154,67 @@ export async function dispatch(env,plan){
    throw error;
   }
  }
- return {executed:true,route,results};
+ const applied=results.filter(item=>item.status==='applied').length;
+ return {executed:true,route,results,complete:applied===(plan.calls||[]).length,partial:applied>0&&applied<(plan.calls||[]).length};
 }
 
-// Read-only. After an unknown outcome: has the entity's revision moved past the one the call expected?
+// What each call kind can settle by itself. A request id makes a replay a no-op (the writer opens no batch for a request it already applied);
+// mutateFilm and mutatePerson carry NO request id: they are idempotent in content, not by request id.
+const RECONCILE={
+ mutateFilm:{kind:()=>'film',id:input=>input.id,byRequestId:false},
+ mutatePerson:{kind:()=>'person',id:input=>input.id,byRequestId:false},
+ recordLocalizationSources:{kind:input=>input.kind,id:input=>input.id,byRequestId:true},
+ admitRatedFilm:{kind:()=>'film',id:input=>input.filmId||(/^tmdb_(\d+)$/.exec(String(input.receiptKey))?'film:tmdb:'+/^tmdb_(\d+)$/.exec(String(input.receiptKey))[1]:null),byRequestId:true},
+ retainFilm:{kind:()=>'film',id:input=>input.id,byRequestId:true},
+ recordRetirementDecision:{kind:()=>'film',id:input=>input.filmId,byRequestId:true},
+};
+export async function readRevisions(env,ids){
+ const db=database(env);
+ const list=[...new Set(ids)];
+ const out={};
+ for(let at=0;at<list.length;at+=SHADOW_READ_CHUNK){
+  const chunk=list.slice(at,at+SHADOW_READ_CHUNK);
+  for(const row of await many(db,`SELECT kind,id,revision FROM canonical_revision WHERE id IN (${chunk.map(()=>'?').join(',')})`,chunk))out[row.id]=Number(row.revision);
+ }
+ for(const id of list)if(!(id in out))out[id]=0;
+ return out;
+}
+
+// Does D1 already hold what a mutateFilm/mutatePerson call wanted? (external ids, aliases, upserted credits; read-only)
+async function contentPresent(db,fn,input){
+ if(fn==='mutateFilm'){
+  const film=input.film||{};
+  for(const item of film.externalIds||[])if(!(await one(db,'SELECT 1 AS x FROM film_external_id WHERE film_id=? AND scheme=? AND value=?',[input.id,item.scheme,String(item.value)])))return false;
+  for(const item of film.aliases||[])if(!(await one(db,'SELECT 1 AS x FROM film_alias WHERE film_id=? AND kind=? AND value=?',[input.id,item.kind||'title',item.value])))return false;
+  for(const item of input.credits?.upsert||[])if(!(await one(db,'SELECT 1 AS x FROM film_person_credit WHERE film_id=? AND person_id=? AND role=?',[input.id,item.personId,item.role])))return false;
+  return !!(await one(db,'SELECT 1 AS x FROM film WHERE id=?',[input.id]));
+ }
+ const person=input.person||{};
+ for(const item of person.externalIds||[])if(!(await one(db,'SELECT 1 AS x FROM person_external_id WHERE person_id=? AND scheme=? AND value=?',[input.id,item.scheme,String(item.value)])))return false;
+ for(const item of person.aliases||[])if(!(await one(db,'SELECT 1 AS x FROM person_alias WHERE person_id=? AND kind=? AND value=?',[input.id,item.kind||'name',item.value])))return false;
+ return !!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[input.id]));
+}
+
+// Read-only. After an unknown outcome. A moved revision is NOT proof that THIS call applied (any competing producer moves it), so the verdict is
+// never "applied" from the revision alone:
+// - not_applied: the revision is still the expected one, the atomic batch left nothing; re-dispatch with the same revision.
+// - settle_by_request_id: the writer dedupes by request id; replay the same call (a no-op if it applied; a `conflict` to re-read if it did not).
+// - content_present: mutateFilm/mutatePerson only, the revision moved and D1 already holds everything the call wanted; no replay is needed.
+// - reread_and_replan: the revision moved and the content is missing; read the revisions again (readRevisions), re-plan and dispatch (idempotent in content).
+// - unsupported: the call kind or its entity cannot be reconciled; block it, never guess.
 export async function readback(env,call){
- const kind=KIND[call?.fn];
- const id=call?.input?.id??call?.input?.filmId;
- if(!kind||typeof id!=='string')throw failed('canonical_producer_invalid');
+ const spec=RECONCILE[call?.fn];
+ const input=call?.input;
+ const kind=spec&&plain(input)?spec.kind(input):null,id=spec&&plain(input)?spec.id(input):null;
+ if(!spec||typeof id!=='string'||!['film','person'].includes(kind))return {outcome:'unsupported',applied:null};
  const db=database(env);
  const row=await one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',[kind,id]);
- const revision=Number(row?.revision??0);
- const expected=Number(call.input.expectedRevision??0);
- return {id,revision,applied:revision>expected,replay:revision>expected?'same_request_id_is_a_noop':'safe_to_replay_with_same_request_id'};
+ const revision=Number(row?.revision??0),expected=Number(input.expectedRevision??0);
+ const base={id,kind,revision,expected,moved:revision>expected};
+ if(spec.byRequestId)return {...base,outcome:'settle_by_request_id',applied:null,note:'replay the same call: an applied request id is a no-op'};
+ if(revision<=expected)return {...base,outcome:'not_applied',applied:false};
+ if(await contentPresent(db,call.fn,input))return {...base,outcome:'content_present',applied:null,note:'the wanted content exists; a competing writer may have written it'};
+ return {...base,outcome:'reread_and_replan',applied:false};
 }
 
 const capped=list=>list.length>SHADOW_LIST_CAP?list.slice(0,SHADOW_LIST_CAP):list;

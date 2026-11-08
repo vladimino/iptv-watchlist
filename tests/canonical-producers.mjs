@@ -11,7 +11,7 @@ import {mutateFilm,mutatePerson} from '../src/canonical-mutations.js';
 import {transitionAuthority} from '../src/film-person-authority.js';
 import {readLocalization} from '../src/localization-sources.js';
 import {CONFIRMED_RETIREMENTS,OWNER_CONFIRMATION} from '../scripts/tmdb-tv-identity-plan.mjs';
-import {writerRoute,projectorFence,planEpgIdentity,planLocalization,planDiscoveryAdmission,planRatedAdmission,planRetention,planRetirement,planBatch,dispatch,readback,shadowCompare,handoffReadiness,GAPS,SHADOW_ITEM_CAP} from '../src/canonical-producers.js';
+import {writerRoute,projectorFence,planEpgIdentity,planLocalization,planDiscoveryAdmission,planRatedAdmission,planRetention,planRetirement,planBatch,dispatch,readback,readRevisions,shadowCompare,handoffReadiness,GAPS,SHADOW_ITEM_CAP} from '../src/canonical-producers.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-canonical-producers-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
@@ -120,9 +120,10 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  await mutatePerson(env,{id:'person:tmdb_director/1',expectedRevision:0,at:AT,person:{roleId:'tmdb_director/1',contractVersion:1}});
  await mutateFilm(env,{id:'film:tmdb:9',expectedRevision:0,at:AT,film:{contractVersion:1,externalIds:[{scheme:'tmdb',value:'9',trusted:true}]},credits:{upsert:[{personId:'person:tmdb_director/1',role:'director',ordinal:0}]}});
  const plan=planEpgIdentity({at:AT,epgGeneration:'g1',revisions:{'film:tmdb:9':1,'person:director/7':1},film:{id:'film:tmdb:9',originalTitle:'Nine',externalIds:[{scheme:'tmdb',value:'9',trusted:true},{scheme:'tmdb_tv',value:'9',trusted:false}],aliases:[{kind:'title',value:'Девять'}]},credits:[{personId:'person:director/7',role:'director'}],persons:[{id:'person:director/7',roleId:'director/7'}]});
- assert.deepEqual(plan.calls.map(call=>call.fn),['mutateFilm','mutatePerson']);
- assert.equal(plan.calls[0].input.credits.remove,undefined,'a roster never removes a credit');
- assert.equal(plan.calls[0].input.credits.upsert[0].ordinal,undefined,'no ordinal is renumbered');
+ assert.deepEqual(plan.calls.map(call=>call.fn),['mutatePerson','mutateFilm'],'Persons first: a credit references its Person');
+ assert.equal(plan.atomic,false,'a multi-entity plan is not one atomic batch');
+ assert.equal(plan.calls[1].input.credits.remove,undefined,'a roster never removes a credit');
+ assert.equal(plan.calls[1].input.credits.upsert[0].ordinal,undefined,'no ordinal is renumbered');
  const result=await dispatch(env,plan);
  assert.deepEqual(result.results.map(item=>item.status),['applied','applied']);
  assert.deepEqual(rows(file,"SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id='film:tmdb:9' ORDER BY ordinal"),[{person_id:'person:tmdb_director/1',role:'director',ordinal:0},{person_id:'person:director/7',role:'director',ordinal:1}]);
@@ -130,6 +131,24 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  // Replaying the same plan (a producer retry) after a normal outcome with a stale revision is a conflict, never a second write.
  assert.equal((await dispatch(env,plan)).results[0].status,'conflict');
  for(const bad of [null,{at:AT,film:{id:'tmdb:9'}},{at:AT,film:{id:'film:tmdb:9'},credits:[{personId:'x',role:'producer'}]},{at:AT,film:{id:'film:tmdb:9'},persons:[{id:'person:x'}]}])assert.equal(planEpgIdentity(bad).calls.length,0);
+ // A credit whose Person is neither created by the plan nor declared known is refused (no foreign-key failure at dispatch).
+ assert.equal(planEpgIdentity({at:AT,film:{id:'film:tmdb:30'},credits:[{personId:'person:director/404',role:'director'}]}).skipped[0].reason,'credit_person_unresolved');
+ // First admission: a previously unseen Person referenced by a new Film's credit applies, Person first.
+ const first=planEpgIdentity({at:AT,epgGeneration:'g1',film:{id:'film:tmdb:30',externalIds:[{scheme:'tmdb',value:'30',trusted:true}]},credits:[{personId:'person:director/30',role:'director'}],persons:[{id:'person:director/30',roleId:'director/30'}]});
+ const firstResult=await dispatch(env,first);
+ assert.deepEqual([firstResult.complete,firstResult.partial,firstResult.results.map(item=>item.status)],[true,false,['applied','applied']]);
+ assert.equal(count(file,"film_person_credit WHERE film_id='film:tmdb:30'"),1);
+ // A later-step failure leaves the earlier step applied (partial, reported); a re-read and re-plan then converges without a duplicate.
+ await mutatePerson(env,{id:'person:director/31',expectedRevision:0,at:AT,person:{roleId:'director/31',contractVersion:1}});
+ const later=planEpgIdentity({at:AT,epgGeneration:'g1',revisions:{'film:tmdb:31':5},film:{id:'film:tmdb:31',externalIds:[{scheme:'tmdb',value:'31',trusted:true}]},credits:[{personId:'person:director/32',role:'director'}],persons:[{id:'person:director/32',roleId:'director/32'}]});
+ const partial=await dispatch(env,later);
+ assert.deepEqual([partial.complete,partial.partial,partial.results.map(item=>item.status)],[false,true,['applied','conflict']]);
+ assert.equal(count(file,"person WHERE id='person:director/32'"),1,'the Person step stays applied');
+ const fresh=await readRevisions(env,['film:tmdb:31','person:director/32']);
+ const replanned=planEpgIdentity({at:AT,epgGeneration:'g1',revisions:fresh,film:{id:'film:tmdb:31',externalIds:[{scheme:'tmdb',value:'31',trusted:true}]},credits:[{personId:'person:director/32',role:'director'}],persons:[{id:'person:director/32',roleId:'director/32'}]});
+ const converged=await dispatch(env,replanned);
+ assert.deepEqual([converged.complete,converged.results.map(item=>item.status)],[true,['applied','applied']]);
+ assert.equal(count(file,"film_person_credit WHERE film_id='film:tmdb:31'"),1,'no duplicate credit after the replay');
  // Mixed generations never share a batch.
  assert.equal(planBatch([planEpgIdentity({at:AT,epgGeneration:'g1',film:{id:'film:a'}}),planEpgIdentity({at:AT,epgGeneration:'g2',film:{id:'film:b'}})]).reason,'mixed_generation');
  assert.equal(planBatch([planEpgIdentity({at:AT,epgGeneration:'g1',film:{id:'film:a'}}),planEpgIdentity({at:AT,epgGeneration:'g1',film:{id:'film:b'}})]).ok,true);
@@ -210,28 +229,59 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  for(const bad of [{...incoming,status:'reviewed'},{...incoming,source:'dictionary'},{...incoming,value:''}])assert.equal(planLocalization({kind:'film',id:'film:tmdb:3',localization:bad,resolved,revision:2,at:AT,requestId:'x'}).calls.length,0);
 }
 
-// 8. An unknown batch outcome is reported, never blindly retried, and settled by readback and the same request id.
+// 8. An unknown batch outcome is reported, never blindly retried, and is never settled by the revision alone.
 {
  const file=database('open');
  const real=d1Standin(file);
- const plan=planEpgIdentity({at:AT,epgGeneration:'g',film:{id:'film:tmdb:21',originalTitle:'X',externalIds:[{scheme:'tmdb',value:'21',trusted:true}]}});
- // The batch commits, then the answer is lost.
- const lostAnswer={DB:{prepare:sql=>real.prepare(sql),batch:async statements=>{if(statements.length>1&&/film_person_cas/.test(statements[0].text||''))await real.batch(statements);if(statements.length>1)throw new Error('D1_ERROR: network lost');return real.batch(statements);}}};
+ const plan=planEpgIdentity({at:AT,epgGeneration:'g',film:{id:'film:tmdb:21',originalTitle:'X',externalIds:[{scheme:'tmdb',value:'21',trusted:true}],aliases:[{kind:'title',value:'Икс'}]}});
+ // (b) The batch commits, then the answer is lost.
+ const lostAnswer={DB:{prepare:sql=>real.prepare(sql),batch:async statements=>{if(statements.length>1){await real.batch(statements);throw new Error('D1_ERROR: network lost');}return real.batch(statements);}}};
  const lost=await dispatch(lostAnswer,plan);
  assert.equal(lost.results[0].status,'unknown');
  assert.equal(lost.results.length,1,'nothing after an unknown outcome runs');
+ assert.equal(lost.partial,false);
  const seen=await readback(state(file),plan.calls[0]);
- assert.equal(seen.applied,true);
+ assert.deepEqual([seen.outcome,seen.applied],['content_present',null],'the content exists; the revision alone is never proof that this call applied');
  assert.equal(count(file,'film'),1);
- // The batch never reached D1: readback says it is safe to replay with the same request id.
+ // (c) The batch never reached D1: not_applied, safe to dispatch again; the replay applies once.
  const file2=database('open');
  const dropped={DB:{prepare:sql=>d1Standin(file2).prepare(sql),batch:async statements=>{if(statements.length>1)throw new Error('D1_ERROR: network');return d1Standin(file2).batch(statements);}}};
- const unknown=await dispatch(dropped,plan);
- assert.equal(unknown.results[0].status,'unknown');
+ assert.equal((await dispatch(dropped,plan)).results[0].status,'unknown');
  const absent=await readback(state(file2),plan.calls[0]);
- assert.deepEqual([absent.applied,absent.replay],[false,'safe_to_replay_with_same_request_id']);
+ assert.deepEqual([absent.outcome,absent.applied],['not_applied',false]);
  assert.equal((await dispatch(state(file2),plan)).results[0].status,'applied');
- await assert.rejects(()=>readback(state(file2),{fn:'nope',input:{}}),code('canonical_producer_invalid'));
+ // (a) A lost batch while a competing producer moved the SAME Film's revision: the revision moved, but this call's content is missing, so it is
+ // NOT reported applied and the advice is to re-read and re-plan (replaying with the old revision would be a conflict).
+ const file3=database('open'),env3=state(file3);
+ const competing=await mutateFilm(env3,{id:'film:tmdb:21',expectedRevision:0,at:AT,film:{contractVersion:1,externalIds:[{scheme:'tmdb',value:'21',trusted:true}]}});
+ assert.equal(competing.revision,1);
+ const lostB={DB:{prepare:sql=>d1Standin(file3).prepare(sql),batch:async statements=>{if(statements.length>1)throw new Error('D1_ERROR: network');return d1Standin(file3).batch(statements);}}};
+ const wanted=planEpgIdentity({at:AT,epgGeneration:'g',revisions:{'film:tmdb:21':0},film:{id:'film:tmdb:21',aliases:[{kind:'title',value:'Лишь у меня'}]}});
+ assert.equal((await dispatch(lostB,wanted)).results[0].status,'unknown');
+ const confused=await readback(state(file3),wanted.calls[0]);
+ assert.deepEqual([confused.moved,confused.outcome,confused.applied],[true,'reread_and_replan',false],'a competing write is not proof of this lost batch');
+ assert.equal(count(file3,"film_alias WHERE value='Лишь у меня'"),0,'the alias was never written');
+ const fresh=await readRevisions(state(file3),['film:tmdb:21']);
+ const redo=planEpgIdentity({at:AT,epgGeneration:'g',revisions:fresh,film:{id:'film:tmdb:21',aliases:[{kind:'title',value:'Лишь у меня'}]}});
+ assert.equal((await dispatch(state(file3),redo)).results[0].status,'applied');
+ // (d) Two separate EPG calls with distinct payloads on one Film: the first applied, the second lost; each readback is judged on its own content.
+ const file4=database('open'),env4=state(file4);
+ const A=planEpgIdentity({at:AT,epgGeneration:'g',film:{id:'film:tmdb:40',aliases:[{kind:'title',value:'Первый'}]}});
+ assert.equal((await dispatch(env4,A)).results[0].status,'applied');
+ const lostC={DB:{prepare:sql=>d1Standin(file4).prepare(sql),batch:async statements=>{if(statements.length>1)throw new Error('D1_ERROR: network');return d1Standin(file4).batch(statements);}}};
+ const B=planEpgIdentity({at:AT,epgGeneration:'g',revisions:{'film:tmdb:40':1},film:{id:'film:tmdb:40',aliases:[{kind:'title',value:'Второй'}]}});
+ assert.equal((await dispatch(lostC,B)).results[0].status,'unknown');
+ assert.equal((await readback(state(file4),A.calls[0])).outcome,'content_present');
+ assert.equal((await readback(state(file4),B.calls[0])).outcome,'not_applied','B expected revision 1 and the revision is still 1');
+ // A call without a request id never claims request-id replay safety; calls that dedupe by request id say so; every advertised kind reconciles.
+ const byId=await readback(state(file4),{fn:'recordLocalizationSources',input:{kind:'film',id:'film:tmdb:40',expectedRevision:1,requestId:'r',sources:[]}});
+ assert.deepEqual([byId.outcome,byId.kind],['settle_by_request_id','film']);
+ const admit=await readback(state(file4),{fn:'admitRatedFilm',input:{receiptKey:'tmdb_603',expectedRevision:0,requestId:'r'}});
+ assert.deepEqual([admit.id,admit.outcome],['film:tmdb:603','settle_by_request_id'],'an absent filmId is derived from the receipt key');
+ for(const fn of ['retainFilm','recordRetirementDecision'])assert.equal((await readback(state(file4),{fn,input:{id:'film:tmdb:40',filmId:'film:tmdb:40',expectedRevision:1,requestId:'r'}})).outcome,'settle_by_request_id');
+ const person=await readback(state(file4),{fn:'mutatePerson',input:{id:'person:director/1',expectedRevision:0,person:{roleId:'director/1'}}});
+ assert.equal(person.outcome,'not_applied');
+ for(const bad of [{fn:'nope',input:{}},{fn:'admitRatedFilm',input:{receiptKey:'abc',expectedRevision:0}},{fn:'mutateFilm',input:null},null])assert.equal((await readback(state(file4),bad)).outcome,'unsupported');
  // A lost fence or revision is a conflict to read again, not an unknown.
  const racing={DB:d1Standin(file2,{onBatch:async()=>{sqlite(file2,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");}})};
  const fenced=await dispatch(racing,planEpgIdentity({at:AT,film:{id:'film:tmdb:22',externalIds:[]}}));
