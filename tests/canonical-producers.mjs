@@ -273,6 +273,39 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  assert.equal((await dispatch(lostC,B)).results[0].status,'unknown');
  assert.equal((await readback(state(file4),A.calls[0])).outcome,'content_present');
  assert.equal((await readback(state(file4),B.calls[0])).outcome,'not_applied','B expected revision 1 and the revision is still 1');
+ // (e..j) content_present needs EXACT equivalence of every write effect: a same-entity revision bump by a competing producer never lets a partial
+ // match hide a lost update (a different originalTitle, an untrusted or differently-proven id, a removal not performed, a different Person role).
+ const file5=database('open'),env5=state(file5);
+ await mutatePerson(env5,{id:'person:director/50',expectedRevision:0,at:AT,person:{roleId:'director/50',contractVersion:1}});
+ await mutatePerson(env5,{id:'person:actor/51',expectedRevision:0,at:AT,person:{roleId:'actor/51',contractVersion:1}});
+ await mutateFilm(env5,{id:'film:tmdb:50',expectedRevision:0,at:AT,film:{contractVersion:1,originalTitle:'A',externalIds:[{scheme:'tmdb',value:'50',trusted:false,conflicting:true,provenance:{source:'x'}},{scheme:'tmdb_tv',value:'50',trusted:true,provenance:{source:'y'}}]},credits:{upsert:[{personId:'person:director/50',role:'director'}]}});
+ const bump=revision=>mutateFilm(env5,{id:'film:tmdb:50',expectedRevision:revision,at:AT,film:{contractVersion:1,aliases:[{kind:'title',value:'bump'+revision}]}});
+ await bump(1);await bump(2); // another producer: the revision is now 3, the content unchanged
+ const verdict=input=>readback(state(file5),{fn:'mutateFilm',input:{id:'film:tmdb:50',expectedRevision:1,at:AT,...input}});
+ const film=(over={},credits)=>({film:{contractVersion:1,...over},credits});
+ assert.equal((await verdict(film({originalTitle:'B'}))).outcome,'reread_and_replan','a differing originalTitle is not present');
+ assert.equal((await verdict(film({originalTitle:'A'}))).outcome,'content_present','an equal originalTitle and an existing row are present');
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb',value:'50',trusted:true,provenance:{source:'x'}}]}))).outcome,'reread_and_replan','an untrusted/conflicting row is not the trusted id the call wanted');
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb_tv',value:'50',trusted:true,provenance:{source:'other'}}]}))).outcome,'reread_and_replan','different provenance');
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb_tv',value:'50',trusted:true,provenance:{source:'y'}}]}))).outcome,'content_present','the exact trusted row with the same provenance');
+ // Each trust field alone: a non-conflicting untrusted row is not the trusted id wanted; a conflicting row is not the non-conflicting one wanted.
+ await mutateFilm(env5,{id:'film:tmdb:50',expectedRevision:3,at:AT,film:{contractVersion:1,externalIds:[{scheme:'tmdb_tv',value:'52',trusted:false,provenance:{source:'z'}}]}});
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb_tv',value:'52',trusted:true,provenance:{source:'z'}}]}))).outcome,'reread_and_replan','only the trusted flag differs');
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb_tv',value:'52',trusted:false,provenance:{source:'z'}}]}))).outcome,'content_present','the same untrusted row');
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb',value:'50',trusted:false,provenance:{source:'x'}}]}))).outcome,'reread_and_replan','only the conflicting flag differs');
+ assert.equal((await verdict(film({externalIds:[{scheme:'tmdb',value:'50',trusted:false,conflicting:true,provenance:{source:'x'}}]}))).outcome,'content_present','the same conflicting row');
+ assert.equal((await verdict(film({},{upsert:[{personId:'person:actor/51',role:'actor'}]}))).outcome,'reread_and_replan','an upserted credit that is absent');
+ assert.equal((await verdict(film({contractVersion:2}))).outcome,'reread_and_replan','a differing contract version');
+ assert.equal((await verdict(film({removeExternalIds:[{scheme:'tmdb',value:'50'}]}))).outcome,'reread_and_replan','a removal that was not performed');
+ assert.equal((await verdict(film({removeExternalIds:[{scheme:'tmdb',value:'404'}]}))).outcome,'content_present','a removal of an absent row holds');
+ assert.equal((await verdict(film({},{remove:[{personId:'person:director/50',role:'director'}]}))).outcome,'reread_and_replan','a credit removal that was not performed');
+ assert.equal((await verdict(film({},{upsert:[{personId:'person:director/50',role:'director'}]}))).outcome,'content_present');
+ assert.equal((await verdict(film({canonicalIdentity:'film:other'}))).outcome,'reread_and_replan','a differing canonical identity');
+ const personVerdict=input=>readback(state(file5),{fn:'mutatePerson',input:{id:'person:director/50',expectedRevision:0,at:AT,...input}});
+ assert.equal((await personVerdict({person:{roleId:'director/50',contractVersion:1}})).outcome,'content_present');
+ assert.equal((await personVerdict({person:{roleId:'director/99',contractVersion:1}})).outcome,'reread_and_replan','a differing role id');
+ assert.equal((await personVerdict({person:{roleId:'director/50',contractVersion:1,externalIds:[{scheme:'tmdb',value:'1',trusted:true}]}})).outcome,'reread_and_replan','an external id that is absent');
+ assert.equal((await readback(state(file5),{fn:'mutatePerson',input:{id:'person:missing/1',expectedRevision:0,at:AT,person:{roleId:'x',contractVersion:1}}})).outcome,'not_applied','an absent Person with an unchanged revision');
  // A call without a request id never claims request-id replay safety; calls that dedupe by request id say so; every advertised kind reconciles.
  const byId=await readback(state(file4),{fn:'recordLocalizationSources',input:{kind:'film',id:'film:tmdb:40',expectedRevision:1,requestId:'r',sources:[]}});
  assert.deepEqual([byId.outcome,byId.kind],['settle_by_request_id','film']);

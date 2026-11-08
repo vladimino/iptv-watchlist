@@ -180,26 +180,45 @@ export async function readRevisions(env,ids){
  return out;
 }
 
-// Does D1 already hold what a mutateFilm/mutatePerson call wanted? (external ids, aliases, upserted credits; read-only)
+// Does D1 hold EXACTLY the state a mutateFilm/mutatePerson call would have left? Every write effect the call advertises is compared: the Film or
+// Person row fields it sets (contract version, role id, and canonical identity / original title when given), each external id with its trust,
+// conflict flag and provenance, each removal (the row must be absent), each alias and each upserted credit (present), each credit removal (absent).
+// Anything that differs, or that cannot be proven equal, is "not present": a competing producer may have changed the entity, and a replay
+// through the revision check is then the safe path. Read-only.
+const jsonOf=value=>value===undefined||value===null?null:JSON.stringify(value);
 async function contentPresent(db,fn,input){
- if(fn==='mutateFilm'){
-  const film=input.film||{};
-  for(const item of film.externalIds||[])if(!(await one(db,'SELECT 1 AS x FROM film_external_id WHERE film_id=? AND scheme=? AND value=?',[input.id,item.scheme,String(item.value)])))return false;
-  for(const item of film.aliases||[])if(!(await one(db,'SELECT 1 AS x FROM film_alias WHERE film_id=? AND kind=? AND value=?',[input.id,item.kind||'title',item.value])))return false;
-  for(const item of input.credits?.upsert||[])if(!(await one(db,'SELECT 1 AS x FROM film_person_credit WHERE film_id=? AND person_id=? AND role=?',[input.id,item.personId,item.role])))return false;
-  return !!(await one(db,'SELECT 1 AS x FROM film WHERE id=?',[input.id]));
+ if(!plain(input))return false;
+ const isFilm=fn==='mutateFilm';
+ const table=isFilm?'film_external_id':'person_external_id',column=isFilm?'film_id':'person_id',aliasTable=isFilm?'film_alias':'person_alias';
+ const body=isFilm?input.film:input.person;
+ if(!plain(body))return false;
+ if(isFilm){
+  const row=await one(db,'SELECT contract_version,canonical_identity,original_title FROM film WHERE id=?',[input.id]);
+  if(!row||row.contract_version!==body.contractVersion)return false;
+  if(body.canonicalIdentity!==undefined&&body.canonicalIdentity!==null&&row.canonical_identity!==body.canonicalIdentity)return false;
+  if(body.originalTitle!==undefined&&body.originalTitle!==null&&row.original_title!==body.originalTitle)return false;
+ }else{
+  const row=await one(db,'SELECT role_id,contract_version FROM person WHERE id=?',[input.id]);
+  if(!row||row.role_id!==body.roleId||row.contract_version!==body.contractVersion)return false;
  }
- const person=input.person||{};
- for(const item of person.externalIds||[])if(!(await one(db,'SELECT 1 AS x FROM person_external_id WHERE person_id=? AND scheme=? AND value=?',[input.id,item.scheme,String(item.value)])))return false;
- for(const item of person.aliases||[])if(!(await one(db,'SELECT 1 AS x FROM person_alias WHERE person_id=? AND kind=? AND value=?',[input.id,item.kind||'name',item.value])))return false;
- return !!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[input.id]));
+ for(const item of body.removeExternalIds||[])if(await one(db,`SELECT 1 AS x FROM ${table} WHERE ${column}=? AND scheme=? AND value=?`,[input.id,item.scheme,String(item.value)]))return false;
+ for(const item of body.externalIds||[]){
+  const row=await one(db,`SELECT trusted,conflicting,provenance_json FROM ${table} WHERE ${column}=? AND scheme=? AND value=?`,[input.id,item.scheme,String(item.value)]);
+  if(!row||row.trusted!==(item.trusted&&!item.conflicting?1:0)||row.conflicting!==(item.conflicting?1:0)||(row.provenance_json??null)!==jsonOf(item.provenance))return false;
+ }
+ for(const item of body.aliases||[])if(!(await one(db,`SELECT 1 AS x FROM ${aliasTable} WHERE ${column}=? AND kind=? AND value=?`,[input.id,item.kind||(isFilm?'title':'name'),item.value])))return false;
+ if(isFilm){
+  for(const item of input.credits?.remove||[])if(await one(db,'SELECT 1 AS x FROM film_person_credit WHERE film_id=? AND person_id=? AND role=?',[input.id,item.personId,item.role]))return false;
+  for(const item of input.credits?.upsert||[])if(!(await one(db,'SELECT 1 AS x FROM film_person_credit WHERE film_id=? AND person_id=? AND role=?',[input.id,item.personId,item.role])))return false;
+ }
+ return true;
 }
 
 // Read-only. After an unknown outcome. A moved revision is NOT proof that THIS call applied (any competing producer moves it), so the verdict is
 // never "applied" from the revision alone:
 // - not_applied: the revision is still the expected one, the atomic batch left nothing; re-dispatch with the same revision.
 // - settle_by_request_id: the writer dedupes by request id; replay the same call (a no-op if it applied; a `conflict` to re-read if it did not).
-// - content_present: mutateFilm/mutatePerson only, the revision moved and D1 already holds everything the call wanted; no replay is needed.
+// - content_present: mutateFilm/mutatePerson only, the revision moved and D1 holds EXACTLY the state the call would have left (every value, trust, provenance, removal); otherwise reread_and_replan.
 // - reread_and_replan: the revision moved and the content is missing; read the revisions again (readRevisions), re-plan and dispatch (idempotent in content).
 // - unsupported: the call kind or its entity cannot be reconciled; block it, never guess.
 export async function readback(env,call){
