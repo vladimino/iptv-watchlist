@@ -208,6 +208,7 @@ html.film-screen .status-footer,html.events-screen .status-footer{margin-top:28p
 .film-similar-poster{position:relative;flex:none}
 .film-similar-card .poster{width:78px;height:117px}
 .film-similar-card .film-info h3{font-size:19px;line-height:1.25;margin:2px 0 4px;display:block}
+.film-similar-card .letterboxd-link{margin:0 0 0 8px;vertical-align:middle}
 .film-similar-open{display:inline;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:650;text-align:left;overflow-wrap:anywhere;text-decoration:none}
 .film-similar-open:hover{color:var(--lime)}
 .film-similar-open:focus-visible{outline:2px solid var(--lime);outline-offset:3px;border-radius:2px}
