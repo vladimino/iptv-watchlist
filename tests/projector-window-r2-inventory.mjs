@@ -103,7 +103,7 @@ const FILE_SITES={
  'src/owner-review-d1.js':{r2:2,wrapper:0,dynamic:0},
  'src/prediction-d1.js':{r2:5,wrapper:0,dynamic:0},
  'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
- 'src/worker.js':{r2:14,wrapper:46,dynamic:18},
+ 'src/worker.js':{r2:14,wrapper:47,dynamic:18},
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -167,6 +167,7 @@ const classes={
  'sealFinalizeStep@src/worker.js':'under the sealStep lease',
  'sealPublishStep@src/worker.js':'under the sealStep lease',
  'sealQueueStep@src/worker.js':'under the sealStep lease',
+ 'flushEpgEvent@src/worker.js':'EPG event log and the run record (sync.json), not projector inputs; under the sealStep lease, finishSync or the complete-run continuation',
  'copyEpgGeneration@src/worker.js':'under the publication lease',
  'persistWatchlist@src/worker.js':'under the publication lease',
  'planDiscoveryLedger@src/worker.js':'under the publication lease',
