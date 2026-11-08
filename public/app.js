@@ -183,12 +183,33 @@ function homeTarget(){const here=new URL(window.location.href);return onHomeScre
 function refreshReturnLinks(){ReturnHome.decorate(document,homeTarget());}
 function syncReturnLink(){const link=$('#return-home');if(link)link.hidden=!(filmScreen||eventsScreen);refreshReturnLinks();}
 let eventsScreen=false,filmScreen=null,filmReturnId=null,filmFiltersAtOpen=null,filmCompareId=null,filmCompareFilm=null,filmCompareById=new Map(),filmScrollById=new Map(),movieScrollY=0,eventsTrigger=null;
+// The feed is a single node: in the sidebar (compact) on the programme and film pages, in the main column on the events screen.
+function placeActivity(){
+ const activity=document.querySelector('.activity'),host=eventsScreen?$('#events-screen'):$('#filters');
+ if(activity&&host&&typeof host.appendChild==='function'&&activity.parentNode!==host)host.appendChild(activity);
+}
+function syncEventTypeButtons(){
+ for(const button of document.querySelectorAll('#events-types [data-event-type]'))button.setAttribute('aria-pressed',String(button.dataset.eventType===eventTypeFilterId));
+}
+function syncEventTypeFromUrl(){eventTypeFilterId=eventTypeFrom(new URL(window.location.href).search);syncEventTypeButtons();startEventSearch();}
+function selectEventType(id){
+ if(!EVENT_TYPE_FILTERS.some(item=>item.id===id))return;
+ eventTypeFilterId=id;syncEventTypeButtons();
+ // The choice lives in the URL of this history entry (no new entry), next to the return target.
+ if(eventsRequested()&&currentPathname()==='/events')window.history.replaceState(window.history.state,'',ReturnHome.withReturn(withEventType('/events',id),homeTarget()));
+ startEventSearch();
+}
 function applyEventsScreen(on){
  if(on&&!eventsScreen)movieScrollY=window.scrollY||0;
  eventsScreen=!!on;
  document.documentElement?.classList?.toggle('events-screen',eventsScreen);
  const expand=$('#activity-expand');
  if(expand)expand.hidden=eventsScreen;
+ const types=$('#events-types'),main=$('#events-screen');
+ if(types)types.hidden=!eventsScreen;
+ if(main)main.hidden=!eventsScreen;
+ placeActivity();
+ if(eventsScreen)syncEventTypeFromUrl();else{cancelEventSearch();renderActivity();}
  syncReturnLink();
  if(typeof window.scrollTo==='function')window.scrollTo(0,eventsScreen?0:movieScrollY||0);
 }
@@ -288,13 +309,22 @@ function onHistoryNavigation(){
  if(filmScreen)applyFilmScreen(null);
  const onEvents=eventsRequested();
  if(!onEvents){const next=readUrlState(new URL(window.location.href));if(leavingFilm&&filtersChanged)render();else if(filterStateKey(next)!==filterStateKey(state))restoreUrl();}
- if(onEvents!==eventsScreen)applyEventsScreen(onEvents);
+ if(onEvents!==eventsScreen)applyEventsScreen(onEvents);else if(onEvents)syncEventTypeFromUrl();
  if(eventsScreen)$('#activity-title')?.focus?.({preventScroll:true});
  else if(leavingFilm)focusFilmReturn(returnId);
  else (eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
 }
+// On a film page the sidebar filters are live. Whatever changes them is reflected in the programme state the page will return to.
+function syncFilmReturn(){
+ const here=new URL(window.location.href),current=ReturnHome.fromSearch(here.search),home=urlForState('https://iptv.local'+current),target=home.pathname+home.search+home.hash;
+ const path=here.pathname+here.search+here.hash,next=ReturnHome.withReturn(path,target);
+ if(next!==path)window.history.replaceState(window.history.state,'',next);
+ refreshReturnLinks();
+}
 function syncUrl(){
- if(!urlReady||urlRestoring||eventsRequested()||filmIdFromLocation()||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
+ if(!urlReady||urlRestoring||!Number.isInteger(state.from)||!Number.isInteger(state.to)||state.from<1900||state.to>MAX_YEAR||state.from>state.to||state.maxRuntime!==null&&(!Number.isInteger(state.maxRuntime)||state.maxRuntime<1))return;
+ if(filmIdFromLocation()){syncFilmReturn();return;}
+ if(eventsRequested())return;
  const next=urlForState(window.location.href);
  const target=next.pathname+next.search+next.hash,current=window.location.pathname+window.location.search+window.location.hash;
  if(target!==current)window.history.replaceState(window.history.state,'',target);
@@ -314,6 +344,83 @@ function restoreUrl(){
 }
 let films = [];
 let eventCursor=null,eventLoading=false;const loadedEvents=new Map();
+// AIR-381: the events screen filters the loaded events by the type of event. Pure mapping: «Все события» shows every loaded event, known or not,
+// and the other buttons name the stored `type` values they stand for. A chosen type also searches older pages by itself (see startEventSearch).
+const EVENT_TYPE_FILTERS=[
+ {id:'all',label:'Все события',types:null},
+ {id:'watchlist',label:'Watchlist и просмотр',types:['watchlist','started','unstarted']},
+ {id:'epg',label:'Программа',types:['epg']},
+ {id:'ratings',label:'Оценки',types:['ratings']},
+ {id:'enrichment',label:'Прогнозы',types:['enrichment']},
+ {id:'taste_profile',label:'Модель вкуса',types:['taste_profile']},
+];
+function eventTypeFrom(search){
+ let params;try{params=new URLSearchParams(String(search||''));}catch{return 'all';}
+ for(const value of params.getAll('type')){const found=EVENT_TYPE_FILTERS.find(item=>item.id===value);if(found)return found.id;}
+ return 'all';
+}
+function eventMatchesType(event,id){
+ const filter=EVENT_TYPE_FILTERS.find(item=>item.id===id);
+ return !filter||!filter.types||filter.types.includes(event&&event.type);
+}
+function withEventType(href,id){return id==='all'||!EVENT_TYPE_FILTERS.some(item=>item.id===id)?href:href+(href.includes('?')?'&':'?')+'type='+encodeURIComponent(id);}
+const EVENT_SEARCH_TARGET=10;
+let eventTypeFilterId='all',activityNote='Загружаем события…',eventsReady=false;
+const eventSearch={token:0,state:'idle',controller:null};
+function eventMatchCount(id){let count=0;for(const event of loadedEvents.values())if(eventMatchesType(event,id))count++;return count;}
+const eventPause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+function cancelEventSearch(){
+ eventSearch.token++;
+ if(eventSearch.controller){try{eventSearch.controller.abort();}catch{}eventSearch.controller=null;}
+ eventSearch.state='idle';
+}
+// A chosen type looks for its events in the older pages by itself, one request at a time and in cursor order, until 10 events of that type are
+// loaded or the cursor is exhausted; a page with no match does not stop it and needs no click. What is already loaded is reused. It stops at once on
+// a change of type or screen (the request is aborted), on an API error (shown, with an explicit retry; never retried by itself) and on a cursor that
+// repeats or does not advance. «Все события» never scans: it keeps the first page and the manual «Более давние события».
+async function startEventSearch(){
+ const id=eventTypeFilterId;
+ cancelEventSearch();
+ if(!eventsScreen||id==='all'||!eventsReady){renderActivity();return;}
+ const token=eventSearch.token,controller=typeof AbortController==='function'?new AbortController():null,seen=new Set();
+ eventSearch.controller=controller;
+ if(eventCursor&&eventMatchCount(id)<EVENT_SEARCH_TARGET)eventSearch.state='searching';
+ renderActivity();
+ while(token===eventSearch.token&&eventCursor&&eventMatchCount(id)<EVENT_SEARCH_TARGET){
+  while(eventLoading&&token===eventSearch.token)await eventPause(25);
+  if(token!==eventSearch.token)return;
+  const cursor=eventCursor;
+  if(seen.has(cursor)){eventSearch.state='stuck';break;}
+  seen.add(cursor);
+  const result=await loadEvents(true,{quiet:true,auto:true,signal:controller?controller.signal:undefined});
+  if(token!==eventSearch.token)return;
+  if(result!==true){eventSearch.state='error';break;}
+  renderActivity();
+  await eventPause(0);
+ }
+ if(token!==eventSearch.token)return;
+ eventSearch.controller=null;
+ if(eventSearch.state==='searching')eventSearch.state=eventCursor?'idle':'exhausted';
+ else if(eventSearch.state==='idle'&&!eventCursor)eventSearch.state='exhausted';
+ renderActivity();
+}
+function activityStatusText(filter,ordered,shown){
+ if(filter==='all'||!ordered.length)return activityNote;
+ const found='Найдено среди загруженных: '+eventMatchCount(filter)+'.';
+ if(eventSearch.state==='searching')return 'Ищем более давние события… '+found;
+ if(eventSearch.state==='error')return 'Не удалось загрузить события. '+found;
+ if(eventSearch.state==='stuck')return 'Архив событий не продвигается дальше. '+found;
+ if(!shown.length)return eventSearch.state==='exhausted'?'Во всём доступном архиве событий этого типа нет.':'Среди загруженных событий этого типа пока нет.';
+ return activityNote;
+}
+function syncActivityMore(){
+ const button=$('#activity-more');
+ if(!button)return;
+ const filtered=eventsScreen&&eventTypeFilterId!=='all';
+ if(filtered&&eventSearch.state==='searching'){button.hidden=true;return;}
+ if(filtered&&(eventSearch.state==='error'||eventSearch.state==='stuck')){button.hidden=false;button.disabled=false;button.textContent='Повторить';return;}
+ if(!eventLoading&&eventsReady){button.hidden=!eventCursor;button.textContent='Более давние события';}
+}
 let startedIds=new Set(),startedReady=false,startedLoading=false;const savingStarted=new Set();
 const peopleSources={directors:[],actors:[]};
 const $ = selector => document.querySelector(selector);
@@ -557,7 +664,7 @@ function filmCredits(film){const directors=filmPeople(film.directors?.length>1?'
 function knownFacetIds(values,labels){const seen=new Set(),out=[];for(const value of values||[]){if(typeof value!=='string'||!Object.hasOwn(labels,value)||seen.has(value))continue;seen.add(value);out.push(value);}return out;}
 function filmFacetChip(kind,value,label,dimension){return `<button type="button" class="film-chip" data-facet-kind="${kind}" data-facet-value="${escapeHTML(value)}"${dimension?` data-facet-dimension="${escapeHTML(dimension)}"`:''}>${escapeHTML(label)}</button>`;}
 function filmFingerprint(film){const item=enrichment.films?.[String(film.id)]||{},fingerprint=item.fingerprint&&typeof item.fingerprint==='object'?item.fingerprint:null,mechanics=knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods=knownFacetIds(fingerprint?.moodIds||item.moodIds,MOOD_LABELS),stored=fingerprint?.execution&&typeof fingerprint.execution==='object'?fingerprint.execution:{},execution=EXECUTION_FILTERS.flatMap(dimension=>{const value=stored[dimension.id];if(value==='unknown'||value==='not_applicable')return [];const label=EXECUTION_VALUES[dimension.id]?.[value];return label?[{id:dimension.id,name:dimension.label,value,label}]:[];});if(!mechanics.length&&!moods.length&&!execution.length)return `<section class="film-section film-fingerprint" aria-label="Характеристики"><h2>Характеристики</h2><p class="film-missing">Характеристики не сохранены</p></section>`;const row=(title,html)=>`<div class="film-facet-row"><h3>${title}</h3><div class="film-chips">${html}</div></div>`;return `<section class="film-section film-fingerprint" aria-label="Характеристики"><h2>Характеристики</h2>${mechanics.length?row('Механика',mechanics.map(id=>filmFacetChip('mechanics',id,MECHANIC_LABELS[id])).join('')):''}${moods.length?row('Настроение',moods.map(id=>filmFacetChip('moods',id,moodLabel(id))).join('')):''}${execution.length?`<div class="film-execution">${execution.map(item=>`<div class="film-execution-item"><h3>${escapeHTML(item.name)}</h3>${filmFacetChip('execution',item.value,item.label,item.id)}</div>`).join('')}</div>`:''}</section>`;}
-function selectFacet(kind,value,dimension){if(kind==='mechanics'){if(!Object.hasOwn(MECHANIC_LABELS,value))return;state.mechanics.add(value);}else if(kind==='moods'){if(!Object.hasOwn(MOOD_LABELS,value))return;state.moods.add(value);}else if(kind==='execution'){if(!dimension||!Object.hasOwn(EXECUTION_VALUES,dimension)||!Object.hasOwn(EXECUTION_VALUES[dimension],value))return;state.execution[dimension].add(value);}else return;if(!filmIdFromLocation()){render();return;}const list=urlForState('https://iptv.local/'),target=list.pathname+list.search+list.hash;window.history.pushState(null,'',target);applyFilmScreen(null);render();}
+function selectFacet(kind,value,dimension){if(kind==='mechanics'){if(!Object.hasOwn(MECHANIC_LABELS,value))return;state.mechanics.add(value);}else if(kind==='moods'){if(!Object.hasOwn(MOOD_LABELS,value))return;state.moods.add(value);}else if(kind==='execution'){if(!dimension||!Object.hasOwn(EXECUTION_VALUES,dimension)||!Object.hasOwn(EXECUTION_VALUES[dimension],value))return;state.execution[dimension].add(value);}else return;render();}
 function storedComparable(film){const item=enrichment.films?.[String(film?.id)]||{},fingerprint=item.fingerprint&&typeof item.fingerprint==='object'?item.fingerprint:null,mechanics=knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods=knownFacetIds(fingerprint?.moodIds||item.moodIds,MOOD_LABELS),stored=fingerprint?.execution&&typeof fingerprint.execution==='object'?fingerprint.execution:{},execution=new Map();for(const dimension of EXECUTION_FILTERS){const value=stored[dimension.id];if(!value||value==='unknown'||value==='not_applicable'||!EXECUTION_VALUES[dimension.id]?.[value])continue;execution.set(dimension.id,value);}return {mechanics,moods,execution,empty:!mechanics.length&&!moods.length&&!execution.size};}
 function filmCompareLabel(film){const title=normalizeTitle(film.title||'');const ambiguous=films.some(other=>String(other.id)!==String(film.id)&&normalizeTitle(other.title||'')===title);return `${film.title||'Фильм'}${film.year?` · ${film.year}`:''}${ambiguous?` · ${film.id}`:''}`;}
 function showFacetValue(text){const value=String(text||'');return value?value.charAt(0).toLocaleUpperCase('ru')+value.slice(1):'';}
@@ -723,7 +830,7 @@ function filmHistoryAction(action){
 function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability','film-similar-cards'])setFilmHtml(id,'');const similar=$('#film-similar');if(similar)similar.hidden=true;similarMarkup='';if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));renderSimilar();}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
-function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;if(!onFilm){render();return;}const list=urlForState('https://iptv.local/'),target=list.pathname+list.search+list.hash;window.history.pushState(null,'',target);applyFilmScreen(null);render();input?.focus?.({preventScroll:true});}
+function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;render();if(onFilm)input?.focus?.({preventScroll:true});}
 function synopsis(film){
  const text=String(film.synopsis||'').trim();if(!text)return '';
  const max=280;if(text.length<=max)return `<p class="film-synopsis">${escapeHTML(text)}</p>`;
@@ -1546,11 +1653,6 @@ function addChannelFilter(name){
   const current=new URL(window.location.href);
   if(target!==current.pathname+current.search+current.hash)window.history.pushState(window.history.state,'',target);
  }
- if(filmIdFromLocation()){
-  const home=urlForState('https://iptv.local/'),here=new URL(window.location.href);
-  window.history.replaceState(window.history.state,'',ReturnHome.withReturn(here.pathname+here.search+here.hash,home.pathname+home.search+home.hash));
-  refreshReturnLinks();
- }
  render();
  const scope=filmIdFromLocation()?'#film-screen [data-channel]':'[data-channel]';
  const button=[...document.querySelectorAll(scope)].find(node=>node.dataset?.channel===channel)||[...document.querySelectorAll('[data-channel]')].find(node=>node.dataset?.channel===channel);
@@ -1627,9 +1729,10 @@ function bindControls(){
  const statusDetails=$('#status-details');statusDetails.addEventListener('toggle',()=>{$('#status-details-label').textContent=statusDetails.open?'Скрыть детали':'Показать детали';});
  // Both footer links are real /events links. A plain click opens the in-page screen; a modified or non-primary click (new tab, copy) keeps native navigation.
  for(const link of [$('#status-events-link'),$('#status-integrations-events')])if(link)link.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();openEventsScreen(link);});
+ const typeGroup=$('#events-types');if(typeGroup)typeGroup.addEventListener('click',event=>{const button=event.target.closest?.('[data-event-type]');if(button)selectEventType(button.dataset.eventType);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
  const returnLink=$('#return-home');if(returnLink)returnLink.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();returnHome();});
- $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
+ $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>{if(eventsScreen&&eventTypeFilterId!=='all'&&(eventSearch.state==='error'||eventSearch.state==='stuck'))startEventSearch();else loadEvents(true);});
  const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;presetStatus='';renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
  const presetEditorForm=$('#preset-editor');if(presetEditorForm){
   presetEditorForm.addEventListener('submit',async event=>{
@@ -1873,7 +1976,21 @@ function restoreActivityAnchor(scroll,anchor,fallback){
  const node=scroll.querySelector?.(`[data-event-id="${String(anchor.id).replace(/"/g,'')}"]`);
  scroll.scrollTop=node?node.offsetTop+anchor.offset:fallback;
 }
-async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');button.disabled=true;button.classList.toggle('is-loading',more);if(more){button.setAttribute('aria-busy','true');button.textContent='Загружаем события…';if(!options.quiet)$('#activity-status').textContent='Загружаем более давние события…';}try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''));if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);const scroll=document.querySelector('.activity-scroll'),anchor=rememberActivityAnchor(scroll),position=scroll?scroll.scrollTop:0,ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();let older=null;for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}$('#activity-list').innerHTML=ordered.map(event=>eventHTML(event,olderById.get(event.id))).join('');restoreActivityAnchor(scroll,anchor,position);if(!keepCursor)eventCursor=data.cursor;$('#activity-status').textContent=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';return true;}catch{if(!options.quiet){$('#activity-status').textContent='Не удалось загрузить события.';button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;button.classList.remove('is-loading');button.removeAttribute('aria-busy');button.disabled=false;}}
+// One feed, one list, one fetch. The compact feed of the programme and film pages shows every loaded event; on the events screen the same list is
+// filtered by the selected type. Only the view changes: loadedEvents and the cursor are never touched here.
+function renderActivity(){
+ const scroll=document.querySelector('.activity-scroll'),anchor=rememberActivityAnchor(scroll),position=scroll?scroll.scrollTop:0;
+ const ordered=[...loadedEvents.values()].sort((a,b)=>Date.parse(b.at)-Date.parse(a.at)||a.id.localeCompare(b.id)),olderById=new Map();
+ let older=null;
+ for(const event of [...ordered].reverse())if(event.type==='enrichment'){olderById.set(event.id,older);older=event;}
+ const filter=eventsScreen?eventTypeFilterId:'all',shown=ordered.filter(event=>eventMatchesType(event,filter));
+ $('#activity-list').innerHTML=shown.map(event=>eventHTML(event,olderById.get(event.id))).join('');
+ restoreActivityAnchor(scroll,anchor,position);
+ const status=$('#activity-status');
+ if(status)status.textContent=activityStatusText(filter,ordered,shown);
+ syncActivityMore();
+}
+async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');if(!options.auto){button.disabled=true;button.classList.toggle('is-loading',more);if(more){button.setAttribute('aria-busy','true');button.textContent='Загружаем события…';if(!options.quiet)$('#activity-status').textContent='Загружаем более давние события…';}}try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''),options.signal?{signal:options.signal}:undefined);if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);if(!keepCursor)eventCursor=data.cursor;eventsReady=true;activityNote=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';renderActivity();if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle'&&eventCursor&&eventMatchCount(eventTypeFilterId)<EVENT_SEARCH_TARGET)startEventSearch();return true;}catch{if(options.signal&&options.signal.aborted)return 'aborted';if(!options.quiet){activityNote='Не удалось загрузить события.';$('#activity-status').textContent=activityNote;button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;if(!options.auto){button.classList.remove('is-loading');button.removeAttribute('aria-busy');button.disabled=false;}}}
 function initFilmCompare(){
  const input=$('#film-compare-input'),list=$('#film-compare-options'),clear=$('#film-compare-clear'),root=$('#film-compare-combo');
  if(!input||!list||!clear||!root||typeof input.addEventListener!=='function')return;
