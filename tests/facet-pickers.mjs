@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
 const ctx=vm.createContext({Date,Intl,Set,Map,URL});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 ctx.saved={films:{
  a:{fingerprint:{plotMechanics:['heist'],moodIds:['tense'],execution:{pace:'fast',decision_logic:'strong',plot_engine:'unknown'}}},
  b:{fingerprint:{plotMechanics:['rescue'],moodIds:['light'],execution:{pace:'slow',decision_logic:'mixed'}}},

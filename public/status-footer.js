@@ -108,21 +108,21 @@ const FOOTER_MARKUP = `<footer class="status-footer" aria-label="Состоян�
               <div data-integration="resolver"><dt>Распознавание</dt><dd id="integration-resolver">—</dd></div>
               <div data-integration="predictions"><dt>Прогнозы</dt><dd id="integration-predictions">—</dd></div>
               <div data-integration="metadata" hidden><dt>Метаданные</dt><dd id="integration-metadata">—</dd></div>
-            </dl><a class="status-events-link" id="status-integrations-events" href="/events">История в событиях</a></section>
+            </dl><a class="status-events-link" id="status-integrations-events" href="/events" data-return-carry>История в событиях</a></section>
             <section aria-labelledby="status-run-title"><h3 id="status-run-title">Последний запуск</h3><dl>
               <div><dt>Начат</dt><dd id="detail-run-started">—</dd></div>
               <div><dt>Добавлено</dt><dd id="detail-run-added">—</dd></div>
               <div><dt>Ошибки</dt><dd id="detail-run-failed">—</dd></div>
               <div><dt>Результат</dt><dd id="detail-run-reason">—</dd></div>
               <div><dt>По расписанию</dt><dd id="detail-run-next">—</dd></div>
-            </dl><a class="status-events-link" id="status-events-link" href="/events">Смотреть события</a></section>
+            </dl><a class="status-events-link" id="status-events-link" href="/events" data-return-carry>Смотреть события</a></section>
             <section aria-labelledby="status-profile-title"><h3 id="status-profile-title">Модель вкуса</h3><dl>
               <div><dt>Версия</dt><dd id="detail-profile-version">—</dd></div>
               <div><dt>Обновлена</dt><dd id="detail-profile-updated">—</dd></div>
             </dl></section>
           </div>
         </details>
-        <a class="footer-admin-link" href="/admin">Админка</a>
+        <a class="footer-admin-link" href="/admin" data-return-carry>Админка</a>
         </div>
       </div>
     </footer>`;
@@ -130,6 +130,7 @@ function mountStatusFooter(){
   const shell=document.querySelector('main.admin-shell');
   if(!shell||document.querySelector('.status-footer'))return;
   shell.insertAdjacentHTML('beforeend', FOOTER_MARKUP);
+  if(typeof ReturnHome!=='undefined')ReturnHome.init();
   const statusDetails=$('#status-details');
   if(!statusDetails||statusDetails.dataset.footerBound)return;
   statusDetails.dataset.footerBound='1';

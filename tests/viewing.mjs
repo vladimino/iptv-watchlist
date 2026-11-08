@@ -10,7 +10,7 @@ assert.match(html,/data-viewing="new"/);
 assert.match(html,/data-viewing="rewatch"/);
 
 const ctx=vm.createContext({Date,Intl,Set,Map});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 ctx.rated={id:'rated',title:'Фильм',original:'Film',aliases:[],year:2020,runtime:100,genres:['Драма'],directors:[],actors:[]};
 ctx.unrated={...ctx.rated,id:'unrated'};
 ctx.input={profile:null,films:{rated:{actualRating:3.5,prediction:null},unrated:{actualRating:null,prediction:{predictedRating:5}}}};

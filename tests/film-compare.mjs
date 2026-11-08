@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-const source=fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
+const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const listeners=new Map();
 const nodes=new Map();
 const options=new Map();

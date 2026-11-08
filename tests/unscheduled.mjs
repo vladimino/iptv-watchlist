@@ -5,7 +5,7 @@ const report=JSON.parse(fs.readFileSync('../sources/cloud-programme.json','utf8'
 const merged=ctx.programmeWithWatchlist(report,watchlist);
 assert.equal(merged.films.length,watchlist.films.length);assert.equal(new Set(merged.films.map(f=>f.id)).size,watchlist.films.length);
 for(const f of report.films){const found=merged.films.find(x=>x.id===f.id);if(found){assert.equal(found.title,f.title);assert.deepEqual(found.shows,f.shows);}}
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 ctx.fixture=merged;ctx.cutoff=Date.parse(report.updatedAt);
 vm.runInContext("CUTOFF=cutoff;MAX_YEAR=Math.max(MAX_YEAR,...fixture.films.map(f=>Number(f.year)||0));state.to=MAX_YEAR;films=fixture.films.map(f=>({...f,genres:f.genres||[],shows:f.shows.map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));",ctx);
 assert.equal(vm.runInContext('state.includeUnscheduled',ctx),false);

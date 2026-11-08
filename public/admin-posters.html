@@ -12,9 +12,9 @@
 <body class="admin-page">
   <header class="masthead">
     <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ постеры</span></div>
-    <a class="admin-home" href="/">К программе</a>
   </header>
   <main class="admin-shell">
+    <a class="return-home" data-return-home href="/">На главную</a>
     <section class="page-heading">
       <div>
         <p class="eyebrow">ВЛАДЕЛЕЦ · РУЧНАЯ ОПЕРАЦИЯ</p>
@@ -23,7 +23,7 @@
       </div>
     </section>
     <div class="admin-workspace">
-      <nav class="admin-views" aria-label="Разделы"><a href="/admin">Каталог</a><a href="/admin/health">Здоровье данных</a><a href="/admin/letterboxd">Архив Letterboxd</a><a href="/admin/limb">Лимб</a><a href="/admin/posters" aria-current="page">Постеры</a></nav>
+      <nav class="admin-views" aria-label="Разделы"><a href="/admin" data-return-carry>Каталог</a><a href="/admin/health" data-return-carry>Здоровье данных</a><a href="/admin/letterboxd" data-return-carry>Архив Letterboxd</a><a href="/admin/limb" data-return-carry>Лимб</a><a href="/admin/posters" aria-current="page" data-return-carry>Постеры</a></nav>
       <div class="admin-main">
     <p id="posters-snapshot" class="admin-snapshot" aria-live="polite"><span class="info-icon" aria-hidden="true">i</span><span id="posters-snapshot-text">Каталог ещё не прочитан.</span></p>
     <p id="posters-loading" class="admin-state" role="status" aria-busy="true" hidden>Читаем обе копии каталога…</p>
@@ -83,6 +83,7 @@
       </div>
     </div>
   </main>
+  <script src="/return-home.js"></script>
   <script src="/admin-posters.js"></script>
   <script src="/status-footer.js"></script>
 </body>

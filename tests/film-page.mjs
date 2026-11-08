@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-const source=fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
+const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const hour=3600000;
 const clock=Date.parse('2026-10-24T12:00:00Z');
 const nodes=new Map();
@@ -374,7 +374,7 @@ assert.match(css,/#film-screen\{max-width:1280px\}/);
 assert.doesNotMatch(css,/\.film-screen\{[^}]*max-width/);
 assert.match(css,/\.film-read\{max-width:760px\}/);
 assert.match(html,/<div class="film-read">/);
-assert(html.indexOf('<div class="film-read">')<html.indexOf('id="film-back"')&&html.indexOf('id="film-screen-availability"')<html.indexOf('id="film-similar"'),'long-form film content stays in the readable column ahead of similar films');
+assert(html.indexOf('<div class="film-read">')<html.indexOf('class="film-hero"')&&html.indexOf('id="film-screen-availability"')<html.indexOf('id="film-similar"'),'long-form film content stays in the readable column ahead of similar films');
 assert.match(css,/\.film-score-card\{[^}]*max-width:240px/);
 assert.match(css,/\.film-why\{[^}]*width:100%/);
 assert.doesNotMatch(css,/\.film-why\{[^}]*max-width:420px/);

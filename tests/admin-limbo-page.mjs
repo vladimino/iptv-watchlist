@@ -9,7 +9,7 @@ import {bundleAdmin} from '../src/admin/bundle.js';
 import {scoped} from '../scripts/bundle-scope.mjs';
 
 const html = fs.readFileSync('public/admin-limbo.html', 'utf8');
-const page = fs.readFileSync('public/admin-limbo.js', 'utf8');
+const page = fs.readFileSync('public/return-home.js', 'utf8') + '\n' + fs.readFileSync('public/admin-limbo.js', 'utf8');
 const client = fs.readFileSync('src/admin/client.js', 'utf8');
 const limboClient = fs.readFileSync('src/admin/limbo-client.js', 'utf8');
 const css = fs.readFileSync('public/admin.css', 'utf8');
@@ -38,8 +38,8 @@ assert.match(html, /<summary>Контекст конвейера и пороги
 assert.match(html, /<h2 id="limbo-focus-title">Выбранная запись<\/h2>/);
 assert.match(html, /<script src="\/admin-limbo\.js"><\/script>/);
 assert.match(html, /href="\/admin"/);
-assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limb" id="admin-view-limbo">Лимб<\/a>.*<\/nav>/, 'the admin sections link to the inventory');
-assert.match(html, /<a href="\/admin\/limb" aria-current="page">Лимб<\/a>/, 'the inventory is the current section on its own page');
+assert.match(shell, /<nav class="admin-views"[^>]*>.*<a href="\/admin\/limb" id="admin-view-limbo" data-return-carry>Лимб<\/a>.*<\/nav>/, 'the admin sections link to the inventory');
+assert.match(html, /<a href="\/admin\/limb" aria-current="page" data-return-carry>Лимб<\/a>/, 'the inventory is the current section on its own page');
 assert.match(html, /<title>Лимб данных<\/title>/);
 assert.match(html, /brand-sub">\/ лимб</);
 assert.match(html, /<h1>Лимб данных<\/h1>/);

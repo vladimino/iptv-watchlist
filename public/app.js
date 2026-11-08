@@ -170,32 +170,34 @@ function filterStateKey(snapshot=state){
  const scopes=activeSearchScopes(snapshot.searchScopes);
  return JSON.stringify({shortlistMode:snapshot.shortlistMode,period:snapshot.period,sort:snapshot.sort,viewing:snapshot.viewing,minPrediction:snapshot.minPrediction,minProbability:snapshot.minProbability,startedOnly:!!snapshot.startedOnly,lastChanceOnly:!!snapshot.lastChanceOnly,includeUnscheduled:!!snapshot.includeUnscheduled,directors:snapshot.directors||'',actors:snapshot.actors||'',query:snapshot.query||'',searchScopes:{titles:scopes.titles,people:scopes.people,plot:scopes.plot},genres:[...(snapshot.genres||[])].sort(),mechanics:[...(snapshot.mechanics||[])].sort(),moods:[...(snapshot.moods||[])].sort(),channels:[...(snapshot.channels||[])].sort(),execution,from:snapshot.from,to:snapshot.to,maxRuntime:snapshot.maxRuntime});
 }
-const FILM_QUERY_KEY='iptv-film-list-query';
 function eventsRequested(href=window.location.href){const url=new URL(href);if(url.searchParams.get('screen')==='events')return true;const path=url.pathname.replace(/\/+$/,'')||'/';return path==='/events';}
 const FILM_ID=/^[A-Za-z0-9_-]{1,80}$/;
 const FILM_CONTROL='a,button,summary,input,select,label,textarea';
 function filmIdFromLocation(href=window.location.href){const path=new URL(href,'https://iptv.local').pathname.replace(/\/+$/,'')||'/';const match=path.match(/^\/film\/([^/]+)$/);if(!match)return null;let id;try{id=decodeURIComponent(match[1]);}catch{return null;}return FILM_ID.test(id)?id:null;}
 function filmSearchFrom(href){const url=new URL(href);url.searchParams.delete('screen');return url.search;}
-function filmQueryStore(name){try{return globalThis[name]||null;}catch{return null;}}
-function writeFilmQuery(search){for(const name of ['sessionStorage','localStorage']){try{filmQueryStore(name)?.setItem(FILM_QUERY_KEY,search);}catch{}}}
-function readFilmQuery(){try{const session=filmQueryStore('sessionStorage');if(session){const value=session.getItem(FILM_QUERY_KEY);if(value!==null)return value;}}catch{}try{return filmQueryStore('localStorage')?.getItem(FILM_QUERY_KEY)||'';}catch{return '';}}
-function rememberFilmList(){if(eventsScreen||eventsRequested()||filmIdFromLocation())return;writeFilmQuery(filmSearchFrom(window.location.href));}
+// AIR-380: the way back to the programme is the home target carried in the URL of the screen (`return`, see return-home.js), never remembered in
+// storage: a bookmark or a deep link goes to the canonical home, and a reload keeps the target.
+function currentPathname(){return new URL(window.location.href).pathname.replace(/\/+$/,'')||'/';}
+function onHomeScreen(){return currentPathname()==='/'&&!eventsRequested()&&!filmIdFromLocation();}
+function homeTarget(){const here=new URL(window.location.href);return onHomeScreen()?ReturnHome.ofHomeLocation(here):ReturnHome.fromSearch(here.search);}
+function refreshReturnLinks(){ReturnHome.decorate(document,homeTarget());}
+function syncReturnLink(){const link=$('#return-home');if(link)link.hidden=!(filmScreen||eventsScreen);refreshReturnLinks();}
 let eventsScreen=false,filmScreen=null,filmReturnId=null,filmFiltersAtOpen=null,filmCompareId=null,filmCompareFilm=null,filmCompareById=new Map(),filmScrollById=new Map(),movieScrollY=0,eventsTrigger=null;
 function applyEventsScreen(on){
  if(on&&!eventsScreen)movieScrollY=window.scrollY||0;
  eventsScreen=!!on;
  document.documentElement?.classList?.toggle('events-screen',eventsScreen);
- const expand=$('#activity-expand'),back=$('#activity-back');
+ const expand=$('#activity-expand');
  if(expand)expand.hidden=eventsScreen;
- if(back)back.hidden=!eventsScreen;
+ syncReturnLink();
  if(typeof window.scrollTo==='function')window.scrollTo(0,eventsScreen?0:movieScrollY||0);
 }
 function openEventsScreen(trigger){
  eventsTrigger=trigger||$('#activity-expand');
  // The film screen hides the workspace with !important, so events opened over it would stay invisible. Leave it first.
  if(filmScreen)applyFilmScreen(null);
- if(!eventsRequested()){rememberFilmList();window.history.pushState({iptvEvents:true},'','/events');}
- else if(new URL(window.location.href).searchParams.get('screen')==='events'){writeFilmQuery(filmSearchFrom(window.location.href));window.history.replaceState(window.history.state,'','/events');}
+ if(!eventsRequested()){const fromHome=onHomeScreen(),target=homeTarget();window.history.pushState({iptvEvents:true,iptvHome:fromHome?target:null},'',ReturnHome.withReturn('/events',target));}
+ else if(new URL(window.location.href).searchParams.get('screen')==='events'){window.history.replaceState(window.history.state,'',ReturnHome.withReturn('/events','/'+filmSearchFrom(window.location.href)));}
  applyEventsScreen(true);
  $('#activity-title')?.focus?.({preventScroll:true});
 }
@@ -210,10 +212,11 @@ function focusFilmReturn(id){
  $('#search')?.focus?.({preventScroll:true});
 }
 function filmFiltersChanged(){return filmFiltersAtOpen!=null&&filmFiltersAtOpen!==filterStateKey(state);}
-function showFilmList(search){
- const next='/'+(search.startsWith('?')||!search?search:'?'+search);
+function showHome(target){
+ // A real navigation to the target: Back returns to the screen that was left.
+ const next=ReturnHome.parseTarget(target)||ReturnHome.HOME;
  const leavingFilm=!!filmScreen,returnId=filmReturnId,filtersChanged=filmFiltersChanged();
- window.history.replaceState(null,'',next);
+ window.history.pushState({iptvHome:true},'',next);
  applyEventsScreen(false);
  if(filmScreen)applyFilmScreen(null);
  const incoming=readUrlState(new URL(window.location.href));
@@ -247,6 +250,7 @@ function applyFilmScreen(id){
  const remembered=next&&filmScrollById.has(String(next))?filmScrollById.get(String(next)):0;
  if(next)filmScrollById.delete(String(next));
  if(typeof window.scrollTo==='function')window.scrollTo(0,filmScreen?remembered:movieScrollY||0);
+ syncReturnLink();
  if(filmScreen)$('#film-screen-title')?.focus?.({preventScroll:true});
 }
 function openComparedFilm(id){
@@ -261,21 +265,21 @@ function openFilm(id){
  if(!filmId)return;
  filmReturnId=filmId;
  if(filmIdFromLocation()===filmId){applyFilmScreen(filmId);return;}
- rememberFilmList();
- window.history.pushState({iptvFilm:filmId},'','/film/'+encodeURIComponent(filmId));
+ const fromHome=onHomeScreen(),target=homeTarget();
+ window.history.pushState({iptvFilm:filmId,iptvHome:fromHome?target:null},'',ReturnHome.withReturn(filmHref(filmId),target));
  applyFilmScreen(filmId);
 }
 function plainFilmActivation(event){
  if(!event||event.defaultPrevented||event.button!=null&&event.button!==0)return false;
  return !(event.metaKey||event.ctrlKey||event.shiftKey||event.altKey);
 }
-function closeFilm(){
- if(window.history.state?.iptvFilm){window.history.back();return;}
- showFilmList(readFilmQuery());
-}
-function closeEventsScreen(){
- if(window.history.state?.iptvEvents){window.history.back();return;}
- showFilmList(readFilmQuery());
+// «На главную» on the film and events screens. A screen opened straight from this programme page by this page sits right after exactly that page
+// in the history, so Back is the exact way home (scroll included, no new entry). In every other case (deep link, reload, nested navigation, a changed
+// target) the link is a plain navigation to the target carried in the URL, or to the canonical home without one.
+function returnHome(){
+ const target=homeTarget(),state=window.history.state;
+ if(state&&(state.iptvFilm||state.iptvEvents)&&state.iptvHome===target){window.history.back();return;}
+ showHome(target);
 }
 function onHistoryNavigation(){
  const filmId=filmIdFromLocation();
@@ -294,7 +298,7 @@ function syncUrl(){
  const next=urlForState(window.location.href);
  const target=next.pathname+next.search+next.hash,current=window.location.pathname+window.location.search+window.location.hash;
  if(target!==current)window.history.replaceState(window.history.state,'',target);
- writeFilmQuery(next.search);
+ refreshReturnLinks();
  markCurrentPreset();
 }
 function restoreUrl(){
@@ -1542,7 +1546,11 @@ function addChannelFilter(name){
   const current=new URL(window.location.href);
   if(target!==current.pathname+current.search+current.hash)window.history.pushState(window.history.state,'',target);
  }
- if(filmIdFromLocation())writeFilmQuery(urlForState('https://iptv.local/').search);
+ if(filmIdFromLocation()){
+  const home=urlForState('https://iptv.local/'),here=new URL(window.location.href);
+  window.history.replaceState(window.history.state,'',ReturnHome.withReturn(here.pathname+here.search+here.hash,home.pathname+home.search+home.hash));
+  refreshReturnLinks();
+ }
  render();
  const scope=filmIdFromLocation()?'#film-screen [data-channel]':'[data-channel]';
  const button=[...document.querySelectorAll(scope)].find(node=>node.dataset?.channel===channel)||[...document.querySelectorAll('[data-channel]')].find(node=>node.dataset?.channel===channel);
@@ -1580,6 +1588,9 @@ function bindControls(){
  document.querySelectorAll('[data-min-prediction]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minPrediction=b.dataset.minPrediction==='any'?null:Number(b.dataset.minPrediction);render();}}));
  document.querySelectorAll('[data-min-probability]').forEach(b=>b.addEventListener('click',()=>{if(!b.disabled){state.minProbability=b.dataset.minProbability==='any'?null:Number(b.dataset.minProbability);render();}}));
  $('#progress-retry').addEventListener('click',()=>loadStarted());
+ // A film card is a real link: before a new-tab open or a copy it takes the programme's current state as its return target.
+ const refreshFilmLink=event=>{const link=event.target.closest?.('a.film-open');if(!link||!onHomeScreen())return;const id=link.dataset?.filmId;if(id)link.setAttribute('href',ReturnHome.withReturn(filmHref(id),homeTarget()));};
+ for(const type of ['pointerdown','focusin','contextmenu'])$('#movies').addEventListener(type,refreshFilmLink);
  $('#movies').addEventListener('click',onMovieClick);
  $('#finds')?.addEventListener('click',onFindsClick);
  $('#film-screen')?.addEventListener('click',onMovieClick);
@@ -1617,8 +1628,7 @@ function bindControls(){
  // Both footer links are real /events links. A plain click opens the in-page screen; a modified or non-primary click (new tab, copy) keeps native navigation.
  for(const link of [$('#status-events-link'),$('#status-integrations-events')])if(link)link.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();openEventsScreen(link);});
  const activityExpand=$('#activity-expand');if(activityExpand)activityExpand.addEventListener('click',()=>openEventsScreen(activityExpand));
- const activityBack=$('#activity-back');if(activityBack)activityBack.addEventListener('click',closeEventsScreen);
- const filmBack=$('#film-back');if(filmBack)filmBack.addEventListener('click',closeFilm);
+ const returnLink=$('#return-home');if(returnLink)returnLink.addEventListener('click',event=>{if(!plainFilmActivation(event))return;event.preventDefault();returnHome();});
  $('#reset').addEventListener('click',reset);$('#empty-reset').addEventListener('click',reset);$('#activity-more').addEventListener('click',()=>loadEvents(true));
  const presetSave=$('#preset-save');if(presetSave)presetSave.addEventListener('click',()=>{presetEditor={mode:'create'};presetPrompt=null;presetStatus='';renderPresets();const input=$('#preset-name');if(input){input.value='';input.focus();}});
  const presetEditorForm=$('#preset-editor');if(presetEditorForm){
@@ -1739,7 +1749,7 @@ function stopLiveRefresh(){
 }
 async function init(){
  bindControls();
- if(eventsRequested()){const here=new URL(window.location.href);if((here.pathname.replace(/\/+$/,'')||'/')!=='/events'){writeFilmQuery(filmSearchFrom(here.href));window.history.replaceState(window.history.state,'','/events');}applyEventsScreen(true);}
+ if(eventsRequested()){const here=new URL(window.location.href);if((here.pathname.replace(/\/+$/,'')||'/')!=='/events'){window.history.replaceState(window.history.state,'',ReturnHome.withReturn('/events','/'+filmSearchFrom(here.href)));}applyEventsScreen(true);}
  else{const openingFilm=filmIdFromLocation();if(openingFilm)applyFilmScreen(openingFilm);}
  setYearBounds(true);
  try{await loadProgramme();}

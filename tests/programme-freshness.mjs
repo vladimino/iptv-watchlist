@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 
 const hour=3600000,t0=Date.parse('2026-11-05T12:00:00Z');
 const ctx=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,JSON,console,document:{querySelector(){return null;},querySelectorAll(){return [];},documentElement:{classList:{toggle(){}}}},window:{history:{state:null,pushState(){},replaceState(){}},location:{href:'https://iptv.local/',pathname:'/',search:'',hash:''},matchMedia:()=>({matches:false}),addEventListener(){},scrollY:0,scrollTo(){}},localStorage:{getItem:()=>null,setItem(){}},fetch:()=>Promise.reject(new Error('no network'))});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 const snapshot=(updatedAt,extra={})=>JSON.stringify({updatedAt:new Date(updatedAt).toISOString(),cutoff:updatedAt,window:{from:updatedAt-72*hour,to:updatedAt+168*hour,hotTo:updatedAt+24*hour},stats:{epgEnd:updatedAt+150*hour},...extra});
 const status=(updatedAt,now,extra)=>{run(`report=${snapshot(updatedAt,extra)}`);return JSON.parse(JSON.stringify(run(`programmeStatus(effectiveWindow(report,${now}))`)));};

@@ -83,7 +83,7 @@ const context = vm.createContext({Date, Intl, URL, URLSearchParams, Set, Map, JS
     presetData = [...presetData, {id: '33333333-3333-4333-8333-333333333333', name: body.name, query: body.query}];
     return new Response(JSON.stringify({schemaVersion: 1, presets: presetData}), {status: 201, headers: {ETag: '"2"'}});
   }});
-vm.runInContext(app.replace(/init\(\);\s*$/, ''), context);
+vm.runInContext(fs.readFileSync('public/return-home.js', 'utf8') + '\n' + app.replace(/init\(\);\s*$/, ''), context);
 const run = code => vm.runInContext(code, context);
 
 // Empty list: one line, no form, one "save" action.
