@@ -3,6 +3,7 @@
 These pages describe maintained operational boundaries under [authorization levels L0–L3](../process/authorization-and-escalation.md). Proven L0 reads and scoped L1 delivery need no repeated owner prompt; no new automatic L2 production writer is authorized by the policy change, and L3 retains owner-approved plans and holdpoints. Check each operation-specific runbook and accepted safeguards.
 
 - [Deployment and Cloudflare operations](deployment.md)
+- [Film/Person schema 13–16: read-only preflight and apply sequence](film-person-schema-preflight.md)
 - [Production monitor and incident response](monitoring.md)
 - [Local development setup](local-setup.md)
 - [Recovery procedures](recovery/README.md)
