@@ -33,4 +33,4 @@ A mismatch or an inconsistent verdict stops the sequence and is escalated: no au
 
 ## 4. What stays out of this step
 
-A bounded baseline import and reconciliation, the `r2` to `prepared` move and every later step are separate operation-specific owner decisions after a proven schema (AIR-373 continues, then AIR-374). The producer writes that no fenced mutation covers yet ([AIR-371 evidence](../evidence/d1-migration/air-371-producer-routing-offline-2026-11-07.md)) block the cutover, not the staging of the schema while authority stays R2. A code rollback reverts neither the schema nor any row.
+A bounded baseline import and reconciliation, the `r2` to `prepared` move and every later step are separate operation-specific owner decisions after a proven schema; the baseline tooling and what each of those steps needs are in [the baseline runbook](film-person-baseline.md). The producer writes that no fenced mutation covers yet ([AIR-371 evidence](../evidence/d1-migration/air-371-producer-routing-offline-2026-11-07.md)) block the cutover, not the staging of the schema while authority stays R2. A code rollback reverts neither the schema nor any row.
