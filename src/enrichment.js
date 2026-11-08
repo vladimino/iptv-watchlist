@@ -1189,27 +1189,34 @@ function queueStatusView(q){return q?{schemaVersion:q.schemaVersion,hotCount:q.h
 // Links come only from the stored ids (`catalogLidTmdb`: all records must agree, titles are never compared), so a watched film known only by an
 // unlinked Letterboxd id is counted once, as itself, and is never taken for a different catalog film. Unknown is `state:'unknown'` with null counts,
 // never 0.
+// The identities are linked through the stored records, and the metadata cache holds links no other record has (a watched film known only by its Letterboxd id).
+// So the blocks are known only when every source they read is readable: the view index, the watchlist and the metadata cache (an empty `{}` cache is readable;
+// an unreadable or missing one is not, and is never taken for "nothing is linked").
+function footerPlainObject(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}
+function footerIdentitySources({index,watchlist,metadata}){return typeof catalogLidTmdb==='function'&&footerPlainObject(index)&&Array.isArray(watchlist?.films)&&footerPlainObject(metadata);}
 function footerIdentity(id,byLid){
  const key=String(id),own=/^tmdb_([1-9]\d*)$/.exec(key);
  if(own)return 'tmdb:'+own[1];
  const linked=byLid.get(key);
  return linked?'tmdb:'+linked:'id:'+key;
 }
+// A rating is a finite number. null, '', false and strings are not ratings (Number(null), Number('') and Number(false) are 0, a real rating's value).
+function footerRating(value){return typeof value==='number'&&Number.isFinite(value);}
 function footerFacts(index,byLid){
  const watched=new Set(),rated=new Set(),seed=typeof INITIAL_PERSONAL_RATINGS==='undefined'?{}:INITIAL_PERSONAL_RATINGS;
  for(const [id,item] of Object.entries(index||{})){
   const identity=footerIdentity(id,byLid);
   if(item?.watched===true)watched.add(identity);
   const rating=Object.hasOwn(item||{},'actualRating')?item.actualRating:seed[id];
-  if(rating!==null&&rating!==undefined&&Number.isFinite(Number(rating)))rated.add(identity);
+  if(footerRating(rating))rated.add(identity);
  }
  // The compiled ratings seed also covers ids the index does not hold.
- for(const [id,rating] of Object.entries(seed))if(!Object.hasOwn(index||{},id)&&Number.isFinite(Number(rating)))rated.add(footerIdentity(id,byLid));
+ for(const [id,rating] of Object.entries(seed))if(!Object.hasOwn(index||{},id)&&footerRating(rating))rated.add(footerIdentity(id,byLid));
  return {watched,rated};
 }
 function footerCollection({report,catalog,watchlist,index,metadata}){
  const unknown={state:'unknown',total:null,watched:null,rated:null,watchlist:null};
- if(typeof catalogLidTmdb!=='function'||!index||typeof index!=='object'||Array.isArray(index)||!Array.isArray(watchlist?.films))return unknown;
+ if(!footerIdentitySources({index,watchlist,metadata}))return unknown;
  const byLid=catalogLidTmdb({metadata,watchlist,programme:report,catalog}),all=new Set(),listed=new Set();
  for(const film of watchlist.films){if(film?.id==null)continue;const identity=footerIdentity(film.id,byLid);listed.add(identity);all.add(identity);}
  // A programme film flagged catalog-only is a catalog film that merely airs; it is not on the watchlist.
@@ -1224,7 +1231,7 @@ function footerCollection({report,catalog,watchlist,index,metadata}){
 // do not overlap: 4.0 to 4.4 and 4.5 and above. The show window is not applied: this counts the collection, not the airing now.
 function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness}){
  const unknown={state:'unknown',rating40to44:null,rating45plus:null};
- if(typeof catalogLidTmdb!=='function'||!profile||!index||typeof index!=='object'||Array.isArray(index)||!Array.isArray(watchlist?.films)||!catalog||typeof catalog!=='object')return unknown;
+ if(!profile||!catalog||typeof catalog!=='object'||!footerIdentitySources({index,watchlist,metadata}))return unknown;
  const byLid=catalogLidTmdb({metadata,watchlist,programme:report,catalog}),listed=new Set();
  for(const film of [...watchlist.films,...(report?.films||[]).filter(film=>film?.catalogOnly!==true)]){if(film?.id!=null)listed.add(footerIdentity(film.id,byLid));}
  // A recorded watchlist fact, either value, is membership: it is not a first-watch offer.

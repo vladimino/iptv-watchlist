@@ -19,13 +19,13 @@ for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compati
 const pred=(id,rating,{probability=.8,confidence='high',version=7,profileHash='profile-7',extra={}}={})=>({fingerprintHash:'fp-'+id,impactFeatures:{fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,fingerprintPromptVersion:1},prediction:{predictedRating:rating,probability4Plus:probability,confidence,tasteProfileVersion:version,tasteProfileHash:profileHash,fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,predictionPromptVersion:1,...extra}});
 const film=(id,tmdbId,extra={})=>({id,tmdbId:tmdbId==null?undefined:String(tmdbId),title:id,original:id,year:2020,genres:[],actors:[],directors:[],shows:[],...extra});
 const verified=(id,tmdbId,extra={})=>({...film(id,tmdbId,extra),canonicalIdentity:'tmdb:'+tmdbId});
-function seed({catalog={},watchlist=[],programme=[],index={},metadata,profile=true,seedRatings={},watchlistObject}={}){
+function seed({catalog={},watchlist=[],programme=[],index={},metadata={},profile=true,seedRatings={},watchlistObject}={}){
  records.clear();writes.length=0;context.INITIAL_PERSONAL_RATINGS=seedRatings;
  if(profile)records.set('enrichment/profile/current.json',{version:7,updatedAt:'2026-10-12T18:00:00Z',profileHash:'profile-7',profile:{}});
  records.set('programme.json',{runId:'programme-1',updatedAt:'2026-10-13T08:00:00Z',watchlistCount:watchlist.length,films:programme,stats:{}});
  records.set('epg/discovered-films.json',catalog);
  if(watchlistObject!==null)records.set('watchlist.json',watchlistObject||{updatedAt:'2026-10-13T07:55:00Z',films:watchlist});
- if(metadata!==undefined)records.set('metadata.json',metadata);
+ if(metadata!==null)records.set('metadata.json',metadata);
  records.set('enrichment/view-index.json',index);
 }
 const read=async()=>{const response=await context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env);assert.equal(response.status,200);return response.json();};
@@ -85,6 +85,42 @@ seed({watchlistObject:{films:'nope'}});
 data=await read();assert.equal(data.collection.state,'unknown');
 seed({});records.delete('enrichment/view-index.json');
 data=await read();assert.equal(data.collection.state,'unknown','no view index: unknown');assert.equal(data.recommendations.newUnseen.state,'unknown');
+
+// Ratings are numbers. null, '', false and strings are not ratings, in the index and in the compiled seed, and a cleared rating never excludes a candidate.
+seed({seedRatings:{'lid-null':null,'lid-empty':'','lid-false':false,'lid-string':'4','lid-nan':NaN,'lid-ok':3.5,'lid-zero':0},index:{'lid-idx-null':{actualRating:null},'lid-idx-empty':{actualRating:''},'lid-idx-false':{actualRating:false},'lid-idx-ok':{actualRating:5}}});
+data=await read();
+assert.equal(data.collection.rated,3,'only 3.5, 0 (a real, finite number) and 5 are ratings: '+JSON.stringify(data.collection));
+seed({catalog:{tmdb_60:verified('tmdb_60',60)},metadata:{'lid-60':{id:'lid-60',tmdbId:'60'}},index:{tmdb_60:pred('60',4.8),'lid-60':{actualRating:null}},seedRatings:{'lid-60':null}});
+data=await read();
+assert.equal(data.recommendations.newUnseen.rating45plus,1,'a cleared (null) rating, in the index or the seed, does not exclude a new film');
+seed({catalog:{tmdb_60:verified('tmdb_60',60)},metadata:{'lid-60':{id:'lid-60',tmdbId:'60'}},index:{tmdb_60:pred('60',4.8)},seedRatings:{'lid-60':''}});
+data=await read();assert.equal(data.recommendations.newUnseen.rating45plus,1,'an empty seed value is not a rating');
+seed({catalog:{tmdb_60:verified('tmdb_60',60)},metadata:{'lid-60':{id:'lid-60',tmdbId:'60'}},index:{tmdb_60:pred('60',4.8)},seedRatings:{'lid-60':4}});
+data=await read();assert.equal(data.recommendations.newUnseen.rating45plus,0,'a real seeded rating on the linked id excludes it');
+
+// The metadata cache links identities no other record links: without it the blocks are unknown, never "ok".
+const linked={catalog:{tmdb_41:verified('tmdb_41',41)},index:{tmdb_41:pred('41',4.8),'lid-41':{watched:true}}};
+seed({...linked,metadata:{'lid-41':{id:'lid-41',tmdbId:'41'}}});
+data=await read();assert.deepEqual(data.recommendations.newUnseen,{state:'ok',rating40to44:0,rating45plus:0},'with the metadata link the watched film is not new');
+seed({...linked,metadata:null});
+data=await read();
+assert.equal(data.recommendations.newUnseen.state,'unknown','metadata absent: the watched film is not counted as new');assert.equal(data.recommendations.newUnseen.rating45plus,null);
+assert.deepEqual(data.collection,{state:'unknown',total:null,watched:null,rated:null,watchlist:null},'metadata absent: the collection is unknown');
+// An unreadable metadata object (a read that fails) is the same.
+seed({...linked});records.set('metadata.json',{});
+{
+ const failing={BUCKET:{...env.BUCKET,async get(key){if(key==='metadata.json')throw new Error('r2 down');return env.BUCKET.get.call(env.BUCKET,key);}}};
+ const response=await context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),failing);
+ assert.equal(response.status,200,'a metadata failure does not fail the footer');
+ const failed=await response.json();
+ assert.equal(failed.recommendations.newUnseen.state,'unknown');assert.equal(failed.collection.state,'unknown');
+ assert.ok(failed.coverage&&failed.integrations,'the rest of the footer is intact');
+}
+// An empty, readable metadata cache is a real "nothing is linked".
+seed({...linked,metadata:{}});
+data=await read();assert.equal(data.collection.state,'ok');assert.equal(data.recommendations.newUnseen.rating45plus,1,'without a stored link the unlinked watched id is not taken for this film');
+// A non-object metadata value is not readable.
+seed({...linked,metadata:[]});data=await read();assert.equal(data.collection.state,'unknown');
 
 // ---- New and interesting ----
 const catalog4={
