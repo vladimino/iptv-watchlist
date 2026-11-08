@@ -80,7 +80,7 @@ Migration `0013` ([schema reference](../reference/data/d1-schema.md#canonical-fi
 
 ## Projector window (schema 18, not applied)
 
-Migration `0018` ([migration index](../../migrations/README.md)) adds `projector_window`, one seeded `idle` row (`state` `idle`, `requested` or `held`, an `owner`, and one absolute `expires_at`). It follows a complete version 17, writes nothing else, and is in the repository only: a deploy does not apply it and the code treats an absent table as no window ([ADR 0103](../adr/0103-projector-exclusive-window.md)). The row is a mutual-exclusion flag with an expiry and is never compared to data. The projector writes it (request, grant and release) and moves the existing `discovery_lease` row with it in one batch; no Film, Person or Discovery document changes owner. Applying it and switching `D1_ENRICHMENT_WINDOW` are separate owner decisions.
+Migration `0018` ([migration index](../../migrations/README.md)) adds `projector_window`, one seeded `idle` row (`state` `idle`, `requested` or `held`, an `owner`, and one absolute `expires_at`). It follows a complete version 17, writes nothing else, and was applied to production on 2026-11-08 ([apply record](../evidence/d1-migration/air-383-0018-apply-2026-11-08.md)); the code treats an absent table as no window ([ADR 0103](../adr/0103-projector-exclusive-window.md)), and the flag that requests a window is off. The row is a mutual-exclusion flag with an expiry and is never compared to data. The projector writes it (request, grant and release) and moves the existing `discovery_lease` row with it in one batch; no Film, Person or Discovery document changes owner. Applying it and switching `D1_ENRICHMENT_WINDOW` are separate owner decisions.
 
 ## Reads during a loading ledger seal
 
