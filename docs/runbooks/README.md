@@ -5,6 +5,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Deployment and Cloudflare operations](deployment.md)
 - [L3 draft: Discovery pause window for the D1 enrichment projector](d1-projector-discovery-freeze.md) (AIR-383, not executed)
 - [Film/Person schema 13–16: read-only preflight and apply sequence](film-person-schema-preflight.md)
+- [Film/Person baseline: parity ledger, bounded import and the `prepared` gate](film-person-baseline.md)
 - [Production monitor and incident response](monitoring.md)
 - [Local development setup](local-setup.md)
 - [Recovery procedures](recovery/README.md)

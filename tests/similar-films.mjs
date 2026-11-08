@@ -326,18 +326,27 @@ assert.doesNotMatch(linked,/href="\/film\//,'a catalog film that is not loaded d
   assert.match(html,/data-similar-open="local-peer"/);
   assert.equal(count(html,/letterboxd-link/g),0,'no icon for '+String(bad));
  }
- // A catalog-only film: icon strictly from a validated letterboxdUrl, title stays plain text.
+ // A catalog-only film: a stored canonical URL wins; otherwise the verified TMDB id gives Letterboxd's own redirect. The title stays plain text.
  const catalogHtml=extra=>{load({films:[open,watch('local-peer',{title:'Сосед'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:[{...catalog('tmdb_31',31,{title:'Снаружи',mechanics:['investigation'],prediction:strong(4.4,.8)}),...extra}]});return run('renderSimilar(now).filter(row=>row.source==="catalog").map(row=>similarCard(row,now)).join("")');};
  const proven=catalogHtml({letterboxdUrl:lb});
  assert.equal(count(proven,/class="letterboxd-link"/g),1);
- assert.match(proven,/<h3>Снаружи<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/film\/assassins-creed\/" target="_blank" rel="noopener noreferrer"/,'plain-text title, then the icon');
- assert.doesNotMatch(proven,/themoviedb\.org|data-similar-open="tmdb_31"|href="\/film\//);
+ assert.match(proven,/<h3>Снаружи<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/film\/assassins-creed\/" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"/,'plain-text title, then the canonical icon');
+ assert.doesNotMatch(proven,/themoviedb\.org|letterboxd\.com\/tmdb|data-similar-open="tmdb_31"|href="\/film\//,'a known URL is never replaced by the redirect');
  for(const extra of [{},{letterboxdUrl:null},{letterboxdUrl:'https://www.themoviedb.org/movie/31'},{letterboxdUrl:'javascript:alert(1)'},{letterboxdUrl:'https://letterboxd.com/film/x'},{letterboxdUrl:42}]){
   const html=catalogHtml(extra);
-  assert.match(html,/Снаружи/);
-  assert.equal(count(html,/letterboxd-link/g),0,'no icon for '+JSON.stringify(extra));
-  assert.doesNotMatch(html,/themoviedb\.org/,'no TMDB jump');
+  assert.match(html,/<h3>Снаружи<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/31" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd по TMDB id" aria-label="Открыть в Letterboxd по TMDB id"/,'redirect icon for '+JSON.stringify(extra));
+  assert.equal(count(html,/letterboxd-link/g),1);
+  assert.doesNotMatch(html,/themoviedb\.org|javascript|href="\/film\//,'no TMDB jump, no untrusted value');
  }
+ // A catalog row's own `url` is TMDB: a Letterboxd-looking value there does not override the redirect.
+ const spoofed=catalogHtml({url:'https://letterboxd.com/film/some-slug/'});
+ assert.match(spoofed,/href="https:\/\/letterboxd\.com\/tmdb\/31"/);
+ assert.doesNotMatch(spoofed,/some-slug/,'the untrusted catalog url is not used');
+ // A local/watchlist row never gets the redirect, whatever ids it carries.
+ load({films:[open,watch('local-peer',{title:'Сосед',tmdbId:'77',canonicalIdentity:'tmdb:77'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:null});
+ const localHtml=run('renderSimilar(now).filter(row=>row.film.id==="local-peer").map(row=>similarCard(row,now)).join("")');
+ assert.match(localHtml,/data-similar-open="local-peer"/);
+ assert.equal(count(localHtml,/letterboxd-link/g),0,'a watchlist row has no TMDB fallback');
  assert.equal(fetches.length,0,'no request for the icon');
 }
 

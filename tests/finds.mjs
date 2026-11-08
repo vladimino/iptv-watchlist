@@ -105,17 +105,52 @@ const card=run('findsCard(input,now)',rich);
 assert.match(card,/^<article class="finds-card" data-finds-film="tmdb_71">/);
 assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span><img class="poster" src="https:\/\/img.example\/p.jpg"/);
 assert.match(card,/score-predicted[^>]*><span>ПРОГНОЗ<\/span><strong>4\.7<\/strong><small>82% на 4\.0\+<\/small>/);
-assert.match(card,/<h3>Богатый<\/h3>/,'AIR-382: the title is plain text');
+assert.match(card,/<h3>Богатый<a class="letterboxd-link"/,'AIR-382: the title is plain text, only the icon follows it');
 assert.doesNotMatch(card,/themoviedb\.org|finds-title-link|<h3><a|<button/,'AIR-382: no TMDB link or control on the title');
-assert.doesNotMatch(card,/letterboxd-link/,'a TMDB url is not a Letterboxd link, so no icon without a proven URL');
+// AIR-384: a verified TMDB movie without a stored canonical URL gets Letterboxd's own /tmdb/<id> redirect; the TMDB `url` itself is never a Letterboxd link.
+assert.match(card,/<h3>Богатый<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/71" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd по TMDB id" aria-label="Открыть в Letterboxd по TMDB id">/,'redirect icon beside a plain-text title');
+assert.equal((card.match(/<a /g)||[]).length,1,'the icon is the only link in the card');
 {
- const lb='https://letterboxd.com/film/rich-film/';
+ const lb='https://letterboxd.com/film/rich-film/',target=(f,o)=>JSON.parse(run('JSON.stringify(letterboxdTarget(input,'+JSON.stringify(o||{})+'))',f)||'null');
  const withIcon=run('findsCard(input,now)',{...rich,letterboxdUrl:lb});
- assert.match(withIcon,new RegExp('<h3>Богатый<a class="letterboxd-link" href="'+lb.replace(/[.\/]/g,'\\$&')+'" target="_blank" rel="noopener noreferrer"'),'a proven URL gives the shared icon link');
+ assert.match(withIcon,new RegExp('<h3>Богатый<a class="letterboxd-link" href="'+lb.replace(/[.\/]/g,'\\$&')+'" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"'),'a stored canonical URL always wins and keeps the plain label');
+ assert.doesNotMatch(withIcon,/letterboxd\.com\/tmdb\//,'no redirect next to a known canonical URL');
  assert.equal((withIcon.match(/<a /g)||[]).length,1,'only the icon is a link');
- for(const bad of ['https://www.themoviedb.org/movie/71','http://letterboxd.com/film/x/','https://letterboxd.com/film/x','https://letterboxd.com/film/X_y/','https://letterboxd.com.evil.example/film/x/','javascript:alert(1)','https://letterboxd.com/film/x/"onmouseover="a',42,null,{}]){
-  assert.doesNotMatch(run('findsCard(input,now)',{...rich,letterboxdUrl:bad}),/letterboxd-link/,'rejected: '+String(bad));
+ // A catalog film's `url` is its TMDB page, not provenance: even a syntactically valid Letterboxd-looking `url` cannot override the verified redirect.
+ for(const spoof of ['https://letterboxd.com/film/some-slug/','https://letterboxd.com/film/rich-film/']){
+  const html=run('findsCard(input,now)',{...rich,url:spoof});
+  assert.match(html,/href="https:\/\/letterboxd\.com\/tmdb\/71"/,'the redirect stays: '+spoof);
+  assert.doesNotMatch(html,/some-slug|rich-film/,'the untrusted catalog url is not shown');
+  assert.deepEqual(target({...rich,url:spoof},{catalog:true}),{href:'https://letterboxd.com/tmdb/71',kind:'tmdb-redirect'});
+  assert.deepEqual(target({...rich,url:spoof,tmdbId:undefined,canonicalIdentity:undefined},{catalog:true}),null,'and without a verified id there is no icon at all');
+  assert.deepEqual(target({...rich,url:spoof}),{href:spoof,kind:'canonical'},'a watchlist/local film still uses its own Letterboxd url');
+  assert.deepEqual(target({...rich,url:spoof,letterboxdUrl:lb},{catalog:true}),{href:lb,kind:'canonical'},'a proven letterboxdUrl still wins for a catalog film');
  }
+ // A malformed or unsafe stored value is never echoed: a verified id falls back to the redirect.
+ for(const bad of ['https://www.themoviedb.org/movie/71','http://letterboxd.com/film/x/','https://letterboxd.com/film/x','https://letterboxd.com/film/X_y/','https://letterboxd.com.evil.example/film/x/','javascript:alert(1)','https://letterboxd.com/film/x/"onmouseover="a',42,null,{}]){
+  const html=run('findsCard(input,now)',{...rich,letterboxdUrl:bad});
+  assert.match(html,/href="https:\/\/letterboxd\.com\/tmdb\/71"/,'redirect for a bad stored value: '+String(bad));
+  assert.doesNotMatch(html,/evil|javascript|onmouseover|themoviedb\.org/,'the untrusted value is not shown');
+ }
+ // Identity matrix: only canonicalIdentity exactly `tmdb:<n>` agreeing with a positive-integer tmdbId earns the redirect.
+ assert.deepEqual(target(rich,{catalog:true}),{href:'https://letterboxd.com/tmdb/71',kind:'tmdb-redirect'});
+ assert.deepEqual(target({...rich,tmdbId:71},{catalog:true}),{href:'https://letterboxd.com/tmdb/71',kind:'tmdb-redirect'},'an integer tmdbId is the same id');
+ assert.equal(target(rich),null,'the redirect is for catalog-only cards only: no fallback by default');
+ assert.equal(target({...rich,url:'https://www.themoviedb.org/movie/71',letterboxdUrl:undefined},{}),null,'a local film without a proven URL gets no fallback');
+ for(const [name,patch] of [
+  ['zero id',{tmdbId:'0',canonicalIdentity:'tmdb:0'}],['negative id',{tmdbId:'-71',canonicalIdentity:'tmdb:-71'}],['fractional id',{tmdbId:'7.1',canonicalIdentity:'tmdb:7.1'}],
+  ['leading zero',{tmdbId:'071',canonicalIdentity:'tmdb:071'}],['padded id',{tmdbId:' 71',canonicalIdentity:'tmdb: 71'}],['exponent',{tmdbId:'1e3',canonicalIdentity:'tmdb:1e3'}],
+  ['too long',{tmdbId:'1234567890123',canonicalIdentity:'tmdb:1234567890123'}],['non-numeric',{tmdbId:'abc',canonicalIdentity:'tmdb:abc'}],
+  ['injection',{tmdbId:'71"><script>',canonicalIdentity:'tmdb:71"><script>'}],['empty id',{tmdbId:'',canonicalIdentity:'tmdb:'}],
+  ['missing id',{tmdbId:undefined}],['null id',{tmdbId:null}],['object id',{tmdbId:{}}],['unsafe integer',{tmdbId:2**60,canonicalIdentity:'tmdb:'+2**60}],
+  ['identity mismatch',{canonicalIdentity:'tmdb:72'}],['tv identity',{canonicalIdentity:'tmdb_tv:71'}],['tv identity 2',{canonicalIdentity:'tmdb:tv:71'}],
+  ['no identity',{canonicalIdentity:undefined}],['null identity',{canonicalIdentity:null}],['wrong case',{canonicalIdentity:'TMDB:71'}],['namespaced',{canonicalIdentity:'film:tmdb:71'}],
+  ['letterboxd id only',{tmdbId:undefined,canonicalIdentity:undefined,id:'heat-1995'}]]){
+  assert.equal(target({...rich,...patch},{catalog:true}),null,'no icon: '+name);
+  assert.doesNotMatch(run('findsCard(input,now)',{...rich,...patch}),/letterboxd-link/,'card without icon: '+name);
+ }
+ // A title or year alone proves nothing.
+ assert.equal(target({title:'Богатый',year:2020,id:'x'},{catalog:true}),null);
 }
 assert.match(card,/<p class="original">Rich Film<\/p>/);
 assert.match(card,/<span class="film-year">2020 · 100 мин<\/span>/);
@@ -124,7 +159,7 @@ assert.match(card,/<div class="film-moods finds-labels"><span>Ограблени
 assert.match(card,/<p class="finds-airing" data-airing="live">Сейчас в эфире · Первый<\/p>/);
 assert.doesNotMatch(card,/data-film-id|film-open|data-started-id|Последний шанс/);
 const bare=run('findsCard(input,now)',{...film('tmdb_72',72,'Голый',4.0,.7,'medium',[show(-30)],{fingerprint:null,moods:[]}),url:null,poster:null,runtime:null,genres:[]});
-assert.match(bare,/<h3>Голый<\/h3>/);
+assert.match(bare,/<h3>Голый<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/72"/,"a missing url does not matter: the verified TMDB id still gives the redirect icon");
 assert.match(bare,/no-poster/);
 assert.doesNotMatch(bare,/finds-labels/,'no labels block without known facets');
 assert.match(bare,/<span class="film-year">2020<\/span>/);
