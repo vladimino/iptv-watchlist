@@ -120,62 +120,44 @@
     <footer class="status-footer" aria-label="Состояние данных и прогнозов">
       <div class="footer-status">
         <div class="status-summary" role="status" aria-live="polite">
-          <div class="status-row"><span>Модель вкуса</span><strong id="taste-version">не настроена</strong></div>
-          <div class="status-row status-row-coverage"><span>Локальная база</span><strong id="status-local-coverage">загрузка…</strong></div>
-          <div class="status-row status-row-coverage"><span>Окно просмотра</span><strong id="status-window-coverage">загрузка…</strong></div>
-          <div class="status-row status-run-row"><span id="status-run-label">Последний run</span><div class="status-run-value"><strong id="status-last-run">загрузка…</strong><small id="status-next-run">Следующий запуск по расписанию: —</small></div></div>
-          <div class="status-row"><span>Интеграции</span><strong id="status-integrations">загрузка…</strong></div>
+          <div class="status-row"><span>Коллекция</span><strong id="summary-collection">загрузка…</strong></div>
+          <div class="status-row status-row-coverage"><span>Прогнозы</span><strong id="summary-forecast">загрузка…</strong></div>
+          <div class="status-row"><span>Новые 4.0+</span><strong id="summary-new">загрузка…</strong></div>
+          <div class="status-row"><span>EPG</span><strong id="summary-epg">загрузка…</strong></div>
+          <div class="status-row"><span>Автоматизация</span><strong id="summary-automation">загрузка…</strong></div>
         </div>
+        <p class="status-stale-note" id="status-stale-note" hidden></p>
         <div class="footer-bar">
         <details class="footer-details" id="status-details">
           <summary><span id="status-details-label">Показать детали</span></summary>
           <div class="footer-details-body">
-            <section aria-labelledby="status-predictions-title"><h3 id="status-predictions-title">Прогнозы</h3><dl>
-              <div><dt>Локальная база</dt><dd id="detail-local-coverage">—</dd></div>
-              <div><dt>Окно просмотра</dt><dd id="detail-window-coverage">—</dd></div>
-              <div><dt>Ждут в окне</dt><dd id="detail-pending-hot">—</dd></div>
-              <div><dt>Холодная очередь</dt><dd id="detail-pending-cold">—</dd></div>
-              <div><dt>Вне окна в кеше</dt><dd id="detail-cache-off-window">—</dd></div>
-              <div><dt>Ждут фонового прогноза вне окна</dt><dd id="detail-pending-off-window">—</dd></div>
-              <div><dt title="Фильмы, чья повторная попытка отложена до указанного времени. Это не время следующего запуска.">Отложены до повтора</dt><dd id="detail-deferred">—</dd></div>
-              <div><dt>Текущий пакет</dt><dd id="detail-current-batch">—</dd></div>
-              <div><dt>Следующий пакет</dt><dd id="detail-next-batch">—</dd></div>
+            <section aria-labelledby="status-collection-title"><h3 id="status-collection-title">Моя коллекция</h3><p class="status-section-help">Счётчики пересекаются, а не складываются: один фильм может быть и в watchlist, и просмотренным, и оценённым.</p><dl>
+              <div><dt title="Уникальные фильмы: watchlist, программа, каталог и фильмы с сохранёнными фактами. Один фильм считается один раз.">Всего фильмов</dt><dd id="detail-collection-total">—</dd></div>
+              <div><dt title="Фильмы с подтверждённым фактом просмотра. Отсутствие в watchlist или Diary просмотром не считается.">Просмотрено</dt><dd id="detail-collection-watched">—</dd></div>
+              <div><dt title="Фильмы с сохранённой оценкой.">Оценено</dt><dd id="detail-collection-rated">—</dd></div>
+              <div><dt>В watchlist</dt><dd id="detail-collection-watchlist">—</dd></div>
             </dl></section>
-            <section aria-labelledby="status-epg-title"><h3 id="status-epg-title">EPG / TMDB</h3><p class="status-section-help" id="status-epg-help">EPG-показатели относятся к текущему каталогу передач, локальная база — ко всем сохранённым canonical TMDB-фильмам. Эти totals независимы.</p><dl>
-              <div><dt title="Уникальные TMDB-фильмы, распознанные среди кандидатов текущего EPG.">Распознано в текущем EPG</dt><dd id="detail-epg-recognized">—</dd></div>
-              <div><dt title="Кандидаты текущего эфира, которым ещё нужно сопоставление. Исторический журнал сюда не входит.">Ждут распознавания</dt><dd id="detail-epg-pending">—</dd></div>
-              <div><dt title="Кандидаты прошлых эфиров. Они сохранены и не тратят новые запросы.">Исторический журнал</dt><dd id="detail-epg-history">—</dd></div>
-              <div><dt title="Уникальные canonical TMDB film identities, подтверждённые как фильмы и сохранённые локально.">Фильмы в локальной базе</dt><dd id="detail-epg-confirmed">—</dd></div>
-              <div><dt>Кеш вне окна</dt><dd id="detail-epg-cache">—</dd></div>
-              <div><dt>Покрытие EPG</dt><dd id="detail-epg-coverage">—</dd></div>
-              <div><dt>Каналы</dt><dd id="detail-epg-channels">—</dd></div>
-              <div><dt>Проверено передач</dt><dd id="detail-epg-checked">—</dd></div>
+            <section aria-labelledby="status-forecast-title"><h3 id="status-forecast-title">Рекомендации</h3><p class="status-section-help">Новые: фильмы каталога вне watchlist, которые ты не смотрел и не оценивал, с актуальным прогнозом, шансом 4+ не ниже 70% и неснижённой уверенностью.</p><dl>
+              <div><dt title="Фильмы всей локальной базы с прогнозом, актуальным для текущей модели вкуса.">Прогнозы · вся база</dt><dd id="detail-forecast-local">—</dd></div>
+              <div><dt title="Фильмы, которые идут в окне просмотра, с актуальным прогнозом.">Прогнозы · окно просмотра</dt><dd id="detail-forecast-window">—</dd></div>
+              <div><dt>Новые · 4.5 и выше</dt><dd id="detail-new-45">—</dd></div>
+              <div><dt>Новые · от 4.0 до 4.4</dt><dd id="detail-new-40">—</dd></div>
+              <div><dt>Модель вкуса</dt><dd id="detail-taste">—</dd></div>
             </dl></section>
-            <section aria-labelledby="status-watchlist-title"><h3 id="status-watchlist-title">Watchlist</h3><dl>
-              <div><dt>Фильмы</dt><dd id="detail-watchlist-films">—</dd></div>
-              <div><dt>Обновлён</dt><dd id="detail-watchlist-updated">—</dd></div>
-              <div><dt>Без метаданных</dt><dd id="detail-watchlist-metadata">—</dd></div>
-              <div><dt>Названия требуют проверки</dt><dd id="detail-watchlist-titles">—</dd></div>
+            <section aria-labelledby="status-programme-title"><h3 id="status-programme-title">Кинопрограмма</h3><p class="status-section-help">Распознанные фильмы и кандидаты считаются по-разному: кандидат — передача из EPG, которая ещё не опознана как фильм.</p><dl>
+              <div><dt title="Последняя подтверждённая загрузка EPG, а не время открытия страницы.">Обновление EPG</dt><dd id="detail-epg-updated">—</dd></div>
+              <div><dt title="Конец горизонта передач, известных на сейчас.">Известные передачи</dt><dd id="detail-epg-horizon">—</dd></div>
+              <div><dt title="Уникальные фильмы TMDB, распознанные среди кандидатов текущего EPG.">Распознано фильмов</dt><dd id="detail-epg-recognized">—</dd></div>
+              <div><dt title="Кандидаты текущего эфира, которым ещё нужно сопоставление. Это не фильмы.">Ждут распознавания</dt><dd id="detail-epg-pending">—</dd></div>
             </dl></section>
-            <section aria-labelledby="status-integrations-title"><h3 id="status-integrations-title">Интеграции</h3><p class="status-section-help" id="status-integrations-help">Состояние заданий. Окно программы показано сверху.</p><dl id="status-integration-list">
+            <section aria-labelledby="status-integrations-title"><h3 id="status-integrations-title">Автоматизация</h3><p class="status-section-help" id="status-integrations-help">«Нет данных» не значит сбой, а ожидание повторной попытки не авария. Подробности: события и диагностика.</p><dl id="status-integration-list">
               <div data-integration="letterboxd_watchlist"><dt>Watchlist</dt><dd id="integration-watchlist">—</dd></div>
               <div data-integration="letterboxd_ratings"><dt>Оценки</dt><dd id="integration-ratings">—</dd></div>
               <div data-integration="epg"><dt>Загрузка EPG</dt><dd id="integration-epg">—</dd></div>
               <div data-integration="resolver"><dt>Распознавание</dt><dd id="integration-resolver">—</dd></div>
               <div data-integration="predictions"><dt>Прогнозы</dt><dd id="integration-predictions">—</dd></div>
               <div data-integration="metadata" hidden><dt>Метаданные</dt><dd id="integration-metadata">—</dd></div>
-            </dl><a class="status-events-link" id="status-integrations-events" href="/events" data-return-carry>История в событиях</a></section>
-            <section aria-labelledby="status-run-title"><h3 id="status-run-title">Последний запуск</h3><dl>
-              <div><dt>Начат</dt><dd id="detail-run-started">—</dd></div>
-              <div><dt>Добавлено</dt><dd id="detail-run-added">—</dd></div>
-              <div><dt>Ошибки</dt><dd id="detail-run-failed">—</dd></div>
-              <div><dt>Результат</dt><dd id="detail-run-reason">—</dd></div>
-              <div><dt>По расписанию</dt><dd id="detail-run-next">—</dd></div>
-            </dl><a class="status-events-link" id="status-events-link" href="/events" data-return-carry>Смотреть события</a></section>
-            <section aria-labelledby="status-profile-title"><h3 id="status-profile-title">Модель вкуса</h3><dl>
-              <div><dt>Версия</dt><dd id="detail-profile-version">—</dd></div>
-              <div><dt>Обновлена</dt><dd id="detail-profile-updated">—</dd></div>
-            </dl></section>
+            </dl><a class="status-events-link" id="status-integrations-events" href="/events" data-return-carry>События</a><a class="status-events-link" id="status-health-link" href="/admin/health" data-return-carry>Диагностика</a></section>
           </div>
         </details>
         <a class="footer-admin-link" href="/admin" data-return-carry>Админка</a>

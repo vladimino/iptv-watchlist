@@ -119,7 +119,8 @@ const R = vm.runInContext('ReturnHome', helperContext);
   assert.ok(index.indexOf('src="/return-home.js"') < index.indexOf('src="/app.js"'));
   const footerJs = fs.readFileSync('public/status-footer.js', 'utf8');
   for (const source of [index, footerJs]) {
-    for (const id of ['status-events-link', 'status-integrations-events']) assert.match(source, new RegExp('id="' + id + '" href="/events" data-return-carry'), id);
+    assert.match(source, /id="status-integrations-events" href="\/events" data-return-carry/, 'the footer events link');
+    assert.match(source, /id="status-health-link" href="\/admin\/health" data-return-carry/, 'AIR-389: the footer diagnostics link keeps the return target');
     assert.match(source, /class="footer-admin-link" href="\/admin" data-return-carry/);
   }
   assert.match(footerJs, /ReturnHome\.init\(\)/, 'the admin footer is decorated once it is mounted');
@@ -225,7 +226,7 @@ assert.equal(homeLink.attrs.href, homeTargetValue, 'and points at the exact prog
 assert.equal(carrying[0].attrs.href, '/events?return=' + encodeURIComponent(homeTargetValue), 'the footer links keep carrying it on the film screen');
 
 // film → events keeps the same target (it is the film's, not the film's own URL).
-run("openEventsScreen(document.querySelector('#status-events-link'))");
+run("openEventsScreen(document.querySelector('#status-integrations-events'))");
 assert.equal(new URL(window.location.href).pathname, '/events');
 assert.equal(run('ReturnHome.fromSearch(new URL(window.location.href).search)'), homeTargetValue, 'film → events: the original programme state, not the film page');
 assert.equal(run('window.history.state.iptvHome'), null, 'an entry opened from another screen does not claim to follow the programme directly');
