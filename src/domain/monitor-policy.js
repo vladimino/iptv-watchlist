@@ -84,7 +84,7 @@ export function evaluateDiscovery(facts, now) {
   return {stream: 'discovery', state: STATE_RANK[all] > STATE_RANK[state] ? all : state, issues, facts: {executor: facts.executor ?? null, backlog, remainingChunks: record?.remainingChunks ?? null}};
 }
 
-// ---- Ratings: the orchestration read model already derives health from the run record and the Madrid 17:30 schedule.
+// ---- Ratings: the orchestration read model already derives health from the run record and the Madrid 17:00 schedule.
 export function evaluateRatings(model, now) {
   if (!model || model.error) return unreadable('ratings', 'Ratings');
   const issues = [];
