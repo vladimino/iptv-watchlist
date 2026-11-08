@@ -72,6 +72,8 @@ function seed(recovery){
 const writers=new Set();
 for(const recovery of [false,true])for(const path of [...routes].sort()){
  seed(recovery);puts=[];fetches=[];
+ // An existing, empty catalog object: the lookup answers absent. (A missing object is 503, covered by tests/catalog-film.mjs.)
+ if(path.startsWith('/api/catalog/film/'))records.set('epg/discovered-films.json',{});
  const response=await context.worker.fetch(new Request('https://iptv.vladimino.workers.dev'+path),env,execution);
  assert(response.status<500,path+' returned '+response.status+': '+await response.clone().text());
  if(puts.length){assert(recovery,path+' wrote without pending recovery: '+puts.join(', '));writers.add(path);}
