@@ -557,9 +557,23 @@ async function persistWatchlist(env,run,report){const list=await loadJSON(env,'w
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
-async function persistEvents(env,run,report){run.events=run.events.map(event=>event?.type==='epg'&&event.at!==report.updatedAt?epgEvent(report,event.id):event);for(const event of run.events)await writeEvent(env,event);}
+// AIR-390: the journal written with the watchlist and the scan is every event except the `epg` one. The `epg` event is written
+// by persistEpgEvent when the run completes, so its `at` is the completion time that sync.json also carries.
+async function persistEvents(env,run,report){for(const event of run.events)if(event?.type!=='epg')await writeEvent(env,event);}
+// One `epg` event per run. `at` is `run.completedAt`, fixed and saved to sync.json before the event is written, so a retry, a
+// resumed seal or a repeated finishSync writes the same key. Counts are those of the published report (an event of a superseded scan is rebuilt from it). A run that already
+// has its event under the scan time (written by code before AIR-390, in a seal that spans a deploy) keeps it and gets no second one.
+async function persistEpgEvent(env,run,report){
+ const base=(run.events||[]).find(item=>item?.type==='epg');
+ if(!base)return;
+ if(!run.completedAt){
+  if(await loadJSON(env,removalEventKey({at:report.updatedAt,id:base.id})))return;
+  run.completedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
+ }
+ await writeEvent(env,{...(base.at===report.updatedAt?base:epgEvent(report,base.id)),at:run.completedAt});
+}
 async function finishSyncPersist(env,run,report){await persistWatchlist(env,run,report);await persistScan(env,run,report);await persistEvents(env,run,report);}
-async function finishSync(env,run,report){await finishSyncPersist(env,run,report);run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await persistEpgEvent(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -1214,9 +1228,10 @@ async function sealQueueStep(env,run,deadline=Infinity){
  const report=payload.report;
  const out=await sealUnits(env,run,deadline,[
   {name:'refresh',phase:'queue',work:async()=>{try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);}return 'ok';}},
+  {name:'epg_event',phase:'epg_event',work:async()=>{await persistEpgEvent(env,run,report);return 'ok';}},
  ]);
  if(!out.done)return await sealCheckpoint(env,run,out);
- run.stage='complete';run.updatedAt=new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
+ run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
  await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};

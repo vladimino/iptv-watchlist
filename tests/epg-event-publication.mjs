@@ -83,11 +83,15 @@ const published=records.get('programme.json');
 assert.equal(published.runId,runId);assert.notEqual(published.updatedAt,staleAt,'the published scan is the second one');
 assert.equal(epgEvents().length,1,'exactly one EPG event for the published generation');
 const epg=epgEvents()[0];
-assert.equal(epg.id,runId+'-epg');assert.equal(epg.at,published.updatedAt,'the event time is the published updatedAt');
+assert.equal(epg.id,runId+'-epg');
+// AIR-390: the event time is the successful end of the run, the very value sync.json (and so the footer) carries, not the scan time.
+const doneRun=records.get('sync.json');assert.equal(doneRun.stage,'complete');
+assert.equal(epg.at,doneRun.updatedAt,'the event time is the completion time of the run');assert.equal(epg.at,doneRun.completedAt);
+assert.ok(Date.parse(epg.at)>=Date.parse(published.updatedAt),'completion is not before the scan');
 assert.equal(epg.broadcasts,published.films.reduce((n,f)=>n+f.shows.length,0),'the counts are those of the published report');
 assert.equal(epg.broadcasts,3);
 assert.equal(watchlistEvents().length,1);assert.equal(watchlistEvents()[0].id,runId+'-watchlist');assert.equal(watchlistEvents()[0].at,published.updatedAt,'a watchlist event with no removal to hand over is rebuilt for the published scan');
-assert.ok(epg.key.includes(String(9999999999999-Date.parse(published.updatedAt)).padStart(13,'0')),'the key orders by the published time');
+assert.ok(epg.key.includes(String(9999999999999-Date.parse(epg.at)).padStart(13,'0')),'the key orders by the completion time');
 assert.equal(events().filter(event=>event.at===staleAt).length,0,'nothing carries the superseded scan time');
 
 // 3. A repeated step, an events refresh and the completed-run continuation never duplicate.
@@ -107,9 +111,31 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,0,'no eve
 const savedRun=records.get('sync.json');savedRun.events=savedRun.events.map(event=>event.type==='epg'?{...event,at:'2026-01-01T00:00:00.000Z',broadcasts:99}:event);set('sync.json',savedRun);
 const resumed=await post('/api/sync/epg',{runId});assert.equal(resumed.status,200,JSON.stringify(resumed.data));
 const mine=epgEvents().filter(event=>event.id===runId+'-epg');
-assert.equal(mine.length,1);assert.equal(mine[0].at,records.get('programme.json').updatedAt);assert.equal(mine[0].broadcasts,2);
+assert.equal(mine.length,1);assert.equal(mine[0].at,records.get('sync.json').updatedAt,'AIR-390: the completion time');assert.notEqual(mine[0].at,'2026-01-01T00:00:00.000Z');assert.equal(mine[0].broadcasts,2);
 await post('/api/sync/epg',{runId});await settle();
 assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a further step is idempotent');
+
+// 4a. AIR-390: the completion time is fixed before the event is written; a failed event write and a retry keep one time and one key.
+{
+ const runC=await readyToCommit();
+ showCount=1;let failures=0;failPublish=key=>{if(key.includes('-epg.json')&&failures<2){failures++;return true;}return false;};
+ const interrupted=await post('/api/sync/epg',{runId:runC});assert.ok(interrupted.status>=500,'the EPG event write failure surfaces');
+ failPublish=null;
+ assert.equal(records.get('programme.json').runId,runC,'published');
+ assert.equal(epgEvents().filter(event=>event.id===runC+'-epg').length,0,'no EPG event and no false update while the run is not complete');
+ const interruptedRun=records.get('sync.json');assert.notEqual(interruptedRun.stage,'complete');assert.ok(interruptedRun.completedAt,'the completion time is saved before the event write');
+ const fixedAt=interruptedRun.completedAt;await pause();
+ const again=await post('/api/sync/epg',{runId:runC});assert.equal(again.status,200,JSON.stringify(again.data));
+ const eventsOfRun=epgEvents().filter(event=>event.id===runC+'-epg');
+ assert.equal(eventsOfRun.length,1);assert.equal(eventsOfRun[0].at,fixedAt,'the retry writes the saved time');
+ assert.equal(records.get('sync.json').updatedAt,fixedAt,'sync.json, the footer source, carries the same time');
+ const keysBefore=events().map(event=>event.key).join();
+ await post('/api/sync/epg',{runId:runC});await settle();
+ assert.equal(events().map(event=>event.key).join(),keysBefore,'a repeat writes no new key');
+ // Newest first by the completion time.
+ const order=(await read('/api/events')).events.filter(event=>event.type==='epg').map(event=>event.at);
+ assert.deepEqual(order,[...order].sort().reverse(),'events are ordered newest first');
+}
 
 // 4b. Watchlist delta across a rescan: the removed film is reported once, from the published generation; its removal reference follows the event key.
 {

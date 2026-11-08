@@ -104,7 +104,7 @@ const report=published[0].pending?.['programme.json']??published[0].programme??n
 assert.ok(report,'the publication carries the report: '+Object.keys(published[0]).join(','));
 const epg=events().filter(event=>event.type==='epg');
 assert.equal(epg.length,1,'exactly one EPG event');
-assert.equal(epg[0].id,'run-new-epg');assert.equal(epg[0].at,report.updatedAt,'its time is the published report time');assert.notEqual(epg[0].at,first.at);
+assert.equal(epg[0].id,'run-new-epg');assert.equal(epg[0].at,run.updatedAt,'AIR-390: its time is the completion time of the run, the one sync.json and the footer carry');assert.equal(run.completedAt,epg[0].at);assert.ok(Date.parse(epg[0].at)>=Date.parse(report.updatedAt),'completion is not before the scan');assert.notEqual(epg[0].at,first.at);
 assert.equal(epg[0].broadcasts,report.films.reduce((count,f)=>count+f.shows.length,0));assert.equal(epg[0].broadcasts,3);
 
 // 3. The removal event: one, same delta, and the hand-over reference names the key that was written.

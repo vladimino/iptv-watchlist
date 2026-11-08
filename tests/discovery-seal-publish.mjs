@@ -275,6 +275,65 @@ for(const mode of ['document','emit']){
  assert.equal(repeated.stage,'complete');assert.equal(repeated.ratingsPipeline,'separate');assert.equal(repeated.ratingsMigration,undefined);
 }
 
+// AIR-390: the staged path writes the `epg` event in the queue phase, with the completion time that also becomes the run's updatedAt.
+{
+ const bkt=bucket(12),env={BUCKET:bkt};
+ const report={runId:'run-e',updatedAt:'2026-11-06T10:00:00.000Z',watchlistCount:0,films:[],stats:{a:1}};
+ context.ratingsGate=async()=>({active:true,migration:'complete'});
+ context.persistEvents=async()=>{};
+ context.refreshPredictionQueue=async()=>{};
+ const template={id:'run-e-epg',type:'epg',at:report.updatedAt,films:1,archive:0,future:0,broadcasts:0};
+ const keyOf=at=>'events/items/'+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-run-e-epg.json';
+ const epgKeys=async()=>[...bkt.objects.keys()].filter(key=>key.startsWith('events/items/')&&key.endsWith('-run-e-epg.json'));
+ await bkt.put('epg/seal/run-e/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
+ const runE={runId:'run-e',stage:'seal',seal:{jobId:'j',phase:'queue'},events:[template],ratingsPipeline:'separate'};
+ const realPut=bkt.put;let failEvent=1;
+ bkt.put=async(key,...rest)=>{if(key.includes('-run-e-epg.json')&&failEvent-->0)throw new Error('injected event write failure');return realPut.call(bkt,key,...rest);};
+ await assert.rejects(()=>context.sealQueueStep(env,runE),/injected event write failure/);
+ bkt.put=realPut;
+ assert.equal(runE.stage,'seal','the run is not complete while its event is missing');assert.deepEqual(await epgKeys(),[],'no event for an incomplete run');
+ assert.ok(runE.completedAt,'the completion time is fixed before the write');
+ const fixed=runE.completedAt;
+ const saved=JSON.parse(await (await bkt.get('sync.json')).text());assert.equal(saved.completedAt,fixed,'and saved to sync.json');
+ await new Promise(resolve=>setTimeout(resolve,15));
+ const done=await context.sealQueueStep(env,runE);
+ assert.equal(done.stage,'complete');assert.equal(runE.updatedAt,fixed,'sync.json updatedAt is the completion time');
+ assert.deepEqual(await epgKeys(),[keyOf(fixed)],'one event, keyed by the completion time');
+ const stored=JSON.parse(await (await bkt.get(keyOf(fixed))).text());assert.equal(stored.at,fixed);assert.equal(stored.id,'run-e-epg');assert.notEqual(stored.at,report.updatedAt);
+ // A repeated queue step after a lost answer writes the same key.
+ await bkt.put('epg/seal/run-e/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
+ const replay={...runE,stage:'seal',seal:{jobId:'j',phase:'queue'}};await context.sealQueueStep(env,replay);
+ assert.deepEqual(await epgKeys(),[keyOf(fixed)],'a replay creates no second key');assert.equal(replay.updatedAt,fixed);
+ // A run whose event was already written under the scan time by earlier code (a seal that spans the deploy) gets no second event.
+ const legacyReport={...report,updatedAt:'2026-11-06T09:00:00.000Z'};
+ await bkt.put('epg/seal/run-l/payload.json',JSON.stringify({report:legacyReport,watchlist:{films:[]},uncertain:[],fence:'g'}));
+ const legacyKey='events/items/'+String(9999999999999-Date.parse(legacyReport.updatedAt)).padStart(13,'0')+'-run-l-epg.json';
+ await bkt.put(legacyKey,JSON.stringify({id:'run-l-epg',type:'epg',at:legacyReport.updatedAt,films:1,archive:0,future:0,broadcasts:0}));
+ const runL={runId:'run-l',stage:'seal',seal:{jobId:'j',phase:'queue'},events:[{...template,id:'run-l-epg',at:legacyReport.updatedAt}],ratingsPipeline:'separate'};
+ await context.sealQueueStep(env,runL);
+ assert.equal(runL.stage,'complete');assert.equal(runL.completedAt,undefined);
+ assert.equal([...bkt.objects.keys()].filter(key=>key.endsWith('-run-l-epg.json')).length,1,'no second event for the legacy run');
+}
+
+// AIR-390: the direct completion path (finishSync) follows the same rule: the time is saved first, a retry keeps it, sync.json carries it.
+{
+ const bkt=bucket(13),env={BUCKET:bkt};
+ const report={runId:'run-f',updatedAt:'2026-11-06T10:00:00.000Z',watchlistCount:0,films:[],stats:{uniqueFilms:0}};
+ context.persistWatchlist=async()=>{};context.persistScan=async()=>{};context.persistEvents=async()=>{};context.refreshPredictionQueue=async()=>{};
+ const run={runId:'run-f',stage:'epg',events:[{id:'run-f-epg',type:'epg',at:report.updatedAt,films:0,archive:0,future:0,broadcasts:0}],watchlist:[]};
+ const realPut=bkt.put;let fail=1;
+ bkt.put=async(key,...rest)=>{if(key.includes('-run-f-epg.json')&&fail-->0)throw new Error('injected event write failure');return realPut.call(bkt,key,...rest);};
+ await assert.rejects(()=>context.finishSync(env,run,report),/injected event write failure/);
+ bkt.put=realPut;
+ assert.notEqual(run.stage,'complete');const fixed=run.completedAt;assert.ok(fixed);
+ assert.equal(JSON.parse(await (await bkt.get('sync.json')).text()).completedAt,fixed,'saved before the event write');
+ await new Promise(resolve=>setTimeout(resolve,15));
+ await context.finishSync(env,run,report);
+ assert.equal(run.stage,'complete');assert.equal(run.updatedAt,fixed);
+ const keys=[...bkt.objects.keys()].filter(key=>key.endsWith('-run-f-epg.json'));
+ assert.equal(keys.length,1);assert.equal(JSON.parse(await (await bkt.get(keys[0])).text()).at,fixed);
+}
+
 // AIR-353: the `publish` step is four units around one atomic pointer. A cancellation before the pointer changes nothing; a
 // cancellation after it leaves the generation published exactly once and the repeat finishes the rest without a second
 // pointer; a deadline between units stops the step with a checkpoint and the next calls resume where it stopped.
