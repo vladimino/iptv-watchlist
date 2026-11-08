@@ -38,7 +38,10 @@
       "mcp__Cloudflare_Observability__observability_values",
       "mcp__Cloudflare_Observability__workers_list",
       "mcp__Cloudflare_Observability__workers_get_worker",
-      "mcp__Cloudflare_Observability__search_cloudflare_documentation"
+      "mcp__Cloudflare_Observability__search_cloudflare_documentation",
+      "mcp__Cloudflare_Developer_Platform__d1_databases_list",
+      "mcp__Cloudflare_Developer_Platform__d1_database_get",
+      "mcp__Cloudflare_Developer_Platform__d1_database_query"
     ]
   },
   "hooks": {
