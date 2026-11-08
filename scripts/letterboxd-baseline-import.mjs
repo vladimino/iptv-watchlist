@@ -8,9 +8,10 @@ import {access,mkdir,readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {EXPORT_FILES,parseExport} from '../src/letterboxd-export.js';
-import {buildIndex,matchExport} from '../src/letterboxd-match.js';
+import {buildIndex,matchExport,normTitle} from '../src/letterboxd-match.js';
+import {REVIEW_REASONS as SEARCH_REVIEW_REASONS,SEARCH_BASIS} from '../src/letterboxd-tmdb-search.js';
 import {archiveGeneratedAt,readZip} from '../src/letterboxd-zip.js';
-import {ReconcileError,assertOutsideRepository,loadSnapshot} from './letterboxd-reconcile.mjs';
+import {ReconcileError,assertOutsideRepository,exportDigest,loadCatalogDir,loadSnapshot} from './letterboxd-reconcile.mjs';
 
 // A plan fixes its chunk size in origin.json, and every remote step re-derives the chunks from it. The Worker does several
 // sequential R2 operations per film, so a chunk must finish well inside the client's request limits: new plans default to
@@ -64,22 +65,70 @@ export function originChunkSize(origin){
  throw new ImportError('origin.json has an unknown schema or chunk size',3);
 }
 
-export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,includeInferred=false,now=Date.now()}){
+export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,includeInferred=false,now=Date.now()}){
  checkChunkSize(chunkSize);
- const zipPath=await assertOutsideRepository(zip,'--zip'),snapshotPath=await assertOutsideRepository(snapshot,'--snapshot'),outputPath=await assertOutsideRepository(output,'--output');
+ // The identity input is either a fenced consistent snapshot (the original contract) or, for matching only, a catalog directory read once from
+ // the live authorities (ADR 0105); never both, never neither. TMDB search results only extend an inferred plan.
+ if(!!snapshot===!!catalogDir)throw new ImportError('plan needs exactly one of --snapshot and --catalog-dir',2);
+ if(tmdbResults&&!includeInferred)throw new ImportError('--tmdb-results needs --include-inferred',2);
+ if(tmdbResults&&!catalogDir)throw new ImportError('--tmdb-results needs --catalog-dir: it is bound to a catalog read',2);
+ const zipPath=await assertOutsideRepository(zip,'--zip'),snapshotPath=snapshot?await assertOutsideRepository(snapshot,'--snapshot'):null,catalogPath=catalogDir?await assertOutsideRepository(catalogDir,'--catalog-dir'):null,resultsPath=tmdbResults?await assertOutsideRepository(tmdbResults,'--tmdb-results'):null,outputPath=await assertOutsideRepository(output,'--output');
  const archive=await readArchive(zipPath,generatedAt,now);
  // A directory holds one plan for good. Re-planning over it, even with the same archive and size, can change the accepted
  // films (another snapshot, other matching) and would destroy the only copy of the plan its receipts were made from.
  for(const name of OUTPUT_FILES)if(await access(path.join(outputPath,name)).then(()=>true,()=>false))throw new ImportError('--output already holds a plan or its results ('+name+'); plan into a new empty directory',2);
  const texts=Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,archive.files[name]?.text??null]));
- const parsed=parseExport(texts),loaded=await loadSnapshot(snapshotPath),matches=matchExport(parsed.films,buildIndex(loaded.objects),{inferred:includeInferred});
+ const parsed=parseExport(texts),loaded=catalogPath?await loadCatalogDir(catalogPath):await loadSnapshot(snapshotPath),index=buildIndex(loaded.objects),matches=matchExport(parsed.films,index,{inferred:includeInferred});
  const films=new Map(parsed.films.map(film=>[film.code,film])),byStatus={},items=[],review={};
  for(const match of matches){byStatus[match.status]=(byStatus[match.status]||0)+1;if(match.status==='accepted'||(includeInferred&&match.status==='inferred'))items.push(planItem(films.get(match.code),match));else if(includeInferred&&match.status==='candidate'&&match.reason)review[match.reason]=(review[match.reason]||0)+1;}
+ // TMDB search results (ADR 0105): only for films the catalog does not know. A search decision is applied by the same rules as a stored
+ // match: one movie, claimed by one code, not already held by an accepted or inferred film. A TMDB movie that is already a catalog Film is
+ // linked as an existing Film; only a missing one carries `admit`, so the Film is created once, by the existing admission path.
+ const search={decided:0,review:{},pending:0,errors:0,blocked:0};let resultsText=null;
+ if(resultsPath){
+  resultsText=await readFile(resultsPath,'utf8');let doc;try{doc=JSON.parse(resultsText);}catch{throw new ImportError('--tmdb-results is not JSON',2);}
+  if(doc?.schemaVersion!==1||!doc.results||typeof doc.results!=='object'||Array.isArray(doc.results))throw new ImportError('--tmdb-results has an unknown schema',2);
+  // The results are only valid for the export and the catalog read they were searched for: a stale or foreign file is refused whole.
+  const expected={exportSha256:exportDigest(texts),catalogReadAt:loaded.baselineIdentity?.readAt,catalogFilms:loaded.baselineIdentity?.catalogFilms};
+  if(!doc.binding||doc.binding.exportSha256!==expected.exportSha256||doc.binding.catalogReadAt!==expected.catalogReadAt||doc.binding.catalogFilms!==expected.catalogFilms)throw new ImportError('--tmdb-results was not made for this export and catalog read',2);
+  const held=new Set(matches.filter(match=>match.tmdbId&&(match.status==='accepted'||match.status==='inferred')).map(match=>String(match.tmdbId)));
+  const wanted=matches.filter(match=>match.status==='unmatched'),unmatchedCodes=new Set(wanted.map(match=>match.code)),claims=new Map();
+  // Every entry must belong to a film this plan left unmatched, and an `inferred_new` entry must satisfy the rule again here, against the
+  // export film itself: the search tool's own judgement is not trusted by the planner.
+  for(const [code,hit] of Object.entries(doc.results)){
+   if(!unmatchedCodes.has(code))throw new ImportError('--tmdb-results holds a film this plan did not leave unmatched',2);
+   if(hit?.decision==='inferred_new'){
+    const film=films.get(code);
+    if(!/^[1-9]\d{0,11}$/.test(String(hit.tmdb))||hit.basis!==SEARCH_BASIS||typeof hit.title!=='string'||!Number.isInteger(hit.year))throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);
+    if(!Number.isInteger(film.year)||hit.year!==film.year||!normTitle(film.name)||normTitle(hit.title)!==normTitle(film.name))throw new ImportError('--tmdb-results holds a decision that does not match its export film (title or year)',2);
+    if(!claims.has(String(hit.tmdb)))claims.set(String(hit.tmdb),[]);claims.get(String(hit.tmdb)).push(code);
+   }else if(hit?.decision==='review'){if(!SEARCH_REVIEW_REASONS.includes(hit.reason))throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);}
+   else if(hit?.decision!=='error'&&hit?.decision!=='blocked')throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);
+  }
+  for(const match of wanted){
+   const hit=doc.results[match.code];
+   if(!hit){search.pending++;continue;}
+   if(hit.decision==='error'){search.errors++;continue;}
+   if(hit.decision==='blocked'){search.blocked++;continue;}
+   if(hit.decision==='review'){search.review[hit.reason]=(search.review[hit.reason]||0)+1;continue;}
+   if(claims.get(String(hit.tmdb)).length>1){search.review.tmdb_duplicate_in_export=(search.review.tmdb_duplicate_in_export||0)+1;continue;}
+   if(held.has(String(hit.tmdb))){search.review.tmdb_already_accepted=(search.review.tmdb_already_accepted||0)+1;continue;}
+   const item=planItem(films.get(match.code),{status:'inferred',code:match.code,filmId:null,tmdbId:String(hit.tmdb)});
+   if(!index.catalogByTmdb.has(String(hit.tmdb)))item.admit={title:String(hit.title),year:hit.year};
+   items.push(item);search.decided++;
+  }
+  // A results file that was re-bound to a newer catalog read by `letterboxd-tmdb-search.mjs rebase` says so, in aggregates only: the original
+  // catalog read, the cumulative request count it keeps, and how many entries the newer catalog superseded or sent to review.
+  if(doc.rebase){
+   const counts=doc.rebase.counts&&typeof doc.rebase.counts==='object'?doc.rebase.counts:{};
+   search.rebase={originalCatalogReadAt:doc.rebase.original?.binding?.catalogReadAt??null,steps:Array.isArray(doc.rebase.steps)?doc.rebase.steps.length:null,requests:doc.requests,superseded:counts.superseded??null,movedToReview:counts.movedToReview??null};
+  }
+ }
  items.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
  const lines=items.map((item,i)=>JSON.stringify({chunk:Math.floor(i/chunkSize),item})),planText=lines.join('\n')+(lines.length?'\n':'');
- const origin={schemaVersion:2,archiveName:archive.archiveName,archiveSha256:archive.archiveSha256,generatedAt:archive.generatedAt,generatedAtSource:archive.generatedAtSource,files:Object.fromEntries(Object.entries(archive.files).map(([name,file])=>[name,file.sha256])),planSha256:sha256(planText),chunkSize,identityPolicy:includeInferred?'inferred_included':'verified_only',chunks:Math.ceil(items.length/chunkSize),snapshot:{status:loaded.status,baselineIdentity:loaded.baselineIdentity,missingKeys:loaded.missing}};
+ const origin={schemaVersion:2,archiveName:archive.archiveName,archiveSha256:archive.archiveSha256,generatedAt:archive.generatedAt,generatedAtSource:archive.generatedAtSource,files:Object.fromEntries(Object.entries(archive.files).map(([name,file])=>[name,file.sha256])),planSha256:sha256(planText),chunkSize,identityPolicy:includeInferred?'inferred_included':'verified_only',tmdbResultsSha256:resultsText===null?null:sha256(resultsText),chunks:Math.ceil(items.length/chunkSize),snapshot:{status:loaded.status,baselineIdentity:loaded.baselineIdentity,missingKeys:loaded.missing}};
  const count=predicate=>items.filter(predicate).length;
- const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,chunkSize,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,identityPolicy:includeInferred?'inferred_included':'verified_only',inferred:count(item=>item.identity==='inferred'),review,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
+ const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,chunkSize,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,identityPolicy:includeInferred?'inferred_included':'verified_only',inferred:count(item=>item.identity==='inferred'),filmsToCreate:count(item=>item.admit),search:resultsPath?search:null,review,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
  await mkdir(outputPath,{recursive:true,mode:0o700});
  // Create-only, so a concurrent plan into the same directory cannot overwrite either.
  await writeFile(path.join(outputPath,'plan.jsonl'),planText,{mode:0o600,flag:'wx'});
@@ -168,7 +217,7 @@ function networkCause(error){
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid'};
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid','--catalog-dir':'catalogDir','--tmdb-results':'tmdbResults'};
  for(let i=0;i<rest.length;i++){
   // A switch, not a value: the AIR-388 policy is never on by default and only a plan can turn it on.
   if(rest[i]==='--include-inferred'){if(mode!=='plan')throw new ImportError('--include-inferred is a plan option; '+mode+' uses the plan in its directory',2);args.includeInferred=true;continue;}
@@ -181,7 +230,7 @@ function parseArgs(argv){
 async function main(){
  try{
   const args=parseArgs(process.argv.slice(2));
-  if(args.mode==='plan'){if(!args.zip||!args.snapshot||!args.output)throw new ImportError('plan needs --zip, --snapshot and --output',2);console.log(JSON.stringify(await plan(args)));return;}
+  if(args.mode==='plan'){if(!args.zip||!args.output||(!args.snapshot&&!args.catalogDir))throw new ImportError('plan needs --zip, --output and one of --snapshot and --catalog-dir',2);console.log(JSON.stringify(await plan(args)));return;}
   if(!args.zip||!args.output||!args.endpoint)throw new ImportError(args.mode+' needs --zip, --output and --endpoint',2);
   if(args.mode==='unlink'){if(!args.lid)throw new ImportError('unlink needs --lid',2);const summary=await unlinkFilm(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);return;}
   const summary=await remote(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);

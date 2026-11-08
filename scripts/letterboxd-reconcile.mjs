@@ -65,6 +65,33 @@ export async function loadSnapshot(directory){
  return {objects,missing,status:manifest.status,baselineIdentity:manifest.baselineIdentity??null};
 }
 
+// AIR-388 B2 (ADR 0105): a directory of objects read once, read-only, from the live authorities, for matching only. It is not a fenced
+// snapshot and does not claim to be one: `provenance.json` records what was read and when, and a missing required file is an error, never a
+// silently smaller catalog. Files: catalog.json (the admitted Film records, id -> record), links.json (the trusted Letterboxd-to-TMDB link
+// index), provenance.json {source: 'live_catalog_read', readAt, ...}; optional metadata.json, watchlist.json, programme.json, view-index.json.
+export async function loadCatalogDir(directory){
+ const read=async(name,required)=>{
+  let text;try{text=await readFile(path.join(directory,name),'utf8');}catch(error){if(required)throw new ReconcileError('Catalog directory has no '+name,2);return undefined;}
+  try{return JSON.parse(text);}catch{throw new ReconcileError(name+' is not JSON',2);}
+ };
+ const provenance=await read('provenance.json',true);
+ if(provenance?.source!=='live_catalog_read'||typeof provenance.readAt!=='string')throw new ReconcileError('provenance.json must name source live_catalog_read and readAt',2);
+ const catalog=await read('catalog.json',true),factLinks=await read('links.json',true);
+ if(!catalog||typeof catalog!=='object'||Array.isArray(catalog)||!Object.keys(catalog).length)throw new ReconcileError('catalog.json must be a non-empty object',2);
+ if(!factLinks||typeof factLinks!=='object'||Array.isArray(factLinks))throw new ReconcileError('links.json must be an object',2);
+ const objects={catalog,factLinks},missing=[];
+ for(const [name,key] of [['metadata.json','metadata'],['watchlist.json','watchlist'],['programme.json','programme'],['view-index.json','viewIndex']]){const value=await read(name,false);if(value===undefined)missing.push(name);else objects[key]=value;}
+ return {objects,missing,status:'live_catalog_read',baselineIdentity:{readAt:provenance.readAt,catalogFilms:Object.keys(catalog).length,linkAliases:Object.keys(factLinks).length}};
+}
+
+// A digest of the export's named CSV texts, so a TMDB results file can be tied to the exact export it was searched for (the search tool reads
+// the extracted CSVs, the planner reads the ZIP; both feed the same texts here).
+export function exportDigest(texts){
+ const hash=createHash('sha256');
+ for(const [kind,name] of Object.entries(EXPORT_FILES)){hash.update(name+'\0');hash.update(String(texts[kind]??'')+'\0');}
+ return hash.digest('hex');
+}
+
 const zero=names=>Object.fromEntries(names.map(name=>[name,0]));
 function exportSummary(parsed){
  return {files:parsed.files,sets:Object.fromEntries(SET_NAMES.map(name=>[name,parsed.sets[name].length])),films:parsed.films.length,crossFileMismatches:parsed.crossFileMismatches,invalidRows:parsed.invalidRows.length};
