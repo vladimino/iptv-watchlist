@@ -42,6 +42,22 @@ The latest `projection_run` summary (hourly cron, started 08:37:30 UTC, outcome 
 
 **Conclusion.** Parity between D1 and the R2-derived expected state does **not** hold now: D1 lacks about half of the Films and a third of the Persons that the projector would write, and the projector has been deferring on `input_changed` (see the AIR-375 evidence for the same pattern in earlier ticks). The baseline gate cannot be passed, and `prepared` cannot be proposed, until the projector completes runs (or a bounded load closes the difference) and a measured ledger shows zero unexplained differences.
 
+## Liveness of the projector (read-only, from `projection_state.projected_at` and the last `projection_run`)
+
+`projected_at` is the time each entity was last written by the projector, so its distribution shows the natural runs that wrote.
+
+| Window (UTC) | Entities written by the hourly runs |
+| --- | --- |
+| 5 Nov 00:37 and 08:37 | 3 Films |
+| 7 Nov 21:37, 22:37; 8 Nov 00:37, 01:37 | 775 Persons per run (the per-run budget), no Film |
+| 8 Nov 02:37 | 325 Persons (end of that chunk) |
+| 8 Nov 03:37 to 09:37 (seven ticks) | **nothing written** |
+| Films, last write of any Film | 5 Nov 08:37 UTC (3 on 5 Nov, 44 on 4 Nov, 61 on 3 Nov) |
+
+The last two runs both ended `deferred`: 08:37 `input_changed` (input `discovery_authority`, after a 10.6 s read phase) and 09:37 `authority_unavailable` (input `discovery_authority`, 5.2 s). The Discovery generation read 30,766 in the 08:37 run and **31,989 at 09:48:52 UTC** (+1,223 in about 71 minutes, about 17 per minute) with a live Discovery lease at that read, so a generation-pinned read phase of about ten seconds rarely sees one stable generation. Only the latest run row is kept, so the outcome of the seven silent ticks is inferred from the absence of writes, not read.
+
+**Verdict.** The projector progressed in bounded chunks for a few hours after 21:37 UTC on 7 Nov and has written nothing since 02:38 UTC on 8 Nov; no Film has been written since 5 Nov. That is sustained starvation, not progress. It is a separate problem from the tool AIR-373 builds (the deferral does not prevent developing and testing it), and the projector's code and generation fencing are not touched by this card. A bounded retry of the read phase that keeps the generation fencing is the first candidate; a separate catalog/decisions revision instead of the global generation is better architecturally and a much larger contract change.
+
 ## Not measured
 
 The R2-derived expected state (it needs a read-only R2 snapshot or a projector `dry` run, each an owner decision); per-entity hashes; the D1-only Person identification; the class-C exceptions; whether the deferral is a transient race with Discovery (the hourly runs of both start at :37) or a persistent fault; and whether the pending Films are legitimately new or an artefact of the view.
