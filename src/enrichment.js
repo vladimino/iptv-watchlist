@@ -1233,7 +1233,8 @@ function footerCollection({report,catalog,watchlist,index,metadata}){
 function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness}){
  const unknown={state:'unknown',rating40to44:null,rating45plus:null};
  // Without a freshness rule nothing can be called current: that is unknown, not "no eligible film".
- if(!profile||typeof freshness?.indexed!=='function'||!catalog||typeof catalog!=='object'||!footerIdentitySources({index,watchlist,metadata}))return unknown;
+ // The programme films (not flagged catalog-only) are part of the exclusion, so an absent programme is an unknown membership, not an empty one.
+ if(!profile||typeof freshness?.indexed!=='function'||!footerPlainObject(catalog)||!footerPlainObject(report)||!footerIdentitySources({index,watchlist,metadata}))return unknown;
  const byLid=catalogLidTmdb({metadata,watchlist,programme:report,catalog}),listed=new Set();
  for(const film of [...watchlist.films,...(report?.films||[]).filter(film=>film?.catalogOnly!==true)]){if(film?.id!=null)listed.add(footerIdentity(film.id,byLid));}
  // A recorded watchlist fact, either value, is membership: it is not a first-watch offer.
@@ -1438,7 +1439,10 @@ async function footerStatus(env){
  // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
  if(!footerPlainObject(report)&&!degraded.includes('programme'))degraded.push('programme_missing');
  if(!footerPlainObject(catalog)&&!degraded.includes('catalog'))degraded.push('catalog_missing');
- const coverageReadable=!['programme','catalog','index','freshness','programme_missing','catalog_missing'].some(name=>degraded.includes(name))&&!!freshness;
+ // An absent view index or taste profile is not a measured 0 current predictions either: without them the coverage is unknown.
+ if(!footerPlainObject(index)&&!degraded.includes('index'))degraded.push('index_missing');
+ if(!footerPlainObject(profile)&&!degraded.includes('profile'))degraded.push('profile_missing');
+ const coverageReadable=!['programme','catalog','index','profile','freshness','programme_missing','catalog_missing','index_missing','profile_missing'].some(name=>degraded.includes(name))&&!!freshness;
  const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
  const queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
  const collection=footerCollection({report,catalog,watchlist,index,metadata}),newUnseen=footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness});

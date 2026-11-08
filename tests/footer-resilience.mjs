@@ -104,6 +104,8 @@ for(const key of ['enrichment/profile/current.json','enrichment/view-index.json'
  assert.ok(Array.isArray(r.body.degraded)&&r.body.degraded.length>0,key+' is named as degraded: '+JSON.stringify(r.body.degraded));
  for(const field of LEGACY)assert.ok(Object.hasOwn(r.body,field),key+': legacy field kept: '+field);
  assert.deepEqual(writes,[]);
+ // The coverage needs the taste profile and the view index: when either read fails the numbers are unknown, not 0 of N.
+ if(key==='enrichment/profile/current.json'||key==='enrichment/view-index.json')for(const field of ['confirmedFilmsTotal','currentPredictionsTotal','windowFilmsTotal','windowCurrentPredictions','localPercent','windowPercent'])assert.equal(r.body.coverage[field],null,key+': coverage.'+field+' is unknown after a failed read');
 }
 // The metadata cache is what links identities: without it the new blocks are unknown, never "ok".
 {const {bucket}=bucketFor({faulty:['metadata.json']});const r=await footer(world,{DB:db,BUCKET:bucket});assert.equal(r.body.collection.state,'unknown');assert.equal(r.body.recommendations.newUnseen.state,'unknown');}
@@ -143,8 +145,27 @@ const NULL_COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilm
   assert.ok(r.body.degraded.includes(name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
   for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,label+': coverage.'+key+' is unknown, not 0 or 100');
   assert.equal(r.body.collection.state,'unknown',label+': the collection is unknown');
-  // The new-film count reads the catalog, the watchlist, the index and the metadata; the programme only repeats the watchlist, so it alone does not make it unknown.
-  assert.equal(r.body.recommendations.newUnseen.state,name==='catalog_missing'?'unknown':'ok',label+': the new-film count follows the catalog');
+  assert.equal(r.body.recommendations.newUnseen.state,'unknown',label+': the new-film count is unknown');
+ }
+ // B3: the programme takes part in the watchlist exclusion, so without it the new-film count is unknown, never a count that silently includes a watchlisted film.
+ {
+  const watchlisted={id:'lid-77',tmdbId:'77',title:'Watchlisted',original:'Watchlisted',year:2020,genres:[],actors:[],directors:[],shows:[],catalogOnly:false};
+  const withProgramme=r2Files({'programme.json':{runId:'p1',updatedAt:new Date(now).toISOString(),watchlistCount:1,films:[watchlisted],stats:{}}});
+  r=await footer(r2,withProgramme);
+  assert.deepEqual(r.body.recommendations.newUnseen,{state:'ok',rating40to44:0,rating45plus:0},'with the programme, the watchlisted film (linked by the stored id) is not new');
+  r=await footer(r2,r2Files({'programme.json':undefined}));
+  assert.deepEqual(r.body.recommendations.newUnseen,{state:'unknown',rating40to44:null,rating45plus:null},'without the programme the same film is NOT counted as new: unknown');
+  assert.ok(r.body.degraded.includes('programme_missing'));
+ }
+ // An absent view index or taste profile is not a measured "0 current predictions" either.
+ for(const [label,over,name] of [['view index absent',{'enrichment/view-index.json':undefined},'index_missing'],['taste profile absent',{'enrichment/profile/current.json':undefined},'profile_missing']]){
+  r=await footer(r2,r2Files(over));
+  assert.equal(r.status,200,label);
+  assert.ok(r.body.degraded.includes(name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
+  for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,label+': coverage.'+key+' is unknown, not 0 of N');
+  // The collection counts facts, not predictions: it needs the view index but not the taste profile.
+  assert.equal(r.body.collection.state,name==='index_missing'?'unknown':'ok',label+': the collection follows the view index');
+  assert.equal(r.body.recommendations.newUnseen.state,'unknown',label+': the new-film count is unknown');
  }
  // B1: a freshness rule that cannot be computed makes the new-film count unknown, never "no eligible film".
  const original=vm.runInContext('predictionFreshness',r2);
