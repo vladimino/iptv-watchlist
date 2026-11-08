@@ -16,12 +16,30 @@ assert.equal(run('state.sort'),'personal');
 assert.deepEqual([read(base).sort,read(base).sortExplicit],['personal',false]);
 // Explicit sorts are kept and marked explicit.
 for(const sort of ['personal','title','expiring']){const s=read(base+'?sort='+sort);assert.deepEqual([s.sort,s.sortExplicit],[sort,true],sort);}
-assert.deepEqual([read(base+'?sort=relevance').sort,read(base+'?sort=relevance').sortExplicit],['relevance',false]);
 // Invalid and retired sorts fall back; with a query the automatic relevance applies.
 for(const bad of ['oops','time','TIME','','expiring%00']){const s=read(base+'?sort='+bad);assert.deepEqual([s.sort,s.sortExplicit],['personal',false],'sort='+bad);}
 assert.equal(read(base+'?sort=time&q=дюна').sort,'relevance');
 assert.equal(read(base+'?q=дюна').sort,'relevance');
 assert.equal(read(base+'?q=%20&sort=time').sort,'personal');
+// relevance exists only while a query does.
+assert.deepEqual([read(base+'?sort=relevance').sort,read(base+'?sort=relevance').sortExplicit],['personal',false]);
+assert.deepEqual([read(base+'?sort=relevance&q=%20').sort,read(base+'?sort=relevance&q=дюна').sort],['personal','relevance']);
+
+// Explicit personal -> URL -> reload/restore -> type a query: the choice holds. The implicit default does not leave a trace.
+{
+ run("Object.assign(state,{sort:'personal',sortExplicit:true,query:''})");
+ const url=run("urlForState(new URL('https://iptv.example/')).href");
+ assert.equal(new URL(url).searchParams.get('sort'),'personal');
+ run(`Object.assign(state,readUrlState(new URL(${JSON.stringify(url)})))`);
+ assert.deepEqual([run('state.sort'),run('state.sortExplicit')],['personal',true]);
+ run("applySearchInput('дюна')");assert.equal(run('state.sort'),'personal','typing a query keeps the explicit personal');
+ run("applySearchInput('')");assert.equal(run('state.sort'),'personal');
+ run("Object.assign(state,{sort:'personal',sortExplicit:false,query:''})");
+ const implicit=run("urlForState(new URL('https://iptv.example/')).href");
+ assert.equal(new URL(implicit).searchParams.get('sort'),null,'the implicit default writes nothing');
+ run(`Object.assign(state,readUrlState(new URL(${JSON.stringify(implicit)})))`);
+ run("applySearchInput('дюна')");assert.equal(run('state.sort'),'relevance','an implicit default still gives way to relevance');
+}
 
 // Writing the URL: the default is silent, other sorts are written, an explicit default with a query is kept.
 assert.equal(write(base,{}),null);
@@ -29,7 +47,7 @@ assert.equal(write(base,{sort:'title',sortExplicit:true}),'title');
 assert.equal(write(base,{sort:'expiring',sortExplicit:true}),'expiring');
 assert.equal(write(base,{sort:'relevance',query:'дюна'}),'relevance');
 assert.equal(write(base,{sort:'personal',sortExplicit:true,query:'дюна'}),'personal');
-assert.equal(write(base,{sort:'personal',sortExplicit:true}),null);
+assert.equal(write(base,{sort:'personal',sortExplicit:true}),'personal','an explicit personal survives the URL even without a query');
 // A legacy link is normalized on the next write: `sort=time` is dropped.
 run("Object.assign(state,readUrlState(new URL('https://iptv.example/?sort=time&campaign=save')))");
 const rewritten=new URL(run("urlForState(new URL('https://iptv.example/?sort=time&campaign=save')).href"));

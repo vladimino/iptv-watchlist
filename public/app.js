@@ -113,7 +113,7 @@ function readUrlState(url){
  if(p.get('shortlist')==='today')defaults.shortlistMode='today';
  if(p.get('view')==='watchlist')defaults.includeUnscheduled=true;
  if(['all','archive','future'].includes(p.get('period')))defaults.period=p.get('period');
- if(p.get('sort')==='relevance')defaults.sort='relevance';
+ if(p.get('sort')==='relevance'&&normalizeSearch(p.get('q')||''))defaults.sort='relevance';
  // AIR-382: «Для меня» is the default. The retired `time` sort (an old link) and any unknown value fall back to it, or to relevance while a search is typed.
  else if(['title','personal','expiring'].includes(p.get('sort'))){defaults.sort=p.get('sort');defaults.sortExplicit=true;}
  else if(normalizeSearch(p.get('q')||''))defaults.sort='relevance';
@@ -147,7 +147,7 @@ function urlForState(current){
  if(state.query)add('q',state.query);
  const searchIn=searchScopeParam();if(searchIn)add('searchIn',searchIn);
  if(state.sort!=='personal')add('sort',state.sort);
- else if(state.sortExplicit&&normalizeSearch(state.query))add('sort','personal');
+ else if(state.sortExplicit)add('sort','personal');
  for(const genre of [...state.genres].sort((a,b)=>a.localeCompare(b,'ru')))add('genre',genre);
  for(const mechanic of [...state.mechanics].sort())add('mechanic',mechanic);
  for(const mood of [...state.moods].sort((a,b)=>a.localeCompare(b,'ru')))add('mood',mood);

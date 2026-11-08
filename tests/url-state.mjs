@@ -35,7 +35,7 @@ assert.equal(new URL(canonical).hash,'#films');
 assert.equal(serialize(canonical),canonical,'serialization is deterministic');
 assert.equal(read(canonical).sort,'personal','canonical link restores the sorting');
 
-vm.runInContext(`Object.assign(state,{period:'all',sort:'personal',viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),mechanics:new Set(),moods:new Set(),from:1900,to:MAX_YEAR,maxRuntime:null})`,context);
+vm.runInContext(`Object.assign(state,{period:'all',sort:'personal',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',genres:new Set(),mechanics:new Set(),moods:new Set(),from:1900,to:MAX_YEAR,maxRuntime:null})`,context);
 assert.equal(serialize(canonical),'https://iptv.example/?campaign=save#films','defaults and reset remove only app-owned params');
 
 const malformed=read('https://iptv.example/?view=garbage&period=old&sort=oops&genre=Invalid&genre=%D0%94%D1%80%D0%B0%D0%BC%D0%B0&mechanic=unknown&mood=%20%20&from=2028&to=abc&runtime=-2&viewing=nope&started=yes&lastChance=2&director=other&actor=other&prediction=5&chance=0.99');
