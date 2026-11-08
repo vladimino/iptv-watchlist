@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
 const context=vm.createContext({Date,Intl,Set,Map,URL});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
 vm.runInContext(`MAX_YEAR=2027;genres=['Драма','Фантастика','Ужасы'];report={people:{directors:[{id:'director/1',name:'Кристофер Нолан'}],actors:[{id:'actor/2',name:'Крис Пратт'}]}}`,context);
 const read=url=>vm.runInContext(`readUrlState(new URL(${JSON.stringify(url)}))`,context);
 const serialize=url=>vm.runInContext(`urlForState(new URL(${JSON.stringify(url)})).href`,context);

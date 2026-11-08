@@ -27,7 +27,7 @@ const context=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,document,w
  const saved=JSON.parse(options.body);
  return new Response(JSON.stringify({schemaVersion:1,presets:[{id:'22222222-2222-4222-8222-222222222222',name:saved.name,query:saved.query}]}),{status:201,headers:{ETag:'"1"'}});
 }});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
 const run=code=>vm.runInContext(code,context);
 run('urlReady=true;state.viewing="rewatch";state.minPrediction=4;state.execution.pace.add("fast");state.execution.decision_logic.add("unknown")');
 assert.equal(run('presetQuery()'),'execution=pace%3Afast&viewing=rewatch&prediction=4');

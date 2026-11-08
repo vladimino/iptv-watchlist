@@ -10,9 +10,9 @@
 <body>
   <header class="masthead"><div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ watchlist</span></div><span class="demo-badge" id="connection-badge" title="Свежесть сохранённой программы">Загрузка программы</span></header>
   <main>
+    <a class="return-home" id="return-home" data-return-home href="/" hidden>На главную</a>
     <section id="film-screen" class="film-screen" hidden aria-labelledby="film-screen-title">
       <div class="film-read">
-      <button type="button" id="film-back">К списку</button>
       <div class="film-hero">
         <div id="film-poster"></div>
         <div class="film-hero-copy">
@@ -91,7 +91,7 @@
         <fieldset class="year-filter"><legend>Год выпуска</legend><div class="years"><label><span>От</span><input id="year-from" type="number" min="1900" max="2026" value="1900" inputmode="numeric"></label><span class="year-dash">—</span><label><span>До</span><input id="year-to" type="number" min="1900" max="2026" value="2026" inputmode="numeric"></label></div><div class="year-presets" role="group" aria-label="Быстрый выбор годов"><button type="button" data-year-from="1900" data-year-to="current" aria-pressed="true">Любой</button><button type="button" data-year-from="1900" data-year-to="1989" aria-pressed="false" title="По 1989 включительно">Старые</button><button type="button" data-year-from="1990" data-year-to="1999" aria-pressed="false" title="1990–1999">1990-е</button><button type="button" data-year-from="2000" data-year-to="2009" aria-pressed="false" title="2000–2009">2000-е</button><button type="button" data-year-from="2010" data-year-to="2019" aria-pressed="false" title="2010–2019">2010-е</button><button type="button" data-year-from="2020" data-year-to="current" aria-pressed="false" title="С 2020 по текущий год">2020-е</button><button type="button" data-year-from="2025" data-year-to="current" aria-pressed="false" title="С 2025 по текущий год">Свежие</button></div><p id="year-error" class="error" hidden>Укажи годы от 1900 до 2026; «от» не должно быть больше «до».</p></fieldset>
         <fieldset class="runtime-filter"><legend>Длительность</legend><label class="runtime-input"><span>Максимальная длина, минут</span><input id="runtime-max" type="number" min="1" step="1" inputmode="numeric" placeholder="Без ограничения" aria-describedby="runtime-error"></label><div class="runtime-presets" role="group" aria-label="Быстрый выбор длительности"><button type="button" data-runtime-max="90" aria-pressed="false">До 90 минут</button><button type="button" data-runtime-max="120" aria-pressed="false">До 2 часов</button><button type="button" data-runtime-max="any" aria-pressed="true">Любые</button></div><p id="runtime-error" class="error" hidden>Укажи положительное целое число минут.</p></fieldset>
         <label class="started-filter unscheduled-filter"><input id="include-unscheduled" type="checkbox"><span>Показывать фильмы без показов</span></label>
-        <section class="activity" aria-labelledby="activity-title"><div class="activity-head"><h2 id="activity-title" tabindex="-1">События</h2><button type="button" class="activity-mode" id="activity-expand">Развернуть</button><button type="button" class="activity-mode" id="activity-back" hidden>К фильмам</button></div><div class="activity-scroll" role="region" aria-label="История событий" tabindex="0"><ol id="activity-list"></ol><p id="activity-status" role="status">Загружаем события…</p><button type="button" id="activity-more" hidden>Более давние события</button></div></section>
+        <section class="activity" aria-labelledby="activity-title"><div class="activity-head"><h2 id="activity-title" tabindex="-1">События</h2><button type="button" class="activity-mode" id="activity-expand">Развернуть</button></div><div class="activity-scroll" role="region" aria-label="История событий" tabindex="0"><ol id="activity-list"></ol><p id="activity-status" role="status">Загружаем события…</p><button type="button" id="activity-more" hidden>Более давние события</button></div></section>
       </aside>
       <section class="results" aria-label="Фильмы и показы">
         <div class="period-tabs" role="group" aria-label="Период показов"><button data-period="all" aria-pressed="true">Все показы <span id="count-all"></span></button><button data-period="archive" aria-pressed="false">Архив <span id="count-archive"></span></button><button data-period="future" aria-pressed="false">Следующие сутки <span id="count-future"></span></button></div>
@@ -152,25 +152,26 @@
               <div data-integration="resolver"><dt>Распознавание</dt><dd id="integration-resolver">—</dd></div>
               <div data-integration="predictions"><dt>Прогнозы</dt><dd id="integration-predictions">—</dd></div>
               <div data-integration="metadata" hidden><dt>Метаданные</dt><dd id="integration-metadata">—</dd></div>
-            </dl><a class="status-events-link" id="status-integrations-events" href="/events">История в событиях</a></section>
+            </dl><a class="status-events-link" id="status-integrations-events" href="/events" data-return-carry>История в событиях</a></section>
             <section aria-labelledby="status-run-title"><h3 id="status-run-title">Последний запуск</h3><dl>
               <div><dt>Начат</dt><dd id="detail-run-started">—</dd></div>
               <div><dt>Добавлено</dt><dd id="detail-run-added">—</dd></div>
               <div><dt>Ошибки</dt><dd id="detail-run-failed">—</dd></div>
               <div><dt>Результат</dt><dd id="detail-run-reason">—</dd></div>
               <div><dt>По расписанию</dt><dd id="detail-run-next">—</dd></div>
-            </dl><a class="status-events-link" id="status-events-link" href="/events">Смотреть события</a></section>
+            </dl><a class="status-events-link" id="status-events-link" href="/events" data-return-carry>Смотреть события</a></section>
             <section aria-labelledby="status-profile-title"><h3 id="status-profile-title">Модель вкуса</h3><dl>
               <div><dt>Версия</dt><dd id="detail-profile-version">—</dd></div>
               <div><dt>Обновлена</dt><dd id="detail-profile-updated">—</dd></div>
             </dl></section>
           </div>
         </details>
-        <a class="footer-admin-link" href="/admin">Админка</a>
+        <a class="footer-admin-link" href="/admin" data-return-carry>Админка</a>
         </div>
       </div>
     </footer>
   </main>
+  <script src="/return-home.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -12,9 +12,10 @@
 <body class="admin-page">
   <header class="masthead">
     <div class="brand"><span class="brand-icon" aria-hidden="true">▶</span>в эфире<span class="brand-sub">/ операции</span></div>
-    <a class="admin-home" href="/admin">К данным</a>
+    <a class="admin-home" href="/admin" data-return-carry>К данным</a>
   </header>
   <main class="admin-shell">
+    <a class="return-home" data-return-home href="/">На главную</a>
     <p id="action-demo-banner" class="demo-note action-banner" role="note"><span class="info-icon" aria-hidden="true">i</span><span><b>Тренажёр на вымышленных данных. Реальные фильмы не меняются.</b> Данные, проверка и результат живут только в этой вкладке; страница не делает запросов к сайту.</span></p>
     <section class="page-heading">
       <div>
@@ -31,6 +32,7 @@
     </section>
     <section id="action-root" class="admin-card" aria-label="Действие"></section>
   </main>
+  <script src="/return-home.js"></script>
   <script src="/admin-actions.js"></script>
 </body>
 </html>

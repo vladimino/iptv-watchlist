@@ -21,7 +21,7 @@ const entry=(extra)=>({url:film(FILM).url,state:'rated',rating:4,lastResult:'dia
 
 function putEvent(id,when,removed){const event=removal(id,when,removed);bucket.set(eventKeyOf(when,id),event);return event;}
 const ui=vm.createContext({Date,Intl,URL,Set,Map});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
 function eventHTML(event){ui.event=event;return vm.runInContext('eventHTML(event)',ui);}
 
 // 1. No rated legacy entry: the removal phase does not list events. A legacy entry without a confirmed half-star

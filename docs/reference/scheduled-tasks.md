@@ -7,6 +7,7 @@ EPG and Discovery retain their separately verified execution modes. Ratings has 
 ## Daily programme update
 
 - **Task:** `Обновление программы «В эфире»`. **Expected:** enabled; daily at **17:00 Europe/Madrid** (local civil time; daylight saving changes apply); `default_timezone: Europe/Madrid`.
+- **Cloudflare executor (AIR-348, inert).** [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md) (Proposed) adds a Cloudflare EPG Workflow that can replace this Task. Nothing here changes until the owner's separately approved switch: this Task stays the EPG executor, is not disabled and its prompt is not edited. After the switch completes, `epg_sync_start` and `epg_sync_step` answer `external_writer_fenced` (and `switch_in_progress` while admission is closed), so a stale prompt cannot publish; disabling this Task is a further separate owner approval.
 - **Authority:** connected owner-only IPTV Watchlist MCP to Cloudflare Worker `iptv`, authoritative R2 `iptv`. Never use legacy Sites, direct HTTP, Cloudflare Cron, a browser or local CSV as a production substitute.
 - **Preflight:** `probe_read`, `epg_status`, `epg_pipeline_status`; stop safely if unavailable, unauthorized or inconsistent.
 - **Execution:** exactly one `epg_sync_start({})` for this invocation, using only its returned `runId`; sequential `epg_sync_step({runId})` through metadata and programme publication; stop on ownership/lease conflicts, terminal errors or unsafe retries. Do not adopt another run.

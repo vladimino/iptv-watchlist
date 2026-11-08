@@ -52,6 +52,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | Scheduled Task Drift registry-only activation (2026-11-07) | [orchestration/scheduled-task-drift-registry-only-2026-11-07.md](orchestration/scheduled-task-drift-registry-only-2026-11-07.md) |
 | AIR-347 Ratings Task disabled after Cloudflare cutover | [orchestration/ratings-task-disabled-2026-11-06.md](orchestration/ratings-task-disabled-2026-11-06.md) |
 | AIR-347 Ratings executor offline evidence | [orchestration/ratings-executor-air-347-2026-11-05.md](orchestration/ratings-executor-air-347-2026-11-05.md) |
+| AIR-348 EPG executor offline evidence | [orchestration/epg-executor-air-348-2026-11-07.md](orchestration/epg-executor-air-348-2026-11-07.md) |
 | AIR-188 extended future EPG fixture measurements | [epg-extended-future-air-188-2026-11-05.md](epg-extended-future-air-188-2026-11-05.md) |
 | AIR-359 EPG event versus published generation | [epg-event-publication-air-359-2026-11-06.md](epg-event-publication-air-359-2026-11-06.md) |
 | AIR-361 Ratings run result event | [ratings-event-air-361-2026-11-06.md](ratings-event-air-361-2026-11-06.md) |

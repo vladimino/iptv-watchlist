@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-const app=fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
+const app=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const html=fs.readFileSync('public/index.html','utf8');
 const css=fs.readFileSync('public/styles.css','utf8');
 const attributes=new Map(),classes=new Set();

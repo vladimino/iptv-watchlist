@@ -35,7 +35,7 @@ const before=JSON.stringify(records.get('enrichment/films/a/mood-facet.json'));a
 ctx.env=env;ctx.changes={prediction:{moodLabels:['меланхолично','военная миссия']}};await vm.runInContext('updateViewIndex(env,"new",changes)',ctx);assert.deepEqual(records.get('enrichment/films/new/mood-facet.json').moodIds,['melancholic','military'],'new writes mapped');
 const body={innerHTML:'',querySelectorAll(){return []},contains(){return false}};
 const ui=vm.createContext({Date,Intl,Set,Map,URL,document:{querySelector(sel){return {'#facet-body':body,'#facet-search':{value:''}}[sel]||null;},querySelectorAll(){return [];},activeElement:null}});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
 assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(MOOD_LABELS)',ui)),labels);
 assert.deepEqual(JSON.parse(vm.runInContext('JSON.stringify(MOOD_GROUPS)',ui)),view.moodVocabulary.groups);
 function chipIds(film,item){return JSON.parse(vm.runInContext('film='+JSON.stringify(film)+';enrichment={films:{[film.id]:'+JSON.stringify(item)+'}};JSON.stringify(presentationChips(film).map(chip=>chip.id||chip.label))',ui));}

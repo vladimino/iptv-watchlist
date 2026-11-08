@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
-const page = fs.readFileSync('public/admin.js', 'utf8').replace(/\nstartAdmin\(\);\s*$/, '\n');
+const page = fs.readFileSync('public/return-home.js', 'utf8') + '\n' + fs.readFileSync('public/admin.js', 'utf8').replace(/\nstartAdmin\(\);\s*$/, '\n');
 assert.match(page, /readback_failed/);
 assert.match(page, /adminFinishUnknownTitle/);
 

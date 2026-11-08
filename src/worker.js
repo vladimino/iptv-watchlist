@@ -334,7 +334,11 @@ async function updatePublishedFiles(env,files){
  for(const [name,value] of Object.entries(files))await saveJSON(env,publicEpgKey(name),value);
  return publication.programmeRunId;
 }
+// AIR-348 / ADR 0100: a mutation boundary of an EPG step. A step that no longer holds its lease under the mode revision it was admitted
+// with (the owner closed admission, or the lease ran out) stops here and the write does not happen. A no-op outside such a step.
+async function epgStepGuard(env){if(env?.epgStep&&typeof EpgOrchestration!=='undefined')await EpgOrchestration.assertStep(env);}
 const saveJSON=async(env,key,value)=>{
+ await epgStepGuard(env);
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeWrite(env,key,value);
   if(routed.handled)return;
@@ -464,6 +468,7 @@ async function queueCommittedDiscovery(env,run){
  try{await noteDiscoveryWorkflow(env);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
 }
 async function copyEpgGeneration(env,runId){
+ await epgStepGuard(env);
  for(const name of ['discovery-latest.json','discovered-films.json','programme.json']){
   const staged=await env.BUCKET.get(epgGenerationKey(runId,name));if(!staged)continue;
   const dest=name==='programme.json'?name:'epg/'+name,meta={httpMetadata:{contentType:'application/json'}};
@@ -902,6 +907,7 @@ function sealResponse(run,discovery,extra={}){
 // Stores the generation ledger (R2 only, streamed with a known length) and the staging payload, then moves the run to
 // `seal`. It writes nothing to the D1 ledger and does not touch the lease row beyond holding it for the duration.
 async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,uncertain,publication}){
+ await epgStepGuard(env);
  const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
  let planned=null;
  try{
@@ -1001,6 +1007,7 @@ async function sealUnits(env,run,deadline,list){
  for(const unit of list){
   if(units[unit.name])continue;
   if(ran>0&&Date.now()>=deadline)return {done:false};
+  await epgStepGuard(env);
   const outcome=await tracedPhase(run.runId,'seal_'+unit.phase,unit.work);
   ran++;
   if(outcome==='failed'){
@@ -1085,6 +1092,7 @@ async function sealQueueStep(env,run,deadline=Infinity){
 // One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
 // `nextAction: continue` until the run is complete.
 async function sealStep(env,run,entryAt=Date.now()){
+ await epgStepGuard(env);
  const deadline=entryAt+SEAL_REQUEST_BUDGET_MS;
  if(!run.seal?.jobId)throw new Error('seal_job_missing');
  // The lease is taken without the published pointer's programme: once the ledger is committed the discovery authority
@@ -1183,13 +1191,32 @@ async function completeWithRatings(env,run,report){
  const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
  return {...result,ratingsPipeline:'blocked',ratingsMigration:gate.migration};
 }
+async function epgOrchestrationOf(env){
+ // AIR-348: the executor's read model. A pure read; an unreadable record is reported, never repaired.
+ if(typeof EpgOrchestration==='undefined')return null;
+ try{return await EpgOrchestration.readModel(env,Date.now());}catch{return {mode:null,health:'unknown',failure:{class:null,code:'evidence_unreadable'},sideEffects:'none'};}
+}
 async function syncStatus(env){
  const run=await loadJSON(env,'sync.json');
- return run?{runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),...(run.diaryHistory?{diaryHistory:run.diaryHistory}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started'};
+ const orchestration=await epgOrchestrationOf(env);
+ return run?{orchestration,runId:run.runId,stage:run.stage,updatedAt:run.updatedAt,remaining:run.remaining,failures:run.failures?.length,error:run.error,ratingError:run.ratingError,ratingRepair:run.ratingRepair,ratingsPending:!!run.ratingPending?.length,...(run.ratingAttempt?{ratingAttempt:run.ratingAttempt}:{}),...(run.removalRatingLookup?{removalRatingLookup:run.removalRatingLookup}:{}),...(run.diaryHistory?{diaryHistory:run.diaryHistory}:{}),enrichmentQueueError:run.enrichmentQueueError||null,...(run.lifecycleLocalization?{lifecycleLocalization:run.lifecycleLocalization}:{})}:{stage:'not_started',orchestration};
 }
 // Shared by POST /api/sync/* and the MCP sync tools. One call is one existing step. `caller` names the
 // boundary (http, mcp) for the AIR-151 step diagnostics; it changes nothing about the step.
 async function postSync(env,execution,pathname,body,caller='http'){
+ // AIR-348 / ADR 0100: the external writer path (HTTP, the MCP tools, an old Task prompt) is fenced once the owner has closed
+ // admission or switched the EPG executor to Cloudflare, and a step it is admitted for holds the durable step lease until it ends,
+ // so the owner's drain can prove no step is in flight. The executor's own calls (caller `internal`) hold their lease already.
+ let lease=null;
+ if(caller!=='internal'&&typeof EpgOrchestration!=='undefined'){
+  const gate=await EpgOrchestration.beginExternalStep(env);
+  if(gate.reason)return json({runId:body?.runId??null,stage:null,nextAction:gate.nextCatchUpAt?'wait':'stop',reason:gate.reason,error:gate.reason,nextCatchUpAt:gate.nextCatchUpAt??null},409);
+  env=gate.env;lease=gate.step||null;
+ }
+ try{return await postSyncRun(env,execution,pathname,body,caller);}
+ finally{if(lease)await EpgOrchestration.endStep(env,lease).catch(()=>false);}
+}
+async function postSyncRun(env,execution,pathname,body,caller){
  if(pathname==='/api/sync/start')return json(await beginSync(env));
  const started=Date.now(),step=continuationStep(caller,pathname,body?.runId),persisted=()=>pathname==='/api/sync/epg'||step.branch==='run_mismatch';
  await openContinuationStep(env,step,persisted());
@@ -1211,6 +1238,7 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
+ await epgStepGuard(env);
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await tracedPhase(run.runId,'generation_copy',()=>copyEpgGeneration(env,run.runId));await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}
  const titles=await loadJSON(env,'titles.json')||{};
  try{await localizeFilmTitles(run.watchlist,titles,'on');await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
@@ -1248,7 +1276,7 @@ export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
 // AIR-347 (ADR 0090): the same firing also calls the ratings executor's `ensure`; with the executor mode external it reads one document and returns.
 // AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; with DISCOVERY_EXECUTOR absent it returns without create().
-async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env):Promise.resolve(),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]));},
+async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env):Promise.resolve(),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]));},
 async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
@@ -1275,6 +1303,7 @@ async fetch(request,env,execution){
   // AIR-349: the monitor's stored result is a pure read; the synthetic test message changes only the monitor's own document.
   if(url.pathname==='/api/monitor/status'&&request.method==='GET')return json(await Monitor.status(env));
   if(url.pathname==='/api/monitor/test'&&request.method==='POST')return json(await Monitor.test(env));
+  if(url.pathname==='/api/epg/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await EpgOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step','/api/letterboxd/ratings/migrate'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}

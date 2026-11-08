@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 
 const ctx=vm.createContext({Date,Intl,Set,Map,URL,URLSearchParams});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 vm.runInContext(fs.readFileSync('src/filter-presets.js','utf8'),ctx);
 const run=code=>vm.runInContext(code,ctx);
 run(`CUTOFF=1000000000000;WINDOW_START=CUTOFF-72*3600000;WINDOW_END=CUTOFF+24*3600000;const show=channel=>({channel,start:CUTOFF+3600000,offset:1});films=[

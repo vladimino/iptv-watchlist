@@ -97,7 +97,8 @@ function adminUrl(state) {
   }
   const path = state.view === 'health' ? '/admin/health' : '/admin';
   const query = params.toString();
-  return query ? path + '?' + query : path;
+  // The programme page this admin was opened from stays reachable: its target is part of every admin URL (AIR-380).
+  return ReturnHome.keep(query ? path + '?' + query : path, window.location.search);
 }
 
 function adminWrite(state, mode) {

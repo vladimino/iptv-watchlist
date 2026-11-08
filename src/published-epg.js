@@ -21,6 +21,14 @@ const POINTER_KEY='epg/published-generation.json';
 const PROGRAMME_KEY='programme.json';
 const WATCHLIST_KEY='watchlist.json';
 const FENCE_SQL='UPDATE published_epg_cas SET ok=changes() WHERE id=1';
+// AIR-348 / ADR 0100. An EPG executor or external-path commit carries `epgFence: {revision}`: the revision of the executor
+// `mode` document as read at admission (null: no document yet, the default external mode). The commit batch asserts it in
+// its own statement, so a commit admitted before the owner closed admission cannot land after it. ok=0 trips CHECK (ok = 1).
+function epgFenceStatements(fence){
+ if(fence==null)return [];
+ if(!(fence.revision===null||(Number.isInteger(fence.revision)&&fence.revision>=1)))throw failed('published_epg_fence');
+ return [["UPDATE published_epg_cas SET ok=CASE WHEN (SELECT COUNT(*) FROM epg_orchestration_document WHERE key='mode' AND (? IS NULL OR revision=?))=? THEN 1 ELSE 0 END WHERE id=1",[fence.revision,fence.revision,fence.revision===null?0:1]]];
+}
 const RESERVED_STATEMENTS=3;
 const TABLES=['published_epg_authority','published_epg_cas','published_epg_generation','published_epg_document','published_epg_member','published_epg_show','published_epg_stage','published_epg_stage_chunk','published_epg_stage_row'];
 
@@ -283,6 +291,7 @@ async function commitPublish(db,stage,claim,authority,expected,now,ttl){
   ?['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,generation,expected]]
   :['UPDATE published_epg_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=?',[generation]];
  await fenced(db,[
+  ...epgFenceStatements(stage.epgFence),
   claimStillHeld(stage,claim,now,ttl),
   [FENCE_SQL,[]],
   move,
@@ -307,6 +316,7 @@ async function commitReplace(db,stage,claim,authority,kind,now,ttl){
    ['DELETE FROM published_epg_show WHERE programme_run_id=?',[stage.target]],
   ];
  await fenced(db,[
+  ...epgFenceStatements(stage.epgFence),
   claimStillHeld(stage,claim,now,ttl),
   [FENCE_SQL,[]],
   ['UPDATE published_epg_authority SET generation=generation+1, watchlist_generation=CASE WHEN ?=\'watchlist\' THEN watchlist_generation+1 ELSE watchlist_generation END WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id=?',[kind,generation,stage.target]],
@@ -339,8 +349,8 @@ async function stageCommit(db,spec,options){
   await validate(db,{...stage,owner},claim,now,ttl);
   if(typeof options.afterValidate==='function')await options.afterValidate({db,stage:{...stage,owner},claim,now});
   try{
-   if(spec.replace)await commitReplace(db,{...stage,owner},claim,authority,spec.replace,now,ttl);
-   else await commitPublish(db,{...stage,owner},claim,authority,spec.expected,now,ttl);
+   if(spec.replace)await commitReplace(db,{...stage,owner,epgFence:options.epgFence??null},claim,authority,spec.replace,now,ttl);
+   else await commitPublish(db,{...stage,owner,epgFence:options.epgFence??null},claim,authority,spec.expected,now,ttl);
   }catch(error){
    if(error?.code==='published_epg_fence'){
     const committed=await one(db,'SELECT 1 AS ok FROM published_epg_generation WHERE programme_run_id=?',[spec.replace?spec.stageId:stage.target]);
@@ -358,6 +368,7 @@ async function stageCommit(db,spec,options){
 }
 
 export async function publishGeneration(env,input,options={}){
+ if(options.epgFence===undefined&&env?.epgFence!==undefined)options={...options,epgFence:env.epgFence};
  const db=database(env);
  const opened=await readAuthority(db);
  if(opened.cutover==='held')throw failed('published_epg_fence');
@@ -385,6 +396,7 @@ export async function publishGeneration(env,input,options={}){
 }
 
 async function replacePart(env,target,kind,programme,watchlist,options){
+ if(options.epgFence===undefined&&env?.epgFence!==undefined)options={...options,epgFence:env.epgFence};
  const db=database(env);
  const authority=await readAuthority(env);
  if(authority.cutover==='held')return false;

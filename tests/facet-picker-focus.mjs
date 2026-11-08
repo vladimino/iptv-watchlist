@@ -103,7 +103,7 @@ const window={
  history:{state:null,replaceState(_state,_title,url){window.location.href=new URL(url,window.location.href).href;}},
 };
 const context=vm.createContext({Date,Intl,URL,Set,Map,document,window,requestAnimationFrame(fn){fn();}});
-vm.runInContext(fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
+vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
 const run=code=>vm.runInContext(code,context);
 run(`CUTOFF=1000000000000;WINDOW_START=CUTOFF-72*3600000;WINDOW_END=CUTOFF+24*3600000;const show=(channel,start)=>({channel,start,offset:(start-CUTOFF)/3600000});films=[
  {id:'a',title:'Альфа',original:'A',aliases:[],year:2020,runtime:90,genres:['Драма'],directors:[],actors:[],shows:[show('Первый',CUTOFF-3600000)]},
