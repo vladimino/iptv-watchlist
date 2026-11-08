@@ -20,25 +20,25 @@ const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expecte
 // The pure module's own source is free of I/O, a clock and randomness.
 assert.doesNotMatch(fs.readFileSync('src/domain/orchestration-policy.js','utf8'),/\b(fetch|BUCKET|import|require|Date\.now|new Date\(\)|Math\.random|crypto)\b/);
 
-// 1. Policy: the Madrid day key and the 17:30 schedule on the two DST change days and either side of them.
+// 1. Policy: the Madrid day key and the 17:00 schedule on the two DST change days and either side of them.
 {
- // CEST (UTC+2): 17:30 is 15:30Z. CET (UTC+1): 17:30 is 16:30Z.
- const cases=[['2026-10-24T15:29:59Z','2026-10-24',false],['2026-10-24T15:30:00Z','2026-10-24',true],['2026-10-26T15:30:00Z','2026-10-26',false],['2026-10-26T16:30:00Z','2026-10-26',true],
-  ['2026-03-28T16:29:59Z','2026-03-28',false],['2026-03-28T16:30:00Z','2026-03-28',true],['2026-03-30T15:29:59Z','2026-03-30',false],['2026-03-30T15:30:00Z','2026-03-30',true]];
+ // CEST (UTC+2): 17:00 is 15:00Z. CET (UTC+1): 17:00 is 16:00Z.
+ const cases=[['2026-10-24T14:59:59Z','2026-10-24',false],['2026-10-24T15:00:00Z','2026-10-24',true],['2026-10-26T15:00:00Z','2026-10-26',false],['2026-10-26T16:00:00Z','2026-10-26',true],
+  ['2026-03-28T15:59:59Z','2026-03-28',false],['2026-03-28T16:00:00Z','2026-03-28',true],['2026-03-30T14:59:59Z','2026-03-30',false],['2026-03-30T15:00:00Z','2026-03-30',true]];
  for(const [time,day,due] of cases){const result=Policy.dailyDue(Date.parse(time));assert.equal(result.dayKey,day,time);assert.equal(result.due,due,time);}
  // The change days: fall back on 2026-10-25 (03:00 CEST to 02:00 CET), spring forward on 2026-03-29 (02:00 CET to 03:00 CEST).
- assert.equal(at(Policy.madridInstant('2026-10-25',17,30)),'2026-10-25T16:30:00.000Z');
- assert.equal(at(Policy.madridInstant('2026-03-29',17,30)),'2026-03-29T15:30:00.000Z');
+ assert.equal(at(Policy.madridInstant('2026-10-25',17,0)),'2026-10-25T16:00:00.000Z');
+ assert.equal(at(Policy.madridInstant('2026-03-29',17,0)),'2026-03-29T15:00:00.000Z');
  for(const day of ['2026-10-25','2026-03-29']){
-  const dueAt=Policy.madridInstant(day,17,30);
+  const dueAt=Policy.madridInstant(day,17,0);
   assert.equal(Policy.dailyDue(dueAt).dayKey,day);assert.equal(Policy.dailyDue(dueAt-1).due,false);
   assert.equal(Policy.madridDayKey(dueAt+6*H),day,'late catch-up the same local date');
   assert.notEqual(Policy.madridDayKey(dueAt+8*H),day,'the next local date is another run key');
  }
  // Late evening UTC is already the next Madrid date.
  assert.equal(Policy.madridDayKey(Date.parse('2026-07-01T22:30:00Z')),'2026-07-02');
- assert.equal(at(Policy.nextDailyDue(Date.parse('2026-10-24T15:30:00Z'))),'2026-10-25T16:30:00.000Z');
- assert.equal(at(Policy.nextDailyDue(Date.parse('2026-10-24T10:00:00Z'))),'2026-10-24T15:30:00.000Z');
+ assert.equal(at(Policy.nextDailyDue(Date.parse('2026-10-24T15:00:00Z'))),'2026-10-25T16:00:00.000Z');
+ assert.equal(at(Policy.nextDailyDue(Date.parse('2026-10-24T10:00:00Z'))),'2026-10-24T15:00:00.000Z');
 }
 
 // 2. Policy: failure classes, the budget, cooldowns, caps, progress and health.
@@ -194,14 +194,14 @@ const modeDoc=world=>world.bucket.value(MODE);
  assert.notEqual(plain(await w.R.handle(w.env,'start',{trigger:'manual'})).body.reason,'external_writer_fenced');
 }
 
-// 5. `ensure`: one run per Madrid date under duplicate and overlapping firings (T06), not before 17:30, and across DST (T17).
+// 5. `ensure`: one run per Madrid date under duplicate and overlapping firings (T06), not before 17:00, and across DST (T17).
 {
- const w=setup({start:Date.parse('2026-10-24T15:29:00Z')});
+ const w=setup({start:Date.parse('2026-10-24T14:29:00Z')});
  await activate(w);
  const early=plain(await w.RO.ensure(w.env,{now:w.clock.now}));eq([early.started,early.reason],[false,'not_due']);
- assert.equal(early.dueAt,'2026-10-24T15:30:00.000Z');
- // Two overlapping firings after 17:30: one wins the compare-and-swap on the control record, one create is made.
- w.clock.now=Date.parse('2026-10-24T15:37:00Z');
+ assert.equal(early.dueAt,'2026-10-24T15:00:00.000Z');
+ // Two overlapping firings after 17:00: one wins the compare-and-swap on the control record, one create is made.
+ w.clock.now=Date.parse('2026-10-24T15:07:00Z');
  const both=plain(await Promise.all([w.RO.ensure(w.env,{now:w.clock.now}),w.RO.ensure(w.env,{now:w.clock.now})]));
  assert.equal(both.filter(item=>item.started).length,1);assert.equal(both.filter(item=>item.reason==='write_conflict').length,1);
  assert.equal(w.workflow.creates.length,1);eq(w.workflow.creates[0],{id:'ratings_20261024_0',params:{runKey:'2026-10-24',series:0,epoch:1}});
@@ -218,7 +218,7 @@ const modeDoc=world=>world.bucket.value(MODE);
  const doc=control(uncertain);eq([doc.failure.code,doc.budget.consecutive,doc.phase],['create_uncertain',1,'stopped']);
  eq(plain(await uncertain.RO.ensure(uncertain.env,{now:uncertain.clock.now+10*1000})).reason,'cooldown');
  // The DST change days: exactly one run key per Madrid date, and the next date is a new key.
- for(const [day,dueZ] of [['2026-10-25','2026-10-25T16:30:00Z'],['2026-03-29','2026-03-29T15:30:00Z']]){
+ for(const [day,dueZ] of [['2026-10-25','2026-10-25T16:00:00Z'],['2026-03-29','2026-03-29T15:00:00Z']]){
   const d=setup({start:Date.parse(dueZ)-1000});await activate(d);
   assert.equal(plain(await d.RO.ensure(d.env,{now:Date.parse(dueZ)-1000})).reason,'not_due',day);
   for(const offset of [0,2*H,5*H])await d.RO.ensure(d.env,{now:Date.parse(dueZ)+offset});
@@ -300,7 +300,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  eq(plain(await w.RO.ensure(w.env,{now:w.clock.now+H})).reason,'blocked_until_next_date');assert.equal(w.workflow.creates.length,1);
  // The next Madrid date starts with a fresh budget and the diary answers again.
  w.net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-25','99002')],false));
- const nextDue=Policy.madridInstant('2026-10-25',17,30)+MIN;w.clock.now=nextDue;
+ const nextDue=Policy.madridInstant('2026-10-25',17,0)+MIN;w.clock.now=nextDue;
  const next=plain(await w.RO.ensure(w.env,{now:nextDue}));eq([next.started,next.runKey,next.series],[true,'2026-10-25',0]);
  const second=plain(await w.RO.run(w.env,{runKey:'2026-10-25',series:0,epoch:1},w.step,w.hooks));eq(second.reason,'complete');
  eq([control(w).budget.consecutive,control(w).budget.total],[0,0]);
@@ -344,7 +344,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  const model=plain(await w.RO.readModel(w.env,w.clock.now));eq([model.health,model.quarantine.scope],['quarantined','run']);
  eq(plain(await w.RO.ensure(w.env,{now:w.clock.now+H})),{started:false,reason:'quarantined',scope:'run'});
  w.net.hang=null;w.net.diary.set(1,diaryPage([diaryRow('diary-only',8,'2026-10-25','99002')],false));
- const nextDay=Policy.madridInstant('2026-10-25',17,30)+MIN;w.clock.now=nextDay;
+ const nextDay=Policy.madridInstant('2026-10-25',17,0)+MIN;w.clock.now=nextDay;
  eq(plain(await w.RO.ensure(w.env,{now:nextDay})).started,true);
  assert.equal(plain(await w.RO.run(w.env,{runKey:'2026-10-25',series:0,epoch:1},w.step,w.hooks)).reason,'complete');
 }
@@ -363,7 +363,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  const outcome=plain(await iso.RO.run(iso.env,payload2,iso.step,iso.hooks));eq(outcome.reason,'evidence_contradictory');
  eq([control(iso).quarantine.scope,control(iso).failure.class],['domain','unsafe']);
  // A new date does not clear a domain quarantine; the owner's explicit clear does, and runs no step.
- eq(plain(await iso.RO.ensure(iso.env,{now:Policy.madridInstant('2026-10-25',17,30)+MIN})),{started:false,reason:'quarantined',scope:'domain'});
+ eq(plain(await iso.RO.ensure(iso.env,{now:Policy.madridInstant('2026-10-25',17,0)+MIN})),{started:false,reason:'quarantined',scope:'domain'});
  const fetches=iso.net.fetches.length;
  const cleared=plain(await iso.RO.handle(iso.env,{action:'clear_quarantine'}));eq(cleared.body.cleared,{run:true,control:true});
  assert.equal(iso.net.fetches.length,fetches,'clearing runs no step');assert.equal(iso.bucket.value(RUN).isolation,null);assert.equal(control(iso).quarantine,null);
@@ -401,8 +401,8 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
  const w=setup({start:Date.parse('2026-10-24T14:00:00Z')});
  const writes=()=>w.bucket.writes().length,base=writes();
  let model=plain(await w.RO.readModel(w.env,w.clock.now));eq([model.mode,model.health,model.oldestPendingAt],['external','idle',null]);
- // External mode after 17:30 with no finished run: healthy for two hours, then stalled; the monitor reads this.
- model=plain(await w.RO.readModel(w.env,Date.parse('2026-10-24T16:30:00Z')));eq([model.health,model.oldestPendingAt],['healthy','2026-10-24T15:30:00.000Z']);
+ // External mode after 17:00 with no finished run: healthy for two hours, then stalled; the monitor reads this.
+ model=plain(await w.RO.readModel(w.env,Date.parse('2026-10-24T16:30:00Z')));eq([model.health,model.oldestPendingAt],['healthy','2026-10-24T15:00:00.000Z']);
  model=plain(await w.RO.readModel(w.env,Date.parse('2026-10-24T17:40:00Z')));assert.equal(model.health,'stalled');
  await w.R.start(w.env,{trigger:'scheduled'},w.clock.now);const afterStart=writes();
  model=plain(await w.RO.readModel(w.env,Date.parse('2026-10-24T17:40:00Z')));assert.equal(writes(),afterStart,'the read model writes nothing');

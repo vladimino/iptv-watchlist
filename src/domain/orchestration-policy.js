@@ -4,7 +4,7 @@
 // Shared code never holds state (ADR 0089 decision 1.2). The field-level contract is docs/reference/orchestration-reliability.md.
 
 export const MADRID_ZONE = 'Europe/Madrid';
-export const RATINGS_SCHEDULE = Object.freeze({hour: 17, minute: 30});
+export const RATINGS_SCHEDULE = Object.freeze({hour: 17, minute: 0});
 // AIR-348 / ADR 0100: the daily EPG publication is due at 17:00 Europe/Madrid, the monitor's EPG due time.
 export const EPG_SCHEDULE = Object.freeze({hour: 17, minute: 0});
 export const COOLDOWNS_MS = Object.freeze([60000, 300000, 900000, 3600000]);
@@ -44,7 +44,7 @@ export function madridMinutes(ms) {
 }
 
 // The instant at which the Madrid wall clock reads `hour:minute` on `dayKey`. A wall time that does not exist (spring
-// forward) or exists twice (fall back) never occurs at 17:30; the search still settles on the first instant of that reading.
+// forward) or exists twice (fall back) never occurs at 17:00; the search still settles on the first instant of that reading.
 export function madridInstant(dayKey, hour, minute) {
   const [year, month, day] = dayKey.split('-').map(Number);
   const wanted = Date.UTC(year, month - 1, day, hour, minute);
