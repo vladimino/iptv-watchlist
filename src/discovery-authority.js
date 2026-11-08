@@ -230,16 +230,35 @@ async function writeDecisions(env,map,gate,context){
   ]);
  }catch(error){throw error.code?error:failed('discovery_unavailable',error);}
 }
+// AIR-386: the whole decisions document is read in keyset pages, never as one unbounded SELECT. A page is DECISION_PAGE rows, so one
+// query result and one array stay small however many decisions exist; the Map that old readers still need is the only whole copy,
+// and it is bounded by an explicit budget (rows and payload bytes) instead of the 20000-row READ_CAP that stopped the D1 projector
+// once the table reached 20001 rows. Over the budget the read fails closed as `discovery_bounded`; nothing is truncated.
+// Consistency: the pages are separate statements, but every decision writer moves the authority generation in the same batch, and
+// routeRead compares the generation before and after the read (`discovery_fence` on a change), so a read that raced a writer is
+// refused whole and never returns missing, duplicated or mixed pages. Every row is still verified against its decision_hash.
+export const DECISION_PAGE=1000;
+export const DECISION_READ_ROWS=100000;
+export const DECISION_READ_BYTES=24*1024*1024;
 async function readDecisions(env){
- const rows=await many(database(env),'SELECT observation_key, payload_json, decision_hash FROM discovery_decision ORDER BY observation_key');
- if(rows.length>READ_CAP)throw failed('discovery_bounded');
+ const db=database(env);
  const map={};
- for(const row of rows){
-  let parsed;try{parsed=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
-  if(await decisionHash(parsed)!==row.decision_hash)throw failed('discovery_unavailable');
-  map[row.observation_key]=parsed;
+ let after=null,total=0,bytes=0;
+ for(;;){
+  const rows=after===null
+   ?await many(db,'SELECT observation_key, payload_json, decision_hash FROM discovery_decision ORDER BY observation_key LIMIT ?',[DECISION_PAGE])
+   :await many(db,'SELECT observation_key, payload_json, decision_hash FROM discovery_decision WHERE observation_key>? ORDER BY observation_key LIMIT ?',[after,DECISION_PAGE]);
+  for(const row of rows){
+   total++;
+   bytes+=String(row.payload_json??'').length;
+   if(total>DECISION_READ_ROWS||bytes>DECISION_READ_BYTES)throw failed('discovery_bounded');
+   let parsed;try{parsed=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
+   if(await decisionHash(parsed)!==row.decision_hash)throw failed('discovery_unavailable');
+   map[row.observation_key]=parsed;
+  }
+  if(rows.length<DECISION_PAGE)return map;
+  after=rows[rows.length-1].observation_key;
  }
- return map;
 }
 async function readPayload(env,table){
  const row=await one(database(env),`SELECT payload_json FROM ${table} WHERE id=1`);

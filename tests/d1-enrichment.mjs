@@ -485,10 +485,11 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
   assert.equal(db.calls.batches,batches);assert.deepEqual(db.sql('SELECT kind,id,change_key FROM projection_state ORDER BY kind,id'),before);
  }
  // (d) An answer that cannot be used fails closed with the key, never silently: a bounded or unreadable catalog, a non-object value.
- for(const [label,routeRead] of [['bounded',async()=>{const error=new Error('discovery_bounded');error.code='discovery_bounded';throw error;}],['unreadable',async()=>{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}],['not an object',async()=>({handled:true,value:[1,2,3]})]]){
+ for(const [label,routeRead,cause] of [['bounded',async()=>{const error=new Error('discovery_bounded');error.code='discovery_bounded';throw error;},'discovery_bounded'],['unreadable',async()=>{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;},'discovery_unavailable'],['not an object',async()=>({handled:true,value:[1,2,3]}),undefined]]){
   const a=authority({routeRead}),{db}=migrated();
   const summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
   assert.deepEqual([summary.outcome,summary.reason],['failed','input_invalid'],label);
+  assert.equal(summary.inputCause,cause,label+' is told apart from the other input_invalid causes');
   assert.match(summary.inputKey,/discovered-films\.json$|discovery-resolution\.json$/,label);
   assert.equal(one(db,'SELECT COUNT(*) FROM film'),0,label);
  }
