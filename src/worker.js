@@ -114,6 +114,23 @@ function catalogPosters(metadata){
   return shared?{poster:shared,source:'metadata_cache'}:{poster:null,source:null};
  };
 }
+// AIR-382. A catalog film has no Letterboxd page of its own: `url` is its TMDB page. A Letterboxd link is exposed only when stored records
+// prove it: a record (metadata cache, watchlist, programme) with a Letterboxd id, that TMDB id and a canonical `https://letterboxd.com/film/<slug>/`
+// URL, while the Letterboxd id bridges to that one TMDB id in every stored record and every record of the TMDB id gives the same URL. Anything
+// else (no record, two ids, two URLs, a malformed URL) yields no link. Titles and slugs are never compared or guessed, and nothing is fetched.
+const CATALOG_LETTERBOXD_URL=/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/;
+function catalogLetterboxdUrls({metadata,watchlist,programme,catalog}){
+ const byLid=catalogLidTmdb({metadata,watchlist,programme,catalog}),byTmdb=new Map(),conflicted=new Set();
+ const add=(id,tmdbId,url)=>{
+  if(id==null||tmdbId==null||tmdbId===''||typeof url!=='string'||!CATALOG_LETTERBOXD_URL.test(url))return;
+  const lid=String(id),tmdb=String(tmdbId);
+  if(CATALOG_TMDB_ID.test(lid)||byLid.get(lid)!==tmdb||conflicted.has(tmdb))return;
+  if(!byTmdb.has(tmdb))byTmdb.set(tmdb,url);else if(byTmdb.get(tmdb)!==url){byTmdb.delete(tmdb);conflicted.add(tmdb);}
+ };
+ for(const [id,record] of Object.entries(metadata||{}))add(record?.id??id,record?.tmdbId,record?.url);
+ for(const film of [...(watchlist?.films||[]),...(programme?.films||[])])add(film?.id,film?.tmdbId,film?.url);
+ return film=>byTmdb.get(String(film.tmdbId))||null;
+}
 // Films the owner has watched or rated, as TMDB ids, so a catalog record is excluded whatever id it uses. A view-index entry
 // counts when it is watched (`watched: true`, projected from fact records) or carries an actual rating (also the legacy index).
 // The entry's own TMDB id comes from a `tmdb_<n>` key; a Letterboxd id is bridged to a TMDB id only through a stored id: the
@@ -229,7 +246,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const bridge={index,metadata,watchlist,programme,catalog},consumedTmdb=catalogConsumedTmdb(bridge),watchlistTmdb=catalogWatchlistTmdb(bridge);
- const hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
+ const letterboxdFor=catalogLetterboxdUrls({metadata,watchlist,programme,catalog}),hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
  const byIdentity=new Map();
  for(const film of Object.values(catalog||{})){
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
@@ -247,8 +264,8 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   if(hidden?.(film)){hiddenIdentities.add(identity);continue;}
   const latest=Math.max(...shows.map(show=>Number(show.start))),availableUntil=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now);
   const prediction=item.prediction,fingerprint=item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=canonicalMoodFacet(fingerprint,prediction);
-  const artwork=posterFor(film);
-  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,
+  const artwork=posterFor(film),letterboxdUrl=letterboxdFor(film);
+  const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
    directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
    shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
    availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
