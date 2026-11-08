@@ -18,7 +18,7 @@ const source=fs.readFileSync('src/d1-enrichment.js','utf8');
 assert.doesNotMatch(source,/\bBUCKET\.(put|delete)\b/,'the projector never writes R2');
 assert.match(fs.readFileSync('src/worker.js','utf8'),/async scheduled\(controller,env,execution\)\{execution\.waitUntil\(Promise\.allSettled\(\[typeof runD1EnrichmentProjection==='function'\?runD1EnrichmentProjection\(/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\([^)]*\)[^\n]*metadataSync|metadataSync[^\n]*runD1EnrichmentProjection/,'no sync step runs the projector');
-assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*"\]/);
+assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["15 \* \* \* \*"\]/);
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-enrichment-'));
 let databases=0;

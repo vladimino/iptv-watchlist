@@ -335,7 +335,7 @@ assert.equal(quarantined.reason,'recovery_exhausted');assert.equal(creates.lengt
 // 11. The production entry stays inert: no flag, no Workflow schedule, cron may reconcile but does not run a chunk.
 const wrangler=JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
 assert.equal(wrangler.main,'dist/server/workflow-entry.js');
-assert.deepEqual(wrangler.triggers.crons,['0 * * * *']);
+assert.deepEqual(wrangler.triggers.crons,['15 * * * *']);
 assert.equal(wrangler.vars.DISCOVERY_EXECUTOR,undefined);
 assert.equal(JSON.stringify(wrangler).includes('schedules'),false);
 assert.equal(wrangler.workflows[0].binding,'DISCOVERY_WORKFLOW');

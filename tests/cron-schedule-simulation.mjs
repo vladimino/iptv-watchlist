@@ -1,6 +1,6 @@
 // AIR-348: offline simulation of the Worker's single hourly cron against the Madrid-local logical due time of the daily
 // executors (EPG and Ratings, both 17:00 Europe/Madrid). It compares the former expression (`37 * * * *`) with the current one
-// (`0 * * * *`, pinned below) on a winter day, a summer day and both DST change days, and drives the real EpgOrchestration.ensure through every
+// (`15 * * * *`, pinned below) on a winter day, a summer day and both DST change days, and drives the real EpgOrchestration.ensure through every
 // hourly tick of each Madrid date with duplicate firings and a missed due tick. It proves schedule arithmetic and idempotency only:
 // no Cloudflare, no production and no Workflow instance.
 import assert from 'node:assert/strict';
@@ -17,13 +17,13 @@ import {d1Standin} from './d1-standin.mjs';
 const H=3600000,MIN=60000;
 const at=ms=>new Date(ms).toISOString();
 
-// 1. The configured cron is the single trigger and it is exactly the hourly minute-0 expression (owner-approved AIR-348 change).
+// 1. The configured cron is the single trigger and it is exactly the hourly minute-15 expression (AIR-383, owner-preferred schedule).
 const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
 const configured=[...wrangler.matchAll(/"crons":\s*\[([^\]]*)\]/g)].map(m=>[...m[1].matchAll(/"([^"]+)"/g)].map(x=>x[1]));
 assert.equal(configured.length,1,'one cron block');
 assert.equal(configured[0].length,1,'one cron trigger');
 const current=configured[0][0];
-assert.equal(current,'0 * * * *','the one trigger is the hourly minute-0 expression; a second trigger or another minute fails here');
+assert.equal(current,'15 * * * *','the one trigger is the hourly minute-15 expression; a second trigger or another minute fails here');
 const minuteOf=expression=>Number(expression.split(' ')[0]);
 
 // The ticks of an hourly cron `M * * * *` (UTC) between two instants.
@@ -44,7 +44,7 @@ const DAYS=[['winter','2026-11-09'],['summer','2026-07-01'],['fall-back day','20
 for(const [label,day] of DAYS){
  for(const [name,schedule] of Object.entries(SCHEDULES)){
   const dueAt=Policy.madridInstant(day,schedule.hour,schedule.minute);
-  for(const minute of [0,37]){
+  for(const minute of [0,15,37]){
    const list=ticks(minute,dueAt-6*H,dueAt+6*H);
    const first=list.find(t=>Policy.dailyDue(t,schedule).due&&Policy.dailyDue(t,schedule).dayKey===day);
    assert.equal(first-dueAt,minute*MIN,label+' '+name+' cron minute '+minute+': the first tick after due is '+minute+' minutes after it');
@@ -97,7 +97,7 @@ async function simulate({day,minute,skipFirstDue=false,duplicates=true}){
  return {wf,dueAt};
 }
 for(const [label,day] of DAYS){
- for(const minute of [0,37]){
+ for(const minute of [0,15,37]){
   const normal=await simulate({day,minute});
   assert.equal(normal.wf.creates.length,1,label+' cron '+minute+': exactly one instance per Madrid date with duplicate firings at every tick');
   assert.equal(normal.wf.creates[0].params.runKey,day);
