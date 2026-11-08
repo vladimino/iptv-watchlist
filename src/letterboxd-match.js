@@ -106,7 +106,12 @@ function byTitle(film,index,options={}){
  const keys=index.titles.get(normTitle(film.name));
  const none={filmId:null,tmdbId:null,catalogIds:[],candidates:[],evidence:{}};
  if(!keys)return {...none,status:'unmatched',method:null,reason:'no_stored_title'};
- const all=[...keys].map(key=>index.targets.get(key)),near=film.year?all.filter(entry=>nearYear(entry,film.year)):all;
+ const all=[...keys].map(key=>index.targets.get(key));
+ // The inferred policy asks for the same year and the original title, so a namesake one year away (a remake, a later film with the
+ // same name) must not turn an exact match into an ambiguity. When that exact set exists the choice is made inside it; when it
+ // does not, the legacy +/-1 window below applies and the row is reviewed. Without the policy nothing here changes.
+ const name=normTitle(film.name),exact=options.inferred&&film.year?all.filter(entry=>entry.years.has(film.year)&&entry.originals.has(name)):[];
+ const near=exact.length?exact:film.year?all.filter(entry=>nearYear(entry,film.year)):all;
  if(!near.length)return {...none,status:'unmatched',method:null,reason:'title_without_year_match'};
  const identities=new Map();for(const entry of near){const id=identityOf(entry);if(!identities.has(id))identities.set(id,[]);identities.get(id).push(entry);}
  const candidates=sortedStrings(near.map(entry=>entry.key));

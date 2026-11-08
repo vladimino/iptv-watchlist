@@ -146,6 +146,21 @@ export async function remote({mode,zip,output,endpoint,fromChunk=0,toChunk=null,
  }
  return report();
 }
+// Corrects one inferred film of a committed plan (AIR-388, ADR 0104): the Worker reverses that film's facts under the rollback rules and
+// removes the Letterboxd link and `identity` the import made, leaving the rest of its chunk alone. Only an inferred item of this plan
+// is accepted; a repeat is safe. One owner-approved production operation like every remote step.
+export async function unlinkFilm({zip,output,endpoint,lid,fetchImpl=fetch,env=process.env,now=Date.now()}){
+ const {origin,chunks}=await loadVerifiedPlan({zip,output,now}),url=endpointUrl(endpoint,'unlink');
+ const chunk=chunks.findIndex(items=>items.some(item=>item.lid===lid&&item.identity==='inferred'));
+ if(chunk<0)throw new ImportError('That film is not an inferred item of this plan',2);
+ const body={origin:{archiveSha256:origin.archiveSha256,generatedAt:origin.generatedAt,generatedAtSource:origin.generatedAtSource},chunk,lid};
+ let response;
+ try{response=await fetchImpl(url,{method:'POST',headers:{'Content-Type':'application/json',...accessHeaders(env)},body:JSON.stringify(body),redirect:'error'});}
+ catch(error){return {schemaVersion:1,mode:'unlink',chunk,failed:{error:'network_error',cause:networkCause(error)}};}
+ let data=null;try{data=await response.json();}catch{}
+ if(!response.ok)return {schemaVersion:1,mode:'unlink',chunk,failed:{status:response.status,error:data?.code||data?.error||'http_'+response.status}};
+ return {schemaVersion:1,mode:'unlink',chunk,failed:null,facts:data?.facts||{},unlinked:!!data?.unlinked};
+}
 // Only an error code or name leaves the process: messages can quote the URL or headers.
 function networkCause(error){
  const code=[error?.cause?.code,error?.code,error?.name].find(value=>typeof value==='string'&&/^[A-Za-z0-9_]{1,64}$/.test(value));
@@ -153,11 +168,11 @@ function networkCause(error){
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk'};
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid'};
  for(let i=0;i<rest.length;i++){
   // A switch, not a value: the AIR-388 policy is never on by default and only a plan can turn it on.
   if(rest[i]==='--include-inferred'){if(mode!=='plan')throw new ImportError('--include-inferred is a plan option; '+mode+' uses the plan in its directory',2);args.includeInferred=true;continue;}
-  const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] [--include-inferred] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n]',2);args[name]=rest[++i];}
+  const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] [--include-inferred] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n] | unlink --zip <abs> --output <abs> --endpoint <https://…> --lid <code>',2);args[name]=rest[++i];}
  for(const key of ['fromChunk','toChunk'])if(args[key]!=null){args[key]=Number(args[key]);if(!Number.isInteger(args[key])||args[key]<0)throw new ImportError('Chunk numbers are non-negative integers',2);}
  // The chunk size belongs to the plan; the remote steps read it from origin.json.
  if(args.chunkSize!=null){if(mode!=='plan')throw new ImportError('--chunk-size is a plan option; '+mode+' uses the chunk size in origin.json',2);args.chunkSize=checkChunkSize(/^\d+$/.test(args.chunkSize)?Number(args.chunkSize):NaN);}
@@ -168,6 +183,7 @@ async function main(){
   const args=parseArgs(process.argv.slice(2));
   if(args.mode==='plan'){if(!args.zip||!args.snapshot||!args.output)throw new ImportError('plan needs --zip, --snapshot and --output',2);console.log(JSON.stringify(await plan(args)));return;}
   if(!args.zip||!args.output||!args.endpoint)throw new ImportError(args.mode+' needs --zip, --output and --endpoint',2);
+  if(args.mode==='unlink'){if(!args.lid)throw new ImportError('unlink needs --lid',2);const summary=await unlinkFilm(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);return;}
   const summary=await remote(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);
  }catch(error){
   const known=error instanceof ImportError||error instanceof ReconcileError||error?.name==='ZipError'||error?.name==='CsvError';

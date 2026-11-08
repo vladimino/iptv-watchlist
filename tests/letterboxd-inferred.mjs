@@ -10,7 +10,7 @@ import vm from 'node:vm';
 import {deflateRawSync} from 'node:zlib';
 import {crc32} from '../src/letterboxd-zip.js';
 import {INFERRED_METHOD,INFERRED_STATUS,METHODS,REVIEW_REASONS,STATUSES,buildIndex,matchExport} from '../src/letterboxd-match.js';
-import {plan,planItem,remote} from '../scripts/letterboxd-baseline-import.mjs';
+import {plan,planItem,remote,unlinkFilm} from '../scripts/letterboxd-baseline-import.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
 const by=(rows,code)=>rows.find(row=>row.code===code);
@@ -27,6 +27,8 @@ const catalog=Object.fromEntries([
  film(108,'Taken By Code',2015),
  film(109,'Original Nine',2016,{aliases:['Export Name Nine']}),
  film(110,'Remake Film',1990),film(111,'Remake Film',2009),
+ film(120,'Namesake',2000),film(121,'Namesake',2001),
+ film(122,'Same Twin',2003),film(123,'Same Twin',2003),
 ]);
 const metadata={Vv1:{id:'Vv1',title:'Taken By Code',original:'Taken By Code',year:2015,tmdbId:'108'},Nn1:{id:'Nn1',title:'No Tmdb',original:'No Tmdb',year:2017}};
 const factLinks={'letterboxd:OtherLid':'lb-1','tmdb:105':'lb-1','letterboxd:Ll6':'lb-2','tmdb:106':'lb-2','letterboxd:Cx9':'lb-3','tmdb:999':'lb-3'};
@@ -49,6 +51,9 @@ const films=[
  exportFilm('Cx9','Remake Film',2009),             // this code is linked to another TMDB id
  exportFilm('Rm1','Remake Film',1990),             // the remake pair stays apart by year
  exportFilm('Zz0','Nothing Like It',2020),         // no stored title
+ exportFilm('Nm1','Namesake',2000),                // exact year wins over a namesake one year later
+ exportFilm('Nm2','Namesake',2001),                // and the other way round
+ exportFilm('Tw1','Same Twin',2003),               // two movies, same original title and year: still ambiguous
 ];
 const off=matchExport(films,index),on=matchExport(films,index,{inferred:true});
 
@@ -80,6 +85,12 @@ review('Cx9','tmdb_linked_elsewhere');
 assert.equal(by(on,'Ll6').status,'inferred');           // linked to this very code
 assert.equal(by(on,'Rm1').status,'inferred');assert.equal(by(on,'Rm1').tmdbId,'110');   // a remake is told apart by its year
 assert.equal(by(on,'Zz0').status,'unmatched');
+// Review blocker 2: an exact-year original-title match is chosen inside its own set, an adjacent-year namesake is no ambiguity.
+assert.equal(by(on,'Nm1').status,'inferred');assert.equal(by(on,'Nm1').tmdbId,'120');
+assert.equal(by(on,'Nm2').status,'inferred');assert.equal(by(on,'Nm2').tmdbId,'121');
+assert.equal(by(on,'Tw1').status,'ambiguous');
+// Legacy mode is unchanged: the same rows stay ambiguous in the +/-1 window.
+assert.equal(by(off,'Nm1').status,'ambiguous');assert.equal(by(off,'Nm2').status,'ambiguous');
 // A demoted row carries no inferred markers.
 for(const code of ['Aa7','Aa8','Ww2'])assert.ok(!('identity' in by(on,code).evidence)&&!('basis' in by(on,code).evidence),code);
 // Without the stored links the contradiction cannot be seen here; the commit-time alias conflict stays the authority.
@@ -181,5 +192,64 @@ try{
  assert.equal((await post(env2,'commit',{origin:third,chunk:0,items:[{...asVerified,facts:{watched:true,rating:3},identity:'inferred'}]})).status,200);
  const stored=[...b2.records.values()].find(value=>value?.links?.letterboxd==='Qq1');
  assert.equal(stored.identity,undefined);assert.equal(stored.rating.value,3);
+
+ // ---- Review blocker 1: a wrong inferred link can be corrected per film, and a rollback no longer leaves it behind ----
+ const linksOf=bk=>bk.records.get('letterboxd/facts/links.json')||{};
+ const factRecord=(bk,factKey)=>bk.records.get(F.recordKey(factKey));
+ // The CLI corrects one film of the committed plan and leaves the rest of its chunk alone.
+ const rollbackEnv={BUCKET:bucket()};
+ const commitAll=await remote({mode:'commit',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(rollbackEnv),env:{},now});
+ assert.equal(commitAll.failed,null);
+ assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],'tmdb-101');assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Vv1']!==undefined,true);
+ await assert.rejects(unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Vv1',fetchImpl:workerFetch(rollbackEnv),env:{},now}),/not an inferred item/);
+ await assert.rejects(unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Nope1',fetchImpl:workerFetch(rollbackEnv),env:{},now}),/not an inferred item/);
+ const one=await unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Aa1',fetchImpl:workerFetch(rollbackEnv),env:{},now});
+ assert.equal(one.failed,null);assert.equal(one.unlinked,true);assert.equal(one.facts.restored,2);
+ assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],undefined,'the alias is gone');
+ assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Vv1']!==undefined,true,'a verified link is untouched');
+ const afterOne=factRecord(rollbackEnv.BUCKET,'tmdb-101');
+ assert.equal(afterOne.identity,undefined);assert.equal(afterOne.links.letterboxd,null);assert.equal(afterOne.links.tmdb,'101');assert.equal(afterOne.rating,undefined,'its rating is reversed');
+ assert.ok(factRecord(rollbackEnv.BUCKET,Object.values(linksOf(rollbackEnv.BUCKET))[0]),'other records stay');
+ // A repeat changes nothing; the same code can now be linked to the corrected movie without an alias conflict.
+ const putsBeforeRepeat=rollbackEnv.BUCKET.puts;
+ const repeat=await unlinkFilm({zip:zipPath,output:out,endpoint:'https://site.example',lid:'Aa1',fetchImpl:workerFetch(rollbackEnv),env:{},now});
+ assert.equal(repeat.failed,null);assert.equal(repeat.unlinked,false);
+ const fixedOrigin={...origin,archiveSha256:'c'.repeat(64)};
+ const fixed=await post(rollbackEnv,'commit',{origin:fixedOrigin,chunk:0,items:[{lid:'Aa1',tmdb:'202',facts:{watched:true},effectiveOn:{},identity:'inferred'}]});
+ assert.equal(fixed.status,200);const fixedBody=await fixed.json();assert.equal(fixedBody.conflicts,0,'no alias conflict after the correction');
+ assert.equal(linksOf(rollbackEnv.BUCKET)['letterboxd:Aa1'],'tmdb-202');
+ assert.deepEqual(factRecord(rollbackEnv.BUCKET,'tmdb-202').identity,{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:'c'.repeat(64)});
+ // Without the correction the same re-import is an alias conflict: counted, never written.
+ const stuck={BUCKET:bucket()};
+ await post(stuck,'commit',{origin,chunk:0,items:[{lid:'Aa1',tmdb:'101',facts:{watched:true},effectiveOn:{},identity:'inferred'}]});
+ const blocked=await (await post(stuck,'commit',{origin:fixedOrigin,chunk:0,items:[{lid:'Aa1',tmdb:'202',facts:{watched:true},effectiveOn:{},identity:'inferred'}]})).json();
+ assert.equal(blocked.conflicts,1);
+
+ // A chunk rollback now undoes the inferred links of that chunk too and keeps a verified link.
+ const whole={BUCKET:bucket()};
+ assert.equal((await remote({mode:'commit',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(whole),env:{},now})).failed,null);
+ const rolled=await remote({mode:'rollback',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(whole),env:{},now});
+ assert.equal(rolled.failed,null);
+ assert.equal(linksOf(whole.BUCKET)['letterboxd:Aa1'],undefined);assert.equal(linksOf(whole.BUCKET)['letterboxd:Vv1']!==undefined,true);
+ assert.equal(factRecord(whole.BUCKET,'tmdb-101').identity,undefined);assert.equal(factRecord(whole.BUCKET,'tmdb-101').links.letterboxd,null);
+ const replayRollback=await remote({mode:'rollback',zip:zipPath,output:out,endpoint:'https://site.example',fetchImpl:workerFetch(whole),env:{},now});
+ assert.equal(replayRollback.failed,null);
+
+ // A later observation is kept: the unlink reverses only what is still this import's, and still clears the inferred link.
+ const later={BUCKET:bucket()},early={...origin,archiveSha256:'d'.repeat(64)},newer={origin:{archiveSha256:'e'.repeat(64),generatedAt:'2026-11-08T14:30:00.000Z',generatedAtSource:'archive_name'},chunk:0,items:[{lid:'Aa1',tmdb:'101',facts:{watched:true,rating:5},effectiveOn:{},identity:'inferred'}]};
+ await post(later,'commit',{origin:early,chunk:0,items:[{lid:'Aa1',tmdb:'101',facts:{watched:true,rating:3},effectiveOn:{},identity:'inferred'},{lid:'Bb2',tmdb:'102',facts:{watched:true},effectiveOn:{},identity:'inferred'}]});
+ assert.equal((await post(later,'commit',newer)).status,200);
+ assert.equal(factRecord(later.BUCKET,'tmdb-101').rating.value,5);
+ const unlink=body=>post(later,'unlink',body);
+ const kept=await (await unlink({origin:early,chunk:0,lid:'Aa1'})).json();
+ assert.equal(kept.unlinked,true);assert.ok(kept.facts.superseded>=1,'the newer rating is superseded, not reversed');
+ assert.equal(factRecord(later.BUCKET,'tmdb-101').rating.value,5);assert.equal(factRecord(later.BUCKET,'tmdb-101').identity,undefined);
+ assert.equal(linksOf(later.BUCKET)['letterboxd:Bb2'],'tmdb-102','the other film of the chunk is untouched');
+ assert.equal(factRecord(later.BUCKET,'tmdb-102').identity.kind,'inferred');
+ // Refusals: a film that is not an inferred entry of that chunk, and a chunk with no receipt.
+ assert.equal((await unlink({origin:early,chunk:0,lid:'Zz1'})).status,409);
+ assert.equal((await unlink({origin:early,chunk:7,lid:'Aa1'})).status,409);
+ assert.equal((await unlink({origin:early,chunk:0,lid:'bad lid!'})).status,400);
+ assert.equal((await post(later,'unlink',{origin:early,chunk:0})).status,400);
 }finally{await rm(scratch,{recursive:true,force:true});}
 console.log('Letterboxd inferred identity: off by default and accepted rows unchanged, unique original title with the same year, every review bucket (year drift, alias only, linked elsewhere, duplicate in export, already accepted, no TMDB id, missing year), remakes told apart by year, plan switch and counts without names, route validation, provenance, replay and no relabelling');

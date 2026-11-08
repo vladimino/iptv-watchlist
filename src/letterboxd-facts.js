@@ -544,28 +544,43 @@ function recordRatingChange(record,incoming,effective){
   return {...next,replay:false};
  }
 
- // Rollback of one committed chunk: restore each fact's before-image only while this export's observation is current,
- // and the projection's before-image only for fields this rollback left without a fact.
- // Rollback of one committed chunk, crash-recoverable: a create-only rollback intent first fixes the plan, per fact, from the
- // receipt (the export's observation and the view fields it projected). Each step then converges to that plan and is safe to
- // repeat: a fact whose export observation is still current is restored to its before-image (or removed when the import created
- // it); one already restored by an earlier attempt counts as restored; one a later writer replaced is superseded and kept.
- // View fields of a removed fact return to the commit's before-image unless the record holds that fact again.
- async function rollbackBaselineChunk(env,body){
+ // Removes the Letterboxd link an inferred import made, for each listed film, and only while the record still carries that import's
+ // inferred identity. The alias goes first and the record second, so an interrupted run converges when it is repeated. It never
+ // touches the TMDB alias, a record's facts, or a link an earlier or verified writer made.
+ async function unlinkInferred(env,sha,entries){
+  let unlinked=0;
+  for(const {lid,factKey} of entries){
+   const ours=record=>record?.identity?.kind==='inferred'&&record.identity.sourceRef===sha&&record.links?.letterboxd===lid;
+   const {value:record}=await readJSON(env,recordKey(factKey));
+   if(!ours(record))continue;
+   await casJSON(env,FACTS_KEYS.links,{},index=>{const alias='letterboxd:'+lid;if(index[alias]!==factKey)return null;delete index[alias];return index;});
+   await casJSON(env,recordKey(factKey),null,current=>{if(!ours(current))return null;delete current.identity;current.links.letterboxd=null;return current;});
+   unlinked++;
+  }
+  return {unlinked};
+ }
+
+ // Corrects one inferred film of a committed chunk without touching the rest of it: its facts are reversed under the rollback rules
+ // (a later observation is kept as superseded), then the Letterboxd link and the `identity` that import made are removed. The film
+ // can then be linked again by a later export or an owner step. Repeating it is safe; a verified or conflicting entry is refused.
+ async function unlinkBaselineFilm(env,body){
   const {origin,chunk}=validateBaselineRequest(body,{needItems:false}),sha=origin.archiveSha256;
-  const {value:done}=await readJSON(env,importKey(sha,chunk,'rollback'));if(done)return {...done,replay:true};
+  const lid=String(body?.lid??'');if(!LID.test(lid))throw new FactsError('invalid_request','Invalid Letterboxd id');
   const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
   if(!receipt)throw new FactsError('not_committed','This chunk has no receipt');
-  let plan=null;
-  await casJSON(env,importKey(sha,chunk,'rollback-intent'),null,current=>{
-   if(current){plan=current;return null;}
-   plan={schemaVersion:1,archiveSha256:sha,chunk,openedAt:new Date().toISOString(),viewBefore:receipt.viewBefore||{},
-    facts:receipt.entries.filter(entry=>!entry.conflict).flatMap(entry=>entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId})))};
-   return plan;
-  });
+  const entry=receipt.entries.find(item=>item.lid===lid&&!item.conflict&&item.identity==='inferred');
+  if(!entry)throw new FactsError('not_inferred','This film is not an inferred import of this chunk');
+  const {counts}=await reverseFacts(env,entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId})),receipt.viewBefore||{});
+  const {unlinked}=await unlinkInferred(env,sha,[{lid,factKey:entry.factKey}]);
+  return {schemaVersion:1,archiveSha256:sha,chunk,lid,facts:counts,unlinked:unlinked>0};
+ }
+
+ // Reverses the given fact observations of one or more films (shared by a chunk rollback and a per-film unlink): a fact whose
+ // observation is still current returns to its before-image, one a later writer replaced is superseded and kept.
+ async function reverseFacts(env,facts,viewBefore){
   const counts={restored:0,superseded:0},records=new Map(),removed=[];
-  for(const factKey of [...new Set(plan.facts.map(item=>item.factKey))]){
-   const items=plan.facts.filter(item=>item.factKey===factKey),outcome=new Map();
+  for(const factKey of [...new Set(facts.map(item=>item.factKey))]){
+   const items=facts.filter(item=>item.factKey===factKey),outcome=new Map();
    const {value:record}=await casJSON(env,recordKey(factKey),null,current=>{
     if(!current)return null;
     outcome.clear();let changed=false;
@@ -594,13 +609,37 @@ function recordRatingChange(record,incoming,effective){
    for(const {factKey,fact,links} of removed){
     if(records.get(factKey)?.[fact])continue;
     for(const id of projectionIds(links)){
-     const field=VIEW_FIELDS[fact],prior=plan.viewBefore?.[id]||{},item={...(view[id]||{})};
+     const field=VIEW_FIELDS[fact],prior=viewBefore?.[id]||{},item={...(view[id]||{})};
      if(Object.hasOwn(prior,field))item[field]=prior[field];else delete item[field];
      if(JSON.stringify(item)!==JSON.stringify(view[id]||{})){view[id]=item;changed=true;}
     }
    }
    return changed?view:null;
   });
+  return {counts,records};
+ }
+
+
+ // Rollback of one committed chunk, crash-recoverable: a create-only rollback intent first fixes the plan, per fact, from the
+ // receipt (the export's observation and the view fields it projected). Each step then converges to that plan and is safe to
+ // repeat: a fact whose export observation is still current is restored to its before-image (or removed when the import created
+ // it); one already restored by an earlier attempt counts as restored; one a later writer replaced is superseded and kept.
+ // View fields of a removed fact return to the commit's before-image unless the record holds that fact again.
+ async function rollbackBaselineChunk(env,body){
+  const {origin,chunk}=validateBaselineRequest(body,{needItems:false}),sha=origin.archiveSha256;
+  const {value:done}=await readJSON(env,importKey(sha,chunk,'rollback'));if(done)return {...done,replay:true};
+  const {value:receipt}=await readJSON(env,importKey(sha,chunk,'receipt'));
+  if(!receipt)throw new FactsError('not_committed','This chunk has no receipt');
+  let plan=null;
+  await casJSON(env,importKey(sha,chunk,'rollback-intent'),null,current=>{
+   if(current){plan=current;return null;}
+   plan={schemaVersion:1,archiveSha256:sha,chunk,openedAt:new Date().toISOString(),viewBefore:receipt.viewBefore||{},
+    facts:receipt.entries.filter(entry=>!entry.conflict).flatMap(entry=>entry.observations.map(({fact,observationId})=>({factKey:entry.factKey,fact,observationId}))),
+    inferred:receipt.entries.filter(entry=>!entry.conflict&&entry.identity==='inferred').map(entry=>({lid:entry.lid,factKey:entry.factKey}))};
+   return plan;
+  });
+  const {counts}=await reverseFacts(env,plan.facts,plan.viewBefore);
+  await unlinkInferred(env,sha,plan.inferred||[]);
   const result={schemaVersion:1,archiveSha256:sha,chunk,rolledBackAt:new Date().toISOString(),facts:counts};
   await casJSON(env,importKey(sha,chunk,'rollback'),null,current=>current?null:result);
   return {...result,replay:false};
@@ -617,11 +656,12 @@ function recordRatingChange(record,incoming,effective){
    if(action==='validate')return json(await previewBaselineChunk(env,body));
    if(action==='commit')return json(await commitBaselineChunk(env,body));
    if(action==='rollback')return json(await rollbackBaselineChunk(env,body));
+   if(action==='unlink')return json(await unlinkBaselineFilm(env,body));
    return json({error:'Not found'},404);
   }catch(error){
-   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409}[error.code]||500;return json({error:error.message,code:error.code},status);}
+   if(error instanceof FactsError){const status={invalid_request:400,invalid_observation:400,invalid_identity:400,chunk_conflict:409,not_committed:409,not_inferred:409}[error.code]||500;return json({error:error.message,code:error.code},status);}
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();
