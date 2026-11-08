@@ -595,14 +595,19 @@ for(const stage of ['epg','seal']){
   assert.ok((await epg.beginExternalStep(env,t0+2000)).step,'free again after release');
   assert.equal(await epg.endStep(env,{holder:'someone-else'}),false,'a step cannot release another holder');
  }
- // (e) Unreadable evidence fails closed: a malformed lease refuses the drain and an admission; an unreadable database fences a step.
+ // (e) Unreadable evidence fails closed: a malformed lease refuses the drain and an admission; an unreadable database refuses a step's mutation as
+ // `epg_step_unreadable` (transient, AIR-348), and a malformed lease row still fences it.
  {
   const h=fresh();const {epg,env,db}=h;
   await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0);
   db.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"holder\":5}',1,'x')");
   assert.equal(await epg.drainState(env,t0),'unreadable');
   const broken={...env,DB:{prepare:()=>{throw new Error('d1 down');}},epgStep:{holder:'h',modeRevision:1}};
-  await assert.rejects(epg.assertStep(broken,t0),/epg_step_fenced/);
+  await assert.rejects(epg.assertStep(broken,t0),/epg_step_unreadable/);
+  // a lease row that is present but is not this step's is not a transient read: it still fences
+  const garbled=fresh();await garbled.epg.switchMode(garbled.env,{action:'close_admission',target:'cloudflare'},t0);
+  garbled.db.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"holder\":5}',1,'x')");
+  await assert.rejects(garbled.epg.assertStep({...garbled.env,epgStep:{holder:'h',modeRevision:1}},t0),/epg_step_fenced/);
  }
  // (f) The executor waits for a live lease instead of racing it, and holds and releases its own around each action.
  {
@@ -666,14 +671,14 @@ for(const stage of ['epg','seal']){
    }),epgStep:ext.env.epgStep};
    await epg.assertStep(raced,now);
   }
-  // 4. The mode revision moves in the window and the fallback read is unreadable: fenced.
+  // 4. The mode revision moves in the window and the fallback read is unreadable: refused all the same (fail closed, transient class).
   {
    const h=fresh();const {epg,env}=h;
    const ext=await epg.beginExternalStep(env,t0);
    let calls=0;
    const flaky={...racing(h,async()=>{await epg.switchMode(env,{action:'close_admission',target:'cloudflare'},t0+3*MIN);}),epgStep:ext.env.epgStep};
    const inner=flaky.DB.prepare;flaky.DB={prepare:sql=>{if(String(sql).startsWith('SELECT (SELECT revision')&&++calls>=2)throw new Error('d1 down');return inner(sql);}};
-   await assert.rejects(epg.assertStep(flaky,t0+3*MIN),/epg_step_fenced/);
+   await assert.rejects(epg.assertStep(flaky,t0+3*MIN),/epg_step_unreadable/);
   }
  }
  // (g) The Worker's own mutation boundaries call the guard: the real saveJSON, copyEpgGeneration, sealStep, sealUnits, stageSealedGeneration
@@ -703,6 +708,57 @@ for(const stage of ['epg','seal']){
   assert.equal(JSON.parse(await (await bucket.get('sync.json')).text()).n,1,'nothing is written after close_admission');
   await saveJSON(env,'unrelated.json',{ok:true});
   assert.ok(await bucket.get('unrelated.json'),'a write outside an EPG step is unchanged');
+ }
+}
+
+// 15. AIR-348 (first natural run, 2026-11-08): a D1 read that fails at a step boundary is not an epoch change.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const guardError=code=>Object.assign(new Error(code),{code});
+ // (a) The guard cannot read D1 once: the mutation is refused, the failure is the transient d1_unavailable, the instance cools down and the
+ // same run resumes and finishes. It is not stopped, and no second run is started.
+ {
+  let thrown=false;
+  const base=pipeline({metadataSteps:0});
+  const flaky=async(pathname,body,state,env)=>{if(pathname==='/api/sync/epg'&&!thrown){thrown=true;throw guardError('epg_step_unreadable');}return base(pathname,body,state,env);};
+  const h=cloudflare({pipeline:flaky});
+  const r=runner(h,{startAt:due});
+  await h.epg.ensure(h.env,{now:due});
+  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(outcome.reason,'complete','an unreadable guard read does not stop the instance');
+  assert.ok(r.log.some(n=>n.startsWith('sleep')),'it cooled down and retried');
+  assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1,'the retry resumes the same run');
+  const rec=await control(h);assert.ok(rec.budget.total>=1,'the failure was counted');assert.equal(rec.doneAt!=null,true);
+ }
+ // (b) A real fence (the mode revision moved, the lease was lost) still stops the instance at once, as before.
+ {
+  let thrown=false;
+  const base=pipeline({metadataSteps:0});
+  const fenced=async(pathname,body,state,env)=>{if(pathname==='/api/sync/epg'&&!thrown){thrown=true;throw guardError('epg_step_fenced');}return base(pathname,body,state,env);};
+  const h=cloudflare({pipeline:fenced});
+  const r=runner(h,{startAt:due});
+  await h.epg.ensure(h.env,{now:due});
+  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(outcome.stopped,true);assert.equal(outcome.reason,'epoch_mismatch');
+ }
+ // (c) An instance that ended while the control record still says running (its stop could not be recorded) is reconciled by the next ensure:
+ // a counted transient `instance_terminated` and a cooldown, then a successor series that finishes the day once.
+ {
+  const h=cloudflare({pipeline:pipeline({metadataSteps:0})});
+  const {epg,env,wf}=h;
+  await epg.ensure(env,{now:due});
+  assert.equal((await control(h)).phase,'starting');
+  wf.instances.set('epg_20261107_0','complete');
+  const seen=await epg.ensure(env,{now:due+MIN,random:()=>0.5});
+  assert.equal(seen.reason,'cooldown');assert.equal(seen.recorded,'instance_terminated');
+  const rec=await control(h);assert.equal(rec.phase,'stopped');assert.equal(rec.budget.consecutive,1);assert.equal(rec.doneAt,null);
+  const successor=await epg.ensure(env,{now:due+10*MIN,random:()=>0.5});
+  assert.equal(successor.started,true);assert.equal(successor.instanceId,'epg_20261107_1');
+  const r=runner(h,{startAt:due+10*MIN});
+  const outcome=await epg.run(env,{runKey:'2026-11-07',series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(outcome.reason,'complete');
+  assert.ok((await control(h)).doneAt,'the day is done once');
+  eq(await epg.ensure(env,{now:due+11*MIN}),{started:false,reason:'complete'});
  }
 }
 console.log('epg-orchestration: ok');
