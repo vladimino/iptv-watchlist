@@ -19,7 +19,7 @@
 
 Consequence for the design: removing the irrelevant bumps with a scoped revision cuts the interruption rate by less than half. A scoped revision that must stay *unchanged* across the whole diff phase (21.2 s on the 08:37 UTC run, 10.6 s of it reading) still has a stable-window probability of about 3 % per attempt (see the model in section 5).
 
-Separate defect, tracked as [AIR-386](https://trello.com/c/z4tQryUa): `discovery_decision` holds 20,001 rows and `readDecisions` throws `discovery_bounded` above `READ_CAP = 20000` (`src/discovery-authority.js` lines 15 and 235). The projector's last stored run (started 10:37 UTC) ended `failed` with `input_invalid: epg/discovery-resolution.json`, which is what the projector's mapping of an unknown Discovery error code produces. The cause is an inference from the count, the key and the mapping; the thrown code was not read from a log.
+Separate defect, tracked and since fixed on `main` by [AIR-386](https://trello.com/c/z4tQryUa) (keyset-paged reads, see [its evidence](air-386-decisions-read-cap-2026-11-08.md)); the finding as it stood at the time of this audit: `discovery_decision` holds 20,001 rows and `readDecisions` throws `discovery_bounded` above `READ_CAP = 20000` (`src/discovery-authority.js` lines 15 and 235). The projector's last stored run (started 10:37 UTC) ended `failed` with `input_invalid: epg/discovery-resolution.json`, which is what the projector's mapping of an unknown Discovery error code produces. The cause is an inference from the count, the key and the mapping; the thrown code was not read from a log.
 
 ## 2. What the projector reads (`src/d1-enrichment.js`, `d1EnrichmentStore`)
 
