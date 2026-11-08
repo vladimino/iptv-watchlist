@@ -97,7 +97,7 @@ async function writeWorkflowState(env,record,etag){
 // ADR 0103: a held projector window refuses every Discovery state write inside its own statement. These writers turn that typed
 // refusal into a value, never into a step failure: nothing is written, no stall or recovery budget is charged, and the caller
 // sleeps until the window's absolute expiry (the one deadline the window was granted with; a missing expiry waits a short fixed time).
-const WINDOW_WAKE_FALLBACK_MS=10000,WINDOW_WAKE_CAP_MS=330000;
+const WINDOW_WAKE_FALLBACK_MS=10000,WINDOW_WAKE_CAP_MS=330000,WINDOW_RETRY_LIMIT=24,WRITE_CONFLICT_RETRY_LIMIT=3;
 async function writeWorkflowStateSoft(env,record,etag){
  try{return {saved:await writeWorkflowState(env,record,etag),windowBusy:false,window:null};}
  catch(error){if(error?.code==='discovery_window')return {saved:false,windowBusy:true,window:error.window||{expiresAt:null,state:null}};throw error;}
@@ -383,7 +383,7 @@ async function stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks){
   if(recovery.quarantined)finalReason='recovery_exhausted';
  }
  const settled=await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery});
- return {stopped:true,reason:finalReason,chunks,instanceId:ownId,...(settled?.reason==='projector_window'?{windowRefused:true,windowUntil:settled.window?.expiresAt??null}:{})};
+ return {stopped:true,reason:finalReason,chunks,instanceId:ownId,settled:settled?.saved===true,settleReason:settled?.reason||null,...(settled?.reason==='projector_window'?{windowUntil:settled.window?.expiresAt??null}:{})};
 }
 // AIR-364 (ADR 0098). Arms the recovery of a recognised step failure and proves what was persisted. The write is one expected-etag CAS
 // of the whole record; a lost CAS re-reads and recomputes from the fresh record (at most three times), so the attempt counter moves
@@ -432,24 +432,43 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
  // `workflowFailure` backoff as every other recovery, then the instance sleeps durably until `dueAt` and asks the existing
  // `ensureDiscoveryWorkflow` for the successor, which re-reads authority, generation, executor record and the recovery gate. The
  // hourly reconcile stays the fallback. A failure of the arming step itself is not caught here: the instance ends as before.
- // A final settle refused by a window is retried after the window's expiry (bounded); the instance never ends on a refused write.
- const finish=async(prefix,reason)=>{
-  let result=null;
-  for(let attempt=0;attempt<3;attempt++){
-   result=await doStep(attempt?prefix+'-retry':prefix,()=>stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks));
-   if(!result?.windowRefused)return result;
-   await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(result)));
+ // ADR 0103. A checkpoint (progress, final stop, recovery arming) is only done when it is confirmed persisted by the owner. `persist`
+ // runs the step again until it is: a window refusal sleeps to the window's expiry and tries again (at most `windowRetryLimit` times,
+ // each a bounded sleep), a lost compare-and-swap tries again without a sleep (at most WRITE_CONFLICT_RETRY_LIMIT times), and the step
+ // cap bounds both. It never treats exhausted retries as a saved write and never as lost ownership: it answers `deferred`, and the
+ // caller ends the instance in an explicit deferred state that the hourly reconcile recovers (the record still names this instance).
+ // No window refusal is charged to the stall or the recovery budget.
+ const windowRetryLimit=Number.isInteger(payload?.windowRetryLimit)&&payload.windowRetryLimit>=1&&payload.windowRetryLimit<=WINDOW_RETRY_LIMIT?payload.windowRetryLimit:WINDOW_RETRY_LIMIT;
+ const persist=async(prefix,fn,classify)=>{
+  let windows=0,conflicts=0,tries=0,last=null;
+  for(;;){
+   last=await doStep(tries++?prefix+'-retry':prefix,fn);
+   const kind=classify(last);
+   if(kind==='saved'||kind==='lost')return {kind,result:last};
+   if(kind==='conflict_final')return {kind:'deferred',cause:'conflict',result:last};
+   if(kind==='window'){
+    if(++windows>=windowRetryLimit||steps>=DISCOVERY_WORKFLOW_STEP_CAP)return {kind:'deferred',cause:'window',result:last};
+    await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(last)));
+    continue;
+   }
+   if(++conflicts>=WRITE_CONFLICT_RETRY_LIMIT||steps>=DISCOVERY_WORKFLOW_STEP_CAP)return {kind:'deferred',cause:'conflict',result:last};
   }
-  return result;
+ };
+ const settleKind=result=>result?.saved===true?'saved':result?.reason==='projector_window'?'window':result?.reason==='other_instance'?'lost':'conflict';
+ const deferredExit=(reason,cause,extra={})=>({stopped:true,deferred:true,reason:cause==='window'?'window_'+reason:reason+'_write_conflict',chunks,instanceId:ownId,...extra});
+ const finish=async(prefix,reason)=>{
+  const done=await persist(prefix,()=>stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks),result=>result?.settled===true?'saved':result?.settleReason==='projector_window'?'window':result?.settleReason==='other_instance'?'lost':'conflict');
+  if(done.kind==='deferred')return deferredExit('stop_unsaved',done.cause,{intended:reason});
+  const {stopped,reason:final,chunks:count,instanceId}=done.result;
+  return {stopped,reason:final,chunks:count,instanceId};
  };
  const recoverAfterStepFailure=async()=>{
-  let armed=null;
-  for(let attempt=0;attempt<3;attempt++){
-   armed=await doStep(attempt?'recover-arm-retry':'recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks));
-   if(armed.reason!=='projector_window')break;
-   await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(armed)));
-  }
-  if(!armed.armed)return {stopped:true,reason:armed.reason==='write_conflict'?'recovery_write_conflict':'not_owner',chunks,instanceId:ownId};
+  const arming=await persist('recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks),result=>result?.armed===true?'saved':result?.reason==='projector_window'?'window':result?.reason==='not_owner'?'lost':'conflict_final');
+  // The arming step already retries its own lost compare-and-swap three times (ADR 0098): a further conflict is the existing, explicit stop.
+  if(arming.kind==='deferred'&&arming.cause==='conflict')return {stopped:true,reason:'recovery_write_conflict',chunks,instanceId:ownId};
+  if(arming.kind==='deferred')return deferredExit('recovery_unarmed',arming.cause);
+  const armed=arming.result;
+  if(arming.kind==='lost')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
   if(armed.quarantined||!Number.isFinite(Date.parse(armed.dueAt||'')))return {stopped:true,reason:'recovery_exhausted',chunks,instanceId:ownId};
   for(let attempt=0;attempt<3;attempt++){
    await step.sleepUntil(stepName('recover-sleep'),new Date(armed.dueAt));
@@ -518,11 +537,9 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     // A window that opened between the chunk and this checkpoint refuses it: the chunk did happen (the count above stays), the record
     // is re-saved after the window's expiry, and a refusal is never a stall.
     const progressPatch={phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null};
-    for(let attempt=0;attempt<3;attempt++){
-     const saved=await doStep(attempt?'progress-retry':'progress',()=>settleWorkflowIfOwner(env,ownId,progressPatch));
-     if(saved?.reason!=='projector_window')break;
-     await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(saved)));
-    }
+    const checkpoint=await persist('progress',()=>settleWorkflowIfOwner(env,ownId,progressPatch),settleKind);
+    if(checkpoint.kind==='lost')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
+    if(checkpoint.kind==='deferred')return deferredExit('checkpoint_unsaved',checkpoint.cause);
    }
  }catch(error){
   if(!workflowStepRecoverable(error,failure.recoverable))throw error;

@@ -901,6 +901,78 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
   assert.equal(record().recovery.attempts,1,'a refused write charges nothing; the failure counts once');
   assert.ok(windowSleeps(h).some(item=>item.at===armExpiry),'arming waits for the expiry');
   assert.ok(windowSleeps(h).some(item=>item.at===succExpiry),'the successor waits for the expiry');
+
+  // (g) Retries: at least three sequential window refusals and lost compare-and-swaps for progress, the final stop and recovery arming.
+  // A checkpoint is done only when it is confirmed persisted; exhausted retries end in an explicit deferred state, never as a saved
+  // write and never as lost ownership, and no window refusal is charged to the stall or the recovery budget.
+  const chain=(prefix,times)=>{let n=0;return async name=>{if(name.startsWith(prefix)&&n<times){n++;open(60000);}};};
+  let conflictBudget=0;
+  const armConflicts=()=>{
+   const windowed=context.DiscoveryAuthority.writeWorkflow;
+   context.DiscoveryAuthority.writeWorkflow=async(...args)=>{if(conflictBudget>0){conflictBudget--;return {handled:true,saved:false};}return windowed(...args);};
+  };
+  const snapshot=h=>({retries:h.names.filter(name=>/^(progress|stop|recover-arm)-retry/.test(name)).length,windowSleeps:windowSleeps(h).length});
+
+  // progress: four refusals in a row, then saved with the count intact and nothing charged.
+  fresh();
+  let atRollover=null;
+  const progressChain=(()=>{let n=0;return async name=>{if(name.startsWith('progress')&&n<4){n++;open(60000);}if(name.startsWith('rollover')&&atRollover===null)atRollover={chunks:record().chunksThisInstance,recovery:record().recovery??null,phase:record().phase};};})();
+  h=harness({before:progressChain});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.deepEqual(snapshot(h),{retries:4,windowSleeps:4});
+  assert.deepEqual(atRollover,{chunks:1,recovery:null,phase:'running'},'saved after the fifth attempt, nothing charged');
+
+  // progress: the retry limit is exhausted. The instance ends deferred, the record is untouched and still names this instance.
+  fresh();
+  h=harness({before:chain('progress',999)});
+  ended=await run(h,{chunkLimit:1,windowRetryLimit:3});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'window_checkpoint_unsaved');assert.equal(ended.stopped,true);
+  assert.deepEqual(snapshot(h),{retries:2,windowSleeps:2},'three attempts, a bounded sleep between them');
+  assert.equal(record().chunksThisInstance,0,'the unsaved count is not claimed as saved');assert.equal(record().phase,'running');assert.equal(record().instanceId,INSTANCE);
+  assert.equal(record().recovery??null,null,'no recovery charge');assert.equal(creates.length,0,'no successor from an unsaved checkpoint');
+
+  // progress: three lost compare-and-swaps end deferred, two are retried and saved.
+  fresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&conflictBudget===0&&!h.armed){h.armed=true;conflictBudget=2;}}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.equal(record().recovery??null,null);
+  fresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;conflictBudget=3;}}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'checkpoint_unsaved_write_conflict');assert.equal(record().chunksThisInstance,0);
+  // progress: another instance owns the record: that is lost ownership, a quiet stop, not a retry.
+  fresh();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;elect(1);}}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'not_owner');assert.equal(ended.deferred,undefined);
+
+  // final stop: four refusals then saved; exhaustion is deferred with the intended reason; lost compare-and-swaps likewise.
+  const stopFresh=()=>{fresh();set('epg/discovery-workflow.json',{...record(),programmeRunId:OTHER});elect(0,OTHER);};
+  stopFresh();
+  h=harness({before:chain('stop',4)});
+  ended=await run(h,{programmeRunId:OTHER});
+  assert.equal(ended.reason,'stale_generation');assert.equal(ended.deferred,undefined);assert.equal(record().phase,'stopped');assert.deepEqual(snapshot(h),{retries:4,windowSleeps:4});
+  stopFresh();
+  h=harness({before:chain('stop',999)});
+  ended=await run(h,{programmeRunId:OTHER,windowRetryLimit:2});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'window_stop_unsaved');assert.equal(ended.intended,'stale_generation');
+  assert.equal(record().phase,'running','the terminal record is not written, so it is not claimed');assert.equal(record().recovery??null,null);
+  stopFresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('stop')&&!h.armed){h.armed=true;conflictBudget=3;}}});
+  ended=await run(h,{programmeRunId:OTHER});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'stop_unsaved_write_conflict');assert.equal(record().phase,'running');
+
+  // recovery arming: four refusals then armed exactly once (counted once); exhaustion is deferred, not not_owner, and arms nothing.
+  fresh();
+  h=harness({failOn:name=>name.startsWith('chunk'),before:chain('recover-arm',4)});
+  ended=await run(h);
+  assert.equal(ended.reason,'recovered');assert.equal(creates.length,1);assert.equal(record().recovery.attempts,1,'counted once');
+  assert.deepEqual({retries:snapshot(h).retries,sleeps:windowSleeps(h).length>=4},{retries:4,sleeps:true});
+  fresh();
+  h=harness({failOn:name=>name.startsWith('chunk'),before:chain('recover-arm',999)});
+  ended=await run(h,{windowRetryLimit:3});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'window_recovery_unarmed');assert.notEqual(ended.reason,'not_owner');
+  assert.equal(creates.length,0);assert.equal(record().recovery??null,null,'nothing armed, nothing charged');assert.equal(record().phase,'running','the reconcile still finds this instance');
  }finally{Date.now=realNow;delete env.DISCOVERY_EXECUTOR;context.advanceDiscovery=realAdvance;clearWorkflowAdmission();}
 }
 
