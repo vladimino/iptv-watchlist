@@ -334,6 +334,11 @@ assert.equal(listeners.filter(item=>item.type==='visibilitychange').length, 1);
  // No EPG block: unknown, not zero; no EPG success: no invented freshness.
  t=text({...base,epgTmdb:undefined,integrations:{aggregate:'unknown',attentionCount:0,sources:[]}});
  assert.deepEqual([t.epgRecognizedText,t.epgPendingText,t.epgHorizon,t.epgSummary],['нет данных','нет данных','нет данных','нет данных']);
+ // A degraded answer (the server could not read a source, for example the Discovery ledger while its transfer is loading): null values are unknown, never 0 or 100%.
+ t=text({...base,degraded:['ledger','catalog'],coverage:{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null,localPercent:null,windowPercent:null,windowPendingTotal:null},epgTmdb:{recognizedFilms:null,pendingRecognition:null,historicalUnresolved:null,ledgerTotal:null,epgStart:null,epgEnd:null},collection:{state:'unknown',total:null,watched:null,rated:null,watchlist:null},recommendations:{newUnseen:{state:'unknown',rating40to44:null,rating45plus:null}},watchlist:{films:null}});
+ for(const key of ['local','windowCoverage'])assert.equal(t[key],'нет данных',key+' is unknown, not 0/0 or 100%');
+ assert.deepEqual([t.epgRecognizedText,t.epgPendingText,t.epgHorizon,t.collectionSummary,t.newSummary],['нет данных','нет данных','нет данных','нет данных','нет данных'],'ledger, collection and new-film values are unknown');
+ assert.doesNotMatch(JSON.stringify([t.local,t.windowCoverage,t.epgRecognizedText,t.epgPendingText]),/100|0\/0|\b0\b/,'no invented zero or full coverage');
  // The five-source automation rows stay readable text, and a failure is not the same words as "no data".
  t=text({...base,integrations:{aggregate:'failed',attentionCount:1,sources:[source('epg',{state:'failed',code:'ok',lastFailureAt:'2026-11-08T12:00:00Z'}),source('resolver',{state:'unknown',code:'no_data',lastSuccessAt:null})]}});
  assert.equal(t.integrationAggregate,'есть сбой');assert.match(t.integrations.epg,/сбой/);assert.match(t.integrations.resolver,/нет данных/);assert.doesNotMatch(t.integrations.resolver,/сбой/,'unknown is not an error');

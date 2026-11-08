@@ -1216,7 +1216,8 @@ function footerFacts(index,byLid){
 }
 function footerCollection({report,catalog,watchlist,index,metadata}){
  const unknown={state:'unknown',total:null,watched:null,rated:null,watchlist:null};
- if(!footerIdentitySources({index,watchlist,metadata}))return unknown;
+ // The total is a union of the programme, the catalog and the watchlist: a source that could not be read would silently shrink it.
+ if(!footerIdentitySources({index,watchlist,metadata})||!footerPlainObject(report)||!footerPlainObject(catalog))return unknown;
  const byLid=catalogLidTmdb({metadata,watchlist,programme:report,catalog}),all=new Set(),listed=new Set();
  for(const film of watchlist.films){if(film?.id==null)continue;const identity=footerIdentity(film.id,byLid);listed.add(identity);all.add(identity);}
  // A programme film flagged catalog-only is a catalog film that merely airs; it is not on the watchlist.
@@ -1231,7 +1232,9 @@ function footerCollection({report,catalog,watchlist,index,metadata}){
 // do not overlap: 4.0 to 4.4 and 4.5 and above. The show window is not applied: this counts the collection, not the airing now.
 function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness}){
  const unknown={state:'unknown',rating40to44:null,rating45plus:null};
- if(!profile||!catalog||typeof catalog!=='object'||!footerIdentitySources({index,watchlist,metadata}))return unknown;
+ // Without a freshness rule nothing can be called current: that is unknown, not "no eligible film".
+ // The programme films (not flagged catalog-only) are part of the exclusion, so an absent programme is an unknown membership, not an empty one.
+ if(!profile||typeof freshness?.indexed!=='function'||!footerPlainObject(catalog)||!footerPlainObject(report)||!footerIdentitySources({index,watchlist,metadata}))return unknown;
  const byLid=catalogLidTmdb({metadata,watchlist,programme:report,catalog}),listed=new Set();
  for(const film of [...watchlist.films,...(report?.films||[]).filter(film=>film?.catalogOnly!==true)]){if(film?.id!=null)listed.add(footerIdentity(film.id,byLid));}
  // A recorded watchlist fact, either value, is membership: it is not a first-watch offer.
@@ -1388,27 +1391,68 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  const failed=sources.filter(item=>item.state==='failed').length,attention=sources.filter(item=>!['healthy','off','running','waiting'].includes(item.state)).length;
  return {aggregate:failed?'failed':attention?'attention':'healthy',attentionCount:attention,failedCount:failed,sources};
 }
+// A source the footer reads. The footer is a dashboard of many sources and must stay readable when one of them is not: a read that fails or does not answer
+// in time leaves that source `null` and is named in `degraded`, and everything that needs it becomes unknown (null, shown as «нет данных»), never 0. Without
+// the guard one closed source (for example the Discovery ledger while its transfer is `loading`, which fails closed with `discovery_incomplete` by design)
+// turned the whole route into the Worker's generic 502.
+const FOOTER_SOURCE_TIMEOUT_MS=10000;
+function footerGuard(env,degraded){
+ const limit=Number(env?.FOOTER_SOURCE_TIMEOUT_MS)>0?Number(env.FOOTER_SOURCE_TIMEOUT_MS):FOOTER_SOURCE_TIMEOUT_MS;
+ return async(name,load)=>{
+  let timer=null;
+  try{
+   const pending=Promise.resolve().then(load);
+   if(typeof setTimeout!=='function')return await pending;
+   return await Promise.race([pending,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('footer_source_timeout')),limit);})]);
+  }catch{if(!degraded.includes(name))degraded.push(name);return null;}
+  finally{if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);}
+ };
+}
+// The published programme and watchlist of a D1 generation, read with SELECTs only and fenced at the pinned generation. `loadJSON` reads the same documents
+// but first runs `PublishedEpg.repairMirrors`, an R2 write; a status read must not write, and two parallel reads must not run two repairs.
+async function footerPublishedDocument(pinned,key){
+ if(pinned.epgPin?.authority==='d1'&&typeof PublishedEpg!=='undefined'){
+  const run=pinned.epgPin.programmeRunId;
+  if(!run)return null;
+  return PublishedEpg.readDocumentAt(pinned,run,key==='watchlist.json'?'watchlist':'programme',pinned.epgPin.generation);
+ }
+ return loadJSON(pinned,key);
+}
 async function footerStatus(env){
- const pinned=await pinEpg(env);
- let ratingsRun=null,ratingsBlocked=null;
- if(typeof LetterboxdRatings!=='undefined'){const state=await LetterboxdRatings.migrationState(env);if(state.migration==='complete')ratingsRun=LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now());else ratingsBlocked={migration:state.migration};}
+ const degraded=[],guard=footerGuard(env,degraded);
+ const pinned=await guard('publication',()=>pinEpg(env))||env;
+ const ratingsState=typeof LetterboxdRatings!=='undefined'?await guard('ratings',async()=>{const state=await LetterboxdRatings.migrationState(env);return state.migration==='complete'?{run:LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now())}:{blocked:{migration:state.migration}};}):null;
+ const ratingsRun=ratingsState?.run??null,ratingsBlocked=ratingsState?.blocked??null;
  // AIR-344: the ledger is streamed and counted once, without keeping its items, before the other records are read.
- const authority=typeof DiscoveryAuthority!=='undefined'?await DiscoveryAuthority.readAuthority(env):null;
- const decisions=authority?.ready?{}:await loadJSON(env,'epg/discovery-resolution.json');
- const ledger=await ledgerStatusAggregates(pinned,decisions||{},Date.now());
+ const authority=typeof DiscoveryAuthority!=='undefined'?await guard('discovery_authority',()=>DiscoveryAuthority.readAuthority(env)):null;
+ const decisions=authority?.ready?{}:await guard('decisions',()=>loadJSON(env,'epg/discovery-resolution.json'));
+ const ledger=await guard('ledger',()=>ledgerStatusAggregates(pinned,decisions||{},Date.now()));
  const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,watchlist,metadata]=await Promise.all([
-  loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json'),loadJSON(env,predictionQueueKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,RUNNER_LEASE_KEY),loadJSON(env,'sync.json'),loadJSON(env,RATINGS_STATUS_KEY),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'watchlist-ingest.json'),loadJSON(env,'epg/resolver-lease.json'),
-  // AIR-389: two more single-object reads, for the collection and the new-film counts. A failure leaves those blocks unknown and nothing else.
-  loadJSON(pinned,'watchlist.json').catch(()=>null),loadJSON(env,'metadata.json').catch(()=>null)
+  guard('profile',()=>loadJSON(env,profileKey)),guard('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),guard('programme',()=>footerPublishedDocument(pinned,'programme.json')),guard('catalog',()=>loadJSON(pinned,'epg/discovered-films.json')),
+  guard('queue',()=>loadJSON(env,predictionQueueKey)),guard('run',()=>loadJSON(env,ENRICHMENT_KEY+'latest-run.json')),guard('lease',()=>loadJSON(env,RUNNER_LEASE_KEY)),guard('sync',()=>loadJSON(env,'sync.json')),guard('ratings_status',()=>loadJSON(env,RATINGS_STATUS_KEY)),
+  guard('discovery_status',()=>loadJSON(env,'epg/discovery-status.json')),guard('continuation',()=>loadJSON(env,'epg/resolver-continuation.json')),guard('watchlist_ingest',()=>loadJSON(env,'watchlist-ingest.json')),guard('resolver_lease',()=>loadJSON(env,'epg/resolver-lease.json')),
+  // AIR-389: two more single-object reads, for the collection and the new-film counts.
+  guard('watchlist',()=>footerPublishedDocument(pinned,'watchlist.json')),guard('metadata',()=>loadJSON(env,'metadata.json'))
  ]);
- const freshness=await predictionFreshness(env,profile),coverage=canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness),queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
+ const freshness=await guard('freshness',()=>predictionFreshness(env,profile));
+ // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
+ // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
+ if(!footerPlainObject(report)&&!degraded.includes('programme'))degraded.push('programme_missing');
+ if(!footerPlainObject(catalog)&&!degraded.includes('catalog'))degraded.push('catalog_missing');
+ // An absent view index or taste profile is not a measured 0 current predictions either: without them the coverage is unknown.
+ if(!footerPlainObject(index)&&!degraded.includes('index'))degraded.push('index_missing');
+ if(!footerPlainObject(profile)&&!degraded.includes('profile'))degraded.push('profile_missing');
+ const coverageReadable=!['programme','catalog','index','profile','freshness','programme_missing','catalog_missing','index_missing','profile_missing'].some(name=>degraded.includes(name))&&!!freshness;
+ const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
+ const queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
  const collection=footerCollection({report,catalog,watchlist,index,metadata}),newUnseen=footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness});
- const {recognized,counts}=ledger;
- const pendingRecognition=counts.currentUnresolved,historicalUnresolved=counts.historicalUnresolved+counts.expiredInactive;
+ const recognized=ledger?.recognized??null,counts=ledger?.counts??null;
+ const pendingRecognition=counts?counts.currentUnresolved:null,historicalUnresolved=counts?counts.historicalUnresolved+counts.expiredInactive:null;
+ const difference=(total,current)=>Number.isInteger(total)&&Number.isInteger(current)?total-current:null;
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions},predictions:{pendingHot:queue?.hotRemaining??coverage.windowFilmsTotal-coverage.windowCurrentPredictions,pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized.size,pendingRecognition,historicalUnresolved,ledgerTotal:counts.ledgerTotal,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?.watchlistCount??report?.films?.length??0,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts.readyNow,resolverLease})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueReadyIds(queue,now=Date.now()){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>now));}
 // The ids a batch takes, in queue order: migration work (ADR-0035 section 6) fills at most FINGERPRINT_MIGRATION_SHARE of the
