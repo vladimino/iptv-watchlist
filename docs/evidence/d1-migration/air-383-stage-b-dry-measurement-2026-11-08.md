@@ -42,13 +42,11 @@ From the timestamps of 1,727 decision rows: 204 write bursts, one every 52.9 s (
 
 ## 5. The window and the daily EPG publication
 
-The daily EPG publication is due at 17:00 Europe/Madrid, 16:00 UTC, the same instant as the hourly cron tick (`0 * * * *`) that starts the projector. A projector that requests a window at 16:00 UTC can hold admission up to 300 s while the external daily Task reaches its seal. That Task waits about 93 s, once, and only for `lease_held`, so a `projector_window` busy of up to 300 s is the activation blocker named in the Stage A review. The options below are for the owner; none was started and the Task prompt was not touched.
+The daily EPG publication is due at 17:00 Europe/Madrid, 16:00 UTC, the same instant as the hourly cron tick (`0 * * * *`) that starts the projector. A projector that requests a window at 16:00 UTC can hold admission up to 300 s while the external daily Task reaches its seal. That Task waits about 93 s, once, and only for `lease_held`, so a `projector_window` busy of up to 300 s is the activation blocker named in the Stage A review.
 
-1. Do not request a window around the daily EPG: skip the request from shortly before to shortly after 16:00 UTC (a small code change, which would go through the normal review).
-2. Change the Task's wait to cover `projector_window` (a Scheduled Task edit, separate owner GO).
-3. Accept the blocker until the EPG executor of [ADR 0100](../../adr/0100-epg-cloudflare-workflow-executor.md) is the daily publisher, which already sleeps to `nextCatchUpAt` without charging its budget.
+**Activation precondition ([ADR 0103](../../adr/0103-projector-exclusive-window.md) decision 5).** Either the external Task can wait for `projector_window` up to the deadline (a Scheduled Task edit, its own owner decision), or an alternative EPG executor is fully proven to wait for it (the EPG executor of [ADR 0100](../../adr/0100-epg-cloudflare-workflow-executor.md) already sleeps to `nextCatchUpAt` without charging its budget, and is not yet the daily publisher). Nothing below replaces that precondition.
 
-Option 1 removes the clash without a Task edit and keeps the window available for the rest of the day; it is the smallest of the three. This is a recommendation, not a decision.
+**Clock-based ideas are optimizations, never the route.** A time-based skip of the window request around 16:00 UTC is allowed by the ADR only as an optimization and is rejected as the primary route: the external publication writes no D1 in-flight marker, a Task start can be delayed, and its seal can overlap any fixed interval. The owner proposes a different optimization, moving the shared cron from `:00` to `:10`. That is a separately authorized scheduling change (this pull request changes no cron). It also moves the Ratings and monitor ticks, the EPG `ensure` and the Discovery reconcile, not only the projector, and it shifts the clash instead of ruling it out: neither `:10` nor a time-based exclusion proves that a window and an EPG seal cannot overlap, because a delayed Task start, a long metadata phase or a retry can still reach the seal inside a window. Neither one removes the blocker, and neither is a substitute for the precondition above.
 
 ## 6. Still open before any activation
 
