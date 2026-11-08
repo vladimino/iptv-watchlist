@@ -345,6 +345,70 @@ assert.equal(typePanel.hidden, true);
 assert.equal(shownIds().length, run('loadedEvents.size'), 'the compact feed is not filtered');
 assert.ok(requests.every(request => request.method === 'GET' && request.url.startsWith('/api/events')), 'no request but reads of the events feed');
 
+// 4.10 Choosing a type changes only the `type` parameter of the current events URL: every other parameter, the encoded non-ASCII return target and the fragment survive byte for byte.
+await reset(chain([1]));
+await run('loadEvents(false)');
+const eventsBase = '/events?return=' + encodeURIComponent('/?q=жара&genre=Драма') + '&foo=bar+baz&empty=';
+win.history.replaceState(null, '', 'https://iptv.example' + eventsBase + '&type=epg#section-2');
+run('eventsScreen=false;applyEventsScreen(true)');
+assert.equal(run('eventTypeFilterId'), 'epg');
+const where = () => {const url = new URL(win.location.href); return url.pathname + url.search + url.hash;};
+run("selectEventType('ratings')");
+await settle();
+assert.equal(where(), eventsBase + '&type=ratings#section-2', 'the old type is replaced, everything else is untouched, the hash too');
+assert.equal(run('ReturnHome.fromSearch(new URL(window.location.href).search)'), '/?q=%D0%B6%D0%B0%D1%80%D0%B0&genre=%D0%94%D1%80%D0%B0%D0%BC%D0%B0', 'the non-ASCII return target still resolves');
+run("selectEventType('all')");
+await settle();
+assert.equal(where(), eventsBase + '#section-2', 'back to the default removes only `type`');
+run("selectEventType('enrichment')");
+await settle();
+assert.equal(where(), eventsBase + '&type=enrichment#section-2');
+win.history.replaceState(null, '', 'https://iptv.example/events?type=taste_profile&x=1&return=' + encodeURIComponent('/?q=1') + '#h');
+run("selectEventType('watchlist')");
+await settle();
+assert.equal(where(), '/events?x=1&return=' + encodeURIComponent('/?q=1') + '&type=watchlist#h', 'a type anywhere in the query is replaced and the rest keeps its order');
+assert.equal(run("withEventType('/events?a=1#h','epg')"), '/events?a=1&type=epg#h');
+assert.equal(run("withEventType('/events?type=epg&type=ratings&a=1','all')"), '/events?a=1', 'every old type goes');
+assert.equal(run("withEventType('/events?%74ype=epg','all')"), '/events', 'an encoded key is recognised');
+
+// 4.11 The state of the search is told even when nothing is loaded: an empty first page, an empty archive, a failure, a repeated cursor.
+await reset({first: {events: [], cursor: null}});
+await run('loadEvents(false)');
+await onEvents('ratings');
+assert.equal(run('eventSearch.state'), 'exhausted');
+assert.equal(status.textContent, 'Во всём доступном архиве событий этого типа нет.', 'an archive that is empty to the end reports it accurately');
+run("selectEventType('all')");
+assert.equal(status.textContent, 'Здесь появятся события списка.', '«Все события» keeps its own text for an empty feed');
+await reset({first: {events: [], cursor: null}});
+win.history.replaceState(null, '', 'https://iptv.example/events?type=ratings');
+run('eventsScreen=false;applyEventsScreen(true)');
+await run('loadEvents(false)');
+await settle();
+assert.equal(status.textContent, 'Во всём доступном архиве событий этого типа нет.', 'a deep link into an empty archive reports its end too');
+await reset({first: {events: [], cursor: 'c1'}, c1: {events: [ev('z', 'epg')], cursor: null}});
+await run('loadEvents(false)');
+gates.set('c1', new Promise(resolve => {gates.release = resolve;}));
+await onEvents('ratings');
+await sleep(20);
+assert.equal(status.textContent, 'Ищем более давние события… Найдено среди загруженных: 0.', 'searching is shown although the first page was empty');
+gates.release();
+await settle();
+assert.equal(status.textContent, 'Во всём доступном архиве событий этого типа нет.');
+await reset({first: {events: [], cursor: 'c1'}, c1: {events: [ev('z', 'epg')], cursor: null}});
+await run('loadEvents(false)');
+failures.add('c1');
+await onEvents('ratings');
+assert.equal(run('eventSearch.state'), 'error');
+assert.equal(status.textContent, 'Не удалось загрузить события. Найдено среди загруженных: 0.', 'a failure after an empty first page is visible');
+assert.equal(more.textContent, 'Повторить');
+assert.equal(more.hidden, false);
+await reset({first: {events: [], cursor: 'c1'}, c1: {events: [], cursor: 'c1'}});
+await run('loadEvents(false)');
+await onEvents('ratings');
+assert.equal(run('eventSearch.state'), 'stuck');
+assert.equal(status.textContent, 'Архив событий не продвигается дальше. Найдено среди загруженных: 0.', 'a repeated cursor after an empty first page is visible');
+assert.equal(more.textContent, 'Повторить');
+
 // 5. The film page keeps its sidebar; the events frame is the same grid.
 {
   assert.match(app, /function syncFilmReturn\(\)/, 'the film route keeps its return target in step with the sidebar filters');

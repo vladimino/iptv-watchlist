@@ -196,7 +196,7 @@ function selectEventType(id){
  if(!EVENT_TYPE_FILTERS.some(item=>item.id===id))return;
  eventTypeFilterId=id;syncEventTypeButtons();
  // The choice lives in the URL of this history entry (no new entry), next to the return target.
- if(eventsRequested()&&currentPathname()==='/events')window.history.replaceState(window.history.state,'',ReturnHome.withReturn(withEventType('/events',id),homeTarget()));
+ if(eventsRequested()&&currentPathname()==='/events'){const here=new URL(window.location.href);window.history.replaceState(window.history.state,'',withEventType(here.pathname+here.search+here.hash,id));}
  startEventSearch();
 }
 function applyEventsScreen(on){
@@ -363,7 +363,15 @@ function eventMatchesType(event,id){
  const filter=EVENT_TYPE_FILTERS.find(item=>item.id===id);
  return !filter||!filter.types||filter.types.includes(event&&event.type);
 }
-function withEventType(href,id){return id==='all'||!EVENT_TYPE_FILTERS.some(item=>item.id===id)?href:href+(href.includes('?')?'&':'?')+'type='+encodeURIComponent(id);}
+// Replaces only the `type` parameter of an href: every other parameter (the encoded `return` target included) and the fragment stay byte for byte.
+function withEventType(href,id){
+ const text=String(href),hashAt=text.indexOf('#'),hash=hashAt>=0?text.slice(hashAt):'',noHash=hashAt>=0?text.slice(0,hashAt):text;
+ const queryAt=noHash.indexOf('?'),path=queryAt>=0?noHash.slice(0,queryAt):noHash,query=queryAt>=0?noHash.slice(queryAt+1):'';
+ const keyOf=pair=>{const name=pair.split('=')[0];try{return decodeURIComponent(name.replace(/\+/g,' '));}catch{return name;}};
+ const kept=query?query.split('&').filter(pair=>pair!==''&&keyOf(pair)!=='type'):[];
+ if(id!=='all'&&EVENT_TYPE_FILTERS.some(item=>item.id===id))kept.push('type='+encodeURIComponent(id));
+ return path+(kept.length?'?'+kept.join('&'):'')+hash;
+}
 const EVENT_SEARCH_TARGET=10;
 let eventTypeFilterId='all',activityNote='Загружаем события…',eventsReady=false;
 const eventSearch={token:0,state:'idle',controller:null};
@@ -405,12 +413,14 @@ async function startEventSearch(){
  renderActivity();
 }
 function activityStatusText(filter,ordered,shown){
- if(filter==='all'||!ordered.length)return activityNote;
- const found='Найдено среди загруженных: '+eventMatchCount(filter)+'.';
- if(eventSearch.state==='searching')return 'Ищем более давние события… '+found;
- if(eventSearch.state==='error')return 'Не удалось загрузить события. '+found;
- if(eventSearch.state==='stuck')return 'Архив событий не продвигается дальше. '+found;
- if(!shown.length)return eventSearch.state==='exhausted'?'Во всём доступном архиве событий этого типа нет.':'Среди загруженных событий этого типа пока нет.';
+ if(filter==='all')return activityNote;
+ const state=eventSearch.state,found='Найдено среди загруженных: '+eventMatchCount(filter)+'.';
+ // The state of the search is told first: an empty first page followed by a failure, a repeated cursor or the end of the archive must show.
+ if(state==='searching')return 'Ищем более давние события… '+found;
+ if(state==='error')return 'Не удалось загрузить события. '+found;
+ if(state==='stuck')return 'Архив событий не продвигается дальше. '+found;
+ if(!shown.length&&state==='exhausted')return 'Во всём доступном архиве событий этого типа нет.';
+ if(!shown.length&&ordered.length)return 'Среди загруженных событий этого типа пока нет.';
  return activityNote;
 }
 function syncActivityMore(){
@@ -1990,7 +2000,7 @@ function renderActivity(){
  if(status)status.textContent=activityStatusText(filter,ordered,shown);
  syncActivityMore();
 }
-async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');if(!options.auto){button.disabled=true;button.classList.toggle('is-loading',more);if(more){button.setAttribute('aria-busy','true');button.textContent='Загружаем события…';if(!options.quiet)$('#activity-status').textContent='Загружаем более давние события…';}}try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''),options.signal?{signal:options.signal}:undefined);if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);if(!keepCursor)eventCursor=data.cursor;eventsReady=true;activityNote=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';renderActivity();if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle'&&eventCursor&&eventMatchCount(eventTypeFilterId)<EVENT_SEARCH_TARGET)startEventSearch();return true;}catch{if(options.signal&&options.signal.aborted)return 'aborted';if(!options.quiet){activityNote='Не удалось загрузить события.';$('#activity-status').textContent=activityNote;button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;if(!options.auto){button.classList.remove('is-loading');button.removeAttribute('aria-busy');button.disabled=false;}}}
+async function loadEvents(more=false,options={}){if(eventLoading)return 'busy';eventLoading=true;const button=$('#activity-more');if(!options.auto){button.disabled=true;button.classList.toggle('is-loading',more);if(more){button.setAttribute('aria-busy','true');button.textContent='Загружаем события…';if(!options.quiet)$('#activity-status').textContent='Загружаем более давние события…';}}try{const response=await fetch('/api/events'+(more&&eventCursor?'?cursor='+encodeURIComponent(eventCursor):''),options.signal?{signal:options.signal}:undefined);if(!response.ok)throw new Error();const data=await response.json();const keepCursor=!more&&loadedEvents.size>20;for(const event of data.events)loadedEvents.set(event.id,event);if(!keepCursor)eventCursor=data.cursor;eventsReady=true;activityNote=!more&&!data.events.length?'Здесь появятся события списка.':'';button.hidden=!eventCursor;button.textContent='Более давние события';renderActivity();if(!options.auto&&eventsScreen&&eventTypeFilterId!=='all'&&!eventSearch.controller&&eventSearch.state==='idle')startEventSearch();return true;}catch{if(options.signal&&options.signal.aborted)return 'aborted';if(!options.quiet){activityNote='Не удалось загрузить события.';$('#activity-status').textContent=activityNote;button.hidden=false;button.textContent='Повторить';}return false;}finally{eventLoading=false;if(!options.auto){button.classList.remove('is-loading');button.removeAttribute('aria-busy');button.disabled=false;}}}
 function initFilmCompare(){
  const input=$('#film-compare-input'),list=$('#film-compare-options'),clear=$('#film-compare-clear'),root=$('#film-compare-combo');
  if(!input||!list||!clear||!root||typeof input.addEventListener!=='function')return;
