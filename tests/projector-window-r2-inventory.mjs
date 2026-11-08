@@ -1,11 +1,14 @@
-// ADR 0103 / AIR-383: the transitive R2 side effects of the Discovery chunk, admin-recovery and EPG publication paths, against the
-// projector's inputs. The earlier test (projector-window-r2-writes.mjs) classifies the write sites of three files. This one follows the
-// calls: it builds a call graph over every file of the Worker bundle (functions, `const f=(...)=>` arrows; a bare call resolves inside its
-// own file or to a name defined once, a `Module.f(` call to an exported function), takes everything reachable from the entry points and
-// finds every function in that closure that writes to R2 (a direct bucket put or delete, `saveJSON`, `mergeStoredJSON`, `saveMutable`,
-// `routeWrite`, a mirror put). The closure is a conservative superset (a name match is an edge), so the test can only err towards more
-// writers, never fewer. Every writer must be classified here; an unclassified or a stale one fails. It then proves, for the writers that
-// can touch a key the projector reads, how each one is kept out of a held window.
+// ADR 0103 / AIR-383: the R2 side effects of the Discovery chunk, admin-recovery and EPG publication paths, against the projector's inputs.
+// Two independent parts, because a call graph by name is a best effort and not a proof:
+//  1. A whole-bundle inventory of every R2 write site and wrapper call in `src/`, by text, with no graph and no reachability. The count of
+//     sites per file is frozen, every receiver of `.put(` and every `.delete(` is accounted for (an alias or a new receiver fails), and the
+//     complete list of sites that write a key naming a projector input that is not Discovery's is frozen with its owner. A new writer in any
+//     file, in any call form that uses these primitives, fails here until it is looked at and classified.
+//  2. A call graph over the bundle (functions and `const f=(...)=>` arrows; a bare call resolves inside its own file or to a name defined
+//     once, a `Module.f(` call to an exported function). It does NOT see object or class methods, aliases, callbacks or dynamic dispatch
+//     (it lists no unresolved callee), so its closure is not a superset of what can run; it is a best-effort map of the named paths. From
+//     the chunk, admin and publication entry points it finds the writer functions on named paths and requires each to be classified.
+// What neither part sees: a key built at run time, a write by a primitive that is not in the lists, and production.
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -52,6 +55,76 @@ const CHUNK=['advanceDiscovery','runWorkflowChunk','adminDiscoveryRecoveryRoute'
 const PUBLICATION=['sealStep','stageSealedGeneration','publishD1Generation','publishEpgGeneration'];
 const chunk=closure(CHUNK),publication=closure(PUBLICATION);
 
+// ---- Part 1: the whole-bundle inventory (no graph).
+const consts=new Map();
+for(const [,text] of texts)for(const m of text.matchAll(/(?:^|\n)\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*('[^'\n]*'|`[^`\n]*`)/g))if(!consts.has(m[1]))consts.set(m[1],m[2]);
+const NOT_DISCOVERY=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','view-index.json','letterboxd/admissions/verified-films.json','owner-reviews.json'];
+const PRIMITIVE=/((?:env\.)?\bBUCKET\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bbucket\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bsaveJSON|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputStable|\bputKnownLength)\(/g;
+const perFile=new Map(),inputSites=new Map();let siteCount=0;
+function argsOf(text,from){let depth=0,i=from,start=from;const args=[];for(;i<text.length;i++){const c=text[i];if('([{'.includes(c))depth++;else if(')]}'.includes(c)){if(depth===0)break;depth--;}else if(c===','&&depth===0){args.push(text.slice(start,i));start=i+1;if(args.length>=2)break;}}args.push(text.slice(start,i));return args;}
+for(const [file,text] of texts){
+ let m;PRIMITIVE.lastIndex=0;
+ while((m=PRIMITIVE.exec(text))){
+  siteCount++;
+  const r2=/BUCKET|bucket/.test(m[1]),args=argsOf(text,m.index+m[0].length);
+  const keyArg=((r2||/putStable|putKnownLength/.test(m[1]))?args[0]:args[1]||'').replace(/\s+/g,'');
+  const resolved=keyArg.replace(/[A-Za-z_$][A-Za-z0-9_$]*/g,x=>consts.get(x)||x);
+  const dynamic=/[A-Za-z_$][A-Za-z0-9_$]*/.test(resolved.replace(/'[^']*'|`[^`]*`/g,''));
+  const row=perFile.get(file)||{r2:0,wrapper:0,dynamic:0};
+  row[r2?'r2':'wrapper']++;if(dynamic)row.dynamic++;perFile.set(file,row);
+  if(NOT_DISCOVERY.some(n=>resolved.includes(n))){const k=file+'|'+m[1]+'|'+keyArg;inputSites.set(k,(inputSites.get(k)||0)+1);}
+ }
+}
+// Every receiver of `.put(` is the R2 binding; every `.delete(` receiver is the R2 binding or a known in-memory Map or Set. An alias or a new
+// receiver fails, so a write that the primitive list cannot see by name cannot arrive silently.
+const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also']);
+const receivers=new Map();
+for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0-9_$.]*)\.(put|delete|createMultipartUpload|resumeMultipartUpload)\(/g)){
+ const who=m[1],method=m[2];
+ const r2=who==='env.BUCKET'||who==='bucket'||who==='BUCKET';
+ if(method==='put'||method==='createMultipartUpload'||method==='resumeMultipartUpload')assert.ok(r2,file+': .'+method+'( on an unknown receiver '+who+' (an alias of the R2 binding?)');
+ else assert.ok(r2||IN_MEMORY.has(who),file+': .delete( on a receiver that is neither the R2 binding nor a known Map or Set: '+who);
+}
+const FILE_SITES={
+ 'src/admin/discovery-recovery.js':{r2:10,wrapper:0,dynamic:8},
+ 'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
+ 'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
+ 'src/discovery-workflow.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
+ 'src/enrichment.js':{r2:11,wrapper:41,dynamic:27},
+ 'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
+ 'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/letterboxd-rated-candidates.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/letterboxd-ratings.js':{r2:1,wrapper:5,dynamic:5},
+ 'src/metadata-cache.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/monitor.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/owner-review-d1.js':{r2:2,wrapper:0,dynamic:0},
+ 'src/prediction-d1.js':{r2:5,wrapper:0,dynamic:0},
+ 'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
+ 'src/worker.js':{r2:14,wrapper:46,dynamic:18},
+};
+const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
+assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
+// The complete list of sites that name a key of a projector input that is not Discovery's. Each belongs to a path of its own domain.
+const INPUT_WRITERS={
+ "src/admin/film-title-route.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'admin Film title route (owner review), its own route'},
+ "src/enrichment.js|mergeStoredJSON|ENRICHMENT_KEY+'view-index.json'":{count:4,owner:'ratings and removal view-index maintenance, its own paths'},
+ "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
+ "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
+ "src/owner-review-d1.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
+ "src/worker.js|saveJSON|'people.json'":{count:2,owner:'metadata sync steps (Persons)'},
+ "src/worker.js|saveJSON|'titles.json'":{count:2,owner:'metadata sync steps (titles)'},
+ "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},
+};
+assert.deepEqual(Object.fromEntries([...inputSites].sort()),Object.fromEntries(Object.entries(INPUT_WRITERS).sort().map(([k,v])=>[k,v.count])),'the sites that write a non-Discovery projector input changed: classify the new one');
+// None of the Discovery files writes a non-Discovery projector input by name; the read-repair mirror writer is the one dynamic-key writer
+// of such a document, and it is classified in part 2.
+for(const key of Object.keys(INPUT_WRITERS))assert.equal(/^src\/(discovery\.js|discovery-workflow\.js|admin\/discovery-recovery\.js)\|/.test(key),false,'a Discovery file names a non-Discovery projector input: '+key);
+const inventory={sites:siteCount,files:perFile.size,inputSites:[...inputSites.values()].reduce((a,b)=>a+b,0)};
+
+// ---- Part 2: the best-effort graph of the named paths.
 const classes={
  // The Discovery files: every site is classified, with its guard, in projector-window-r2-writes.mjs.
  'advanceDiscovery@src/discovery.js':'discovery file',
@@ -162,4 +235,4 @@ for(const [name,list] of defs){
  }
 }
 
-console.log('Projector window transitive R2 side effects: '+reached.size+' writer functions reachable from '+CHUNK.length+' chunk/admin and '+PUBLICATION.length+' publication entry points classified (graph of '+defs.size+' function names over '+files.length+' files); the only lease-free path that writes a projector-input key is the read-repair of D1 published mirrors, which the projector does not read under a published D1 snapshot; every publication entry takes the lease before its first write');
+console.log('Projector window R2 side effects: whole-bundle inventory of '+inventory.sites+' write sites in '+inventory.files+' files with the '+inventory.inputSites+' sites that name a non-Discovery projector input frozen; best-effort named-path graph: '+reached.size+' writer functions from '+CHUNK.length+' chunk/admin and '+PUBLICATION.length+' publication entry points classified; the lease-free path found on those named paths that writes a projector-input key is the read-repair of D1 published mirrors; every publication entry takes the lease before its first write');

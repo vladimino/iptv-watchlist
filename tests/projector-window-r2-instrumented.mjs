@@ -105,29 +105,45 @@ const step={
 };
 step.retried=0;
 
-// Instrumented chunk run: drain a seeded ledger with real advanceDiscovery calls (the resolver chunk path) and with the real Workflow
-// loop, recording every R2 write.
+// Instrumented runs: the direct chunk path and the Workflow loop are recorded SEPARATELY (the recorder is cleared between them), each run
+// must write and make progress on its own, and each receipt is classified on its own. One receipt must never carry the other.
 function workflowEnv(mode){return {...env,DISCOVERY_EXECUTOR:mode};}
-const seenKeys=new Set();
+let receipt=new Set();
 const realPut=bucket.put.bind(bucket);
-bucket.put=async(key,value,options)=>{seenKeys.add(key);return realPut(key,value,options);};
-if(typeof bucket.delete!=='function')bucket.delete=async key=>{seenKeys.add('delete:'+key);records.delete(key);};
+bucket.put=async(key,value,options)=>{receipt.add(key);return realPut(key,value,options);};
+if(typeof bucket.delete!=='function')bucket.delete=async key=>{receipt.add('delete:'+key);records.delete(key);};
 async function drainChunks(environment){let guard=0;while(guard++<8){const outcome=await call('advanceDiscovery')(environment,{});if(outcome.discovery.nextAction==='stop')break;}}
+const decidedCount=()=>Object.keys(records.get('epg/discovery-resolution.json')||{}).length;
 context.advanceDiscovery=realAdvance;
+
+// Receipt 1: the real resolver chunk (direct advanceDiscovery calls).
+receipt=new Set();
 seed({count:60});
 await drainChunks(workflowEnv('workflow'));
-assert.ok(seenKeys.size>0,'the run wrote to R2 (the recorder works)');
-assert.ok(Object.keys(records.get('epg/discovery-resolution.json')||{}).length>=24,'the chunk resolved decisions');
+const chunkReceipt=new Set(receipt);
+assert.ok(chunkReceipt.has('epg/discovery-resolution.json'),'the direct chunk wrote the decisions to R2 (the recorder works)');
+assert.ok(chunkReceipt.has('epg/discovery-status.json'),'the direct chunk wrote its status');
+assert.equal(decidedCount(),60,'the direct chunk made full progress');
+
+// Receipt 2: the real Workflow loop, from a cleared recorder and a freshly seeded ledger.
+receipt=new Set();
 seed({count:60});
+assert.equal(receipt.size,0,'the second recorder starts empty');
 Object.assign(env,workflowEnv('workflow'));
 elect();
 const drained=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
 assert.equal(drained.reason,'complete');
+const workflowReceipt=new Set(receipt);
+assert.ok(workflowReceipt.has('epg/discovery-resolution.json'),'the Workflow loop wrote the decisions on its own');
+assert.ok(workflowReceipt.has('epg/discovery-workflow.json'),'the Workflow loop wrote its own state');
+assert.equal(decidedCount(),60,'the Workflow loop made full progress');
 
-// Every written key is one the classification knows (the Discovery working set), and none is a projector input that is not Discovery's.
+// Each receipt is classified on its own: every key is one the classification knows, none is a non-Discovery projector input.
 const KNOWN=[/^epg\/discovery-resolution\.json$/,/^epg\/discovery-status\.json$/,/^epg\/discovery-score-preview\.json$/,/^epg\/discovered-films\.json$/,/^epg\/resolver-lease\.json$/,/^epg\/resolver-continuation\.json$/,/^epg\/resolver-continuation-diagnostics\.json$/,/^epg\/discovery-workflow\.json$/,/^epg\/discovery-observations\//,/^epg\/discovery-index\//,/^epg\/generations\/[^/]+\/discovered-films\.json$/,/^epg\/generations\/[^/]+\/programme\.json$/,/^programme\.json$/];
 const projectorInputs=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json','admin/owner-reviews.json'];
-const unknown=[...seenKeys].filter(key=>!KNOWN.some(re=>re.test(key)));
-assert.deepEqual(unknown,[],'R2 keys written by a chunk that the classification does not know: '+unknown.join(', '));
-for(const key of seenKeys)assert.equal(projectorInputs.includes(key.replace(/^delete:/,'')),false,'a chunk wrote the projector input '+key);
-console.log('Projector window R2 instrumented chunk run: '+seenKeys.size+' R2 keys written by the real chunk and Workflow loop ('+[...seenKeys].sort().join(', ')+'), all known, none a non-Discovery projector input');
+for(const [label,keys] of [['direct chunk',chunkReceipt],['Workflow loop',workflowReceipt]]){
+ const unknown=[...keys].filter(key=>!KNOWN.some(re=>re.test(key)));
+ assert.deepEqual(unknown,[],label+': R2 keys written that the classification does not know: '+unknown.join(', '));
+ for(const key of keys)assert.equal(projectorInputs.includes(key.replace(/^delete:/,'')),false,label+' wrote the projector input '+key);
+}
+console.log('Projector window R2 instrumented runs: direct chunk '+[...chunkReceipt].sort().join(', ')+'; Workflow loop '+[...workflowReceipt].sort().join(', ')+'; each receipt separate, known, and none a non-Discovery projector input');
