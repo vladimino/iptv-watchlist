@@ -46,7 +46,20 @@ The daily EPG publication is due at 17:00 Europe/Madrid, 16:00 UTC, the same ins
 
 **Activation precondition ([ADR 0103](../../adr/0103-projector-exclusive-window.md) decision 5).** Either the external Task can wait for `projector_window` up to the deadline (a Scheduled Task edit, its own owner decision), or an alternative EPG executor is fully proven to wait for it (the EPG executor of [ADR 0100](../../adr/0100-epg-cloudflare-workflow-executor.md) already sleeps to `nextCatchUpAt` without charging its budget, and is not yet the daily publisher). Nothing below replaces that precondition.
 
-**Clock-based ideas are optimizations, never the route.** A time-based skip of the window request around 16:00 UTC is allowed by the ADR only as an optimization and is rejected as the primary route: the external publication writes no D1 in-flight marker, a Task start can be delayed, and its seal can overlap any fixed interval. The owner proposes a different optimization, moving the shared cron from `:00` to `:10`. That is a separately authorized scheduling change (this pull request changes no cron). It also moves the Ratings and monitor ticks, the EPG `ensure` and the Discovery reconcile, not only the projector, and it shifts the clash instead of ruling it out: neither `:10` nor a time-based exclusion proves that a window and an EPG seal cannot overlap, because a delayed Task start, a long metadata phase or a retry can still reach the seal inside a window. Neither one removes the blocker, and neither is a substitute for the precondition above.
+**Clock-based ideas are optimizations, never the route.** A time-based skip of the window request around 16:00 UTC is allowed by the ADR only as an optimization and is rejected as the primary route: the external publication writes no D1 in-flight marker, a Task start can be delayed, and its seal can overlap any fixed interval. The owner's preferred optimization is to move the shared Worker cron from `0 * * * *` to `15 * * * *` (minute 15). It is a proposal for a separately authorized future schedule change, and this pull request changes no cron.
+
+Assessment of what a `:15` tick moves, from the repository (code and documentation search, not a run; the Controller has to repeat it against the live state when the change is authorized):
+
+| Job on the shared scheduled hook | Effect of `:15` |
+| --- | --- |
+| EPG `ensure` (logical due 17:00 Europe/Madrid, decided from the Madrid date) | The first tick after the due time moves from 17:00 to 17:15 Madrid, 15 minutes later |
+| Ratings `ensure` (logical due 17:30 in ADR 0090; ADR 0100 mentions moving it to 17:00) | With the due at 17:30 the first tick after it moves from 18:00 to 18:15 Madrid; with a due of 17:00 it moves to 17:15 |
+| Discovery reconcile and the projector | Both move by 15 minutes; the projector tick of the day moves from 16:00 to 16:15 UTC. The external daily Task nominally starts at 16:00 UTC and reaches its seal some minutes later (how many is not measured here), so a 16:15 tick may fall inside that run instead of before it |
+| Monitor | Runs on the same tick; no scheduling code keys on the minute of the hour (a search for `getUTCMinutes` and `getMinutes` in `src/` finds only two unrelated archive-date validators), but its thresholds and alert timing were not audited here |
+| Hourly ChatGPT Task (at :20 Europe/Madrid, external) | A window requested at `:15` expires at the latest at `:20` (300 s), the minute the Task starts, so the two are adjacent instead of far apart; the Task meets a `projector_window` busy only if the window runs to its deadline |
+| Documentation | The cron text and diagram on the scheduling page, ADR 0100 and ADR 0090 would need the new minute when the change is made |
+
+A `:15` shift lowers the likelihood of an overlap and does not prove its absence: a delayed Task start, a long metadata phase, a retry or an in-flight seal can still reach the seal inside a window. Neither `:15` nor a time-based exclusion removes the blocker or replaces the precondition above.
 
 ## 6. Still open before any activation
 
