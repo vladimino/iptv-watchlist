@@ -224,6 +224,99 @@ function openEventsScreen(trigger){
  $('#activity-title')?.focus?.({preventScroll:true});
 }
 function filmHref(id){return '/film/'+encodeURIComponent(String(id));}
+// AIR-387. One permanent URL per film: `/film/tmdb_<n>` for a TMDB movie, with the Letterboxd id kept as an alias that opens the same page.
+// A watchlist film gets the TMDB permalink only when its record proves a movie: `tmdbLink` resolved to a /movie/ page of the same number as `tmdbId`
+// (a TV page, an unresolved, contradictory or missing link, and a number held by two loaded films all keep the Letterboxd id, which always works).
+// Nothing is guessed from a title or a year, nothing is stored, and no identity, rating or prediction key changes.
+const FILM_TMDB_ROUTE=/^tmdb_([1-9]\d{0,11})$/,TMDB_ROUTE_ID=/^[1-9]\d{0,11}$/;
+function routeTmdb(id){const match=FILM_TMDB_ROUTE.exec(String(id??''));return match?match[1]:null;}
+function trustedMovieTmdb(film){
+ const id=film?.tmdbId==null?'':String(film.tmdbId),link=film?.tmdbLink;
+ if(!TMDB_ROUTE_ID.test(id)||link?.status!=='resolved'||link.link?.type!=='movie'||String(link.link.id)!==id)return null;
+ return id;
+}
+function programmeTmdbOwners(){
+ const owners=new Map();
+ for(const film of films||[]){const tmdb=trustedMovieTmdb(film);if(!tmdb)continue;if(!owners.has(tmdb))owners.set(tmdb,new Set());owners.get(tmdb).add(String(film.id));}
+ return owners;
+}
+function filmPermalinkId(film){
+ const id=String(film?.id??'');
+ if(!id||routeTmdb(id))return id;
+ const tmdb=trustedMovieTmdb(film);
+ return tmdb&&programmeTmdbOwners().get(tmdb)?.size===1?'tmdb_'+tmdb:id;
+}
+function filmPath(film){return filmHref(filmPermalinkId(film));}
+// The permanent catalog read for a TMDB route that no loaded source holds. A found film is cached for the session; absent, retired and
+// conflict are cached too, a transient failure is not (the next render asks again). A cached film on another generation than the loaded
+// programme is refreshed in the background while the old one stays on screen, so the page never blinks "not found" and never mixes two runs.
+const catalogFilmReads=new Map(),catalogPageCache=new WeakMap();
+function catalogPageFilm(entry){
+ let page=catalogPageCache.get(entry);
+ if(!page){page={...entry,catalogOnly:true,catalogRoute:true,genres:Array.isArray(entry.genres)?entry.genres:[],directors:entry.directors||[],actors:entry.actors||[],shows:Array.isArray(entry.shows)?entry.shows:[]};catalogPageCache.set(entry,page);}
+ return page;
+}
+async function ensureCatalogFilm(tmdb,{refresh=false}={}){
+ const known=catalogFilmReads.get(tmdb);
+ if(known?.state==='loading'||known&&!refresh&&known.state!=='unavailable'&&known.state!=='error')return;
+ const token=Symbol('catalog-film'),askedRun=report?.runId??null;
+ catalogFilmReads.set(tmdb,{...(known?.state==='found'?known:{}),state:known?.state==='found'?'found':'loading',token,refreshing:true,askedRun});
+ let next;
+ try{
+  const response=await fetch('/api/catalog/film/'+encodeURIComponent(tmdb),{headers:{Accept:'application/json'}});
+  let body=null;try{body=await response.json();}catch{}
+  const status=typeof body?.status==='string'?body.status:'';
+  if(response.ok&&status==='found'&&body.film&&String(body.film.tmdbId)===tmdb&&body.film.canonicalIdentity==='tmdb:'+tmdb)next={state:'found',film:body.film,programmeRunId:body.programmeRunId||null};
+  else if(response.status===404&&status==='absent')next={state:'absent'};
+  else if(response.status===410&&status==='retired')next={state:'retired'};
+  else if(response.status===409&&status==='conflict')next={state:'conflict'};
+  else if(response.status===503||status==='unavailable')next={state:'unavailable'};
+  else next={state:'error'};
+ }catch{next={state:'error'};}
+ if(catalogFilmReads.get(tmdb)?.token!==token)return;
+ // A failed refresh keeps the film already shown.
+ const previous=known?.state==='found'?known:null;
+ if(next.state==='unavailable'||next.state==='error'){
+  if(previous)catalogFilmReads.set(tmdb,{...previous,refreshing:false,token:null,askedRun});
+  else catalogFilmReads.set(tmdb,{state:next.state,token:null,transient:true,at:Date.now()});
+ }else catalogFilmReads.set(tmdb,{...next,token:null,askedRun});
+ if(filmScreen&&routeTmdb(filmScreen)===tmdb)renderFilmShell();
+}
+// What a film route shows: a loaded programme film (by its own id, or by its TMDB permalink when the record proves it), a catalog film the Finds
+// already hold, or the permanent catalog read. `status` is never "missing" while a source is still loading.
+function resolveFilm(routeId){
+ const id=String(routeId??'');
+ const own=(films||[]).find(item=>String(item.id)===id);
+ if(own)return {film:own,source:'programme',status:'ready'};
+ const tmdb=routeTmdb(id);
+ const settled=programmeReady||programmeRefreshError||(films||[]).length>0;
+ if(!tmdb)return {film:null,source:null,status:settled?'missing':'loading'};
+ const owners=programmeTmdbOwners().get(tmdb);
+ if(owners?.size>1)return {film:null,source:null,status:'conflict'};
+ if(owners?.size===1){const film=films.find(item=>String(item.id)===[...owners][0]);if(film)return {film,source:'programme',status:'ready',alias:true};}
+ const held=(findsSource.films||[]).find(item=>String(item.tmdbId)===tmdb&&item.canonicalIdentity==='tmdb:'+tmdb);
+ if(held&&findsFresh())return {film:catalogPageFilm(held),source:'catalog',status:'ready'};
+ const cached=catalogFilmReads.get(tmdb);
+ if(cached?.state==='found'){
+  const run=report?.runId??null;
+  // Asked once per loaded generation: an answer pinned to another run than the loaded programme is not asked for again until the programme moves.
+  if(run&&cached.programmeRunId&&cached.programmeRunId!==run&&cached.askedRun!==run&&!cached.refreshing&&settled)ensureCatalogFilm(tmdb,{refresh:true});
+  return {film:catalogPageFilm(cached.film),source:'catalog',status:'ready'};
+ }
+ if(cached?.transient){if(settled&&Date.now()-cached.at>15000)ensureCatalogFilm(tmdb);return {film:null,source:null,status:cached.state};}
+ if(cached&&cached.state!=='loading')return {film:null,source:null,status:cached.state};
+ if(!settled)return {film:null,source:null,status:'loading'};
+ ensureCatalogFilm(tmdb);
+ return {film:null,source:null,status:'loading'};
+}
+function currentFilm(){return filmScreen?resolveFilm(filmScreen).film:null;}
+// A film opened by its Letterboxd id whose record proves a TMDB movie is moved to the permalink in place: same entry, same `return`, no new history.
+function canonicalizeFilmUrl(film){
+ if(!film||film.catalogRoute||!filmScreen)return;
+ const permalink=filmPermalinkId(film);
+ if(permalink===String(filmScreen)||!routeTmdb(permalink)||filmIdFromLocation()!==String(filmScreen))return;
+ try{window.history.replaceState(window.history.state,'',ReturnHome.keep(filmHref(permalink),new URL(window.location.href).search));filmScreen=permalink;}catch{}
+}
 function filmOpener(id){
  if(!id||typeof document.querySelector!=='function')return null;
  return document.querySelector(`a.film-open[data-film-id="${String(id).replace(/"/g,'')}"]`);
@@ -248,13 +341,25 @@ function showHome(target){
  if(leavingFilm)focusFilmReturn(returnId);
  else if(sameList)(eventsTrigger||$('#activity-expand'))?.focus?.({preventScroll:true});
 }
+const FILM_STATUS_TEXT={
+ loading:['Фильм','Загружаем фильм…'],
+ missing:['Фильм не найден','В загруженной программе нет фильма с этим идентификатором.'],
+ absent:['Фильм не найден','В каталоге нет проверенного фильма с этим идентификатором TMDB.'],
+ retired:['Запись каталога снята','Эта запись каталога заменена и больше не действует.'],
+ conflict:['Идентичность фильма не подтверждена','Для этого идентификатора в данных есть конфликт, поэтому фильм не показан.'],
+ unavailable:['Каталог сейчас недоступен','Не удалось прочитать каталог. Обнови страницу чуть позже.'],
+ error:['Не удалось загрузить фильм','Каталог ответил ошибкой. Обнови страницу чуть позже.']
+};
 function renderFilmShell(){
- const id=filmScreen,film=id?films.find(item=>String(item.id)===id):null,screen=$('#film-screen');
- if(screen)screen.dataset.filmId=id||'';
+ const id=filmScreen,screen=$('#film-screen');
+ const resolved=id?resolveFilm(id):{film:null,source:null,status:'missing'},film=resolved.film;
+ if(film&&resolved.source==='programme')canonicalizeFilmUrl(film);
+ if(screen)screen.dataset.filmId=filmScreen||'';
  const title=$('#film-screen-title'),identity=$('#film-screen-identity'),status=$('#film-screen-status');
- if(title)title.textContent=film?film.title:'Фильм не найден';
- if(identity)identity.textContent=id||'';
- if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?'В загруженной программе нет фильма с этим идентификатором.':'';
+ const text=FILM_STATUS_TEXT[resolved.status]||FILM_STATUS_TEXT.missing;
+ if(title)title.textContent=film?film.title:id?text[0]:'Фильм не найден';
+ if(identity)identity.textContent=filmScreen||'';
+ if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?text[1]:'';
  fillFilmPage(film);
 }
 function applyFilmScreen(id){
@@ -640,7 +745,7 @@ function startedButton(film,labeled=false){
 }
 function progressError(message){const text=$('#progress-error-text'),box=$('#progress-error');if(text)text.textContent=message;if(box)box.hidden=!message;const film=$('#film-screen-progress');if(film){film.textContent=message;film.hidden=!message;}}
 async function loadStarted(options={}){if(startedLoading||savingStarted.size)return 'busy';startedLoading=true;try{const r=await fetch('/api/started');if(!r.ok)throw new Error();const data=await r.json();if(!Array.isArray(data.ids))throw new Error();const next=new Set(data.ids.map(String)),wasReady=startedReady,same=next.size===startedIds.size&&[...next].every(id=>startedIds.has(id));startedIds=next;startedReady=true;$('#started-only').disabled=false;progressError('');if(!same||!wasReady)renderPreservingScroll();return true;}catch{if(!options.quiet)progressError('Не удалось загрузить отметки просмотра. Повтори попытку.');return false;}finally{startedLoading=false;}}
-function refreshFilmStarted(id){if(!filmScreen||String(filmScreen)!==String(id))return;const film=films.find(item=>String(item.id)===String(id)),actions=$('#film-screen-actions');if(!film||!actions)return;actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;const button=document.querySelector(`#film-screen [data-started-id="${String(id).replace(/"/g,'')}"]`);button?.focus?.({preventScroll:true});}
+function refreshFilmStarted(id){const film=currentFilm(),actions=$('#film-screen-actions');if(!filmScreen||!film||film.catalogRoute||String(film.id)!==String(id))return;if(!film||!actions)return;actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;const button=document.querySelector(`#film-screen [data-started-id="${String(id).replace(/"/g,'')}"]`);button?.focus?.({preventScroll:true});}
 async function toggleStarted(id){if(!startedReady||startedLoading||savingStarted.has(id))return;const next=!startedIds.has(id);savingStarted.add(id);progressError('');render();refreshFilmStarted(id);try{const r=await fetch('/api/started',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,started:next})});if(!r.ok)throw new Error();const data=await r.json();if(data.id!==id||data.started!==next)throw new Error();next?startedIds.add(id):startedIds.delete(id);loadEvents();}catch{progressError('Не удалось сохранить отметку. Нажми на глаз ещё раз, чтобы повторить.');}finally{savingStarted.delete(id);render();refreshFilmStarted(id);}}
 function confidenceText(value){return {low:'низкая',medium:'средняя',high:'высокая'}[value]||'';}
 // Optional evidence assessment. Absent on every live DTO today, so the forecast line stays the model
@@ -686,13 +791,15 @@ function filmWhy(prediction){if(!prediction||!Number.isFinite(prediction.predict
 function setFilmHtml(id,html){const node=$('#'+id);if(node)node.innerHTML=html;}
 function availableShows(film,now=viewingClock()){const model=viewingWindow(now);return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show))).sort((a,b)=>a.start-b.start||String(a.channel||'').localeCompare(String(b.channel||''),'ru'));}
 function nearestAvailable(shows,now){const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now),upcoming=shows.find(show=>show.start>now);if(live&&upcoming)return {show:live,also:upcoming,label:'Сейчас в эфире',nextLabel:'Следующий показ'};if(live)return {show:live,label:'Сейчас в эфире'};if(upcoming)return {show:upcoming,label:'Ближайший показ'};return shows.length?{show:shows[shows.length-1],label:'Последний доступный показ'}:null;}
-function filmScore(film){const item=enrichment.films?.[String(film.id)]||{},actual=item.actualRating,prediction=item.prediction;const rating=actual!==null&&actual!==undefined&&Number.isFinite(Number(actual))?`<article class="film-score-card"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></article>`:`<article class="film-score-card is-empty"><span>Оценка Letterboxd</span><p class="film-missing">Оценка Letterboxd не сохранена</p></article>`;const forecast=prediction&&Number.isFinite(prediction.predictedRating)?(()=>{const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence),assessed=evidenceConfidenceHtml(prediction.confidenceAssessment,prediction.fingerprintHash),model=confidence?(assessed?`уверенность модели ${escapeHTML(confidence)}`:`уверенность ${escapeHTML(confidence)}`):'';return `<article class="film-score-card"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong><p>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${model?`<span>${model}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>${assessed}</article>`;})():'<article class="film-score-card is-empty"><span>Прогноз</span><p class="film-missing">Прогноз ещё не готов</p></article>';return `<section class="film-score" aria-label="Оценка и прогноз"><div class="film-score-row">${forecast}${rating}</div>${filmWhy(prediction)}</section>`;}
+// A catalog page carries its own current prediction and fingerprint (null when none is current); a watchlist film reads the view index.
+function filmItem(film){return film?.catalogRoute?{prediction:film.prediction||undefined,fingerprint:film.fingerprint||undefined,moodIds:film.fingerprint?.moodIds}:(enrichment.films?.[String(film.id)]||{});}
+function filmScore(film){const item=filmItem(film),actual=item.actualRating,prediction=item.prediction;const rating=actual!==null&&actual!==undefined&&Number.isFinite(Number(actual))?`<article class="film-score-card"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></article>`:`<article class="film-score-card is-empty"><span>Оценка Letterboxd</span><p class="film-missing">Оценка Letterboxd не сохранена</p></article>`;const forecast=prediction&&Number.isFinite(prediction.predictedRating)?(()=>{const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence),assessed=evidenceConfidenceHtml(prediction.confidenceAssessment,prediction.fingerprintHash),model=confidence?(assessed?`уверенность модели ${escapeHTML(confidence)}`:`уверенность ${escapeHTML(confidence)}`):'';return `<article class="film-score-card"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong><p>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${model?`<span>${model}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>${assessed}</article>`;})():'<article class="film-score-card is-empty"><span>Прогноз</span><p class="film-missing">Прогноз ещё не готов</p></article>';return `<section class="film-score" aria-label="Оценка и прогноз"><div class="film-score-row">${forecast}${film.catalogRoute?'':rating}</div>${filmWhy(prediction)}</section>`;}
 function filmSynopsis(film){const text=String(film.synopsis||'').trim();return `<section class="film-section"><h2>Синопсис</h2>${text?`<p class="film-page-synopsis">${escapeHTML(text)}</p>`:'<p class="film-missing">Синопсис не сохранён</p>'}</section>`;}
 function filmPeople(label,people,key){if(!people?.length)return '';return `<div class="film-people-row"><h3>${label}</h3><div class="film-people">${creditLinks(people,key)}</div></div>`;}
 function filmCredits(film){const directors=filmPeople(film.directors?.length>1?'Режиссёры':'Режиссёр',film.directors,'directors'),actors=filmPeople('В ролях',film.actors,'actors');return `<section class="film-section"><h2>Люди</h2>${directors||actors?directors+actors:'<p class="film-missing">Режиссёр и актёры не указаны</p>'}</section>`;}
 function knownFacetIds(values,labels){const seen=new Set(),out=[];for(const value of values||[]){if(typeof value!=='string'||!Object.hasOwn(labels,value)||seen.has(value))continue;seen.add(value);out.push(value);}return out;}
 function filmFacetChip(kind,value,label,dimension){return `<button type="button" class="film-chip" data-facet-kind="${kind}" data-facet-value="${escapeHTML(value)}"${dimension?` data-facet-dimension="${escapeHTML(dimension)}"`:''}>${escapeHTML(label)}</button>`;}
-function filmFingerprint(film){const item=enrichment.films?.[String(film.id)]||{},fingerprint=item.fingerprint&&typeof item.fingerprint==='object'?item.fingerprint:null,mechanics=knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods=knownFacetIds(fingerprint?.moodIds||item.moodIds,MOOD_LABELS),stored=fingerprint?.execution&&typeof fingerprint.execution==='object'?fingerprint.execution:{},execution=EXECUTION_FILTERS.flatMap(dimension=>{const value=stored[dimension.id];if(value==='unknown'||value==='not_applicable')return [];const label=EXECUTION_VALUES[dimension.id]?.[value];return label?[{id:dimension.id,name:dimension.label,value,label}]:[];});if(!mechanics.length&&!moods.length&&!execution.length)return `<section class="film-section film-fingerprint" aria-label="Характеристики"><h2>Характеристики</h2><p class="film-missing">Характеристики не сохранены</p></section>`;const row=(title,html)=>`<div class="film-facet-row"><h3>${title}</h3><div class="film-chips">${html}</div></div>`;return `<section class="film-section film-fingerprint" aria-label="Характеристики"><h2>Характеристики</h2>${mechanics.length?row('Механика',mechanics.map(id=>filmFacetChip('mechanics',id,MECHANIC_LABELS[id])).join('')):''}${moods.length?row('Настроение',moods.map(id=>filmFacetChip('moods',id,moodLabel(id))).join('')):''}${execution.length?`<div class="film-execution">${execution.map(item=>`<div class="film-execution-item"><h3>${escapeHTML(item.name)}</h3>${filmFacetChip('execution',item.value,item.label,item.id)}</div>`).join('')}</div>`:''}</section>`;}
+function filmFingerprint(film){const item=filmItem(film),fingerprint=item.fingerprint&&typeof item.fingerprint==='object'?item.fingerprint:null,mechanics=knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods=knownFacetIds(fingerprint?.moodIds||item.moodIds,MOOD_LABELS),stored=fingerprint?.execution&&typeof fingerprint.execution==='object'?fingerprint.execution:{},execution=EXECUTION_FILTERS.flatMap(dimension=>{const value=stored[dimension.id];if(value==='unknown'||value==='not_applicable')return [];const label=EXECUTION_VALUES[dimension.id]?.[value];return label?[{id:dimension.id,name:dimension.label,value,label}]:[];});if(!mechanics.length&&!moods.length&&!execution.length)return `<section class="film-section film-fingerprint" aria-label="Характеристики"><h2>Характеристики</h2><p class="film-missing">Характеристики не сохранены</p></section>`;const row=(title,html)=>`<div class="film-facet-row"><h3>${title}</h3><div class="film-chips">${html}</div></div>`;return `<section class="film-section film-fingerprint" aria-label="Характеристики"><h2>Характеристики</h2>${mechanics.length?row('Механика',mechanics.map(id=>filmFacetChip('mechanics',id,MECHANIC_LABELS[id])).join('')):''}${moods.length?row('Настроение',moods.map(id=>filmFacetChip('moods',id,moodLabel(id))).join('')):''}${execution.length?`<div class="film-execution">${execution.map(item=>`<div class="film-execution-item"><h3>${escapeHTML(item.name)}</h3>${filmFacetChip('execution',item.value,item.label,item.id)}</div>`).join('')}</div>`:''}</section>`;}
 function selectFacet(kind,value,dimension){if(kind==='mechanics'){if(!Object.hasOwn(MECHANIC_LABELS,value))return;state.mechanics.add(value);}else if(kind==='moods'){if(!Object.hasOwn(MOOD_LABELS,value))return;state.moods.add(value);}else if(kind==='execution'){if(!dimension||!Object.hasOwn(EXECUTION_VALUES,dimension)||!Object.hasOwn(EXECUTION_VALUES[dimension],value))return;state.execution[dimension].add(value);}else return;render();}
 function storedComparable(film){const item=enrichment.films?.[String(film?.id)]||{},fingerprint=item.fingerprint&&typeof item.fingerprint==='object'?item.fingerprint:null,mechanics=knownFacetIds(fingerprint?.plotMechanics,MECHANIC_LABELS),moods=knownFacetIds(fingerprint?.moodIds||item.moodIds,MOOD_LABELS),stored=fingerprint?.execution&&typeof fingerprint.execution==='object'?fingerprint.execution:{},execution=new Map();for(const dimension of EXECUTION_FILTERS){const value=stored[dimension.id];if(!value||value==='unknown'||value==='not_applicable'||!EXECUTION_VALUES[dimension.id]?.[value])continue;execution.set(dimension.id,value);}return {mechanics,moods,execution,empty:!mechanics.length&&!moods.length&&!execution.size};}
 function filmCompareLabel(film){const title=normalizeTitle(film.title||'');const ambiguous=films.some(other=>String(other.id)!==String(film.id)&&normalizeTitle(other.title||'')===title);return `${film.title||'Фильм'}${film.year?` · ${film.year}`:''}${ambiguous?` · ${film.id}`:''}`;}
@@ -821,7 +928,7 @@ function filmHistorySection(film){
  if(filmHistory.status==='error')return `<section class="film-section film-history" aria-label="История">${head}<p class="film-missing" role="alert">${filmHistory.error===409?'История менялась во время чтения.':filmHistory.error===400||filmHistory.error===404?'История для этого фильма недоступна.':'Не удалось загрузить историю.'}</p><button type="button" class="history-action" data-history-action="open">Повторить</button></section>`;
  return `<section class="film-section film-history" aria-label="История">${head}${filmHistoryBody()}<button type="button" class="history-action" data-history-action="close">Скрыть историю</button></section>`;
 }
-function renderFilmHistory(){const film=filmScreen?films.find(item=>String(item.id)===String(filmScreen)):null;if(film)setFilmHtml('film-screen-history',filmHistorySection(film));}
+function renderFilmHistory(){const film=currentFilm();if(film)setFilmHtml('film-screen-history',filmHistorySection(film));}
 // Reads every page of one consistent version: a 409 (the history changed between pages) restarts from the first page
 // and never mixes two versions. Events are kept once per identity. A newer request or another film discards this one.
 async function loadFilmHistory(filmId){
@@ -849,14 +956,14 @@ async function loadFilmHistory(filmId){
  }catch(error){if(token!==filmHistory.token)return;filmHistory={...filmHistory,status:'error',events:[],data:null,error:error?.status??null};}
  renderFilmHistory();
  // The pressed button is gone: keep keyboard focus in the section, on its heading.
- if(String(filmScreen)===String(filmId))$('#film-screen-history h2')?.focus?.({preventScroll:true});
+ if(String(currentFilm()?.id??'')===String(filmId))$('#film-screen-history h2')?.focus?.({preventScroll:true});
 }
 function filmHistoryAction(action){
  if(!filmScreen)return;
- if(action==='open')return loadFilmHistory(String(filmScreen));
+ if(action==='open'){const film=currentFilm();return film?loadFilmHistory(String(film.id)):undefined;}
  if(action==='close'){filmHistory={...filmHistory,token:filmHistory.token+1,status:'idle',events:[],data:null};renderFilmHistory();$('#film-screen-history [data-history-action]')?.focus?.({preventScroll:true});}
 }
-function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability','film-similar-cards'])setFilmHtml(id,'');const similar=$('#film-similar');if(similar)similar.hidden=true;similarMarkup='';if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');if(actions)actions.innerHTML=`${letterboxdLink(film)}${startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));renderSimilar();}
+function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability','film-similar-cards'])setFilmHtml(id,'');const similar=$('#film-similar');if(similar)similar.hidden=true;similarMarkup='';{const compare=$('#film-compare');if(compare)compare.hidden=false;}if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');const catalogRoute=!!film.catalogRoute,compare=$('#film-compare');if(compare)compare.hidden=catalogRoute;if(actions)actions.innerHTML=`${letterboxdLink(film,{catalog:catalogRoute})}${catalogRoute?'':startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',catalogRoute?'':filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',catalogRoute?'':filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));renderSimilar();}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
 function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;render();if(onFilm)input?.focus?.({preventScroll:true});}
@@ -905,7 +1012,7 @@ function lastChanceBadge(film){
 }
 function card(film){
  const item=enrichment.films[String(film.id)]||{},hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
- return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3><a class="film-open" href="${filmHref(film.id)}" data-film-id="${escapeHTML(film.id)}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
+ return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
 }
 function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
 
@@ -1274,7 +1381,8 @@ function similarTake(sorted,limit,state){
 }
 function buildSimilar(source,now=nowMs()){
  if(!source)return [];
- const origin=similarWatchlistView(source),people={directors:similarCreditIds(source.directors),actors:similarCreditIds(source.actors)};
+// A catalog page ranks from its own prediction and fingerprint, a watchlist film from the view index.
+ const origin=source.catalogRoute?similarCatalogView(source):similarWatchlistView(source),people={directors:similarCreditIds(source.directors),actors:similarCreditIds(source.actors)};
  const watchlist=[],catalog=[];
  const consider=(film,view,sourceName)=>{
   if(!film||similarSameFilm(source,film))return;
@@ -1324,7 +1432,9 @@ function similarConsumedTmdb(){
 }
 function similarCatalogBlocked(film,consumed){if(similarRewatch(similarViewItem(film.id)))return true;const verified=similarVerifiedIdentity(film);return !!verified&&consumed.has(verified.slice(5));}
 function similarBadge(kind){if(kind==='new')return '<span class="film-similar-badge is-new" title="Фильм вне watchlist, не новинка проката">NEW</span>';if(kind==='rewatch')return '<span class="film-similar-badge is-rewatch">Пересмотр</span>';return '<span class="film-similar-badge">В watchlist</span>';}
-function similarTitle(film){const title=film.title||film.original||'Фильм',local=(films||[]).some(item=>String(item.id)===String(film.id));if(local)return `<button type="button" class="film-similar-open" data-similar-open="${escapeHTML(String(film.id))}">${escapeHTML(title)}</button>`;return escapeHTML(title);}
+// A title opens the internal film page: a loaded film by its permalink (its own id when no TMDB movie is proven), a catalog-only film by `tmdb_<n>`
+// when its identity is verified. Anything else stays plain text. Never a jump to TMDB.
+function similarTitle(film){const title=film.title||film.original||'Фильм',loaded=(films||[]).find(item=>String(item.id)===String(film.id)),verified=similarVerifiedIdentity(film),target=loaded?filmPermalinkId(loaded):verified?'tmdb_'+film.tmdbId:null;if(target)return `<button type="button" class="film-similar-open" data-similar-open="${escapeHTML(target)}">${escapeHTML(title)}</button>`;return escapeHTML(title);}
 function similarPoster(film){const name=film.original||film.title||'';if(typeof film.poster==='string'&&film.poster)return `<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(name)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`;return `<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;}
 function similarScoreBadges(row){
  const item=similarViewItem(row.film.id),raw=item?.actualRating,actual=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Number(raw):null,prediction=row.prediction;
@@ -1346,7 +1456,7 @@ function similarCard(row,now){
 let similarMarkup='';
 function similarFocusTarget(node){const card=node?.closest?.('.film-similar-card');if(!card)return null;if(node.dataset?.similarOpen)return {kind:'open',id:node.dataset.similarOpen};return null;}
 function similarRestoreFocus(cards,target){if(!target||typeof cards.querySelectorAll!=='function')return;const next=target.kind==='open'?[...cards.querySelectorAll('[data-similar-open]')].find(node=>node.dataset.similarOpen===target.id):null;next?.focus?.();}
-function renderSimilar(now=nowMs()){const section=$('#film-similar');if(!section)return [];const film=filmScreen?films.find(item=>String(item.id)===String(filmScreen)):null,picks=film?buildSimilar(film,now):[];section.hidden=picks.length===0;const cards=$('#film-similar-cards');if(cards){const html=picks.map(row=>similarCard(row,now)).join('');if(similarMarkup!==html){const active=document.activeElement,target=active&&cards.contains?.(active)?similarFocusTarget(active):null;cards.innerHTML=html;similarMarkup=html;if(target)similarRestoreFocus(cards,target);}}return picks;}
+function renderSimilar(now=nowMs()){const section=$('#film-similar');if(!section)return [];const film=currentFilm(),picks=film?buildSimilar(film,now):[];section.hidden=picks.length===0;const cards=$('#film-similar-cards');if(cards){const html=picks.map(row=>similarCard(row,now)).join('');if(similarMarkup!==html){const active=document.activeElement,target=active&&cards.contains?.(active)?similarFocusTarget(active):null;cards.innerHTML=html;similarMarkup=html;if(target)similarRestoreFocus(cards,target);}}return picks;}
 function findsLabels(film){
  const mechanics=(film.fingerprint?.plotMechanics||[]).filter(id=>MECHANIC_LABELS[id]).map(id=>MECHANIC_LABELS[id]);
  const moods=[...new Set([...(film.prediction?.moodIds||[]),...(film.fingerprint?.moodIds||[])])].filter(id=>MOOD_LABELS[id]).map(moodLabel);
@@ -1357,7 +1467,7 @@ function findsMatchText(film,context){const matched=findsMatched(film,context);c
 function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
  const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),match=findsMatchText(film,context),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
- const title=escapeHTML(film.title||film.original||'');
+ const label=escapeHTML(film.title||film.original||''),verifiedId=similarVerifiedIdentity(film)?'tmdb_'+film.tmdbId:null,title=verifiedId?`<a class="film-open" href="${filmHref(verifiedId)}" data-film-id="${escapeHTML(verifiedId)}">${label}</a>`:label;
  return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
 }
 function findsMarkAction(film){
@@ -1406,6 +1516,8 @@ async function undoFindWatched(tmdbId){
  (document.querySelector(`[data-finds-watched="${tmdbId}"]`)||$('#finds-notice [data-finds-undo]'))?.focus();
 }
 function onFindsClick(event){
+ const opener=event.target.closest?.('a.film-open');
+ if(opener){if(!plainFilmActivation(event))return;event.preventDefault?.();openFilm(opener.dataset?.filmId||filmIdFromLocation(opener.href||''));return;}
  const mark=event.target.closest('[data-finds-watched]');if(mark&&!mark.disabled){markFindWatched(mark.dataset.findsWatched);return;}
  const undo=event.target.closest('[data-finds-undo]');if(undo&&!undo.disabled)undoFindWatched(undo.dataset.findsUndo);
 }
@@ -1722,6 +1834,7 @@ function bindControls(){
  const refreshFilmLink=event=>{const link=event.target.closest?.('a.film-open');if(!link||!onHomeScreen())return;const id=link.dataset?.filmId;if(id)link.setAttribute('href',ReturnHome.withReturn(filmHref(id),homeTarget()));};
  for(const type of ['pointerdown','focusin','contextmenu'])$('#movies').addEventListener(type,refreshFilmLink);
  $('#movies').addEventListener('click',onMovieClick);
+ for(const type of ['pointerdown','focusin','contextmenu'])$('#finds')?.addEventListener(type,refreshFilmLink);
  $('#finds')?.addEventListener('click',onFindsClick);
  $('#film-screen')?.addEventListener('click',onMovieClick);
  document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.addEventListener('click',()=>{state.shortlistMode=button.dataset.shortlistMode;render();}));
@@ -2023,7 +2136,7 @@ function initFilmCompare(){
  const input=$('#film-compare-input'),list=$('#film-compare-options'),clear=$('#film-compare-clear'),root=$('#film-compare-combo');
  if(!input||!list||!clear||!root||typeof input.addEventListener!=='function')return;
  let matches=[],active=-1;
- const showResult=()=>{const current=films.find(item=>String(item.id)===String(filmScreen));if(current)setFilmHtml('film-compare-result',filmCompare(current));};
+ const showResult=()=>{const current=currentFilm();if(current)setFilmHtml('film-compare-result',filmCompare(current));};
  const close=()=>{list.hidden=true;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');active=-1;};
  const open=()=>{const q=normalizeTitle(input.value);const pool=q?films.filter(film=>[film.title,film.original].some(name=>normalizeTitle(name||'').includes(q))):[];matches=pool.slice(0,12);active=-1;const more=pool.length>matches.length;list.innerHTML=matches.length?matches.map((film,i)=>`<li role="option" id="film-compare-option-${i}" data-index="${i}" aria-selected="${String(film.id)===String(filmCompareId)}">${escapeHTML(filmCompareLabel(film))}</li>`).join('')+(more?'<li class="no-options" role="presentation">Уточни название</li>':''):(q?'<li class="no-options" role="presentation">Нет совпадений</li>':'<li class="no-options" role="presentation">Начни вводить название</li>');list.hidden=false;input.setAttribute('aria-expanded','true');input.removeAttribute('aria-activedescendant');};
  const choose=i=>{const film=matches[i];if(!film)return;filmCompareId=String(film.id);input.value=filmCompareLabel(film);close();showResult();};
