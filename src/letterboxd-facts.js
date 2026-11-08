@@ -198,7 +198,7 @@ function recordRatingChange(record,incoming,effective){
  }
 
  // Writes observations into one record. A redirected record is followed once; a fenced one sends the write to its target.
- async function recordObservations(env,factKey,links,observations,{floors={}}={}){
+ async function recordObservations(env,factKey,links,observations,{floors={},identity=null}={}){
   let key=factKey;
   for(let hop=0;hop<2;hop++){
    const {value}=await readJSON(env,recordKey(key));
@@ -211,7 +211,12 @@ function recordRatingChange(record,incoming,effective){
   const {value:record}=await casJSON(env,recordKey(key),emptyRecord(key,links),current=>{
    if(current.redirectTo||current.migrating)throw new FactsError('write_contention','Record started a migration during write');
    outcomes.length=0;let changed=false;
+   // An inferred identity (AIR-388, ADR 0104) is recorded on the record that first receives the Letterboxd id: a fresh record, or an
+   // existing one that had no Letterboxd id. A record that already holds facts and a Letterboxd id keeps whatever it had, so a
+   // verified record is never relabelled, and a replay (the identity is already there) changes nothing.
+   const untouched=!current.watched&&!current.rating&&!current.watchlist,letterboxdMissing=current.links.letterboxd==null;
    for(const [k,v] of Object.entries(links||{}))if(v!=null&&current.links[k]==null){current.links[k]=String(v);changed=true;}
+   if(identity&&!current.identity&&(untouched||letterboxdMissing)){current.identity={kind:identity.kind,basis:identity.basis,sourceRef:identity.sourceRef};changed=true;}
    for(const {fact,observation:incoming} of observations){const result=applyObservation(current,fact,incoming,{floor:floors[fact]||null});outcomes.push({fact,...result});if(result.outcome==='new'||result.outcome==='replaces')changed=true;}
    return changed?current:null;
   });
@@ -455,6 +460,8 @@ function recordRatingChange(record,incoming,effective){
    if(!item||!LID.test(String(item.lid||'')))fail('Invalid Letterboxd id');
    if(lids.has(item.lid))fail('A film appears twice in one chunk');lids.add(item.lid);
    if(item.tmdb!=null&&!TMDB.test(String(item.tmdb)))fail('Invalid TMDB id');
+   if(item.identity!==undefined&&item.identity!=='inferred')fail('Invalid identity kind');
+   if(item.identity==='inferred'&&item.tmdb==null)fail('An inferred identity needs a TMDB id');
    const facts=item.facts||{},keys=Object.keys(facts);
    if(!keys.length||keys.some(key=>!FACT_NAMES.includes(key)))fail('Unknown or missing facts');
    if('watched' in facts&&facts.watched!==true)fail('An export can only show watched: true');
@@ -462,7 +469,8 @@ function recordRatingChange(record,incoming,effective){
    if('rating' in facts&&!validValue('rating',facts.rating))fail('Invalid rating');
    if('rating' in facts&&facts.watched!==true)fail('A rating or "not rated" row is also watched');
    const effectiveOn={};for(const [fact,day] of Object.entries(item.effectiveOn||{})){if(!FACT_NAMES.includes(fact)||!DAY.test(String(day)))fail('Invalid effectiveOn');effectiveOn[fact]=day;}
-   return {lid:String(item.lid),tmdb:item.tmdb!=null?String(item.tmdb):null,facts,effectiveOn};
+   // A verified item keeps the exact shape (and chunk hash) it always had; only an inferred one carries its kind.
+   return {lid:String(item.lid),tmdb:item.tmdb!=null?String(item.tmdb):null,facts,effectiveOn,...(item.identity==='inferred'?{identity:'inferred'}:{})};
   });
   return {origin,chunk:body.chunk,items};
  }
@@ -516,9 +524,9 @@ function recordRatingChange(record,incoming,effective){
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb},factKey=await linkOrNote(env,links);
    if(!factKey){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
-   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey)});
+   const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null});
    tally(counts,result.outcomes);records.push(result.record);
-   films.push({lid:item.lid,factKey:result.factKey,observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
+   films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});
   }
   await projectRecords(env,records);
   // Read back: every fact this import made current is still current, or a greater observation replaced it.

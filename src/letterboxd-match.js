@@ -2,10 +2,17 @@
 // Pure: it receives already loaded objects and returns match records; no storage, network or clock.
 // Identity follows ADR-0009: only a stored Letterboxd id or a trusted TMDB identity can accept a match. Equality of the export
 // code with a stored id is accepted only when the stored title and year corroborate it, because code = LID is a hypothesis this
-// tool measures, not a proven contract. A title and year agreement is never accepted: no stored signal independently proves
+// tool measures, not a proven contract. A title and year agreement is never `accepted`: no stored signal independently proves
 // that the export row and the stored film are the same Letterboxd film, so it stays a candidate for manual review.
+// AIR-388 (ADR 0104) adds one owner-approved exception that never changes `accepted`: with {inferred:true}, one normalized ORIGINAL
+// title plus the same year that leads to exactly one stored TMDB movie, with no competing or contradicting link, is `inferred`
+// (a pragmatic identity, recorded as such, never reported as verified). Everything else stays a candidate with a review reason.
 export const METHODS=Object.freeze(['lid_exact','tmdb_verified','title_year']);
 export const STATUSES=Object.freeze(['accepted','provisional','candidate','ambiguous','conflict','unmatched']);
+// Kept apart from the two lists above so that every report built from them keeps its exact keys until the policy is asked for.
+export const INFERRED_STATUS='inferred',INFERRED_METHOD='title_year_unique';
+// Candidate reasons that only the inferred policy produces; each one is a compact owner-review bucket.
+export const REVIEW_REASONS=Object.freeze(['year_drift','alias_title_only','no_tmdb_id','tmdb_linked_elsewhere','tmdb_duplicate_in_export','tmdb_already_accepted']);
 export const normTitle=value=>String(value??'').normalize('NFKC').toLowerCase().replace(/ё/g,'е').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
 const LID=/^[A-Za-z0-9_-]{1,40}$/;
 const isLid=id=>LID.test(id)&&!id.startsWith('tmdb_');
@@ -18,10 +25,11 @@ const sortedStrings=values=>[...values].map(String).sort();
 // snapshot: {watchlist, programme, metadata, catalog, viewIndex, ratings} where ratings is a published ratings generation.
 export function buildIndex(snapshot={}){
  const targets=new Map(),titles=new Map(),catalogByTmdb=new Map();
- const target=(key,init)=>{let entry=targets.get(key);if(!entry)targets.set(key,entry={key,...init,sources:new Set(),tmdbIds:new Set(),titles:new Set(),years:new Set(),ratings:new Set()});return entry;};
+ const target=(key,init)=>{let entry=targets.get(key);if(!entry)targets.set(key,entry={key,...init,sources:new Set(),tmdbIds:new Set(),titles:new Set(),originals:new Set(),years:new Set(),ratings:new Set()});return entry;};
  const describe=(entry,film)=>{
   const tmdbId=tmdbOf(film?.tmdbId);if(tmdbId)entry.tmdbIds.add(tmdbId);
   const year=yearOf(film?.year);if(year)entry.years.add(year);
+  const original=normTitle(film?.original);if(original)entry.originals.add(original);
   for(const title of [film?.title,film?.original,film?.titleRu,...(Array.isArray(film?.aliases)?film.aliases:[])]){const key=normTitle(title);if(!key)continue;entry.titles.add(key);if(!titles.has(key))titles.set(key,new Set());titles.get(key).add(entry.key);}
  };
  const lidFilm=(source,film,id=film?.id)=>{const lid=String(id??'');if(!isLid(lid))return null;const entry=target('lid:'+lid,{kind:'lid',id:lid});entry.sources.add(source);if(film)describe(entry,film);return entry;};
@@ -40,8 +48,16 @@ export function buildIndex(snapshot={}){
   const rating=ratingOf(snapshot.viewIndex?.[id]?.actualRating);if(rating)entry.ratings.add(rating);
   if(!catalogByTmdb.has(tmdbId))catalogByTmdb.set(tmdbId,new Set());catalogByTmdb.get(tmdbId).add(id);
  }
+ // Stored Letterboxd-to-TMDB links (letterboxd/facts/links.json: alias -> record key). Optional; when absent the inferred policy
+ // cannot see a contradicting link, and the commit-time alias conflict check stays the authority.
+ const linkedLids=new Map(),linkedTmdb=new Map();
+ if(snapshot.factLinks&&typeof snapshot.factLinks==='object'&&!Array.isArray(snapshot.factLinks)){
+  const byRecord=new Map();
+  for(const [alias,record] of Object.entries(snapshot.factLinks)){const [kind,id]=alias.split(':');if(!id||(kind!=='letterboxd'&&kind!=='tmdb'))continue;if(!byRecord.has(record))byRecord.set(record,{lids:new Set(),tmdb:new Set()});byRecord.get(record)[kind==='tmdb'?'tmdb':'lids'].add(id);}
+  for(const {lids,tmdb} of byRecord.values())for(const t of tmdb){if(!linkedLids.has(t))linkedLids.set(t,new Set());for(const l of lids){linkedLids.get(t).add(l);if(!linkedTmdb.has(l))linkedTmdb.set(l,new Set());linkedTmdb.get(l).add(t);}}
+ }
  const lids=[...targets.values()].filter(entry=>entry.kind==='lid');
- return {targets,titles,catalogByTmdb,summary:{
+ return {targets,titles,catalogByTmdb,linkedLids,linkedTmdb,summary:{
   storedLids:lids.length,
   lidsBySource:Object.fromEntries(['watchlist','programme','metadata','ratings_generation','view_index'].map(source=>[source,lids.filter(entry=>entry.sources.has(source)).length])),
   lidsWithTmdbId:lids.filter(entry=>entry.tmdbIds.size===1).length,
@@ -86,7 +102,7 @@ function byCode(film,index){
  return {...base,tmdbId,catalogIds,status:'accepted',method,reason:null};
 }
 
-function byTitle(film,index){
+function byTitle(film,index,options={}){
  const keys=index.titles.get(normTitle(film.name));
  const none={filmId:null,tmdbId:null,catalogIds:[],candidates:[],evidence:{}};
  if(!keys)return {...none,status:'unmatched',method:null,reason:'no_stored_title'};
@@ -107,12 +123,40 @@ function byTitle(film,index){
  const result={filmId:lid?.id||null,tmdbId,catalogIds,candidates,evidence,method:'title_year'};
  if(identity.startsWith('conflict:'))return {...result,method:null,status:'conflict',reason:'stored_tmdb_conflict'};
  if(!film.year)return {...result,status:'candidate',reason:'missing_year'};
- return {...result,status:'candidate',reason:'identity_unverified'};
+ if(!options.inferred)return {...result,status:'candidate',reason:'identity_unverified'};
+ return inferredOrReview(film,entries,result,index);
 }
 
-// films: parseExport().films. Returns one record per film, ordered by export code.
-export function matchExport(films,index){
- return [...films].sort((a,b)=>a.code<b.code?-1:a.code>b.code?1:0).map(film=>{const code=byCode(film,index);return code?{code:film.code,basis:'code',...code}:{code:film.code,basis:'title',...byTitle(film,index)};});
+// The AIR-388 policy for one title match. Inferred needs: a typed TMDB movie id, the same year, the normalized ORIGINAL title (an
+// alias alone is review), no stored link of that TMDB id to another Letterboxd id and none of this code to another TMDB id.
+// Duplicates across the export are judged afterwards, over all rows. Every other case is a candidate with one review reason.
+function inferredOrReview(film,entries,result,index){
+ const review=reason=>({...result,status:'candidate',reason});
+ if(!result.tmdbId)return review('no_tmdb_id');
+ if(result.evidence.yearDelta!==0)return review('year_drift');
+ const name=normTitle(film.name);
+ if(!entries.some(entry=>entry.originals.has(name)))return review('alias_title_only');
+ const lids=index.linkedLids?.get(result.tmdbId);
+ if(lids&&[...lids].some(lid=>lid!==film.code))return review('tmdb_linked_elsewhere');
+ const tmdbs=index.linkedTmdb?.get(film.code);
+ if(tmdbs&&[...tmdbs].some(tmdb=>tmdb!==result.tmdbId))return review('tmdb_linked_elsewhere');
+ return {...result,status:INFERRED_STATUS,method:INFERRED_METHOD,reason:null,evidence:{...result.evidence,identity:'inferred',basis:'original_title_exact_year_unique'}};
+}
+
+// films: parseExport().films. Returns one record per film, ordered by export code. options.inferred turns on the AIR-388 policy;
+// without it the result is exactly what it was before (no `inferred` row, title matches stay `identity_unverified` candidates).
+export function matchExport(films,index,options={}){
+ const rows=[...films].sort((a,b)=>a.code<b.code?-1:a.code>b.code?1:0).map(film=>{const code=byCode(film,index);return code?{code:film.code,basis:'code',...code}:{code:film.code,basis:'title',...byTitle(film,index,options)};});
+ if(!options.inferred)return rows;
+ // One TMDB movie claimed by two export codes, or by a code that is already accepted, is never inferred: all claimants go to review.
+ const claims=new Map();
+ for(const row of rows)if(row.tmdbId&&(row.status==='inferred'||row.status==='accepted')){if(!claims.has(row.tmdbId))claims.set(row.tmdbId,[]);claims.get(row.tmdbId).push(row);}
+ for(const group of claims.values()){
+  if(group.length<2)continue;
+  const reason=group.some(row=>row.status==='accepted')?'tmdb_already_accepted':'tmdb_duplicate_in_export';
+  for(const row of group)if(row.status==='inferred'){row.status='candidate';row.method='title_year';row.reason=reason;delete row.evidence.identity;delete row.evidence.basis;}
+ }
+ return rows;
 }
 
 // Whether the export code equals the stored Letterboxd id, judged from the matches only.

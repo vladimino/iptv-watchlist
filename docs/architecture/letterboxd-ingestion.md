@@ -40,7 +40,7 @@ The owner-triggered `POST /api/enrichment/ratings/refresh` of AIR-64 is **retire
 ```mermaid
 flowchart TD
     subgraph sources["Observations"]
-        export["Owner's account export<br/>accepted identities to the merge"]
+        export["Owner's account export<br/>accepted or inferred identities<br/>to the merge"]
         diary["Diary entry, at its watched date"]
         films["Complete public films list<br/>(no longer scanned after a commit)"]
         watchlist["Complete watchlist"]
@@ -65,6 +65,8 @@ flowchart TD
     builder --> list
     list -.->|"read on every request:<br/>hide only, never a fact"| finds
 ```
+
+An export film reaches the merge when its identity is `accepted` (verified) or, only in a plan made with `--include-inferred`, `inferred` ([ADR 0104](../adr/0104-inferred-letterboxd-identity.md)): one normalized original title with the same year that leads to exactly one stored TMDB movie, with no competing or contradicting link. An inferred identity is recorded as such on the fact record and is never shown as verified. The display-exclusion builder still reads `accepted` only.
 
 A fact record also carries `ratingHistory`, the append-only list of the film's rating changes, written in the same compare-and-swap as the rating; the projection does not read it ([ADR 0038](../adr/0038-durable-rating-and-prediction-lineage.md), [user facts contract](../reference/integrations/letterboxd-user-facts.md)). Unresolved export rows (no accepted identity) never reach the merge; they stay in the importer's private report until a separate identity verification. The dashed path is display-only: the offline builder writes their normalized names and years to a private list, and Finds hide a catalog film whose original title and year match it uniquely, on every request and without a switch ([ADR-0041](../adr/0041-retire-finds-title-exclusion-switch.md)). Finds read that list without writing anything, and the match never becomes a fact, a rating or an identity link ([catalog API](../reference/api/catalog.md#display-only-title-exclusion), [runbook](../runbooks/finds-display-exclusion.md)).
 
