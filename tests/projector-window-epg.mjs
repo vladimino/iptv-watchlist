@@ -163,4 +163,55 @@ await Authority.releaseProjectorWindow(env,{owner:'p1'});
  await Authority.releaseProjectorWindow(env,{owner:'p6'});
 }
 
+// 8. Resume: the same EPG run continues after the window, from each place the window can catch it. Busy changes nothing on the run
+// (no failure, no phase move, no refreshed clock); once the window is released each path takes the lease again and goes on.
+{
+ db.sql('UPDATE discovery_lease SET lease_id=NULL, expires_at=0 WHERE id=1');
+ // (a) Every publication path takes the lease only through `leaseOrWindowBusy`, which is the one point the window answers.
+ const worker=fs.readFileSync('src/worker.js','utf8');
+ assert.equal((worker.match(/leaseOrWindowBusy\(env\)/g)||[]).length>=3,true,'three publication call sites');
+ assert.equal(/acquireDiscoveryLease\(env\)[^\n]{0,80}Resolver is writing the catalog/.test(worker),false,'no site keeps the bare lease-or-throw');
+ for(const phase of ['requested','held']){
+  const asked=await Authority.requestProjectorWindow(env,{owner:'r1'});
+  if(phase==='held')assert.equal((await Authority.grantProjectorWindow(env,{owner:'r1'})).outcome,'granted');
+  for(const [name,run] of Object.entries(publishCalls))await assert.rejects(run,error=>error.name==='ProjectorWindowBusy'&&error.busy.expiresAt===asked.expiresAt,name+' '+phase);
+  await Authority.releaseProjectorWindow(env,{owner:'r1'});
+  // Released: the path takes the lease (no busy) and the lease is free again afterwards.
+  for(const name of Object.keys(publishCalls)){
+   const lease=await call('leaseOrWindowBusy')(env);
+   assert.ok(lease&&lease.id,name+' resumes: the lease is taken after '+phase);
+   await Authority.releaseLease({...env,discoveryLease:lease},lease);
+  }
+ }
+ // (b) The seal, a window that opens between two calls of the same run: busy while requested and held with the phase untouched,
+ // the next call after the release is not a window answer.
+ const sealRun={runId:'run-1',stage:'seal',seal:{jobId:'job-1',phase:'ledger'}};
+ const asked=await Authority.requestProjectorWindow(env,{owner:'r2'});
+ for(const phase of ['requested','held']){
+  if(phase==='held')await Authority.grantProjectorWindow(env,{owner:'r2'});
+  const out=await call('sealStep')(env,sealRun);
+  assert.equal(out.discovery.busyKind,'projector_window',phase);assert.equal(out.seal.phase,'ledger');assert.equal(out.error,undefined,'no failure on the run');
+  assert.equal(Date.parse(out.discovery.nextCatchUpAt),asked.expiresAt+MARGIN);
+ }
+ await Authority.releaseProjectorWindow(env,{owner:'r2'});
+ let resumed=null,thrown=null;
+ try{resumed=await call('sealStep')(env,sealRun);}catch(error){thrown=error;}
+ assert.equal(thrown?.name==='ProjectorWindowBusy',false,'not a window answer once the window is released');
+ assert.notEqual(resumed?.discovery?.busyKind,'projector_window');
+ // (c) The sync step: after the release it goes past the precheck to the real work for the same run (the EPG source is fetched).
+ const before=fetches;
+ const step={};
+ await Authority.requestProjectorWindow(env,{owner:'r3'});
+ const busy=await (await call('syncStep')(env,'/api/sync/epg',{runId:'run-1'},step)).json();
+ assert.equal(busy.discovery.busyKind,'projector_window');assert.equal(fetches,before,'no fetch while the window is open');
+ await Authority.releaseProjectorWindow(env,{owner:'r3'});
+ // Past the precheck the step runs the real EPG work; this harness has no programme data, so that work ends in its own error. What the
+ // test proves is where it ends: inside the EPG work, not at the window answer, and the run record is untouched by the busy before it.
+ let reachedWork=false,answer=null;
+ try{answer=await (await call('syncStep')(env,'/api/sync/epg',{runId:'run-1'},{})).json();reachedWork=answer?.discovery?.busyKind!=='projector_window';}
+ catch(error){reachedWork=error.name!=='ProjectorWindowBusy'&&error.message!=='projector_window';}
+ assert.equal(reachedWork,true,'the same run goes on to the EPG work after the window');
+ assert.equal(JSON.parse(await (await bucket.get('sync.json')).text()).runId,'run-1','the same run id');
+}
+
 console.log('Projector window, EPG and Workflow (ADR 0103): the three publication paths raise one typed busy for a window and keep the generic error for any other missing lease; the sync step answers a structured non-failure busy to the absolute deadline before any heavy work and without persisting an error; the seal step does the same with its own kind and no TTL cap; the executor reads the answer as a wait; the Workflow state write is refused softly with no stall or recovery charge');
