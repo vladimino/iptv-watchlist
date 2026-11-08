@@ -309,6 +309,38 @@ assert.match(linked,/Снаружи/);
 assert.doesNotMatch(linked,/themoviedb\.org/,'a catalog-only title is plain text');
 assert.doesNotMatch(linked,/href="\/film\//,'a catalog film that is not loaded does not get an internal route');
 
+// AIR-382 (production acceptance fix): the similar cards carry the shared Letterboxd icon beside the title, only for a validated URL.
+{
+ const lb='https://letterboxd.com/film/assassins-creed/';
+ const count=(html,re)=>(html.match(re)||[]).length;
+ // A watchlist film with a Letterboxd url: one icon, new tab, safe rel, and the title still opens the internal page.
+ load({films:[open,watch('local-peer',{title:'Сосед',url:lb})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:null});
+ const withIcon=run('renderSimilar(now).filter(row=>row.film.id==="local-peer").map(row=>similarCard(row,now)).join("")');
+ assert.equal(count(withIcon,/class="letterboxd-link"/g),1,'one icon');
+ assert.match(withIcon,/<h3><button type="button" class="film-similar-open" data-similar-open="local-peer">Сосед<\/button><a class="letterboxd-link" href="https:\/\/letterboxd\.com\/film\/assassins-creed\/" target="_blank" rel="noopener noreferrer"/,'the title keeps its internal button; the icon follows it');
+ assert.equal(count(withIcon,/<svg/g),1,'the shared mark, not a copy');
+ // A watchlist film without a proven URL, or with a TMDB / unsafe one: no icon.
+ for(const bad of [undefined,'https://www.themoviedb.org/movie/5','http://letterboxd.com/film/x/','https://letterboxd.com/film/x','https://letterboxd.com/film/X_y/','https://letterboxd.com.evil.example/film/x/','javascript:alert(1)','https://letterboxd.com/film/x/"onmouseover="a']){
+  load({films:[open,watch('local-peer',{title:'Сосед',url:bad})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:null});
+  const html=run('renderSimilar(now).filter(row=>row.film.id==="local-peer").map(row=>similarCard(row,now)).join("")');
+  assert.match(html,/data-similar-open="local-peer"/);
+  assert.equal(count(html,/letterboxd-link/g),0,'no icon for '+String(bad));
+ }
+ // A catalog-only film: icon strictly from a validated letterboxdUrl, title stays plain text.
+ const catalogHtml=extra=>{load({films:[open,watch('local-peer',{title:'Сосед'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:[{...catalog('tmdb_31',31,{title:'Снаружи',mechanics:['investigation'],prediction:strong(4.4,.8)}),...extra}]});return run('renderSimilar(now).filter(row=>row.source==="catalog").map(row=>similarCard(row,now)).join("")');};
+ const proven=catalogHtml({letterboxdUrl:lb});
+ assert.equal(count(proven,/class="letterboxd-link"/g),1);
+ assert.match(proven,/<h3>Снаружи<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/film\/assassins-creed\/" target="_blank" rel="noopener noreferrer"/,'plain-text title, then the icon');
+ assert.doesNotMatch(proven,/themoviedb\.org|data-similar-open="tmdb_31"|href="\/film\//);
+ for(const extra of [{},{letterboxdUrl:null},{letterboxdUrl:'https://www.themoviedb.org/movie/31'},{letterboxdUrl:'javascript:alert(1)'},{letterboxdUrl:'https://letterboxd.com/film/x'},{letterboxdUrl:42}]){
+  const html=catalogHtml(extra);
+  assert.match(html,/Снаружи/);
+  assert.equal(count(html,/letterboxd-link/g),0,'no icon for '+JSON.stringify(extra));
+  assert.doesNotMatch(html,/themoviedb\.org/,'no TMDB jump');
+ }
+ assert.equal(fetches.length,0,'no request for the icon');
+}
+
 // Opening a loaded recommendation pushes a film URL and Back returns. No request either way.
 load({films:[watch('source',{title:'Источник'}),watch('peer',{title:'Сосед'})],enrichment:{source:openStored,peer:stored({mechanics:['heist']})},filmId:'source'});
 vm.runInContext("filmScreen=null;openFilm('source')",ui);
