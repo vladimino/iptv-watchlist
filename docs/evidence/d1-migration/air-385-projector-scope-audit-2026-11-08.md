@@ -80,7 +80,7 @@ Other findings:
 2. The catalog is not generation-scoped in SQL; `readCatalog` returns the one set of `current` rows and the run id only gates the early `null` return (`readKey`, line 146).
 3. In the seal flow the catalog changes land before the published-EPG pointer flips, and `published_programme_run_id` moves before the pointer, so the global generation cannot stand for "the published generation".
 4. Two resolver implementations exist (paged deltas, rows 4 and 5; document path, rows 7 and 8). A revision has to cover both.
-5. `discovery_decision.generation` and `discovery_admission.generation` are stamped `gate.generation + 1` at write time. They change on every write of the row and only ever increase, which makes them usable as per-row version tokens; a multi-flush load stamps rows with a value that later flushes overtake, so equality, not ordering, is the only safe use.
+5. `discovery_decision.generation` and `discovery_admission.generation` are stamped `gate.generation + 1` at write time from a gate read once per load, so a multi-flush load stamps rows with a value that later flushes overtake. They, the content `decision_hash` (equal again after an A to B to A change) and the history `revision` are not monotonic per-row mutation tokens. ADR 0102 therefore adds a per-row `written_revision` stamped from the post-bump scoped revision of the writing batch.
 6. The manual `reconcile` and `scan` routes reach `saveJSON` with no lease; under D1 authority `routeWrite` throws `discovery_lease`, so by code they fail closed.
 
 ## 4. Not measured
