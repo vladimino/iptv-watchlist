@@ -34,50 +34,70 @@ const TMDB_ID=/^[1-9]\d{0,11}$/;
 const bump=(map,key)=>{map[key]=(map[key]||0)+1;};
 
 // Offline re-binding of an already searched results file to a newer catalog read (ADR 0105). It never asks TMDB, never lowers the cumulative
-// request count and never rewrites the old file: the output is a new file in a new empty directory whose `rebase` block keeps the original
-// binding, provenance, request count and file digest. The export must be byte-identical (same digest). The whole export is matched again
-// against the new catalog and every recorded code is re-judged, failing closed:
-//  - still unmatched: the attempt is kept as recorded (one attempt per film, ever); an `inferred_new` entry must still agree with its export
-//    film (original title, exact year) or the rebase stops; one whose TMDB movie is now linked to another Letterboxd code, or whose code is
-//    now linked to another movie, becomes `review: tmdb_linked_elsewhere`; a duplicate claim or an already accepted/inferred movie is left to
-//    the planner, which sends both to review as before;
-//  - the catalog now knows the film (accepted, inferred, provisional, candidate): the search entry leaves `results` for `rebase.superseded`
+// request count and never rewrites the old file: the output is a new file in a new empty directory. The export must be byte-identical (same
+// digest). The whole export is matched again against the new catalog and every recorded attempt is judged again, failing closed.
+//
+// The durable set of attempted codes is `results` PLUS every attempt an earlier rebase moved to `rebase.superseded`, however many catalog reads
+// ago: a code is attempted once, ever, and its ROOT attempt (the entry TMDB's answer produced) is always kept. Each rebase judges the root
+// attempt of every such code against the new index:
+//  - still unmatched, or unmatched again after the catalog had known it: the root attempt is applied as recorded; an `inferred_new` entry must
+//    still agree with its export film (original title, exact year) or the rebase stops; one whose TMDB movie is now linked to another
+//    Letterboxd code, or whose code is now linked to another movie, becomes `review: tmdb_linked_elsewhere` (the root stays in `superseded`);
+//    a duplicate claim or a movie already held by an accepted/inferred film is left to the planner, which sends both to review as before.
+//    A code attempted before is never pending, so no later search can ask TMDB for it again;
+//  - the catalog now knows the film (accepted, inferred, provisional, candidate): the attempt leaves `results` for `rebase.superseded`
 //    (kept, never used) and the catalog decides;
-//  - the film is now ambiguous or in conflict, or a recorded code is no longer in the export: STOP, nothing is written;
-//  - unmatched with no recorded attempt: stays pending. Nothing is searched here.
+//  - the film is now ambiguous or in conflict, a recorded code is no longer in the export, a code is recorded twice, or there are more
+//    attempts than requests: STOP, nothing is written;
+//  - unmatched with no attempt, ever: stays pending. Nothing is searched here.
+// `rebase.original` is the root: the binding, provenance, request count and file digest of the first search, never replaced; `rebase.steps`
+// lists every rebase (when, from which binding, the digest of the file it started from).
 export async function rebaseResults({exportDir,catalogDir,previous,outputDir,now=()=>new Date()}){
  const previousText=await readFile(previous,'utf8');let doc;try{doc=JSON.parse(previousText);}catch{throw new ReconcileError('The previous tmdb-results.json is not readable JSON',2);}
  if(doc?.schemaVersion!==1||!doc.results||typeof doc.results!=='object'||Array.isArray(doc.results)||!doc.binding||!Number.isInteger(doc.requests)||doc.requests<0)throw new ReconcileError('The previous tmdb-results.json has an unknown schema',2);
+ const priorSuperseded=doc.rebase?.superseded;
+ if(doc.rebase!==undefined&&(!doc.rebase||typeof doc.rebase!=='object'||!doc.rebase.original||!Array.isArray(doc.rebase.steps)||!priorSuperseded||typeof priorSuperseded!=='object'||Array.isArray(priorSuperseded)))throw new ReconcileError('The previous tmdb-results.json has an unknown rebase block',2);
  const target=path.join(outputDir,'tmdb-results.json');
  if(await access(target).then(()=>true,()=>false))throw new ReconcileError('--output already holds a tmdb-results.json; rebase into a new empty directory',2);
  const {matches,index,byCode,total,exportSha256,provenance}=await unmatchedFilms({exportDir,catalogDir});
  if(doc.binding.exportSha256!==exportSha256)throw new ReconcileError('The previous results were searched for another export: a rebase needs the same export digest',3);
  if(doc.binding.catalogReadAt===provenance.readAt&&doc.binding.catalogFilms===provenance.catalogFilms)throw new ReconcileError('The catalog read is the one the results are already bound to: nothing to rebase',2);
  const statusOf=new Map(matches.map(match=>[match.code,match]));
- const report={exportFilms:total,previousRequests:doc.requests,previousCatalog:{readAt:doc.binding.catalogReadAt,films:doc.binding.catalogFilms},catalog:{readAt:provenance.readAt,films:provenance.catalogFilms},recorded:Object.keys(doc.results).length,kept:{},superseded:{},movedToReview:{tmdb_linked_elsewhere:0},keptInferredNewWithExistingFilm:0,pendingWithoutAttempt:0,stop:{}};
+ // The root attempt per code. A code that is in both `results` and `superseded` is legitimate in one shape only: an earlier rebase sent a
+ // kept attempt to review (`superseded.now` is `unmatched`); the superseded entry is then the root and the results entry is derived from it.
+ const root=new Map(),stop={};
+ for(const [code,entry] of Object.entries(doc.results))root.set(code,entry);
+ for(const [code,saved] of Object.entries(priorSuperseded||{})){
+  if(!saved||typeof saved!=='object'||!saved.entry||typeof saved.entry!=='object'){bump(stop,'unreadable_superseded');continue;}
+  if(Object.hasOwn(doc.results,code)&&saved.now!=='unmatched'){bump(stop,'attempt_recorded_twice');continue;}
+  root.set(code,saved.entry);
+ }
+ if(root.size>doc.requests)bump(stop,'more_attempts_than_requests');
+ const report={exportFilms:total,previousRequests:doc.requests,previousCatalog:{readAt:doc.binding.catalogReadAt,films:doc.binding.catalogFilms},catalog:{readAt:provenance.readAt,films:provenance.catalogFilms},attempts:root.size,carriedSuperseded:Object.keys(priorSuperseded||{}).length,kept:{},superseded:{},restored:0,movedToReview:{tmdb_linked_elsewhere:0},keptInferredNewWithExistingFilm:0,pendingWithoutAttempt:0,stop};
  const results={},superseded={};
- for(const [code,entry] of Object.entries(doc.results)){
-  const film=byCode.get(code),match=statusOf.get(code);
-  if(!film||!match){bump(report.stop,'code_not_in_export');continue;}
-  if(match.status==='ambiguous'||match.status==='conflict'){bump(report.stop,'now_'+match.status);continue;}
+ for(const [code,entry] of root){
+  const film=byCode.get(code),match=statusOf.get(code),wasSuperseded=Object.hasOwn(priorSuperseded||{},code)&&priorSuperseded[code].now!=='unmatched';
+  if(!film||!match){bump(stop,'code_not_in_export');continue;}
+  if(match.status==='ambiguous'||match.status==='conflict'){bump(stop,'now_'+match.status);continue;}
   if(match.status!=='unmatched'){superseded[code]={now:match.status,entry};bump(report.superseded,match.status);continue;}
   if(entry?.decision==='inferred_new'){
-   if(!TMDB_ID.test(String(entry.tmdb))||!Number.isInteger(entry.year)||typeof entry.title!=='string'||!Number.isInteger(film.year)||entry.year!==film.year||!normTitle(film.name)||normTitle(entry.title)!==normTitle(film.name)){bump(report.stop,'title_or_year_mismatch');continue;}
+   if(!TMDB_ID.test(String(entry.tmdb))||!Number.isInteger(entry.year)||typeof entry.title!=='string'||!Number.isInteger(film.year)||entry.year!==film.year||!normTitle(film.name)||normTitle(entry.title)!==normTitle(film.name)){bump(stop,'title_or_year_mismatch');continue;}
    const tmdb=String(entry.tmdb),lids=index.linkedLids.get(tmdb),codeTmdb=index.linkedTmdb.get(code);
-   if((lids&&[...lids].some(lid=>lid!==code))||(codeTmdb&&[...codeTmdb].some(id=>id!==tmdb))){results[code]={decision:'review',reason:'tmdb_linked_elsewhere'};superseded[code]={now:'unmatched',entry};report.movedToReview.tmdb_linked_elsewhere++;bump(report.kept,'review');continue;}
+   if((lids&&[...lids].some(lid=>lid!==code))||(codeTmdb&&[...codeTmdb].some(id=>id!==tmdb))){results[code]={decision:'review',reason:'tmdb_linked_elsewhere'};superseded[code]={now:'unmatched',entry};report.movedToReview.tmdb_linked_elsewhere++;bump(report.kept,'review');if(wasSuperseded)report.restored++;continue;}
    if(index.catalogByTmdb.has(tmdb))report.keptInferredNewWithExistingFilm++;
-  }
-  results[code]=entry;bump(report.kept,entry?.decision==='review'?'review':entry?.decision);
+  }else if(!['review','error','blocked'].includes(entry?.decision)){bump(stop,'unknown_decision');continue;}
+  results[code]=entry;bump(report.kept,entry.decision==='review'?'review':entry.decision);if(wasSuperseded)report.restored++;
  }
- if(Object.keys(report.stop).length)throw Object.assign(new ReconcileError('The rebase stops, nothing was written: '+JSON.stringify(report.stop),3),{report});
- report.pendingWithoutAttempt=matches.filter(match=>match.status==='unmatched'&&!Object.hasOwn(results,match.code)&&!Object.hasOwn(superseded,match.code)).length;
+ if(Object.keys(stop).length)throw Object.assign(new ReconcileError('The rebase stops, nothing was written: '+JSON.stringify(stop),3),{report});
+ report.pendingWithoutAttempt=matches.filter(match=>match.status==='unmatched'&&!root.has(match.code)).length;
+ const rootOriginal=doc.rebase?doc.rebase.original:{binding:doc.binding,provenance:doc.provenance??null,requests:doc.requests,resultsSha256:sha256(previousText)};
  const out={schemaVersion:1,binding:{exportSha256,catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms},requests:doc.requests,
-  provenance:{searchedAt:doc.provenance?.searchedAt??null,catalog:doc.provenance?.catalog??null},
-  rebase:{rebasedAt:now().toISOString(),original:{binding:doc.binding,provenance:doc.provenance??null,requests:doc.requests,resultsSha256:sha256(previousText)},counts:{kept:report.kept,superseded:report.superseded,movedToReview:report.movedToReview},superseded},
+  provenance:{searchedAt:rootOriginal.provenance?.searchedAt??doc.provenance?.searchedAt??null,catalog:rootOriginal.provenance?.catalog??doc.provenance?.catalog??null},
+  rebase:{rebasedAt:now().toISOString(),original:rootOriginal,steps:[...(doc.rebase?.steps||[]),{rebasedAt:now().toISOString(),from:doc.binding,fromResultsSha256:sha256(previousText),to:{catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms}}],counts:{kept:report.kept,superseded:report.superseded,movedToReview:report.movedToReview,restored:report.restored},superseded},
   results};
  await mkdir(outputDir,{recursive:true,mode:0o700});
  await writeFile(target,JSON.stringify(out,null,1)+'\n',{mode:0o600,flag:'wx'});
- return {rebased:true,...report,requests:doc.requests};
+ return {rebased:true,...report,steps:out.rebase.steps.length,requests:doc.requests};
 }
 
 export function tmdbSearchFn({token,auth='token',fetchImpl=fetch,timeoutMs=20000}){
@@ -121,7 +141,9 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
   if(prior.schemaVersion!==1||!prior.results||typeof prior.results!=='object'||!prior.binding||prior.binding.exportSha256!==binding.exportSha256||prior.binding.catalogReadAt!==binding.catalogReadAt||prior.binding.catalogFilms!==binding.catalogFilms)throw new ReconcileError('The existing tmdb-results.json belongs to another export or catalog read; use a new --output directory',2);
   state={results:prior.results,requests:Number.isInteger(prior.requests)&&prior.requests>=0?prior.requests:0};
  }
- const pending=films.filter(film=>!Object.hasOwn(state.results,film.code)).length;
+ // A code a rebase moved to `rebase.superseded` was attempted once already: it is never asked again, whatever the catalog says now.
+ const barred=new Set(Object.keys(prior?.rebase?.superseded||{}));
+ const pending=films.filter(film=>!Object.hasOwn(state.results,film.code)&&!barred.has(film.code)).length;
  const budgetLeft=Math.max(0,maxRequests-state.requests);
  if(args.dry)return {dryRun:true,exportFilms:total,matchStatus:status,unmatched:films.length,alreadyAttempted:films.length-pending,requestsUsed:state.requests,requestsWouldBeMade:Math.min(pending,budgetLeft),maxRequests,rps,catalog:provenance};
  const auth=args.auth===undefined?'token':args.auth;
@@ -129,7 +151,7 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
  const token=String(env.TMDB_READ_TOKEN||'').trim();
  if(auth==='token'&&!token)throw new ReconcileError('TMDB_READ_TOKEN is not set: no TMDB request was made',2);
  let outcome;
- try{outcome=await runSearches({films,search:tmdbSearchFn({token,auth,fetchImpl}),state,maxRequests,rps,...(sleep?{sleep}:{}),...(now?{now}:{})});}
+ try{outcome=await runSearches({films:films.filter(film=>Object.hasOwn(state.results,film.code)||!barred.has(film.code)),search:tmdbSearchFn({token,auth,fetchImpl}),state,maxRequests,rps,...(sleep?{sleep}:{}),...(now?{now}:{})});}
  finally{
   // Whatever happened, what was attempted is on disk before this process ends.
   await mkdir(outputDir,{recursive:true,mode:0o700});

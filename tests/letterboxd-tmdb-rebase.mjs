@@ -69,7 +69,7 @@ try{
  assert.equal(report.rebased,true);assert.equal(report.requests,842,'the cumulative request count is kept');assert.equal(report.previousRequests,842);
  assert.deepEqual(report.superseded,{inferred:2},'Becomes Known and Existing Later are now inferred from the catalog');
  assert.deepEqual(report.kept,{inferred_new:3,review:2,blocked:1});
- assert.equal(report.recorded,8);assert.deepEqual(report.stop,{});
+ assert.equal(report.attempts,8);assert.equal(report.carriedSuperseded,0);assert.deepEqual(report.stop,{});
  assert.equal(report.movedToReview.tmdb_linked_elsewhere,1);assert.equal(report.keptInferredNewWithExistingFilm,1,'the search chose a movie the catalog now holds: kept, linked as an existing Film by the planner');
  assert.equal(report.pendingWithoutAttempt,1,'a film with no recorded attempt stays pending and is not searched');
  const printed=JSON.stringify(report);for(const secret of ['Known','Becomes','Linked','Un1','Un3','2010'])assert.ok(!printed.includes(secret),'the report leaks '+secret);
@@ -127,7 +127,57 @@ try{
  await assert.rejects(main(['rebase','--export',exportDir,'--catalog-dir',newDir,'--previous',oldPath,'--output',path.join(scratch,'u2'),'--dry-run'],{env:{}}),/Usage/);
  await assert.rejects(main(['--export',exportDir,'--catalog-dir',newDir,'--previous',oldPath,'--output',path.join(scratch,'u3'),'--dry-run'],{env:{}}),/belongs to the rebase command/);
  await assert.rejects(main(['rebase','--export',exportDir,'--catalog-dir',newDir,'--previous','tests/old.json','--output',path.join(scratch,'u4')],{env:{}}),/absolute|outside/);
+
+ // ---- Three catalog reads: unmatched -> known -> unmatched again. The first attempt is durable across every rebase (one attempt per code, ever). ----
+ // Read 2 (newDir) knew Becomes Known (Un1): rebase #1 moved its attempt to `rebase.superseded`. Read 3 no longer knows it.
+ const rebase1Text=await readFile(path.join(outDir,'tmdb-results.json'),'utf8');const rebase1=JSON.parse(rebase1Text);
+ assert.ok('Un1' in rebase1.rebase.superseded&&!('Un1' in rebase1.results));assert.equal(rebase1.rebase.steps.length,1);assert.equal(rebase1.requests,843,'the resume above spent one request on the film with no attempt');
+ const catalog3={...oldCatalog,tmdb_605:cat(605,'Existing Later',2014),tmdb_602:cat(602,'Totally Other Original',2011)};
+ const read3=await catalogAt('cat-3','2026-11-08T19:50:00.000Z',catalog3,factLinks);
+ const out2=path.join(scratch,'rebased-2');
+ const report2=await main(['rebase','--export',exportDir,'--catalog-dir',read3,'--previous',path.join(outDir,'tmdb-results.json'),'--output',out2],{env:{},now:()=>Date.parse('2026-11-08T19:55:00Z')});
+ assert.equal(networkCalls,0);assert.equal(report2.restored,1,'the superseded attempt is judged again and restored');assert.equal(report2.pendingWithoutAttempt,0,'a code attempted before is never pending');
+ assert.equal(report2.requests,843);assert.equal(report2.steps,2);assert.equal(report2.attempts,9);
+ const rebased2=JSON.parse(await readFile(path.join(out2,'tmdb-results.json'),'utf8'));
+ assert.deepEqual(rebased2.results.Un1,old.results.Un1,'the saved decision is restored as recorded');assert.ok(!('Un1' in rebased2.rebase.superseded),'a restored code is no longer superseded');
+ assert.equal(rebased2.rebase.superseded.Un5.now,'inferred');assert.deepEqual(rebased2.rebase.superseded.Un5.entry,old.results.Un5,'a code still known keeps its root attempt through the second rebase');
+ assert.equal(rebased2.rebase.superseded.Un3.now,'unmatched');assert.deepEqual(rebased2.rebase.superseded.Un3.entry,old.results.Un3,'the root attempt behind a review is kept');assert.deepEqual(rebased2.results.Un3,{decision:'review',reason:'tmdb_linked_elsewhere'});
+ // the root provenance is the first search, not the previous hop; every hop is traceable
+ assert.deepEqual(rebased2.rebase.original,{binding:old.binding,provenance:old.provenance,requests:842,resultsSha256:sha(oldText)},'the root provenance and the first source digest are never replaced');
+ assert.equal(rebased2.rebase.steps.length,2);assert.equal(rebased2.rebase.steps[0].fromResultsSha256,sha(oldText));assert.equal(rebased2.rebase.steps[1].fromResultsSha256,sha(rebase1Text));assert.equal(rebased2.rebase.steps[1].from.catalogReadAt,'2026-11-08T19:30:00.000Z');
+ assert.deepEqual(rebased2.provenance,old.provenance);
+ // the normal search command on read 3 asks for NO code at all: not the restored one, not a superseded one, not a recorded one
+ const askedAfter=[];
+ const searchAfter=await main(['--export',exportDir,'--catalog-dir',read3,'--output',out2,'--auth','proxy'],{env:{},fetchImpl:async url=>{askedAfter.push(new URL(url).searchParams.get('query'));return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
+ assert.deepEqual(askedAfter,[],'zero repeat requests after three catalog reads');assert.equal(searchAfter.requests,0);assert.equal(searchAfter.totalRequests,843);
+ const dryAfter=await main(['--export',exportDir,'--catalog-dir',read3,'--output',out2,'--dry-run'],{env:{}});assert.equal(dryAfter.requestsWouldBeMade,0);
+ // even a superseded code that the catalog would call unmatched is barred in the search command (defence in depth against a hand-edited file)
+ {
+  const tampered=JSON.parse(await readFile(path.join(out2,'tmdb-results.json'),'utf8'));tampered.rebase.superseded.Un1={now:'inferred',entry:old.results.Un1};delete tampered.results.Un1;
+  const tamperedDir=path.join(scratch,'tampered-out');await mkdir(tamperedDir);await writeFile(path.join(tamperedDir,'tmdb-results.json'),JSON.stringify(tampered));
+  const askedT=[];await main(['--export',exportDir,'--catalog-dir',read3,'--output',tamperedDir,'--auth','proxy'],{env:{},fetchImpl:async url=>{askedT.push(new URL(url).searchParams.get('query'));return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
+  assert.deepEqual(askedT,[],'a superseded code is never asked');
+ }
+ // Read 4: the link that sent Linked Elsewhere to review is gone: the root attempt is judged again and its decision is restored, never pending.
+ const read4=await catalogAt('cat-4','2026-11-08T20:10:00.000Z',catalog3,{});
+ const out3=path.join(scratch,'rebased-3');
+ const report3=await main(['rebase','--export',exportDir,'--catalog-dir',read4,'--previous',path.join(out2,'tmdb-results.json'),'--output',out3],{env:{},now:()=>Date.parse('2026-11-08T20:15:00Z')});
+ assert.equal(report3.pendingWithoutAttempt,0);assert.equal(report3.steps,3);
+ const rebased3=JSON.parse(await readFile(path.join(out3,'tmdb-results.json'),'utf8'));
+ assert.deepEqual(rebased3.results.Un3,old.results.Un3,'the original decision comes back once the conflict is gone');assert.ok(!('Un3' in rebased3.rebase.superseded));assert.equal(rebased3.rebase.original.resultsSha256,sha(oldText));
+ // A code recorded twice, or more attempts than requests, stops the rebase.
+ {
+  const twice=JSON.parse(await readFile(path.join(out2,'tmdb-results.json'),'utf8'));twice.results.Un5=old.results.Un5;
+  const twicePath=path.join(scratch,'twice.json');await writeFile(twicePath,JSON.stringify(twice));await refuse({previous:twicePath,catalogDir:read4},/attempt_recorded_twice/,'twice');
+  const fewer=JSON.parse(await readFile(path.join(out2,'tmdb-results.json'),'utf8'));fewer.requests=2;
+  const fewerPath=path.join(scratch,'fewer.json');await writeFile(fewerPath,JSON.stringify(fewer));await refuse({previous:fewerPath,catalogDir:read4},/more_attempts_than_requests/,'fewer');
+  const odd2=JSON.parse(await readFile(path.join(out2,'tmdb-results.json'),'utf8'));odd2.rebase.steps='x';
+  const odd2Path=path.join(scratch,'odd2.json');await writeFile(odd2Path,JSON.stringify(odd2));await refuse({previous:odd2Path,catalogDir:read4},/unknown rebase block/,'oddblock');
+ }
+ // The plan from the twice-rebased file says how many steps led there.
+ const plannedAfter=await plan({zip:zipPath,catalogDir:read3,tmdbResults:path.join(out2,'tmdb-results.json'),includeInferred:true,output:path.join(scratch,'p-after'),now:Date.parse('2026-11-09T00:00:00Z')});
+ assert.equal(plannedAfter.search.rebase.steps,2);assert.equal(plannedAfter.search.rebase.originalCatalogReadAt,'2026-11-08T16:16:32.058Z');assert.equal(plannedAfter.search.rebase.requests,843);
  assert.equal(networkCalls,0,'no refusal path reached the network');
  assert.equal(typeof rebaseResults,'function');
 }finally{globalThis.fetch=realFetch;await rm(scratch,{recursive:true,force:true});}
-console.log('Letterboxd TMDB rebase: a stale catalog read is a hard failure without the explicit rebase; the rebase is offline, keeps the 842 requests and the original provenance, supersedes what the new catalog knows, sends a newly linked TMDB movie to review, stops on an ambiguous film, a title or year mismatch or a foreign export, and the old file is never rewritten.');
+console.log('Letterboxd TMDB rebase: a stale catalog read is a hard failure without the explicit rebase; the rebase is offline, keeps the 842 requests and the original provenance, supersedes what the new catalog knows, sends a newly linked TMDB movie to review, stops on an ambiguous film, a title or year mismatch or a foreign export, the old file is never rewritten, and after three catalog reads (unmatched, known, unmatched) the attempt is still durable, restored under the same checks, never pending, never searched twice, with the root provenance intact.');

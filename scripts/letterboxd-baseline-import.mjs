@@ -121,7 +121,7 @@ export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,o
   // catalog read, the cumulative request count it keeps, and how many entries the newer catalog superseded or sent to review.
   if(doc.rebase){
    const counts=doc.rebase.counts&&typeof doc.rebase.counts==='object'?doc.rebase.counts:{};
-   search.rebase={originalCatalogReadAt:doc.rebase.original?.binding?.catalogReadAt??null,requests:doc.requests,superseded:counts.superseded??null,movedToReview:counts.movedToReview??null};
+   search.rebase={originalCatalogReadAt:doc.rebase.original?.binding?.catalogReadAt??null,steps:Array.isArray(doc.rebase.steps)?doc.rebase.steps.length:null,requests:doc.requests,superseded:counts.superseded??null,movedToReview:counts.movedToReview??null};
   }
  }
  items.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
