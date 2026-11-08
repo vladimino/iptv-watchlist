@@ -55,6 +55,8 @@ export async function loadSnapshot(directory){
  };
  const objects={},missing=[];
  for(const [name,key] of Object.entries(SNAPSHOT_KEYS)){const value=await load(key);if(value===undefined)missing.push(key);else objects[name]=value;}
+ // Optional and never reported as missing: the stored Letterboxd-to-TMDB links let the AIR-388 inferred policy see a contradiction.
+ const factLinks=await load('letterboxd/facts/links.json');if(factLinks!==undefined)objects.factLinks=factLinks;
  const pointer=objects.ratingsPointer;
  if(pointer?.projected===true&&typeof pointer.generationId==='string'){
   const key=ratingsGenerationKey(pointer.generationId),value=await load(key);

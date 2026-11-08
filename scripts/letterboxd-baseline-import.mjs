@@ -41,6 +41,9 @@ export function planItem(film,match){
  if(film.inWatched||film.inRatings){facts.watched=true;if(film.watchedDate)effectiveOn.watched=film.watchedDate;}
  if(film.inRatings)facts.rating=film.rating;else if(film.inWatched)facts.rating=null;
  if(film.inWatchlist)facts.watchlist=true;
+ // An inferred match (AIR-388, ADR 0104) names the export code as the Letterboxd id and carries its identity kind; a verified
+ // item has no `identity` key, so every plan made before this change keeps its exact bytes.
+ if(match.status==='inferred')return {lid:match.filmId??match.code,tmdb:match.tmdbId,facts,effectiveOn,identity:'inferred'};
  return {lid:match.filmId,tmdb:match.tmdbId??null,facts,effectiveOn};
 }
 
@@ -61,7 +64,7 @@ export function originChunkSize(origin){
  throw new ImportError('origin.json has an unknown schema or chunk size',3);
 }
 
-export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,now=Date.now()}){
+export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAULT_CHUNK_SIZE,includeInferred=false,now=Date.now()}){
  checkChunkSize(chunkSize);
  const zipPath=await assertOutsideRepository(zip,'--zip'),snapshotPath=await assertOutsideRepository(snapshot,'--snapshot'),outputPath=await assertOutsideRepository(output,'--output');
  const archive=await readArchive(zipPath,generatedAt,now);
@@ -69,14 +72,14 @@ export async function plan({zip,snapshot,output,generatedAt=null,chunkSize=DEFAU
  // films (another snapshot, other matching) and would destroy the only copy of the plan its receipts were made from.
  for(const name of OUTPUT_FILES)if(await access(path.join(outputPath,name)).then(()=>true,()=>false))throw new ImportError('--output already holds a plan or its results ('+name+'); plan into a new empty directory',2);
  const texts=Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,archive.files[name]?.text??null]));
- const parsed=parseExport(texts),loaded=await loadSnapshot(snapshotPath),matches=matchExport(parsed.films,buildIndex(loaded.objects));
- const films=new Map(parsed.films.map(film=>[film.code,film])),byStatus={},items=[];
- for(const match of matches){byStatus[match.status]=(byStatus[match.status]||0)+1;if(match.status==='accepted')items.push(planItem(films.get(match.code),match));}
+ const parsed=parseExport(texts),loaded=await loadSnapshot(snapshotPath),matches=matchExport(parsed.films,buildIndex(loaded.objects),{inferred:includeInferred});
+ const films=new Map(parsed.films.map(film=>[film.code,film])),byStatus={},items=[],review={};
+ for(const match of matches){byStatus[match.status]=(byStatus[match.status]||0)+1;if(match.status==='accepted'||(includeInferred&&match.status==='inferred'))items.push(planItem(films.get(match.code),match));else if(includeInferred&&match.status==='candidate'&&match.reason)review[match.reason]=(review[match.reason]||0)+1;}
  items.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
  const lines=items.map((item,i)=>JSON.stringify({chunk:Math.floor(i/chunkSize),item})),planText=lines.join('\n')+(lines.length?'\n':'');
- const origin={schemaVersion:2,archiveName:archive.archiveName,archiveSha256:archive.archiveSha256,generatedAt:archive.generatedAt,generatedAtSource:archive.generatedAtSource,files:Object.fromEntries(Object.entries(archive.files).map(([name,file])=>[name,file.sha256])),planSha256:sha256(planText),chunkSize,chunks:Math.ceil(items.length/chunkSize),snapshot:{status:loaded.status,baselineIdentity:loaded.baselineIdentity,missingKeys:loaded.missing}};
+ const origin={schemaVersion:2,archiveName:archive.archiveName,archiveSha256:archive.archiveSha256,generatedAt:archive.generatedAt,generatedAtSource:archive.generatedAtSource,files:Object.fromEntries(Object.entries(archive.files).map(([name,file])=>[name,file.sha256])),planSha256:sha256(planText),chunkSize,identityPolicy:includeInferred?'inferred_included':'verified_only',chunks:Math.ceil(items.length/chunkSize),snapshot:{status:loaded.status,baselineIdentity:loaded.baselineIdentity,missingKeys:loaded.missing}};
  const count=predicate=>items.filter(predicate).length;
- const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,chunkSize,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
+ const report={schemaVersion:1,tool:'letterboxd-baseline-import',privacy:'Aggregate counts only. Per-film rows are in the private plan.jsonl next to this file.',generatedAtSource:origin.generatedAtSource,chunkSize,invalidRows:parsed.invalidRows.length,matchStatus:byStatus,identityPolicy:includeInferred?'inferred_included':'verified_only',inferred:count(item=>item.identity==='inferred'),review,planned:{films:items.length,chunks:origin.chunks,watched:count(item=>item.facts.watched),rated:count(item=>typeof item.facts.rating==='number'),notRated:count(item=>item.facts.rating===null),watchlist:count(item=>item.facts.watchlist)},unresolved:matches.length-items.length};
  await mkdir(outputPath,{recursive:true,mode:0o700});
  // Create-only, so a concurrent plan into the same directory cannot overwrite either.
  await writeFile(path.join(outputPath,'plan.jsonl'),planText,{mode:0o600,flag:'wx'});
@@ -143,6 +146,21 @@ export async function remote({mode,zip,output,endpoint,fromChunk=0,toChunk=null,
  }
  return report();
 }
+// Corrects one inferred film of a committed plan (AIR-388, ADR 0104): the Worker reverses that film's facts under the rollback rules and
+// removes the Letterboxd link and `identity` the import made, leaving the rest of its chunk alone. Only an inferred item of this plan
+// is accepted; a repeat is safe. One owner-approved production operation like every remote step.
+export async function unlinkFilm({zip,output,endpoint,lid,fetchImpl=fetch,env=process.env,now=Date.now()}){
+ const {origin,chunks}=await loadVerifiedPlan({zip,output,now}),url=endpointUrl(endpoint,'unlink');
+ const chunk=chunks.findIndex(items=>items.some(item=>item.lid===lid&&item.identity==='inferred'));
+ if(chunk<0)throw new ImportError('That film is not an inferred item of this plan',2);
+ const body={origin:{archiveSha256:origin.archiveSha256,generatedAt:origin.generatedAt,generatedAtSource:origin.generatedAtSource},chunk,lid};
+ let response;
+ try{response=await fetchImpl(url,{method:'POST',headers:{'Content-Type':'application/json',...accessHeaders(env)},body:JSON.stringify(body),redirect:'error'});}
+ catch(error){return {schemaVersion:1,mode:'unlink',chunk,failed:{error:'network_error',cause:networkCause(error)}};}
+ let data=null;try{data=await response.json();}catch{}
+ if(!response.ok)return {schemaVersion:1,mode:'unlink',chunk,failed:{status:response.status,error:data?.code||data?.error||'http_'+response.status}};
+ return {schemaVersion:1,mode:'unlink',chunk,failed:null,facts:data?.facts||{},unlinked:!!data?.unlinked};
+}
 // Only an error code or name leaves the process: messages can quote the URL or headers.
 function networkCause(error){
  const code=[error?.cause?.code,error?.code,error?.name].find(value=>typeof value==='string'&&/^[A-Za-z0-9_]{1,64}$/.test(value));
@@ -150,8 +168,11 @@ function networkCause(error){
 }
 
 function parseArgs(argv){
- const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk'};
- for(let i=0;i<rest.length;i++){const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n]',2);args[name]=rest[++i];}
+ const [mode,...rest]=argv,args={mode},names={'--zip':'zip','--snapshot':'snapshot','--output':'output','--generated-at':'generatedAt','--chunk-size':'chunkSize','--endpoint':'endpoint','--from-chunk':'fromChunk','--to-chunk':'toChunk','--lid':'lid'};
+ for(let i=0;i<rest.length;i++){
+  // A switch, not a value: the AIR-388 policy is never on by default and only a plan can turn it on.
+  if(rest[i]==='--include-inferred'){if(mode!=='plan')throw new ImportError('--include-inferred is a plan option; '+mode+' uses the plan in its directory',2);args.includeInferred=true;continue;}
+  const name=names[rest[i]];if(!name||i+1>=rest.length)throw new ImportError('Usage: letterboxd-baseline-import.mjs plan --zip <abs> --snapshot <abs> --output <abs> [--generated-at <UTC>] [--chunk-size 1..'+MAX_CHUNK_SIZE+'] [--include-inferred] | validate|commit|rollback --zip <abs> --output <abs> --endpoint <https://…> [--from-chunk n] [--to-chunk n] | unlink --zip <abs> --output <abs> --endpoint <https://…> --lid <code>',2);args[name]=rest[++i];}
  for(const key of ['fromChunk','toChunk'])if(args[key]!=null){args[key]=Number(args[key]);if(!Number.isInteger(args[key])||args[key]<0)throw new ImportError('Chunk numbers are non-negative integers',2);}
  // The chunk size belongs to the plan; the remote steps read it from origin.json.
  if(args.chunkSize!=null){if(mode!=='plan')throw new ImportError('--chunk-size is a plan option; '+mode+' uses the chunk size in origin.json',2);args.chunkSize=checkChunkSize(/^\d+$/.test(args.chunkSize)?Number(args.chunkSize):NaN);}
@@ -162,6 +183,7 @@ async function main(){
   const args=parseArgs(process.argv.slice(2));
   if(args.mode==='plan'){if(!args.zip||!args.snapshot||!args.output)throw new ImportError('plan needs --zip, --snapshot and --output',2);console.log(JSON.stringify(await plan(args)));return;}
   if(!args.zip||!args.output||!args.endpoint)throw new ImportError(args.mode+' needs --zip, --output and --endpoint',2);
+  if(args.mode==='unlink'){if(!args.lid)throw new ImportError('unlink needs --lid',2);const summary=await unlinkFilm(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);return;}
   const summary=await remote(args);console.log(JSON.stringify(summary));if(summary.failed)process.exit(1);
  }catch(error){
   const known=error instanceof ImportError||error instanceof ReconcileError||error?.name==='ZipError'||error?.name==='CsvError';
