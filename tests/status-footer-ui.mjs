@@ -212,8 +212,8 @@ assert.match(adminMarkup, /<\/details>\s*<a class="footer-admin-link" href="\/ad
 assert.doesNotMatch(html, /status-footer\.js/, 'the programme page keeps its own footer script');
 assert.doesNotMatch(css, /html\.film-screen \.status-footer\{display:\s*none/);
 assert.doesNotMatch(css, /html\.events-screen \.status-footer\{display:\s*none/);
-assert.match(css, /html\.film-screen \.workspace\{display:none!important\}/);
-assert.match(css, /html\.film-screen \.search-panel\{display:none!important\}/);
+assert.match(css, /html\.film-screen \.page-heading,html\.film-screen \.demo-note,html\.film-screen \.search-panel,html\.film-screen \.results\{display:none!important\}/, 'AIR-381: the film page replaces only the programme column');
+assert.doesNotMatch(css, /html\.film-screen \.workspace\{display:none/);
 assert.match(css, /html\.film-screen \.status-footer,html\.events-screen \.status-footer\{margin-top:28px\}/);
 assert.match(css, /\.admin-shell>\.status-footer\{margin-top:36px\}/);
 assert.doesNotMatch(css, /\.status-footer\{[^}]*position:\s*(?:fixed|sticky)/);
