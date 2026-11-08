@@ -60,6 +60,9 @@ export async function runSearches({films,search,state={results:{},requests:0},ma
   last=now();requests++;state.requests++;
   let answer;
   try{answer=await search(film);}catch{answer={status:0};}
+  // A 401 says the credential was not applied: nothing was learned about this film, so it is NOT recorded (it can be asked again once the
+  // credential works), the run ends at once, and the request still counts against the total budget.
+  if(answer.status===401){stopped='unauthorized';break;}
   if(answer.status===403||answer.status===429){results[film.code]={decision:'blocked',reason:'http_'+answer.status};stopped=answer.status===429?'rate_limited':'forbidden';break;}
   if(answer.status!==200){failures++;results[film.code]={decision:'error',reason:'http_'+answer.status};if(failures>=3){stopped='repeated_failure';break;}continue;}
   failures=0;

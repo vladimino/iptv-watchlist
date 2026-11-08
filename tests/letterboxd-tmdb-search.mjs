@@ -88,6 +88,15 @@ for(const [status,stopped] of [[429,'rate_limited'],[403,'forbidden']]){
  await runSearches({films:many(4),search:async f=>{asked.push(f.code);return okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
  assert.deepEqual(asked,['C0000','C0001','C0002','C0003']);assert.equal(state.results.C0001.decision,'blocked');
 }
+// a 401 means the credential was not applied: the run ends at once, the film is NOT recorded (nothing was learned), the request counts, and
+// the same code is asked again once the credential works
+{
+ const state={results:{},requests:0};const asked=[];
+ const first=await runSearches({films:many(4),search:async f=>{asked.push(f.code);return f.code==='C0001'?{status:401}:okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
+ assert.equal(first.stopped,'unauthorized');assert.equal(first.requests,2);assert.equal(state.requests,2);assert.ok(!('C0001' in state.results),'the 401 film is not recorded');assert.ok(!('C0002' in state.results));
+ const second=await runSearches({films:many(4),search:async f=>{asked.push(f.code);return okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
+ assert.deepEqual(asked,['C0000','C0001','C0001','C0002','C0003']);assert.equal(second.remaining,0);assert.equal(second.totalRequests,5);
+}
 // the budget is cumulative over resumes: it is spent once, never per invocation
 {
  const state={results:{},requests:0};
@@ -162,6 +171,26 @@ try{
  const resume=await main(base,{env:{TMDB_READ_TOKEN:'tok-test'},fetchImpl:async(url)=>{asked.push(new URL(url).searchParams.get('query'));return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
  assert.deepEqual(asked,[]);assert.equal(resume.requests,0);assert.equal(resume.totalRequests,3);assert.equal(resume.counts.blocked,1);
  const dry2=await main([...base,'--dry-run'],{env:{}});assert.equal(dry2.requestsUsed,3);assert.equal(dry2.requestsWouldBeMade,0);assert.equal(dry2.alreadyAttempted,3);
+ // --auth proxy: the environment injects the Authorization header, so the tool needs no token and sends none; the default still refuses
+ {
+  const outProxy=path.join(scratch,'out-proxy'),proxy=['--export',exportDir,'--catalog-dir',catalogDir,'--output',outProxy,'--auth','proxy'];
+  await assert.rejects(main([...proxy.slice(0,6),'--auth','nonsense'],{env:{}}),/--auth must be token or proxy/);
+  // a 401 (the proxy did not apply a credential): one request, that film not recorded, stop
+  const seenP=[];
+  const denied=await main(proxy,{env:{},fetchImpl:async(url,init)=>{seenP.push(init.headers);return new Response('no',{status:401});},sleep:async()=>{},now:()=>1});
+  assert.equal(denied.auth,'proxy');assert.equal(denied.stopped,'unauthorized');assert.equal(denied.requests,1);assert.deepEqual(denied.counts,{});
+  assert.ok(seenP.every(h=>h.Authorization===undefined&&h.Accept==='application/json'),'no Authorization header is sent in proxy mode');
+  const savedP=JSON.parse(await readFile(path.join(outProxy,'tmdb-results.json'),'utf8'));assert.deepEqual(savedP.results,{});assert.equal(savedP.requests,1);
+  // the proxy works: all three are asked (the first again), still with no header and no token
+  const askedP=[],headersP=[];
+  const okP=await main(proxy,{env:{},fetchImpl:async(url,init)=>{askedP.push(new URL(url).searchParams.get('query'));headersP.push(init.headers);return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
+  assert.equal(askedP.length,3);assert.equal(okP.stopped,null);assert.equal(okP.totalRequests,4);assert.ok(headersP.every(h=>h.Authorization===undefined));
+  assert.equal(JSON.stringify(okP).includes('tok'),false);
+  // the default mode still sends the bearer header
+  const tokenSeen=[];
+  await main(['--export',exportDir,'--catalog-dir',catalogDir,'--output',path.join(scratch,'out-token')],{env:{TMDB_READ_TOKEN:'tok-x'},fetchImpl:async(url,init)=>{tokenSeen.push(init.headers.Authorization);return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
+  assert.ok(tokenSeen.length>0&&tokenSeen.every(h=>h==='Bearer tok-x'));
+ }
  // the file is bound to its export: another export (or catalog read) is refused, never reused
  await writeFile(path.join(exportDir,'watched.csv'),csv('Date,Name,Year,Letterboxd URI',[['2024-01-01','Another Film','2001','https://boxd.it/Zz9']]));
  await assert.rejects(main(base,{env:{TMDB_READ_TOKEN:'tok-test'},fetchImpl:async()=>{asked.push('x');},sleep:async()=>{},now:()=>1}),/belongs to another export or catalog read/);

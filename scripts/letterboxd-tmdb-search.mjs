@@ -2,8 +2,10 @@
 // node scripts/letterboxd-tmdb-search.mjs --export <abs dir> --catalog-dir <abs dir> --output <abs dir> [--max-requests 1..1500] [--rps >0..4] [--dry-run]
 // - Reads the four named CSVs of the extracted export and a catalog directory (see loadCatalogDir), matches with the inferred policy, and
 //   asks TMDB once per still-unmatched film (search/movie, page 1, one attempt, never a retry). The first 403 or 429 ends the run.
-// - The credential is TMDB_READ_TOKEN (a read-only API read access token) from the environment only; it is sent as a bearer header and is
-//   never printed or written. Without it only --dry-run runs. No new credential is created by this tool.
+// - Credential, one of two ways, never printed or written, and this tool creates none. Default: TMDB_READ_TOKEN (a read-only API read access
+//   token) from the environment, sent as a bearer header; without it only --dry-run runs. `--auth proxy`: the environment injects the
+//   Authorization header itself for api.themoviedb.org (a network secret of the cloud environment), the tool sends none and needs no token.
+//   Under a proxy, run it with NODE_USE_ENV_PROXY=1, or Node's fetch ignores the proxy. A 401 ends the run without recording that film.
 // - Writes `tmdb-results.json` (private, outside the repository) and prints counts only: no name, code or year reaches standard output.
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import path from 'node:path';
@@ -23,9 +25,10 @@ export async function unmatchedFilms({exportDir,catalogDir}){
  return {films,total:parsed.films.length,exportSha256:exportDigest(texts),status:Object.fromEntries([...new Set(matches.map(match=>match.status))].map(status=>[status,matches.filter(match=>match.status===status).length])),provenance:loaded.baselineIdentity};
 }
 
-export function tmdbSearchFn({token,fetchImpl=fetch,timeoutMs=20000}){
+export function tmdbSearchFn({token,auth='token',fetchImpl=fetch,timeoutMs=20000}){
  return async film=>{
-  const response=await fetchImpl(searchUrl(film),{headers:{Authorization:'Bearer '+token,Accept:'application/json'},redirect:'error',signal:AbortSignal.timeout(timeoutMs)});
+  const headers=auth==='proxy'?{Accept:'application/json'}:{Authorization:'Bearer '+token,Accept:'application/json'};
+  const response=await fetchImpl(searchUrl(film),{headers,redirect:'error',signal:AbortSignal.timeout(timeoutMs)});
   if(response.status!==200){await response.body?.cancel();return {status:response.status};}
   let body;try{body=await response.json();}catch{return {status:502};}
   return {status:200,results:Array.isArray(body?.results)?body.results.map(({id,title,original_title,release_date})=>({id,title,original_title,release_date})):[]};
@@ -36,8 +39,8 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
  const args={};
  for(let i=0;i<argv.length;i++){
   if(argv[i]==='--dry-run'){args.dry=true;continue;}
-  const name={'--export':'exportDir','--catalog-dir':'catalogDir','--output':'outputDir','--max-requests':'maxRequests','--rps':'rps'}[argv[i]];
-  if(!name||i+1>=argv.length)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs --export <abs> --catalog-dir <abs> --output <abs> [--max-requests n] [--rps n] [--dry-run]',2);
+  const name={'--export':'exportDir','--catalog-dir':'catalogDir','--output':'outputDir','--max-requests':'maxRequests','--rps':'rps','--auth':'auth'}[argv[i]];
+  if(!name||i+1>=argv.length)throw new ReconcileError('Usage: letterboxd-tmdb-search.mjs --export <abs> --catalog-dir <abs> --output <abs> [--max-requests n] [--rps n] [--auth token|proxy] [--dry-run]',2);
   args[name]=argv[++i];
  }
  if(!args.exportDir||!args.catalogDir||!args.outputDir)throw new ReconcileError('--export, --catalog-dir and --output are required',2);
@@ -59,16 +62,18 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
  const pending=films.filter(film=>!Object.hasOwn(state.results,film.code)).length;
  const budgetLeft=Math.max(0,maxRequests-state.requests);
  if(args.dry)return {dryRun:true,exportFilms:total,matchStatus:status,unmatched:films.length,alreadyAttempted:films.length-pending,requestsUsed:state.requests,requestsWouldBeMade:Math.min(pending,budgetLeft),maxRequests,rps,catalog:provenance};
+ const auth=args.auth===undefined?'token':args.auth;
+ if(auth!=='token'&&auth!=='proxy')throw new ReconcileError('--auth must be token or proxy',2);
  const token=String(env.TMDB_READ_TOKEN||'').trim();
- if(!token)throw new ReconcileError('TMDB_READ_TOKEN is not set: no TMDB request was made',2);
+ if(auth==='token'&&!token)throw new ReconcileError('TMDB_READ_TOKEN is not set: no TMDB request was made',2);
  let outcome;
- try{outcome=await runSearches({films,search:tmdbSearchFn({token,fetchImpl}),state,maxRequests,rps,...(sleep?{sleep}:{}),...(now?{now}:{})});}
+ try{outcome=await runSearches({films,search:tmdbSearchFn({token,auth,fetchImpl}),state,maxRequests,rps,...(sleep?{sleep}:{}),...(now?{now}:{})});}
  finally{
   // Whatever happened, what was attempted is on disk before this process ends.
   await mkdir(outputDir,{recursive:true,mode:0o700});
   await writeFile(file,JSON.stringify({schemaVersion:1,binding,requests:state.requests,provenance:{searchedAt:new Date().toISOString(),catalog:provenance},results:state.results},null,1)+'\n',{mode:0o600});
  }
- return {exportFilms:total,unmatched:films.length,requests:outcome.requests,totalRequests:outcome.totalRequests,stopped:outcome.stopped,remaining:outcome.remaining,counts:outcome.counts};
+ return {auth,exportFilms:total,unmatched:films.length,requests:outcome.requests,totalRequests:outcome.totalRequests,stopped:outcome.stopped,remaining:outcome.remaining,counts:outcome.counts};
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
