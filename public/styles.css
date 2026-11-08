@@ -208,11 +208,9 @@ html.film-screen .status-footer,html.events-screen .status-footer{margin-top:28p
 .film-similar-poster{position:relative;flex:none}
 .film-similar-card .poster{width:78px;height:117px}
 .film-similar-card .film-info h3{font-size:19px;line-height:1.25;margin:2px 0 4px;display:block}
-.film-similar-open,.film-similar-external{display:inline;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:650;text-align:left;overflow-wrap:anywhere;text-decoration:none}
-.film-similar-open:hover,.film-similar-external:hover{color:var(--lime)}
-.film-similar-external:hover{text-decoration:underline}
-.film-similar-open:focus-visible,.film-similar-external:focus-visible{outline:2px solid var(--lime);outline-offset:3px;border-radius:2px}
-.film-similar-out{margin-left:6px;color:var(--muted);font-size:11px;font-weight:650;letter-spacing:.06em}
+.film-similar-open{display:inline;padding:0;border:0;background:none;color:inherit;font:inherit;font-weight:650;text-align:left;overflow-wrap:anywhere;text-decoration:none}
+.film-similar-open:hover{color:var(--lime)}
+.film-similar-open:focus-visible{outline:2px solid var(--lime);outline-offset:3px;border-radius:2px}
 .film-similar-badge{display:inline-block;margin-top:8px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted);font-size:11px;font-weight:650;letter-spacing:.04em}
 .film-similar-card .film-similar-badge.is-new{position:absolute;top:-6px;left:-6px;z-index:1;margin-top:0;padding:3px 7px;border:0;border-radius:5px;background:var(--lime);color:#17241b;font-size:10px;font-weight:800;letter-spacing:.08em;box-shadow:0 2px 6px #0006}
 .film-similar-badge.is-rewatch{border-color:#6d7c62;color:var(--lime)}
@@ -246,7 +244,6 @@ html.film-screen .page-heading,html.film-screen .demo-note,html.film-screen .sea
 .finds-poster{position:relative;flex:none}
 .finds-badge{position:absolute;top:-6px;left:-6px;z-index:1;padding:3px 7px;border-radius:5px;background:var(--lime);color:#17241b;font-size:10px;font-weight:800;letter-spacing:.08em;box-shadow:0 2px 6px #0006}
 .finds-card .film-info h3{font-size:19px;margin:2px 0 4px;display:block}
-.finds-title-link{color:inherit;text-decoration:none}.finds-title-link:hover,.finds-title-link:focus-visible{color:var(--lime);text-decoration:underline}.finds-title-link:focus-visible{outline:2px solid var(--lime);outline-offset:3px;border-radius:2px}
 .finds-labels{padding:0 17px 10px}
 .finds-match{margin:0;padding:0 17px 8px;font-size:12px;color:#9fd3ad}
 .finds-airing{margin:0;padding:0 17px 15px;font-size:13px;color:#cde7d1}.finds-airing[data-airing=live]{color:var(--lime);font-weight:600}
