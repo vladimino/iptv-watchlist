@@ -105,7 +105,18 @@ const card=run('findsCard(input,now)',rich);
 assert.match(card,/^<article class="finds-card" data-finds-film="tmdb_71">/);
 assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span><img class="poster" src="https:\/\/img.example\/p.jpg"/);
 assert.match(card,/score-predicted[^>]*><span>ПРОГНОЗ<\/span><strong>4\.7<\/strong><small>82% на 4\.0\+<\/small>/);
-assert.match(card,/<a class="finds-title-link" href="https:\/\/www.themoviedb.org\/movie\/71" target="_blank" rel="noopener noreferrer" title="Открыть на TMDB">Богатый<\/a>/);
+assert.match(card,/<h3>Богатый<\/h3>/,'AIR-382: the title is plain text');
+assert.doesNotMatch(card,/themoviedb\.org|finds-title-link|<h3><a|<button/,'AIR-382: no TMDB link or control on the title');
+assert.doesNotMatch(card,/letterboxd-link/,'a TMDB url is not a Letterboxd link, so no icon without a proven URL');
+{
+ const lb='https://letterboxd.com/film/rich-film/';
+ const withIcon=run('findsCard(input,now)',{...rich,letterboxdUrl:lb});
+ assert.match(withIcon,new RegExp('<h3>Богатый<a class="letterboxd-link" href="'+lb.replace(/[.\/]/g,'\\$&')+'" target="_blank" rel="noopener noreferrer"'),'a proven URL gives the shared icon link');
+ assert.equal((withIcon.match(/<a /g)||[]).length,1,'only the icon is a link');
+ for(const bad of ['https://www.themoviedb.org/movie/71','http://letterboxd.com/film/x/','https://letterboxd.com/film/x','https://letterboxd.com/film/X_y/','https://letterboxd.com.evil.example/film/x/','javascript:alert(1)','https://letterboxd.com/film/x/"onmouseover="a',42,null,{}]){
+  assert.doesNotMatch(run('findsCard(input,now)',{...rich,letterboxdUrl:bad}),/letterboxd-link/,'rejected: '+String(bad));
+ }
+}
 assert.match(card,/<p class="original">Rich Film<\/p>/);
 assert.match(card,/<span class="film-year">2020 · 100 мин<\/span>/);
 assert.match(card,/<div class="film-tags">Триллер · Драма<\/div>/);
