@@ -66,6 +66,17 @@ async function epgPublication(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
 }
+// The publication as `epgPublication` reports it (authority, run, phase, fence, generation), read with SELECTs only. `epgPublication` repairs the
+// R2 compatibility mirrors of a D1 generation (an R2 write) before it answers; a route that promises to be a pure read uses this one instead.
+// The generation fence is kept: the caller reads its documents at this exact generation (`readDocumentAt` re-checks it before and after).
+async function epgPublicationReadOnly(env){
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live)return {authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,etag:live.fence,fence:live.fence,generation:live.generation};
+ }
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
+}
 async function pinEpg(env){
  if(env.epgPin?.programmeRunId||env.epgPin?.authority==='d1')return env;
  if(typeof PublishedEpg!=='undefined'){
@@ -328,6 +339,8 @@ async function catalogFilmRoute(env,tmdbId){
   else{
    // Discovery still on R2: the one shared catalog object, filtered by identity (no D1 here, nothing is superseded).
    const shared=await loadJSON(env,'epg/discovered-films.json');
+   // A missing or malformed catalog object is a source that cannot be read, not proof that the film was never admitted.
+   if(!shared||typeof shared!=='object'||Array.isArray(shared)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
    found=catalogFilmState(Object.entries(shared||{}).filter(([,film])=>film&&String(film.tmdbId)===tmdbId).map(([filmId,film])=>({filmId,state:'current',canonicalIdentity:film.canonicalIdentity,tmdbId:String(film.tmdbId),film})),tmdbId);
   }
  }catch(error){
@@ -341,7 +354,7 @@ async function catalogFilmRoute(env,tmdbId){
  if(found.state==='unavailable')return json({status:'unavailable',error:'The catalog is being updated',reason:'discovery_pending'},503);
  // The optional context degrades to "nothing known": a film with no shows, no prediction and no Letterboxd link is still a film.
  const degraded=[],optional=async(name,load)=>{try{return await load();}catch{degraded.push(name);return null;}};
- const publication=await optional('publication',()=>epgPublication(env));
+ const publication=await optional('publication',()=>epgPublicationReadOnly(env));
  const pinnedRunId=publication?.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  const [programme,watchlist,index,profile,metadata]=await Promise.all([
   pinnedRunId?optional('programme',()=>catalogGenerationCopy(env,publication,pinnedRunId,'programme.json')):null,

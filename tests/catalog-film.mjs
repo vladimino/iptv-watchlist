@@ -9,6 +9,8 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
+import {scoped} from '../scripts/bundle-scope.mjs';
+import * as PublishedEpgModule from '../src/published-epg.js';
 
 // ---- 1. readFilmAdmission against a real schema (sqlite stand-in) ----
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-film-'));
@@ -150,6 +152,61 @@ const base={
  for(const code of ['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative']){ctx.__stub=async()=>{const error=new Error(code);error.code=code;throw error;};r=await get('7');assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable',code],code);}
  ctx.__stub=async()=>{throw new Error('boom');};r=await get('7');assert.deepEqual([r.status,r.body.status],[500,'error'],'an unknown failure is an error, not an absence');
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+}
+
+// ---- 3b. A missing source is not an absence ----
+{
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ seed({});
+ records.delete('epg/discovered-films.json');records.delete('epg/generations/'+G1+'/discovered-films.json');
+ let r=await get('7');
+ assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','discovery_unavailable'],'a missing shared catalog object is unreadable, not "never admitted"');
+ records.set('epg/discovered-films.json',[]);r=await get('7');
+ assert.deepEqual([r.status,r.body.status],[503,'unavailable'],'a malformed catalog object is unreadable too');
+ records.set('epg/discovered-films.json',{});r=await get('7');
+ assert.deepEqual([r.status,r.body.status],[404,'absent'],'an existing, empty catalog is a real absence');
+ assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+}
+
+// ---- 3c. A D1-published generation: the GET never repairs the R2 mirrors, writes D1 or asks a provider ----
+{
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).map(name=>name.slice(0,-4)).sort();
+ const mkdb=name=>{
+  const file=path.join(root,name+'.sqlite');const statementsSeen=[];
+  const db=d1Standin(file,{onQuery:async text=>{statementsSeen.push(text);}});
+  for(const migration of names)db.sql(fs.readFileSync('migrations/'+migration+'.sql','utf8'));
+  return {db,statementsSeen};
+ };
+ const {db,statementsSeen}=mkdb('published');
+ db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1");
+ const seeding=new Map(),seedBucket={async get(key){return seeding.has(key)?{etag:'e',json:async()=>structuredClone(seeding.get(key))}:null;},async put(key,value){seeding.set(key,JSON.parse(value));return {etag:'e'};},async list(){return {objects:[],truncated:false};}};
+ const published=await PublishedEpgModule.publishGeneration({DB:db,BUCKET:seedBucket},{programmeRunId:G1,phase:'published',expectedProgrammeRunId:null,programme:{runId:G1,updatedAt:new Date(now).toISOString(),watchlistCount:0,films:[]},watchlist:{updatedAt:new Date(now).toISOString(),films:[]}},{now});
+ assert.equal(published.pointed,true,'the fixture is a real D1-published generation');
+ // Production reads through a bucket whose compatibility mirrors are missing (and, in the second run, stale: another run's pointer).
+ for(const mirrors of ['missing','stale']){
+  const mem=new Map();
+  if(mirrors==='stale'){mem.set('epg/published-generation.json',{phase:'published',programmeRunId:'11111111-1111-4111-8111-aaaaaaaaaaaa'});mem.set('programme.json',{runId:'old',films:[]});}
+  for(const key of ['epg/discovered-films.json','epg/generations/'+G1+'/discovered-films.json'])mem.set(key,{tmdb_7:catalogFilm('tmdb_7',7,{shows:[show(now-hour)]})});
+  mem.set(constant('profileKey'),profile);mem.set(constant('ENRICHMENT_KEY')+'view-index.json',{tmdb_7:stored()});
+  const writes=[];
+  const spy={async get(key){return mem.has(key)?{etag:'e',json:async()=>structuredClone(mem.get(key))}:null;},async put(key){writes.push('put:'+key);throw new Error('R2 write in a GET: '+key);},async delete(key){writes.push('delete:'+key);throw new Error('R2 delete in a GET: '+key);},async list(){return {objects:[],truncated:false};},async head(key){return mem.has(key)?{etag:'e'}:null;}};
+  const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},
+   fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
+  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);
+  vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);
+  for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
+  fetches.length=0;
+  const callsBefore={batches:db.calls.batches,statements:db.calls.statements};statementsSeen.length=0;
+  const response=await world.worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/7'),{DB:db,BUCKET:spy},{waitUntil(){}});
+  const body=await response.json();
+  assert.equal(response.status,200,mirrors+' mirrors: '+JSON.stringify(body));
+  assert.equal(body.status,'found');assert.equal(body.film.tmdbId,'7');
+  assert.equal(body.programmeRunId,G1,'the answer is pinned to the D1 generation, not to the stale or missing mirror');
+  assert.deepEqual(writes,[],mirrors+' mirrors: no R2 put or delete in a GET');
+  assert.equal(db.calls.batches,callsBefore.batches,'no D1 batch');assert.equal(db.calls.statements,callsBefore.statements,'no D1 statement written');
+  assert.ok(statementsSeen.length>0&&statementsSeen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+statementsSeen.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));
+  assert.deepEqual(fetches,[],'no provider request');
+ }
 }
 
 // ---- 4. Method and routing guards ----
