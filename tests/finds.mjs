@@ -22,7 +22,7 @@ assert(orderOf('id="shortlist"')<orderOf('id="movies"'),'shortlist stays above t
 assert(orderOf('id="movies"')<orderOf('id="empty"'),'the grid comes before its empty state');
 assert(orderOf('id="empty"')<orderOf('id="finds"'),'the finds section follows the grid and its empty state');
 assert(orderOf('id="finds"')<orderOf('class="status-footer"'),'the finds section stays inside the results column above the footer');
-assert.match(html.slice(orderOf('id="finds"'),orderOf('class="status-footer"')),/<\/section>\s*<\/section>\s*<\/div>\s*<footer/,'the finds section is the last block of the results column');
+assert.match(html.slice(orderOf('id="finds"'),orderOf('class="status-footer"')),/<\/section>\s*<\/section>\s*<section id="film-screen"/,'the finds section is the last block of the results column (the film and events columns follow it in the workspace)');
 assert.equal((app.match(/fetch\('\/api\/catalog\/available'\)/g)||[]).length,1,'the section reads the catalog route once');
 assert.match(app,/loadEnrichment\(\{quiet:true\}\),\n\s+loadCatalog\(\),/,'the catalog refreshes with the other live loaders');
 assert.doesNotMatch(app,/finds-card[^`]*film-open/,'a find never opens the watchlist film route');

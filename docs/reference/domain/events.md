@@ -52,3 +52,23 @@ Contract of [AIR-361](https://trello.com/c/pKYwrxcZ). One immutable event per Ra
 Written, read and unchanged are different numbers: 50 rows checked with one new fact reads «записей проверено 50, новых фактов 1». The payload carries no titles, ids, URLs, rating lists or raw Letterboxd content.
 
 **Delivery.** The D1 run record is the source and R2 is a projection, and the two are not atomic. An event is built from a **committed** terminal record only and put with a create-only precondition, so a repeat finds the key and writes nothing; a close that a start has not committed (a compare-and-swap that is lost) publishes nothing. It is delivered right after the terminal commit and again at the next look: a start (after its own commit), a terminal read by the Cloudflare executor, the closing of a stale run, or the hourly executor tick, so a missed event is repaired without starting Ratings again. The run is marked `ratingsEventAt` once delivered. If the record is replaced before delivery, the owed event moves to the new record (`pendingEvents`) with a retry time (15 minutes, doubling to a day), so the attempt rate is bounded but the outcome is never given up on. Only when more than 60 outcomes are owed at once (about two months of daily runs with the Events Log unreachable) is the oldest discarded, and `eventsDropped` on the run record counts it. The owner accepted this bounded policy on 2026-11-06 (AIR-361 review); keeping overflow without loss would need another store and a new decision. A failed put never fails the run, never reads Diary again and never repeats a step; the status reads and writes nothing. Events for runs that ended before this change are not created.
+
+## Type filter on the events screen
+
+The events screen (`/events`) shows the one feed of `GET /api/events` in its main column; its sidebar holds a single-select group of six buttons, «Тип событий». The filter is applied in the browser to the events already loaded, never on the server, and it never changes the loaded set or the cursor. The compact feed of the programme and film pages is not filtered.
+
+| Button | Stored `type` values it shows |
+| --- | --- |
+| «Все события» (default) | Every loaded event, including a type the page does not know |
+| «Watchlist и просмотр» | `watchlist`, `started`, `unstarted` |
+| «Программа» | `epg` |
+| «Оценки» | `ratings` |
+| «Прогнозы» | `enrichment` (start, progress, stop and completion of a prediction run) |
+| «Модель вкуса» | `taste_profile` (a profile publication, not a prediction run) |
+
+The choice is the `type` query parameter of the events URL, next to the `return` target of the programme page; the default needs no parameter, an unknown value means «Все события», and a deep link, a reload and Back or Forward restore the pressed button. Changing the choice replaces the current history entry.
+
+**Automatic pagination.** Choosing a type (and opening `/events` with one) loads the following pages by itself, in cursor order and one request at a time, until 10 loaded events match or the cursor is exhausted. A page with no match neither stops the search nor needs a click, and events that are already loaded are reused, so nothing is read twice. While it searches the page says «Ищем более давние события…» with the number of matches found among the loaded events, and the matches found so far are listed. When 10 are loaded the search stops and «Более давние события» stays for manual paging. «Все события» never searches: it shows the first page and the manual button.
+
+The search stops at once, and its request is aborted, when the type or the screen changes. It stops on an API error (the reason is shown with «Повторить»; there is no automatic retry, and the retry resumes from the cursor that failed) and on a cursor that repeats or does not advance (a visible message and the same «Повторить»). An empty result is reported only when the whole archive has been read: «Во всём доступном архиве событий этого типа нет.» Before that, a type with no loaded match says «Среди загруженных событий этого типа пока нет.» A count is always a count of the loaded events, not a total. Events are keyed by `id`, so a page that repeats an event does not list it twice. Each page is a normal read of `GET /api/events`, which may also recover an undelivered prediction stop event (see above): this is not a safe production probe.
+
