@@ -62,6 +62,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-365 monitor Telegram transport offline evidence | [monitoring/telegram-air-365-2026-11-07.md](monitoring/telegram-air-365-2026-11-07.md) |
 | AIR-375 D1 enrichment projector `input_missing` under D1 discovery authority (RCA and fix) | [d1-migration/air-375-projector-input-missing-2026-11-07.md](d1-migration/air-375-projector-input-missing-2026-11-07.md) |
 | AIR-383 Discovery ingress and generation-bump audit for a projector quiet window | [d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md](d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md) |
+| AIR-383 projector exclusive window, dormant implementation | [d1-migration/air-383-projector-window-dormant-implementation-2026-11-08.md](d1-migration/air-383-projector-window-dormant-implementation-2026-11-08.md) | 8 Nov 2026, offline tests and code reading | Coverage matrix, R2 side-effect reading, unmeasured values, activation blocker. |
 | AIR-386 Discovery decisions above 20 000 rows: bounded read failure (RCA and fix) | [d1-migration/air-386-decisions-read-cap-2026-11-08.md](d1-migration/air-386-decisions-read-cap-2026-11-08.md) |
 | AIR-349 monitor production activation (steps 4 to 6) | [monitoring/monitor-activation-air-349-2026-11-07.md](monitoring/monitor-activation-air-349-2026-11-07.md) |
 | AIR-366 monitor `dry` mode removal and pre-merge gate | [monitoring/dry-removal-air-366-2026-11-07.md](monitoring/dry-removal-air-366-2026-11-07.md) |

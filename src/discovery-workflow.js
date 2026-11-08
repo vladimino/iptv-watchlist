@@ -171,7 +171,10 @@ async function settleWorkflowIfOwner(env,ownId,patch){
  let state=await readWorkflowState(env);
  if(state.record?.instanceId&&state.record.instanceId!==ownId)return {saved:false,reason:'other_instance',record:state.record};
  const next={schemaVersion:1,...(state.record||{}),...patch,instanceId:ownId,updatedAt:new Date().toISOString()};
- if(await writeWorkflowState(env,next,state.etag))return {saved:true,reason:null,record:next};
+ // ADR 0103: a held projector window refuses this state write inside its own statement. That is a soft, typed refusal with an
+ // expiry, not a step failure: nothing is written, no stall or recovery budget is charged, and the caller carries on to its sleep.
+ try{if(await writeWorkflowState(env,next,state.etag))return {saved:true,reason:null,record:next};}
+ catch(error){if(error?.code==='discovery_window')return {saved:false,reason:'projector_window',window:error.window||null,record:state.record};throw error;}
  state=await readWorkflowState(env);
  if(state.record?.instanceId&&state.record.instanceId!==ownId)return {saved:false,reason:'other_instance',record:state.record};
  return {saved:false,reason:'write_conflict',record:state.record};
@@ -282,6 +285,8 @@ function workflowAdmissionError(error){
  const code=error?.code||error?.reason||'';
  if(code==='discovery_fence'||code==='authority_held')return 'authority_held';
  if(code==='discovery_incomplete'||code==='authority_loading')return 'authority_loading';
+ // ADR 0103: a held projector window refuses the state write; the hourly reconcile simply tries again after its deadline.
+ if(code==='discovery_window')return 'projector_window';
  return 'd1_unavailable';
 }
 async function ensureDiscoveryWorkflow(env){

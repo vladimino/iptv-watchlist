@@ -2,6 +2,8 @@
 
 **Status:** Draft prepared for [AIR-383](https://trello.com/c/Hnuf2tB0) after the owner chose option D of the decision brief on 2026-11-08. **Nothing in this page has been run, and it authorizes nothing.** Every step that changes production (a Worker variable, a Scheduled Task, a workflow instance) is an L3 operation under the [authorization policy](../process/authorization-and-escalation.md) and needs the owner's operation-specific GO, named by tool, target, value and time window. Times are UTC unless Europe/Madrid is stated.
 
+**State of the automatic window.** Its code is in the repository behind the feature flag `D1_ENRICHMENT_WINDOW` (off) and the table of migration `0018` (not applied); neither is active. The owner's GO to apply the migration, the measurements of the lease hold times and of a run under the wait, and the proof that an EPG publication waits for the window ([ADR 0103](../adr/0103-projector-exclusive-window.md) decision 5) come before any activation, and none of them is a step of this page.
+
 **Scope of this page.** It is a manual, one-off fallback performed by a human. An automatic, bounded window coordinated through D1 is proposed in [ADR 0103](../adr/0103-projector-exclusive-window.md) (Proposed); this page does not describe it and stays valid as the fallback if that design is not accepted or cannot be demonstrated.
 
 ## Why this exists
