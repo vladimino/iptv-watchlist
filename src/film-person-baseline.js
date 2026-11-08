@@ -375,7 +375,8 @@ export async function verifyAir286(db,ids,{chunk=80,cap=LIST_CAP}={}){
     if(Number(row.contract_version)!==1)reasons.push('contract_version');
    }
    const own=aliasBy.get(id)||[];
-   if(own.length>1)reasons.push('alias_count');
+   // Fail closed: the alias with the writer's marker is the only independent proof, so none (an unnamed Person) or several is not proof.
+   if(own.length!==1)reasons.push(own.length?'alias_count':'alias_missing');
    for(const alias of own){
     if(alias.kind!=='name')reasons.push('alias_kind');
     let parsed;try{parsed=stable(JSON.parse(alias.provenance_json));}catch{parsed=null;}

@@ -421,11 +421,11 @@ const e2eLedger=async file=>{
  const file=database();seed(file);
  const T="'"+AT+"'";
  const add=sqlite(file,[
-  `INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/77','actor/77',1,${T}),('person:tmdb_actor/55','tmdb_actor/55',1,${T}),('person:tmdb_actor/56','tmdb_actor/56',1,${T}),('person:tmdb_director/57','tmdb_director/57',1,${T}),('person:tmdb_actor/58','tmdb_actor/58',1,${T}),('person:tmdb_actor/59','tmdb_actor/59',1,${T}),('person:tmdb_actor/60','tmdb_actor/60',2,${T}),('person:tmdb_actor/61','tmdb_actor/61',1,${T}),('person:tmdb_actor/62','tmdb_actor/62',1,${T})`,
+  `INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/77','actor/77',1,${T}),('person:tmdb_actor/55','tmdb_actor/55',1,${T}),('person:tmdb_actor/56','tmdb_actor/56',1,${T}),('person:tmdb_director/57','tmdb_director/57',1,${T}),('person:tmdb_actor/58','tmdb_actor/58',1,${T}),('person:tmdb_actor/59','tmdb_actor/59',1,${T}),('person:tmdb_actor/60','tmdb_actor/60',2,${T}),('person:tmdb_actor/61','tmdb_actor/61',1,${T}),('person:tmdb_actor/62','tmdb_actor/62',1,${T}),('person:tmdb_actor/65','tmdb_actor/65',1,${T})`,
   "INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES ('person:tmdb_actor/55','name','a','"+AIR286+"'),('person:tmdb_actor/56','name','b',NULL),('person:tmdb_director/57','name','c','"+AIR286+"'),('person:tmdb_actor/58','name','d','"+AIR286+"'),('person:tmdb_actor/60','name','e','"+AIR286+"'),('person:tmdb_actor/61','title','f','"+AIR286+"'),('person:tmdb_actor/61','name','g','"+AIR286+"'),('person:tmdb_actor/62','name','h','{\"source\":\"tmdb\",\"task\":\"AIR-999\"}')",
   "INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting) VALUES ('person:tmdb_actor/58','letterboxd','x',1,0)",
   `INSERT INTO person_dimension (person_id,dimension,status,source,provenance_json,attempts,updated_at) VALUES ('person:tmdb_actor/59','identity','resolved','x','{}',0,${T})`,
-  "INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1','person:actor/77','actor',5),('film:tmdb:3','person:tmdb_actor/55','actor',0),('film:tmdb:1','person:tmdb_actor/56','actor',6),('film:tmdb:1','person:tmdb_director/57','actor',7),('film:tmdb:1','person:tmdb_actor/58','actor',8),('film:tmdb:1','person:tmdb_actor/60','actor',9),('film:tmdb:1','person:tmdb_actor/61','actor',10),('film:tmdb:1','person:tmdb_actor/62','actor',11)",
+  "INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1','person:actor/77','actor',5),('film:tmdb:3','person:tmdb_actor/55','actor',0),('film:tmdb:1','person:tmdb_actor/56','actor',6),('film:tmdb:1','person:tmdb_director/57','actor',7),('film:tmdb:1','person:tmdb_actor/58','actor',8),('film:tmdb:1','person:tmdb_actor/60','actor',9),('film:tmdb:1','person:tmdb_actor/61','actor',10),('film:tmdb:1','person:tmdb_actor/62','actor',11),('film:tmdb:1','person:tmdb_actor/65','actor',12)",
  ].join(';\n'));
  assert.equal(add.status,0,add.stderr);
  const cut=await readAll(db(file),{pageSize:1000});
@@ -441,6 +441,7 @@ const e2eLedger=async file=>{
  assert.ok(rejected['person:tmdb_actor/60'].includes('contract_version'));
  assert.ok(rejected['person:tmdb_actor/61'].includes('alias_count')&&rejected['person:tmdb_actor/61'].includes('alias_kind'));
  assert.ok(rejected['person:tmdb_actor/62'].includes('alias_provenance'),'another task is not AIR-286');
+ assert.deepEqual(rejected['person:tmdb_actor/65'],['alias_missing'],'an unnamed Person (right id, role, version, watchlist credit) has no automatic proof');
  // A Person with no credit at all is rejected, and a missing row cannot be verified.
  {
   const seeded=sqlite(file,`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb_actor/64','tmdb_actor/99',1,${T});INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES ('person:tmdb_actor/64','name','z','${AIR286}');INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1','person:tmdb_actor/64','actor',20)`);
@@ -453,7 +454,7 @@ const e2eLedger=async file=>{
  assert.deepEqual(direct.verified,['person:tmdb_actor/9']);
  assert.deepEqual(direct.rejected.map(item=>[item.id,item.reasons.includes('no_credit')||item.reasons.includes('no_person_row')]),[['person:tmdb_actor/404',true],['person:tmdb_actor/63',true]]);
  // The ledger: the expected side lacks every unkeyed Person (the view does not carry them). Only the verified one is explained; the rest keeps the gate closed.
- const unkeyed=new Set(['person:actor/77','person:tmdb_actor/9','person:tmdb_actor/55','person:tmdb_actor/56','person:tmdb_director/57','person:tmdb_actor/58','person:tmdb_actor/60','person:tmdb_actor/61','person:tmdb_actor/62']);
+ const unkeyed=new Set(['person:tmdb_actor/65','person:actor/77','person:tmdb_actor/9','person:tmdb_actor/55','person:tmdb_actor/56','person:tmdb_director/57','person:tmdb_actor/58','person:tmdb_actor/60','person:tmdb_actor/61','person:tmdb_actor/62']);
  const expectedWithout=()=>{
   const classes=JSON.parse(JSON.stringify(cut.entries));
   classes.person=classes.person.filter(([k])=>!unkeyed.has(k));
@@ -469,6 +470,13 @@ const e2eLedger=async file=>{
  assert.ok(base.diffs.some(item=>item.class==='credit'&&item.key.includes('person:tmdb_actor/55')),'a credit on a non-watchlist Film is unexplained even for a tmdb id');
  assert.ok(base.diffs.some(item=>item.class==='credit'&&item.key.includes('person:tmdb_director/57')),'a credit in the wrong role is unexplained');
  assert.equal((await baselineGate(base.ledger)).pass,false,'the gate stays closed');
+ assert.ok(base.diffs.some(item=>item.class==='person'&&item.key==='person:tmdb_actor/65'),'an alias-less Person is unexplained although id, role, version and credit look right');
+ {
+  // Only the alias-less Person is left unexplained: its own exception explains exactly it, and the gate then depends on nothing else about it.
+  const only=await ledgerOf({personExceptions:[{id:'person:tmdb_actor/65',reason:'unnamed AIR-286 Person, owner checked',approvedBy:'owner'}]});
+  assert.ok(!only.diffs.some(item=>item.key.includes('person:tmdb_actor/65')),'the exception explains the listed id');
+  assert.ok(only.diffs.some(item=>item.class==='person'&&item.key==='person:actor/77')&&only.diffs.some(item=>item.class==='person'&&item.key==='person:tmdb_actor/56'),'no other Person is explained');
+ }
  // An owner exception explains exactly the listed id and its own rows, nothing else.
  const excepted=await ledgerOf({personExceptions:[{id:'person:actor/77',reason:'owner reviewed: a manual import',approvedBy:'owner'},{id:'person:director/1',reason:'a keyed Person',approvedBy:'owner'},{id:'person:ghost',reason:'not in D1',approvedBy:'owner'},{id:'person:tmdb_actor/56',reason:'',approvedBy:'owner'},{id:'person:tmdb_actor/55',reason:'x'}]});
  const left=excepted.diffs.map(item=>item.key.split('\u001f').slice(0,2).join('|'));
