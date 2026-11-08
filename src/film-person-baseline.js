@@ -40,44 +40,92 @@ export const CLASSES=Object.freeze([
 const CLASS_NAMES=CLASSES.map(item=>item.name);
 const UNIT_OF=Object.fromEntries(CLASSES.map(item=>[item.name,item.unit]));
 
+// ---------- the ONE value encoding, shared by both sides ----------
+// Every class compares a KEY (the primary key columns joined by the separator) and a VALUE: the listed columns, in this order, each coerced by its declared type
+// and serialized as a JSON ARRAY by encodeValue. The D1 reader and the expected-side mapper both call encodeValue with a plain array of the class's columns, so
+// equal data cannot encode differently. A class with no value column (an alias, a watchlist row) encodes as `[]` on both sides.
+//   int  : an integer (a boolean becomes 1 or 0); text : a string (ids and digests are text on both sides); null stays null.
+// Per class: film [contract_version, canonical_identity, original_title]; person [role_id]; filmExternalId/personExternalId [trusted, conflicting];
+// filmAlias/personAlias []; credit [ordinal]; filmLocalization/personLocalization [status, authority, value]; watchlist []; redirect [to_film_id];
+// retirement [state, movie_id, tv_id]; ratedAdmission [tmdb, source_code, archive_sha256]; retention [watchlist]; ownerLink [identity_link, identity_state];
+// projectionKey [change_key].
+export const VALUE_COLUMNS=Object.freeze({
+ film:[['contract_version','int'],['canonical_identity','text'],['original_title','text']],
+ person:[['role_id','text']],
+ filmExternalId:[['trusted','int'],['conflicting','int']],
+ personExternalId:[['trusted','int'],['conflicting','int']],
+ filmAlias:[],personAlias:[],
+ credit:[['ordinal','int']],
+ filmLocalization:[['status','text'],['authority','text'],['value','text']],
+ personLocalization:[['status','text'],['authority','text'],['value','text']],
+ watchlist:[],
+ redirect:[['to_film_id','text']],
+ retirement:[['state','text'],['movie_id','text'],['tv_id','text']],
+ ratedAdmission:[['tmdb','text'],['source_code','text'],['archive_sha256','text']],
+ retention:[['watchlist','int']],
+ ownerLink:[['identity_link','text'],['identity_state','text']],
+ projectionKey:[['change_key','text']],
+});
+function coerce(type,value){
+ if(value===null||value===undefined)return null;
+ if(type==='int'){const number=typeof value==='boolean'?(value?1:0):Number(value);if(!Number.isInteger(number))throw failed('baseline_encoding');return number;}
+ return String(value);
+}
+export function encodeValue(name,values){
+ const columns=VALUE_COLUMNS[name];
+ if(!columns||!Array.isArray(values)||values.length!==columns.length)throw failed('baseline_encoding');
+ return JSON.stringify(values.map((value,index)=>coerce(columns[index][1],value)));
+}
+
 // ---------- the expected side: the projector's own view, normalized ----------
-// inputs: enrichmentInputs() output {films:[{id,film,watchlist,credits}],people:[{id,person}]}; extra: optional pre-normalized classes (retirement, admission,
-// retention, owner links, redirects, projection keys) the caller derives from the same sources.
+// inputs: enrichmentInputs() output {films:[{id,film,watchlist,credits}],people:[{id,person}]}; extra: {class:[[key, [column values...]]]} for the classes the view does not
+// carry (retirement, admission, retention, owner links, redirects, projection keys); each value is the plain array of that class's columns and goes through encodeValue.
 export function expectedFromInputs(inputs,extra={}){
  const classes={};
- const put=(name,key,value)=>{(classes[name]||(classes[name]=[])).push([key,stable(value)]);};
+ const put=(name,key,values)=>{(classes[name]||(classes[name]=[])).push([key,encodeValue(name,values)]);};
  for(const name of CLASS_NAMES)classes[name]=[];
+ const trust=item=>[item.trusted&&!item.conflicting?1:0,item.conflicting?1:0];
+ const localization=state=>[state.status,state.provenance?.authority??null,state.value??null];
  for(const entry of inputs?.films||[]){
   const film=entry.film||{},id=entry.id;
   put('film',id,[film.contractVersion??null,film.canonicalIdentity??null,film.originalTitle??null]);
-  for(const item of film.externalIds||[])put('filmExternalId',keyOf(id,item.scheme,String(item.value)),[item.trusted&&!item.conflicting?1:0,item.conflicting?1:0]);
-  for(const item of film.aliases||[])put('filmAlias',keyOf(id,item.kind||'title',item.value),null);
-  for(const credit of entry.credits||[])put('credit',keyOf(id,credit.personId,credit.role),credit.ordinal);
-  if(film.localization?.status)put('filmLocalization',id,[film.localization.status,film.localization.provenance?.authority??null,film.localization.value??null]);
-  if(entry.watchlist===true)put('watchlist',id,null);
-  for(const redirect of film.redirects||[])put('redirect',redirect.from||redirect.id,redirect.to||redirect.survivor||null);
+  for(const item of film.externalIds||[])put('filmExternalId',keyOf(id,item.scheme,String(item.value)),trust(item));
+  for(const item of film.aliases||[])put('filmAlias',keyOf(id,item.kind||'title',item.value),[]);
+  for(const credit of entry.credits||[])put('credit',keyOf(id,credit.personId,credit.role),[credit.ordinal]);
+  if(film.localization?.status)put('filmLocalization',id,localization(film.localization));
+  if(entry.watchlist===true)put('watchlist',id,[]);
+  for(const redirect of film.redirects||[])put('redirect',redirect.from||redirect.id,[redirect.to||redirect.survivor||null]);
  }
  for(const entry of inputs?.people||[]){
   const person=entry.person||{},id=entry.id;
   put('person',id,[person.roleId??null]);
-  for(const item of person.externalIds||[])put('personExternalId',keyOf(id,item.scheme,String(item.value)),[item.trusted&&!item.conflicting?1:0,item.conflicting?1:0]);
-  for(const item of person.aliases||[])put('personAlias',keyOf(id,item.kind||'name',item.value),null);
-  if(person.localization?.status)put('personLocalization',id,[person.localization.status,person.localization.provenance?.authority??null,person.localization.value??null]);
+  for(const item of person.externalIds||[])put('personExternalId',keyOf(id,item.scheme,String(item.value)),trust(item));
+  for(const item of person.aliases||[])put('personAlias',keyOf(id,item.kind||'name',item.value),[]);
+  if(person.localization?.status)put('personLocalization',id,localization(person.localization));
  }
- for(const [name,entries] of Object.entries(extra))if(CLASS_NAMES.includes(name))classes[name]=entries.map(([key,value])=>[key,typeof value==='string'?value:stable(value)]);
+ for(const [name,entries] of Object.entries(extra))if(CLASS_NAMES.includes(name))classes[name]=entries.map(([key,values])=>[key,encodeValue(name,values)]);
  return classes;
 }
 
 // ---------- explanations ----------
-// A rule explains one difference (never a whole class). Context: unkeyedPersons (D1 Persons with no projector key by design), retainedFilms (Films D1 keeps
-// through retention or a rated admission). Owner exceptions (class C) must carry a reason and the approving owner; an exception without both is ignored.
+// A rule explains one difference (never a whole class). Context (see contextFromActual): explainedPersons (unkeyed Persons that are VERIFIED AIR-286 Persons or are
+// named by an owner exception: an unkeyed Person alone is not an explanation), watchlistFilms, retainedFilms (Films D1 keeps through retention or a rated admission).
+// Owner exceptions (class C) must carry a reason and the approving owner; an exception without both is ignored.
 const first=key=>key.split(SEP)[0];
+const credited=({key,context})=>{
+ const [film,person,role]=key.split(SEP);
+ if(context.exceptedPersons?.has(person)===true)return true;
+ // The AIR-286 / projector rule: a TMDB credit in the role of its id on a watchlist Film stays in D1 although the R2 view does not carry it.
+ const match=/^person:(tmdb_director|tmdb_actor)\//.exec(person||'');
+ return !!match&&AIR286_ROLE[match[1]]===role&&context.watchlistFilms?.has(film)===true;
+};
+const ofExplained=({key,context})=>context.explainedPersons?.has(first(key))===true;
 export const DEFAULT_EXPLANATIONS=Object.freeze([
- {id:'d1_only_credit',class:'credit',side:'extra',note:'AIR-286: TMDB credits only D1 holds (person:tmdb_*, or a Person without a projector key)',test:({key,context})=>{const person=key.split(SEP)[1]||'';return person.startsWith('person:tmdb_')||context.unkeyedPersons?.has(person)===true;}},
- {id:'d1_only_person',class:'person',side:'extra',note:'a Person D1 holds without a projector key by design',test:({key,context})=>context.unkeyedPersons?.has(key)===true},
- {id:'d1_only_person_row',class:'personExternalId',side:'extra',note:'rows of a Person without a projector key',test:({key,context})=>context.unkeyedPersons?.has(first(key))===true},
- {id:'d1_only_person_alias',class:'personAlias',side:'extra',note:'rows of a Person without a projector key',test:({key,context})=>context.unkeyedPersons?.has(first(key))===true},
- {id:'d1_only_person_localization',class:'personLocalization',side:'extra',note:'rows of a Person without a projector key',test:({key,context})=>context.unkeyedPersons?.has(first(key))===true},
+ {id:'d1_only_credit',class:'credit',side:'extra',note:'AIR-286: a TMDB credit in the role of its id on a watchlist Film (or of an owner-excepted Person), which only D1 holds',test:credited},
+ {id:'d1_only_person',class:'person',side:'extra',note:'a Person without a projector key whose AIR-286 provenance is verified, or an owner-excepted id',test:({key,context})=>context.explainedPersons?.has(key)===true},
+ {id:'d1_only_person_row',class:'personExternalId',side:'extra',note:'rows of an explained Person only',test:ofExplained},
+ {id:'d1_only_person_alias',class:'personAlias',side:'extra',note:'rows of an explained Person only',test:ofExplained},
+ {id:'d1_only_person_localization',class:'personLocalization',side:'extra',note:'rows of an explained Person only',test:ofExplained},
  ...['film','filmExternalId','filmAlias','credit','filmLocalization'].map(name=>({id:'retained_film_'+name,class:name,side:'extra',note:'a Film kept by retention or a rated admission outside the current view',test:({key,context})=>context.retainedFilms?.has(first(key))===true})),
 ]);
 function explain({cls,side,key,expectedValue,actualValue},{explanations,exceptions,context}){
@@ -145,27 +193,39 @@ export async function baselineGate(ledger){
 }
 
 // ---------- the D1 reader ----------
-// The read interface of the reader over a D1 binding (or the sqlite stand-in): get(sql,params) and all(sql,params).
+// The interface of the reader over a D1 binding (or the sqlite stand-in): get and all for reads, run for the cut's lease row.
 export function readerOf(binding){
- return {get:async(sql,params=[])=>(await binding.prepare(sql).bind(...params).first())??null,all:async(sql,params=[])=>(await binding.prepare(sql).bind(...params).all()).results||[]};
+ return {
+  get:async(sql,params=[])=>(await binding.prepare(sql).bind(...params).first())??null,
+  all:async(sql,params=[])=>(await binding.prepare(sql).bind(...params).all()).results||[],
+  run:async(sql,params=[])=>{await binding.prepare(sql).bind(...params).run();},
+ };
 }
+// `value` is derived from VALUE_COLUMNS (the one encoding); `witness` is the bounded aggregate of the cut check (see readWitness).
 const SPEC=Object.freeze([
- {name:'film',table:'film',key:['id'],value:['contract_version','canonical_identity','original_title']},
- {name:'person',table:'person',key:['id'],value:['role_id']},
- {name:'filmExternalId',table:'film_external_id',key:['film_id','scheme','value'],value:['trusted','conflicting']},
- {name:'personExternalId',table:'person_external_id',key:['person_id','scheme','value'],value:['trusted','conflicting']},
- {name:'filmAlias',table:'film_alias',key:['film_id','kind','value'],value:[]},
- {name:'personAlias',table:'person_alias',key:['person_id','kind','value'],value:[]},
- {name:'credit',table:'film_person_credit',key:['film_id','person_id','role'],value:['ordinal']},
- {name:'filmLocalization',table:'film_dimension',where:"dimension='localization'",key:['film_id'],value:['status','authority','value']},
- {name:'personLocalization',table:'person_dimension',where:"dimension='localization'",key:['person_id'],value:['status','authority','value']},
- {name:'watchlist',table:'watchlist_film',key:['film_id'],value:[]},
- {name:'redirect',table:'film_redirect',key:['from_id'],value:['to_film_id']},
- {name:'retirement',table:'tmdb_retirement_current',key:['film_id'],value:['state','movie_id','tv_id'],optional:true},
- {name:'ratedAdmission',table:'film_rated_admission',key:['film_id'],value:['tmdb','source_code','archive_sha256'],optional:true},
- {name:'retention',table:'film_retention',key:['film_id'],value:['watchlist'],optional:true},
- {name:'ownerLink',table:'owner_review_entry',key:['kind','source_key'],value:['identity_link','identity_state']},
- {name:'projectionKey',table:'projection_state',where:"projection='enrichment'",key:['kind','id'],value:['change_key']},
+ {name:'film',table:'film',key:['id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t'},
+ {name:'person',table:'person',key:['id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t'},
+ {name:'filmExternalId',table:'film_external_id',key:['film_id','scheme','value'],witness:'COUNT(*) AS n, SUM(trusted) AS a, SUM(conflicting) AS b'},
+ {name:'personExternalId',table:'person_external_id',key:['person_id','scheme','value'],witness:'COUNT(*) AS n, SUM(trusted) AS a, SUM(conflicting) AS b'},
+ {name:'filmAlias',table:'film_alias',key:['film_id','kind','value'],witness:'COUNT(*) AS n, SUM(length(value)) AS a'},
+ {name:'personAlias',table:'person_alias',key:['person_id','kind','value'],witness:'COUNT(*) AS n, SUM(length(value)) AS a'},
+ {name:'credit',table:'film_person_credit',key:['film_id','person_id','role'],witness:'COUNT(*) AS n, SUM(ordinal) AS a, SUM(length(person_id)) AS b'},
+ {name:'filmLocalization',table:'film_dimension',where:"dimension='localization'",key:['film_id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t'},
+ {name:'personLocalization',table:'person_dimension',where:"dimension='localization'",key:['person_id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t'},
+ {name:'watchlist',table:'watchlist_film',key:['film_id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t'},
+ {name:'redirect',table:'film_redirect',key:['from_id'],witness:'COUNT(*) AS n, SUM(length(to_film_id)) AS a'},
+ {name:'retirement',table:'tmdb_retirement_current',key:['film_id'],witness:'COUNT(*) AS n, MAX(seq) AS a',optional:true},
+ {name:'ratedAdmission',table:'film_rated_admission',key:['film_id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t',optional:true},
+ {name:'retention',table:'film_retention',key:['film_id'],witness:'COUNT(*) AS n, MAX(updated_at) AS t',optional:true},
+ {name:'ownerLink',table:'owner_review_entry',key:['kind','source_key'],witness:"COUNT(*) AS n, SUM(generation) AS a, SUM(length(COALESCE(identity_link,''))) AS b"},
+ {name:'projectionKey',table:'projection_state',where:"projection='enrichment'",key:['kind','id'],witness:'COUNT(*) AS n, MAX(projected_at) AS t'},
+].map(spec=>({...spec,value:VALUE_COLUMNS[spec.name].map(([column])=>column)})));
+// Tables the ledger does not compare but whose change shows a writer at work (the revision table of 0013 and the tables of 0014; all optional).
+const EXTRA_WITNESS=Object.freeze([
+ {name:'canonicalRevision',table:'canonical_revision',witness:'COUNT(*) AS n, SUM(revision) AS a',optional:true},
+ {name:'filmLocalizationSource',table:'film_localization_source',witness:'COUNT(*) AS n, MAX(updated_at) AS t',optional:true},
+ {name:'personLocalizationSource',table:'person_localization_source',witness:'COUNT(*) AS n, MAX(updated_at) AS t',optional:true},
+ {name:'filmMetadata',table:'film_metadata',witness:'COUNT(*) AS n, MAX(updated_at) AS t'},
 ]);
 // The localization value is compared by digest through the ledger and never listed; the reader returns entries as [key,value] pairs of strings.
 const noTable=error=>/no such table/i.test(String(error?.message||error))||/no such table/i.test(String(error?.cause?.message||''));
@@ -194,7 +254,7 @@ export async function readD1State(db,{state=null,pageSize=PAGE_SIZE,queryBudget=
   }
   used++;current.queries++;
   const bucket=current.entries[spec.name]||(current.entries[spec.name]=[]);
-  for(const row of rows)bucket.push([spec.key.map(col=>String(row[col])).join(SEP),stable(spec.value.map(col=>row[col]??null))]);
+  for(const row of rows)bucket.push([spec.key.map(col=>String(row[col])).join(SEP),encodeValue(spec.name,spec.value.map(col=>row[col]??null))]);
   if(rows.length<pageSize){current.classIndex++;current.after=null;}
   else{const last=rows[rows.length-1];current.after=spec.key.map(col=>last[col]);}
  }
@@ -210,26 +270,142 @@ export async function readGate(db,{now=new Date().toISOString()}={}){
  const live=!!(lease?.lease_id&&(typeof lease.lease_until!=='string'||lease.lease_until>now));
  return {marker:marker?{mode:marker.mode,cutover:marker.cutover,generation:Number(marker.generation)}:null,baseline:baseline?{state:baseline.state,reference:baseline.reference??null}:null,lease:{id:lease?.lease_id??null,until:lease?.lease_until??null,live}};
 }
-// A full read bracketed by two gate reads. It is consistent only when the marker did not move, the baseline row did not change and no live lease other than ours
-// stood at either end; the reasons name what failed. A budget stop returns done false and the state to resume from.
-export async function readConsistently(db,{state=null,ownLeaseId=null,now=()=>new Date().toISOString(),pageSize,queryBudget}={}){
- const before=state?.gateBefore||await readGate(db,{now:now()});
- const read=await readD1State(db,{state,pageSize,queryBudget});
- if(!read.done)return {done:false,state:{...read,gateBefore:before},consistent:null,reasons:[]};
- const after=await readGate(db,{now:now()});
- const reasons=[];
- if(!before.marker||!after.marker)reasons.push('marker_unreadable');
- else if(stable(before.marker)!==stable(after.marker))reasons.push('marker_moved');
- if(stable(before.baseline)!==stable(after.baseline))reasons.push('baseline_changed');
- for(const gate of [before,after])if(gate.lease.live&&gate.lease.id!==ownLeaseId&&!reasons.includes('foreign_lease_live'))reasons.push('foreign_lease_live');
- return {done:true,entries:read.entries,unavailable:read.unavailable,queries:read.queries,consistent:reasons.length===0,reasons,gateBefore:before,gateAfter:after};
+
+// ---------- the stable cut ----------
+// D1 has no snapshot isolation across separate queries, so a keyset read is only a CUT of the data when nothing writes while it runs. Two guards, both needed:
+//  (a) the read TAKES the projector's own lease (projection_run, the SQL of the projector and of scripts/d1-projection-seed.mjs) before it reads a page, renews it at
+//      every page and checks at every page that the row still names us (holder and started_at); a foreign or lost lease aborts the read as `lease_lost`; if a live
+//      foreign lease already stands, nothing is read (`lease_unavailable`). The lease is released in a finally.
+//  (b) a CONTENT WITNESS: per table, a bounded aggregate (a count plus a maximum timestamp, or sums of the stored flags, ordinals, lengths and revisions) taken at the
+//      start, re-taken for the table just read at EVERY page boundary and for every table at the end; any difference refuses the read as `unstable_cut:<table>`.
+// What the cut does NOT cover: a writer that takes neither the lease nor changes a witnessed aggregate (an update that keeps every count, sum and maximum, or a change
+// that is reverted between two witnesses) and a write by a writer that ignores the lease between the last witness and the end of the read. In r2 the writers are the
+// enrichment projector (it takes the lease, so it cannot write during the read) and one-off owner operations such as the AIR-286 credits script, owner-review writes and
+// Admin routes, which do not take it and are caught only by the witness; the fenced AIR-367..370 writers are dormant (they refuse unless the marker is open). The
+// witness is a fingerprint, not a proof; the ledger digest names one measurement, and a later write makes it stale. A cut is one lease term and is not resumed.
+export const LEASE_MS=10*60000;
+export const CUT_MAX_PAGES=5000;
+const PROJECTION='enrichment';
+const ACQUIRE='INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES (?,?,?,?) ON CONFLICT(projection) DO UPDATE SET lease_id=excluded.lease_id,lease_until=excluded.lease_until,started_at=excluded.started_at WHERE projection_run.lease_until IS NULL OR projection_run.lease_until<?';
+async function witnessOf(db,spec){
+ try{return stable(await db.get(`SELECT ${spec.witness} FROM ${spec.table}${spec.where?' WHERE '+spec.where:''}`));}
+ catch(error){if(spec.optional&&noTable(error))return null;throw failed('baseline_read_unavailable',error);}
 }
-// Context for the explanation rules, from the actual side of one read.
-export function contextFromActual(actual){
- const keyed=new Set((actual.classes.projectionKey||[]).filter(([key])=>key.startsWith('person'+SEP)).map(([key])=>key.split(SEP)[1]));
- const unkeyedPersons=new Set((actual.classes.person||[]).map(([id])=>id).filter(id=>!keyed.has(id)));
+export async function readWitness(db,specs=[...SPEC,...EXTRA_WITNESS]){
+ const out={};
+ for(const spec of specs)out[spec.name]=await witnessOf(db,spec);
+ return out;
+}
+const leaseHeld=async(db,leaseId,startedAt)=>{const row=await db.get("SELECT lease_id, started_at FROM projection_run WHERE projection='enrichment'");return row?.lease_id===leaseId&&row.started_at===startedAt;};
+export async function readStableCut(db,{leaseId,ttlMs=LEASE_MS,now=()=>new Date().toISOString(),pageSize=PAGE_SIZE,maxPages=CUT_MAX_PAGES,personExceptions=[]}={}){
+ if(typeof leaseId!=='string'||!leaseId)throw failed('baseline_invalid');
+ const startedAt=now(),until=new Date(Date.parse(startedAt)+ttlMs).toISOString();
+ await db.run(ACQUIRE,[PROJECTION,leaseId,until,startedAt,startedAt]);
+ if(!await leaseHeld(db,leaseId,startedAt))return {done:false,consistent:false,reasons:['lease_unavailable'],leaseId,pages:0};
+ const reasons=[];
+ let state=null,pages=0,verification={verified:[],rejected:[]},gateBefore=null,gateAfter=null;
+ try{
+  gateBefore=await readGate(db,{now:startedAt});
+  const before=await readWitness(db);
+  for(;;){
+   const previous=state?state.classIndex:0;
+   state=await readD1State(db,{state,pageSize,queryBudget:1});
+   pages++;
+   // The lease is renewed and re-checked at every page: a foreign take (even one released again before the end) changes the row and aborts the read.
+   await db.run('UPDATE projection_run SET lease_until=? WHERE projection=? AND lease_id=?',[new Date(Date.parse(now())+ttlMs).toISOString(),PROJECTION,leaseId]);
+   if(!await leaseHeld(db,leaseId,startedAt)){reasons.push('lease_lost');break;}
+   const spec=SPEC[previous];
+   if(spec&&!state.unavailable.includes(spec.name)&&await witnessOf(db,spec)!==before[spec.name]){reasons.push('unstable_cut:'+spec.name);break;}
+   if(state.done)break;
+   if(pages>=maxPages){reasons.push('budget_exceeded');break;}
+  }
+  if(!reasons.length){
+   const unkeyed=unkeyedPersonIds(state.entries);
+   verification=await verifyAir286(db,unkeyed);
+   const after=await readWitness(db);
+   for(const name of Object.keys(after))if(after[name]!==before[name])reasons.push('unstable_cut:'+name);
+   gateAfter=await readGate(db,{now:now()});
+   if(!gateBefore.marker||!gateAfter.marker)reasons.push('marker_unreadable');
+   else if(stable(gateBefore.marker)!==stable(gateAfter.marker))reasons.push('marker_moved');
+   if(stable(gateBefore.baseline)!==stable(gateAfter.baseline))reasons.push('baseline_changed');
+   if(!await leaseHeld(db,leaseId,startedAt))reasons.push('lease_lost');
+  }
+ }finally{
+  await db.run('UPDATE projection_run SET lease_id=NULL, lease_until=NULL WHERE projection=? AND lease_id=?',[PROJECTION,leaseId]);
+ }
+ const done=state?.done===true;
+ return {done,entries:state?.entries,unavailable:state?.unavailable,queries:state?.queries,pages,consistent:done&&reasons.length===0,reasons,gateBefore,gateAfter,leaseId,air286:verification};
+}
+const unkeyedPersonIds=entries=>{
+ const keyed=new Set((entries.projectionKey||[]).filter(([key])=>key.startsWith('person'+SEP)).map(([key])=>key.split(SEP)[1]));
+ return (entries.person||[]).map(([id])=>id).filter(id=>!keyed.has(id));
+};
+
+// ---------- provenance of a Person without a projector key ----------
+// A Person the projector did not key is not thereby legitimate: it can be a corrupted or incomplete projection. It is explained only when its AIR-286 provenance is
+// VERIFIED from what the AIR-286 writer (scripts/tmdb-watchlist-credits.mjs) actually leaves: id person:tmdb_director/<n> or person:tmdb_actor/<n> with role_id the
+// id without its prefix and contract version 1; at most one alias, of kind `name`, whose provenance is exactly {"source":"tmdb","task":"AIR-286"}; no external id and no
+// dimension row; at least one credit, each in the role of its id (tmdb_director -> director, tmdb_actor -> actor) on a Film that has a Letterboxd id (a watchlist Film)
+// or is a watchlist member. Everything else is rejected with its reasons, stays unexplained and keeps the gate closed, unless the owner lists the id in an exception.
+const AIR286_PROVENANCE=stable({source:'tmdb',task:'AIR-286'});
+const AIR286_ID=/^person:(tmdb_director|tmdb_actor)\/[1-9]\d{0,11}$/;
+const AIR286_ROLE={tmdb_director:'director',tmdb_actor:'actor'};
+const group=(rows,column)=>{const out=new Map();for(const row of rows){if(!out.has(row[column]))out.set(row[column],[]);out.get(row[column]).push(row);}return out;};
+export async function verifyAir286(db,ids,{chunk=80,cap=LIST_CAP}={}){
+ const verified=new Set(),rejected=[];let rejectedCount=0;
+ const list=[...new Set(ids)].sort();
+ for(let at=0;at<list.length;at+=chunk){
+  const part=list.slice(at,at+chunk),marks=part.map(()=>'?').join(',');
+  const [people,aliases,externals,dimensions,credits]=await Promise.all([
+   db.all(`SELECT id, role_id, contract_version FROM person WHERE id IN (${marks})`,part),
+   db.all(`SELECT person_id, kind, provenance_json FROM person_alias WHERE person_id IN (${marks})`,part),
+   db.all(`SELECT person_id, COUNT(*) AS n FROM person_external_id WHERE person_id IN (${marks}) GROUP BY person_id`,part),
+   db.all(`SELECT person_id, COUNT(*) AS n FROM person_dimension WHERE person_id IN (${marks}) GROUP BY person_id`,part),
+   db.all(`SELECT c.person_id, c.role, EXISTS (SELECT 1 FROM film_external_id l WHERE l.film_id=c.film_id AND l.scheme='letterboxd') AS letterboxd, EXISTS (SELECT 1 FROM watchlist_film w WHERE w.film_id=c.film_id) AS listed FROM film_person_credit c WHERE c.person_id IN (${marks})`,part),
+  ]);
+  const aliasBy=group(aliases,'person_id'),creditBy=group(credits,'person_id');
+  const externalBy=new Map(externals.map(row=>[row.person_id,row.n])),dimensionBy=new Map(dimensions.map(row=>[row.person_id,row.n]));
+  const personBy=new Map(people.map(row=>[row.id,row]));
+  for(const id of part){
+   const reasons=[],row=personBy.get(id),match=AIR286_ID.exec(id);
+   if(!match)reasons.push('id_shape');
+   if(!row)reasons.push('no_person_row');
+   else{
+    if(match&&row.role_id!==id.slice('person:'.length))reasons.push('role_id');
+    if(Number(row.contract_version)!==1)reasons.push('contract_version');
+   }
+   const own=aliasBy.get(id)||[];
+   if(own.length>1)reasons.push('alias_count');
+   for(const alias of own){
+    if(alias.kind!=='name')reasons.push('alias_kind');
+    let parsed;try{parsed=stable(JSON.parse(alias.provenance_json));}catch{parsed=null;}
+    if(parsed!==AIR286_PROVENANCE)reasons.push('alias_provenance');
+   }
+   if(externalBy.get(id))reasons.push('external_ids');
+   if(dimensionBy.get(id))reasons.push('dimensions');
+   const own2=creditBy.get(id)||[];
+   if(!own2.length)reasons.push('no_credit');
+   for(const credit of own2){
+    if(match&&credit.role!==AIR286_ROLE[match[1]])reasons.push('credit_role');
+    if(!(credit.letterboxd===1||credit.listed===1))reasons.push('credit_film');
+   }
+   if(reasons.length){rejectedCount++;if(rejected.length<cap)rejected.push({id,reasons:[...new Set(reasons)]});}
+   else verified.add(id);
+  }
+ }
+ return {verified:[...verified].sort(),rejected,rejectedCount};
+}
+
+// Context for the explanation rules, from the actual side of one cut and its provenance check. explainedPersons are the unkeyed Persons that are VERIFIED AIR-286
+// Persons or are listed in a valid owner exception (id, reason, approvedBy); an exception for a keyed Person, or an id that is not in D1, explains nothing, and an
+// exception covers the rows of exactly its own id.
+export function contextFromActual(actual,{air286=[],personExceptions=[]}={}){
+ const unkeyed=new Set(unkeyedPersonIds(actual.classes));
+ const exceptedPersons=new Set((Array.isArray(personExceptions)?personExceptions:[]).filter(item=>item&&typeof item.id==='string'&&typeof item.reason==='string'&&item.reason.trim()&&typeof item.approvedBy==='string'&&item.approvedBy.trim()).map(item=>item.id).filter(id=>unkeyed.has(id)));
+ const verified=new Set((Array.isArray(air286)?air286:[]).filter(id=>unkeyed.has(id)));
  const retainedFilms=new Set([...(actual.classes.retention||[]).map(([id])=>id),...(actual.classes.ratedAdmission||[]).map(([id])=>id)]);
- return {unkeyedPersons,retainedFilms};
+ const watchlistFilms=new Set((actual.classes.watchlist||[]).map(([id])=>id));
+ return {unkeyedPersons:unkeyed,air286Persons:verified,exceptedPersons,explainedPersons:new Set([...verified,...exceptedPersons]),retainedFilms,watchlistFilms};
 }
 
 // ---------- the delta plan ----------

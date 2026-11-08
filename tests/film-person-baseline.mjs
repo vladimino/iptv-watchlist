@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
-import {CLASSES,DEFAULT_EXPLANATIONS,LIST_CAP,buildParityLedger,baselineGate,contextFromActual,expectedFromInputs,keyOf,makeGate,markBaselineLoading,planReconciliation,readConsistently,readD1State,readGate,readerOf,recordBaselineVerified,runImport,sha256Hex} from '../src/film-person-baseline.js';
+import {CLASSES,DEFAULT_EXPLANATIONS,LIST_CAP,buildParityLedger,baselineGate,contextFromActual,encodeValue,expectedFromInputs,keyOf,makeGate,markBaselineLoading,planReconciliation,readD1State,readGate,readStableCut,readWitness,readerOf,recordBaselineVerified,runImport,sha256Hex,verifyAir286,VALUE_COLUMNS} from '../src/film-person-baseline.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-baseline-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
@@ -34,7 +34,7 @@ function seed(file){
   "INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:1','tmdb','1',1,0),('film:tmdb:2','tmdb','2',1,0),('film:tmdb:3','tmdb','3',1,0),('film:retained','tmdb','4',1,0)",
   "INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting) VALUES ('person:director/1','letterboxd','d1',1,0)",
   "INSERT INTO film_alias (film_id,kind,value) VALUES ('film:tmdb:1','title','Один'),('film:tmdb:2','title','Два')",
-  "INSERT INTO person_alias (person_id,kind,value) VALUES ('person:director/1','name','Режиссёр'),('person:tmdb_actor/9','name','Актёр')",
+  "INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES ('person:director/1','name','Режиссёр',NULL),('person:tmdb_actor/9','name','Актёр','{\"source\":\"tmdb\",\"task\":\"AIR-286\"}')",
   "INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1','person:director/1','director',0),('film:tmdb:1','person:actor/2','actor',0),('film:tmdb:1','person:tmdb_actor/9','actor',1),('film:tmdb:2','person:actor/3','actor',0)",
   "INSERT INTO film_dimension (film_id,dimension,status,source,provenance_json,value,authority,attempts,updated_at) VALUES ('film:tmdb:1','localization','reviewed','owner','{}','Владелец','owner',0,?1),('film:tmdb:2','localization','provisional','wikidata','{}','Автомат',NULL,0,?1)",
   "INSERT INTO person_dimension (person_id,dimension,status,source,provenance_json,value,authority,attempts,updated_at) VALUES ('person:director/1','localization','reviewed','dictionary','{}','Режиссёр',NULL,0,?1)",
@@ -44,11 +44,9 @@ function seed(file){
  ].map(text=>text.replaceAll('?1',"'"+AT+"'")).join(';\n');
  const r=sqlite(file,insert);assert.equal(r.status,0,r.stderr);
 }
-async function readAll(handle,options={}){
- let read=await readConsistently(handle,{now:NOW,...options});
- while(!read.done)read=await readConsistently(handle,{state:read.state,now:NOW,...options});
- return read;
-}
+// A stable cut: the read takes the projector's lease, so it is made through readStableCut with a lease id of its own.
+const readAll=(handle,options={})=>readStableCut(handle,{leaseId:'baseline:test',now:NOW,...options});
+const AIR286='{"source":"tmdb","task":"AIR-286"}';
 const toClasses=entries=>Object.fromEntries(Object.entries(entries).map(([name,list])=>[name,list.map(([k,v])=>[k,v])]));
 const SOURCE={aggregateSha256:'a'.repeat(64),verified:true};
 const everyClass=()=>Object.fromEntries(CLASSES.map(item=>[item.name,[]]));
@@ -80,7 +78,7 @@ const cloneSide=(side,classes)=>({classes:JSON.parse(JSON.stringify(classes??sid
  d.credit=[[keyOf('film:1','person:tmdb_actor/9','actor'),'1'],[keyOf('film:1','person:actor/2','actor'),'0']];
  d.person=[['person:orphan','["x"]']];d.personAlias=[[keyOf('person:orphan','name','x'),'null']];
  d.film=[['film:retained','["k"]']];d.filmAlias=[[keyOf('film:retained','title','K'),'null']];
- const context={unkeyedPersons:new Set(['person:orphan']),retainedFilms:new Set(['film:retained'])};
+ const context={explainedPersons:new Set(['person:orphan']),watchlistFilms:new Set(['film:1']),retainedFilms:new Set(['film:retained'])};
  const explained=await buildParityLedger({expected:{classes:e,complete:true,source:SOURCE},actual:{classes:d,complete:true,consistent:true},context});
  assert.equal(explained.ledger.totals.explained,5);
  assert.deepEqual(explained.diffs,[{class:'credit',side:'extra',key:keyOf('film:1','person:actor/2','actor')}]);
@@ -117,7 +115,17 @@ const cloneSide=(side,classes)=>({classes:JSON.parse(JSON.stringify(classes??sid
  assert.deepEqual([c.film.length,c.person.length,c.filmExternalId.length,c.filmAlias.length,c.credit.length,c.watchlist.length,c.redirect.length,c.retirement.length],[2,1,2,1,1,1,1,1]);
  assert.deepEqual(c.filmExternalId.find(([k])=>k.includes('tmdb_tv'))[1],'[0,1]');
  assert.deepEqual(c.filmLocalization,[['film:tmdb:1','["reviewed","owner","В"]']]);
- assert.deepEqual(c.watchlist,[['film:tmdb:1','null']],'only a listed Film is expected in the watchlist');
+ assert.deepEqual(c.watchlist,[['film:tmdb:1','[]']],'only a listed Film is expected in the watchlist, with the same empty value array as D1');
+ assert.deepEqual(c.filmAlias,[[keyOf('film:tmdb:1','title','А'),'[]']]);
+ assert.deepEqual(c.credit,[[keyOf('film:tmdb:1','person:director/1','director'),'[0]']]);
+ assert.deepEqual(c.redirect,[['film:old','["film:tmdb:1"]']]);
+ // One encoding: a count of columns and a type per class, nulls kept, text for ids, integers for flags; anything else is refused.
+ assert.equal(encodeValue('retention',[true]),'[1]');assert.equal(encodeValue('retirement',[ 'retire',17266,9687]),'["retire","17266","9687"]');
+ assert.equal(encodeValue('film',[1,null,undefined]),'[1,null,null]');
+ for(const bad of [[],['x'],[1.5,null,null]])assert.throws(()=>encodeValue('film',bad),code('baseline_encoding'));
+ assert.throws(()=>encodeValue('nope',[]),code('baseline_encoding'));
+ assert.throws(()=>encodeValue('credit','0'),code('baseline_encoding'));
+ for(const [name,columns] of Object.entries(VALUE_COLUMNS))assert.ok(CLASSES.some(item=>item.name===name)&&Array.isArray(columns),name);
  for(const item of CLASSES)assert.ok(Array.isArray(c[item.name]),item.name);
 }
 
@@ -152,41 +160,128 @@ const fullRead=await readAll(db(fixture),{pageSize:1000});
  assert.deepEqual(fullRead.entries.filmExternalId.find(([k])=>k===keyOf('film:tmdb:1','tmdb','1'))[1],'[1,0]');
 }
 
-// 4. The consistent-read check: a moved marker, a changed baseline row or a foreign live lease invalidates the read; our own lease does not.
+// 4. The stable cut: the read takes the projector's lease, checks it at every page, and re-takes a content witness at every page boundary and at the end.
+const leaseRow=file=>rows(file,"SELECT lease_id, started_at FROM projection_run WHERE projection='enrichment'")[0];
+// A writer that does NOT hold the lease: it writes straight to the database from the stand-in's query hook, at the n-th query that matches `pattern`.
+const intruder=(file,pattern,statement,nth=1)=>{let seen=0,fired=false;const standin=d1Standin(file,{onQuery:async text=>{if(!fired&&pattern.test(text)&&++seen===nth){fired=true;const r=sqlite(file,statement);assert.equal(r.status,0,r.stderr);}}});return readerOf(standin);};
 {
- const idle=await readConsistently(db(fixture),{now:NOW,pageSize:1000});
- assert.deepEqual([idle.done,idle.consistent,idle.reasons],[true,true,[]]);
- const moving=database();seed(moving);
- const hook=d1Standin(moving,{onQuery:async text=>{if(/FROM watchlist_film/.test(text)&&!hook.moved){hook.moved=true;sqlite(moving,"UPDATE film_person_baseline SET state='loading',reference='x' WHERE id=1");}}});
- const changed=await readConsistently(readerOf(hook),{now:NOW,pageSize:1000});
- assert.deepEqual([changed.consistent,changed.reasons],[false,['baseline_changed']]);
- const marker=database();seed(marker);
- const hook2=d1Standin(marker,{onQuery:async text=>{if(/FROM watchlist_film/.test(text)&&!hook2.moved){hook2.moved=true;sqlite(marker,"UPDATE film_person_baseline SET state='loading',reference='x';UPDATE film_person_baseline SET state='verified';UPDATE film_person_authority SET mode='prepared',generation=1");}}});
- const moved=await readConsistently(readerOf(hook2),{now:NOW,pageSize:1000});
- assert.ok(moved.reasons.includes('marker_moved'));assert.equal(moved.consistent,false);
- const leased=database();seed(leased);
- sqlite(leased,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','foreign','2099-01-01T00:00:00.000Z','2026-11-08T09:00:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='foreign',lease_until='2099-01-01T00:00:00.000Z'");
- const foreign=await readConsistently(db(leased),{now:NOW,pageSize:1000,ownLeaseId:'mine'});
- assert.deepEqual([foreign.consistent,foreign.reasons],[false,['foreign_lease_live']]);
- assert.equal((await readConsistently(db(leased),{now:NOW,pageSize:1000,ownLeaseId:'foreign'})).consistent,true,'our own lease is allowed');
- // A lease row that names a holder but cannot be dated is treated as live, never as free.
- sqlite(leased,"UPDATE projection_run SET lease_until=NULL");
- const undated=await readConsistently(db(leased),{now:NOW,pageSize:1000,ownLeaseId:'mine'});
- assert.deepEqual([undated.consistent,undated.reasons],[false,['foreign_lease_live']]);
- sqlite(leased,"UPDATE projection_run SET lease_until='2026-11-08T09:59:00.000Z'");
- assert.equal((await readConsistently(db(leased),{now:NOW,pageSize:1000,ownLeaseId:'mine'})).consistent,true,'an expired lease is not live');
+ const quiet=await readAll(db(fixture),{pageSize:1000});
+ assert.deepEqual([quiet.done,quiet.consistent,quiet.reasons],[true,true,[]]);
+ assert.equal(leaseRow(fixture).lease_id,null,'the lease is released after the read');
+ const paged=await readAll(db(fixture),{pageSize:1});
+ assert.deepEqual([paged.consistent,paged.entries],[true,fullRead.entries],'a quiet read of one-row pages passes and reads the same set');
+ assert.ok(paged.pages>20);
+ // The lease is held WHILE the pages are read: a foreign acquire at the projector's own SQL cannot take it mid-read.
+ {
+  const file=database();seed(file);let observed=null;
+  const standin=d1Standin(file,{onQuery:async text=>{if(/FROM watchlist_film/.test(text)&&observed===null){sqlite(file,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','proj','2099-01-01T00:00:00.000Z','x') ON CONFLICT(projection) DO UPDATE SET lease_id=excluded.lease_id,lease_until=excluded.lease_until,started_at=excluded.started_at WHERE projection_run.lease_until IS NULL OR projection_run.lease_until<'2026-11-08T10:00:00.000Z'");observed=leaseRow(file).lease_id;}}});
+  const read=await readAll(readerOf(standin),{pageSize:1000});
+  assert.deepEqual([observed,read.consistent],['baseline:test',true],'the projector could not take the lease while we held it');
+ }
+ // (a) A foreign live lease already stands: nothing is read and the foreign row is untouched.
+ {
+  const file=database();seed(file);
+  sqlite(file,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','foreign','2099-01-01T00:00:00.000Z','2026-11-08T09:00:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='foreign',lease_until='2099-01-01T00:00:00.000Z',started_at='2026-11-08T09:00:00.000Z'");
+  const refused=await readAll(db(file),{pageSize:1000});
+  assert.deepEqual([refused.done,refused.consistent,refused.reasons,refused.entries],[false,false,['lease_unavailable'],undefined]);
+  assert.deepEqual(leaseRow(file),{lease_id:'foreign',started_at:'2026-11-08T09:00:00.000Z'},'the foreign lease is not released or changed');
+  // An expired foreign lease is taken, and the read goes ahead.
+  sqlite(file,"UPDATE projection_run SET lease_until='2026-11-08T09:59:00.000Z'");
+  assert.equal((await readAll(db(file),{pageSize:1000})).consistent,true);
+ }
+ // (b) An interleaved write by a writer without the lease, marker and baseline UNCHANGED, is caught by the witness: mid-class (page boundary), in a table already read,
+ // in a table not yet read, and in an unread table whose count does not change (a flag flip).
+ {
+  const file=database();seed(file);
+  const early=await readAll(intruder(file,/FROM film\b/,"UPDATE film SET updated_at='2026-11-08T10:05:00.000Z' WHERE id='film:tmdb:3'",2),{pageSize:1});
+  assert.deepEqual([early.done,early.consistent,early.reasons],[false,false,['unstable_cut:film']],'caught at the page boundary of the class being read');
+  assert.ok(early.pages<8,'the read stopped early, at the page boundary, not at the end');
+  assert.equal(leaseRow(file).lease_id,null,'the lease is released after an aborted read');
+ }
+ for(const [label,pattern,statement,reason] of [
+  ['a table already read','/FROM watchlist_film/',"UPDATE film SET updated_at='2026-11-08T10:06:00.000Z' WHERE id='film:tmdb:1'",'unstable_cut:film'],
+  ['a flag flip with the same count','/FROM film_alias/',"UPDATE film_external_id SET trusted=0 WHERE film_id='film:tmdb:3'",'unstable_cut:filmExternalId'],
+  ['an ordinal change','/FROM film_dimension/',"UPDATE film_person_credit SET ordinal=7 WHERE film_id='film:tmdb:2'",'unstable_cut:credit'],
+  ['a new row','/FROM person_alias/',"INSERT INTO film_alias (film_id,kind,value) VALUES ('film:tmdb:3','title','Три')",'unstable_cut:filmAlias'],
+  ['a deleted row','/FROM film_person_credit/',"DELETE FROM watchlist_film WHERE film_id='film:tmdb:2'",'unstable_cut:watchlist'],
+  ['a projector key written','/FROM film_redirect/',"UPDATE projection_state SET projected_at='2026-11-08T10:07:00.000Z' WHERE id='film:tmdb:3'",'unstable_cut:projectionKey'],
+  ['an owner-review write','/FROM watchlist_film/',"INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','k','{}',NULL,'unlinked',1)",'unstable_cut:ownerLink'],
+  ['a revision bump (a fenced writer)','/FROM watchlist_film/',"INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:tmdb:1',1,'2026-11-08T10:00:00.000Z')",'unstable_cut:canonicalRevision'],
+  ['a metadata write','/FROM film_dimension/',"INSERT INTO film_metadata (film_id,schema_version,genres_json,payload_json,updated_at) VALUES ('film:tmdb:1',1,'[]','{}','2026-11-08T10:00:00.000Z')",'unstable_cut:filmMetadata'],
+ ]){
+  const file=database();seed(file);
+  const pattern2=new RegExp(pattern.slice(1,-1));
+  const result=await readAll(intruder(file,pattern2,statement,2),{pageSize:1000});
+  assert.deepEqual([result.consistent,result.reasons.includes(reason)],[false,true],label+': '+JSON.stringify(result.reasons));
+  assert.equal(leaseRow(file).lease_id,null,label+': the lease is released');
+ }
+ // The writes are real: without an intruder the same read is consistent (the witness is not simply failing).
+ // (c) A foreign lease taken AND released between two checks (the row ends free, or back with us under another start time) is detected at the next page.
+ {
+  const file=database();seed(file);
+  const freed=await readAll(intruder(file,/FROM person\b/,"UPDATE projection_run SET lease_id='foreign',started_at='foreign-start';UPDATE projection_run SET lease_id=NULL,lease_until=NULL"),{pageSize:1000});
+  assert.deepEqual([freed.consistent,freed.reasons],[false,['lease_lost']]);
+  const file2=database();seed(file2);
+  const swapped=await readAll(intruder(file2,/FROM person\b/,"UPDATE projection_run SET started_at='foreign-start'"),{pageSize:1000});
+  assert.deepEqual([swapped.consistent,swapped.reasons],[false,['lease_lost']],'the same holder with another start time is not our lease');
+ }
+ // (c2) A lease lost only AFTER the last page (during the provenance check) is caught by the final check; the lease is renewed at every page.
+ {
+  const file=database();seed(file);
+  const late=await readAll(intruder(file,/FROM person_alias WHERE person_id IN/,"UPDATE projection_run SET lease_id='foreign'"),{pageSize:1000});
+  assert.deepEqual([late.consistent,late.reasons],[false,['lease_lost']]);
+  const file2=database();seed(file2);
+  let tick=0;const seen=[];
+  const standin=d1Standin(file2,{onQuery:async()=>{const row=leaseRow(file2);if(row?.lease_id)seen.push(rows(file2,"SELECT lease_until FROM projection_run WHERE projection='enrichment'")[0].lease_until);}});
+  const clock=()=>new Date(Date.parse(AT)+(tick++)*60000).toISOString();
+  const quiet=await readStableCut(readerOf(standin),{leaseId:'baseline:test',now:clock,pageSize:2});
+  assert.equal(quiet.consistent,true,JSON.stringify(quiet.reasons));
+  assert.ok(new Set(seen).size>2&&seen.every((value,i)=>i===0||value>=seen[i-1]),'the lease_until moves forward as pages are read');
+ }
+ // (d) A lost lease aborts the read at once and its remaining pages are not read.
+ {
+  const file=database();seed(file);
+  const lost=await readAll(intruder(file,/FROM person_external_id/,"UPDATE projection_run SET lease_id='foreign'"),{pageSize:1000});
+  assert.deepEqual([lost.done,lost.consistent,lost.reasons],[false,false,['lease_lost']]);
+  assert.ok(lost.pages<6);
+  assert.equal(leaseRow(file).lease_id,'foreign','a foreign holder is not released by our finally');
+ }
+ // (e) The marker and the baseline row still invalidate the read (they are not witnessed tables).
+ {
+  const file=database();seed(file);
+  const baseline=await readAll(intruder(file,/FROM watchlist_film/,"UPDATE film_person_baseline SET state='loading',reference='x' WHERE id=1"),{pageSize:1000});
+  assert.deepEqual([baseline.consistent,baseline.reasons],[false,['baseline_changed']]);
+  const file2=database();seed(file2);
+  const moved=await readAll(intruder(file2,/FROM watchlist_film/,"UPDATE film_person_baseline SET state='loading',reference='x';UPDATE film_person_baseline SET state='verified';UPDATE film_person_authority SET mode='prepared',generation=1"),{pageSize:1000});
+  assert.ok(moved.reasons.includes('marker_moved'));assert.equal(moved.consistent,false);
+ }
+ // (f) A page budget aborts the cut (it is never resumed across lease terms) and releases the lease.
+ {
+  const file=database();seed(file);
+  const budget=await readAll(db(file),{pageSize:1,maxPages:3});
+  assert.deepEqual([budget.done,budget.consistent,budget.reasons],[false,false,['budget_exceeded']]);
+  assert.equal(leaseRow(file).lease_id,null);
+ }
+ // The witness: every compared table plus the revision table and the new tables; an optional table that is absent is null, not an error; it changes with the data.
+ const witness=await readWitness(db(fixture));
+ assert.ok(['film','credit','projectionKey','canonicalRevision','filmLocalizationSource','personLocalizationSource','filmMetadata','retention','ratedAdmission','retirement'].every(name=>name in witness));
+ const old=database({upTo:chain.findIndex(name=>name.startsWith('0016_'))});
+ assert.equal((await readWitness(db(old))).retirement,null);
+ const legacy=database({upTo:chain.findIndex(name=>name.startsWith('0013_'))});
+ assert.equal((await readWitness(db(legacy))).canonicalRevision,null);
+ assert.ok((await readAll(db(legacy),{pageSize:1000})).reasons.includes('marker_unreadable'),'a schema below 13 has no marker to read');
  const gate=await readGate(db(fixture),{now:AT});
  assert.deepEqual([gate.marker,gate.baseline.state,gate.lease.live],[{mode:'r2',cutover:'open',generation:0},'empty',false]);
- // The unavailable marker (a schema below 13) is reported, not invented.
- const legacy=database({upTo:chain.findIndex(name=>name.startsWith('0013_'))});
  assert.equal((await readGate(db(legacy),{now:AT})).marker,null);
- assert.ok((await readConsistently(db(legacy),{now:NOW,pageSize:1000})).reasons.includes('marker_unreadable'));
+ await assert.rejects(()=>readStableCut(db(fixture),{}),code('baseline_invalid'));
 }
 
 // 5. The expected side derived from the actual side with perturbations: the plan, the explanations from context, and the sample verification.
 const actualSide={classes:toClasses(fullRead.entries),unavailable:fullRead.unavailable,complete:true,consistent:true};
-const context=contextFromActual(actualSide);
+const context=contextFromActual(actualSide,{air286:fullRead.air286.verified});
 {
+ assert.deepEqual(fullRead.air286.verified,['person:tmdb_actor/9'],'the one unkeyed Person has verified AIR-286 provenance');
+ assert.deepEqual([...context.explainedPersons],['person:tmdb_actor/9']);
  assert.deepEqual([...context.unkeyedPersons],['person:tmdb_actor/9'],'the one Person without a projector key');
  assert.deepEqual([...context.retainedFilms].sort(),['film:retained']);
  const expected=cloneSide(actualSide);
@@ -227,6 +322,180 @@ const context=contextFromActual(actualSide);
  assert.notEqual(replan.units.find(u=>u.ids[0]==='film:tmdb:2').d1Digest,tmdb2.d1Digest);
  assert.equal(replan.units.find(u=>u.ids[0]==='film:new:1').d1Digest,plan.units.find(u=>u.ids[0]==='film:new:1').d1Digest);
  globalThis.__plan=plan;
+}
+
+// 5b. REAL end-to-end convergence: expectedFromInputs -> a sqlite D1 stand-in seeded with the corresponding rows (by explicit SQL, not by the module's mapping) -> a stable cut
+// -> the ledger: zero differences and zero unexplained; then one mutated row per class makes exactly that class report.
+const e2eInputs={
+ films:[
+  {id:'film:tmdb:10',film:{contractVersion:1,canonicalIdentity:'ident-10',originalTitle:'Ten',externalIds:[{scheme:'tmdb',value:'10',trusted:true,conflicting:false},{scheme:'letterboxd',value:'ten',trusted:true}],aliases:[{kind:'title',value:'Десять'}],localization:{status:'reviewed',value:'Владелец10',provenance:{authority:'owner'}},redirects:[{from:'film:old:10',to:'film:tmdb:10'}]},watchlist:true,credits:[{personId:'person:director/10',role:'director',ordinal:0},{personId:'person:actor/11',role:'actor',ordinal:0},{personId:'person:actor/12',role:'actor',ordinal:1}]},
+  {id:'film:tmdb:20',film:{contractVersion:1,originalTitle:'Twenty',externalIds:[{scheme:'tmdb',value:'20',trusted:true}],aliases:[],localization:{status:'provisional',value:'Двадцать',provenance:{}}},watchlist:false,credits:[]},
+ ],
+ people:[
+  {id:'person:director/10',person:{roleId:'director/10',externalIds:[{scheme:'letterboxd',value:'d10',trusted:true}],aliases:[{kind:'name',value:'Режиссёр'}],localization:{status:'reviewed',value:'Режиссёр10',provenance:{}}}},
+  {id:'person:actor/11',person:{roleId:'actor/11',externalIds:[],aliases:[{kind:'name',value:'Актёр'}],localization:{status:'provisional',value:'Актёр11'}}},
+  {id:'person:actor/12',person:{roleId:'actor/12',externalIds:[],aliases:[],localization:{status:'missing'}}},
+ ],
+};
+const e2eExtras={
+ retirement:[['film:abc1',['retire','5','6']]],
+ ratedAdmission:[['film:tmdb:20',['20','srcA','a'.repeat(64)]]],
+ retention:[['film:tmdb:20',[0]]],
+ ownerLink:[[keyOf('film','k1'),['film:tmdb:10','verified']]],
+ projectionKey:[[keyOf('film','film:tmdb:10'),['ck1']],[keyOf('film','film:tmdb:20'),['ck2']],[keyOf('person','person:director/10'),['pk1']],[keyOf('person','person:actor/11'),['pk2']],[keyOf('person','person:actor/12'),['pk3']]],
+};
+function seedE2e(file){
+ const T="'"+AT+"'";
+ const statements=[
+  `INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:tmdb:10',1,'ident-10','Ten',${T}),('film:tmdb:20',1,NULL,'Twenty',${T})`,
+  `INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:director/10','director/10',1,${T}),('person:actor/11','actor/11',1,${T}),('person:actor/12','actor/12',1,${T})`,
+  "INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting) VALUES ('film:tmdb:10','tmdb','10',1,0),('film:tmdb:10','letterboxd','ten',1,0),('film:tmdb:20','tmdb','20',1,0)",
+  "INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting) VALUES ('person:director/10','letterboxd','d10',1,0)",
+  "INSERT INTO film_alias (film_id,kind,value) VALUES ('film:tmdb:10','title','Десять')",
+  "INSERT INTO person_alias (person_id,kind,value) VALUES ('person:director/10','name','Режиссёр'),('person:actor/11','name','Актёр')",
+  "INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:old:10','film:tmdb:10','2026-11-01T00:00:00.000Z')",
+  "INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:10','person:director/10','director',0),('film:tmdb:10','person:actor/11','actor',0),('film:tmdb:10','person:actor/12','actor',1)",
+  `INSERT INTO film_dimension (film_id,dimension,status,source,provenance_json,value,authority,attempts,updated_at) VALUES ('film:tmdb:10','localization','reviewed','owner','{}','Владелец10','owner',0,${T}),('film:tmdb:20','localization','provisional','wikidata','{}','Двадцать',NULL,0,${T})`,
+  `INSERT INTO person_dimension (person_id,dimension,status,source,provenance_json,value,authority,attempts,updated_at) VALUES ('person:director/10','localization','reviewed','dictionary','{}','Режиссёр10',NULL,0,${T}),('person:actor/11','localization','provisional','wikidata','{}','Актёр11',NULL,0,${T}),('person:actor/12','localization','missing',NULL,'{}',NULL,NULL,0,${T})`,
+  `INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:10',${T})`,
+  `INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:20','20','srcA','${'a'.repeat(64)}','T',2000,'k','tmdb_20','2026-11-01T00:00:00.000Z','r1',${T})`,
+  `INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:tmdb:20','watchlist_fact',0,'{}','r2','2026-11-01T00:00:00.000Z',${T})`,
+  `INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,payload_json,recorded_at) VALUES ('d1','film:abc1','retire','abc1','5','6','{}','{"by":"owner","at":"t","source":"s"}','owner_request','{}',${T})`,
+  "INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','k1','{}','film:tmdb:10','verified',1)",
+  `INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES ('enrichment','film','film:tmdb:10','ck1',${T}),('enrichment','film','film:tmdb:20','ck2',${T}),('enrichment','person','person:director/10','pk1',${T}),('enrichment','person','person:actor/11','pk2',${T}),('enrichment','person','person:actor/12','pk3',${T})`,
+ ];
+ const result=sqlite(file,statements.join(';\n'));
+ assert.equal(result.status,0,result.stderr);
+}
+const e2eLedger=async file=>{
+ const cut=await readAll(db(file),{pageSize:2});
+ assert.equal(cut.consistent,true,JSON.stringify(cut.reasons));
+ const expected={classes:expectedFromInputs(e2eInputs,e2eExtras),complete:true,source:SOURCE};
+ return buildParityLedger({expected,actual:{classes:cut.entries,unavailable:cut.unavailable,complete:true,consistent:true},context:contextFromActual({classes:cut.entries},{air286:cut.air286.verified})});
+};
+{
+ const file=database();seedE2e(file);
+ const {ledger,diffs}=await e2eLedger(file);
+ assert.deepEqual([ledger.totals.missing,ledger.totals.extra,ledger.totals.differs,ledger.totals.explained,ledger.totals.unexplained,diffs.length],[0,0,0,0,0,0],JSON.stringify(ledger.unexplainedList));
+ assert.equal(ledger.complete,true);
+ for(const item of CLASSES){const c=ledger.classes[item.name];assert.equal(c.expected.digest,c.actual.digest,item.name);assert.ok(c.expected.count>0,item.name+' is exercised');}
+ // One mutated row per class: exactly that class reports, 'differs' for a class with a value column.
+ const retireRestore="INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,supersedes_seq,payload_json,recorded_at) VALUES ('d2','film:abc1','restore','abc1','5','6','{\"reason\":\"r\"}','{\"by\":\"owner\",\"at\":\"t\",\"source\":\"s\"}','owner_request',1,'{}','"+AT+"')";
+ const mutations=[
+  ['film',"UPDATE film SET original_title='Ten!' WHERE id='film:tmdb:10'",'differs'],
+  ['person',"UPDATE person SET role_id='director/99' WHERE id='person:director/10'",'differs'],
+  ['filmExternalId',"UPDATE film_external_id SET trusted=0 WHERE film_id='film:tmdb:10' AND scheme='tmdb'",'differs'],
+  ['personExternalId',"UPDATE person_external_id SET trusted=0 WHERE person_id='person:director/10'",'differs'],
+  ['filmAlias',"UPDATE film_alias SET value='Другой' WHERE film_id='film:tmdb:10'",'both'],
+  ['personAlias',"UPDATE person_alias SET value='Другое' WHERE person_id='person:actor/11'",'both'],
+  ['credit',"UPDATE film_person_credit SET ordinal=5 WHERE person_id='person:actor/12'",'differs'],
+  ['filmLocalization',"UPDATE film_dimension SET value='Другое' WHERE film_id='film:tmdb:10' AND dimension='localization'",'differs'],
+  ['personLocalization',"UPDATE person_dimension SET value='Другое' WHERE person_id='person:director/10' AND dimension='localization'",'differs'],
+  ['watchlist',"DELETE FROM watchlist_film WHERE film_id='film:tmdb:10'",'missing'],
+  ['redirect',"UPDATE film_redirect SET to_film_id='film:tmdb:20' WHERE from_id='film:old:10'",'differs'],
+  ['retirement',retireRestore,'differs'],
+  ['ratedAdmission',"UPDATE film_rated_admission SET source_code='srcB' WHERE film_id='film:tmdb:20'",'differs'],
+  ['retention',"UPDATE film_retention SET watchlist=1 WHERE film_id='film:tmdb:20'",'differs'],
+  ['ownerLink',"UPDATE owner_review_entry SET identity_state='held' WHERE source_key='k1'",'differs'],
+  ['projectionKey',"UPDATE projection_state SET change_key='zz' WHERE id='film:tmdb:10'",'differs'],
+ ];
+ assert.deepEqual(mutations.map(item=>item[0]).sort(),CLASSES.map(item=>item.name).sort(),'every class has a mutation');
+ for(const [name,statement,kind] of mutations){
+  const mutated=database();seedE2e(mutated);
+  const r=sqlite(mutated,statement);assert.equal(r.status,0,name+': '+r.stderr);
+  const {ledger:l}=await e2eLedger(mutated);
+  for(const item of CLASSES){
+   const c=l.classes[item.name],differences=c.missing+c.extra+c.differs;
+   if(item.name!==name){assert.equal(differences,0,name+' leaked into '+item.name);continue;}
+   assert.ok(differences>0,name+' is reported');
+   if(kind==='differs')assert.deepEqual([c.differs,c.missing,c.extra],[1,0,0],name);
+   if(kind==='missing')assert.deepEqual([c.missing,c.extra,c.differs],[1,0,0],name);
+   if(kind==='both')assert.deepEqual([c.missing,c.extra,c.differs],[1,1,0],name);
+  }
+  assert.equal(l.totals.unexplained,l.totals.missing+l.totals.extra+l.totals.differs,name+': nothing is explained away');
+ }
+}
+
+// 5c. A Person without a projector key is explained only by VERIFIED AIR-286 provenance or an owner exception; never by being unkeyed.
+{
+ const file=database();seed(file);
+ const T="'"+AT+"'";
+ const add=sqlite(file,[
+  `INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:actor/77','actor/77',1,${T}),('person:tmdb_actor/55','tmdb_actor/55',1,${T}),('person:tmdb_actor/56','tmdb_actor/56',1,${T}),('person:tmdb_director/57','tmdb_director/57',1,${T}),('person:tmdb_actor/58','tmdb_actor/58',1,${T}),('person:tmdb_actor/59','tmdb_actor/59',1,${T}),('person:tmdb_actor/60','tmdb_actor/60',2,${T}),('person:tmdb_actor/61','tmdb_actor/61',1,${T}),('person:tmdb_actor/62','tmdb_actor/62',1,${T})`,
+  "INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES ('person:tmdb_actor/55','name','a','"+AIR286+"'),('person:tmdb_actor/56','name','b',NULL),('person:tmdb_director/57','name','c','"+AIR286+"'),('person:tmdb_actor/58','name','d','"+AIR286+"'),('person:tmdb_actor/60','name','e','"+AIR286+"'),('person:tmdb_actor/61','title','f','"+AIR286+"'),('person:tmdb_actor/61','name','g','"+AIR286+"'),('person:tmdb_actor/62','name','h','{\"source\":\"tmdb\",\"task\":\"AIR-999\"}')",
+  "INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting) VALUES ('person:tmdb_actor/58','letterboxd','x',1,0)",
+  `INSERT INTO person_dimension (person_id,dimension,status,source,provenance_json,attempts,updated_at) VALUES ('person:tmdb_actor/59','identity','resolved','x','{}',0,${T})`,
+  "INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1','person:actor/77','actor',5),('film:tmdb:3','person:tmdb_actor/55','actor',0),('film:tmdb:1','person:tmdb_actor/56','actor',6),('film:tmdb:1','person:tmdb_director/57','actor',7),('film:tmdb:1','person:tmdb_actor/58','actor',8),('film:tmdb:1','person:tmdb_actor/60','actor',9),('film:tmdb:1','person:tmdb_actor/61','actor',10),('film:tmdb:1','person:tmdb_actor/62','actor',11)",
+ ].join(';\n'));
+ assert.equal(add.status,0,add.stderr);
+ const cut=await readAll(db(file),{pageSize:1000});
+ assert.equal(cut.consistent,true);
+ const rejected=Object.fromEntries(cut.air286.rejected.map(item=>[item.id,item.reasons]));
+ assert.deepEqual(cut.air286.verified,['person:tmdb_actor/9'],'only the verified AIR-286 Person is verified');
+ assert.ok(rejected['person:actor/77'].includes('id_shape'),'wrong id shape');
+ assert.ok(rejected['person:tmdb_actor/55'].includes('credit_film'),'a credit on a Film that is neither a watchlist Film nor a member');
+ assert.ok(rejected['person:tmdb_actor/56'].includes('alias_provenance'),'an alias without the AIR-286 provenance');
+ assert.ok(rejected['person:tmdb_director/57'].includes('credit_role'),'a credit in another role than its id');
+ assert.ok(rejected['person:tmdb_actor/58'].includes('external_ids'));
+ assert.ok(rejected['person:tmdb_actor/59'].includes('dimensions'));
+ assert.ok(rejected['person:tmdb_actor/60'].includes('contract_version'));
+ assert.ok(rejected['person:tmdb_actor/61'].includes('alias_count')&&rejected['person:tmdb_actor/61'].includes('alias_kind'));
+ assert.ok(rejected['person:tmdb_actor/62'].includes('alias_provenance'),'another task is not AIR-286');
+ // A Person with no credit at all is rejected, and a missing row cannot be verified.
+ {
+  const seeded=sqlite(file,`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb_actor/64','tmdb_actor/99',1,${T});INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES ('person:tmdb_actor/64','name','z','${AIR286}');INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1','person:tmdb_actor/64','actor',20)`);
+  assert.equal(seeded.status,0,seeded.stderr);
+  const wrong=await verifyAir286(db(file),['person:tmdb_actor/64']);
+  assert.deepEqual(wrong.rejected,[{id:'person:tmdb_actor/64',reasons:['role_id']}],'a valid-looking Person with a foreign role_id is rejected');
+ }
+ const none=sqlite(file,`INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb_actor/63','tmdb_actor/63',1,${T})`);assert.equal(none.status,0,none.stderr);
+ const direct=await verifyAir286(db(file),['person:tmdb_actor/63','person:tmdb_actor/404','person:tmdb_actor/9']);
+ assert.deepEqual(direct.verified,['person:tmdb_actor/9']);
+ assert.deepEqual(direct.rejected.map(item=>[item.id,item.reasons.includes('no_credit')||item.reasons.includes('no_person_row')]),[['person:tmdb_actor/404',true],['person:tmdb_actor/63',true]]);
+ // The ledger: the expected side lacks every unkeyed Person (the view does not carry them). Only the verified one is explained; the rest keeps the gate closed.
+ const unkeyed=new Set(['person:actor/77','person:tmdb_actor/9','person:tmdb_actor/55','person:tmdb_actor/56','person:tmdb_director/57','person:tmdb_actor/58','person:tmdb_actor/60','person:tmdb_actor/61','person:tmdb_actor/62']);
+ const expectedWithout=()=>{
+  const classes=JSON.parse(JSON.stringify(cut.entries));
+  classes.person=classes.person.filter(([k])=>!unkeyed.has(k));
+  for(const name of ['personExternalId','personAlias','personLocalization'])classes[name]=classes[name].filter(([k])=>!unkeyed.has(k.split('\u001f')[0]));
+  classes.credit=classes.credit.filter(([k])=>!unkeyed.has(k.split('\u001f')[1]));
+  return {classes,complete:true,source:SOURCE};
+ };
+ const ledgerOf=async options=>buildParityLedger({expected:expectedWithout(),actual:{classes:cut.entries,complete:true,consistent:true,unavailable:cut.unavailable},context:contextFromActual({classes:cut.entries},{air286:cut.air286.verified,...options})});
+ const base=await ledgerOf({});
+ const rest=base.diffs.map(item=>item.class+':'+item.key.split('\u001f').slice(0,2).join('|'));
+ assert.ok(base.ledger.totals.unexplained>0&&!rest.some(item=>item.includes('person:tmdb_actor/9')),'the verified Person and its rows are explained, nothing else is: '+rest.join(','));
+ assert.ok(base.diffs.some(item=>item.class==='person'&&item.key==='person:actor/77'),'a non-AIR-286 unkeyed Person is unexplained');
+ assert.ok(base.diffs.some(item=>item.class==='credit'&&item.key.includes('person:tmdb_actor/55')),'a credit on a non-watchlist Film is unexplained even for a tmdb id');
+ assert.ok(base.diffs.some(item=>item.class==='credit'&&item.key.includes('person:tmdb_director/57')),'a credit in the wrong role is unexplained');
+ assert.equal((await baselineGate(base.ledger)).pass,false,'the gate stays closed');
+ // An owner exception explains exactly the listed id and its own rows, nothing else.
+ const excepted=await ledgerOf({personExceptions:[{id:'person:actor/77',reason:'owner reviewed: a manual import',approvedBy:'owner'},{id:'person:director/1',reason:'a keyed Person',approvedBy:'owner'},{id:'person:ghost',reason:'not in D1',approvedBy:'owner'},{id:'person:tmdb_actor/56',reason:'',approvedBy:'owner'},{id:'person:tmdb_actor/55',reason:'x'}]});
+ const left=excepted.diffs.map(item=>item.key.split('\u001f').slice(0,2).join('|'));
+ assert.ok(!left.some(item=>item.includes('person:actor/77')),'the listed id and its credit are explained');
+ assert.ok(left.some(item=>item.includes('person:tmdb_actor/56'))&&left.some(item=>item.includes('person:tmdb_actor/55')),'an exception without a reason or an approver explains nothing');
+ assert.ok(left.some(item=>item.includes('person:tmdb_director/57')),'no other id is explained');
+ assert.equal(excepted.ledger.totals.unexplained,base.ledger.totals.unexplained-excepted.ledger.totals.explained+base.ledger.totals.explained,'the exception only moved its own rows');
+ // The explanation never covers unmatched CHILD rows of other Persons: extra rows on a KEYED Person stay unexplained although an excepted and a verified Person exist.
+ const keyedChild=JSON.parse(JSON.stringify(cut.entries));
+ keyedChild.personAlias.push([keyOf('person:director/1','name','Лишний'),'[]']);
+ keyedChild.personExternalId.push([keyOf('person:director/1','tmdb','1'),'[1,0]']);
+ keyedChild.credit.push([keyOf('film:tmdb:2','person:actor/3','actor'),'[9]']);
+ const child=await buildParityLedger({expected:expectedWithout(),actual:{classes:keyedChild,complete:true,consistent:true,unavailable:cut.unavailable},context:contextFromActual({classes:keyedChild},{air286:cut.air286.verified,personExceptions:[{id:'person:actor/77',reason:'manual',approvedBy:'owner'}]})});
+ const childKeys=child.diffs.map(item=>item.class+':'+item.key.split('\u001f')[0]+(item.class==='credit'?'|'+item.key.split('\u001f')[1]:''));
+ assert.ok(childKeys.includes('personAlias:person:director/1')&&childKeys.includes('personExternalId:person:director/1')&&childKeys.includes('credit:film:tmdb:2|person:actor/3'),'child rows of other Persons stay unexplained: '+childKeys.join(','));
+ // A verified Person whose TMDB credit sits on a non-watchlist Film: the credit is not explained by the Person's verification.
+ const moved=JSON.parse(JSON.stringify(cut.entries));
+ moved.credit.push([keyOf('film:tmdb:3','person:tmdb_actor/9','actor'),'[3]']);
+ const offList=await buildParityLedger({expected:expectedWithout(),actual:{classes:moved,complete:true,consistent:true,unavailable:cut.unavailable},context:contextFromActual({classes:moved},{air286:cut.air286.verified})});
+ assert.ok(offList.diffs.some(item=>item.class==='credit'&&item.key.includes('film:tmdb:3')&&item.key.includes('person:tmdb_actor/9')));
+ // An air286 id list can only explain an unkeyed Person: a keyed or absent id in it is ignored.
+ const ctx=contextFromActual({classes:cut.entries},{air286:['person:director/1','person:ghost','person:tmdb_actor/9']});
+ assert.deepEqual([...ctx.explainedPersons],['person:tmdb_actor/9']);
+ const keyedException=contextFromActual({classes:cut.entries},{personExceptions:[{id:'person:director/1',reason:'r',approvedBy:'owner'},{id:'person:ghost',reason:'r',approvedBy:'owner'}]});
+ assert.equal(keyedException.explainedPersons.size,0,'an exception explains only an existing unkeyed Person');
+ const noNeed=contextFromActual({classes:cut.entries},{});
+ assert.equal(noNeed.explainedPersons.size,0,'an unkeyed Person is not explained by being unkeyed');
 }
 
 // 6. The importer driver with an injected writer: checkpoint, resume at every point, unknown outcomes, a concurrent writer, gate and lease mismatch, idempotent re-run.
