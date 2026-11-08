@@ -8,7 +8,7 @@
 -- projector_window is a mutual-exclusion flag with an expiry, not a version: nothing compares it to data. `state` is `idle`,
 -- `requested` (Discovery admission is closed, in-flight chunks finish) or `held` (the projector owns the existing discovery_lease
 -- row). `owner` is the projector's lease id. `expires_at` (epoch milliseconds) is ONE absolute deadline set at the request and
--- shared by `requested` and `held`; it is never extended, and an expired row is treated as idle by every reader and writer.
+-- shared by `requested` and `held`; it is never extended, at most 300000 ms after `requested_at` (a CHECK, repeated by the coordination API), and an expired row is treated as idle by every reader and writer.
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
@@ -34,7 +34,7 @@ CREATE TABLE projector_window (
  owner TEXT,
  requested_at INTEGER,
  expires_at INTEGER NOT NULL DEFAULT 0 CHECK (expires_at >= 0),
- CHECK ((state = 'idle' AND owner IS NULL) OR (state <> 'idle' AND owner IS NOT NULL AND requested_at IS NOT NULL AND expires_at > 0))
+ CHECK ((state = 'idle' AND owner IS NULL) OR (state <> 'idle' AND owner IS NOT NULL AND requested_at IS NOT NULL AND expires_at > 0 AND expires_at - requested_at <= 300000))
 ) STRICT;
 
 INSERT INTO projector_window (id, state, owner, requested_at, expires_at) VALUES (1, 'idle', NULL, NULL, 0);

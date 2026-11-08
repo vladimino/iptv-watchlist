@@ -1060,8 +1060,14 @@ export async function renewLease(env,lease,context={}){
 }
 // ADR 0103. The projector's side of the window. Each step is one atomic statement or batch; none of them runs unless the
 // authority is d1 and open and the table exists, and nothing here is called while the feature flag is off.
+// The whole-window bound is enforced here, at the coordination boundary, not trusted from a caller: a finite positive integer number of
+// milliseconds no larger than WINDOW_DEADLINE_MS, so no caller can persist an admission closure longer than the accepted 300 s. The
+// migration repeats the bound as a CHECK. Anything else is refused before any statement runs.
+const windowMillis=value=>Number.isSafeInteger(value)&&value>0;
+function validWindowTime(now){return Number.isSafeInteger(now)&&now>0;}
 export async function requestProjectorWindow(env,{owner,deadlineMs=WINDOW_DEADLINE_MS,now=nowMs()}={}){
  if(typeof owner!=='string'||!owner)throw failed('discovery_conflict');
+ if(!windowMillis(deadlineMs)||deadlineMs>WINDOW_DEADLINE_MS||!validWindowTime(now))throw failed('discovery_window_invalid');
  const gate=await readAuthority(env);
  if(gate.held)throw failed('discovery_fence');
  if(!gate.ready||!gate.windowTable)return {outcome:'not_applicable',reason:gate.ready?'no_window_table':'authority_not_d1'};
@@ -1076,6 +1082,7 @@ export async function requestProjectorWindow(env,{owner,deadlineMs=WINDOW_DEADLI
 // batch changes nothing, so an expired request can never be granted late and never leaves a lease behind.
 export async function grantProjectorWindow(env,{owner,minRunMs=WINDOW_MIN_RUN_MS,now=nowMs()}={}){
  if(typeof owner!=='string'||!owner)throw failed('discovery_conflict');
+ if(!windowMillis(minRunMs)||minRunMs>WINDOW_DEADLINE_MS||!validWindowTime(now))throw failed('discovery_window_invalid');
  const gate=await readAuthority(env);
  if(gate.held)throw failed('discovery_fence');
  if(!gate.ready||!gate.windowTable)return {outcome:'not_applicable',reason:gate.ready?'no_window_table':'authority_not_d1'};

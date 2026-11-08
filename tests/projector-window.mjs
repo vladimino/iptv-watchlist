@@ -132,6 +132,36 @@ assert.equal(DEADLINE,300000);assert.equal(MIN,120000);
  assert.equal((await Authority.requestProjectorWindow(env,{owner:'p3',now:T0})).outcome,'not_applicable');
 }
 
+// 3b. The whole-window bound is enforced at the coordination boundary: oversized, zero, negative, fractional, non-finite, non-numeric
+// and unsafe parameters are refused before any statement runs, so a future caller cannot persist an hours-long admission closure.
+{
+ const {db}=migrated();open(db);
+ const env=envFor(db);
+ const idle=JSON.stringify(windowRow(db));
+ const bad=[DEADLINE+1,DEADLINE*12,3600000,0,-1,1.5,NaN,Infinity,-Infinity,'300000','',null,{},[],Number.MAX_SAFE_INTEGER,Number.MAX_VALUE];
+ for(const value of bad){
+  await assert.rejects(Authority.requestProjectorWindow(env,{owner:'p1',deadlineMs:value,now:T0}),error=>error.code==='discovery_window_invalid'||(value===null&&error.code==='discovery_window_invalid'),'deadlineMs '+String(value));
+  await assert.rejects(Authority.grantProjectorWindow(env,{owner:'p1',minRunMs:value,now:T0}),error=>error.code==='discovery_window_invalid','minRunMs '+String(value));
+ }
+ for(const now of [0,-5,1.5,NaN,Infinity,'1000',null]){
+  await assert.rejects(Authority.requestProjectorWindow(env,{owner:'p1',now}),error=>error.code==='discovery_window_invalid','now '+String(now));
+  await assert.rejects(Authority.grantProjectorWindow(env,{owner:'p1',now}),error=>error.code==='discovery_window_invalid','grant now '+String(now));
+ }
+ await assert.rejects(Authority.requestProjectorWindow(env,{owner:'',now:T0}),error=>error.code==='discovery_conflict');
+ assert.equal(JSON.stringify(windowRow(db)),idle,'a refused request writes nothing');
+ // The boundary values are accepted: exactly the bound and one millisecond.
+ const edge=await Authority.requestProjectorWindow(env,{owner:'p1',deadlineMs:DEADLINE,now:T0});
+ assert.equal(edge.outcome,'requested');assert.equal(edge.expiresAt,T0+DEADLINE);
+ await Authority.releaseProjectorWindow(env,{owner:'p1'});
+ const tiny=await Authority.requestProjectorWindow(env,{owner:'p1',deadlineMs:1,now:T0});
+ assert.equal(tiny.outcome,'requested');assert.equal(tiny.expiresAt,T0+1);
+ // Defence in depth: the table itself refuses a row longer than the bound, even from a caller that skips the API.
+ await Authority.releaseProjectorWindow(env,{owner:'p1'});
+ assert.throws(()=>db.sql(`UPDATE projector_window SET state='requested', owner='x', requested_at=${T0}, expires_at=${T0+DEADLINE+1} WHERE id=1`),/CHECK|constraint/i);
+ db.sql(`UPDATE projector_window SET state='requested', owner='x', requested_at=${T0}, expires_at=${T0+DEADLINE} WHERE id=1`);
+ assert.equal(windowRow(db).state,'requested');
+}
+
 // 4. Held: the three lease-free generation writers are refused by their own statement, softly and with the expiry; requested and idle
 // let them through; nothing moves the generation inside the window.
 {
