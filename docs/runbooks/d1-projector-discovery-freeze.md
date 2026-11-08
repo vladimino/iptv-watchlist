@@ -4,7 +4,7 @@
 
 ## Why this exists
 
-The projector (`src/d1-enrichment.js`, cron `37 * * * *`) pins the global Discovery authority generation before it reads and checks it again right before the write. Between those two points lies the whole diff phase (10.6 s of reading, 21.2 s in total on the 2026-11-08 08:37 run). Measured on 2026-11-08 07:31–10:01 UTC from `discovery_decision_history`, Discovery wrote in every one of 150 consecutive minutes and the generation rose by 16–17 per minute (about one bump per 3.5 s). A bounded retry of the read phase has a stable-window probability of about 5 % at 10.6 s and 0.25 % at 21.2 s (Poisson, 17 per minute), so it cannot restore progress; the generation fence must not be weakened. Option D therefore removes the writer for a window long enough for the projector to drain. It treats the symptom: the architectural fix (a scoped revision for the projector's inputs) stays a separate card.
+The projector (`src/d1-enrichment.js`, single hourly Worker cron (`triggers.crons` in `wrangler.jsonc`)) pins the global Discovery authority generation before it reads and checks it again right before the write. Between those two points lies the whole diff phase (10.6 s of reading, 21.2 s in total on the 2026-11-08 08:37 run). Measured on 2026-11-08 07:31–10:01 UTC from `discovery_decision_history`, Discovery wrote in every one of 150 consecutive minutes and the generation rose by 16–17 per minute (about one bump per 3.5 s). A bounded retry of the read phase has a stable-window probability of about 5 % at 10.6 s and 0.25 % at 21.2 s (Poisson, 17 per minute), so it cannot restore progress; the generation fence must not be weakened. Option D therefore removes the writer for a window long enough for the projector to drain. It treats the symptom: the architectural fix (a scoped revision for the projector's inputs) stays a separate card.
 
 Estimated work to drain (from the 08:37 plan in the [AIR-373 inventory](../evidence/d1-migration/air-373-baseline-inventory-2026-11-08.md), a plan that moves while Discovery runs): 3,163 Films and 12,400 Persons. The per-run budget wrote 775 Persons on the runs that wrote; Films are one batch each. Plan for **at least 16–20 hourly ticks**, and re-measure after the first two ticks. The window is a multi-hour to roughly one-day pause of Discovery, not a short stop.
 
@@ -21,13 +21,13 @@ Each one must be quiet, or proven unable to write, for the whole window. The lis
 
 | # | Writer | Normal trigger | How it is held quiet | Verified how |
 | --- | --- | --- | --- | --- |
-| 1 | Discovery Workflow instance (`DISCOVERY_EXECUTOR=workflow`) | Worker cron `:37` reconcile and self-renewing instances | Set the variable to `external` (owner, Cloudflare Worker variable); the cron then creates none and a live instance stops | `feature_flags`; Workflows instance list (Cloudflare API, read); generation stops moving |
+| 1 | Discovery Workflow instance (`DISCOVERY_EXECUTOR=workflow`) | Worker cron reconcile and self-renewing instances | Set the variable to `external` (owner, Cloudflare Worker variable); the cron then creates none and a live instance stops | `feature_flags`; Workflows instance list (Cloudflare API, read); generation stops moving |
 | 2 | Hourly ChatGPT Scheduled Task (`:20` Europe/Madrid), Stage A discovery catch-up through `epg_sync_step` | ChatGPT scheduler | Owner pauses that exact Task for the window, or accepts that with `external` it will run chunks; **it must be paused** | Registry readback `Automations.peek` by the stable ID in the [scheduled-task contract](../reference/scheduled-tasks.md) |
 | 3 | Daily EPG/watchlist Scheduled Task (17:00 Europe/Madrid) | ChatGPT scheduler | Owner decides: pause it for a window that spans 17:00, or start the window after it completes. It publishes a new generation and writes the sources the projector reads | Registry readback; `epg_status` stage `complete` |
 | 4 | Manual `epg_sync_start`/`epg_sync_step`, resolve and admin discovery-recovery routes | Owner or a session | Nobody calls them; this is a procedural hold, so say so in the owner's GO | Generation stops moving |
 | 5 | Ratings workflow executor | Worker cron `ensure` | Not a Discovery writer; leave untouched. Its independence is a requirement, not something to pause | n/a |
 | 6 | Monitor `Monitor.run` | Worker cron | Not a writer of these inputs; leave `MONITOR=on` (the permanent emergency gate). Expect Discovery-stall alerts during the window; the owner decides in the GO whether to acknowledge them | Telegram alerts |
-| 7 | D1 enrichment projector | Worker cron `:37` | The only writer left; it is the purpose of the window | `projection_run`, `projection_state` |
+| 7 | D1 enrichment projector | Worker cron | The only writer left; it is the purpose of the window | `projection_run`, `projection_state` |
 
 Do not reset a lease, edit `epg/resolver-lease.json`, or change `D1_ENRICHMENT_WRITE`, `MONITOR` or any cron during the window.
 
@@ -59,7 +59,7 @@ If any condition fails, do not wait for the cron to fail: fix the writer that mo
 
 ## During the window
 
-The projector is run only by its normal cron at `:37`; **no manual run**. After each tick read, with D1 `SELECT` only: the `projection_run` row (outcome, `reason`, `loadMs`, `durationMs`, written counts, `remaining`, `leaseLost`), `COUNT(*)` of `projection_state`, and `MAX(projected_at)`. Expected: `outcome` of `budget` or `complete` with rising counts and a falling `remaining`, no `leaseLost`, no `partial`. Review points: after the first tick (did it write at all), after the second (rate and the estimate of ticks left), then every tick.
+The projector is run only by its normal hourly cron; **no manual run**. After each tick read, with D1 `SELECT` only: the `projection_run` row (outcome, `reason`, `loadMs`, `durationMs`, written counts, `remaining`, `leaseLost`), `COUNT(*)` of `projection_state`, and `MAX(projected_at)`. Expected: `outcome` of `budget` or `complete` with rising counts and a falling `remaining`, no `leaseLost`, no `partial`. Review points: after the first tick (did it write at all), after the second (rate and the estimate of ticks left), then every tick.
 
 Stop and resume immediately (see Resume) if: two consecutive ticks write nothing and the reason is not `writer_active`/`input_changed` explained by a quiet-test failure; any `leaseLost`, `failed` or `partial` outcome; an `absent_guard` or `membership_guard` outcome (the projector is fail-closed here and does not write; the cause is input, not the window); the owner withdraws the GO; the maximum window is reached.
 
@@ -69,7 +69,7 @@ Either `remaining=0` with a run `complete` and an unchanged plan on the next tic
 
 ## Resume (owner performs; one GO per operation)
 
-1. Set `DISCOVERY_EXECUTOR=workflow`; read it back. The next cron reconcile at `:37` recreates the instance, which re-reads authority, generation, executor record and the recovery gate; no manual start.
+1. Set `DISCOVERY_EXECUTOR=workflow`; read it back. The next cron reconcile recreates the instance, which re-reads authority, generation, executor record and the recovery gate; no manual start.
 2. Re-enable the paused Scheduled Task(s) and read them back. Do not trigger them manually.
 3. Verification (read-only): generation moves again, one Discovery instance is running, a Discovery chunk completes in the next tick, the monitor shows no open incident after its own recovery, Ratings and EPG crons unaffected.
 4. Record the sanitized evidence (counts and timestamps only) in `docs/evidence/d1-migration/` with the index entry.
