@@ -3,7 +3,7 @@
 // projector lease, a moved marker). Nothing here reads or writes any database or the network.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {SEQUENCE,V12_TABLES,expectedObjects,loadExpected,assertReadOnly,inventorySql,preflightSteps,MARKER_STEPS,evaluatePreflight} from '../scripts/schema-preflight.mjs';
+import {SEQUENCE,V12_TABLES,expectedObjects,loadExpected,assertReadOnly,inventorySql,preflightSteps,MARKER_STEPS,evaluatePreflight,unwrap} from '../scripts/schema-preflight.mjs';
 
 const expected=loadExpected();
 const NOW='2026-11-08T10:00:00.000Z';
@@ -71,11 +71,53 @@ const evaluate=(input,options={})=>evaluatePreflight(input,{expected,now:NOW,...
  assert.equal(evaluate(results(12,0,{projector_lease:[{lease_id:'l',lease_until:'2026-11-08T09:00:00.000Z'}]})).ok,true);
  assert.equal(evaluate(results(12,0,{projector_lease:[{lease_id:null,lease_until:null}]})).ok,true);
  // The marker after 0013: unread is a blocker; moved is noted; moved before the schema is complete is a blocker (it is never what a clean apply leaves).
- assert.ok(evaluate(results(13,1)).blockers.includes('marker_unread'));
+ assert.ok(evaluate(results(13,1)).blockers.includes('result_missing:marker'),'an omitted marker read is a missing result');
+ assert.ok(evaluate(results(13,1,{marker:[],fence:[],baseline:[]})).blockers.includes('marker_unread'),'an empty marker read is unread');
  verdict=evaluate(results(16,4,{...MARKER,baseline:[{id:1,state:'loading',reference:'x'}]}));
  assert.ok(verdict.ok&&verdict.notes[0].startsWith('marker_not_initial'));
  verdict=evaluate(results(15,3,{...MARKER,marker:[{id:1,mode:'prepared',cutover:'open',generation:1}]}));
  assert.ok(verdict.blockers.includes('authority_moved_before_schema_complete'));
+}
+
+// 3b. Fail closed: a missing, null, non-array or failed probe result is never an empty one, so no success verdict can come from an incomplete read.
+{
+ const SUCCESS=new Set(['ready_v12','complete'].concat([13,14,15].map(v=>'at_v'+v)));
+ const never=(input,label)=>{const verdict=evaluate(input);assert.equal(verdict.ok,false,label);assert.ok(!SUCCESS.has(verdict.state),label+': '+verdict.state);assert.equal(verdict.next,null,label);assert.deepEqual(verdict.remaining,[],label);return verdict;};
+ const complete=(version,applied)=>results(version,applied,version>=13?MARKER:{});
+ for(const [version,applied] of [[12,0],[13,1],[14,2],[15,3],[16,4]]){
+  const keys=['version','prerequisites','inventory','projector_lease'].concat(version>=13?['marker','fence','baseline']:[]);
+  assert.equal(evaluate(complete(version,applied)).ok,true,'the complete read passes at v'+version);
+  for(const key of keys){
+   const omitted={...complete(version,applied)};delete omitted[key];
+   const verdict=never(omitted,'v'+version+' omitting '+key);
+   assert.ok(verdict.blockers.includes('result_missing:'+key),'v'+version+' '+key);
+   for(const bad of [null,undefined,{},'rows',7,{success:false,errors:['boom']},[{success:false}].length&&{results:[]}])never({...complete(version,applied),[key]:bad},'v'+version+' '+key+' = '+JSON.stringify(bad));
+  }
+ }
+ // The marker, the fence and the baseline are single-row tables: a second row is as unreadable as none.
+ for(const key of ['marker','fence','baseline']){
+  const doubled=evaluate(results(13,1,{...MARKER,[key]:[...MARKER[key],...MARKER[key]]}));
+  assert.equal(doubled.ok,false,key+' with two rows');assert.ok(doubled.blockers.includes('marker_unread'),key);
+ }
+ // A verified empty lease read ([]) and an empty inventory at a clean v12 stay valid and distinct from an absent one.
+ assert.equal(evaluate(results(12,0,{projector_lease:[]})).ok,true);
+ assert.equal(evaluate(results(12,0,{inventory:[]})).ok,true);
+ // A lease row that cannot be dated is treated as live, never as free.
+ assert.ok(evaluate(results(12,0,{projector_lease:[{lease_id:'l',lease_until:null}]})).blockers.some(item=>item.startsWith('projector_lease_live')));
+ assert.ok(evaluate(results(12,0,{projector_lease:[{lease_id:'l'}]})).blockers.some(item=>item.startsWith('projector_lease_live')));
+ assert.ok(evaluate(results(12,0,{projector_lease:[{lease_id:'l',lease_until:12345}]})).blockers.some(item=>item.startsWith('projector_lease_live')));
+ assert.equal(evaluate(results(12,0,{projector_lease:[{lease_id:'l',lease_until:NOW}]})).ok,true,'a lease that ends exactly now is over');
+ // A missing probe in an otherwise unknown state still reports every missing key; nothing at all is also unknown.
+ assert.equal(evaluatePreflight(undefined,{expected,now:NOW}).ok,false);
+ assert.equal(evaluatePreflight(null,{expected,now:NOW}).state,'unknown');
+ assert.ok(evaluatePreflight({},{expected,now:NOW}).blockers.includes('result_missing:inventory'));
+ // unwrap: the rows of a successful D1 response only; an error envelope, success false or a missing results array are null.
+ assert.deepEqual(unwrap([{results:[{a:1}],success:true,meta:{}}]),[{a:1}]);
+ assert.deepEqual(unwrap([{results:[],success:true}]),[]);
+ for(const bad of [null,undefined,{},[],[{results:[{a:1}],success:false}],[{success:true}],[{results:'x',success:true}],{results:[],success:true},'x'])assert.equal(unwrap(bad),null,JSON.stringify(bad));
+ // The verdict of an unwrapped failed probe cannot pass.
+ never({...complete(12,0),inventory:unwrap([{results:[],success:false}])},'a failed inventory query');
+ never({...complete(12,0),projector_lease:unwrap({error:'timeout'})},'a failed lease query');
 }
 
 // 4. Static: the kit is offline and the documented procedure exists.
