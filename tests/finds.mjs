@@ -105,17 +105,17 @@ const card=run('findsCard(input,now)',rich);
 assert.match(card,/^<article class="finds-card" data-finds-film="tmdb_71">/);
 assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span><img class="poster" src="https:\/\/img.example\/p.jpg"/);
 assert.match(card,/score-predicted[^>]*><span>ПРОГНОЗ<\/span><strong>4\.7<\/strong><small>82% на 4\.0\+<\/small>/);
-assert.match(card,/<h3>Богатый<a class="letterboxd-link"/,'AIR-382: the title is plain text, only the icon follows it');
-assert.doesNotMatch(card,/themoviedb\.org|finds-title-link|<h3><a|<button/,'AIR-382: no TMDB link or control on the title');
+assert.match(card,/<h3><a class="film-open" href="\/film\/tmdb_71" data-film-id="tmdb_71">Богатый<\/a><a class="letterboxd-link"/,'AIR-387: the title opens the internal film page, then the icon');
+assert.doesNotMatch(card,/themoviedb\.org|finds-title-link|<button/,'AIR-387: the title never jumps to TMDB');
 // AIR-384: a verified TMDB movie without a stored canonical URL gets Letterboxd's own /tmdb/<id> redirect; the TMDB `url` itself is never a Letterboxd link.
-assert.match(card,/<h3>Богатый<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/71" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd по TMDB id" aria-label="Открыть в Letterboxd по TMDB id">/,'redirect icon beside a plain-text title');
-assert.equal((card.match(/<a /g)||[]).length,1,'the icon is the only link in the card');
+assert.match(card,/<h3><a class="film-open" href="\/film\/tmdb_71" data-film-id="tmdb_71">Богатый<\/a><a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/71" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd по TMDB id" aria-label="Открыть в Letterboxd по TMDB id">/,'redirect icon beside a plain-text title');
+assert.equal((card.match(/<a /g)||[]).length,2,'the internal title link and the icon are the only links in the card');
 {
  const lb='https://letterboxd.com/film/rich-film/',target=(f,o)=>JSON.parse(run('JSON.stringify(letterboxdTarget(input,'+JSON.stringify(o||{})+'))',f)||'null');
  const withIcon=run('findsCard(input,now)',{...rich,letterboxdUrl:lb});
- assert.match(withIcon,new RegExp('<h3>Богатый<a class="letterboxd-link" href="'+lb.replace(/[.\/]/g,'\\$&')+'" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"'),'a stored canonical URL always wins and keeps the plain label');
+ assert.match(withIcon,new RegExp('<h3><a class="film-open" href="/film/tmdb_71" data-film-id="tmdb_71">Богатый</a><a class="letterboxd-link" href="'+lb.replace(/[.\/]/g,'\\$&')+'" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"'),'a stored canonical URL always wins and keeps the plain label');
  assert.doesNotMatch(withIcon,/letterboxd\.com\/tmdb\//,'no redirect next to a known canonical URL');
- assert.equal((withIcon.match(/<a /g)||[]).length,1,'only the icon is a link');
+ assert.equal((withIcon.match(/<a /g)||[]).length,2,'the internal title link and the icon');
  // A catalog film's `url` is its TMDB page, not provenance: even a syntactically valid Letterboxd-looking `url` cannot override the verified redirect.
  for(const spoof of ['https://letterboxd.com/film/some-slug/','https://letterboxd.com/film/rich-film/']){
   const html=run('findsCard(input,now)',{...rich,url:spoof});
@@ -157,9 +157,10 @@ assert.match(card,/<span class="film-year">2020 · 100 мин<\/span>/);
 assert.match(card,/<div class="film-tags">Триллер · Драма<\/div>/);
 assert.match(card,/<div class="film-moods finds-labels"><span>Ограбление<\/span><span>Напряжённый<\/span><\/div>/,'one mechanic and one mood, two labels at most');
 assert.match(card,/<p class="finds-airing" data-airing="live">Сейчас в эфире · Первый<\/p>/);
-assert.doesNotMatch(card,/data-film-id|film-open|data-started-id|Последний шанс/);
+assert.doesNotMatch(card,/data-started-id|Последний шанс/,'no started or last-chance controls on a find');
+assert.equal((card.match(/data-film-id=/g)||[]).length,1,'the title link is the only film opener');
 const bare=run('findsCard(input,now)',{...film('tmdb_72',72,'Голый',4.0,.7,'medium',[show(-30)],{fingerprint:null,moods:[]}),url:null,poster:null,runtime:null,genres:[]});
-assert.match(bare,/<h3>Голый<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/72"/,"a missing url does not matter: the verified TMDB id still gives the redirect icon");
+assert.match(bare,/<h3><a class="film-open" href="\/film\/tmdb_72" data-film-id="tmdb_72">Голый<\/a><a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/72"/,"a missing url does not matter: the verified TMDB id still gives the redirect icon");
 assert.match(bare,/no-poster/);
 assert.doesNotMatch(bare,/finds-labels/,'no labels block without known facets');
 assert.match(bare,/<span class="film-year">2020<\/span>/);
