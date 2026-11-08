@@ -1,0 +1,80 @@
+# ADR 0103: The D1 enrichment projector runs in an exclusive window that Discovery yields through the existing lease, keeping the strict generation fence
+
+**Status:** Proposed  
+**Original decision date:** 2026-11-08 (principle only; the contract below is not yet accepted)  
+**Recorded at:** 2026-11-08  
+**Approval source:** The owner chose the principle, a coordinated exclusive quiet window with the strict generation and lease fences kept and no second family of versions, in the [owner decision of 2026-11-08 on AIR-383](https://trello.com/c/Hnuf2tB0#comment-6af070c05b9e2259c505cdde), after rejecting the scoped-revision design of the closed [PR #429](https://github.com/vladimino/iptv-watchlist/pull/429). That comment permits this design and an ordinary PR; it authorizes no schema apply, flag, Task, cron, lease, Workflow or manual run. Moving this record to Accepted needs the owner's material approval after independent review.  
+**Related work:** [AIR-383](https://trello.com/c/Hnuf2tB0), [AIR-386](https://trello.com/c/z4tQryUa), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0085](0085-d1-authoritative-discovery.md), [ADR 0093](0093-discovery-workflow-cron-reconcile.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [Discovery pause runbook](../runbooks/d1-projector-discovery-freeze.md), [ingress audit](../evidence/d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md)  
+**Supersedes:** None. It adds a coordination step in front of the generation fence of [ADR 0056](0056-d1-enrichment-write-through.md) and changes none of that ADR's fences.  
+**Superseded by:** None
+
+## Context
+
+The projector pins the global Discovery generation before it reads and compares it again before it writes; the 21 s diff phase lies between the two points, and Discovery bumps the generation about 17 times a minute with no quiet minute in a 150-minute sample. A retry cannot pass that fence, and a design that relaxes it was rejected by the owner as disproportionately complex. The remaining way to keep the fence exactly as it is is a window in which Discovery does not write.
+
+The runtime does not offer one place to do that: Discovery is a Cloudflare Workflow that continues itself, and the projector is a step of the hourly Worker cron, so they are not steps of one Workflow ([audit](../evidence/d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md)). What both already share is D1. Every Discovery chunk, seal, publish handoff and owner correction takes the single `discovery_lease` row, and the Workflow and the chunk routes already wait, without counting a failure, when it is held. Two gaps remain: a requester has no priority (a stream of back-to-back chunks can keep the row busy), and three statements that move the generation, `writeContinuation`, `writeWorkflow` and `importSegment`, do not require the lease.
+
+## Decision
+
+The projector takes a short exclusive window, and Discovery yields through the lease it already respects. The generation pin, the projector lease and the batch fences are unchanged and still decide whether a write may happen; the window only makes them passable.
+
+1. **One coordination row.** Proposed DDL, not a migration file and not applied: a table `projector_window` with one seeded row (`id` 1, `state` `idle`, `owner`, `requested_at`, `expires_at`), `state` one of `idle`, `requested`, `held`. It is a mutual-exclusion flag with an expiry, not a version: nothing compares it to data. With the table absent, or the flag off, every code path behaves as today.
+2. **Protocol, each step one atomic D1 statement or batch.**
+   - **Request.** At the start of its tick, after the existing writer-idle checks, the projector sets `requested` with its own lease id as `owner` and `expires_at` = now plus the request lifetime, only if the row is `idle` or expired. A refusal ends the tick `deferred` (`window_busy`).
+   - **Admission closes.** `acquireLease` (and so every chunk, seal, publish handoff and owner correction) refuses while the row is `requested` or `held`, unexpired and not owned by the caller, and answers `busy` with kind `projector_window` and the expiry. The Workflow, the chunk route and the EPG seal already turn a `busy` answer into a wait until the given time. In-flight chunks are not interrupted.
+   - **Grant.** One batch moves `discovery_lease` to the projector (its lease id, expiry equal to the window expiry) only if the lease row is free or expired, the row is still `requested` by this owner and `discovery_transfer.state` is not `loading`, and sets the row `held`. While `held` the lease row **is** the window, so every lease-fenced Discovery write, which already asserts `lease_id` and `expires_at` in its own batch, fails in D1.
+   - **Closing the lease-free writers.** `writeContinuation`, `writeWorkflow` and `importSegment` gain `AND NOT EXISTS (SELECT 1 FROM projector_window WHERE state='held' AND expires_at>?)` in their own generation-bump statement, so they cannot move the generation while the window is held. A refusal throws a new soft code, `discovery_window`, which the Workflow and routes treat as `busy` until the window expiry, never as a failure toward its stall and recovery limits.
+   - **Run.** With the window held, the projector reads, diffs and writes under the existing strict protocol: the generation read at the start still equals the generation before the first batch because nothing can change it. Every write batch also asserts, next to the projector lease fence, that the row is `held` by this owner and unexpired; a window that expired mid-run fails the batch closed and ends the run `deferred` (`window_lost`).
+   - **Release.** One batch frees `discovery_lease` (if still the projector's) and sets the row `idle`. A crashed or timed-out projector releases nothing; the row and the lease expire by themselves at `expires_at`, Discovery resumes, and the next tick starts again.
+3. **Why this proves quiescence without trusting an expiry.** A Discovery D1 write cannot commit unless its own batch finds the live lease with its own id; after the grant the lease row holds the projector's id, so a stalled former holder, however alive, is refused by the statement it sends, whatever its clock says. The three lease-free writers are refused by the window predicate. A lease expiry is used only to decide when the grant may happen, never as evidence that anything stopped. What this does not cover is any side effect outside D1: the audit found no Discovery path that writes an R2 object the projector reads, and the implementation card must prove that with a test that enumerates the R2 writes reachable from a chunk before the flag may be switched on. The EPG sync's own R2 writes keep the existing sync-stage check and etag re-check.
+4. **Bounded on both sides.** Request lifetime and hold are proposals to confirm in measurement: at most 180 s waiting for quiet (the longest an in-flight lease can last is its 90 s TTL, plus a chunk's own tail) and at most 300 s held, both inside the 15-minute wall limit of a Cron Trigger invocation and the projector's 10-minute lease. Discovery is therefore paused for at most about 5 minutes in an hour, about 8 %, typically less; each window is one per tick; a window never renews itself, so it cannot become a permanent pause. The projector cannot be starved either, because admission closes at `requested`. A request that is not granted in time withdraws itself and the tick ends `deferred` (`window_not_granted`).
+5. **Yield to the EPG publication and keep the others independent.** The projector does not request a window while the EPG sync is in its metadata or EPG stage (the existing writer-idle check), so the daily publication, which starts on the same hourly tick, is not delayed by a window. The reverse order is a **risk, not a proven property**: if a window is requested first, the EPG seal sees `busy` and waits, but its documented wait on a busy seal is a single bounded wait of about 93 s, and a window may last longer. The implementation card must show that a seal refused for `projector_window` is retried rather than ending a publication in failure, or else make the projector skip windows from the EPG's due time until the publication completes; until then the flag stays off. Ratings, the monitor and the EPG executor do not read the row.
+6. **Backlog.** The historical estimate is 16 to 20 hourly ticks (775 Persons written per full run, 3,000 Films not yet in D1). A window does not by itself raise the per-run budget (60 s of wall time, 800 queries). Whether to raise it inside the held window is a measured, separate decision of the implementation card: the window makes a larger budget safe, but it lengthens the pause. If the measured drain exceeds the owner's bound, the card stops with a decision brief rather than extending the hold.
+7. **Observability.** The run summary gains payload-free fields: `window` (outcome `granted`, `not_granted`, `busy`, `lost`), `windowWaitMs`, `windowHeldMs`, the generation at grant and at the first batch, `written` and `remaining` as today, and the age of the last write. Every non-success window outcome is a visible `deferred` reason and is never reported as success.
+8. **Failure behaviour (all fail closed; no blind retry).**
+
+   | Situation | Result |
+   | --- | --- |
+   | EPG publish or seal in flight | the projector defers before requesting; if a window came first, the seal waits on `busy`, which must be proven a retry and not a failed publication (decision 5); no deadlock, both bounded |
+   | Owner correction or external Task chunk arrives | `acquireLease` refuses (`busy`), retried by the caller after the expiry |
+   | Workflow instance mid-step | an in-flight chunk finishes; its next step waits; a state write is refused with `discovery_window` and waits, no stall counted |
+   | Chunk or Workflow stalled or crashed | its D1 writes are refused by the lease and the window; its lease expiry only decides when the grant may happen |
+   | Projector lease lost or batch outcome unknown | the run stops; no retry in the run; the window expires or is released; the next tick's diff is the readback |
+   | Cron fires twice | the second request is refused (`window_busy`) |
+   | Marker held or unreadable | the projector fails closed as today; no window is requested |
+   | Worker restart mid-window | the row and lease expire by themselves; nothing needs recovery |
+9. **Staged delivery, each stage its own card and approval.** (a) Dormant: the migration file, the `acquireLease` and lease-free-writer predicates, the soft `discovery_window` handling in the Workflow and routes, the projector protocol behind a new flag that defaults off (registered in the [flag contract](../reference/feature-flags.md)), and the deterministic tests; nothing applied. (b) Measurement in `dry`: lease hold times and the time to quiet. (c) Owner GOs, separately: apply the migration, switch the flag. (d) Read-only natural acceptance at several consecutive ticks with Discovery resumed: growing Film and Person rows, a falling or explained `remaining`, no `leaseLost`, no unexplained `deferred`, Discovery chunks completing between windows.
+10. **Required deterministic tests.** An interleaving of Discovery chunks and the projector at 17 bumps a minute and 20,000 decisions with the projector productive and Discovery resumed after each window; no Discovery generation bump while `held` for any writer, including the three lease-free ones (a structural test lists every `generation=generation+1` statement and fails on one without the lease fence or the window predicate); a stalled former holder whose late batch is refused; a window that expires mid-run; two projector runners (one wins); a crash before and after request, grant and release; an in-flight chunk at request; an EPG seal at request; an owner correction at request; a Workflow instance that waits without a stall count and with `recovery_exhausted` unreachable through the window; transfer `loading` at grant; no starvation of either side over 1,000 simulated ticks; the strict generation fence unchanged (a bump after the grant, forced in the test, still defers); monitor, Ratings and EPG executor unaffected; the AIR-375 and AIR-386 reads unchanged.
+
+**Not decided here:** the migration number and exact DDL, the flag name, the request lifetime, the hold and the wall budget inside the window (measured by stage (b)), the per-run budget, any schema apply or flag switch, and any change to the discovery authority contract of ADR 0085. Nothing in this record is implemented, deployed, activated or verified in production.
+
+## Alternatives considered
+
+- **The existing lease alone, no new row.** No schema, but a requester has no priority, so back-to-back Workflow chunks can starve the projector, and `writeContinuation`, `writeWorkflow` and `importSegment` would still move the generation inside the window.
+- **The manual pause of the [runbook](../runbooks/d1-projector-discovery-freeze.md).** Kept as the owner-approved fallback. It needs a human, edits a Worker variable and a Scheduled Task, pauses Discovery for a day or more, and is not automatic.
+- **A bounded retry of the whole read phase (AIR-383).** Rejected: 0.25 % to 5 % per attempt at the measured rate.
+- **Scoped revisions and per-entity compare-and-swap (closed PR #429, ADR 0102 not accepted).** Rejected by the owner as disproportionately complex.
+- **Setting `DISCOVERY_EXECUTOR` to `external`.** A global switch, not coordination: it does not stop the external Task or the owner routes, and it needs an owner edit for each window.
+
+## Consequences
+
+- The strict fence is unchanged and passes, because nothing can change the generation while the window is held; the safety argument is one D1 mutual exclusion, enforced by the statements of the writers themselves.
+- New complexity: one table, one more predicate on `acquireLease` and on three statements, a soft `discovery_window` code, a request, grant and release in the projector, and new summary fields. No new family of versions.
+- Discovery loses up to about 5 minutes an hour, with a hard bound, and the EPG seal may wait for a window once; both are visible.
+- Progress is bounded by the per-run budget, not by luck; the backlog drains over the estimated ticks unless the budget is raised, which is a measured follow-up.
+- A bug in the predicate coverage would let a Discovery write through the window; the structural test over every generation-bumping statement is the contract for that.
+
+## Recovery and migration boundary
+
+Stage (a) is additive and inert (the migration is a file only, the flag is off). Setting the flag off, or never applying the migration, restores today's behaviour exactly. A window never needs a repair: expiry returns Discovery to normal by itself. The projector's rows written inside a window are real writes that a code or flag rollback does not undo (ADR 0056). Migration apply and flag activation are separate owner GOs; this ADR authorizes neither and no change to a Scheduled Task, cron, lease or Discovery run.
+
+## Evidence
+
+- **Original decision:** [owner decision on AIR-383, 2026-11-08](https://trello.com/c/Hnuf2tB0#comment-6af070c05b9e2259c505cdde)
+- **Implementation:** none; this record is a proposal
+- **Dated verification:** [ingress and generation-bump audit with the measured rate, 2026-11-08](../evidence/d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md), read-only
+- **Uncertainty:** the lease hold times and the time to quiet are not measured; whether any Discovery ingress writes an R2 object the projector reads is believed not but unproven; the wall time of a run with writes under the new wait is not measured; the effect on the daily EPG publication is reasoned, not observed
+
+## Follow-ups
+
+The four staged cards of decision 9, to be created after this record is accepted. [AIR-373](https://trello.com/c/ugu3sQmp) baseline and [AIR-348](https://trello.com/c/PUrlzMuH) cutover readiness consume the natural-acceptance result of stage (d).
