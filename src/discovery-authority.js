@@ -57,7 +57,7 @@ async function digest(text){
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
  return [...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
-function closed(){return {ready:false,held:false,tables:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
+function closed(){return {ready:false,held:false,tables:false,windowTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
 // AIR-387. One catalog film by TMDB movie id, for the permanent film page. A bounded read-only lookup: one indexed row
 // (media_kind, tmdb_id), no catalog scan, no write. It answers every state of that identity, so the caller can tell a film
 // that was never admitted from one that was superseded, and it fails closed like `routeRead`: a held cutover, a catalog or
@@ -100,6 +100,30 @@ export function evidenceKey(item){
 function leaseOf(env){const lease=env?.discoveryLease;return lease&&typeof lease.id==='string'&&lease.id?lease:null;}
 function nowMs(){return Date.now();}
 
+// ADR 0103 (AIR-383): the exclusive projector window. The table `projector_window` is optional: with it absent (migration 0018 not
+// applied) every statement below is exactly what it was before, so a deploy changes nothing. While the row is `requested`, new lease
+// acquisition is refused; while it is `held`, the three writers that move the generation without holding the lease are refused
+// too, inside their own statement. One absolute deadline covers both states and is never extended; an expired row is idle.
+export const WINDOW_DEADLINE_MS=300000;
+export const WINDOW_MIN_RUN_MS=120000;
+const WINDOW_HELD_SQL=" AND NOT EXISTS (SELECT 1 FROM projector_window WHERE state='held' AND expires_at>?)";
+const WINDOW_ACTIVE_SQL=" AND NOT EXISTS (SELECT 1 FROM projector_window WHERE state IN ('requested','held') AND expires_at>?)";
+function windowHeldGuard(gate,now=nowMs()){return gate?.windowTable?[WINDOW_HELD_SQL,[now]]:['',[]];}
+function windowError(window){const error=failed('discovery_window');error.window={expiresAt:window?.expiresAt??null,state:window?.state??null};return error;}
+export async function readProjectorWindow(env,now=nowMs()){
+ const row=await one(database(env),'SELECT state, owner, requested_at AS requestedAt, expires_at AS expiresAt FROM projector_window WHERE id=1');
+ if(!row)return {present:false,active:false,state:'idle',owner:null,expiresAt:null};
+ const expiresAt=Number(row.expiresAt),active=row.state!=='idle'&&Number.isFinite(expiresAt)&&expiresAt>now;
+ return {present:true,active,state:active?row.state:'idle',owner:active?row.owner:null,requestedAt:row.requestedAt==null?null:Number(row.requestedAt),expiresAt:active?expiresAt:null};
+}
+// A writer whose batch the window refused learns why by re-reading the row: a held window is a soft, typed refusal with its
+// expiry (the caller waits); anything else stays the ordinary fence failure.
+async function throwIfWindowHeld(env,gate,error){
+ if(!gate?.windowTable)return;
+ let window;try{window=await readProjectorWindow(env);}catch{return;}
+ if(window.active&&window.state==='held')throw Object.assign(windowError(window),{cause:error});
+}
+
 export async function readAuthority(env){
  const db=database(env);
  if(!db)return closed();
@@ -112,7 +136,7 @@ export async function readAuthority(env){
  const numeric=Number(version);
  if(!Number.isFinite(numeric)||numeric<11)return {...closed(),version:Number.isFinite(numeric)?numeric:null};
  let names;
- try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'discovery\\_%' ESCAPE '\\'")).map(row=>row.name);}
+ try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'discovery\\_%' ESCAPE '\\' OR name='projector_window')")).map(row=>row.name);}
  catch(error){throw failed('discovery_unavailable',error);}
  if(!TABLES.every(name=>names.includes(name)))throw failed('discovery_unavailable');
  let row,transfer;
@@ -123,7 +147,7 @@ export async function readAuthority(env){
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
  const ready=row.mode==='d1'&&row.cutover==='open',held=row.mode==='d1'&&row.cutover==='held';
- return {ready,held,tables:true,mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state};
+ return {ready,held,tables:true,windowTable:names.includes('projector_window'),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state};
 }
 
 function assertOpen(gate){
@@ -950,7 +974,7 @@ export async function importSegment(env,segment){
  if(!run)throw failed('discovery_fence');
  const chunks=[];
  let current=[
-  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)',[gate.generation,nowMs()]],
+  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(gate)[0],[gate.generation,nowMs(),...windowHeldGuard(gate)[1]]],
   [FENCE_SQL,[]],
   ['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]],
   ['INSERT INTO discovery_segment (source_key, programme_run_id, residence, r2_key, content_sha256, item_count) VALUES (?,?,\'archive\',?,?,?)',[segment.sourceKey,run,segment.r2Key??null,sha,segment.items.length]],
@@ -974,14 +998,14 @@ export async function importSegment(env,segment){
   if(index>0){
    const again=await readAuthority(env);
    chunks[index].unshift([FENCE_SQL,[]]);
-   chunks[index].unshift(['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)',[again.generation,nowMs()]]);
+   chunks[index].unshift(['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(again)[0],[again.generation,nowMs(),...windowHeldGuard(again)[1]]]);
    generation=again.generation;
   }
   await commit(db,chunks[index]);
  }
  const end=await readAuthority(env);
  await commit(db,[
-  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)',[end.generation,nowMs()]],
+  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(end)[0],[end.generation,nowMs(),...windowHeldGuard(end)[1]]],
   [FENCE_SQL,[]],
   ['UPDATE discovery_transfer SET state=\'committed\', batches=batches+1 WHERE id=1',[]],
  ]);
@@ -1003,9 +1027,15 @@ export async function acquireLease(env,context={}){
  if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId)return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
  const id=crypto.randomUUID(),expiresAt=nowMs()+LEASE_TTL_MS;
  const db=database(env);
- await commit(db,[['UPDATE discovery_lease SET lease_id=?, expires_at=?, programme_run_id=? WHERE id=1 AND (lease_id IS NULL OR expires_at<=?)',[id,expiresAt,context.programmeRunId??gate.programmeRunId??null,nowMs()]]]);
+ const refusal=gate.windowTable?[WINDOW_ACTIVE_SQL,[nowMs()]]:['',[]];
+ await commit(db,[['UPDATE discovery_lease SET lease_id=?, expires_at=?, programme_run_id=? WHERE id=1 AND (lease_id IS NULL OR expires_at<=?)'+refusal[0],[id,expiresAt,context.programmeRunId??gate.programmeRunId??null,nowMs(),...refusal[1]]]]);
  const row=await one(db,'SELECT lease_id, expires_at, programme_run_id FROM discovery_lease WHERE id=1');
  if(row?.lease_id!==id){
+  // ADR 0103: a requested or held window is its own, typed, absolute-deadline busy; the caller waits until then.
+  if(gate.windowTable){
+   const window=await readProjectorWindow(env);
+   if(window.active)return {handled:true,lease:null,busy:{kind:'projector_window',expiresAt:window.expiresAt,state:window.state}};
+  }
   // AIR-362: say why, and until when, so a caller can wait for the holder instead of guessing. A lease row that is already
   // expired or released (the holder finished between the failed update and this read) is `lost_race`, with no expiry.
   const expiresAt=Number(row?.expires_at);
@@ -1028,6 +1058,65 @@ export async function renewLease(env,lease,context={}){
  if(ok)lease.expiresAt=expiresAt;
  return {handled:true,ok};
 }
+// ADR 0103. The projector's side of the window. Each step is one atomic statement or batch; none of them runs unless the
+// authority is d1 and open and the table exists, and nothing here is called while the feature flag is off.
+// The whole-window bound is enforced here, at the coordination boundary, not trusted from a caller: a finite positive integer number of
+// milliseconds no larger than WINDOW_DEADLINE_MS, so no caller can persist an admission closure longer than the accepted 300 s. The
+// migration repeats the bound as a CHECK. Anything else is refused before any statement runs.
+const windowMillis=value=>Number.isSafeInteger(value)&&value>0;
+function validWindowTime(now){return Number.isSafeInteger(now)&&now>0;}
+export async function requestProjectorWindow(env,{owner,deadlineMs=WINDOW_DEADLINE_MS,now=nowMs()}={}){
+ if(typeof owner!=='string'||!owner)throw failed('discovery_conflict');
+ if(!windowMillis(deadlineMs)||deadlineMs>WINDOW_DEADLINE_MS||!validWindowTime(now))throw failed('discovery_window_invalid');
+ const gate=await readAuthority(env);
+ if(gate.held)throw failed('discovery_fence');
+ if(!gate.ready||!gate.windowTable)return {outcome:'not_applicable',reason:gate.ready?'no_window_table':'authority_not_d1'};
+ const db=database(env),expiresAt=now+deadlineMs;
+ await commit(db,[['UPDATE projector_window SET state=\'requested\', owner=?, requested_at=?, expires_at=? WHERE id=1 AND (state=\'idle\' OR expires_at<=?)',[owner,now,expiresAt,now]]]);
+ const window=await readProjectorWindow(env,now);
+ if(window.owner===owner&&window.state==='requested')return {outcome:'requested',expiresAt:window.expiresAt};
+ return {outcome:'busy',reason:window.active?'window_held_by_other':'lost_race',expiresAt:window.expiresAt};
+}
+// One batch moves the existing discovery_lease to the owner and the row to `held`, only if the row is still this owner's `requested`
+// row, unexpired with at least the minimum run time left, the lease is free or expired and no transfer is loading. A refused
+// batch changes nothing, so an expired request can never be granted late and never leaves a lease behind.
+export async function grantProjectorWindow(env,{owner,minRunMs=WINDOW_MIN_RUN_MS,now=nowMs()}={}){
+ if(typeof owner!=='string'||!owner)throw failed('discovery_conflict');
+ if(!windowMillis(minRunMs)||minRunMs>WINDOW_DEADLINE_MS||!validWindowTime(now))throw failed('discovery_window_invalid');
+ const gate=await readAuthority(env);
+ if(gate.held)throw failed('discovery_fence');
+ if(!gate.ready||!gate.windowTable)return {outcome:'not_applicable',reason:gate.ready?'no_window_table':'authority_not_d1'};
+ const db=database(env);
+ try{
+  await commit(db,[
+   ['UPDATE discovery_lease SET lease_id=?, expires_at=(SELECT expires_at FROM projector_window WHERE id=1), programme_run_id=(SELECT programme_run_id FROM discovery_authority WHERE id=1) WHERE id=1 AND (lease_id IS NULL OR expires_at<=?) AND EXISTS (SELECT 1 FROM projector_window WHERE id=1 AND state=\'requested\' AND owner=? AND expires_at>? AND expires_at-?>=?) AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state<>\'loading\') AND EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode=\'d1\' AND cutover=\'open\')',[owner,now,owner,now,now,minRunMs]],
+   ['UPDATE projector_window SET state=\'held\' WHERE id=1 AND state=\'requested\' AND owner=? AND expires_at>? AND changes()=1',[owner,now]],
+   [FENCE_SQL,[]],
+  ]);
+ }catch(error){
+  if(error.code!=='discovery_fence')throw error;
+  const window=await readProjectorWindow(env,now);
+  if(window.owner!==owner||window.state!=='requested')return {outcome:'lost',reason:window.active?'window_held_by_other':'expired'};
+  if(window.expiresAt-now<minRunMs)return {outcome:'too_late',expiresAt:window.expiresAt};
+  const lease=await one(db,'SELECT lease_id, expires_at FROM discovery_lease WHERE id=1');
+  if(lease?.lease_id&&Number(lease.expires_at)>now)return {outcome:'pending',reason:'lease_live',leaseExpiresAt:Number(lease.expires_at)};
+  return {outcome:'pending',reason:'transfer_loading'};
+ }
+ const after=await readAuthority(env),window=await readProjectorWindow(env,now);
+ return {outcome:'granted',expiresAt:window.expiresAt,generation:after.generation};
+}
+// Frees only this owner's lease and window. A crashed owner releases nothing and both expire by themselves.
+export async function releaseProjectorWindow(env,{owner}={}){
+ if(typeof owner!=='string'||!owner)return {released:false};
+ const gate=await readAuthority(env);
+ if(!gate.windowTable)return {released:false};
+ await commit(database(env),[
+  ['UPDATE discovery_lease SET lease_id=NULL, expires_at=0 WHERE id=1 AND lease_id=?',[owner]],
+  ['UPDATE projector_window SET state=\'idle\', owner=NULL, requested_at=NULL, expires_at=0 WHERE id=1 AND owner=?',[owner]],
+ ]);
+ return {released:true};
+}
+// The window is the lease row while held; the projector's own batches assert it (src/d1-enrichment.js).
 export async function releaseLease(env,lease){
  const gate=await readAuthority(env);
  if(!gate.ready||!lease?.id)return {handled:!!gate.ready};
@@ -1068,10 +1157,10 @@ export async function writeContinuation(env,record,etag){
  try{
   await commit(database(env),[
    [`UPDATE discovery_continuation SET programme_run_id=?, payload_json=?, revision=revision+1 WHERE ${revisionSql}`,params],
-   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1',[gate.generation]],
+   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0],[gate.generation,...windowHeldGuard(gate)[1]]],
    [FENCE_SQL,[]],
   ]);
- }catch(error){if(error.code==='discovery_fence')return {handled:true,saved:false};throw error;}
+ }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);return {handled:true,saved:false};}throw error;}
  return {handled:true,saved:true};
 }
 export async function readWorkflow(env){
@@ -1095,10 +1184,10 @@ export async function writeWorkflow(env,record,etag){
  try{
   await commit(database(env),[
    [`UPDATE discovery_workflow SET instance_id=?, programme_run_id=?, series=?, payload_json=?, revision=revision+1 WHERE ${where}`,params],
-   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1',[gate.generation]],
+   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0],[gate.generation,...windowHeldGuard(gate)[1]]],
    [FENCE_SQL,[]],
   ]);
- }catch(error){if(error.code==='discovery_fence')return {handled:true,saved:false};throw error;}
+ }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);return {handled:true,saved:false};}throw error;}
  return {handled:true,saved:true};
 }
 

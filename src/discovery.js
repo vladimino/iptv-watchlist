@@ -191,7 +191,10 @@ function scorePreviewSummary(preview,currentProgrammeRunId){
  return {mode:'on',programmeRunId:previewRun,currentProgrammeRunId:current,stale,rows:items.length,outcomes,reasons,needsConfirmation:outcomes.needs_verification,cutover:'on'};
 }
 async function saveScorePreview(env,source,preview,fence=null){if(fence)await fence();await saveJSON(env,DISCOVERY_SCORE_PREVIEW_KEY,{schemaVersion:1,mode:'on',programmeRunId:source.programmeRunId||null,items:preview});}
-async function acquireDiscoveryLease(env){
+// ADR 0103. `takeDiscoveryLease` answers the lease and, when none was taken, why: a requested or held projector window is the typed
+// busy `{kind:'projector_window',expiresAt}`, which the EPG publication paths turn into a structured wait. `acquireDiscoveryLease`
+// keeps its old shape (the lease or null) for every caller that treats a missing lease as busy.
+async function takeDiscoveryLease(env){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
   if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
@@ -199,14 +202,15 @@ async function acquireDiscoveryLease(env){
    const published=await publishedPointer(env);
    const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:published?.programmeRunId??null});
    if(taken.lease)env.discoveryLease=taken.lease;
-   return taken.lease;
+   return {lease:taken.lease,busy:taken.busy||null};
   }
  }
  const object=await env.BUCKET.get(DISCOVERY_LEASE_KEY),old=object?await object.json():null;
- if(old?.expiresAt>Date.now())return null;
+ if(old?.expiresAt>Date.now())return {lease:null,busy:null};
  const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
- return saved===null?null:lease;
+ return {lease:saved===null?null:lease,busy:null};
 }
+async function acquireDiscoveryLease(env){return (await takeDiscoveryLease(env)).lease;}
 // AIR-154: a chunk renews its lease immediately before every durable write. Renewal fails as soon as
 // another hop holds the lease, so a hop that stalled past the lease TTL cannot write over its successor;
 // expiry therefore means the hop has been silent for a whole TTL, which is the quiescence a resume needs.
@@ -1412,8 +1416,12 @@ async function advanceDiscovery(env,body={}){
   const record={stage:'error',reason:'missing_secret',at:new Date().toISOString(),hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:current?.programmeRunId??null};
   await saveJSON(env,CONTINUATION_KEY,record);trace.saved={...continuationSummary(record),owned:true};return {stage:'missing_secret',checked:0,remaining:null,discovery:discoveryContract(record,{nextAction:'stop'}),diagnostic:trace};
  }
- const acquired=await acquireDiscoveryLease(env);
- if(!acquired){trace.branch='lease_lost';return busyOutcome(current,trace);}
+ const takenLease=await takeDiscoveryLease(env),acquired=takenLease.lease;
+ if(!acquired){
+  // ADR 0103: a projector window is a busy with its own absolute deadline, so the series waits for it instead of the hourly gate.
+  if(takenLease.busy?.kind==='projector_window'&&Number.isFinite(takenLease.busy.expiresAt)){trace.branch='projector_window';return busyOutcome(current,trace,new Date(takenLease.busy.expiresAt).toISOString());}
+  trace.branch='lease_lost';return busyOutcome(current,trace);
+ }
  // AIR-154 fence: the decision was made on the record read before the lease; another hop may have moved
  // it meanwhile. A changed record is not ours to continue from, so the lease is released and we wait.
  const fresh=await readContinuation(env);

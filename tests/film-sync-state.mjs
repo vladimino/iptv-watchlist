@@ -99,7 +99,7 @@ const body=(bucket,key)=>bucket.objects.get(key).text;
  assert.equal(status.schema,true);
  assert.equal(status.schemaVersion,undefined);
  assert.equal(status.syncCheckpoints,undefined);
- assert.deepEqual(Object.keys(status).sort(),['absent','checkpoints','lastRun','mode','schema']);
+ assert.deepEqual(Object.keys(status).sort(),['absent','checkpoints','lastRun','lastWriteAgeSec','lastWriteAt','mode','schema','windowMode']);
 }
 
 // 2. Applying 0005 on that same kind of database makes the next run fill the clocks. A second run writes nothing.

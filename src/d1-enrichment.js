@@ -18,6 +18,13 @@ const D1_ENRICHMENT_PERSON_BATCH=25;
 const D1_ENRICHMENT_ABSENT_FILMS=25,D1_ENRICHMENT_ABSENT_PEOPLE=250;
 const D1_ENRICHMENT_MEMBERSHIP_MIN=5,D1_ENRICHMENT_MEMBERSHIP_SHARE=0.02;
 const D1_ENRICHMENT_FENCE='INSERT INTO projection_fence (held) SELECT COUNT(*) FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?';
+// ADR 0103 (AIR-383). Behind D1_ENRICHMENT_WINDOW (off by default) a run asks for an exclusive window: Discovery stops admitting new
+// chunks, the existing discovery_lease is granted to this run, and the strict generation pin, projector lease and batch fences below
+// run unchanged while nothing else can move the generation. With the flag off, the table absent or the Discovery authority not d1, no
+// line of this runs and the run is what it was.
+const D1_ENRICHMENT_WINDOW_POLL_MS=2000;
+const D1_ENRICHMENT_WINDOW_FENCE='INSERT INTO projection_fence (held) SELECT COUNT(*) FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>? AND (SELECT COUNT(*) FROM projector_window WHERE state=\'held\' AND owner=? AND expires_at>?)=1';
+function d1EnrichmentWindowMode(env){return env?.D1_ENRICHMENT_WINDOW==='on'?'on':'off';}
 const D1_ENRICHMENT_STATE="INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES (?,?,?,?,?) ON CONFLICT(projection,kind,id) DO UPDATE SET change_key=excluded.change_key,projected_at=excluded.projected_at";
 
 function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value==='on'?'on':value==='dry'?'dry':'off';}
@@ -55,7 +62,7 @@ function d1EnrichmentAdapter(binding){
 //   catalog and the resolution are updated in place, so the same programmeRunId does not prove the same content. Any change
 //   defers the run before any D1 write; the next hourly run reads again.
 class D1EnrichmentInputError extends Error{constructor(reason,key,cause){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;this.inputCause=cause||null;}}
-const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable'];
+const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable','window_busy','window_not_granted','window_lost'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
 async function d1EnrichmentRead(env,etags,key,shape,required=true){
@@ -201,29 +208,71 @@ function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set()){
  return {people,films,absent};
 }
 
-async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS}={}){
+// ADR 0103. The window steps for one run. Returns the window record for the summary, or null when no window applies (flag off,
+// table absent or the Discovery authority not d1: the run goes on exactly as before). A refusal throws a deferred input error and
+// leaves nothing behind: a request that was made is released by the caller's finally.
+async function d1EnrichmentWindowAcquire(env,leaseId,options,state){
+ if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.requestProjectorWindow!=='function')return null;
+ const clock=options.clock||{now:()=>Date.now(),sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))};
+ const deadlineMs=options.deadlineMs??DiscoveryAuthority.WINDOW_DEADLINE_MS,minRunMs=options.minRunMs??DiscoveryAuthority.WINDOW_MIN_RUN_MS,pollMs=options.pollMs??D1_ENRICHMENT_WINDOW_POLL_MS;
+ // The existing writer-idle checks (the metadata and EPG sync stages) come first: a window is never requested into a running sync.
+ await d1EnrichmentWritersIdle(env);
+ const waitStarted=clock.now();
+ const requested=await DiscoveryAuthority.requestProjectorWindow(env,{owner:leaseId,deadlineMs,now:waitStarted});
+ if(requested.outcome==='not_applicable')return {outcome:'not_applicable',reason:requested.reason};
+ if(requested.outcome==='busy')throw new D1EnrichmentInputError('window_busy','projector_window');
+ state.requested=true;
+ for(;;){
+  const granted=await DiscoveryAuthority.grantProjectorWindow(env,{owner:leaseId,minRunMs,now:clock.now()});
+  if(granted.outcome==='granted'){
+   state.granted=true;state.heldStarted=clock.now();
+   return {outcome:'granted',waitMs:clock.now()-waitStarted,expiresAt:granted.expiresAt,generationAtGrant:granted.generation};
+  }
+  if(granted.outcome==='lost')throw new D1EnrichmentInputError('window_lost','projector_window');
+  if(granted.outcome==='too_late')throw new D1EnrichmentInputError('window_not_granted','projector_window');
+  // pending: an in-flight lease or a loading transfer. Wait for it without a busy loop, never past the point where too little time is left.
+  if(Number.isFinite(requested.expiresAt)&&requested.expiresAt-clock.now()<minRunMs+pollMs)throw new D1EnrichmentInputError('window_not_granted','projector_window');
+  await clock.sleep(pollMs);
+ }
+}
+async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={}}={}){
  const mode=d1EnrichmentMode(env);
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
- const started=Date.now(),nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB),leaseId=crypto.randomUUID();
+ const begun=Date.now();let started=begun;
+ const nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB),leaseId=crypto.randomUUID();
+ const windowState={requested:false,granted:false,heldStarted:null};
  const summary={projection:D1_ENRICHMENT_PROJECTION,mode,trigger,startedAt:nowIso,version:EnrichmentProjection.ENRICHMENT_PROJECTION_VERSION};
  if(mode==='on'&&!(await d1EnrichmentLease(db,leaseId)))return {...summary,skipped:'lease_held'};
  try{
+  if(mode==='on'&&d1EnrichmentWindowMode(env)==='on'){
+   const window=await d1EnrichmentWindowAcquire(env,leaseId,windowOptions,windowState);
+   if(window){summary.window=window;started=Date.now();}
+  }
   const plan=await d1EnrichmentDiff(env,db,now,summary);
   // More absences or lost watchlist memberships than a routine sync explains point at broken input: nothing is written.
   const guard=d1EnrichmentGuard(plan,summary);
   if(guard){summary.outcome=guard;return summary;}
   if(mode==='dry'){summary.outcome='dry';return summary;}
-  await d1EnrichmentHandoffGuard(env,summary.programmeRunId,summary.discoveryGate);
-  const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs});
+  const writeGate=await d1EnrichmentHandoffGuard(env,summary.programmeRunId,summary.discoveryGate);
+  if(summary.window?.outcome==='granted'&&writeGate&&Number.isFinite(writeGate.generation))summary.window.generationAtFirstBatch=writeGate.generation;
+  const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null});
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
+  // A window that ended under the run is a deferred outcome with its own reason, never a success.
+  if(written.windowLost&&!written.leaseLost){summary.outcome='deferred';summary.reason='window_lost';summary.inputKey='projector_window';}
   return summary;
  }catch(error){
   summary.outcome='failed';summary.error=String(error?.message||error).slice(0,200);
   if(error instanceof D1EnrichmentInputError){summary.reason=error.reason;summary.inputKey=error.key;if(error.inputCause)summary.inputCause=error.inputCause;if(D1_ENRICHMENT_DEFERRED.includes(error.reason))summary.outcome='deferred';}
   return summary;
  }finally{
-  summary.queries=db.queries;summary.durationMs=Date.now()-started;
+  summary.queries=db.queries;summary.durationMs=Date.now()-begun;
+  // Free only this run's own window and lease. A failed or unknown release is not retried: the row and the lease expire by themselves.
+  if(windowState.requested){
+   if(summary.window&&windowState.heldStarted!=null)summary.window.heldMs=Date.now()-windowState.heldStarted;
+   if(!summary.window)summary.window={outcome:summary.reason&&D1_ENRICHMENT_DEFERRED.includes(summary.reason)&&summary.reason.startsWith('window_')?summary.reason:'released'};
+   await DiscoveryAuthority.releaseProjectorWindow(env,{owner:leaseId}).catch(()=>{});
+  }
   if(mode==='on')await d1EnrichmentRelease(db,leaseId,summary).catch(()=>{});
   console.log(JSON.stringify({event:'d1_enrichment_projection',...summary}));
  }
@@ -354,15 +403,26 @@ async function d1EnrichmentRelease(db,leaseId,summary){
 
 // One batch per Film and one per group of Persons. Each starts with the fence, writes the rows, stores the change keys and
 // clears the fence row. A failed batch writes nothing and its entities keep their old keys, so the next run tries them again.
-async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
+async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null}){
  const repository=CanonicalRepository.createCanonicalRepository(db);
- const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false};
+ const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false,windowLost:false};
  const fenced=async(write)=>{
-  await db.transaction(async()=>{
-   await db.run(D1_ENRICHMENT_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]);
-   await write();
-   await db.run('DELETE FROM projection_fence');
-  });
+  try{
+   await db.transaction(async()=>{
+    // Inside a window every batch also asserts, in the same statement, that this run still owns an unexpired `held` window.
+    if(windowOwner)await db.run(D1_ENRICHMENT_WINDOW_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString(),windowOwner,Date.now()]);
+    else await db.run(D1_ENRICHMENT_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]);
+    await write();
+    await db.run('DELETE FROM projection_fence');
+   });
+  }catch(error){
+   // A refused fence is told apart by re-reading, never by the error text: the lease lost and the window lost are different outcomes.
+   if(windowOwner&&/CHECK constraint failed/i.test(String(error?.message||error))){
+    const held=await db.get('SELECT 1 AS ok FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?',[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]).catch(()=>null);
+    try{error.fenceCause=held?'window':'lease';}catch{}
+   }
+   throw error;
+  }
  };
  const state=(kind,id,key)=>db.run(D1_ENRICHMENT_STATE,[D1_ENRICHMENT_PROJECTION,kind,id,key,new Date().toISOString()]);
  const syncState=(id,key)=>db.run(D1_ENRICHMENT_STATE,[METADATA_SYNC_PROJECTION,'film',id,key,new Date().toISOString()]);
@@ -370,7 +430,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
  const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs;
  const failed=(kind,id,error)=>{
   const message=String(error?.message||error);
-  if(/CHECK constraint failed/i.test(message))result.leaseLost=true;
+  if(/CHECK constraint failed/i.test(message)){if(error?.fenceCause==='window')result.windowLost=true;else result.leaseLost=true;}
   result.errorCount++;
   if(result.errors.length<20)result.errors.push({kind,id,error:message.slice(0,160)});
  };
@@ -383,7 +443,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
  for(const item of plan.sync||[])if(!filmIds.has(item.id))queue.push({kind:'sync',item});
  for(const entity of plan.absent)queue.push({kind:'absent',item:entity});
  for(let index=0;index<queue.length;index++){
-  if(result.leaseLost||!budgetLeft()){result.remaining=queue.slice(index).reduce((sum,task)=>sum+(task.items?.length||1),0);break;}
+  if(result.leaseLost||result.windowLost||!budgetLeft()){result.remaining=queue.slice(index).reduce((sum,task)=>sum+(task.items?.length||1),0);break;}
   const task=queue[index];
   try{
    if(task.kind==='people'){
@@ -391,7 +451,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs}){
     try{await writePeople(task.items);}
     catch(error){
      if(task.items.length===1||/CHECK constraint failed/i.test(String(error?.message||error)))throw error;
-     for(const entry of task.items){if(result.leaseLost||!budgetLeft())break;try{await writePeople([entry]);}catch(single){failed('person',entry.id,single);}}
+     for(const entry of task.items){if(result.leaseLost||result.windowLost||!budgetLeft())break;try{await writePeople([entry]);}catch(single){failed('person',entry.id,single);}}
     }
    }else if(task.kind==='film'){
     const entry=task.item;
@@ -447,10 +507,11 @@ async function d1EnrichmentStatus(binding,env){
  if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)||(Number(version)>=7&&syncTable&&cacheReady&&(predictionReady||predictionAbsent))))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
-  binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
+  binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent,MAX(projected_at) AS lastWriteAt FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
- const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
+ const lastWriteAt=counts?.lastWriteAt||null,lastWriteMs=Date.parse(lastWriteAt||'');
+ const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastWriteAt,lastWriteAgeSec:Number.isFinite(lastWriteMs)?Math.max(0,Math.round((Date.now()-lastWriteMs)/1000)):null,windowMode:d1EnrichmentWindowMode(env),lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
  if(Number(version)>=5){
   const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
   status.schemaVersion=version;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;

@@ -920,7 +920,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
 // `ledger` (AIR-220): `{latest, meta, mode}` lets the generation's discovery ledger be planned under this lease, fenced on the
 // published pointer read here; without it `files` already carry the ledger (full mode, unchanged).
 async function publishD1Generation(env,runId,files,ledger,watchlist,publication){
- const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
+ const lease=await leaseOrWindowBusy(env);
  try{
   const next={...files};
   if(ledger){
@@ -942,7 +942,7 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
 }
 async function publishEpgGeneration(env,runId,files,ledger=null,watchlist=null){
  if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('published_epg_fence');const publication=await PublishedEpg.currentGeneration(env);if(publication)return publishD1Generation(env,runId,files,ledger,watchlist,publication);}
- const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
+ const lease=await leaseOrWindowBusy(env);
  try{
   const next={...files};
   let fencedEtag;
@@ -984,6 +984,29 @@ const SEAL_PUBLICATION_BUDGET_MS=20000;
 const SEAL_FLUSH_ITEMS=60;
 // AIR-362: a seal step that finds the lease held answers `wait` with the holder's real expiry plus this margin, never more
 // than one lease TTL from now. A cancelled step keeps its lease until it expires; the caller waits for that, once.
+// ADR 0103 (AIR-383). A projector window is not a failure of the EPG publication. The three publication paths that take the Discovery
+// lease throw this typed error instead of the generic `Resolver is writing the catalog`, and `syncStep` turns it into a structured,
+// non-failure `busy` answer whose `nextCatchUpAt` is the window's absolute deadline. Nothing is persisted on the run for it: no
+// `run.error`, no retry budget, no stage change. Any other missing lease keeps the old error.
+class ProjectorWindowBusy extends Error{constructor(busy){super('projector_window');this.name='ProjectorWindowBusy';this.busy=busy;}}
+async function leaseOrWindowBusy(env){
+ const taken=await takeDiscoveryLease(env);
+ if(taken.lease)return taken.lease;
+ if(taken.busy?.kind==='projector_window'&&Number.isFinite(taken.busy.expiresAt))throw new ProjectorWindowBusy(taken.busy);
+ throw new Error('Resolver is writing the catalog');
+}
+// A window that is already requested or held is known before the heavy EPG work starts, so the step answers busy without it.
+async function epgWindowPrecheck(env){
+ if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.readProjectorWindow!=='function')return;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ if(!gate.ready||!gate.windowTable)return;
+ const window=await DiscoveryAuthority.readProjectorWindow(env);
+ if(window.active)throw new ProjectorWindowBusy({kind:'projector_window',expiresAt:window.expiresAt,state:window.state});
+}
+function windowBusyResponse(run,busy,now=Date.now()){
+ const until=Math.max(busy.expiresAt+SEAL_BUSY_MARGIN_MS,now+1000);
+ return {runId:run.runId,stage:run.stage,remaining:run.remaining??0,failures:run.failures?.length??0,discovery:{state:'busy',remainingChunks:null,nextAction:'wait',reason:'busy',busyKind:'projector_window',at:new Date(now).toISOString(),nextCatchUpAt:new Date(until).toISOString(),nextScheduledRunAt:null,retryAt:null,retryAfterSec:Math.ceil((until-now)/1000),programmeRunId:run.runId}};
+}
 const SEAL_BUSY_MARGIN_MS=3000;
 const SEAL_BUSY_LOST_RACE_MS=5000;
 function sealBusyResponse(run,taken,now=Date.now()){
@@ -993,6 +1016,12 @@ function sealBusyResponse(run,taken,now=Date.now()){
  // Only a finite, positive expiry is evidence for a lease-based wait; anything else is treated as a lost race.
  const raw=taken?.busy?.expiresAt;
  const expiresAt=typeof raw==='number'&&Number.isFinite(raw)&&raw>0?raw:null;
+ if(kind==='projector_window'&&expiresAt!==null){
+  // ADR 0103: the window's own absolute deadline, not the lease TTL cap, and its own busy kind. It is a wait for the executor; the
+  // external Task contract waits only for `lease_held` within about 93 s, so for it this is a stop that it reports, never a failure.
+  const until=Math.max(expiresAt+SEAL_BUSY_MARGIN_MS,now+1000);
+  return sealResponse(run,{state:'busy',nextAction:'wait',reason:'busy',busyKind:'projector_window',nextCatchUpAt:new Date(until).toISOString(),retryAfterSec:Math.ceil((until-now)/1000)});
+ }
  const held=kind==='lease_held'&&expiresAt!==null;
  const bounded=held?Math.min(expiresAt,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
  const until=Math.max(bounded,now+1000);
@@ -1011,7 +1040,7 @@ function sealResponse(run,discovery,extra={}){
 // `seal`. It writes nothing to the D1 ledger and does not touch the lease row beyond holding it for the duration.
 async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,uncertain,publication}){
  await epgStepGuard(env);
- const lease=await acquireDiscoveryLease(env);if(!lease)throw new Error('Resolver is writing the catalog');
+ const lease=await leaseOrWindowBusy(env);
  let planned=null;
  try{
   planned=await planDiscoveryLedger(env,{runId:run.runId,latest:holder.discovery,mode:discoveryLedgerMode(env),lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null,holder});
@@ -1338,11 +1367,12 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run,entryAt);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
- try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+ try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){if(e instanceof ProjectorWindowBusy){step.branch='projector_window';step.discovery=discoverySummary(windowBusyResponse(run,e.busy).discovery);return json(windowBusyResponse(run,e.busy));}run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
  await epgStepGuard(env);
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await tracedPhase(run.runId,'generation_copy',()=>copyEpgGeneration(env,run.runId));await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}
+ await epgWindowPrecheck(env);
  const titles=await loadJSON(env,'titles.json')||{};
  try{await localizeFilmTitles(run.watchlist,titles,'on');await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  const people=await loadJSON(env,'people.json')||{};

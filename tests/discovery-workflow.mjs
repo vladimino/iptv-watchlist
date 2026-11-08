@@ -809,4 +809,171 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  }finally{Date.now=realNow;delete env.DISCOVERY_EXECUTOR;clearWorkflowAdmission();}
 }
 
+// 16. ADR 0103: a projector window refuses every Discovery state write inside its own statement. The Workflow loop treats that as a soft,
+// bounded wait to the window's one expiry: nothing is charged to the stall or recovery budget, the instance never ends on a refused
+// write, and the record is re-saved afterwards. Real loop interleavings, with the window opened at the exact step named.
+{
+ const realNow=Date.now;let skew=0;Date.now=()=>realNow()+skew;
+ let windowUntil=0;
+ const record=()=>records.get('epg/discovery-workflow.json');
+ const open=ms=>{windowUntil=Date.now()+ms;return windowUntil;};
+ const armWindow=()=>{context.DiscoveryAuthority.writeWorkflow=async()=>{if(windowUntil>Date.now())throw Object.assign(new Error('discovery_window'),{code:'discovery_window',window:{expiresAt:windowUntil,state:'held'}});return {handled:false,saved:false};};};
+ const fresh=({elected=true,count=48}={})=>{
+  skew=0;windowUntil=0;seed({count});armWorkflowAdmission();armWindow();if(elected)elect();
+  Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});creates.length=0;
+  binding.create=async request=>{creates.push(request);return {id:request.id};};
+  context.advanceDiscovery=realAdvance;
+ };
+ const harness=({before=async()=>{},failOn=()=>false}={})=>{
+  const names=[],slept=[];
+  return {names,slept,step:{
+   async do(name,fn){names.push(name);await before(name);if(failOn(name))throw Object.assign(new Error('discovery_unavailable'),{code:'discovery_unavailable'});return fn();},
+   async sleepUntil(name,date){slept.push({name,at:date.getTime()});skew=Math.max(skew,date.getTime()-realNow()+1);},
+  }};
+ };
+ const windowSleeps=h=>h.slept.filter(item=>item.name.startsWith('window-sleep'));
+ const run=(h,payload={})=>call('runDiscoveryWorkflow')(workflowEnv('workflow'),{programmeRunId:GENERATION,series:0,...payload},h.step);
+ try{
+  // (a) The window opens between a successful chunk and its progress checkpoint. The checkpoint is refused, the chunk stays counted,
+  // the loop sleeps to the expiry (it does not loop on to the next chunk), then re-saves the count before it rolls over.
+  fresh();
+  let opened=0,expiry=0,stateAtRollover=null;
+  let h=harness({before:async name=>{
+   if(name.startsWith('progress')&&!name.includes('retry')&&!opened){opened=1;expiry=open(60000);}
+   if(name.startsWith('rollover')&&stateAtRollover===null)stateAtRollover={chunks:record().chunksThisInstance,recovery:record().recovery??null,phase:record().phase};
+  }});
+  let ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.equal(decided(),24,'exactly one chunk ran');
+  assert.ok(h.names.some(name=>name.startsWith('progress-retry')),'the refused checkpoint is retried after the window');
+  assert.equal(windowSleeps(h).length,1);assert.equal(windowSleeps(h)[0].at,expiry,'the sleep is to the window expiry');
+  assert.ok(h.names.indexOf(h.names.find(name=>name.startsWith('window-sleep')))===-1,'a sleep is not a step name');
+  assert.deepEqual(stateAtRollover,{chunks:1,recovery:null,phase:'running'},'the count is persisted after the window and nothing is charged');
+  assert.equal(h.names.filter(name=>name.startsWith('chunk')).length,1,'no second chunk is run while the window is held');
+
+  // (b) A wait and a busy checkpoint refused by a window sleep to the later of their own time and the expiry.
+  fresh();
+  const soon=new Date(Date.now()+10000).toISOString();
+  set('epg/resolver-continuation.json',{stage:'paused',reason:'backoff',at:iso,hopId:null,remainingChunks:4,nextCatchUpAt:soon,retryAt:soon,programmeRunId:GENERATION});
+  let waitExpiry=0,count=0;
+  h=harness({before:async name=>{if(name.startsWith('wait')&&!waitExpiry)waitExpiry=open(90000);if(name.startsWith('owner')&&++count>2)throw new Error('stop the loop');}});
+  await assert.rejects(run(h),/stop the loop/);
+  assert.equal(h.slept[0].name.startsWith('sleep'),true);assert.equal(h.slept[0].at,waitExpiry,'the wait sleeps to the later expiry');
+  assert.equal(h.names.findIndex(name=>name.startsWith('chunk'))>h.names.findIndex(name=>name.startsWith('wait')),true,'no chunk runs before the wait');assert.equal(record().recovery??null,null);
+
+  // (c) The start refused by a window: no throw, no create, no recovery state; the next reconcile after the expiry starts it.
+  fresh({elected:false});
+  records.delete('epg/discovery-workflow.json');etags.delete('epg/discovery-workflow.json');
+  const until=open(60000);
+  let result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.started,false);assert.equal(result.reason,'projector_window');assert.equal(result.windowUntil,until);
+  assert.equal(creates.length,0);assert.equal(record()?.recovery??null,null);
+  skew=until-realNow()+1;
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.started,true);assert.equal(creates.length,1);
+
+  // (d) The rollover is refused by a window: the instance sleeps to the expiry and then creates its successor once.
+  fresh();
+  let rolloverExpiry=0;
+  h=harness({before:async name=>{if(name.startsWith('rollover')&&!rolloverExpiry)rolloverExpiry=open(60000);}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.equal(creates.length,1,'one successor, created after the window');
+  assert.equal(windowSleeps(h)[0].at,rolloverExpiry);assert.ok(h.names.includes('rollover-stop')===false);
+
+  // (e) A final stop refused by a window is retried after the expiry; the record ends stopped and the instance never ends unsaved.
+  fresh();
+  set('epg/discovery-workflow.json',{...record(),programmeRunId:OTHER});
+  elect(0,OTHER);
+  let stopExpiry=0;
+  h=harness({before:async name=>{if(name.startsWith('stop')&&!name.includes('retry')&&!stopExpiry)stopExpiry=open(60000);}});
+  ended=await run(h,{programmeRunId:OTHER});
+  assert.equal(ended.reason,'stale_generation');assert.equal(record().phase,'stopped');assert.equal(windowSleeps(h)[0].at,stopExpiry);
+  assert.ok(h.names.some(name=>name.startsWith('stop-retry')));
+
+  // (f) Recovery: the arming write and the successor ensure are both refused by a window. The failure is counted once, only when saved.
+  fresh();
+  let armExpiry=0,succExpiry=0;
+  h=harness({failOn:name=>name.startsWith('chunk'),before:async name=>{
+   if(name.startsWith('recover-arm')&&!name.includes('retry')&&!armExpiry)armExpiry=open(60000);
+   if(name.startsWith('recover-successor')&&!succExpiry){succExpiry=Math.max(windowUntil,Date.now())+1000;windowUntil=succExpiry;}
+  }});
+  ended=await run(h);
+  assert.equal(ended.reason,'recovered');assert.equal(creates.length,1,'one successor');
+  assert.equal(record().recovery.attempts,1,'a refused write charges nothing; the failure counts once');
+  assert.ok(windowSleeps(h).some(item=>item.at===armExpiry),'arming waits for the expiry');
+  assert.ok(windowSleeps(h).some(item=>item.at===succExpiry),'the successor waits for the expiry');
+
+  // (g) Retries: at least three sequential window refusals and lost compare-and-swaps for progress, the final stop and recovery arming.
+  // A checkpoint is done only when it is confirmed persisted; exhausted retries end in an explicit deferred state, never as a saved
+  // write and never as lost ownership, and no window refusal is charged to the stall or the recovery budget.
+  const chain=(prefix,times)=>{let n=0;return async name=>{if(name.startsWith(prefix)&&n<times){n++;open(60000);}};};
+  let conflictBudget=0;
+  const armConflicts=()=>{
+   const windowed=context.DiscoveryAuthority.writeWorkflow;
+   context.DiscoveryAuthority.writeWorkflow=async(...args)=>{if(conflictBudget>0){conflictBudget--;return {handled:true,saved:false};}return windowed(...args);};
+  };
+  const snapshot=h=>({retries:h.names.filter(name=>/^(progress|stop|recover-arm)-retry/.test(name)).length,windowSleeps:windowSleeps(h).length});
+
+  // progress: four refusals in a row, then saved with the count intact and nothing charged.
+  fresh();
+  let atRollover=null;
+  const progressChain=(()=>{let n=0;return async name=>{if(name.startsWith('progress')&&n<4){n++;open(60000);}if(name.startsWith('rollover')&&atRollover===null)atRollover={chunks:record().chunksThisInstance,recovery:record().recovery??null,phase:record().phase};};})();
+  h=harness({before:progressChain});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.deepEqual(snapshot(h),{retries:4,windowSleeps:4});
+  assert.deepEqual(atRollover,{chunks:1,recovery:null,phase:'running'},'saved after the fifth attempt, nothing charged');
+
+  // progress: the retry limit is exhausted. The instance ends deferred, the record is untouched and still names this instance.
+  fresh();
+  h=harness({before:chain('progress',999)});
+  ended=await run(h,{chunkLimit:1,windowRetryLimit:3});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'window_checkpoint_unsaved');assert.equal(ended.stopped,true);
+  assert.deepEqual(snapshot(h),{retries:2,windowSleeps:2},'three attempts, a bounded sleep between them');
+  assert.equal(record().chunksThisInstance,0,'the unsaved count is not claimed as saved');assert.equal(record().phase,'running');assert.equal(record().instanceId,INSTANCE);
+  assert.equal(record().recovery??null,null,'no recovery charge');assert.equal(creates.length,0,'no successor from an unsaved checkpoint');
+
+  // progress: three lost compare-and-swaps end deferred, two are retried and saved.
+  fresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&conflictBudget===0&&!h.armed){h.armed=true;conflictBudget=2;}}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'rollover');assert.equal(record().recovery??null,null);
+  fresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;conflictBudget=3;}}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'checkpoint_unsaved_write_conflict');assert.equal(record().chunksThisInstance,0);
+  // progress: another instance owns the record: that is lost ownership, a quiet stop, not a retry.
+  fresh();
+  h=harness({before:async name=>{if(name.startsWith('progress')&&!h.armed){h.armed=true;elect(1);}}});
+  ended=await run(h,{chunkLimit:1});
+  assert.equal(ended.reason,'not_owner');assert.equal(ended.deferred,undefined);
+
+  // final stop: four refusals then saved; exhaustion is deferred with the intended reason; lost compare-and-swaps likewise.
+  const stopFresh=()=>{fresh();set('epg/discovery-workflow.json',{...record(),programmeRunId:OTHER});elect(0,OTHER);};
+  stopFresh();
+  h=harness({before:chain('stop',4)});
+  ended=await run(h,{programmeRunId:OTHER});
+  assert.equal(ended.reason,'stale_generation');assert.equal(ended.deferred,undefined);assert.equal(record().phase,'stopped');assert.deepEqual(snapshot(h),{retries:4,windowSleeps:4});
+  stopFresh();
+  h=harness({before:chain('stop',999)});
+  ended=await run(h,{programmeRunId:OTHER,windowRetryLimit:2});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'window_stop_unsaved');assert.equal(ended.intended,'stale_generation');
+  assert.equal(record().phase,'running','the terminal record is not written, so it is not claimed');assert.equal(record().recovery??null,null);
+  stopFresh();armConflicts();
+  h=harness({before:async name=>{if(name.startsWith('stop')&&!h.armed){h.armed=true;conflictBudget=3;}}});
+  ended=await run(h,{programmeRunId:OTHER});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'stop_unsaved_write_conflict');assert.equal(record().phase,'running');
+
+  // recovery arming: four refusals then armed exactly once (counted once); exhaustion is deferred, not not_owner, and arms nothing.
+  fresh();
+  h=harness({failOn:name=>name.startsWith('chunk'),before:chain('recover-arm',4)});
+  ended=await run(h);
+  assert.equal(ended.reason,'recovered');assert.equal(creates.length,1);assert.equal(record().recovery.attempts,1,'counted once');
+  assert.deepEqual({retries:snapshot(h).retries,sleeps:windowSleeps(h).length>=4},{retries:4,sleeps:true});
+  fresh();
+  h=harness({failOn:name=>name.startsWith('chunk'),before:chain('recover-arm',999)});
+  ended=await run(h,{windowRetryLimit:3});
+  assert.equal(ended.deferred,true);assert.equal(ended.reason,'window_recovery_unarmed');assert.notEqual(ended.reason,'not_owner');
+  assert.equal(creates.length,0);assert.equal(record().recovery??null,null,'nothing armed, nothing charged');assert.equal(record().phase,'running','the reconcile still finds this instance');
+ }finally{Date.now=realNow;delete env.DISCOVERY_EXECUTOR;context.advanceDiscovery=realAdvance;clearWorkflowAdmission();}
+}
+
 console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
