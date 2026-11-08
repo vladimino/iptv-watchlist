@@ -91,6 +91,7 @@ const EpgOrchestration=(()=>{
  function classifyThrown(error){
   const code=String(error?.code||''),message=String(error?.message||'');
   if(code==='published_epg_fence'||code==='epg_step_fenced')return 'epoch_mismatch';
+  if(code==='epg_step_unreadable')return 'd1_unavailable';
   if(code==='discovery_seal_unfinished')return 'evidence_contradictory';
   if(code==='published_epg_unavailable'||code==='write_contention')return 'd1_unavailable';
   if(code==='published_epg_not_authoritative')return 'authority_held';
@@ -136,12 +137,15 @@ const EpgOrchestration=(()=>{
   const step=env?.epgStep;
   if(!step)return;
   const fenced=()=>Object.assign(new Error('epg_step_fenced'),{code:'epg_step_fenced'});
+  // A read that failed says nothing about the fence: the mutation is refused all the same (fail closed), but the executor classes it as a
+  // transient D1 failure (cooldown and retry inside the instance), never as an epoch change that stops the instance for good.
+  const unreadable=()=>Object.assign(new Error('epg_step_unreadable'),{code:'epg_step_unreadable'});
   // One read of the mode revision and the lease, judged completely: the mode revision, the holder, the release flag and the expiry
   // with its margin. Used for the first look and, if a renewal loses its compare-and-set, again for the second: never a partial check.
   async function look(){
    let row;
    try{row=await env.DB.prepare('SELECT (SELECT revision FROM '+TABLE+" WHERE key='mode') AS mode_revision, (SELECT body FROM "+TABLE+" WHERE key='lease') AS lease, (SELECT revision FROM "+TABLE+" WHERE key='lease') AS lease_revision").bind().first();}
-   catch{throw fenced();}
+   catch{throw unreadable();}
    let lease=null;try{lease=row?.lease?JSON.parse(row.lease):null;}catch{throw fenced();}
    const modeRevision=row?.mode_revision==null?null:Number(row.mode_revision);
    if(modeRevision!==(step.modeRevision??null))throw fenced();
