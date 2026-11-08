@@ -117,6 +117,12 @@ export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,o
    if(!index.catalogByTmdb.has(String(hit.tmdb)))item.admit={title:String(hit.title),year:hit.year};
    items.push(item);search.decided++;
   }
+  // A results file that was re-bound to a newer catalog read by `letterboxd-tmdb-search.mjs rebase` says so, in aggregates only: the original
+  // catalog read, the cumulative request count it keeps, and how many entries the newer catalog superseded or sent to review.
+  if(doc.rebase){
+   const counts=doc.rebase.counts&&typeof doc.rebase.counts==='object'?doc.rebase.counts:{};
+   search.rebase={originalCatalogReadAt:doc.rebase.original?.binding?.catalogReadAt??null,requests:doc.requests,superseded:counts.superseded??null,movedToReview:counts.movedToReview??null};
+  }
  }
  items.sort((a,b)=>a.lid<b.lid?-1:a.lid>b.lid?1:0);
  const lines=items.map((item,i)=>JSON.stringify({chunk:Math.floor(i/chunkSize),item})),planText=lines.join('\n')+(lines.length?'\n':'');

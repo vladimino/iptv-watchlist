@@ -11,7 +11,8 @@ export const DEFAULT_MAX_REQUESTS=1500;
 export const DEFAULT_RPS=4;
 export const MAX_RPS=4;
 export const SEARCH_BASIS='tmdb_search_original_title_exact_year_unique';
-export const REVIEW_REASONS=Object.freeze(['missing_year','no_result','no_match','year_drift','alias_title_only','multiple_exact']);
+// `tmdb_linked_elsewhere` is never produced by a search: only a rebase onto a newer catalog read writes it (scripts/letterboxd-tmdb-search.mjs).
+export const REVIEW_REASONS=Object.freeze(['missing_year','no_result','no_match','year_drift','alias_title_only','multiple_exact','tmdb_linked_elsewhere']);
 const TMDB_ID=/^[1-9]\d{0,11}$/;
 const yearOf=value=>{const match=/^(\d{4})-\d{2}-\d{2}$/.exec(String(value??''));return match?Number(match[1]):null;};
 
