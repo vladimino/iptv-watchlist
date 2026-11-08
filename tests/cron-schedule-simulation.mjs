@@ -1,8 +1,8 @@
 // AIR-348: offline simulation of the Worker's single hourly cron against the Madrid-local logical due time of the daily
-// executors (EPG and Ratings, both 17:00 Europe/Madrid). It compares the current expression (`37 * * * *`) with the candidate
-// (`0 * * * *`) on a winter day, a summer day and both DST change days, and drives the real EpgOrchestration.ensure through every
+// executors (EPG and Ratings, both 17:00 Europe/Madrid). It compares the former expression (`37 * * * *`) with the current one
+// (`0 * * * *`, pinned below) on a winter day, a summer day and both DST change days, and drives the real EpgOrchestration.ensure through every
 // hourly tick of each Madrid date with duplicate firings and a missed due tick. It proves schedule arithmetic and idempotency only:
-// no Cloudflare, no production, no Workflow instance, no change to the cron (that is a separate owner-approved operation).
+// no Cloudflare, no production and no Workflow instance.
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
@@ -17,13 +17,13 @@ import {d1Standin} from './d1-standin.mjs';
 const H=3600000,MIN=60000;
 const at=ms=>new Date(ms).toISOString();
 
-// 1. The configured cron is the single trigger, and it is still the current expression (this test changes nothing).
+// 1. The configured cron is the single trigger and it is exactly the hourly minute-0 expression (owner-approved AIR-348 change).
 const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
 const configured=[...wrangler.matchAll(/"crons":\s*\[([^\]]*)\]/g)].map(m=>[...m[1].matchAll(/"([^"]+)"/g)].map(x=>x[1]));
 assert.equal(configured.length,1,'one cron block');
 assert.equal(configured[0].length,1,'one cron trigger');
 const current=configured[0][0];
-assert.match(current,/^(\d{1,2}) \* \* \* \*$/,'an hourly expression with a fixed minute');
+assert.equal(current,'0 * * * *','the one trigger is the hourly minute-0 expression; a second trigger or another minute fails here');
 const minuteOf=expression=>Number(expression.split(' ')[0]);
 
 // The ticks of an hourly cron `M * * * *` (UTC) between two instants.
@@ -39,7 +39,7 @@ assert.equal(SCHEDULES.EPG.minute,0);assert.equal(SCHEDULES.Ratings.minute,0);
 
 // 2. Schedule arithmetic: Madrid 17:00 in CET (16:00Z) and CEST (15:00Z), both change days. With `0 * * * *` the first tick at or after the
 // due time is the due time itself in local terms (an hourly UTC cron reaches every local hour: Madrid is a whole-hour offset), with the
-// current `37 * * * *` it is 37 minutes later. The cron stays in UTC; the Worker decides due from the Madrid date.
+// former `37 * * * *` it was 37 minutes later. The cron stays in UTC; the Worker decides due from the Madrid date.
 const DAYS=[['winter','2026-11-09'],['summer','2026-07-01'],['fall-back day','2026-10-25'],['spring-forward day','2026-03-29']];
 for(const [label,day] of DAYS){
  for(const [name,schedule] of Object.entries(SCHEDULES)){
@@ -142,4 +142,4 @@ for(const dir of ['src','scripts']){
   assert.doesNotMatch(text,/minute\s*[:=]\s*37\b|getUTCMinutes\(\)\s*===?\s*37\b|:37\b/,dir+'/'+name+' does not assume the :37 minute');
  }
 }
-console.log('cron-schedule-simulation: ok (current cron '+current+', candidate 0 * * * *)');
+console.log('cron-schedule-simulation: ok (configured cron '+current+', compared with the former 37 * * * *)');

@@ -8,7 +8,7 @@ flowchart TB
     mcpClient["ChatGPT MCP client"]
     webAccess["Access: All Workers"]
     mcpAccess["Access: IPTV MCP"]
-    cron["Cloudflare cron trigger: 37 * * * *"]
+    cron["Cloudflare cron trigger: 0 * * * *"]
     subgraph worker["Single Worker: iptv"]
         route["src/worker.js HTTP router"]
         mcp["src/mcp.js: JWT and MCP protocol"]

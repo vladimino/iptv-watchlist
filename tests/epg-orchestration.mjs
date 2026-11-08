@@ -29,7 +29,7 @@ let databases=0;
  assert.equal(Policy.EPG_SCHEDULE.hour,17);assert.equal(Policy.EPG_SCHEDULE.minute,0);
  assert.deepEqual(plain(Policy.EPG_SCHEDULE),plain(MonitorPolicyModule.EPG_SCHEDULE),'one EPG due time for the executor and the monitor');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8');
- assert.match(wrangler,/"crons": \["37 \* \* \* \*"\]/,'this change does not move the cron: that is a separate owner-approved production step');
+ assert.match(wrangler,/"crons": \["0 \* \* \* \*"\]/,'the single Worker cron is the hourly minute-0 expression (the owner-approved AIR-348 change; it was 37 * * * *)');
  assert.match(wrangler,/"binding": "EPG_WORKFLOW"[\s\S]*"class_name": "EpgWorkflow"/);
  const build=fs.readFileSync('build.mjs','utf8');
  assert.match(build,/src\/epg-orchestration\.js/);assert.match(build,/export class EpgWorkflow extends WorkflowEntrypoint/);assert.match(build,/runEpgWorkflow/);
