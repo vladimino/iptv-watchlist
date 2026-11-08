@@ -518,7 +518,8 @@ function recordRatingChange(record,incoming,effective){
 
  const ADMISSIONS_KEY='letterboxd/admissions/verified-films.json';
  // ADR 0105: the Film behind a search-found inferred TMDB movie is admitted through the existing admissions receipt, written before the
- // facts (the Film exists before its rating), and the existing enrichment projector upserts it: this is not a second Film writer. An
+ // facts, and the existing enrichment projector upserts the Film from it later (eventually: the receipt is queued, the Film row appears when
+ // the projector runs): this is not a second Film writer. An
  // entry that already holds the movie is kept as it is; a source code already bound to another movie is a conflict and writes nothing.
  // `identity: "inferred"` marks the entry; the projector reads only the fields it knows, so the mark changes nothing for it.
  async function admitInferredFilm(env,item,origin){
@@ -531,6 +532,19 @@ function recordRatingChange(record,incoming,effective){
    outcome='admitted';return current;
   });
   return outcome;
+ }
+
+ // Withdraws the entry THIS commit created (same code, archive and movie, still inferred) when the link then conflicted. An entry that was
+ // already there is never touched. If the projector has already created the Film from it in that short window, only the receipt entry goes:
+ // a Film is never deleted by this route.
+ async function withdrawInferredAdmission(env,item,origin){
+  const key='tmdb_'+item.tmdb;let withdrawn=false;
+  await casJSON(env,ADMISSIONS_KEY,{schemaVersion:1,films:{}},current=>{
+   const entry=current.films&&current.films[key];
+   if(!entry||entry.identity!=='inferred'||entry.sourceCode!==item.lid||entry.archiveSha256!==origin.archiveSha256||String(entry.tmdb)!==item.tmdb)return null;
+   delete current.films[key];withdrawn=true;return current;
+  });
+  return withdrawn;
  }
 
  // Commit: intent (with the projection's before-image) before any write, idempotent fact writes, receipt after read-back.
@@ -549,9 +563,19 @@ function recordRatingChange(record,incoming,effective){
   for(const item of items){
    const links={letterboxd:item.lid,tmdb:item.tmdb};
    let admitted=null;
-   if(item.admit){admitted=await admitInferredFilm(env,item,origin);if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}}
+   if(item.admit){
+    // The authoritative link conflict is checked BEFORE the admission, so a code that already aliases another movie admits nothing.
+    const {value:linkIndex}=await readJSON(env,FACTS_KEYS.links);
+    if(!plannedKey(linkIndex||{},links)){await noteConflict(env,links,'alias_conflict');conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+    admitted=await admitInferredFilm(env,item,origin);
+    if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+   }
    const factKey=await linkOrNote(env,links);
-   if(!factKey){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+   if(!factKey){
+    // A writer linked the code between the check and the link: the entry this commit just created is withdrawn, never one it found.
+    if(admitted==='admitted')await withdrawInferredAdmission(env,item,origin);
+    conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;
+   }
    const observations=await exportObservations(factKey,item,origin),result=await recordObservations(env,factKey,links,observations,{floors:await floorsFor(env,item.lid,factKey),identity:item.identity==='inferred'?{kind:'inferred',basis:'original_title_exact_year_unique',sourceRef:origin.archiveSha256}:null});
    tally(counts,result.outcomes);records.push(result.record);
    films.push({lid:item.lid,factKey:result.factKey,...(item.identity==='inferred'?{identity:'inferred'}:{}),...(admitted?{admitted}:{}),observations:observations.map(({fact,observation:o})=>({fact,observationId:o.observationId,observation:o})),outcomes:result.outcomes});

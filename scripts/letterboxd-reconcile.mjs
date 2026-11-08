@@ -84,6 +84,14 @@ export async function loadCatalogDir(directory){
  return {objects,missing,status:'live_catalog_read',baselineIdentity:{readAt:provenance.readAt,catalogFilms:Object.keys(catalog).length,linkAliases:Object.keys(factLinks).length}};
 }
 
+// A digest of the export's named CSV texts, so a TMDB results file can be tied to the exact export it was searched for (the search tool reads
+// the extracted CSVs, the planner reads the ZIP; both feed the same texts here).
+export function exportDigest(texts){
+ const hash=createHash('sha256');
+ for(const [kind,name] of Object.entries(EXPORT_FILES)){hash.update(name+'\0');hash.update(String(texts[kind]??'')+'\0');}
+ return hash.digest('hex');
+}
+
 const zero=names=>Object.fromEntries(names.map(name=>[name,0]));
 function exportSummary(parsed){
  return {files:parsed.files,sets:Object.fromEntries(SET_NAMES.map(name=>[name,parsed.sets[name].length])),films:parsed.films.length,crossFileMismatches:parsed.crossFileMismatches,invalidRows:parsed.invalidRows.length};

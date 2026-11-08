@@ -11,6 +11,8 @@ import {deflateRawSync} from 'node:zlib';
 import {crc32} from '../src/letterboxd-zip.js';
 import {INFERRED_METHOD,INFERRED_STATUS,METHODS,REVIEW_REASONS,STATUSES,buildIndex,matchExport} from '../src/letterboxd-match.js';
 import {archiveAdmissionsFromDocument} from '../src/enrichment-projection.js';
+import {EXPORT_FILES} from '../src/letterboxd-export.js';
+import {exportDigest} from '../scripts/letterboxd-reconcile.mjs';
 import {plan,planItem,remote,unlinkFilm} from '../scripts/letterboxd-baseline-import.mjs';
 
 const sha256=value=>createHash('sha256').update(value).digest('hex');
@@ -258,18 +260,20 @@ try{
  await writeFile(path.join(catDir,'catalog.json'),JSON.stringify(catalog));await writeFile(path.join(catDir,'links.json'),JSON.stringify(factLinks));await writeFile(path.join(catDir,'metadata.json'),JSON.stringify(metadata));
  await writeFile(path.join(catDir,'provenance.json'),JSON.stringify({source:'live_catalog_read',readAt:'2026-11-08T16:16:32.058Z'}));
  const exportB2={
-  'watched.csv':csv('Date,Name,Year,Letterboxd URI',[['2024-05-04','Taken By Code','2015','https://boxd.it/Vv1'],['2024-06-01','Brand New A','2015','https://boxd.it/Nw1'],['2024-06-02','Foreign Title B','2001','https://boxd.it/Nw2'],['2024-06-03','Dup Seen C','2016','https://boxd.it/Nw3'],['2024-06-04','Dup Seen D','2016','https://boxd.it/Nw4'],['2024-06-05','Same As Accepted E','2015','https://boxd.it/Nw5'],['2024-06-06','Nothing F','2017','https://boxd.it/Nw6'],['2024-06-07','Never Asked G','2018','https://boxd.it/Nw7'],['2024-06-08','Failed H','2019','https://boxd.it/Nw8']]),
+  'watched.csv':csv('Date,Name,Year,Letterboxd URI',[['2024-05-04','Taken By Code','2015','https://boxd.it/Vv1'],['2024-06-01','Brand New A','2015','https://boxd.it/Nw1'],['2024-06-02','Foreign Title B','2001','https://boxd.it/Nw2'],['2024-06-03','Dup Seen C','2016','https://boxd.it/Nw3'],['2024-06-04','Dup Seen C','2016','https://boxd.it/Nw4'],['2024-06-05','Same As Accepted E','2015','https://boxd.it/Nw5'],['2024-06-06','Nothing F','2017','https://boxd.it/Nw6'],['2024-06-07','Never Asked G','2018','https://boxd.it/Nw7'],['2024-06-08','Failed H','2019','https://boxd.it/Nw8'],['2024-06-09','Never Asked I','2020','https://boxd.it/Nw9']]),
   'ratings.csv':csv('Date,Name,Year,Letterboxd URI,Rating',[['2024-06-01','Brand New A','2015','https://boxd.it/Nw1','4.5'],['2024-06-02','Foreign Title B','2001','https://boxd.it/Nw2','3']]),
   'watchlist.csv':csv('Date,Name,Year,Letterboxd URI',[]),'diary.csv':csv('Date,Name,Year,Letterboxd URI,Rating,Watched Date',[]),
  };
  const zipB2=path.join(scratch,'letterboxd-demo-user-2026-11-08-15-00-utc.zip');await writeFile(zipB2,zip(exportB2));
  const sr=(tmdb,title,year)=>({decision:'inferred_new',tmdb:String(tmdb),title,year,basis:'tmdb_search_original_title_exact_year_unique'});
  const resultsPath=path.join(scratch,'tmdb-results.json');
- await writeFile(resultsPath,JSON.stringify({schemaVersion:1,results:{Nw1:sr(801,'Brand New A',2015),Nw2:sr(101,'Foreign Title B',2001),Nw3:sr(802,'Dup Seen C',2016),Nw4:sr(802,'Dup Seen C',2016),Nw5:sr(108,'Same As Accepted E',2015),Nw6:{decision:'review',reason:'no_match'},Nw8:{decision:'error',reason:'http_503'}}}));
+ const bind={exportSha256:exportDigest(Object.fromEntries(Object.entries(EXPORT_FILES).map(([kind,name])=>[kind,exportB2[name]??null]))),catalogReadAt:'2026-11-08T16:16:32.058Z',catalogFilms:Object.keys(catalog).length};
+ const resultsDoc=(results,binding=bind)=>JSON.stringify({schemaVersion:1,...(binding?{binding}:{}),results});
+ await writeFile(resultsPath,resultsDoc({Nw1:sr(801,'Brand New A',2015),Nw2:sr(101,'Foreign Title B',2001),Nw3:sr(802,'Dup Seen C',2016),Nw4:sr(802,'Dup Seen C',2016),Nw5:sr(108,'Same As Accepted E',2015),Nw6:{decision:'review',reason:'no_match'},Nw7:{decision:'blocked',reason:'http_429'},Nw8:{decision:'error',reason:'http_503'}}));
  const outB2=path.join(scratch,'planB2'),now2=Date.parse('2026-11-09T00:00:00Z');
  const repB2=await plan({zip:zipB2,catalogDir:catDir,tmdbResults:resultsPath,includeInferred:true,output:outB2,now:now2});
  assert.equal(repB2.identityPolicy,'inferred_included');assert.equal(repB2.filmsToCreate,1,'only the movie the catalog does not hold is created');
- assert.equal(repB2.inferred,2);assert.deepEqual(repB2.search,{decided:2,review:{tmdb_duplicate_in_export:2,tmdb_already_accepted:1,no_match:1},pending:1,errors:1});
+ assert.equal(repB2.inferred,2);assert.deepEqual(repB2.search,{decided:2,review:{tmdb_duplicate_in_export:2,tmdb_already_accepted:1,no_match:1},pending:1,errors:1,blocked:1});
  assert.equal(repB2.planned.films,3);   // Vv1 verified + the two search-decided films
  const itemsB2=fs.readFileSync(path.join(outB2,'plan.jsonl'),'utf8').trim().split('\n').map(line=>JSON.parse(line).item);
  assert.deepEqual(itemsB2.find(item=>item.lid==='Nw1'),{lid:'Nw1',tmdb:'801',facts:{watched:true,rating:4.5},effectiveOn:{watched:'2024-06-01'},identity:'inferred',admit:{title:'Brand New A',year:2015}});
@@ -282,12 +286,28 @@ try{
  await assert.rejects(plan({zip:zipB2,snapshot:snapshotDir,catalogDir:catDir,output:path.join(scratch,'x1'),now:now2}),/exactly one/);
  await assert.rejects(plan({zip:zipB2,output:path.join(scratch,'x2'),now:now2}),/exactly one/);
  await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:resultsPath,output:path.join(scratch,'x3'),now:now2}),/--include-inferred/);
- const strange=path.join(scratch,'strange.json');await writeFile(strange,JSON.stringify({schemaVersion:1,results:{Nw1:{decision:'inferred_new',tmdb:'abc',title:'x',year:2015,basis:'tmdb_search_original_title_exact_year_unique'}}}));
- await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x4'),now:now2}),/does not understand/);
- await writeFile(strange,JSON.stringify({schemaVersion:2,results:{}}));
- await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x5'),now:now2}),/unknown schema/);
+const strange=path.join(scratch,'strange.json');
+ const refuse=async(doc,pattern,name)=>{await writeFile(strange,doc);await assert.rejects(plan({zip:zipB2,catalogDir:catDir,tmdbResults:strange,includeInferred:true,output:path.join(scratch,'x-'+name),now:now2}),pattern,name);};
+ await refuse(resultsDoc({Nw1:{decision:'inferred_new',tmdb:'abc',title:'Brand New A',year:2015,basis:'tmdb_search_original_title_exact_year_unique'}}),/does not understand/,'badid');
+ await refuse(JSON.stringify({schemaVersion:2,results:{}}),/unknown schema/,'schema');
+ // Review blocker 1: a well-formed numeric TMDB id whose title or year is not the export film's is refused by the planner itself
+ await refuse(resultsDoc({Nw1:sr(801,'Totally Different Film',2015)}),/does not match its export film/,'title');
+ await refuse(resultsDoc({Nw1:sr(801,'Brand New A',2016)}),/does not match its export film/,'year');
+ await refuse(resultsDoc({Nw2:sr(101,'Brand New A',2001)}),/does not match its export film/,'title-on-existing');
+ // a code this plan did not leave unmatched (accepted, or not in the export at all) is refused whole
+ await refuse(resultsDoc({Vv1:sr(900,'Taken By Code',2015)}),/did not leave unmatched/,'accepted-code');
+ await refuse(resultsDoc({Nope1:sr(900,'Brand New A',2015)}),/did not leave unmatched/,'foreign-code');
+ // the file must be the one searched for THIS export and THIS catalog read
+ await refuse(resultsDoc({Nw1:sr(801,'Brand New A',2015)},null),/not made for this export and catalog read/,'no-binding');
+ await refuse(resultsDoc({Nw1:sr(801,'Brand New A',2015)},{...bind,exportSha256:'0'.repeat(64)}),/not made for this export and catalog read/,'other-export');
+ await refuse(resultsDoc({Nw1:sr(801,'Brand New A',2015)},{...bind,catalogReadAt:'2026-11-01T00:00:00.000Z'}),/not made for this export and catalog read/,'other-read');
+ await refuse(resultsDoc({Nw1:sr(801,'Brand New A',2015)},{...bind,catalogFilms:1}),/not made for this export and catalog read/,'other-catalog');
+ await refuse(resultsDoc({Nw6:{decision:'review',reason:'made_up'}}),/does not understand/,'reason');
+ await refuse(resultsDoc({Nw6:{decision:'surprise'}}),/does not understand/,'decision');
+ // results need a catalog directory, not a snapshot
+ await assert.rejects(plan({zip:zipB2,snapshot:snapshotDir,tmdbResults:resultsPath,includeInferred:true,output:path.join(scratch,'x-snap'),now:now2}),/--catalog-dir/);
 
- // The route: admission before the facts, the receipt entry, the projector's reading, replay, conflict, unlink keeps the Film
+  // The route: admission before the facts, the receipt entry, the projector's reading, replay, conflict, unlink keeps the Film
  const shaB2=sha256(fs.readFileSync(zipB2)),originBody={archiveSha256:shaB2,generatedAt:'2026-11-08T15:00:00.000Z',generatedAtSource:'archive_name'};
  const adm={BUCKET:bucket()},admKey='letterboxd/admissions/verified-films.json';
  const nw1=itemsB2.find(item=>item.lid==='Nw1'),nw2=itemsB2.find(item=>item.lid==='Nw2');
@@ -316,5 +336,34 @@ try{
  // the per-film correction removes the link and the facts; the admitted Film stays (one Film, never deleted by an unlink)
  const fix=await unlinkFilm({zip:zipB2,output:outB2,endpoint:'https://site.example',lid:'Nw1',fetchImpl:workerFetch(adm),env:{},now:now2});
  assert.equal(fix.failed,null);assert.equal(fix.unlinked,true);assert.equal(linksOf(adm.BUCKET)['letterboxd:Nw1'],undefined);assert.ok(adm.BUCKET.records.get(admKey).films.tmdb_801,'the admission stays');
+
+ // Review blocker 2: a code that already aliases another movie admits nothing: the link conflict is judged BEFORE the admission
+ {
+  const pre={BUCKET:bucket()};
+  const verifiedItem={lid:'Pp1',tmdb:'111',facts:{watched:true},effectiveOn:{}};
+  assert.equal((await post(pre,'commit',{origin:{...originBody,archiveSha256:'1'.repeat(64)},chunk:0,items:[verifiedItem]})).status,200);
+  const factsBefore=JSON.stringify(factRecord(pre.BUCKET,'tmdb-111'));
+  const refused=await (await post(pre,'commit',{origin:{...originBody,archiveSha256:'2'.repeat(64)},chunk:0,items:[{lid:'Pp1',tmdb:'222',facts:{watched:true,rating:4},effectiveOn:{},identity:'inferred',admit:{title:'Zed',year:2010}}]})).json();
+  assert.equal(refused.conflicts,1);
+  assert.ok(!(pre.BUCKET.records.get(admKey)&&pre.BUCKET.records.get(admKey).films&&pre.BUCKET.records.get(admKey).films.tmdb_222),'no admission for the conflicting movie');
+  assert.equal(JSON.stringify(factRecord(pre.BUCKET,'tmdb-111')),factsBefore,'the existing facts are untouched');
+  assert.equal(linksOf(pre.BUCKET)['tmdb:222'],undefined);
+ }
+ // The same conflict appearing only after the check (a writer linked the code in between): the entry this commit created is withdrawn
+ {
+  const raced=bucket();let linkReads=0;const realGet=raced.get.bind(raced);
+  raced.get=async key=>{if(key==='letterboxd/facts/links.json'){linkReads++;if(linkReads===1)return null;return {etag:'e'+linkReads,json:async()=>({'letterboxd:Rr1':'tmdb-999','tmdb:999':'tmdb-999'})};}return realGet(key);};
+  const env3={BUCKET:raced};
+  const out=await (await post(env3,'commit',{origin:{...originBody,archiveSha256:'3'.repeat(64)},chunk:0,items:[{lid:'Rr1',tmdb:'333',facts:{watched:true},effectiveOn:{},identity:'inferred',admit:{title:'Race Movie',year:2012}}]})).json();
+  assert.equal(out.conflicts,1);assert.ok(!(raced.records.get(admKey).films.tmdb_333),'the entry this commit created is withdrawn');
+ }
+ // An entry that was already there is never withdrawn by a later conflict
+ {
+  const raced=bucket();let linkReads=0;const realGet=raced.get.bind(raced);
+  await raced.put(admKey,JSON.stringify({schemaVersion:1,films:{tmdb_333:{tmdb:'333',sourceCode:'Other1',archiveSha256:'4'.repeat(64),title:'Race Movie',year:2012,filmPath:null,verifiedAt:'2026-11-08T10:00:00.000Z',identity:'inferred'}}}),{});
+  raced.get=async key=>{if(key==='letterboxd/facts/links.json'){linkReads++;if(linkReads===1)return null;return {etag:'e'+linkReads,json:async()=>({'letterboxd:Rr1':'tmdb-999','tmdb:999':'tmdb-999'})};}return realGet(key);};
+  const out=await (await post({BUCKET:raced},'commit',{origin:{...originBody,archiveSha256:'5'.repeat(64)},chunk:0,items:[{lid:'Rr1',tmdb:'333',facts:{watched:true},effectiveOn:{},identity:'inferred',admit:{title:'Race Movie',year:2012}}]})).json();
+  assert.equal(out.conflicts,1);assert.equal(raced.records.get(admKey).films.tmdb_333.sourceCode,'Other1','an entry found, not created, stays');
+ }
 }finally{await rm(scratch,{recursive:true,force:true});}
 console.log('Letterboxd inferred identity: off by default and accepted rows unchanged, unique original title with the same year, every review bucket (year drift, alias only, linked elsewhere, duplicate in export, already accepted, no TMDB id, missing year), remakes told apart by year, plan switch and counts without names, route validation, provenance, replay and no relabelling');

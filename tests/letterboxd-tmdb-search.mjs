@@ -54,7 +54,7 @@ await assert.rejects(runSearches({films:many(1),search:okSearch,rps:0}),/rps/);
 for(const [status,stopped] of [[429,'rate_limited'],[403,'forbidden']]){
  let calls=0;
  const out=await runSearches({films:many(10),search:async f=>{calls++;return calls===3?{status}:okSearch(f);},sleep:fakeSleep,now:fakeNow});
- assert.equal(out.stopped,stopped);assert.equal(calls,3);assert.equal(out.requests,3);assert.equal(out.remaining,8);assert.equal(out.counts.inferred_new,2);
+ assert.equal(out.stopped,stopped);assert.equal(calls,3);assert.equal(out.requests,3);assert.equal(out.remaining,7);assert.equal(out.counts.inferred_new,2);assert.equal(out.counts.blocked,1,'the film behind the 403 or 429 is recorded, not forgotten');
 }
 // three failures in a row end the run; a success in between resets the count; an error is recorded, not decided
 {
@@ -65,12 +65,38 @@ for(const [status,stopped] of [[429,'rate_limited'],[403,'forbidden']]){
  const thrown=await runSearches({films:many(2),search:async()=>{throw new Error('boom');},sleep:fakeSleep,now:fakeNow});
  assert.equal(thrown.counts.error,2);
 }
-// resume: a decision is never asked again, an earlier error is asked once more
+// resume: nothing recorded is asked again, whatever its outcome (a decision, a review, an error, a blocked attempt)
 {
- const state={results:{C0000:{decision:'inferred_new',tmdb:'1',title:'x',year:2000,basis:SEARCH_BASIS},C0001:{decision:'error',reason:'http_500'}}};
+ const state={results:{C0000:{decision:'inferred_new',tmdb:'1',title:'x',year:2000,basis:SEARCH_BASIS},C0001:{decision:'error',reason:'http_500'},C0002:{decision:'blocked',reason:'http_429'}},requests:3};
  const asked=[];
- const out=await runSearches({films:many(3),search:async f=>{asked.push(f.code);return okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
- assert.deepEqual(asked,['C0001','C0002']);assert.equal(out.remaining,0);assert.equal(out.requests,2);
+ const out=await runSearches({films:many(5),search:async f=>{asked.push(f.code);return okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
+ assert.deepEqual(asked,['C0003','C0004'],'an error and a blocked attempt are not asked again');assert.equal(out.remaining,0);assert.equal(out.requests,2);assert.equal(out.totalRequests,5);
+ assert.equal(out.counts.error,1);assert.equal(out.counts.blocked,1);
+}
+// three failures then a resume: the failed films are not requested again
+{
+ const state={results:{},requests:0};let n=0;const asked=[];
+ const first=await runSearches({films:many(6),search:async f=>{n++;asked.push(f.code);return {status:503};},state,sleep:fakeSleep,now:fakeNow});
+ assert.equal(first.stopped,'repeated_failure');assert.equal(first.requests,3);
+ const second=await runSearches({films:many(6),search:async f=>{asked.push(f.code);return okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
+ assert.deepEqual(asked,['C0000','C0001','C0002','C0003','C0004','C0005'],'each code is requested once in total');assert.equal(second.totalRequests,6);
+}
+// the first 429 then a resume: that code is not requested again
+{
+ const state={results:{},requests:0};const asked=[];
+ await runSearches({films:many(4),search:async f=>{asked.push(f.code);return f.code==='C0001'?{status:429}:okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
+ await runSearches({films:many(4),search:async f=>{asked.push(f.code);return okSearch(f);},state,sleep:fakeSleep,now:fakeNow});
+ assert.deepEqual(asked,['C0000','C0001','C0002','C0003']);assert.equal(state.results.C0001.decision,'blocked');
+}
+// the budget is cumulative over resumes: it is spent once, never per invocation
+{
+ const state={results:{},requests:0};
+ const a=await runSearches({films:many(10),search:okSearch,state,maxRequests:3,sleep:fakeSleep,now:fakeNow});
+ assert.equal(a.requests,3);assert.equal(a.stopped,'budget_reached');
+ const b=await runSearches({films:many(10),search:okSearch,state,maxRequests:3,sleep:fakeSleep,now:fakeNow});
+ assert.equal(b.requests,0);assert.equal(b.totalRequests,3);assert.equal(b.stopped,'budget_reached','a second invocation cannot spend the budget again');
+ const c=await runSearches({films:many(10),search:okSearch,state,maxRequests:5,sleep:fakeSleep,now:fakeNow});
+ assert.equal(c.requests,2);assert.equal(c.totalRequests,5);
 }
 
 // ---- The tool: dry run, no credential, a stub TMDB, private output, counts only ----
@@ -123,17 +149,23 @@ try{
   return new Response('slow down',{status:429});
  };
  const run=await main(base,{env:{TMDB_READ_TOKEN:'tok-test'},fetchImpl:stub,sleep:async()=>{},now:()=>1});
- assert.equal(run.stopped,'rate_limited');assert.equal(run.requests,3);assert.equal(run.remaining,1);assert.equal(run.counts.inferred_new,1);assert.equal(run.counts['review:year_drift'],1);
+ assert.equal(run.stopped,'rate_limited');assert.equal(run.requests,3);assert.equal(run.totalRequests,3);assert.equal(run.remaining,0);assert.equal(run.counts.inferred_new,1);assert.equal(run.counts['review:year_drift'],1);assert.equal(run.counts.blocked,1);
  assert.ok(seen.every(s=>s.auth==='Bearer tok-test'&&s.url.startsWith('https://api.themoviedb.org/3/search/movie?')));
  const printed=JSON.stringify(run);for(const secret of ['Secret','Uu1','tok-test','2010'])assert.ok(!printed.includes(secret),'stdout leaks '+secret);
  const saved=JSON.parse(await readFile(path.join(outputDir,'tmdb-results.json'),'utf8'));
- assert.equal(saved.results.Uu1.tmdb,'501');assert.equal(saved.results.Uu2.reason,'year_drift');assert.ok(!('Uu3' in saved.results),'the film behind the 429 has no result');
+ assert.equal(saved.results.Uu1.tmdb,'501');assert.equal(saved.results.Uu2.reason,'year_drift');assert.deepEqual(saved.results.Uu3,{decision:'blocked',reason:'http_429'},'the film behind the 429 is recorded as blocked');
+ assert.equal(saved.requests,3);assert.match(saved.binding.exportSha256,/^[0-9a-f]{64}$/);assert.equal(saved.binding.catalogReadAt,'2026-11-08T16:16:32.058Z');assert.equal(saved.binding.catalogFilms,1);
  assert.ok(!JSON.stringify(saved).includes('tok-test'),'the credential is never written');
  assert.equal(((await stat(path.join(outputDir,'tmdb-results.json'))).mode&0o777),0o600);
- // resume: only the film that has no decision is asked, and a 200 now ends cleanly
+ // resume: nothing recorded is asked again (the 429 film included) and the cumulative count stays
  const asked=[];
  const resume=await main(base,{env:{TMDB_READ_TOKEN:'tok-test'},fetchImpl:async(url)=>{asked.push(new URL(url).searchParams.get('query'));return new Response(JSON.stringify({results:[]}),{status:200});},sleep:async()=>{},now:()=>1});
- assert.deepEqual(asked,['Secret Unknown Three']);assert.equal(resume.remaining,0);assert.equal(resume.counts['review:no_result'],1);
+ assert.deepEqual(asked,[]);assert.equal(resume.requests,0);assert.equal(resume.totalRequests,3);assert.equal(resume.counts.blocked,1);
+ const dry2=await main([...base,'--dry-run'],{env:{}});assert.equal(dry2.requestsUsed,3);assert.equal(dry2.requestsWouldBeMade,0);assert.equal(dry2.alreadyAttempted,3);
+ // the file is bound to its export: another export (or catalog read) is refused, never reused
+ await writeFile(path.join(exportDir,'watched.csv'),csv('Date,Name,Year,Letterboxd URI',[['2024-01-01','Another Film','2001','https://boxd.it/Zz9']]));
+ await assert.rejects(main(base,{env:{TMDB_READ_TOKEN:'tok-test'},fetchImpl:async()=>{asked.push('x');},sleep:async()=>{},now:()=>1}),/belongs to another export or catalog read/);
+ assert.deepEqual(asked,[],'a refused file makes no request');
  // tmdbSearchFn reduces an answer to the four fields the rule reads
  const reduced=await tmdbSearchFn({token:'t',fetchImpl:async()=>new Response(JSON.stringify({results:[{id:1,title:'a',original_title:'b',release_date:'2000-01-01',overview:'x',popularity:3}]}),{status:200})})({name:'a'});
  assert.deepEqual(reduced.results[0],{id:1,title:'a',original_title:'b',release_date:'2000-01-01'});

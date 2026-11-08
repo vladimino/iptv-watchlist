@@ -11,7 +11,7 @@ import {fileURLToPath} from 'node:url';
 import {EXPORT_FILES,parseExport} from '../src/letterboxd-export.js';
 import {buildIndex,matchExport} from '../src/letterboxd-match.js';
 import {DEFAULT_MAX_REQUESTS,DEFAULT_RPS,MAX_RPS,runSearches,searchUrl} from '../src/letterboxd-tmdb-search.js';
-import {ReconcileError,assertOutsideRepository,loadCatalogDir} from './letterboxd-reconcile.mjs';
+import {ReconcileError,assertOutsideRepository,exportDigest,loadCatalogDir} from './letterboxd-reconcile.mjs';
 
 export async function unmatchedFilms({exportDir,catalogDir}){
  const texts={};
@@ -20,7 +20,7 @@ export async function unmatchedFilms({exportDir,catalogDir}){
  const parsed=parseExport(texts),loaded=await loadCatalogDir(catalogDir),index=buildIndex(loaded.objects);
  const matches=matchExport(parsed.films,index,{inferred:true}),byCode=new Map(parsed.films.map(film=>[film.code,film]));
  const films=matches.filter(match=>match.status==='unmatched').map(match=>byCode.get(match.code)).sort((a,b)=>a.code<b.code?-1:1);
- return {films,total:parsed.films.length,status:Object.fromEntries([...new Set(matches.map(match=>match.status))].map(status=>[status,matches.filter(match=>match.status===status).length])),provenance:loaded.baselineIdentity};
+ return {films,total:parsed.films.length,exportSha256:exportDigest(texts),status:Object.fromEntries([...new Set(matches.map(match=>match.status))].map(status=>[status,matches.filter(match=>match.status===status).length])),provenance:loaded.baselineIdentity};
 }
 
 export function tmdbSearchFn({token,fetchImpl=fetch,timeoutMs=20000}){
@@ -45,18 +45,30 @@ export async function main(argv=process.argv.slice(2),{env=process.env,fetchImpl
  if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>DEFAULT_MAX_REQUESTS)throw new ReconcileError('--max-requests must be an integer 1..'+DEFAULT_MAX_REQUESTS,2);
  if(!(rps>0)||rps>MAX_RPS)throw new ReconcileError('--rps must be above 0 and at most '+MAX_RPS,2);
  const exportDir=await assertOutsideRepository(args.exportDir,'--export'),catalogDir=await assertOutsideRepository(args.catalogDir,'--catalog-dir'),outputDir=await assertOutsideRepository(args.outputDir,'--output');
- const {films,total,status,provenance}=await unmatchedFilms({exportDir,catalogDir});
+ const {films,total,exportSha256,status,provenance}=await unmatchedFilms({exportDir,catalogDir});
+ const binding={exportSha256,catalogReadAt:provenance.readAt,catalogFilms:provenance.catalogFilms};
  const file=path.join(outputDir,'tmdb-results.json');
- let state={results:{}};
- try{const prior=JSON.parse(await readFile(file,'utf8'));if(prior?.schemaVersion===1&&prior.results&&typeof prior.results==='object')state={results:prior.results};}catch{}
- const pending=films.filter(film=>!(Object.hasOwn(state.results,film.code)&&state.results[film.code].decision!=='error')).length;
- if(args.dry)return {dryRun:true,exportFilms:total,matchStatus:status,unmatched:films.length,alreadyAnswered:films.length-pending,requestsWouldBeMade:Math.min(pending,maxRequests),maxRequests,rps,catalog:provenance};
+ // The results file is bound to the export and the catalog read it was made for, and it keeps the cumulative request count: a resume asks
+ // only the films with no recorded attempt and can never spend more than the total budget. A file for another input is refused, not reused.
+ let state={results:{},requests:0};
+ let prior=null;try{prior=JSON.parse(await readFile(file,'utf8'));}catch(error){if(error.code!=='ENOENT')throw new ReconcileError('The existing tmdb-results.json is not readable JSON',2);}
+ if(prior){
+  if(prior.schemaVersion!==1||!prior.results||typeof prior.results!=='object'||!prior.binding||prior.binding.exportSha256!==binding.exportSha256||prior.binding.catalogReadAt!==binding.catalogReadAt||prior.binding.catalogFilms!==binding.catalogFilms)throw new ReconcileError('The existing tmdb-results.json belongs to another export or catalog read; use a new --output directory',2);
+  state={results:prior.results,requests:Number.isInteger(prior.requests)&&prior.requests>=0?prior.requests:0};
+ }
+ const pending=films.filter(film=>!Object.hasOwn(state.results,film.code)).length;
+ const budgetLeft=Math.max(0,maxRequests-state.requests);
+ if(args.dry)return {dryRun:true,exportFilms:total,matchStatus:status,unmatched:films.length,alreadyAttempted:films.length-pending,requestsUsed:state.requests,requestsWouldBeMade:Math.min(pending,budgetLeft),maxRequests,rps,catalog:provenance};
  const token=String(env.TMDB_READ_TOKEN||'').trim();
  if(!token)throw new ReconcileError('TMDB_READ_TOKEN is not set: no TMDB request was made',2);
- const outcome=await runSearches({films,search:tmdbSearchFn({token,fetchImpl}),state,maxRequests,rps,...(sleep?{sleep}:{}),...(now?{now}:{})});
- await mkdir(outputDir,{recursive:true,mode:0o700});
- await writeFile(file,JSON.stringify({schemaVersion:1,provenance:{searchedAt:new Date().toISOString(),catalog:provenance,requests:outcome.requests,stopped:outcome.stopped},results:outcome.state.results},null,1)+'\n',{mode:0o600});
- return {exportFilms:total,unmatched:films.length,requests:outcome.requests,stopped:outcome.stopped,remaining:outcome.remaining,counts:outcome.counts};
+ let outcome;
+ try{outcome=await runSearches({films,search:tmdbSearchFn({token,fetchImpl}),state,maxRequests,rps,...(sleep?{sleep}:{}),...(now?{now}:{})});}
+ finally{
+  // Whatever happened, what was attempted is on disk before this process ends.
+  await mkdir(outputDir,{recursive:true,mode:0o700});
+  await writeFile(file,JSON.stringify({schemaVersion:1,binding,requests:state.requests,provenance:{searchedAt:new Date().toISOString(),catalog:provenance},results:state.results},null,1)+'\n',{mode:0o600});
+ }
+ return {exportFilms:total,unmatched:films.length,requests:outcome.requests,totalRequests:outcome.totalRequests,stopped:outcome.stopped,remaining:outcome.remaining,counts:outcome.counts};
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){

@@ -41,28 +41,30 @@ export function selectFromSearch(film,results){
  return {decision:'review',reason:'no_match'};
 }
 
-// Sequential, rate-limited, single attempt per film. The first 403 or 429 ends the whole run with no retry; three failures in a row
-// (network or 5xx) end it too. A film that already has a decision in `state.results` is not asked again, so a run resumes.
-// search(film) -> {status:number, results?:[]}; it may throw, which counts as a failure of that one request.
-export async function runSearches({films,search,state={results:{}},maxRequests=DEFAULT_MAX_REQUESTS,rps=DEFAULT_RPS,sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=Date.now}){
+// Sequential, rate-limited, ONE attempt per film, ever. Every attempt is recorded in `state.results` whatever its outcome (a decision, a
+// review reason, `error` for a failed request, `blocked` for the 403 or 429 that ended a run), so no resume asks the same code again; a
+// retry is a separate, explicit decision outside this function. `state.requests` is the cumulative number of requests over every run on
+// this state, and `maxRequests` caps that total, not one invocation. The first 403 or 429 ends the run with no retry; three failures in a
+// row end it too. search(film) -> {status:number, results?:[]}; it may throw, which counts as a failed request.
+export async function runSearches({films,search,state={results:{},requests:0},maxRequests=DEFAULT_MAX_REQUESTS,rps=DEFAULT_RPS,sleep=ms=>new Promise(r=>setTimeout(r,ms)),now=Date.now}){
  if(!Number.isInteger(maxRequests)||maxRequests<1||maxRequests>DEFAULT_MAX_REQUESTS)throw new Error('maxRequests must be an integer 1..'+DEFAULT_MAX_REQUESTS);
  if(!(rps>0)||rps>MAX_RPS)throw new Error('rps must be above 0 and at most '+MAX_RPS);
  const gap=Math.ceil(1000/rps),results=state.results;
- // A recorded error is not final: a later resume asks that film once more, a decision is never asked again.
- const done=code=>Object.hasOwn(results,code)&&results[code].decision!=='error';
+ if(!Number.isInteger(state.requests)||state.requests<0)state.requests=0;
+ const done=code=>Object.hasOwn(results,code);
  let requests=0,stopped=null,failures=0,last=null;
  for(const film of films){
   if(done(film.code))continue;
-  if(requests>=maxRequests){stopped='budget_reached';break;}
+  if(state.requests>=maxRequests){stopped='budget_reached';break;}
   if(last!==null){const wait=gap-(now()-last);if(wait>0)await sleep(wait);}
-  last=now();requests++;
+  last=now();requests++;state.requests++;
   let answer;
   try{answer=await search(film);}catch{answer={status:0};}
-  if(answer.status===403||answer.status===429){stopped=answer.status===429?'rate_limited':'forbidden';break;}
+  if(answer.status===403||answer.status===429){results[film.code]={decision:'blocked',reason:'http_'+answer.status};stopped=answer.status===429?'rate_limited':'forbidden';break;}
   if(answer.status!==200){failures++;results[film.code]={decision:'error',reason:'http_'+answer.status};if(failures>=3){stopped='repeated_failure';break;}continue;}
   failures=0;
   results[film.code]=selectFromSearch(film,answer.results);
  }
  const counts={};for(const row of Object.values(results)){const key=row.decision==='review'?'review:'+row.reason:row.decision;counts[key]=(counts[key]||0)+1;}
- return {requests,stopped,remaining:films.filter(film=>!done(film.code)).length,counts,state:{results}};
+ return {requests,totalRequests:state.requests,stopped,remaining:films.filter(film=>!done(film.code)).length,counts,state};
 }

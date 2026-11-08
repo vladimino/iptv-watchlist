@@ -8,10 +8,10 @@ import {access,mkdir,readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {EXPORT_FILES,parseExport} from '../src/letterboxd-export.js';
-import {buildIndex,matchExport} from '../src/letterboxd-match.js';
-import {SEARCH_BASIS} from '../src/letterboxd-tmdb-search.js';
+import {buildIndex,matchExport,normTitle} from '../src/letterboxd-match.js';
+import {REVIEW_REASONS as SEARCH_REVIEW_REASONS,SEARCH_BASIS} from '../src/letterboxd-tmdb-search.js';
 import {archiveGeneratedAt,readZip} from '../src/letterboxd-zip.js';
-import {ReconcileError,assertOutsideRepository,loadCatalogDir,loadSnapshot} from './letterboxd-reconcile.mjs';
+import {ReconcileError,assertOutsideRepository,exportDigest,loadCatalogDir,loadSnapshot} from './letterboxd-reconcile.mjs';
 
 // A plan fixes its chunk size in origin.json, and every remote step re-derives the chunks from it. The Worker does several
 // sequential R2 operations per film, so a chunk must finish well inside the client's request limits: new plans default to
@@ -71,6 +71,7 @@ export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,o
  // the live authorities (ADR 0105); never both, never neither. TMDB search results only extend an inferred plan.
  if(!!snapshot===!!catalogDir)throw new ImportError('plan needs exactly one of --snapshot and --catalog-dir',2);
  if(tmdbResults&&!includeInferred)throw new ImportError('--tmdb-results needs --include-inferred',2);
+ if(tmdbResults&&!catalogDir)throw new ImportError('--tmdb-results needs --catalog-dir: it is bound to a catalog read',2);
  const zipPath=await assertOutsideRepository(zip,'--zip'),snapshotPath=snapshot?await assertOutsideRepository(snapshot,'--snapshot'):null,catalogPath=catalogDir?await assertOutsideRepository(catalogDir,'--catalog-dir'):null,resultsPath=tmdbResults?await assertOutsideRepository(tmdbResults,'--tmdb-results'):null,outputPath=await assertOutsideRepository(output,'--output');
  const archive=await readArchive(zipPath,generatedAt,now);
  // A directory holds one plan for good. Re-planning over it, even with the same archive and size, can change the accepted
@@ -83,20 +84,34 @@ export async function plan({zip,snapshot=null,catalogDir=null,tmdbResults=null,o
  // TMDB search results (ADR 0105): only for films the catalog does not know. A search decision is applied by the same rules as a stored
  // match: one movie, claimed by one code, not already held by an accepted or inferred film. A TMDB movie that is already a catalog Film is
  // linked as an existing Film; only a missing one carries `admit`, so the Film is created once, by the existing admission path.
- const search={decided:0,review:{},pending:0,errors:0};let resultsText=null;
+ const search={decided:0,review:{},pending:0,errors:0,blocked:0};let resultsText=null;
  if(resultsPath){
   resultsText=await readFile(resultsPath,'utf8');let doc;try{doc=JSON.parse(resultsText);}catch{throw new ImportError('--tmdb-results is not JSON',2);}
-  if(doc?.schemaVersion!==1||!doc.results||typeof doc.results!=='object')throw new ImportError('--tmdb-results has an unknown schema',2);
+  if(doc?.schemaVersion!==1||!doc.results||typeof doc.results!=='object'||Array.isArray(doc.results))throw new ImportError('--tmdb-results has an unknown schema',2);
+  // The results are only valid for the export and the catalog read they were searched for: a stale or foreign file is refused whole.
+  const expected={exportSha256:exportDigest(texts),catalogReadAt:loaded.baselineIdentity?.readAt,catalogFilms:loaded.baselineIdentity?.catalogFilms};
+  if(!doc.binding||doc.binding.exportSha256!==expected.exportSha256||doc.binding.catalogReadAt!==expected.catalogReadAt||doc.binding.catalogFilms!==expected.catalogFilms)throw new ImportError('--tmdb-results was not made for this export and catalog read',2);
   const held=new Set(matches.filter(match=>match.tmdbId&&(match.status==='accepted'||match.status==='inferred')).map(match=>String(match.tmdbId)));
-  const wanted=matches.filter(match=>match.status==='unmatched'),claims=new Map();
-  for(const match of wanted){const hit=doc.results[match.code];if(hit?.decision==='inferred_new'){if(!claims.has(hit.tmdb))claims.set(hit.tmdb,[]);claims.get(hit.tmdb).push(match.code);}}
+  const wanted=matches.filter(match=>match.status==='unmatched'),unmatchedCodes=new Set(wanted.map(match=>match.code)),claims=new Map();
+  // Every entry must belong to a film this plan left unmatched, and an `inferred_new` entry must satisfy the rule again here, against the
+  // export film itself: the search tool's own judgement is not trusted by the planner.
+  for(const [code,hit] of Object.entries(doc.results)){
+   if(!unmatchedCodes.has(code))throw new ImportError('--tmdb-results holds a film this plan did not leave unmatched',2);
+   if(hit?.decision==='inferred_new'){
+    const film=films.get(code);
+    if(!/^[1-9]\d{0,11}$/.test(String(hit.tmdb))||hit.basis!==SEARCH_BASIS||typeof hit.title!=='string'||!Number.isInteger(hit.year))throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);
+    if(!Number.isInteger(film.year)||hit.year!==film.year||!normTitle(film.name)||normTitle(hit.title)!==normTitle(film.name))throw new ImportError('--tmdb-results holds a decision that does not match its export film (title or year)',2);
+    if(!claims.has(String(hit.tmdb)))claims.set(String(hit.tmdb),[]);claims.get(String(hit.tmdb)).push(code);
+   }else if(hit?.decision==='review'){if(!SEARCH_REVIEW_REASONS.includes(hit.reason))throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);}
+   else if(hit?.decision!=='error'&&hit?.decision!=='blocked')throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);
+  }
   for(const match of wanted){
    const hit=doc.results[match.code];
    if(!hit){search.pending++;continue;}
    if(hit.decision==='error'){search.errors++;continue;}
+   if(hit.decision==='blocked'){search.blocked++;continue;}
    if(hit.decision==='review'){search.review[hit.reason]=(search.review[hit.reason]||0)+1;continue;}
-   if(hit.decision!=='inferred_new'||!/^[1-9]\d{0,11}$/.test(String(hit.tmdb))||hit.basis!==SEARCH_BASIS)throw new ImportError('--tmdb-results holds an entry this plan does not understand',2);
-   if(claims.get(hit.tmdb).length>1){search.review.tmdb_duplicate_in_export=(search.review.tmdb_duplicate_in_export||0)+1;continue;}
+   if(claims.get(String(hit.tmdb)).length>1){search.review.tmdb_duplicate_in_export=(search.review.tmdb_duplicate_in_export||0)+1;continue;}
    if(held.has(String(hit.tmdb))){search.review.tmdb_already_accepted=(search.review.tmdb_already_accepted||0)+1;continue;}
    const item=planItem(films.get(match.code),{status:'inferred',code:match.code,filmId:null,tmdbId:String(hit.tmdb)});
    if(!index.catalogByTmdb.has(String(hit.tmdb)))item.admit={title:String(hit.title),year:hit.year};
