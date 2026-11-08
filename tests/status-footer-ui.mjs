@@ -4,34 +4,40 @@ import assert from 'node:assert/strict';
 
 const html=fs.readFileSync('public/index.html','utf8'),css=fs.readFileSync('public/styles.css','utf8'),app=fs.readFileSync('public/app.js','utf8');
 const footer=html.match(/<footer class="status-footer"[\s\S]*?<\/footer>/)?.[0]||'';
-assert.equal((footer.match(/class="status-row(?: [^"]*)?"/g)||[]).length,5,'collapsed status has the four coverage rows plus integrations');
-assert.match(footer,/Модель вкуса[\s\S]*Локальная база[\s\S]*Окно просмотра[\s\S]*Последний run[\s\S]*Интеграции/);
-assert.match(footer,/id="status-run-label"/);assert.match(footer,/id="status-next-run">Следующий запуск по расписанию:/);assert.match(footer,/>По расписанию</);
+// AIR-389: five meaning-first indicators, in this order, and four thematic groups of details.
+assert.equal((footer.match(/class="status-row(?: [^"]*)?"/g)||[]).length,5,'the collapsed status has exactly five indicators');
+assert.match(footer,/Коллекция[\s\S]*Прогнозы[\s\S]*Новые 4\.0\+[\s\S]*>EPG<[\s\S]*Автоматизация/);
+for(const id of ['summary-collection','summary-forecast','summary-new','summary-epg','summary-automation','status-stale-note'])assert.match(footer,new RegExp('id="'+id+'"'),id);
+assert.doesNotMatch(footer,/status-run-label|status-last-run|status-next-run|Модель вкуса<\/span>|Окно просмотра<\/span>|Локальная база<\/span>/,'the old run and coverage summary rows are gone');
 assert.match(footer,/<details class="footer-details" id="status-details">/,'details are collapsed by default');
 assert.match(footer,/id="status-details-label">Показать детали</);
 const detailsBlock=footer.match(/<details class="footer-details"[\s\S]*?<\/details>/)?.[0]||'';
 assert.doesNotMatch(detailsBlock,/footer-admin-link|href="\/admin"/,'the admin link stays outside the disclosure');
 assert.match(footer,/<\/details>\s*<a class="footer-admin-link" href="\/admin" data-return-carry>Админка<\/a>/,'Админка follows the details control and points at /admin');
 assert.ok(footer.indexOf('id="status-details-label"')<footer.indexOf('class="footer-admin-link"'),'source order is the summary, then the admin link');
-for(const heading of ['Прогнозы','EPG / TMDB','Watchlist','Интеграции','Последний запуск','Модель вкуса'])assert.match(footer,new RegExp('>'+heading+'<'));
-assert.match(footer,/id="status-integrations"/);
+const headings=[...detailsBlock.matchAll(/<h3[^>]*>([^<]+)<\/h3>/g)].map(match=>match[1]);
+assert.deepEqual(headings,['Моя коллекция','Рекомендации','Кинопрограмма','Автоматизация'],'exactly four visible groups, in this order');
+const detailRows=(detailsBlock.replace(/<div data-integration="metadata" hidden>[\s\S]*?<\/div>/,'').match(/<dt\b/g)||[]).length;
+assert.ok(detailRows>=15&&detailRows<=18,'about fifteen to eighteen readable rows instead of the old thirty-three: '+detailRows);
 assert.match(footer,/data-integration="metadata" hidden/);
-assert.match(footer,/id="status-integrations-events" href="\/events" data-return-carry>История в событиях/,'AIR-376: a real /events link, not an in-page anchor');
+assert.match(footer,/id="status-integrations-events" href="\/events" data-return-carry>События/,'AIR-376: a real /events link, not an in-page anchor');
+assert.match(footer,/id="status-health-link" href="\/admin\/health" data-return-carry>Диагностика/,'AIR-389: a link to the exact diagnostics in Admin Health');
 assert.doesNotMatch(footer,/wikidata|token|stack/i);
-assert.match(footer,/Вне окна в кеше/);
-assert.match(footer,/Ждут фонового прогноза вне окна/);
-assert.match(footer,/Распознано в текущем EPG/);assert.match(footer,/Фильмы в локальной базе/);assert.match(footer,/Эти totals независимы/);
-assert.match(footer,/id="status-events-link" href="\/events" data-return-carry>Смотреть события/,'AIR-376: a real /events link, not an in-page anchor');
+for(const gone of ['Холодная очередь','Вне окна в кеше','Ждут фонового прогноза вне окна','Отложены до повтора','Текущий пакет','Следующий пакет','Исторический журнал','Каналы<','Проверено передач','Без метаданных','Названия требуют проверки','Последний запуск','Начат<','Добавлено','Ошибки<','По расписанию<'])assert.doesNotMatch(footer,new RegExp(gone),'removed from the user footer, kept in the API and the diagnostics: '+gone);
+for(const kept of ['Всего фильмов','Просмотрено','Оценено','В watchlist','Прогнозы · вся база','Прогнозы · окно просмотра','Новые · 4.5 и выше','Новые · от 4.0 до 4.4','Модель вкуса','Обновление EPG','Известные передачи','Распознано фильмов','Ждут распознавания'])assert.match(footer,new RegExp(kept),kept);
+assert.match(footer,/Счётчики пересекаются, а не складываются/,'the overlap of the collection counters is stated');
+assert.match(footer,/кандидат — передача из EPG, которая ещё не опознана как фильм/,'candidates are explained as not films');
 assert.doesNotMatch(html,/href="#activity-title"/,'no footer link scrolls to an anchor any more');
 assert.doesNotMatch(footer,/Фоновый прогноз заполняется|Серии и передачи исключаются|уникальных нормализованных названий|hash|prompt|token/i,'collapsed footer contains no old prose or debug data');
 assert.match(app,/statusDetails\.addEventListener\('toggle'/,'expand/collapse label follows native details state');
-assert.match(app,/\$\('#status-events-link'\),\$\('#status-integrations-events'\)[\s\S]*?plainFilmActivation\(event\)[\s\S]*?openEventsScreen\(link\)/,'both footer links open the wide events view on a plain click and keep native navigation for modified clicks');
+assert.match(app,/\$\('#status-integrations-events'\)[\s\S]*?plainFilmActivation\(event\)[\s\S]*?openEventsScreen\(link\)/,'the footer events link opens the wide events view on a plain click and keeps native navigation for modified clicks');
 assert.match(css,/\.status-footer \.footer-status\{[^}]*width:min\(100%,680px\)/,'footer grid has a bounded readable width');
 assert.match(css,/\.status-summary\{[^}]*grid-template-columns:max-content max-content[^}]*column-gap:18px[^}]*width:max-content[^}]*margin-inline:auto/,'desktop compact summary uses a centered content-sized grid');
 assert.match(css,/\.status-row\{display:contents\}/,'compact rows share one label/value grid');
 assert.match(css,/\.status-row>span\{[^}]*text-align:right/,'desktop labels align toward their values');
 assert.match(css,/\.status-row>strong\{[^}]*text-align:left[^}]*overflow-wrap:anywhere/,'desktop values start beside the shared label column');
-assert.match(css,/\.status-run-value\{[^}]*justify-items:start[^}]*text-align:left/,'run value and next-run line align with other values');
+assert.doesNotMatch(css,/status-run-value/,'the run block styles are gone with the run block');
+assert.match(css,/\.status-stale-note\{[^}]*overflow-wrap:anywhere/,'a long stale note wraps');
 const desktopSummaryRule=css.match(/\.status-summary\{([^}]*)\}/)?.[1]||'';
 assert.doesNotMatch(desktopSummaryRule,/1fr/,'desktop value column does not stretch to the footer edge');
 assert.match(css,/\.footer-details-body\{[^}]*grid-template-columns:repeat\(2,minmax\(0,326px\)\)[^}]*max-width:680px/,'expanded sections use the same bounded two-column grid');
@@ -244,10 +250,10 @@ const healthyFooter={generatedAt:'2026-10-13T09:30:00Z',coverage:{confirmedFilms
 const adminContext=vm.createContext({Date, Intl, document, setInterval(fn,ms){timers.push({fn,ms});}, fetch:async url=>{calls.push(String(url));if(mode==='fail')return {ok:false,status:503};return {ok:true,json:async()=>healthyFooter};}});
 vm.runInContext(adminFooterJs, adminContext);
 const textOf=id=>nodes.get(id).textContent;
-for(let i=0;i<5&&textOf('status-local-coverage')!=='статус недоступен';i++)await new Promise(resolve=>setImmediate(resolve));
+for(let i=0;i<5&&textOf('summary-forecast')!=='статус недоступен';i++)await new Promise(resolve=>setImmediate(resolve));
 assert.deepEqual(calls, ['/api/enrichment/footer/status']);
-for(const id of ['status-local-coverage','status-window-coverage','status-last-run','status-integrations'])assert.equal(textOf(id), 'статус недоступен', id);
-assert.equal(textOf('taste-version'), '', 'a failed read does not invent a taste profile');
+for(const id of ['summary-collection','summary-forecast','summary-new','summary-epg','summary-automation'])assert.equal(textOf(id), 'статус недоступен', id);
+assert.equal(nodes.has('detail-taste')?textOf('detail-taste'):'', '', 'a failed read does not invent a taste profile');
 assert.equal(timers.length, 1);assert.equal(timers[0].ms, 60000);
 visibility='hidden';
 timers[0].fn();
@@ -255,34 +261,38 @@ assert.equal(calls.length, 1, 'a hidden admin tab does not read the footer');
 visibility='visible';
 mode='ok';
 timers[0].fn();
-for(let i=0;i<5&&textOf('status-integrations')!=='всё работает';i++)await new Promise(resolve=>setImmediate(resolve));
-assert.equal(textOf('status-integrations'), 'всё работает');
-assert.match(textOf('status-local-coverage'), /10\/10 с актуальным прогнозом · 100%/);
+for(let i=0;i<5&&textOf('summary-automation')!=='всё работает';i++)await new Promise(resolve=>setImmediate(resolve));
+assert.equal(textOf('summary-automation'), 'всё работает');
+assert.match(textOf('summary-forecast'), /10\/10 с актуальным прогнозом · 100%/);
 assert.match(textOf('integration-epg'), /^работает/);
+assert.equal(nodes.get('status-stale-note').hidden, true, 'a fresh read shows no stale note');
 mode='fail';
 timers[0].fn();
-for(let i=0;i<5&&textOf('status-integrations')!=='статус недоступен';i++)await new Promise(resolve=>setImmediate(resolve));
-for(const id of ['status-local-coverage','status-window-coverage','status-last-run','status-integrations','detail-local-coverage','integration-epg'])assert.equal(textOf(id), 'статус недоступен', id);
-assert.match(textOf('status-next-run'), /^Последнее чтение: /);
-assert.doesNotMatch(textOf('status-integrations'), /всё работает/);
-assert.doesNotMatch(textOf('status-local-coverage'), /10\/10/);
-const warned=textOf('status-next-run');
+for(let i=0;i<5&&textOf('summary-automation')!=='статус недоступен';i++)await new Promise(resolve=>setImmediate(resolve));
+// Health is unavailable; the counts stay as a labelled stale snapshot, never as a current reading.
+for(const id of ['summary-epg','summary-automation','integration-epg'])assert.equal(textOf(id), 'статус недоступен', id);
+assert.equal(nodes.get('status-stale-note').hidden, false);
+assert.match(textOf('status-stale-note'), /^Не удалось обновить\. Показаны данные от /);
+assert.doesNotMatch(textOf('summary-automation'), /всё работает/);
+assert.match(textOf('summary-forecast'), /10\/10/, 'the last confirmed count is kept, with the stale note beside it');
+const warned=textOf('status-stale-note');
 timers[0].fn();
 await new Promise(resolve=>setImmediate(resolve));
 await new Promise(resolve=>setImmediate(resolve));
-assert.equal(textOf('status-integrations'), 'статус недоступен', 'another 503 keeps the warning');
-assert.equal(textOf('status-next-run'), warned, 'the last successful read time stays put');
+assert.equal(textOf('summary-automation'), 'статус недоступен', 'another 503 keeps the warning');
+assert.equal(textOf('status-stale-note'), warned, 'the last successful read time stays put');
 const onVisible=listeners.find(item=>item.type==='visibilitychange');
 onVisible.fn();
 await new Promise(resolve=>setImmediate(resolve));
 await new Promise(resolve=>setImmediate(resolve));
-assert.equal(textOf('status-local-coverage'), 'статус недоступен', 'a visible refresh of a failed status does not restore the old health');
+assert.equal(textOf('summary-automation'), 'статус недоступен', 'a visible refresh of a failed status does not restore the old health');
 mode='ok';
 onVisible.fn();
-for(let i=0;i<5&&textOf('status-integrations')!=='всё работает';i++)await new Promise(resolve=>setImmediate(resolve));
-assert.equal(textOf('status-integrations'), 'всё работает');
-assert.match(textOf('status-local-coverage'), /10\/10 с актуальным прогнозом · 100%/);
+for(let i=0;i<5&&textOf('summary-automation')!=='всё работает';i++)await new Promise(resolve=>setImmediate(resolve));
+assert.equal(textOf('summary-automation'), 'всё работает');
+assert.match(textOf('summary-forecast'), /10\/10 с актуальным прогнозом · 100%/);
 assert.match(textOf('integration-epg'), /^работает/);
+assert.equal(nodes.get('status-stale-note').hidden, true, 'a recovered read clears the stale note');
 assert.equal(calls.length, 6);
 const details=nodes.get('status-details');
 assert.equal(details.dataset.footerBound, '1');
@@ -291,4 +301,41 @@ assert.equal(textOf('status-details-label'), 'Скрыть детали');
 details.open=false;details.dispatch('toggle');
 assert.equal(textOf('status-details-label'), 'Показать детали');
 assert.equal(listeners.filter(item=>item.type==='visibilitychange').length, 1);
-console.log('Status footer UI: four-line default, structured details, expand/collapse, Events navigation, film and admin visibility passed');
+// ---- AIR-389: the compact summary and the four groups read a known count or say "нет данных"; unknown is never 0 or healthy ----
+{
+ const text=payload=>{context.footerPayload=payload;return vm.runInContext('footerStatusText(footerPayload)',context);};
+ const source=(id,extra={})=>({id,state:'healthy',code:'ok',lastSuccessAt:'2026-11-08T11:00:00Z',lastFailureAt:null,...extra});
+ const base={generatedAt:'2026-11-08T13:00:00Z',coverage:{confirmedFilmsTotal:10,currentPredictionsTotal:7,windowFilmsTotal:4,windowCurrentPredictions:3,localPercent:70,windowPercent:75},predictions:{},watchlist:{},profile:{version:7,updatedAt:'2026-10-12T18:00:00Z'},
+  epgTmdb:{recognizedFilms:12,pendingRecognition:3,epgStart:Date.parse('2026-11-08T09:00:00Z'),epgEnd:Date.parse('2026-11-12T16:38:00Z')},
+  integrations:{aggregate:'healthy',attentionCount:0,sources:[source('epg',{lastSuccessAt:'2026-11-08T12:05:00Z'}),source('letterboxd_watchlist'),source('letterboxd_ratings'),source('resolver'),source('predictions')]}};
+ const ru=value=>value.toLocaleString('ru');
+ // A known collection and two non-overlapping new-film ranges.
+ let t=text({...base,collection:{state:'ok',total:1234,watched:800,rated:700,watchlist:50},recommendations:{newUnseen:{state:'ok',rating40to44:7,rating45plus:3}}});
+ assert.equal(t.collectionSummary,ru(1234)+' фильма');
+ assert.deepEqual([t.collectionTotal,t.collectionWatched,t.collectionRated,t.collectionWatchlist],[ru(1234),ru(800),ru(700),ru(50)],'readable numbers');
+ assert.equal(t.newSummary,'10 · 4.5+: 3');assert.equal(t.new45,'3');assert.equal(t.new40,'7');
+ assert.match(t.epgSummary,/^8 нояб\./,'the confirmed EPG update, not the time the page was opened');assert.equal(t.epgUpdated,t.epgSummary);
+ assert.match(t.epgHorizon,/^до 12 нояб\./);assert.equal(t.epgRecognizedText,'12');assert.equal(t.epgPendingText,'3');
+ assert.equal(t.integrationAggregate,'всё работает');
+ // An old EPG success is labelled as old, not as fresh.
+ t=text({...base,integrations:{aggregate:'attention',attentionCount:1,sources:[source('epg',{state:'stale',code:'stale',lastSuccessAt:'2026-11-01T12:05:00Z'})]}});
+ assert.match(t.epgSummary,/^1 нояб\..* · давно$/);
+ // An empty collection is a known zero, and "no new films" is a known "нет".
+ t=text({...base,collection:{state:'ok',total:0,watched:0,rated:0,watchlist:0},recommendations:{newUnseen:{state:'ok',rating40to44:0,rating45plus:0}}});
+ assert.deepEqual([t.collectionTotal,t.collectionWatched,t.collectionRated,t.collectionWatchlist],['0','0','0','0']);assert.equal(t.newSummary,'нет');assert.equal(t.new45,'0');
+ // Unknown stays unknown: no 0, no 100%, no "healthy".
+ t=text({...base,collection:{state:'unknown',total:null,watched:null,rated:null,watchlist:null},recommendations:{newUnseen:{state:'unknown',rating40to44:null,rating45plus:null}}});
+ for(const key of ['collectionSummary','collectionTotal','collectionWatched','collectionRated','collectionWatchlist','newSummary','new45','new40'])assert.equal(t[key],'нет данных',key);
+ // An older server (no blocks), a state that is not "ok" and non-integer counts are unknown too.
+ t=text(base);for(const key of ['collectionSummary','collectionTotal','newSummary','new45'])assert.equal(t[key],'нет данных','old DTO: '+key);
+ t=text({...base,collection:{state:'ok',total:'12',watched:1.5,rated:null,watchlist:undefined},recommendations:{newUnseen:{state:'ok',rating40to44:'3',rating45plus:2}}});
+ assert.deepEqual([t.collectionTotal,t.collectionWatched,t.collectionRated,t.collectionWatchlist],['нет данных','нет данных','нет данных','нет данных'],'a count that is not an integer is not shown as a number');
+ assert.equal(t.newSummary,'нет данных','one unreadable range makes the new-film total unknown instead of half of it');
+ // No EPG block: unknown, not zero; no EPG success: no invented freshness.
+ t=text({...base,epgTmdb:undefined,integrations:{aggregate:'unknown',attentionCount:0,sources:[]}});
+ assert.deepEqual([t.epgRecognizedText,t.epgPendingText,t.epgHorizon,t.epgSummary],['нет данных','нет данных','нет данных','нет данных']);
+ // The five-source automation rows stay readable text, and a failure is not the same words as "no data".
+ t=text({...base,integrations:{aggregate:'failed',attentionCount:1,sources:[source('epg',{state:'failed',code:'ok',lastFailureAt:'2026-11-08T12:00:00Z'}),source('resolver',{state:'unknown',code:'no_data',lastSuccessAt:null})]}});
+ assert.equal(t.integrationAggregate,'есть сбой');assert.match(t.integrations.epg,/сбой/);assert.match(t.integrations.resolver,/нет данных/);assert.doesNotMatch(t.integrations.resolver,/сбой/,'unknown is not an error');
+}
+console.log('Status footer UI: five-indicator summary, four groups of about eighteen rows, known counts and "нет данных" for unknown, stale snapshot, structured details, expand/collapse, Events navigation, film and admin visibility passed');

@@ -158,7 +158,7 @@ run('presetPrompt={id:"d4",action:"update"};renderPresets()');
 assert.match(el('#preset-list').innerHTML, /Заменить сохранённые условия текущими\?/);
 
 // 4. Footer links: real /events hrefs; opening events from a film screen leaves the film screen.
-assert.equal((html.match(/class="status-events-link"[^>]*href="\/events"/g) || []).length, 2, 'both footer links are /events links');
+assert.equal((html.match(/class="status-events-link"[^>]*href="\/events"/g) || []).length, 1, 'AIR-389: the footer has one events link (the second footer link goes to Admin Health)');
 assert.doesNotMatch(html, /href="#activity-title"/);
 assert.equal(run('plainFilmActivation({button:0})'), true, 'a plain click is handled in the page');
 for (const event of [{button: 0, ctrlKey: true}, {button: 0, metaKey: true}, {button: 0, shiftKey: true}, {button: 1}, {button: 0, defaultPrevented: true}]) assert.equal(run('plainFilmActivation(' + JSON.stringify(event) + ')'), false, JSON.stringify(event) + ' keeps native navigation (new tab, copy link)');
@@ -166,7 +166,7 @@ for (const event of [{button: 0, ctrlKey: true}, {button: 0, metaKey: true}, {bu
 run('filmScreen="abc"');
 classes.add('film-screen');
 store.set('iptv-film-list-query', '?q=x');
-run('openEventsScreen(document.querySelector("#status-events-link"))');
+run('openEventsScreen(document.querySelector("#status-integrations-events"))');
 assert.equal(new URL(window.location.href).pathname, '/events');
 assert.equal(classes.has('film-screen'), false, 'the film screen no longer hides the events');
 assert.equal(classes.has('events-screen'), true);
@@ -179,7 +179,7 @@ assert.equal(classes.has('events-screen'), false, 'back to a film clears the eve
 // Already on /events: the link keeps it there and does not push a second entry.
 run('openEventsScreen(document.querySelector("#status-integrations-events"))');
 const depth = stack.length;
-run('openEventsScreen(document.querySelector("#status-events-link"))');
+run('openEventsScreen(document.querySelector("#status-integrations-events"))');
 assert.equal(stack.length, depth, 'a second click on /events adds no history entry');
 assert.equal(new URL(window.location.href).pathname, '/events');
 

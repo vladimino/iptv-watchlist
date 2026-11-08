@@ -55,6 +55,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-348 EPG executor offline evidence | [orchestration/epg-executor-air-348-2026-11-07.md](orchestration/epg-executor-air-348-2026-11-07.md) |
 | AIR-348 migration 0017 production apply | [d1-migration/air-348-0017-apply-2026-11-08.md](d1-migration/air-348-0017-apply-2026-11-08.md) |
 | AIR-348 cron `0 * * * *` coexistence preflight | [orchestration/cron-coexistence-air-348-2026-11-08.md](orchestration/cron-coexistence-air-348-2026-11-08.md) |
+| AIR-348 first natural EPG Cloudflare run, read-only 8 November 2026: the instance stopped after 61 steps with `epoch_mismatch` while the mode document was unchanged | [orchestration/epg-first-natural-run-air-348-2026-11-08.md](orchestration/epg-first-natural-run-air-348-2026-11-08.md) |
 | AIR-188 extended future EPG fixture measurements | [epg-extended-future-air-188-2026-11-05.md](epg-extended-future-air-188-2026-11-05.md) |
 | AIR-359 EPG event versus published generation | [epg-event-publication-air-359-2026-11-06.md](epg-event-publication-air-359-2026-11-06.md) |
 | AIR-361 Ratings run result event | [ratings-event-air-361-2026-11-06.md](ratings-event-air-361-2026-11-06.md) |
@@ -64,6 +65,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-383 Discovery ingress and generation-bump audit for a projector quiet window | [d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md](d1-migration/air-383-quiet-window-ingress-audit-2026-11-08.md) |
 | AIR-383 projector exclusive window, dormant implementation | [d1-migration/air-383-projector-window-dormant-implementation-2026-11-08.md](d1-migration/air-383-projector-window-dormant-implementation-2026-11-08.md) | 8 Nov 2026, offline tests and code reading | Coverage matrix, R2 side-effect reading, unmeasured values, activation blocker. |
 | AIR-383 projector exclusive window, dry measurement (Stage B) | [d1-migration/air-383-stage-b-dry-measurement-2026-11-08.md](d1-migration/air-383-stage-b-dry-measurement-2026-11-08.md) | 8 Nov 2026, read-only D1 aggregates | Discovery activity pattern, one natural projector run, burst shape, backlog arithmetic, EPG clash, what stays unmeasured. |
+| AIR-383 projector exclusive window, Stage C preflight | [d1-migration/air-383-stage-c-preflight-2026-11-08.md](d1-migration/air-383-stage-c-preflight-2026-11-08.md) | 8 Nov 2026, read-only D1 and flag readbacks | Fresh state before activation planning, EPG executor already `cloudflare`, correction to the Stage B report. |
 | AIR-386 Discovery decisions above 20 000 rows: bounded read failure (RCA and fix) | [d1-migration/air-386-decisions-read-cap-2026-11-08.md](d1-migration/air-386-decisions-read-cap-2026-11-08.md) |
 | AIR-349 monitor production activation (steps 4 to 6) | [monitoring/monitor-activation-air-349-2026-11-07.md](monitoring/monitor-activation-air-349-2026-11-07.md) |
 | AIR-366 monitor `dry` mode removal and pre-merge gate | [monitoring/dry-removal-air-366-2026-11-07.md](monitoring/dry-removal-air-366-2026-11-07.md) |
