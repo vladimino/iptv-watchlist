@@ -185,7 +185,7 @@ run('state.to=1990');
 run('installProgramme({updatedAt:"2026-10-18T15:00:00Z",window:{from:1,to:90000000},films:[{id:"film-1",title:"Второй",original:"First",year:2031,genres:["Драма"],shows:[]}],people:{directors:[{id:"d1",name:"Нолан",original:"Nolan"}],actors:[]}})');
 assert.equal(run('state.to'),1990,'an explicit year range stays in place');
 
-const coverage=el('#status-local-coverage').textContent;
+const coverage=el('#summary-forecast').textContent;
 const eventsHtml=el('#activity-list').innerHTML;
 el('#activity-status').textContent='события на месте';
 failed.add('/api/enrichment/footer/status');
@@ -194,9 +194,12 @@ const failedRefresh=run('runLiveRefresh()');
 await untilIdle();
 await failedRefresh;
 assert.match(coverage,/1\/2/,'the footer had a measured coverage before the failure');
-assert.equal(el('#status-local-coverage').textContent,'статус недоступен','a footer error stops presenting the last reading as current');
-assert.equal(el('#status-integrations').textContent,'статус недоступен');
-assert.match(el('#status-next-run').textContent,/^Последнее чтение: /);
+// Health is no longer presented as current; the counts stay as a labelled stale snapshot.
+assert.equal(el('#summary-automation').textContent,'статус недоступен','a footer error stops presenting the last health reading as current');
+assert.equal(el('#summary-epg').textContent,'статус недоступен');
+assert.equal(el('#status-stale-note').hidden,false);
+assert.match(el('#status-stale-note').textContent,/^Не удалось обновить\. Показаны данные от /);
+assert.match(el('#summary-forecast').textContent,/1\/2/,'the last measured coverage is kept, beside the stale note');
 assert.equal(el('#activity-list').innerHTML,eventsHtml);
 assert.equal(el('#activity-status').textContent,'события на месте');
 failed.delete('/api/enrichment/footer/status');
@@ -205,7 +208,7 @@ footer={...footer,coverage:{...footer.coverage,currentPredictionsTotal:9,confirm
 const recoveredFooter=run('loadPredictionQueue({quiet:true})');
 await untilIdle();
 await recoveredFooter;
-assert.match(el('#status-local-coverage').textContent,/9/);
+assert.match(el('#summary-forecast').textContent,/9/);
 failed.add('/api/events');
 const failedEvents=run('loadEvents()');
 flush();
