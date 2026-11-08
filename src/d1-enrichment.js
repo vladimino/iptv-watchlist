@@ -54,7 +54,7 @@ function d1EnrichmentAdapter(binding){
 // - after every read, each object is checked again by its etag, and the writer checks are repeated. The published generation's
 //   catalog and the resolution are updated in place, so the same programmeRunId does not prove the same content. Any change
 //   defers the run before any D1 write; the next hourly run reads again.
-class D1EnrichmentInputError extends Error{constructor(reason,key,cause){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;this.cause_=cause||null;}}
+class D1EnrichmentInputError extends Error{constructor(reason,key,cause){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;this.inputCause=cause||null;}}
 const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
@@ -220,7 +220,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   return summary;
  }catch(error){
   summary.outcome='failed';summary.error=String(error?.message||error).slice(0,200);
-  if(error instanceof D1EnrichmentInputError){summary.reason=error.reason;summary.inputKey=error.key;if(error.cause_)summary.inputCause=error.cause_;if(D1_ENRICHMENT_DEFERRED.includes(error.reason))summary.outcome='deferred';}
+  if(error instanceof D1EnrichmentInputError){summary.reason=error.reason;summary.inputKey=error.key;if(error.inputCause)summary.inputCause=error.inputCause;if(D1_ENRICHMENT_DEFERRED.includes(error.reason))summary.outcome='deferred';}
   return summary;
  }finally{
   summary.queries=db.queries;summary.durationMs=Date.now()-started;

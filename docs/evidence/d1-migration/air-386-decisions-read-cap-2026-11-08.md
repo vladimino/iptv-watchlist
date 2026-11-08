@@ -13,9 +13,9 @@ Date: 2026-11-08 (UTC). Scope: read-only D1 `SELECT`s through the connector, cod
 
 ## Change
 
-- `readDecisions` reads in keyset pages of 1 000 rows (`DECISION_PAGE`), verifies every `decision_hash`, and fails closed as `discovery_bounded` only past an explicit budget of 100 000 rows or 24 MiB of payload; nothing is truncated. `READ_CAP` is unchanged for the other readers.
+- `readDecisions` reads in keyset pages of 1 000 rows (`DECISION_PAGE`), verifies every `decision_hash`, and fails closed as `discovery_bounded` only past an explicit budget of 100 000 rows or 24 Mi characters of payload; nothing is truncated. `READ_CAP` is unchanged for the other readers.
 - Consistency is unchanged in kind: every decision writer moves the authority generation in its batch and `routeRead` compares the generation before and after, so a read that raced a writer fails as `discovery_fence` (the projector defers) and no mixed pages are returned.
-- The projector summary gains `inputCause` on `input_invalid` from the authority (`discovery_bounded`, `discovery_unavailable`, `discovery_read_failed`).
+- The projector summary gains `inputCause` when the Discovery authority answers with a failure code, on `input_invalid` and on the deferred `authority_unavailable` (`discovery_bounded`, `discovery_unavailable`, `discovery_read_failed`).
 - Not changed: authority contract, schema, fencing, R2 fallback (none), lease.
 
 ## Tests

@@ -232,7 +232,7 @@ async function writeDecisions(env,map,gate,context){
 }
 // AIR-386: the whole decisions document is read in keyset pages, never as one unbounded SELECT. A page is DECISION_PAGE rows, so one
 // query result and one array stay small however many decisions exist; the Map that old readers still need is the only whole copy,
-// and it is bounded by an explicit budget (rows and payload bytes) instead of the 20000-row READ_CAP that stopped the D1 projector
+// and it is bounded by an explicit budget (rows and payload characters) instead of the 20000-row READ_CAP that stopped the D1 projector
 // once the table reached 20001 rows. Over the budget the read fails closed as `discovery_bounded`; nothing is truncated.
 // Consistency: the pages are separate statements, but every decision writer moves the authority generation in the same batch, and
 // routeRead compares the generation before and after the read (`discovery_fence` on a change), so a read that raced a writer is
