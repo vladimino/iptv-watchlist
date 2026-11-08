@@ -56,6 +56,22 @@ for(const size of [0,1,999,1000,1001,20000,20001,25000,45000]){
  await assert.rejects(()=>read(db),error=>error.code==='discovery_bounded');
 }
 
+// The byte budget is UTF-8 bytes: a payload of 3-byte characters crosses it while far below DECISION_READ_BYTES characters.
+{
+ const wide={status:'needs_verification',attempts:1,note:'я'.repeat(2000)};// 2 bytes per character
+ const rows=Math.floor(Authority.DECISION_READ_BYTES/(2*2000+60));
+ const {db,fill}=fresh(0,{payload:wide});
+ await fill(rows-300);
+ assert.equal(Object.keys((await read(db)).value).length,rows-300,'under the byte budget in bytes');
+ await fill(900,rows-300);
+ assert.ok(rows*2000+900*0<Authority.DECISION_READ_BYTES,'the character count alone stays under the budget');
+ await assert.rejects(()=>read(db),error=>error.code==='discovery_bounded','over it in UTF-8 bytes');
+}
+// The row ceiling is reachable and fails closed.
+{
+ const {db,fill}=fresh();await fill(Authority.DECISION_READ_ROWS+1);
+ await assert.rejects(()=>read(db),error=>error.code==='discovery_bounded');
+}
 // A row whose payload does not match its decision_hash is corruption (discovery_unavailable), also deep in the table, never skipped.
 {
  const {db,fill}=fresh();await fill(2500);

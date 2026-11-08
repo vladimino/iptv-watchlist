@@ -232,14 +232,15 @@ async function writeDecisions(env,map,gate,context){
 }
 // AIR-386: the whole decisions document is read in keyset pages, never as one unbounded SELECT. A page is DECISION_PAGE rows, so one
 // query result and one array stay small however many decisions exist; the Map that old readers still need is the only whole copy,
-// and it is bounded by an explicit budget (rows and payload characters) instead of the 20000-row READ_CAP that stopped the D1 projector
+// and it is bounded by an explicit budget (payload bytes are one component of the heap: the parsed Map costs a small multiple of them, so the byte budget is deliberately well below the Worker's 128 MiB) (rows and UTF-8 payload bytes) instead of the 20000-row READ_CAP that stopped the D1 projector
 // once the table reached 20001 rows. Over the budget the read fails closed as `discovery_bounded`; nothing is truncated.
 // Consistency: the pages are separate statements, but every decision writer moves the authority generation in the same batch, and
 // routeRead compares the generation before and after the read (`discovery_fence` on a change), so a read that raced a writer is
 // refused whole and never returns missing, duplicated or mixed pages. Every row is still verified against its decision_hash.
 export const DECISION_PAGE=1000;
 export const DECISION_READ_ROWS=100000;
-export const DECISION_READ_BYTES=24*1024*1024;
+export const DECISION_READ_BYTES=16*1024*1024;
+const utf8=new TextEncoder();
 async function readDecisions(env){
  const db=database(env);
  const map={};
@@ -250,7 +251,7 @@ async function readDecisions(env){
    :await many(db,'SELECT observation_key, payload_json, decision_hash FROM discovery_decision WHERE observation_key>? ORDER BY observation_key LIMIT ?',[after,DECISION_PAGE]);
   for(const row of rows){
    total++;
-   bytes+=String(row.payload_json??'').length;
+   bytes+=utf8.encode(String(row.payload_json??'')).length;
    if(total>DECISION_READ_ROWS||bytes>DECISION_READ_BYTES)throw failed('discovery_bounded');
    let parsed;try{parsed=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
    if(await decisionHash(parsed)!==row.decision_hash)throw failed('discovery_unavailable');

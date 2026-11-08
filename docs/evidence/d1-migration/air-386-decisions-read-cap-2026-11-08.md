@@ -13,7 +13,7 @@ Date: 2026-11-08 (UTC). Scope: read-only D1 `SELECT`s through the connector, cod
 
 ## Change
 
-- `readDecisions` reads in keyset pages of 1 000 rows (`DECISION_PAGE`), verifies every `decision_hash`, and fails closed as `discovery_bounded` only past an explicit budget of 100 000 rows or 24 Mi characters of payload; nothing is truncated. `READ_CAP` is unchanged for the other readers.
+- `readDecisions` reads in keyset pages of 1 000 rows (`DECISION_PAGE`), verifies every `decision_hash`, and fails closed as `discovery_bounded` only past an explicit budget of 100 000 rows or 16 MiB of UTF-8 payload; nothing is truncated. `READ_CAP` is unchanged for the other readers.
 - Consistency is unchanged in kind: every decision writer moves the authority generation in its batch and `routeRead` compares the generation before and after, so a read that raced a writer fails as `discovery_fence` (the projector defers) and no mixed pages are returned.
 - The projector summary gains `inputCause` when the Discovery authority answers with a failure code, on `input_invalid` and on the deferred `authority_unavailable` (`discovery_bounded`, `discovery_unavailable`, `discovery_read_failed`).
 - Not changed: authority contract, schema, fencing, R2 fallback (none), lease.
@@ -24,7 +24,7 @@ Date: 2026-11-08 (UTC). Scope: read-only D1 `SELECT`s through the connector, cod
 
 ## Limits
 
-- The Map is still held whole in the projector and in document-mode readers; the budget bounds it. At the current 267 bytes per decision the byte budget allows about 90 000 rows. Reaching it needs a projector-specific bounded projection, a separate decision.
+- The Map is still held whole in the projector and in document-mode readers; the budget bounds it. At the current 267 bytes per decision the byte budget allows about 60 000 rows; the parsed Map is a multiple of the payload bytes and no peak-heap measurement was made. Reaching it needs a projector-specific bounded projection, a separate decision.
 - The document-mode writer (`writeDecisions`) still refuses more than 20 000 entries in one write; the paged resolver writes deltas. Whether any caller still writes the whole document at this size is not verified here.
 - Decisions stood at 20 001 across the observation while observations were 39 920; this was not investigated.
 - Whether the next natural projector tick succeeds after deploy is not yet observed. Starvation (AIR-383/385) is a separate defect.
