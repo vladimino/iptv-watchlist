@@ -76,12 +76,12 @@ run('state.searchScopes={titles:false,people:true,plot:false};state.query="бо�
 assert.deepEqual(ids(),['days']);
 run('state.query="28 спустя";state.searchScopes={titles:true,people:true,plot:true}');
 assert.deepEqual(ids().sort(),['days','weeks','years']);
-run('state.query="";state.sort="title";state.sortExplicit=false');
+run('state.query="";state.sort="personal";state.sortExplicit=false');
 run('applySearchInput("нолан")');
 assert.equal(run('state.sort'),'relevance');
 assert.equal(run('state.sortExplicit'),false);
 run('applySearchInput("")');
-assert.equal(run('state.sort'),'title');
+assert.equal(run('state.sort'),'personal');
 run('state.sort="personal";state.sortExplicit=true;applySearchInput("нолан")');
 assert.equal(run('state.sort'),'personal');
 run('state.sort="title";state.sortExplicit=true;state.query="";applySearchInput("нолан")');

@@ -37,7 +37,7 @@ A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-m
 
 ## Thresholds
 
-EPG: delayed 2 hours and degraded 5 hours after the Madrid 17:00 due time without a new publication. Discovery: waiting inside its own `nextCatchUpAt`/`retryAt`, degraded after 3 hours without allowed progress. Ratings: the orchestration read model's own health (stalled two hours after 17:30 Madrid). Predictions: delayed after 3 hours and degraded after 6 hours with pending work and no model batch. Alerts: a degraded issue is confirmed by a second snapshot, a needs-owner issue alerts at once, cooldown 6 hours or 2 hours, at most eight messages per issue per day.
+EPG: delayed 2 hours and degraded 5 hours after the Madrid 17:00 due time without a new publication. Discovery: waiting inside its own `nextCatchUpAt`/`retryAt`, degraded after 3 hours without allowed progress. Ratings: the orchestration read model's own health (stalled two hours after its 17:00 Madrid due time (ADR 0101; 17:30 before)). Predictions: delayed after 3 hours and degraded after 6 hours with pending work and no model batch. Alerts: a degraded issue is confirmed by a second snapshot, a needs-owner issue alerts at once, cooldown 6 hours or 2 hours, at most eight messages per issue per day.
 
 Delivery is at-least-once. Webhook receivers should drop a message whose `id` they have already handled.
 

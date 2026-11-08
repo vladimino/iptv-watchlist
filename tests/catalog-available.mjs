@@ -215,4 +215,41 @@ assert.equal(carried.confidenceAssessment.level,'medium');
 assert.equal(carried.confidenceAssessment.fingerprintHash,assessmentHash);
 assert.deepEqual(puts,[]);
 
+// AIR-382: `letterboxdUrl` is an optional read-only field, present only when stored records prove the Letterboxd page of the TMDB film. `url` stays TMDB.
+{
+ const lb=slug=>'https://letterboxd.com/film/'+slug+'/';
+ const field=(body,id)=>body.films.find(film=>film.id===id);
+ // No metadata cache: no field at all, and `url` is untouched.
+ seed();r=await get();assert.equal(r.status,200);
+ assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'no record, no field');
+ assert.match(field(r.body,'tmdb_7').url,/themoviedb\.org/,'url stays the TMDB page');
+ // One Letterboxd record with this TMDB id and a canonical URL proves it.
+ seed();records.set('metadata.json',{'heat-1995':{id:'heat-1995',tmdbId:'7',url:lb('heat-1995')}});r=await get();
+ assert.equal(field(r.body,'tmdb_7').letterboxdUrl,lb('heat-1995'));
+ assert.equal(Object.hasOwn(field(r.body,'tmdb_18'),'letterboxdUrl'),false,'another film gets nothing');
+ assert.match(field(r.body,'tmdb_7').url,/themoviedb\.org/);
+ // Two different URLs for one TMDB id: conflicted for good, whatever the order.
+ for(const order of [['a','b'],['b','a']]){
+  seed();records.set('metadata.json',Object.fromEntries(order.map(k=>[k,{id:k,tmdbId:'7',url:lb(k)}])));r=await get();
+  assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'two URLs prove nothing');
+ }
+ // Two records with the same URL agree.
+ seed();records.set('metadata.json',{a:{id:'a',tmdbId:'7',url:lb('same')},b:{id:'b',tmdbId:'7',url:lb('same')}});r=await get();
+ assert.equal(field(r.body,'tmdb_7').letterboxdUrl,lb('same'));
+ // A Letterboxd id that bridges to two TMDB ids is unproven.
+ seed();records.set('metadata.json',{a:{id:'a',tmdbId:'7',url:lb('a')}});
+ const wl=records.get('watchlist.json');wl.films.push({id:'a',tmdbId:'18',title:'Clash'});records.set('watchlist.json',wl);r=await get();
+ assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'an ambiguous Letterboxd id bridges nothing');
+ // Malformed, TMDB-shaped or unsafe URLs are never exposed; a tmdb_ id is not a Letterboxd id; no record matches by title.
+ for(const bad of ['https://www.themoviedb.org/movie/7','http://letterboxd.com/film/x/','https://letterboxd.com/film/x','https://letterboxd.com/film/X_y/','https://letterboxd.com.evil.example/film/x/','javascript:alert(1)',7,null]){
+  seed();records.set('metadata.json',{x:{id:'x',tmdbId:'7',url:bad}});r=await get();
+  assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'rejected: '+String(bad));
+ }
+ seed();records.set('metadata.json',{tmdb_7:{id:'tmdb_7',tmdbId:'7',url:lb('x')}});r=await get();
+ assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'a TMDB-keyed record is not a Letterboxd identity');
+ seed();records.set('metadata.json',{x:{id:'x',title:'Film tmdb_7',original:'Original tmdb_7',year:2020,url:lb('x')}});r=await get();
+ assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'a title or year match is not proof');
+ assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+}
+
 console.log('Catalog available: pinned generation, verified catalog-only identity, real shows inside the 72h/24h window with statuses, current prediction for the current profile, watchlist/rating/seed exclusions, one entry per identity, deterministic order, channel summary, generation pin and no side effects passed');

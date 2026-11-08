@@ -63,7 +63,7 @@ With the defaults, a fault that never clears quarantines after cooldowns of abou
 | Element | EPG | Discovery | Ratings |
 | --- | --- | --- | --- |
 | Authority | D1 published EPG (`published_epg_authority` `d1` / `open`) | D1 discovery ledger once its marker is `d1` / `open`; executor not activated before | D1 ratings documents (`ratings_domain_authority` `d1` / `open`); removal events in R2 |
-| Run key | Madrid date, logical 17:00 | Published `programmeRunId` + series | Madrid date, logical 17:30 |
+| Run key | Madrid date, logical 17:00 | Published `programmeRunId` + series | Madrid date, logical 17:00 ([ADR 0101](../adr/0101-ratings-logical-due-time-1700.md); 17:30 in ADR 0090 until then) |
 | Checkpoint / receipt | Staged-step record of the run; the published pointer | Continuation checkpoint of the hop | Run record checkpoint, cursor, queue reference state |
 | Lease / CAS | Executor owner on the control record; the existing publication fence | Executor owner plus the existing resolver lease and continuation CAS | The run record lease (one running run, one active step) |
 | Allowed write order | Stage data, then switch the D1 pointer, then mirrors and tail | Decisions and catalogue updates, then the checkpoint | D1 documents, event by CAS, then the queue reference resolved |
