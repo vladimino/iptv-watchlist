@@ -252,10 +252,14 @@ const control=async harness=>(await harness.epg.readControl(harness.env)).record
 }
 
 // The scripted pipeline: a fixture sync.json that moves forward the way the real steps move it.
-function pipeline({metadataSteps=2,busyOnce=false,fail=null}={}){
- let busy=busyOnce,metadataLeft=metadataSteps,steps=0;
+function pipeline({metadataSteps=2,busyOnce=false,fail=null,windowBusy=null}={}){
+ let busy=busyOnce,metadataLeft=metadataSteps,steps=0,windowLeft=windowBusy?.times??0,busyUntil=0;
  return async(pathname,body,state)=>{
   steps++;
+  // ADR 0103: a projector window answers a structured, non-failure busy to its absolute deadline, at the stage given. The next step of
+  // the same run must not come before that deadline.
+  if(busyUntil&&pathname!=='/api/sync/start'&&state.now()<busyUntil)throw new Error('stepped before the window deadline');
+  if(windowLeft>0&&state.sync&&state.sync.stage===windowBusy.stage&&pathname!=='/api/sync/start'){windowLeft--;busyUntil=state.now()+windowBusy.ms+3000;return {body:{runId:state.sync.runId,stage:state.sync.stage,discovery:{state:'busy',nextAction:'wait',reason:'busy',busyKind:'projector_window',nextCatchUpAt:at(busyUntil)}}};}
   if(fail&&fail.at===steps)return fail.reply;
   if(pathname==='/api/sync/start'){
    state.sync={runId:'run-'+(++state.runs||(state.runs=1)),startedAt:at(state.now()),updatedAt:at(state.now()),stage:metadataLeft?'metadata':'epg',cursor:0,remaining:metadataLeft*10};
@@ -309,6 +313,28 @@ function runner(h,{startAt}){
  eq(await epg.ensure(env,{now:r.clock()}),{started:false,reason:'complete'});
  const model=await epg.readModel(env,r.clock());
  assert.equal(model.health,'healthy');assert.equal(model.published,'run-1');assert.equal(model.mode,'cloudflare');assert.equal(model.sideEffects,'none');
+}
+
+// 7b. ADR 0103: a projector window of up to 300 s answers `busy` (kind projector_window) at the EPG stage and again at the seal. The same
+// run waits to each deadline, charges no failure or retry budget, starts no second run and publishes once. The pipeline throws if a step
+// comes before the deadline it was given, so the wait is proved by the run finishing, not assumed.
+for(const stage of ['epg','seal']){
+ const h=cloudflare({pipeline:pipeline({metadataSteps:2,windowBusy:{stage,ms:300000,times:2}})});
+ const {epg,env,state}=h;
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const r=runner(h,{startAt:due});
+ await epg.ensure(env,{now:due});
+ const outcome=await epg.run(env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261107_0'});
+ const done=await control(h);
+ assert.equal(done.failure,null,stage+': a window wait charges no failure');
+ assert.equal(done.publishedRunId,'run-1');assert.equal(done.runId,'run-1',stage+': the same run');
+ const paths=state.calls.map(c=>c.pathname);
+ assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,stage+': no second run is started');
+ assert.ok(r.log.filter(n=>n.startsWith('sleep')).length>=2,stage+': each window wait is a durable sleep to the deadline');
+ assert.ok(r.clock()-due>=2*300000,stage+': the clock reached both deadlines');
+ const model=await epg.readModel(env,r.clock());
+ assert.equal(model.health,'healthy');assert.equal(model.published,'run-1');
 }
 
 // 8. Read-after-unknown: a run of this date that already completed (someone else drove it, or the control write was lost) is the

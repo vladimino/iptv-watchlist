@@ -4,6 +4,8 @@
 
 **Not measured and why.** Lease hold time, the time from a window request to its grant, and a projector run that waits for a window cannot be measured without the window, which needs the migration and the flag (two separate owner decisions). The Workers Observability reader rejects the cron and Workflow events of this Worker (its response validation fails on a missing `requestId`), so no per-chunk duration was read from logs. Each value marked *proxy* below stands in for a quantity that is not measured.
 
+**Correction, same day.** Section 5 treats the external daily Task as the publisher and the EPG executor of ADR 0100 as not yet active. A later read-only preflight found the executor mode `cloudflare` since 12:44 UTC with that day's run in flight; see [the Stage C preflight](air-383-stage-c-preflight-2026-11-08.md). The measurements below are unaffected.
+
 ## 1. Discovery activity is episodic, not constant
 
 `discovery_decision_history` rows per hour (decisions) and the generation range they span (`gen_span`):
