@@ -30,11 +30,11 @@ async function published(db){
  assert.equal(r.pointed,true,'a real D1-published generation');
 }
 const logs=[];
-function worldFor(){
+function worldFor({d1=true}={}){
  const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,clearTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},
   console:{error:(...args)=>logs.push(args.join(' ')),log(){},warn(){}},fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);
- vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scoped('src/discovery-authority.js','DiscoveryAuthority'),world);
+ if(d1){vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scoped('src/discovery-authority.js','DiscoveryAuthority'),world);}
  for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
  return world;
 }
@@ -115,16 +115,78 @@ for(const key of ['enrichment/profile/current.json','enrichment/view-index.json'
  assert.ok(r.body.degraded.includes('sync')&&r.body.degraded.includes('run'),'the silent sources are named: '+JSON.stringify(r.body.degraded));
 }
 
-// ---- 4. The cause of any other unhandled route error is now in the log (its code and message, nothing else) ----
+// ---- 4. R2 mode (Discovery and the published EPG still on R2): fail-closed gaps the first review found ----
+const r2=worldFor({d1:false});
+const pred=(id,rating)=>({fingerprintHash:'fp-'+id,impactFeatures:{fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,fingerprintPromptVersion:1},prediction:{predictedRating:rating,probability4Plus:.9,confidence:'high',tasteProfileVersion:7,tasteProfileHash:'profile-7',fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,predictionPromptVersion:1}});
+const verified=(id,tmdb)=>({id,tmdbId:String(tmdb),canonicalIdentity:'tmdb:'+tmdb,title:id,original:id,year:2020,genres:[],actors:[],directors:[],shows:[]});
+const r2Files=(over={})=>{
+ const files=new Map([
+  ['enrichment/profile/current.json',{version:7,updatedAt:'2026-10-12T18:00:00Z',profileHash:'profile-7',profile:{}}],
+  ['enrichment/view-index.json',{tmdb_77:pred('77',4.8)}],
+  ['programme.json',{runId:'p1',updatedAt:new Date(now).toISOString(),watchlistCount:0,films:[],stats:{}}],
+  ['epg/discovered-films.json',{tmdb_77:verified('tmdb_77',77)}],
+  ['watchlist.json',{updatedAt:new Date(now).toISOString(),films:[]}],['metadata.json',{}]]);
+ for(const [key,value] of Object.entries(over)){if(value===undefined)files.delete(key);else files.set(key,value);}
+ return {BUCKET:{async get(key){return files.has(key)?{etag:'e',json:async()=>structuredClone(files.get(key))}:null;},async put(){throw new Error('R2 write in a GET');},async list(){return {objects:[],truncated:false};}}};
+};
+const NULL_COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilmsTotal','windowCurrentPredictions','cacheOffWindowTotal','pendingOffWindowTotal','localPercent','windowPercent','windowPendingTotal'];
 {
- logs.length=0;
- const exploding={async get(){throw new Error('storage exploded');},async put(){},async list(){return {objects:[],truncated:false};}}; // no D1 binding: the published EPG read refuses with its own code
- const response=await world.worker.fetch(new Request('https://iptv.example/api/watchlist',{headers:{cookie:'secret=1',authorization:'Bearer secret-token'}}),{BUCKET:exploding},{waitUntil(){}});
- assert.equal(response.status,502);
- assert.equal(logs.length,1,'one structured line');
- const line=JSON.parse(logs[0]);
- assert.deepEqual(Object.keys(line).sort(),['code','event','message','method','path']);
- assert.deepEqual([line.event,line.method,line.path,line.code,line.message],['route_error','GET','/api/watchlist','published_epg_unavailable','published_epg_unavailable'],'the code and the message of the real cause');
- assert.doesNotMatch(logs[0],/secret|cookie|authorization/i,'no header or credential in the log');
+ // The control: with every source present the numbers are real.
+ let r=await footer(r2,r2Files());
+ assert.equal(r.status,200);assert.deepEqual([r.body.coverage.confirmedFilmsTotal,r.body.coverage.currentPredictionsTotal],[1,1]);
+ assert.deepEqual(r.body.recommendations.newUnseen,{state:'ok',rating40to44:0,rating45plus:1},'a valid 4.5+ catalog prediction is counted');
+ assert.equal(Object.hasOwn(r.body,'degraded'),false);
+ // B2: a catalog or a programme that is simply absent is not an empty collection with 0 films and 100% coverage.
+ for(const [label,over,name] of [['catalog absent',{'epg/discovered-films.json':undefined},'catalog_missing'],['programme absent',{'programme.json':undefined},'programme_missing']]){
+  r=await footer(r2,r2Files(over));
+  assert.equal(r.status,200,label);
+  assert.ok(r.body.degraded.includes(name),label+': named in degraded: '+JSON.stringify(r.body.degraded));
+  for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,label+': coverage.'+key+' is unknown, not 0 or 100');
+  assert.equal(r.body.collection.state,'unknown',label+': the collection is unknown');
+  // The new-film count reads the catalog, the watchlist, the index and the metadata; the programme only repeats the watchlist, so it alone does not make it unknown.
+  assert.equal(r.body.recommendations.newUnseen.state,name==='catalog_missing'?'unknown':'ok',label+': the new-film count follows the catalog');
+ }
+ // B1: a freshness rule that cannot be computed makes the new-film count unknown, never "no eligible film".
+ const original=vm.runInContext('predictionFreshness',r2);
+ try{
+  vm.runInContext('predictionFreshness=async()=>{throw new Error("boom")}',r2);
+  r=await footer(r2,r2Files());
+  assert.equal(r.status,200);assert.ok(r.body.degraded.includes('freshness'),'freshness is named: '+JSON.stringify(r.body.degraded));
+  assert.deepEqual(r.body.recommendations.newUnseen,{state:'unknown',rating40to44:null,rating45plus:null},'a failing freshness is unknown, not an authoritative 0');
+  for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,'coverage.'+key+' is unknown without freshness');
+  vm.runInContext('predictionFreshness=()=>new Promise(()=>{})',r2);
+  const started=Date.now();r=await footer(r2,{...r2Files(),FOOTER_SOURCE_TIMEOUT_MS:60});
+  assert.ok(Date.now()-started<3000,'a hung freshness is cut off');assert.equal(r.status,200);
+  assert.equal(r.body.recommendations.newUnseen.state,'unknown','a hung freshness is unknown too');assert.ok(r.body.degraded.includes('freshness'));
+ }finally{vm.runInContext('predictionFreshness=__original',Object.assign(r2,{__original:original}));}
+ r=await footer(r2,r2Files());assert.equal(r.body.recommendations.newUnseen.rating45plus,1,'the real freshness rule is restored');
 }
-console.log('Footer resilience: a real D1-published generation never writes on a footer GET (missing or stale mirrors), a loading, pending or held Discovery transfer no longer turns the footer into a 502 and leaves ledger-dependent values unknown, failing and silent sources are named and bounded, and an unhandled route error leaves a structured log line passed');
+
+// ---- 5. The log line carries only values shaped like an internal code ----
+{
+ const failWith=async(error,world=r2)=>{
+  logs.length=0;
+  const files=r2Files();
+  const env={BUCKET:{...files.BUCKET,async get(key){if(key==='watchlist.json')throw error;return files.BUCKET.get(key);}}};
+  const response=await world.worker.fetch(new Request('https://iptv.example/api/watchlist',{headers:{cookie:'secret=1',authorization:'Bearer secret-token'}}),env,{waitUntil(){}});
+  return {status:response.status,logs:[...logs],line:logs.length?JSON.parse(logs[0]):null,raw:logs.join('\n')};
+ };
+ // An internal code passes, and so does the name of the error class.
+ let r=await failWith(Object.assign(new Error('discovery_incomplete'),{code:'discovery_fence'}));
+ assert.equal(r.status,502);assert.equal(r.logs.length,1,'one structured line');
+ assert.deepEqual(Object.keys(r.line).sort(),['code','event','message','method','name','path']);
+ assert.deepEqual([r.line.event,r.line.method,r.line.path,r.line.code,r.line.message,r.line.name],['route_error','GET','/api/watchlist','discovery_fence','discovery_incomplete','Error']);
+ // Everything else is dropped: a film id, SQL, a path, a secret, a library message, a non-Error value, a code that is not code-shaped.
+ const private_=['film:tmdb_1234567 failed','SELECT payload_json FROM discovery_admission WHERE film_id=\'x\'','epg/generations/22222222-2222-4222-8222-222222222222/programme.json is missing','Bearer abc.def.ghi rejected','D1_ERROR: no such table: film_person','Letterboxd lid heat-1995 not found','R2 write in a GET: programme.json','Discovery_Incomplete','x'.repeat(200)];
+ for(const text of private_){
+  r=await failWith(new Error(text));
+  assert.equal(r.status,502,text.slice(0,30));assert.equal(r.logs.length,1);
+  assert.equal(r.line.message,null,'a free-text message is not logged: '+text.slice(0,40));
+  assert.equal(r.line.code,null);
+  for(const fragment of ['tmdb_1234567','SELECT','discovery_admission','22222222','Bearer','heat-1995','no such table','programme.json','secret','cookie','authorization'])assert.ok(!r.raw.includes(fragment),'the log never carries: '+fragment);
+ }
+ r=await failWith(Object.assign(new Error('boom'),{code:'FILM tmdb_9 / secret'}));assert.equal(r.line.code,null,'a code that is not code-shaped is dropped');assert.ok(!r.raw.includes('secret'));
+ r=await failWith(new TypeError('x is not a function'));assert.equal(r.line.name,'TypeError','the error class is kept');assert.equal(r.line.message,null);
+ r=await failWith('a thrown string with a film id tmdb_5');assert.equal(r.status,502);assert.deepEqual([r.line.code,r.line.message,r.line.name],[null,null,null]);assert.ok(!r.raw.includes('tmdb_5'));
+}
+console.log('Footer resilience: a real D1-published generation never writes on a footer GET (missing or stale mirrors), a loading, pending or held Discovery transfer no longer turns the footer into a 502 and leaves ledger-dependent values unknown, failing and silent sources are named and bounded, and freshness or a missing programme/catalog make the new-film count and the coverage unknown, and the route-error log line carries only code-shaped values passed');

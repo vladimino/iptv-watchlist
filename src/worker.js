@@ -1489,8 +1489,10 @@ async fetch(request,env,execution){
  const page=url.pathname==='/events'?'/':/^\/film\/[A-Za-z0-9_-]{1,80}$/.test(url.pathname)?'/':url.pathname,asset=ASSETS[page];if(asset&&(request.method==='GET'||request.method==='HEAD'))return new Response(request.method==='HEAD'?null:asset.body,{headers:{'Content-Type':asset.type+'; charset=utf-8','Cache-Control':'no-cache'}});
  return json({error:'Not found'},404);
  }catch(e){
-  // The only trace of an unhandled route error: its code and message (our own error text, never a body, header or id), so a 502 can be read from the logs.
-  console.error(JSON.stringify({event:'route_error',method:request.method,path:url.pathname,code:typeof e?.code==='string'?e.code:null,message:String(e?.message||e).slice(0,160)}));
+  // The only trace of an unhandled route error, so a 502 can be read from the logs. Only values shaped like an internal code are logged (lower-case letters,
+  // digits and underscores, at most 64): an error text from D1, a provider or a library can carry a film id, a SQL statement, a path or a secret, and is dropped.
+  const internalCode=value=>typeof value==='string'&&/^[a-z][a-z0-9_]{1,63}$/.test(value)?value:null;
+  console.error(JSON.stringify({event:'route_error',method:request.method,path:url.pathname,code:internalCode(e?.code),message:internalCode(e?.message),name:typeof e?.name==='string'&&/^[A-Za-z]{1,40}$/.test(e.name)?e.name:null}));
   return json({error:e.message},502);
  }
 }};
