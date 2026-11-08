@@ -338,6 +338,10 @@ assert.doesNotMatch(linked,/href="\/film\//,'a catalog film that is not loaded d
   assert.equal(count(html,/letterboxd-link/g),1);
   assert.doesNotMatch(html,/themoviedb\.org|javascript|href="\/film\//,'no TMDB jump, no untrusted value');
  }
+ // A catalog row's own `url` is TMDB: a Letterboxd-looking value there does not override the redirect.
+ const spoofed=catalogHtml({url:'https://letterboxd.com/film/some-slug/'});
+ assert.match(spoofed,/href="https:\/\/letterboxd\.com\/tmdb\/31"/);
+ assert.doesNotMatch(spoofed,/some-slug/,'the untrusted catalog url is not used');
  // A local/watchlist row never gets the redirect, whatever ids it carries.
  load({films:[open,watch('local-peer',{title:'Сосед',tmdbId:'77',canonicalIdentity:'tmdb:77'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:null});
  const localHtml=run('renderSimilar(now).filter(row=>row.film.id==="local-peer").map(row=>similarCard(row,now)).join("")');

@@ -611,7 +611,7 @@ function madridDay(ms){return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/
 function matchHintText(reason){return {ambiguous_short_title_without_year:'Короткое название без года: возможна другая версия.',ambiguous_collision:'Несколько фильмов подходят под это название.',ambiguous_margin:'Совпадение недостаточно уверенное.',contradicted_year:'Год не сходится с известным фильмом.',contradicted_runtime:'Длительность сильно отличается.',no_confident_score:'Нет уверенного совпадения.',no_exact_title:'Название совпало неточно.',no_confident_match:'Нет уверенного совпадения.'}[reason]||'Совпадение неуверенное: возможна другая версия фильма.';}
 // AIR-382. A Letterboxd link needs a proven URL. Watchlist films carry it as `url`; a catalog find carries a TMDB `url`, so only the separate read-only `letterboxdUrl` can prove it there.
 // AIR-384. One pure resolver for the Letterboxd icon target, in this order:
-// 1. a validated canonical Letterboxd film URL (`letterboxdUrl`, or `url` of a watchlist film): always wins;
+// 1. a validated canonical Letterboxd film URL (`letterboxdUrl`; for a watchlist/local film also its `url`): always wins;
 // 2. only for a catalog-only film (`catalog:true`) with a verified TMDB movie identity (`canonicalIdentity` exactly `tmdb:<n>`, agreeing with `tmdbId`, n a
 //    positive integer): Letterboxd's own documented redirect `https://letterboxd.com/tmdb/<n>`. It is a navigation aid, not a Letterboxd id, slug or
 //    provenance: it is never stored, never sent to the API, and nothing is fetched to check it. TV, unknown, mismatched or malformed identities get none;
@@ -619,7 +619,8 @@ function matchHintText(reason){return {ambiguous_short_title_without_year:'Ко�
 const LETTERBOXD_FILM_URL=/^https:\/\/letterboxd\.com\/film\/[a-z0-9-]+\/$/,TMDB_MOVIE_ID=/^[1-9]\d{0,11}$/;
 function letterboxdTarget(film,{catalog=false}={}){
  const valid=value=>typeof value==='string'&&LETTERBOXD_FILM_URL.test(value)?value:'';
- const canonical=valid(film?.letterboxdUrl)||valid(film?.url);
+ // A catalog film's `url` is its TMDB page, never Letterboxd provenance: for a catalog-only film only `letterboxdUrl` can be canonical.
+ const canonical=valid(film?.letterboxdUrl)||(catalog?'':valid(film?.url));
  if(canonical)return {href:canonical,kind:'canonical'};
  if(!catalog||!film)return null;
  const raw=film.tmdbId,id=typeof raw==='string'||Number.isSafeInteger(raw)?String(raw):'';

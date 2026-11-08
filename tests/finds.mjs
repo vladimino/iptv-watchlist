@@ -116,6 +116,16 @@ assert.equal((card.match(/<a /g)||[]).length,1,'the icon is the only link in the
  assert.match(withIcon,new RegExp('<h3>Богатый<a class="letterboxd-link" href="'+lb.replace(/[.\/]/g,'\\$&')+'" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"'),'a stored canonical URL always wins and keeps the plain label');
  assert.doesNotMatch(withIcon,/letterboxd\.com\/tmdb\//,'no redirect next to a known canonical URL');
  assert.equal((withIcon.match(/<a /g)||[]).length,1,'only the icon is a link');
+ // A catalog film's `url` is its TMDB page, not provenance: even a syntactically valid Letterboxd-looking `url` cannot override the verified redirect.
+ for(const spoof of ['https://letterboxd.com/film/some-slug/','https://letterboxd.com/film/rich-film/']){
+  const html=run('findsCard(input,now)',{...rich,url:spoof});
+  assert.match(html,/href="https:\/\/letterboxd\.com\/tmdb\/71"/,'the redirect stays: '+spoof);
+  assert.doesNotMatch(html,/some-slug|rich-film/,'the untrusted catalog url is not shown');
+  assert.deepEqual(target({...rich,url:spoof},{catalog:true}),{href:'https://letterboxd.com/tmdb/71',kind:'tmdb-redirect'});
+  assert.deepEqual(target({...rich,url:spoof,tmdbId:undefined,canonicalIdentity:undefined},{catalog:true}),null,'and without a verified id there is no icon at all');
+  assert.deepEqual(target({...rich,url:spoof}),{href:spoof,kind:'canonical'},'a watchlist/local film still uses its own Letterboxd url');
+  assert.deepEqual(target({...rich,url:spoof,letterboxdUrl:lb},{catalog:true}),{href:lb,kind:'canonical'},'a proven letterboxdUrl still wins for a catalog film');
+ }
  // A malformed or unsafe stored value is never echoed: a verified id falls back to the redirect.
  for(const bad of ['https://www.themoviedb.org/movie/71','http://letterboxd.com/film/x/','https://letterboxd.com/film/x','https://letterboxd.com/film/X_y/','https://letterboxd.com.evil.example/film/x/','javascript:alert(1)','https://letterboxd.com/film/x/"onmouseover="a',42,null,{}]){
   const html=run('findsCard(input,now)',{...rich,letterboxdUrl:bad});
