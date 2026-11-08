@@ -167,7 +167,7 @@ const classes={
  'sealFinalizeStep@src/worker.js':'under the sealStep lease',
  'sealPublishStep@src/worker.js':'under the sealStep lease',
  'sealQueueStep@src/worker.js':'under the sealStep lease',
- 'persistEpgEvent@src/worker.js':'EPG event log and the run record (sync.json), not projector inputs; under the sealStep lease or finishSync',
+ 'flushEpgEvent@src/worker.js':'EPG event log and the run record (sync.json), not projector inputs; under the sealStep lease, finishSync or the complete-run continuation',
  'copyEpgGeneration@src/worker.js':'under the publication lease',
  'persistWatchlist@src/worker.js':'under the publication lease',
  'planDiscoveryLedger@src/worker.js':'under the publication lease',

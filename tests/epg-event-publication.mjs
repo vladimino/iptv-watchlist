@@ -115,24 +115,39 @@ assert.equal(mine.length,1);assert.equal(mine[0].at,records.get('sync.json').upd
 await post('/api/sync/epg',{runId});await settle();
 assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a further step is idempotent');
 
-// 4a. AIR-390: the completion time is fixed before the event is written; a failed event write and a retry keep one time and one key.
+// 4a. AIR-390: the event is written only after the run is durably complete; every failure order keeps one time, one key and no false event.
 {
- const runC=await readyToCommit();
- showCount=1;let failures=0;failPublish=key=>{if(key.includes('-epg.json')&&failures<2){failures++;return true;}return false;};
- const interrupted=await post('/api/sync/epg',{runId:runC});assert.ok(interrupted.status>=500,'the EPG event write failure surfaces');
- failPublish=null;
- assert.equal(records.get('programme.json').runId,runC,'published');
- assert.equal(epgEvents().filter(event=>event.id===runC+'-epg').length,0,'no EPG event and no false update while the run is not complete');
- const interruptedRun=records.get('sync.json');assert.notEqual(interruptedRun.stage,'complete');assert.ok(interruptedRun.completedAt,'the completion time is saved before the event write');
- const fixedAt=interruptedRun.completedAt;await pause();
- const again=await post('/api/sync/epg',{runId:runC});assert.equal(again.status,200,JSON.stringify(again.data));
- const eventsOfRun=epgEvents().filter(event=>event.id===runC+'-epg');
- assert.equal(eventsOfRun.length,1);assert.equal(eventsOfRun[0].at,fixedAt,'the retry writes the saved time');
- assert.equal(records.get('sync.json').updatedAt,fixedAt,'sync.json, the footer source, carries the same time');
- const keysBefore=events().map(event=>event.key).join();
+ const mineOf=id=>epgEvents().filter(event=>event.id===id+'-epg');
+ // (i) The save of the complete run record fails: the event is not written, the persisted run is not complete.
+ let runC=await readyToCommit();showCount=1;let failed=0;
+ failPublish=(key,body)=>{if(key==='sync.json'&&body.stage==='complete'&&body.epgEventPending&&!failed){failed++;return true;}return false;};
+ const noSave=await post('/api/sync/epg',{runId:runC});assert.ok(noSave.status>=500,'the failed complete-save surfaces');failPublish=null;
+ assert.equal(failed,1);assert.equal(mineOf(runC).length,0,'no EPG event while the complete record is not saved');
+ {const persisted=records.get('sync.json');assert.ok(persisted.stage!=='complete'||persisted.epgEventPending,'a persisted complete record always carries the parked event (the error handler may save it)');}
+ await pause();
+ const recovered=await post('/api/sync/epg',{runId:runC});assert.equal(recovered.status,200,JSON.stringify(recovered.data));
+ const done=records.get('sync.json');assert.equal(done.stage,'complete');assert.equal(done.epgEventPending,undefined);
+ // The error handler of the failed attempt may have saved the record with a later updatedAt (milliseconds); the event keeps the completion time.
+ assert.equal(mineOf(runC).length,1);assert.equal(mineOf(runC)[0].at,done.completedAt);assert.ok(Math.abs(Date.parse(done.updatedAt)-Date.parse(done.completedAt))<5000);
+ // (ii) The event put fails after the complete record is saved: the run is complete, the event is parked and the next step writes it.
+ runC=await readyToCommit();showCount=1;let putFails=0;
+ failPublish=key=>{if(key.includes('-epg.json')&&putFails<1){putFails++;return true;}return false;};
+ const parked=await post('/api/sync/epg',{runId:runC});assert.equal(parked.status,200,JSON.stringify(parked.data));failPublish=null;
+ assert.equal(putFails,1);const parkedRun=records.get('sync.json');
+ assert.equal(parkedRun.stage,'complete');assert.ok(parkedRun.epgEventPending,'the finished event is parked on the complete run');assert.equal(parkedRun.epgEventPending.at,parkedRun.updatedAt);
+ assert.equal(mineOf(runC).length,0,'missing, never false: the run record is complete and the event is not there yet');
+ const fixedAt=parkedRun.completedAt;await pause();
  await post('/api/sync/epg',{runId:runC});await settle();
- assert.equal(events().map(event=>event.key).join(),keysBefore,'a repeat writes no new key');
- // Newest first by the completion time.
+ assert.equal(mineOf(runC).length,1);assert.equal(mineOf(runC)[0].at,fixedAt,'the continuation writes the parked time');
+ assert.equal(records.get('sync.json').epgEventPending,undefined);assert.equal(records.get('sync.json').updatedAt,fixedAt);
+ // (iii) The event is written but clearing the mark fails: the repeat writes the same key and clears it; never a second event.
+ runC=await readyToCommit();showCount=1;let clearFails=0;
+ failPublish=(key,body)=>{if(key==='sync.json'&&body.stage==='complete'&&!body.epgEventPending&&mineOf(runC).length===1&&!clearFails){clearFails++;return true;}return false;};
+ const unmarked=await post('/api/sync/epg',{runId:runC});assert.equal(unmarked.status,200,JSON.stringify(unmarked.data));failPublish=null;
+ assert.equal(clearFails,1);assert.equal(mineOf(runC).length,1,'the event is there once');assert.ok(records.get('sync.json').epgEventPending,'the persisted mark is still set');
+ const keysBefore=events().map(event=>event.key).join(),atBefore=mineOf(runC)[0].at;
+ await post('/api/sync/epg',{runId:runC});await settle();
+ assert.equal(records.get('sync.json').epgEventPending,undefined);assert.equal(events().map(event=>event.key).join(),keysBefore,'no new key');assert.equal(mineOf(runC)[0].at,atBefore);
  const order=(await read('/api/events')).events.filter(event=>event.type==='epg').map(event=>event.at);
  assert.deepEqual(order,[...order].sort().reverse(),'events are ordered newest first');
 }

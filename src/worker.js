@@ -558,22 +558,28 @@ async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
 // AIR-390: the journal written with the watchlist and the scan is every event except the `epg` one. The `epg` event is written
-// by persistEpgEvent when the run completes, so its `at` is the completion time that sync.json also carries.
+// by flushEpgEvent once the run is complete, so its `at` is the completion time that sync.json also carries.
 async function persistEvents(env,run,report){for(const event of run.events)if(event?.type!=='epg')await writeEvent(env,event);}
-// One `epg` event per run. `at` is `run.completedAt`, fixed and saved to sync.json before the event is written, so a retry, a
-// resumed seal or a repeated finishSync writes the same key. Counts are those of the published report (an event of a superseded scan is rebuilt from it). A run that already
+// One `epg` event per run, written only after the run is durably `complete`. `prepareEpgCompletion` fixes `run.completedAt` and
+// parks the finished event in `run.epgEventPending`; the caller saves the complete run record (with `updatedAt = completedAt`) and
+// only then `flushEpgEvent` puts the event and clears the mark. A failed save of the complete record therefore exposes no event, and a
+// failed put or clear leaves the mark on the persisted complete run: the next step on it (the continuation branch) writes the same key
+// again and clears it. Counts are those of the published report (an event of a superseded scan is rebuilt from it). A run that already
 // has its event under the scan time (written by code before AIR-390, in a seal that spans a deploy) keeps it and gets no second one.
-async function persistEpgEvent(env,run,report){
+async function prepareEpgCompletion(env,run,report){
  const base=(run.events||[]).find(item=>item?.type==='epg');
- if(!base)return;
- if(!run.completedAt){
-  if(await loadJSON(env,removalEventKey({at:report.updatedAt,id:base.id})))return;
-  run.completedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
- }
- await writeEvent(env,{...(base.at===report.updatedAt?base:epgEvent(report,base.id)),at:run.completedAt});
+ if(!base||run.completedAt)return;
+ if(await loadJSON(env,removalEventKey({at:report.updatedAt,id:base.id})))return;
+ run.completedAt=new Date().toISOString();
+ run.epgEventPending={...(base.at===report.updatedAt?base:epgEvent(report,base.id)),at:run.completedAt};
+}
+async function flushEpgEvent(env,run){
+ if(!run.epgEventPending)return;
+ try{await writeEvent(env,run.epgEventPending);delete run.epgEventPending;await saveJSON(env,'sync.json',run);}
+ catch(e){console.error(JSON.stringify({event:'epg_event_pending',runId:String(run.runId||'').slice(0,64)}));}
 }
 async function finishSyncPersist(env,run,report){await persistWatchlist(env,run,report);await persistScan(env,run,report);await persistEvents(env,run,report);}
-async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await persistEpgEvent(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -1228,11 +1234,12 @@ async function sealQueueStep(env,run,deadline=Infinity){
  const report=payload.report;
  const out=await sealUnits(env,run,deadline,[
   {name:'refresh',phase:'queue',work:async()=>{try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);}return 'ok';}},
-  {name:'epg_event',phase:'epg_event',work:async()=>{await persistEpgEvent(env,run,report);return 'ok';}},
  ]);
  if(!out.done)return await sealCheckpoint(env,run,out);
+ await prepareEpgCompletion(env,run,report);
  run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
  await saveJSON(env,'sync.json',run);
+ await flushEpgEvent(env,run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
 }
@@ -1378,7 +1385,7 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const executor=discoveryExecutorMode(env);if(executor==='invalid'){step.branch='executor_invalid';return json({error:'discovery_executor_invalid',executor:'invalid'},503);}if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';await flushEpgEvent(env,run);if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const executor=discoveryExecutorMode(env);if(executor==='invalid'){step.branch='executor_invalid';return json({error:'discovery_executor_invalid',executor:'invalid'},503);}if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
  if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run,entryAt);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
