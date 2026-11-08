@@ -58,6 +58,32 @@ async function digest(text){
  return [...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
 function closed(){return {ready:false,held:false,tables:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
+// AIR-387. One catalog film by TMDB movie id, for the permanent film page. A bounded read-only lookup: one indexed row
+// (media_kind, tmdb_id), no catalog scan, no write. It answers every state of that identity, so the caller can tell a film
+// that was never admitted from one that was superseded, and it fails closed like `routeRead`: a held cutover, a catalog or
+// decision load in progress, or a mid-read change of the authority throws and is never turned into "absent".
+export async function readFilmAdmission(env,tmdbId){
+ const id=String(tmdbId);
+ if(!/^[1-9]\d{0,11}$/.test(id))throw failed('discovery_conflict');
+ const opened=await readAuthority(env);
+ if(opened.held)throw failed('discovery_fence');
+ if(!opened.ready)return {handled:false};
+ let sealing=false;
+ if(opened.transfer==='loading'){
+  if(!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+  sealing=true;
+ }
+ const rows=await many(database(env),"SELECT film_id, payload_json, canonical_identity, tmdb_id, state FROM discovery_admission WHERE media_kind='movie' AND tmdb_id=? ORDER BY film_id",[id]);
+ const closedGate=await readAuthority(env);
+ if(sealing){if(!closedGate.ready||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer!=='loading')throw failed('discovery_fence');}
+ else if(!closedGate.ready||closedGate.generation!==opened.generation||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer==='loading')throw failed('discovery_fence');
+ const records=[];
+ for(const row of rows){
+  let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
+  records.push({filmId:String(row.film_id),state:row.state,canonicalIdentity:row.canonical_identity,tmdbId:String(row.tmdb_id),film});
+ }
+ return {handled:true,records};
+}
 export function ownsKey(key){
  return key==='epg/discovery-latest.json'||key==='epg/discovered-films.json'||key==='epg/discovery-resolution.json'||key==='epg/discovery-status.json'||key==='epg/discovery-score-preview.json'||key==='epg/resolver-continuation.json'||key==='epg/resolver-lease.json'||key==='epg/discovery-workflow.json'||GENERATION_KEY.test(key);
 }

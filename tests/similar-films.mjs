@@ -330,13 +330,13 @@ assert.doesNotMatch(linked,/href="\/film\//,'a catalog film that is not loaded d
  const catalogHtml=extra=>{load({films:[open,watch('local-peer',{title:'Сосед'})],enrichment:{open:openStored,'local-peer':stored({mechanics:['heist']})},catalogFilms:[{...catalog('tmdb_31',31,{title:'Снаружи',mechanics:['investigation'],prediction:strong(4.4,.8)}),...extra}]});return run('renderSimilar(now).filter(row=>row.source==="catalog").map(row=>similarCard(row,now)).join("")');};
  const proven=catalogHtml({letterboxdUrl:lb});
  assert.equal(count(proven,/class="letterboxd-link"/g),1);
- assert.match(proven,/<h3>Снаружи<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/film\/assassins-creed\/" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"/,'plain-text title, then the canonical icon');
- assert.doesNotMatch(proven,/themoviedb\.org|letterboxd\.com\/tmdb|data-similar-open="tmdb_31"|href="\/film\//,'a known URL is never replaced by the redirect');
+ assert.match(proven,/<h3><button type="button" class="film-similar-open" data-similar-open="tmdb_31">Снаружи<\/button><a class="letterboxd-link" href="https:\/\/letterboxd\.com\/film\/assassins-creed\/" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd" aria-label="Открыть в Letterboxd"/,'plain-text title, then the canonical icon');
+ assert.doesNotMatch(proven,/themoviedb\.org|letterboxd\.com\/tmdb/,'a known URL is never replaced by the redirect, and the title never jumps to TMDB');
  for(const extra of [{},{letterboxdUrl:null},{letterboxdUrl:'https://www.themoviedb.org/movie/31'},{letterboxdUrl:'javascript:alert(1)'},{letterboxdUrl:'https://letterboxd.com/film/x'},{letterboxdUrl:42}]){
   const html=catalogHtml(extra);
-  assert.match(html,/<h3>Снаружи<a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/31" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd по TMDB id" aria-label="Открыть в Letterboxd по TMDB id"/,'redirect icon for '+JSON.stringify(extra));
+  assert.match(html,/<h3><button type="button" class="film-similar-open" data-similar-open="tmdb_31">Снаружи<\/button><a class="letterboxd-link" href="https:\/\/letterboxd\.com\/tmdb\/31" target="_blank" rel="noopener noreferrer" title="Открыть в Letterboxd по TMDB id" aria-label="Открыть в Letterboxd по TMDB id"/,'redirect icon for '+JSON.stringify(extra));
   assert.equal(count(html,/letterboxd-link/g),1);
-  assert.doesNotMatch(html,/themoviedb\.org|javascript|href="\/film\//,'no TMDB jump, no untrusted value');
+  assert.doesNotMatch(html,/themoviedb\.org|javascript/,'no TMDB jump, no untrusted value');
  }
  // A catalog row's own `url` is TMDB: a Letterboxd-looking value there does not override the redirect.
  const spoofed=catalogHtml({url:'https://letterboxd.com/film/some-slug/'});
@@ -490,12 +490,19 @@ run('renderSimilar(now)');
 const moved=ui.document.activeElement;
 assert.notEqual(moved,focused,'a changed title replaces the card');
 assert.equal(moved.dataset.similarOpen,'peer','focus returns to the same loaded film');
-assert.equal(rich.querySelectorAll('a.film-similar-external').length,0,'a catalog-only title is not focusable');
+// AIR-387: a verified catalog-only title opens the internal page, so it is a focusable button like a loaded film's.
+const catalogOpen=()=>rich.querySelectorAll('[data-similar-open]').find(node=>node.dataset.similarOpen==='tmdb_40');
+assert.ok(catalogOpen(),'a catalog-only title is a button to the internal page');
+ui.document.activeElement=catalogOpen();
+vm.runInContext("findsSource.films.find(item=>item.id==='tmdb_40').title='Другое снаружи'",ui);
+run('renderSimilar(now)');
+assert.notEqual(ui.document.activeElement,undefined);
+assert.equal(ui.document.activeElement.dataset.similarOpen,'tmdb_40','focus returns to the same catalog title');
 ui.document.activeElement=rich.querySelectorAll('[data-similar-open]')[0];
 vm.runInContext("films=films.filter(item=>item.id!=='peer')",ui);
 run('renderSimilar(now)');
-assert.equal(rich.querySelectorAll('[data-similar-open]').length,0,'the loaded film is gone');
-assert.equal(ui.document.activeElement?.classList?.contains('film-similar-external')||false,false,'focus is not moved onto a different card');
+assert.deepEqual(rich.querySelectorAll('[data-similar-open]').map(node=>node.dataset.similarOpen),['tmdb_40'],'the loaded film is gone, the catalog title stays');
+assert.equal(rich.querySelectorAll('[data-similar-open]').includes(ui.document.activeElement),false,'focus is not moved onto a different card');
 
 // Source order: up to four watchlist films, then finds. A fifth watchlist film does not come back after a short catalog tail.
 const sourceOpen=stored({mechanics:['heist','investigation'],moods:['tense'],execution:{pace:'fast',plot_engine:'strong'},prediction:strong(4.1,.75)});

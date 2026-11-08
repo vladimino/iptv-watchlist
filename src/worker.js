@@ -66,6 +66,17 @@ async function epgPublication(env){
  const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
  return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
 }
+// The publication as `epgPublication` reports it (authority, run, phase, fence, generation), read with SELECTs only. `epgPublication` repairs the
+// R2 compatibility mirrors of a D1 generation (an R2 write) before it answers; a route that promises to be a pure read uses this one instead.
+// The generation fence is kept: the caller reads its documents at this exact generation (`readDocumentAt` re-checks it before and after).
+async function epgPublicationReadOnly(env){
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live)return {authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,etag:live.fence,fence:live.fence,generation:live.generation};
+ }
+ const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
+ return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
+}
 async function pinEpg(env){
  if(env.epgPin?.programmeRunId||env.epgPin?.authority==='d1')return env;
  if(typeof PublishedEpg!=='undefined'){
@@ -284,6 +295,80 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  const displayExclusion={state:titleExclusion.state,excluded:[...hiddenIdentities].filter(identity=>!byIdentity.has(identity)).length};
  return {programmeRunId,pinned,watchedMarkEnabled,generatedAt:new Date(now).toISOString(),window:{from:new Date(from).toISOString(),to:new Date(to).toISOString()},profile:profile?{version:profile.version}:null,total:films.length,posterCoverage,displayExclusion,films,channels:[...channels.values()].sort((a,b)=>String(a.channelId).localeCompare(String(b.channelId),'en'))};
 }
+// AIR-387. The permanent film page of one verified catalog film, whatever its shows, its prediction or the watchlist say. It is the same
+// catalog entry shape as `catalogAvailable` (so the client's similar-films ranking reads it unchanged), but without any eligibility rule: no
+// window, no consumed/watchlist exclusion, no title exclusion. What it never does is invent: a prediction only when the stored one is current
+// for the current profile and fingerprint, shows only when the record's shows were written by the pinned generation (zero shows is a valid
+// answer), a Letterboxd link only when stored records prove it. No write, no fetch.
+const CATALOG_FILM_TMDB=/^[1-9]\d{0,11}$/;
+function catalogFilmPage({film,programmeRunId,index,profile,metadata,watchlist,programme,freshness,now}){
+ const id=String(film.id),tmdbId=String(film.tmdbId),item=index?.[id],artwork=catalogPosters(metadata)(film);
+ const letterboxdUrl=catalogLetterboxdUrls({metadata,watchlist,programme,catalog:{[id]:film}})(film);
+ const current=!!(profile&&item?.prediction&&freshness.indexed(item,film));
+ const prediction=current?item.prediction:null,fingerprint=current&&item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=prediction?canonicalMoodFacet(fingerprint,prediction):null;
+ const shows=programmeRunId&&film.showsProgrammeRunId===programmeRunId&&Array.isArray(film.shows)?dedupeShows(film.shows).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en')):[];
+ const future=shows.filter(show=>Number(show.start)>now),latest=shows.length?Math.max(...shows.map(show=>Number(show.start))):null;
+ return {id,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
+  directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
+  shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
+  availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:latest===null?null:new Date(latest+CATALOG_ARCHIVE_MS).toISOString(),
+  prediction:prediction?{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds}:null,
+  fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
+}
+// The state of one TMDB movie identity among the catalog records read for it. Only a record whose identity is exactly `tmdb:<n>` is a film here;
+// a record of that number with another identity is a conflict, and a superseded one is retired, never silently replaced by another record.
+function catalogFilmState(records,tmdbId){
+ const identity='tmdb:'+tmdbId;
+ const same=records.filter(record=>String(record.tmdbId)===tmdbId);
+ if(!same.length)return {state:'absent'};
+ const verified=same.filter(record=>record.canonicalIdentity===identity&&record.film?.canonicalIdentity===identity&&String(record.film?.tmdbId)===tmdbId&&String(record.film?.id)===record.filmId);
+ const current=verified.filter(record=>record.state==='current');
+ if(current.length===1)return {state:'found',film:current[0].film};
+ if(current.length>1)return {state:'conflict'};
+ if(same.some(record=>record.state==='pending'))return {state:'unavailable'};
+ if(verified.length&&verified.every(record=>record.state==='superseded'))return {state:'retired'};
+ return {state:'conflict'};
+}
+async function catalogFilmRoute(env,tmdbId){
+ if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
+ const now=Date.now();
+ let found;
+ try{
+  const admission=typeof DiscoveryAuthority!=='undefined'?await DiscoveryAuthority.readFilmAdmission(env,tmdbId):{handled:false};
+  if(admission.handled)found=catalogFilmState(admission.records,tmdbId);
+  else{
+   // Discovery still on R2: the one shared catalog object, filtered by identity (no D1 here, nothing is superseded).
+   const shared=await loadJSON(env,'epg/discovered-films.json');
+   // A missing or malformed catalog object is a source that cannot be read, not proof that the film was never admitted.
+   if(!shared||typeof shared!=='object'||Array.isArray(shared)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+   found=catalogFilmState(Object.entries(shared||{}).filter(([,film])=>film&&String(film.tmdbId)===tmdbId).map(([filmId,film])=>({filmId,state:'current',canonicalIdentity:film.canonicalIdentity,tmdbId:String(film.tmdbId),film})),tmdbId);
+  }
+ }catch(error){
+  const code=error?.code||'';
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
+  return json({status:'error',error:'The catalog lookup failed'},500);
+ }
+ if(found.state==='absent')return json({status:'absent'},404);
+ if(found.state==='retired')return json({status:'retired'},410);
+ if(found.state==='conflict')return json({status:'conflict'},409);
+ if(found.state==='unavailable')return json({status:'unavailable',error:'The catalog is being updated',reason:'discovery_pending'},503);
+ // The optional context degrades to "nothing known": a film with no shows, no prediction and no Letterboxd link is still a film.
+ const degraded=[],optional=async(name,load)=>{try{return await load();}catch{degraded.push(name);return null;}};
+ const publication=await optional('publication',()=>epgPublicationReadOnly(env));
+ const pinnedRunId=publication?.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
+ const [programme,watchlist,index,profile,metadata]=await Promise.all([
+  pinnedRunId?optional('programme',()=>catalogGenerationCopy(env,publication,pinnedRunId,'programme.json')):null,
+  optional('watchlist',()=>publication?.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json')),
+  optional('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),
+  optional('profile',()=>loadJSON(env,profileKey)),
+  optional('metadata',()=>loadJSON(env,'metadata.json')),
+ ]);
+ const runId=programme?.runId&&programme.runId===pinnedRunId?pinnedRunId:null;
+ if(pinnedRunId&&!runId&&!degraded.includes('programme'))degraded.push('programme');
+ const freshness=profile?await optional('freshness',()=>predictionFreshness(env,profile)):null;
+ const page=catalogFilmPage({film:found.film,programmeRunId:runId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
+ return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
+}
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
 // It writes the owner's `watched` fact through the fact records and nothing else. It has no switch: the former
 // FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0055) are retired, and a stale binding of either is inert. The request guard is
@@ -312,13 +397,9 @@ async function catalogWatchedRoute(request,env,url){
   throw error;
  }
 }
-async function catalogAvailableRoute(env){
- const now=Date.now();
- const publication=await epgPublication(env);
- const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
- // Strict pin: with a published pointer the generation's own copies are required, and an absent copy fails closed
- // instead of falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes).
- const generationCopy=async name=>{
+// The generation's own copy of a published document, strictly pinned: with a published pointer an absent copy fails closed instead of
+// falling back to the shared public keys (the shared `loadJSON` fallback is unchanged for other routes). Shared by the catalog routes.
+async function catalogGenerationCopy(env,publication,pinnedRunId,name){
   if(name==='discovered-films.json'&&typeof DiscoveryAuthority!=='undefined'){
    const gate=await DiscoveryAuthority.readAuthority(env);
    if(gate.held){const error=new Error('discovery_fence');error.code='discovery_fence';throw error;}
@@ -331,7 +412,12 @@ async function catalogAvailableRoute(env){
   }
   if(publication.authority==='d1'&&name==='programme.json')return pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'programme',publication.generation):null;
   const object=await env.BUCKET.get(epgGenerationKey(pinnedRunId,name));return object?object.json():null;
- };
+}
+async function catalogAvailableRoute(env){
+ const now=Date.now();
+ const publication=await epgPublication(env);
+ const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
+ const generationCopy=name=>catalogGenerationCopy(env,publication,pinnedRunId,name);
  const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
  const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
@@ -1353,6 +1439,7 @@ async fetch(request,env,execution){
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
+  {const permanent=/^\/api\/catalog\/film\/([^/]+)$/.exec(url.pathname);if(permanent&&request.method==='GET'){let id;try{id=decodeURIComponent(permanent[1]);}catch{id='';}return await catalogFilmRoute(env,id);}}
   if(url.pathname==='/api/catalog/watched')return await catalogWatchedRoute(request,env,url);
   if(url.pathname==='/api/status'&&request.method==='GET')return json(await syncStatus(env));
   if(url.pathname==='/api/integrations/tmdb/status'&&request.method==='GET'){
