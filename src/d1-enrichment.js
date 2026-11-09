@@ -13,6 +13,9 @@ const D1_ENRICHMENT_LEASE_MS=10*60000;
 const D1_ENRICHMENT_QUERY_BUDGET=800;
 const D1_ENRICHMENT_WALL_MS=60000;
 const D1_ENRICHMENT_PERSON_BATCH=25;
+// AIR-395 (interim, before the bucket reconciliation): the checkpoint read of the diff goes out as a few pages at once instead of one query that
+// ships every row (about 32,000, 6 to 11 s in the AIR-392 runs). The result is the same Map; D1 allows six simultaneous connections per invocation.
+const D1_ENRICHMENT_STORED_PAGE=6000,D1_ENRICHMENT_STORED_CONCURRENCY=6;
 // Guards against input that is well formed but incomplete, such as an empty or truncated watchlist. Both are absolute: the size
 // of the projection does not widen them. A run past either writes nothing; a real mass removal goes through a reload instead.
 const D1_ENRICHMENT_ABSENT_FILMS=25,D1_ENRICHMENT_ABSENT_PEOPLE=250;
@@ -284,7 +287,29 @@ async function d1EnrichmentWindowAcquire(env,leaseId,options,state){
   await clock.sleep(pollMs);
  }
 }
-async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={}}={}){
+// AIR-395: every checkpoint row, equal to `SELECT kind,id,change_key FROM projection_state WHERE projection=?`. The first page is one query by the primary key order; a table
+// that fits in it (every table of the tests, and a young one) costs that one query, as before. A larger table is counted and the remaining pages go out together (at most six at a
+// time, D1's limit per invocation). The pages are accepted only when they add up exactly: the row count equals the count and no row came twice. A short or overlapping page (a
+// change under the read) throws the pages away and reads the whole table once, as before. The projector is the only writer of these rows and holds its lease, so the pages see
+// one state; the check is the proof that does not rely on it.
+async function d1EnrichmentStoredRows(db,{page=D1_ENRICHMENT_STORED_PAGE,concurrency=D1_ENRICHMENT_STORED_CONCURRENCY}={}){
+ const whole=()=>db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION]);
+ if(!(page>0))return whole();
+ const pageAt=index=>db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=? ORDER BY kind,id LIMIT ? OFFSET ?',[D1_ENRICHMENT_PROJECTION,page,index*page]);
+ const rows=[...await pageAt(0)];
+ if(rows.length<page)return rows;
+ const total=Number((await db.get('SELECT COUNT(*) AS n FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION]))?.n);
+ if(!Number.isInteger(total)||total<rows.length)return whole();
+ const pages=Math.ceil(total/page);
+ for(let from=1;from<pages;from+=concurrency){
+  const wave=[];
+  for(let index=from;index<Math.min(pages,from+concurrency);index++)wave.push(pageAt(index));
+  for(const part of await Promise.all(wave))for(const row of part)rows.push(row);
+ }
+ if(rows.length!==total||new Set(rows.map(row=>row.kind+'\n'+row.id)).size!==total)return whole();
+ return rows;
+}
+async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE}={}){
  const mode=d1EnrichmentMode(env);
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
@@ -311,7 +336,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   }
   const diffAt=Date.now();
   let plan;
-  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer);}
+  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer,{storedPage});}
   finally{
    timing.diffMs=Date.now()-diffAt;
    // The named remainder of the additive accounting: diffMs = the sum of `phases` + diffResidualMs (untimed glue and CPU). `detail` overlaps and is not in it.
@@ -366,7 +391,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
 
 // The R2 records, the view and every input live only inside this function: once it returns, only the changed entries remain,
 // so the write phase does not hold the whole view (about 50 MB of heap on the 2026-10-29 snapshot, ADR 0056).
-async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER){
+async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER,{storedPage=D1_ENRICHMENT_STORED_PAGE}={}){
  const started=Date.now(),nowIso=new Date(now).toISOString();
  const {store,programmeRunId,discoveryGate}=await d1EnrichmentStore(env,timer);
  summary.programmeRunId=programmeRunId;summary.discoveryGeneration=discoveryGate?discoveryGate.generation:null;
@@ -411,7 +436,7 @@ async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER)
  }
  const inputs=timer.sync('diff.inputs',()=>EnrichmentProjection.enrichmentInputs({view,store}));
  summary.viewMs=Date.now()-started-summary.loadMs;
- const storedRows=await timer.time('diff.storedRead',()=>db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION]),{rows:value=>value.length});
+ const storedRows=await timer.time('diff.storedRead',()=>d1EnrichmentStoredRows(db,{page:storedPage}),{rows:value=>value.length});
  const stored=new Map(storedRows.map(row=>[row.kind+'\n'+row.id,row.change_key]));
  const held=new Set((retirements?.held||[]).map(item=>item.filmId));
  const plan=timer.sync('diff.plan',()=>d1EnrichmentPlan(inputs,stored,nowIso,held));
