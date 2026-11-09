@@ -1,7 +1,7 @@
 # ADR 0106: The D1 enrichment projector writes in groups that prove their reads inside the write batch, in windows whose budget is accounted from the request
 
-**Status:** Proposed (direction C with liveness option L1 approved by the owner on 2026-11-09; implementation, activation and every production step still separately gated)  
-**Original decision date:** 2026-11-09 (direction); full ADR acceptance follows independent exact-HEAD review and merge  
+**Status:** Accepted 2026-11-09 (owner-approved direction C with liveness option L1; implementation, activation and every production step remain separately gated)  
+**Original decision date:** 2026-11-09 (owner accepted ADR in the IPTV Ratings chat after exact-HEAD independent review and green CI)  
 **Recorded at:** 2026-11-09  
 **Approval source:** the owner's architecture decision on [PR #446](https://github.com/vladimino/iptv-watchlist/pull/446), recorded by the IPTV Ratings coordinator on 2026-11-09 after reviewing HEAD `e633702`: variant C with liveness option L1 is the initial delivery direction, and preparing this ADR and implementation planning is approved. It is **not** approval to merge without independent exact-HEAD review and green CI, to activate the grouped path, to raise the wall budget, to create or run a Workflow, or to change a production flag, Task or cron or trigger the projector or Discovery by hand.  
 **Related work:** [AIR-391](https://trello.com/c/9hvEhvfJ), [AIR-392](https://trello.com/c/ivMqVpKC) (diff-latency instrumentation), [AIR-388](https://trello.com/c/fFvwYLjM), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0103](0103-projector-exclusive-window.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [spike evidence](../evidence/d1-migration/air-391-bulk-projector-spike-2026-11-09.md)  
@@ -18,7 +18,7 @@ The [spike](../evidence/d1-migration/air-391-bulk-projector-spike-2026-11-09.md)
 - Before its first write a run spends 3 to 9 s (3 of 11 recent runs) or **50 to 60 s (8 of 11)**; the wait for the window adds 0.8 to 40.5 s. In the slow mode nothing is left of the 60 s budget, whatever the write path. Only part of that overhead is explained (the load and view, 18 to 35 s); the rest is un-instrumented D1 reads of the diff.
 - The Discovery generation moves about 17 times a minute, so nothing computed in one window is valid in the next without per-entity revalidation, which the owner rejected in the closed PR #429.
 
-## Decision (proposed)
+## Decision
 
 1. **A grouped write path inside the existing repository (variant C), behind a flag.** The projector applies Films and their still unwritten Persons in groups (proposal: 10 Films; Persons also 25 at a time when no Film needs them). One cycle: (a) trace the reads the repository will make for the group, (b) fetch them and a digest of each in **one** read batch, (c) run the unchanged `projectFilm`/`projectPerson` against that read cache while collecting their writes, (d) apply them in **one** fenced batch with the guards of decision 3. The repository, its statements and the change keys are unchanged; on the benchmark fixtures the rows equal the per-entity path's.
 2. **Same fences, same atomicity.** The write batch starts with the projector lease fence, or the window fence when a window is held (ADR 0103), stores the change keys and clears the fence. A group commits whole or not at all.
@@ -38,7 +38,7 @@ The [spike](../evidence/d1-migration/air-391-bulk-projector-spike-2026-11-09.md)
 ## Algorithm
 
 ```text
-window (a cron tick, or one iteration of a bounded continuation loop):
+window (one hourly cron tick, L1 only):
   lease -> writer-idle checks -> request window (absolute deadline, request to release, <= 300 s)
   wait for grant (Discovery drains its in-flight chunk; admission closed); refused if < minimum run left
   read inputs under the generation pin; diff against projection_state       (fresh plan, every window)
