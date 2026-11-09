@@ -110,19 +110,27 @@ let reference;
  assert.equal(ticks.reduce((sum,tick)=>sum+tick.people,0),reference.people);
 }
 
-// 2. A run whose load left almost no budget: the first thing written is a Film (with its own Persons), before any other Person.
+// 2. A run whose load left almost no budget: whatever it writes first belongs to the first Film (its own Persons), never to the Person backlog,
+// and the Film itself is written by the next run, without a long wait: every run still makes progress.
 {
- const db=migrated(),bucket=sources({films:FILMS,admitted:ADMITTED});
  let found=null;
  for(let extra=0;extra<40&&!found;extra++){
   const probe=migrated(),probeBucket=sources({films:FILMS,admitted:ADMITTED});
   const summary=await run(probe,probeBucket,{queryBudget:reference.loadQueries+extra,wallMs:6e5});
-  if(summary.writtenFilms+summary.writtenPeople>0)found={extra,summary};
+  if(summary.writtenFilms+summary.writtenPeople>0)found={extra,summary,db:probe,bucket:probeBucket};
  }
  assert.ok(found,'some small budget writes something');
- assert.equal(found.summary.writtenFilms,1,'the very first write of a starved run is a Film: '+JSON.stringify({extra:found.extra,films:found.summary.writtenFilms,people:found.summary.writtenPeople}));
- assert.equal(found.summary.writtenPeople,found.summary.peopleForFilms,'only that Film\'s own Persons were written');
+ assert.equal(found.summary.writtenPeople,found.summary.peopleForFilms,'only the first Film\'s own Persons were written, none of the backlog: '+JSON.stringify([found.summary.writtenFilms,found.summary.writtenPeople,found.summary.peopleForFilms]));
  assert.ok(found.summary.writtenPeople>0);
+ // The same tiny budget again: the Film whose Persons are checkpointed is written within a few runs, and no run is empty.
+ let ticks=0,filmSeen=found.summary.writtenFilms>0;
+ while(!filmSeen&&ticks++<4){
+  const next=await run(found.db,found.bucket,{queryBudget:reference.loadQueries+found.extra,wallMs:6e5});
+  assert.ok(next.writtenFilms+next.writtenPeople>0,'a starved run still makes progress');
+  filmSeen=next.writtenFilms>0;
+ }
+ assert.ok(filmSeen,'the first Film is written within a few starved runs');
+ assert.equal(dangling(found.db),0);
 }
 
 // 3. Both backlogs keep growing: every run adds a new watchlist Film with 8 new Persons (the Person backlog is refilled), and the runs
@@ -166,6 +174,42 @@ let reference;
  assert.deepEqual([released.outcome,released.released,released.writtenFilms,released.writtenPeople],['complete',0,0,0]);
 }
 
+// 6. A Film with more than 25 prerequisite Persons (three groups) and a budget that runs out in the middle: no Film batch starts after the
+// budget is spent, the Persons already written stay checkpointed, the Film stays pending, and the next runs complete it without duplicates.
+{
+ const wide=[listed(500,60)];   // one director and 60 actors: 61 Persons, groups of 25, 25 and 11
+ const bucket=sources({films:wide});
+ const refDb=migrated();
+ const refPlan=await dry(refDb,bucket);
+ assert.deepEqual([refPlan.changedFilms,refPlan.changedPeople],[1,61]);
+ const full=await run(refDb,bucket,{queryBudget:1e6,wallMs:6e5});
+ assert.deepEqual([full.outcome,full.writtenFilms,full.writtenPeople,full.errorCount],['complete',1,61,0]);
+ const expected=dump(refDb);
+ let exhausted=null;
+ for(let extra=1;extra<200&&!exhausted;extra++){
+  const db=migrated(),before=db.calls.batches;
+  const summary=await run(db,bucket,{queryBudget:refPlan.queries+extra,wallMs:6e5});
+  if(summary.outcome==='budget'&&summary.writtenFilms===0&&summary.writtenPeople>0)exhausted={extra,summary,db,batches:db.calls.batches-before};
+ }
+ assert.ok(exhausted,'a budget that runs out after some prerequisite Persons exists');
+ const {summary,db}=exhausted;
+ assert.equal(summary.writtenFilms,0,'no Film after the budget is spent');
+ assert.equal(exhausted.batches,Math.ceil(summary.writtenPeople/25),'only Person batches were sent: no Film transaction started');
+ assert.equal(one(db,'SELECT COUNT(*) FROM film'),0);
+ assert.equal(one(db,"SELECT COUNT(*) FROM projection_state WHERE kind='film'"),0);
+ assert.equal(one(db,"SELECT COUNT(*) FROM projection_state WHERE kind='person'"),summary.writtenPeople,'the Persons written stay checkpointed');
+ assert.ok(summary.remaining>=1+(61-summary.writtenPeople),'the Film and the Persons not written count as remaining: '+summary.remaining);
+ assert.equal(summary.errorCount,0,'a Film not attempted for lack of budget is not an error');
+ // The next runs finish the Film and its Persons, and the result is exactly the unconstrained one.
+ let guard=0,last;
+ do{last=await run(db,bucket,{queryBudget:refPlan.queries+exhausted.extra,wallMs:6e5});assert.equal(dangling(db),0);}while(last.outcome==='budget'&&++guard<20);
+ assert.equal(last.outcome,'complete');
+ assert.equal(dump(db),expected,'the same rows as one unconstrained run, no duplicate');
+ assert.equal(one(db,'SELECT COUNT(*) FROM film'),1);
+ assert.equal(one(db,'SELECT COUNT(*) FROM person'),61);
+ assert.equal(one(db,'SELECT COUNT(*) FROM film_person_credit'),61);
+}
+
 // 5. Error paths are those of before: a Film that cannot be written is an error, counted, and the run goes on; the lost lease still stops
 // the run at once. (The fenced batches themselves are covered by d1-enrichment.mjs.)
 {
@@ -176,4 +220,4 @@ let reference;
  assert.equal(typeof summary.peopleForFilms,'number');
 }
 
-console.log('D1 enrichment fairness (AIR-388): with a Person backlog of 264 and a budget that fits a fraction of it every run writes Films and Persons, admitted Films first and the priority ends by itself, a Film\'s own Persons come before it, a starved run writes a Film first, growing backlogs both progress, housekeeping is not held back, and the runs converge to exactly what one unconstrained run writes with no duplicate.');
+console.log('D1 enrichment fairness (AIR-388): with a Person backlog of 264 and a budget that fits a fraction of it every run writes Films and Persons, admitted Films first and the priority ends by itself, a Film\'s own Persons come before it, a starved run writes only the first Film\'s own Persons and the Film follows, a Film that runs out of budget in the middle of its Persons is not started and is completed next run, growing backlogs both progress, housekeeping is not held back, and the runs converge to exactly what one unconstrained run writes with no duplicate.');

@@ -502,11 +502,14 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
     task={kind:'film',item:entry};
     // This Film's own Persons first (see above); a failure there is recorded by writePeopleGroup and does not stop the Film attempt.
     const needed=[...new Set((entry.credits||[]).map(credit=>credit.personId))].filter(id=>personById.has(id)&&!tried.has(id));
-    for(let i=0;i<needed.length&&!result.leaseLost&&!result.windowLost;i+=D1_ENRICHMENT_PERSON_BATCH){
+    for(let i=0;i<needed.length&&!result.leaseLost&&!result.windowLost&&budgetLeft();i+=D1_ENRICHMENT_PERSON_BATCH){
      const group=needed.slice(i,i+D1_ENRICHMENT_PERSON_BATCH).map(id=>personById.get(id));
      await writePeopleGroup(group);peopleForFilms+=group.length;
     }
-    if(result.leaseLost||result.windowLost){filmAt--;continue;}
+    // The Film's own batch starts only inside the budget and only with the lease and the window: the Persons just written can have used
+    // what was left. A Film not attempted for that reason stays in the lane (the next run finds it again, its Persons already
+    // checkpointed) and counts as remaining; it is not an error.
+    if(result.leaseLost||result.windowLost||!budgetLeft()){filmAt--;continue;}
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
      await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
