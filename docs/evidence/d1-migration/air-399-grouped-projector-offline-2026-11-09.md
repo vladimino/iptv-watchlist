@@ -1,0 +1,61 @@
+# D1 enrichment projector: grouped write path, offline implementation proof (step (a) of ADR 0106)
+
+**Captured:** 2026-11-09, offline (the real `src/d1-enrichment.js` and `src/canonical-repository.js` as the Worker bundle carries them, on an in-memory SQLite and on the `sqlite3` CLI stand-in of the tests). No manual projector, Discovery or EPG run, no D1 or R2 read or write, no migration, flag, Task, cron, window, budget or lease change, no production access of any kind.
+**Scope:** [AIR-399](https://trello.com/c/zyqL80T3): the grouped write path of [ADR 0106](../../adr/0106-bulk-projector-write-path.md) (variant C with liveness L1) behind the inert, off-by-default flag `D1_ENRICHMENT_BULK`, its tests and its offline benchmark. It does not activate anything, does not measure D1 and does not claim a production throughput.
+**Verdict:** **IMPLEMENTED AND PROVEN OFFLINE; INERT; NO PRODUCTION CLAIM.** With the flag on, the projector writes the same rows and the same change keys as the per-entity path in every tested case (new and pooled Persons, owner-reviewed names, D1-only TMDB credits, sync clocks, a changed, removed and added Film, a Film with a redirect), a group costs two round trips, every conflict between the prefetch and the write batch refuses the whole batch and writes nothing, and every other failure ends in the same final rows through the per-entity path. At 5,000 synthetic Films the real code needs **10.724 round trips a Film on the current path and 0.436 on the grouped path**, at **71.6 and 96.1 statements a Film**, with no fallback. What D1 does with a write batch of about a thousand statements and with 91,082 prefetch statements is not measured and decides everything that follows.
+**Used by:** [ADR 0106](../../adr/0106-bulk-projector-write-path.md) steps (c) to (f); [AIR-391 spike](air-391-bulk-projector-spike-2026-11-09.md) (the prototype this implements and the model it calibrates against).
+
+## What was built
+
+`d1EnrichmentGroupCycle` in `src/d1-enrichment.js`, selected per run by `D1_ENRICHMENT_BULK=on` (exact string; only a `D1_ENRICHMENT_WRITE=on` run reads it; registered in the feature-flag registry and [the contract](../../reference/feature-flags.md)). One cycle: **trace** the repository's reads with a recording database that answers nothing; **prefetch** them, a digest of each and the Film/Person authority marker in **one** read batch; **collect** the writes of the unchanged `projectPerson`, `projectFilm` and `projectFilmSyncState` against that answer; **apply** them in **one** atomic batch that starts with the lease (or held window) fence, the marker assertion (`r2` or `prepared`, `open`, the planned generation) and one assertion per traced read, a Film's Persons before the Film. A group that is not applied goes to the unchanged per-entity path. The reference description is in [the schema reference](../../reference/data/d1-schema.md), the operator's reading in the [monitoring runbook](../../runbooks/monitoring.md#d1-projector-grouped-write-path). The flag off leaves the run what it was: `bulk` is absent from the summary, the lanes are accounted in queries as before, and the existing projector, window and bucket tests pass.
+
+## Offline benchmark (`scripts/projector-bulk-bench.mjs --films 5000 --pool 8000 --backlog 1`)
+
+The real projector, flag off (A0, the current per-entity path) and flag on (C, groups of 10 Films, Persons by 25), over the same synthetic store shaped like production (1 director and 11, 6 or 35 actors per Film, mean 12.2 credits; 1 to 5, mean 3, new Persons per Film; the rest from a pool of 8,000 Persons the database already holds). Counts are exact; the modelled time uses the AIR-391 calibration (`rtt` 35 to 50 ms, `stmt` 1 to 2 ms, two production anchors). The rows of the two runs are identical in both scenarios (`sameRows`: **true** and **true**).
+
+| Scenario, variant | Films | Persons | D1 round trips | Per Film | Statements in batches | Per Film | Modelled s per Film (35/1, 50/1.5, 50/2) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| New Films, A0 per entity | 5,000 | 19,999 | 53,618 | 10.724 | 358,207 | 71.6 | 0.447 / 0.6436 / 0.6795 |
+| New Films, C grouped | 5,000 | 19,999 | 2,181 | 0.436 | 480,328 | 96.1 | 0.1113 / 0.1659 / 0.2139 |
+| Backlog (every Film changed, Persons stored), A0 | 5,000 | 0 | 30,018 | 6.004 | 151,005 | 30.2 | 0.2403 / 0.3455 / 0.3606 |
+| Backlog, C grouped | 5,000 | 0 | 1,018 | 0.204 | 218,005 | 43.6 | 0.0507 / 0.0756 / 0.0974 |
+
+C ran 1,084 groups (500 of Films, 584 of Persons) in the first scenario and 500 in the second: **1,584 applied, 0 fallbacks, 0 guard refusals, 0 prefetch misses**; `guards` equal `prefetchReads` in every group. The grouped path sends 91,082 read statements in prefetch batches that the per-entity path does not, and its total of statements sent (read batches included) is 34 % (new Films) and 44 % (backlog) higher than the per-entity path's: the guards in the write batches plus the prefetch's own SELECTs, which is the price ADR 0106 names (about 95 statements a Film, not 71). The modelled speed-up per Film is **4.02, 3.88 and 3.18 times** (new Films) and **4.74, 4.57 and 3.7 times** (backlog) at the three latency points.
+
+**Assumptions, all of them.** Time per Film is round trips times `rtt` plus batch statements times `stmt`: it assumes D1's cost of a batch grows linearly with its statements at the small-batch calibration, and that a read batch of about 200 statements costs one round trip plus its statements. Neither is measured: the largest batch of the calibration anchors is far smaller than a group's (about 960 statements, 10 Films with their Persons). The pre-write overhead (14 to 49 s in the [AIR-392](air-392-projector-pre-write-overhead-2026-11-09.md) runs, 24.8 and 26.7 s in the natural [AIR-395](air-395-checkpoint-reconciliation-offline-2026-11-09.md) ticks) is **not** in these numbers. The table below is arithmetic on the per-Film model for a given write time and is **not** a forecast of an hourly rate: it is what the model would write if a window had that many write seconds. Variant A (concurrent reads, modelled in the AIR-391 spike, about 4 round trips a Film) and B (a Workflow, rejected by ADR 0102) are not reproduced here.
+
+| Write seconds in a window | A0, Films (50/1.5) | C, Films (50/1.5) | A0 range over the three points | C range over the three points |
+| --- | --- | --- | --- | --- |
+| 60 s | 93 | 361 | 88 to 134 | 280 to 539 |
+| 150 s | 233 | 904 | 220 to 335 | 701 to 1347 |
+| 184 s | 285 | 1109 | 270 to 411 | 860 to 1653 |
+| 217 s | 337 | 1308 | 319 to 485 | 1014 to 1949 |
+
+(First scenario, new Films with new Persons. The backlog scenario gives 1889 to 3629 Films at 184 write seconds for C and 510 to 765 for A0.) The ADR's acceptance target (at least 500 changed Films an hour from natural runs) is **not** claimed: it needs the first D1 measurement (step (d)) and the natural runs (steps (e) and (f)).
+
+## What the tests prove (`tests/projector-bulk.mjs`, offline, the real migration chain on the `sqlite3` CLI)
+
+- **The flag.** Exact `on` only; invalid overrides are ignored; a `dry` run with the flag on writes nothing and has no `bulk`; flag off and on give the same rows.
+- **Parity.** Two passes (seven Films with new, pooled and shared Persons, then a changed, a removed and an added Film, a Person renamed under an owner review, a D1-only TMDB credit on a watchlist Film) leave the **same rows in 15 tables and the same change keys** on the per-entity and the grouped path; the owner value and the D1-only credit survive; the grouped path needs fewer batches and single round trips; `danglingCredits` and `foreign_key_check` are empty. Films are written in plan order (admitted-first order is the plan order).
+- **Two round trips.** A group of four Films with their Persons is one read batch and one write batch and no single query; one assertion per traced read; the fence row is cleared.
+- **Conflicts between the batches refuse the whole group and write nothing:** a redirect for a Film of the group, an owner review of a read Person, a trusted external id taken by another Film, a marker generation move, the marker leaving `r2` and `prepared`, a lost lease (the last three stop the run: `authority_moved`, `lease_lost`), a lost window told from a lost lease.
+- **Fallbacks end in the same rows:** a read only the second pass issues (`prefetch_miss`), a read the digest cannot express (no round trip spent), a planning error in either pass, a trusted id two Films of the group claim (`constraint`, the per-entity replay reports the same `identity_collision`), a credited Person that is missing (no dangling credit, same error as the per-entity path), the statement cap (halving, then one Film alone), a D1 error before the commit, a D1 size-limit error, and a batch that **committed and whose answer was lost** (the replay writes the same rows once, no duplicate credit); the last two switch the grouped path off for the rest of the run.
+- **Redirects.** A Film with a redirect never joins a group; the others do.
+- **Budgets.** A query budget stops the run with work left and the next runs converge to the rows of one run; a held window's absolute expiry, the wall reserve and a run statement budget start no group they cannot finish; with room the same plan is written whole.
+- **Fallback share.** A path that refuses every group is latched off after the minimum number of groups and the rest is written per entity with the same rows.
+- **Whole runs.** A stolen lease ends `lease_lost` with nothing written; a marker move ends `deferred` `authority_moved` with nothing written through any path, also with the marker at `d1`; without the marker table the run is the per-entity run; a second run over converged rows writes nothing; off then on equals one off run.
+- **Lanes.** The Film and Person lanes both run grouped and both spend statements (the unit is statements with the flag on).
+- **Source.** No R2 write in the projector, no other reader of the flag, no binding in `wrangler.jsonc`.
+- Existing: `d1-enrichment`, `d1-enrichment-buckets`, `projector-window`, `feature-flags` and the AIR-391 spike test pass; the only change to a shared test helper is that the D1 stand-in answers a batch made of reads with the rows of each statement (D1 does), and a write batch is still one transaction.
+
+## What this does not show
+
+- **No D1 latency, no production effect.** The stand-in has no network and no single-writer queue; a group batch of about 960 statements and a prefetch of about 190 statements are the unmeasured risk named in ADR 0106. A D1 error naming a batch size is a STOP condition and falls back per entity.
+- **No cause for the pre-write wait.** The 14 to 49 s before the first write (AIR-396 investigates it separately) is untouched by this path.
+- **The conservative cases are unproven in volume.** A Film with redirects, a constraint and a data-dependent read each go per entity; their natural frequency is unknown, and the ADR's STOP at a fallback share above 5 % is what natural runs will read from `bulk.fallbackReasons`.
+- **The synthetic data is uniform.** Real Persons share rows and conflicts more than the pool model; `projector-bulk.mjs` tests the conflicts but not their frequency.
+- **Discovery and EPG impact** of a longer batch on the single database is read at step (d), not here.
+
+## STOP and rollback
+
+Nothing is applied. Stages (c) to (f) each need the owner's separate approval. A natural run with the flag on stops at a fallback share above 5 %, a dangling credit, an `authority_moved` outcome, a window that ran past its deadline, a D1 error naming a batch size, or a throughput below half of the model (ADR 0106 decision 11); the card then ends with a decision brief. Switching `D1_ENRICHMENT_BULK` off restores the per-entity path on the next run; a code revert is an ordinary PR; neither undoes a row already written (the rows are the same as the per-entity path's).

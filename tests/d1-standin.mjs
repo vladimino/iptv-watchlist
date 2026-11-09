@@ -27,6 +27,8 @@ export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=n
   async batch(statements){
    calls.batches++;calls.statements+=statements.length;
    if(onBatch)await onBatch(statements);
+   // A batch of reads only (ADR 0106's prefetch) answers with the rows of each statement, in order, as D1 does; a write batch is still one transaction.
+   if(statements.every(item=>/^\s*SELECT/i.test(item.text)))return statements.map(item=>({success:true,results:rows(item.text)}));
    sqlite('BEGIN;\n'+statements.map(item=>item.text+';').join('\n')+'\nCOMMIT;');
    return statements.map(()=>({success:true}));
   },
