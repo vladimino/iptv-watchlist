@@ -112,12 +112,22 @@ const noR2Catalog=label=>assert.ok(!gets.some(key=>/discovered-films\.json$/.tes
  onPointerRead=count=>{if(count===2)records.set('epg/published-generation.json',{phase:'published',programmeRunId:G2});};
  refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'catalog_generation_changed','publication moved after the check');
 }
+// The Discovery authority changing after the film was verified, with the publication and the programme run unchanged: nothing is written.
+for(const [label,sql,code] of [
+ ['cutover held',"UPDATE discovery_authority SET cutover='held' WHERE id=1",'discovery_fence'],
+ ['authority D1/open to R2/open, same run',"UPDATE discovery_authority SET mode='r2' WHERE id=1",'catalog_generation_changed'],
+ ['D1 generation advanced, same run',"UPDATE discovery_authority SET generation=generation+1 WHERE id=1",'catalog_generation_changed'],
+ ['transfer loading, same run',"UPDATE discovery_transfer SET state='loading' WHERE id=1",'discovery_incomplete'],
+]){
+ seedBucket();const db=d1World();let flipped=false;
+ onPointerRead=count=>{if(count===2&&!flipped){flipped=true;db.sql(sql);}};
+ refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,code,label);assert.ok(flipped,label+': changed between the check and the write');
+ assert.equal(records.get('epg/published-generation.json').programmeRunId,G1,label+': the publication did not move');
+}
+// Stable authority: the same request with no change in between writes.
 {
- let authorityReads=0,flipped=false;
- seedBucket();
- const db=migrated({onQuery:async text=>{if(/FROM discovery_authority/.test(text)&&++authorityReads===4&&!flipped){flipped=true;db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");}}});
- db.sql(`UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id=${lit(G1)}, published_programme_run_id=${lit(G1)} WHERE id=1`);admit(db,film(10));
- refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'discovery_fence','authority held after the check');assert.ok(flipped,'the authority was flipped between the check and the write');
+ seedBucket();const db=d1World();
+ const ok=await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true});assert.deepEqual([ok.status,ok.body],[200,{outcome:'saved',watched:true}],'stable D1');
 }
 
 // 4. Discovery still R2-owned: the generation's own R2 copy is read as before; an absent copy is unavailability, not a missing film.
@@ -125,6 +135,11 @@ const noR2Catalog=label=>assert.ok(!gets.some(key=>/discovered-films\.json$/.tes
  seedBucket({withR2Catalog:{tmdb_10:film(10)}});
  const ok=await post({BUCKET:bucket},{tmdbId:'10',watched:true});assert.deepEqual([ok.status,ok.body],[200,{outcome:'saved',watched:true}]);
  const withDb=await post({DB:migrated(),BUCKET:bucket},{tmdbId:'10',watched:false});assert.deepEqual([withDb.status,withDb.body],[200,{outcome:'saved',watched:false}],'a D1 binding with Discovery on r2 reads R2');
+ {const db=migrated();let flipped=false;
+  seedBucket({withR2Catalog:{tmdb_10:film(10)}});
+  onPointerRead=count=>{if(count===2&&!flipped){flipped=true;db.sql(`UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id=${lit(G1)} WHERE id=1`);}};
+  refusedWithoutWrite(await post({DB:db,BUCKET:bucket},{tmdbId:'10',watched:true}),503,'catalog_generation_changed','R2 to D1 after the R2 read');assert.ok(flipped);
+  seedBucket({withR2Catalog:{tmdb_10:film(10)}});}
  puts=[];refusedWithoutWrite(await post({BUCKET:bucket},{tmdbId:'99',watched:true}),409,'film_not_in_catalog','unknown film');
  seedBucket();refusedWithoutWrite(await post({BUCKET:bucket},{tmdbId:'10',watched:true}),503,'catalog_generation_unavailable','no copy at all');
 }

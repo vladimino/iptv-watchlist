@@ -391,8 +391,16 @@ async function catalogWatchedRoute(request,env,url){
  const publication=await epgPublication(env);
  const runId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  if(!runId)return unavailable('catalog_not_published','No published catalog generation');
- let catalog;
- try{catalog=await catalogGenerationCopy(env,publication,runId,'discovered-films.json');}
+ // The Discovery authority the verdict is read under, captured before the read: mode, cutover, generation, programme run and transfer.
+ const discoveryState=gate=>gate?[gate.mode,gate.cutover,gate.generation,gate.programmeRunId,gate.transfer,gate.ready,gate.held].join('|'):'none';
+ let catalog,opened=null;
+ try{
+  if(typeof DiscoveryAuthority!=='undefined'){
+   opened=await DiscoveryAuthority.readAuthority(env);
+   if(opened.ready&&opened.transfer==='loading'){const error=new Error('discovery_incomplete');error.code='discovery_incomplete';throw error;}
+  }
+  catalog=await catalogGenerationCopy(env,publication,runId,'discovered-films.json');
+ }
  catch(error){return unavailable(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'].includes(error?.code)?error.code:'catalog_read_failed');}
  if(!catalog||typeof catalog!=='object'||Array.isArray(catalog))return unavailable('catalog_generation_unavailable','The catalog copy of the published generation is not in place');
  const film=Object.values(catalog).find(item=>item&&String(item.tmdbId)===body.tmdbId&&item.canonicalIdentity==='tmdb:'+body.tmdbId);
@@ -402,9 +410,12 @@ async function catalogWatchedRoute(request,env,url){
   const again=await epgPublicationReadOnly(env);
   if(again.programmeRunId!==runId||again.phase!==publication.phase||again.fence!==publication.fence||again.authority!==publication.authority)return unavailable('catalog_generation_changed','The published generation changed; try again');
   if(typeof DiscoveryAuthority!=='undefined'){
+   // Immediately before the write the authority must still be the one the catalog was read under: same mode and cutover (a D1 to R2
+   // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready) stays R2.
    const gate=await DiscoveryAuthority.readAuthority(env);
    if(gate.held)return unavailable('discovery_fence');
-   if(gate.ready&&gate.programmeRunId!==runId)return unavailable('catalog_generation_changed','The published generation changed; try again');
+   if(gate.ready&&gate.transfer==='loading')return unavailable('discovery_incomplete');
+   if(discoveryState(gate)!==discoveryState(opened)||gate.ready&&gate.programmeRunId!==runId)return unavailable('catalog_generation_changed','The published generation changed; try again');
   }
  }catch{return unavailable('catalog_read_failed');}
  try{
