@@ -251,6 +251,8 @@ html.film-screen .page-heading,html.film-screen .demo-note,html.film-screen .sea
 .finds-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin-top:auto;padding:0 17px 15px}
 .finds-watched,.finds-undo{min-height:36px;padding:6px 14px;border:1px solid #3f7a52;border-radius:8px;background:transparent;color:#d7f5dc;font:inherit;font-size:13px;font-weight:600;cursor:pointer}.finds-watched:hover,.finds-undo:hover{border-color:var(--lime);color:var(--lime)}.finds-watched:focus-visible,.finds-undo:focus-visible{outline:2px solid var(--lime);outline-offset:2px}.finds-watched[disabled],.finds-undo[disabled]{opacity:.6;cursor:progress}
 .finds-mark-error{font-size:12px;color:#ffb4a8}
+/* The title link's ::after stretches over the whole positioned card. Lift the other controls above it so they take their own clicks. */
+.finds-card .letterboxd-link,.finds-card .finds-watched,.finds-card .finds-mark-error{position:relative;z-index:1}
 .finds-notice{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 12px;padding:10px 14px;border-radius:10px;background:#223a2b;color:#d7f5dc;font-size:13px}.finds-notice[hidden]{display:none}
 .finds-person-status{grid-column:1/-1;margin:0;padding:4px 2px 8px;font-size:13px;color:#cde7d1}.finds-person-status[role=alert]{color:#ffb4a8}
 @media(max-width:760px){.finds{padding:14px}.finds-cards{grid-template-columns:1fr}.finds-card{max-width:none}.finds-card .film-head{padding-right:110px}}
