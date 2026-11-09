@@ -37,12 +37,14 @@ function binding(db,{lieAboutCount=false,overlap=false}={}){
  const stats={pageQueries:0,countQueries:0,wholeQueries:0,maxInflight:0,inflight:0};
  const wrap=(sql,statement)=>({...statement,
   async all(){
-   const isPage=/LIMIT/.test(sql),isWhole=/FROM projection_state WHERE projection=\?$/.test(sql);
+   const isPage=/LIMIT/.test(sql),isWhole=/FROM projection_state WHERE projection=\?$/.test(sql)&&!/COUNT\(\*\)/.test(sql);
    let mine=0;
    if(isPage){mine=++stats.pageQueries;stats.inflight++;stats.maxInflight=Math.max(stats.maxInflight,stats.inflight);await new Promise(resolve=>setTimeout(resolve,3));}
    if(isWhole)stats.wholeQueries++;
    try{
     const result=await statement.all();
+    // AIR-396: the adapter reads a single row through all() (to see the D1 meta), so the count is counted and lied about here.
+    if(/SELECT COUNT\(\*\) AS n FROM projection_state/.test(sql)){stats.countQueries++;if(lieAboutCount)return {...result,results:[{n:Number(result.results[0].n)+1}]};}
     if(isPage&&overlap&&result.results.length&&mine===2)result.results.push(result.results[0]);
     return result;
    }finally{if(isPage)stats.inflight--;}
