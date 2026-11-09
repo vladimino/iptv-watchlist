@@ -135,6 +135,40 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  }
 }
 
+// 1f. AIR-393: the remainder is reconciled to confirmed effects across the whole page, not only the 25 shown: a film outside the visible 25 that
+// is rejected or loses to a newer write is not counted, on the first attempt and on an interrupted replay.
+{
+ const ids=Array.from({length:30},(_,i)=>'lid'+String(i).padStart(2,'0')),view=()=>Object.fromEntries(ids.map(id=>[id,{watched:true,actualRating:3}]));
+ const newer={lid:'lid27',watchedDate:'2026-11-09',rating:5,ratingState:'rated',readAt:at(T0)};
+ const prepare=()=>{const s=setup();migrated(s.bucket);s.bucket.set('enrichment/view-index.json',view());s.net.diary.set(1,diaryPage(ids.map((id,i)=>diaryRow(id,8,'2026-11-08','v'+i))));return s;};
+ const check=(event,label)=>{const d=plain(event.details);assert.equal(d.updated.length,25,label);assert.equal(d.more.updated,4,label+': 29 confirmed films, not 30');assert.equal(d.incomplete,undefined,label+': exact, not marked incomplete');assert.equal(d.updated.some(f=>f.id==='lid27'),false,label+': the losing film is not claimed');};
+ // First attempt: a newer observation of lid27 already exists, so this page's write is older and is not a change.
+ {
+  const {clock,bucket,env,R,ctx}=prepare();
+  await g(ctx,'LetterboxdFacts').applyDiaryEvidence(env,[newer]);
+  const {reply}=await runOnce(R,env,clock);assert.equal(reply.state,'finished',JSON.stringify(reply));
+  check(ratings(bucket)[0],'first attempt');
+ }
+ // Interrupted replay: killed after the facts, then the newer write lands; the replay confirms against the stored view.
+ {
+  const {clock,bucket,env,R,ctx}=prepare();
+  let armed=true;bucket.hooks.beforePut=async(key,value)=>{if(armed&&key===RUN&&value?.checkpoint?.diaryPagesRead===1){armed=false;throw new Error('worker killed');}};
+  const started=plain(await R.start(env,{trigger:'scheduled'}));
+  await assert.rejects(()=>R.step(env,{runId:started.runId}),/worker killed/);
+  const planned=bucket.value(RUN).diary.pageChanges['1'];assert.equal(planned.state,'planned');assert.equal(planned.updated.length,30,'the stored plan keeps every candidate, not 25');
+  await g(ctx,'LetterboxdFacts').applyDiaryEvidence(env,[newer]);
+  clock.now+=4*60000;let reply;for(let i=0;i<30;i++){reply=plain(await R.step(env,{runId:started.runId}));clock.now+=1000;if(reply.nextAction!=='continue')break;}
+  assert.equal(reply.state,'finished',JSON.stringify(reply));check(ratings(bucket)[0],'replay');
+ }
+ // Past the stored ceiling the count is a lower bound and the event says so.
+ {
+  const {clock,net,bucket,env,R}=setup();migrated(bucket);
+  net.diary.set(1,diaryPage(Array.from({length:120},(_,i)=>diaryRow('big'+String(i).padStart(3,'0'),8,'2026-11-08','b'+i))));
+  await runOnce(R,env,clock);
+  const d=plain(ratings(bucket)[0].details);assert.equal(d.added.length,25);assert.equal(d.incomplete,true,'more than the ceiling: stated as incomplete');assert.ok(d.more.added>=75,'a lower bound, never less than what is known');
+ }
+}
+
 // 1d. A repeated merge of the same contribution is ignored, never added again.
 {
  const {R}=setup();

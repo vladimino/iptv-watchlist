@@ -108,10 +108,18 @@ const LetterboxdRatings=(()=>{
  // AIR-393: optional `details`, only for the films this run changed. Absent for a run that changed none (or one recorded before this
  // field): the event is then the short summary it always was.
  function detailsOf(run){
+  // The stored contributions keep every confirmed film (a page holds about 50, the hard ceiling is STORE_CAP per group), so the exact count is known when the
+  // event is built: it shows the first CHANGES_CAP films and counts the rest. Past the ceiling the count is a lower bound and the event says it is incomplete.
   const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]).filter(page=>page&&page.state==='applied');
-  const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part):all,mergeChanges(null,null)),incomplete=pages.some(page=>page.incomplete===true);
-  if(incomplete&&!changeCount(merged))return {details:{incomplete:true}};
-  return changeCount(merged)?{details:{...(incomplete?{incomplete:true}:{}),...Object.fromEntries(CHANGE_GROUPS.filter(group=>merged[group].length).map(group=>[group,merged[group]])),...(Object.keys(merged.more).length?{more:merged.more}:{})}}:{};
+  const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part,STORE_CAP):all,mergeChanges(null,null,STORE_CAP));
+  const incomplete=pages.some(page=>page.incomplete===true)||Object.values(merged.more).some(count=>count>0);
+  const shown={},more={};
+  for(const group of CHANGE_GROUPS){
+   const list=merged[group];if(list.length)shown[group]=list.slice(0,CHANGES_CAP);
+   const rest=list.length-Math.min(list.length,CHANGES_CAP)+(merged.more[group]||0);if(rest>0)more[group]=rest;
+  }
+  if(!Object.keys(shown).length&&!Object.keys(more).length)return incomplete?{details:{incomplete:true}}:{};
+  return {details:{...(incomplete?{incomplete:true}:{}),...shown,...(Object.keys(more).length?{more}:{})}};
  }
  async function deliverEvent(env,event){
   if(!event||typeof writeRatingsEvent!=='function')return false;
@@ -242,7 +250,7 @@ const LetterboxdRatings=(()=>{
  // Groups: `added` (a new watched fact, with its rating when the entry has one), `updated` (a different rating; `from` only when the
  // earlier one was a stored number), `rated` (a removed film whose rating was found in this run) and `resolved` (a removal reference of
  // the Events Log settled with a rating). A film appears once per group. Over the cap the rest are only counted in `more`.
- const CHANGE_GROUPS=['added','updated','rated','resolved'],CHANGES_CAP=25;
+ const CHANGE_GROUPS=['added','updated','rated','resolved'],CHANGES_CAP=25,STORE_CAP=100;
  const half=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0.5&&value<=5&&value*2%1===0?value:null;
  function changeEntry(raw){
   const id=String(raw?.id??'').trim();if(!id||id.length>64)return null;
@@ -250,12 +258,12 @@ const LetterboxdRatings=(()=>{
   const tmdb=/^[1-9]\d{0,11}$/.test(String(raw.tmdb??''))?String(raw.tmdb):null,rating=half(raw.rating),from=half(raw.from);
   return {id,title,year,tmdb,rating,...(raw.from!==undefined?{from}:{})};
  }
- function mergeChanges(base,incoming){
+ function mergeChanges(base,incoming,cap=CHANGES_CAP){
   const out={added:[],updated:[],rated:[],resolved:[],more:{}};
   for(const group of CHANGE_GROUPS){
    const seen=new Set(),list=[],carried=Number.isInteger(base?.more?.[group])?base.more[group]:0,extra=Number.isInteger(incoming?.more?.[group])?incoming.more[group]:0;
    for(const raw of [...(base?.[group]||[]),...(incoming?.[group]||[])]){const item=changeEntry(raw);if(!item||seen.has(item.id))continue;seen.add(item.id);list.push(item);}
-   const over=Math.max(0,list.length-CHANGES_CAP);if(over)list.length=CHANGES_CAP;
+   const over=Math.max(0,list.length-cap);if(over)list.length=cap;
    out[group]=list;if(carried+extra+over>0)out.more[group]=carried+extra+over;
   }
   return out;
@@ -264,7 +272,7 @@ const LetterboxdRatings=(()=>{
  function removalChangeFields(run,incoming,stepId){
   const steps=Array.isArray(run.removal?.changeSteps)?run.removal.changeSteps:[];
   if(!incoming||steps.includes(stepId))return run.removal?.changes?{changes:run.removal.changes,changeSteps:steps}:{};
-  return {changes:mergeChanges(run.removal?.changes,incoming),changeSteps:[...steps,stepId].slice(-60)};
+  return {changes:mergeChanges(run.removal?.changes,incoming,STORE_CAP),changeSteps:[...steps,stepId].slice(-60)};
  }
  const changeCount=changes=>CHANGE_GROUPS.reduce((n,group)=>n+(changes?.[group]?.length||0)+(changes?.more?.[group]||0),0);
  // The title of a removed film is the one its removal event carries (the event that listed it when it left the watchlist).
@@ -285,8 +293,9 @@ const LetterboxdRatings=(()=>{
   const out={};
   for(const group of CHANGE_GROUPS){
    out[group]=[];
-   for(const item of groups[group]||[]){
-    const known=labels.get(String(item.id))||{},own=item.title?{title:item.title,year:item.year??null}:(group==='rated'||group==='resolved')&&!known.title?await removedLabel(env,item.id):{};
+   for(const [index,item] of (groups[group]||[]).entries()){
+    // Only the films an event can show (the first 25 of a group) are looked up by their removal event; the rest are only counted.
+    const known=labels.get(String(item.id))||{},own=item.title?{title:item.title,year:item.year??null}:(group==='rated'||group==='resolved')&&!known.title&&index<CHANGES_CAP?await removedLabel(env,item.id):{};
     out[group].push({...item,title:item.title||own.title||known.title||null,year:item.year??own.year??known.year??null,tmdb:item.tmdb||known.tmdb||null});
    }
   }
@@ -327,7 +336,7 @@ const LetterboxdRatings=(()=>{
      const queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
      if(removalQueueV2(queue))for(const item of evidence)if(item.rating!=null&&half(item.rating)!=null&&queue.films[item.lid]&&queue.films[item.lid].state!=='rated')groups.rated.push({id:item.lid,rating:item.rating});
      if(changeCount(groups)){
-      plan={...mergeChanges(null,await labelledChanges(env,groups)),state:'planned'};planned[key]=plan;
+      plan={...mergeChanges(null,await labelledChanges(env,groups),STORE_CAP),state:'planned'};planned[key]=plan;
       await own(current=>({...current,updatedAt:iso(clock()),diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),[key]:plan}}}));
      }
     }catch(e){if(e instanceof LeaseLost){leaseLost=true;return;}plan=null;incomplete=true;}
