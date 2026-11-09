@@ -39,13 +39,19 @@ const D1_ENRICHMENT_STATE="INSERT INTO projection_state (projection,kind,id,chan
 function d1EnrichmentPhases(db){
  const groups={phases:{},detail:{}};
  const entry=(group,name)=>groups[group][name]||(groups[group][name]={ms:0,n:0,q:0,rows:0});
- const done=(group,name,at,queries,rows)=>{const item=entry(group,name);item.ms+=Date.now()-at;item.n++;item.q+=(db?db.queries:0)-queries;if(Number.isFinite(rows))item.rows+=rows;};
+ // AIR-396: `sqlUs` (the database's own sql_duration_ms, in microseconds), `dbRows` (D1 rows_read), `dbN` (reads that carried a D1 meta) and `replica` (of those, served by a replica) are added to an entry only when its reads carried a meta.
+ const snap=()=>{const meter=db?.meter;return meter?{...meter}:null;};
+ const done=(group,name,at,queries,rows,before=null)=>{
+  const item=entry(group,name);item.ms+=Date.now()-at;item.n++;item.q+=(db?db.queries:0)-queries;if(Number.isFinite(rows))item.rows+=rows;
+  const meter=db?.meter;
+  if(before&&meter&&meter.metas>before.metas){item.sqlUs=(item.sqlUs||0)+meter.sqlUs-before.sqlUs;item.dbRows=(item.dbRows||0)+meter.rowsRead-before.rowsRead;item.dbN=(item.dbN||0)+meter.metas-before.metas;item.replica=(item.replica||0)+meter.replica-before.replica;}
+ };
  return {
   ...groups,
   async time(name,fn,{detail=false,rows=null}={}){
-   const at=Date.now(),queries=db?db.queries:0;let count=null;
+   const at=Date.now(),queries=db?db.queries:0,before=snap();let count=null;
    try{const value=await fn();if(rows){try{count=rows(value);}catch{count=null;}}return value;}
-   finally{done(detail?'detail':'phases',name,at,queries,count);}
+   finally{done(detail?'detail':'phases',name,at,queries,count,before);}
   },
   sync(name,fn){const at=Date.now(),queries=db?db.queries:0;try{return fn();}finally{done('phases',name,at,queries,null);}},
  };
@@ -58,11 +64,16 @@ function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value
 // Writes inside transaction() are collected and sent as one db.batch, which D1 applies atomically.
 function d1EnrichmentAdapter(binding,marks=null){
  let buffer=null,queries=0;
+ // AIR-396: the D1 `meta` of every read, summed (whole numbers only): the database's own sql_duration_ms in microseconds, rows_read, how many reads
+ // carried a meta and how many of those were served by a replica. Measurement only: a read returns what it returned before.
+ const meter={sqlUs:0,rowsRead:0,metas:0,replica:0};
+ const sample=result=>{const meta=result?.meta;if(!meta||typeof meta!=='object')return;meter.metas++;const sql=Number(meta.timings?.sql_duration_ms??meta.duration);if(Number.isFinite(sql)&&sql>=0)meter.sqlUs+=Math.round(sql*1000);const rows=Number(meta.rows_read);if(Number.isFinite(rows)&&rows>=0)meter.rowsRead+=rows;if(meta.served_by_primary===false)meter.replica++;};
  const statement=(sql,params)=>binding.prepare(sql).bind(...params);
  return {
   get queries(){return queries;},
-  async get(sql,params=[]){queries++;return (await statement(sql,params).first())??null;},
-  async all(sql,params=[]){queries++;return (await statement(sql,params).all()).results||[];},
+  meter,
+  async get(sql,params=[]){queries++;const result=await statement(sql,params).all();sample(result);return (result.results||[])[0]??null;},
+  async all(sql,params=[]){queries++;const result=await statement(sql,params).all();sample(result);return result.results||[];},
   async run(sql,params=[]){if(buffer){buffer.push(statement(sql,params));return;}queries++;await statement(sql,params).run();},
   async transaction(fn){
    if(buffer)return fn();

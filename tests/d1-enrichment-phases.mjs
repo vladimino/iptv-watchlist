@@ -154,4 +154,17 @@ const entryOk=item=>Object.keys(item).sort().join()==='ms,n,q,rows'&&Object.valu
  assert.ok(measured.length<3000,'the added log and summary size stays small: '+measured.length);
  assert.ok(fs.readFileSync('src/d1-enrichment.js','utf8').split('\n').every(line=>!/timer\.(time|sync)\(['"][^'"]*\$\{/.test(line)),'phase names are literals, never built from data');
 }
+// 8. AIR-396: the D1 meta of the adapter's reads is summed per phase (sql_duration_ms in microseconds, rows_read, replica) and changes nothing else: the same rows and queries as a run without meta.
+{
+ const withMeta=db=>({prepare:sql=>{const make=statement=>({...statement,async all(){const result=await statement.all();return {...result,meta:{served_by_primary:false,timings:{sql_duration_ms:1.5},rows_read:result.results.length}};},first:statement.first.bind(statement)});return {bind:(...params)=>make(db.prepare(sql).bind(...params))};},batch:statements=>db.batch(statements),calls:db.calls});
+ const plain=await run(clockedProjector(5),migrated(),sources(FILMS));
+ const dbA=migrated(),metered=await run(clockedProjector(5),withMeta(dbA),sources(FILMS));
+ assert.equal(metered.outcome,'complete');
+ const item=metered.phases['diff.schemaContract'];
+ assert.deepEqual([item.dbN,item.replica,item.sqlUs,item.dbRows],[1,1,1500,item.dbRows],'one read, served by a replica, 1.5 ms of SQL: '+JSON.stringify(item));
+ assert.equal(plain.phases['diff.schemaContract'].sqlUs,undefined,'no meta, no meta fields');
+ for(const group of [metered.phases,metered.detail])for(const entry of Object.values(group))for(const key of ['sqlUs','dbRows','dbN','replica'])if(key in entry)assert.ok(Number.isInteger(entry[key])&&entry[key]>=0);
+ assert.equal(metered.queries,plain.queries,'the meta changes no query count');
+ assert.deepEqual([metered.writtenFilms,metered.writtenPeople],[plain.writtenFilms,plain.writtenPeople]);
+}
 console.log('D1 enrichment phase timing (AIR-392): timing in run order, a sequential phase partition of the diff with a residual and overlapping reads as detail, the same rows, keys, queries and lanes under clocks of different steps, failed, dry, nothing-to-write and budget paths, a closed set of names with numbers only, and the old fields kept');
