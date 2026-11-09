@@ -182,8 +182,20 @@ async function d1EnrichmentStore(env){
 }
 function plainOwner(value){return !!value.films&&typeof value.films==='object'&&!Array.isArray(value.films)&&!!value.people&&typeof value.people==='object'&&!Array.isArray(value.people);}
 
+// AIR-388: among the changed Films, those a verified rated archive admitted (letterboxd/admissions/verified-films.json) and D1 has never
+// projected go first; the others keep their order. A stable partition, so it changes only the order, never the set or the change keys.
+// Once projected a Film is no longer "new", so the priority ends by itself and cannot hold back the other Films.
+function d1EnrichmentAdmittedFirst(films,store,stored){
+ const admitted=new Set(Object.values(store?.archiveAdmissions||{}).map(item=>String(item?.tmdb)));
+ if(!admitted.size)return {films,count:0};
+ const isNew=entry=>!stored.has('film\n'+entry.id)&&(entry.film?.externalIds||[]).some(item=>item?.scheme==='tmdb'&&admitted.has(String(item.value)));
+ const first=[],rest=[];
+ for(const entry of films)(isNew(entry)?first:rest).push(entry);
+ return {films:[...first,...rest],count:first.length};
+}
+
 // The plan of one run: every Person and Film whose change key differs from the stored one, and every stored entity the view
-// no longer has. Persons come first so a Film's credits find their people. A held Film (a TMDB retirement under owner review,
+// no longer has. A Film's own Persons are written just before it (see d1EnrichmentWrite). A held Film (a TMDB retirement under owner review,
 // ADR 0057) is neither written nor released, whether or not the view still has it: D1 keeps it as it is until the review
 // settles.
 function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set()){
@@ -328,6 +340,8 @@ async function d1EnrichmentDiff(env,db,now,summary){
  const stored=new Map((await db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
  const held=new Set((retirements?.held||[]).map(item=>item.filmId));
  const plan=d1EnrichmentPlan(inputs,stored,nowIso,held);
+ const prioritized=d1EnrichmentAdmittedFirst(plan.films,store,stored);
+ plan.films=prioritized.films;summary.admittedFirst=prioritized.count;
  // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist. A held Film keeps its row.
  const listed=new Set(inputs.films.filter(film=>film.watchlist).map(film=>film.id));
  const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);
@@ -435,26 +449,67 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
   if(result.errors.length<20)result.errors.push({kind,id,error:message.slice(0,160)});
  };
  const writePeople=async items=>{await fenced(async()=>{for(const entry of items){await repository.projectPerson({person:entry.person});await state('person',entry.id,entry.key);}});result.writtenPeople+=items.length;};
- const queue=[];
+ // AIR-388 (fairness): the work of one run is three lanes that share ONE budget, not one queue in a fixed order. A strict order
+ // "all changed Persons, then all changed Films" lets a Person backlog that is refilled faster than it drains (new credits arrive with
+ // every Discovery chunk) keep the Films from ever being written. The lanes are Films (a Film a verified archive admitted and D1 has
+ // never projected first, then the other changed Films, see d1EnrichmentAdmittedFirst), Persons (in plan order) and housekeeping
+ // (the Film sync clocks, then the Films no source lists any more). Each step takes the lane with the lowest spent/weight, where spent
+ // is the lane's own cost in the unit of the budget, queries, so a lane with dearer tasks does not get a larger share; a tie goes to
+ // Films, then Persons, then housekeeping, so even a run whose load used most of the wall time writes a Film before anything else.
+ // Nothing here raises the budget, the wall time or the window, and every batch is fenced exactly as before.
+ // A Film's credits reference Person rows (film_person_credit.person_id -> person.id), so before a Film its own Persons that are still
+ // in the plan are written, in the same step; they leave the Person lane, and a Person that failed is not retried in the run.
+ const WEIGHT={film:3,people:2,housekeeping:1};
+ const spent={film:0,people:0,housekeeping:0};
+ const personOrder=plan.people.map(entry=>entry.id),personById=new Map(plan.people.map(entry=>[entry.id,entry])),tried=new Set();
  const syncById=new Map((plan.sync||[]).map(item=>[item.id,item]));
  const filmIds=new Set(plan.films.map(film=>film.id));
- for(let i=0;i<plan.people.length;i+=D1_ENRICHMENT_PERSON_BATCH)queue.push({kind:'people',items:plan.people.slice(i,i+D1_ENRICHMENT_PERSON_BATCH)});
- for(const film of plan.films)queue.push({kind:'film',item:film});
- for(const item of plan.sync||[])if(!filmIds.has(item.id))queue.push({kind:'sync',item});
- for(const entity of plan.absent)queue.push({kind:'absent',item:entity});
- for(let index=0;index<queue.length;index++){
-  if(result.leaseLost||result.windowLost||!budgetLeft()){result.remaining=queue.slice(index).reduce((sum,task)=>sum+(task.items?.length||1),0);break;}
-  const task=queue[index];
+ const housekeeping=[];
+ for(const item of plan.sync||[])if(!filmIds.has(item.id))housekeeping.push({kind:'sync',item});
+ for(const entity of plan.absent)housekeeping.push({kind:'absent',item:entity});
+ let personAt=0,filmAt=0,houseAt=0,peopleForFilms=0;
+ const skipTried=()=>{while(personAt<personOrder.length&&tried.has(personOrder[personAt]))personAt++;};
+ const untriedPeople=()=>personOrder.length-tried.size;
+ // One Person that cannot be written must not hold back the rest of its group: a failed group is retried one by one.
+ const writePeopleGroup=async items=>{
+  for(const entry of items)tried.add(entry.id);
+  try{await writePeople(items);}
+  catch(error){
+   if(items.length===1||/CHECK constraint failed/i.test(String(error?.message||error))){for(const entry of items)failed('person',entry.id,error);return;}
+   for(const entry of items){if(result.leaseLost||result.windowLost||!budgetLeft())break;try{await writePeople([entry]);}catch(single){failed('person',entry.id,single);}}
+  }
+ };
+ const takePeople=limit=>{const items=[];skipTried();while(personAt<personOrder.length&&items.length<limit){const id=personOrder[personAt++];if(!tried.has(id))items.push(personById.get(id));}return items;};
+ const remaining=()=>untriedPeople()+(plan.films.length-filmAt)+(housekeeping.length-houseAt);
+ while(true){
+  skipTried();
+  const available=[];
+  if(filmAt<plan.films.length)available.push('film');
+  if(personAt<personOrder.length)available.push('people');
+  if(houseAt<housekeeping.length)available.push('housekeeping');
+  if(!available.length)break;
+  if(result.leaseLost||result.windowLost||!budgetLeft()){result.remaining=remaining();break;}
+  let lane=available[0],best=Infinity;
+  for(const name of available){const score=(spent[name]+1)/WEIGHT[name];if(score<best){best=score;lane=name;}}
+  const before=db.queries;
+  let task=null;
   try{
-   if(task.kind==='people'){
-    // One Person that cannot be written must not hold back the rest of its group: a failed group is retried one by one.
-    try{await writePeople(task.items);}
-    catch(error){
-     if(task.items.length===1||/CHECK constraint failed/i.test(String(error?.message||error)))throw error;
-     for(const entry of task.items){if(result.leaseLost||result.windowLost||!budgetLeft())break;try{await writePeople([entry]);}catch(single){failed('person',entry.id,single);}}
+   if(lane==='people'){
+    task={kind:'people',items:takePeople(D1_ENRICHMENT_PERSON_BATCH)};
+    await writePeopleGroup(task.items);
+   }else if(lane==='film'){
+    const entry=plan.films[filmAt++];
+    task={kind:'film',item:entry};
+    // This Film's own Persons first (see above); a failure there is recorded by writePeopleGroup and does not stop the Film attempt.
+    const needed=[...new Set((entry.credits||[]).map(credit=>credit.personId))].filter(id=>personById.has(id)&&!tried.has(id));
+    for(let i=0;i<needed.length&&!result.leaseLost&&!result.windowLost&&budgetLeft();i+=D1_ENRICHMENT_PERSON_BATCH){
+     const group=needed.slice(i,i+D1_ENRICHMENT_PERSON_BATCH).map(id=>personById.get(id));
+     await writePeopleGroup(group);peopleForFilms+=group.length;
     }
-   }else if(task.kind==='film'){
-    const entry=task.item;
+    // The Film's own batch starts only inside the budget and only with the lease and the window: the Persons just written can have used
+    // what was left. A Film not attempted for that reason stays in the lane (the next run finds it again, its Persons already
+    // checkpointed) and counts as remaining; it is not an error.
+    if(result.leaseLost||result.windowLost||!budgetLeft()){filmAt--;continue;}
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
      await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
@@ -464,25 +519,32 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
     });
     result.writtenFilms++;
     if(pending)result.syncWrites++;
-   }else if(task.kind==='sync'){
-    await fenced(async()=>{await writeSync(task.item);});
-    result.syncWrites++;
    }else{
-    const entity=task.item;
-    await fenced(async()=>{
-     if(entity.kind==='film')await repository.releaseFilm(entity.id);
-     if(entity.syncUpdate)await writeSync(entity.syncUpdate);
-     else if(entity.clearSync)await writeSync({id:entity.id,sync:null,key:'absent'});
-     await state(entity.kind,entity.id,'absent');
-    });
-    result.released++;
-    if(entity.syncUpdate||entity.clearSync)result.syncWrites++;
+    task=housekeeping[houseAt++];
+    if(task.kind==='sync'){
+     await fenced(async()=>{await writeSync(task.item);});
+     result.syncWrites++;
+    }else{
+     const entity=task.item;
+     await fenced(async()=>{
+      if(entity.kind==='film')await repository.releaseFilm(entity.id);
+      if(entity.syncUpdate)await writeSync(entity.syncUpdate);
+      else if(entity.clearSync)await writeSync({id:entity.id,sync:null,key:'absent'});
+      await state(entity.kind,entity.id,'absent');
+     });
+     result.released++;
+     if(entity.syncUpdate||entity.clearSync)result.syncWrites++;
+    }
    }
   }catch(error){
-   if(task.kind==='people')for(const entry of task.items)failed('person',entry.id,error);
-   else failed(task.kind==='sync'?'film_sync':task.item.kind||'film',task.item.id,error);
+   if(task?.kind==='film'||task?.kind==='sync'||task?.kind==='absent')failed(task.kind==='sync'?'film_sync':task.kind==='absent'?task.item.kind||'film':'film',task.item.id,error);
+   else if(task?.kind==='people')for(const entry of task.items)failed('person',entry.id,error);
+   else failed('film',null,error);
+  }finally{
+   spent[lane]+=Math.max(1,db.queries-before);
   }
  }
+ result.laneQueries={...spent};result.peopleForFilms=peopleForFilms;
  return result;
 }
 
