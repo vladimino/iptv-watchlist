@@ -123,7 +123,8 @@ const personEntry=(byId,id)=>byId.has(id);
 const holdLease=(db,lease='lease-test')=>db.sql("INSERT INTO projection_run (projection,lease_id,lease_until) VALUES ('enrichment','"+lease+"','"+new Date(Date.now()+6e5).toISOString()+"') ON CONFLICT(projection) DO UPDATE SET lease_id=excluded.lease_id,lease_until=excluded.lease_until");
 const rowCount=db=>count(db,'film')+count(db,'person')+count(db,'film_person_credit')+count(db,'projection_state');
 const films4=Array.from({length:4},(_,index)=>filmRecord(index+1,{shared:true}));
-const cycle=(binding,items,options={})=>projector.d1EnrichmentGroupCycle(projector.d1EnrichmentAdapter(binding),items,{leaseId:'lease-test',...options});
+const MARKER0={mode:'r2',cutover:'open',generation:0};
+const cycle=(binding,items,options={})=>projector.d1EnrichmentGroupCycle(projector.d1EnrichmentAdapter(binding),items,{leaseId:'lease-test',expectedMarker:MARKER0,...options});
 // A second stand-in over the same file whose hook runs before every batch (after the call, before the statements): the way another writer lands between two batches.
 const hooked=(file,onBatch,extra={})=>d1Standin(file,{onBatch,...extra});
 const isWrite=statements=>!/^\s*SELECT/i.test(statements[0].text);
@@ -183,6 +184,18 @@ for(const [name,mutate,outcome,reason] of conflicts){
  assert.equal(applied.outcome,'applied',JSON.stringify(applied));
 }
 
+// 3b. The planning generation is pinned: a marker that moved after the plan and before the prefetch, a missing planning marker and an absent table all stop with nothing written.
+{
+ const {db,file,plan}=await planned(films4);holdLease(db);
+ db.sql(dropTriggers+'UPDATE film_person_authority SET generation=7');
+ const moved=await cycle(hooked(file,null),itemsOf(plan,4));
+ assert.deepEqual([moved.outcome,moved.reason],['stop','authority_moved'],'planned under generation 0, found 7 at prefetch');assert.equal(rowCount(db),0);
+ const unpinned=await cycle(hooked(file,null),itemsOf(plan,4),{expectedMarker:null});
+ assert.deepEqual([unpinned.outcome,unpinned.reason],['stop','authority_unavailable']);assert.equal(rowCount(db),0);
+ const bare=await planned(films4);holdLease(bare.db);bare.db.sql('DROP TABLE film_person_authority');
+ const absent=await cycle(hooked(bare.file,null),itemsOf(bare.plan,4));
+ assert.deepEqual([absent.outcome,absent.reason],['stop','authority_unavailable']);assert.equal(rowCount(bare.db),0);
+}
 // 4. Reads the trace did not see, reads that cannot be digested and planning errors are never written from.
 const realCreate=projector.CanonicalRepository.createCanonicalRepository;
 const patch=wrap=>{let calls=0;projector.CanonicalRepository.createCanonicalRepository=target=>wrap(realCreate(target),target,++calls);};
@@ -224,7 +237,11 @@ assert.match(projector.d1EnrichmentDigestSql('SELECT 1 AS ok FROM watchlist_film
 async function writeWith(binding,plan,{bulk=null,...options}={}){
  const adapter=projector.d1EnrichmentAdapter(binding),leaseId='lease-'+Math.random().toString(16).slice(2);
  assert.ok(await projector.d1EnrichmentLease(adapter,leaseId));
- const result=await projector.d1EnrichmentWrite(adapter,plan,{leaseId,started:Date.now(),queryBudget:1e9,wallMs:1e9,bulk:bulk?projector.d1EnrichmentBulkOptions({D1_ENRICHMENT_BULK:'on'},bulk):null,...options});
+ // the marker the run is planned under, as the run reads it before its diff
+ let marker=null;try{const row=binding.sql('SELECT mode,cutover,generation FROM film_person_authority WHERE id=1')[0];if(row)marker={mode:row.mode,cutover:row.cutover,generation:Number(row.generation)};}catch{}
+ const bulkOptions=bulk?projector.d1EnrichmentBulkOptions({D1_ENRICHMENT_BULK:'on'},bulk):null;
+ if(bulkOptions&&marker)bulkOptions.expectedMarker=marker;
+ const result=await projector.d1EnrichmentWrite(adapter,plan,{leaseId,started:Date.now(),queryBudget:1e9,wallMs:1e9,bulk:bulkOptions,...options});
  binding.sql("UPDATE projection_run SET lease_id=NULL,lease_until=NULL WHERE projection='enrichment' AND lease_id='"+leaseId+"'");
  return {result,adapter,leaseId};
 }
@@ -250,6 +267,16 @@ const bigPlan=await planned(Array.from({length:7},(_,index)=>filmRecord(index+1,
  assert.deepEqual(c.db.sql("SELECT id FROM projection_state WHERE projection='enrichment' AND kind='film' ORDER BY rowid").map(row=>row.id),[...bigPlan.plan.films].map(entry=>entry.id),'Films are written in plan order (admitted-first order is the plan order)');
  assert.equal(danglingCredits(c.db),0);assert.equal(fkProblems(c.db),0);
  assert.ok(on.laneQueries.film>0,'lanes are accounted in statements: '+JSON.stringify(on.laneQueries));
+}
+
+// 3c. Under the grouped path the per-entity writes carry the marker guard too: a group that falls back cannot write after the marker moved.
+{
+ const a=migrated(),c=migrated();
+ let fired=0;
+ const stand=hooked(c.file,async statements=>{if(isWrite(statements)&&!fired++)c.db.sql(dropTriggers+'UPDATE film_person_authority SET generation=generation+1');});
+ const {result}=await writeWith(stand,clone(bigPlan.plan),{bulk:{groupSize:7,maxStatements:12}});
+ assert.equal(result.authorityMoved,true);assert.equal(result.authorityReason,'authority_moved');assert.equal(result.leaseLost,false);assert.equal(count(c.db,'film'),0,'nothing written after the marker moved');
+ void a;
 }
 
 // 6. A Person lane step is a grouped write too, and both lanes share the budget (weights 3:2, Films first).
@@ -328,9 +355,20 @@ const bigPlan=await planned(Array.from({length:7},(_,index)=>filmRecord(index+1,
  const room=migrated();
  const fits=await writeWith(room.db,clone(bigPlan.plan),{bulk:{reserveMs:0,firstGroupMs:0},windowExpiresAt:Date.now()+600000});
  assert.equal(fits.result.writtenFilms,7);assert.equal(fits.result.remaining,0);
+ // near exhaustion: whatever the budget, the statements sent never pass it (a group is admitted for its whole cost: read batch, write batch and the replay of a refused group)
+ for(const budget of [60,200,400,700,1200,2500]){
+  const near=migrated();
+  const bounded=await writeWith(near.db,clone(bigPlan.plan),{bulk:{groupSize:7,statementBudget:budget}});
+  assert.ok(bounded.adapter.statements<=budget,'budget '+budget+' sent '+bounded.adapter.statements);
+  assert.ok(bounded.result.errorCount===0&&danglingCredits(near.db)===0&&fkProblems(near.db)===0,'budget '+budget);
+  if(bounded.result.remaining>0)assert.equal(bounded.result.bulk.stop,'budget','budget '+budget+': '+JSON.stringify(bounded.result.bulk));
+ }
+ const roomy=migrated();
+ const whole=await writeWith(roomy.db,clone(bigPlan.plan),{bulk:{groupSize:7,statementBudget:100000}});
+ assert.equal(whole.result.writtenFilms,7);assert.equal(whole.result.remaining,0);
  const cap=migrated();
  const capped=await writeWith(cap.db,clone(bigPlan.plan),{bulk:{groupSize:2,statementBudget:1}});
- assert.equal(capped.result.bulk.stop,'budget','a run statement budget stops the grouped path before a group it cannot afford: '+JSON.stringify(capped.result.bulk));
+ assert.equal(capped.result.writtenFilms,0,'a spent statement budget starts no group');assert.ok(capped.result.remaining>0);assert.equal(cap.db.calls.batches,0);
 }
 
 // 12. The fallback share: a path that refuses every group is switched off after the minimum number of groups; the rest is per-entity and the rows are the same.
@@ -361,12 +399,21 @@ const phase=Array.from({length:6},(_,index)=>filmRecord(index+1,{shared:index%2=
 
  const d1=migrated();d1.db.sql(dropTriggers+"UPDATE film_person_authority SET mode='d1',generation=1");
  const refused=await run(d1.db,sources(phase),'on');
- assert.deepEqual([refused.outcome,refused.reason],['deferred','authority_moved'],'at d1 the projector is not the writer of the grouped path');assert.equal(count(d1.db,'film'),0);
+ assert.deepEqual([refused.outcome,refused.reason],['deferred','authority_unavailable'],'at d1 the projector is not the writer: the run is planned under no marker and writes nothing');assert.equal(count(d1.db,'film'),0);assert.equal(d1.db.calls.batches,0);
 
- const bare=migrated(),plain=migrated();bare.db.sql('DROP TABLE film_person_authority');
- const without=await run(bare.db,sources(phase),'on'),reference=await run(plain.db,sources(phase),'off');
- assert.equal(without.outcome,'complete');assert.equal(without.bulk.stop,'marker_unavailable');assert.equal(without.bulk.fallbackReasons.marker_unavailable,1);
- assert.equal(dump(bare.db),dump(plain.db),'without the marker table the run is the per-entity run');void reference;
+ // an absent marker table is fail-closed with the flag on: zero writes, no batch of any kind, the diff is not even started
+ const bare=migrated();bare.db.sql('DROP TABLE film_person_authority');
+ const without=await run(bare.db,sources(phase),'on');
+ assert.deepEqual([without.outcome,without.reason,without.inputKey],['deferred','authority_unavailable','film_person_authority']);
+ assert.equal(count(bare.db,'film'),0);assert.equal(count(bare.db,'person'),0);assert.equal(count(bare.db,'projection_state'),0);assert.equal(bare.db.calls.batches,0);
+ // with the flag off the same database is written as before (the marker is not the per-entity path's business)
+ const legacy=await run(bare.db,sources(phase),'off');assert.equal(legacy.outcome,'complete');assert.equal(count(bare.db,'film'),6);
+
+ // a marker that moves between the planning read and the prefetch fails closed with nothing written
+ let first=0;
+ const between=migrated({onBatch:async()=>{if(!first++)between.db.sql(dropTriggers+'UPDATE film_person_authority SET generation=generation+1');}});
+ const pinned=await run(between.db,sources(phase),'on');
+ assert.deepEqual([pinned.outcome,pinned.reason],['deferred','authority_moved'],JSON.stringify(pinned.bulk));assert.equal(count(between.db,'film'),0);assert.equal(count(between.db,'person'),0);
 }
 
 // 14. Idempotent: a second run over converged rows writes nothing, with the flag on or off; a run from the other flag value converges to the same rows.
