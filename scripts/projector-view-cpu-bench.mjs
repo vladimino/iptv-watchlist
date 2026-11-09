@@ -12,10 +12,12 @@
 // 2 is quadratic). `--profile` adds a V8 sampling profile of the whole build and lists the functions with the most self time.
 // What it does NOT measure: Cloudflare Worker CPU (a different machine and runtime), the clock semantics of Date.now() inside a Worker, R2 JSON parsing, the D1
 // metadata-cache transform, any I/O, or production data. A time here says what this code costs on this machine; it does not say what the Worker spent.
-//   node --expose-gc scripts/projector-view-cpu-bench.mjs [--entities 52000] [--sizes 6500,13000,26000,52000,104000] [--repeats 7] [--warmup 2] [--profile 1] [--keys-breakdown 1] [--only 1]
+//   node --expose-gc scripts/projector-view-cpu-bench.mjs [--entities 52000] [--sizes 6500,13000,26000,52000,104000] [--repeats 7] [--warmup 2] [--profile 1] [--keys-breakdown 1] [--only 1] [--vm 1]
 import fs from 'node:fs';
 import os from 'node:os';
 import inspector from 'node:inspector';
+import vm from 'node:vm';
+import {scoped} from './bundle-scope.mjs';
 import {PerformanceObserver,constants} from 'node:perf_hooks';
 import {pathToFileURL} from 'node:url';
 import {projectorContext} from '../tests/d1-enrichment-context.mjs';
@@ -63,7 +65,19 @@ export function fixture(entities,{seed=7}={}){
  return {raw:{watchlist:{updatedAt:T,films:watchlist},programme:{updatedAt:T,films:programme},metadata,discovered,reviews},counts:{films,persons,watchlist:watchlist.length,catalog:Object.keys(discovered).length,metadata:Object.keys(metadata).length}};
 }
 
-const projector=projectorContext({log:()=>{}});
+// How the code is loaded matters a great deal. The test helper (tests/d1-enrichment-context.mjs) runs the bundle's sources inside vm.createContext(); a global read there
+// (Math.imul in the hash loop, JSON, Map) goes through the sandbox's property interceptor, which is far slower than in the Worker, where the bundle is plain script
+// scope. The default here loads the same sources the same way the bundle carries them but in the ordinary global context (vm.runInThisContext); `--vm 1` loads them
+// through the sandboxed test context, to show how large that harness effect is. Neither is the Worker, but only the first resembles its global access.
+function directModules(){
+ vm.runInThisContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'));
+ vm.runInThisContext(scoped('src/domain/film-person-reader.js','LifecycleReader',['readLifecycle']));
+ vm.runInThisContext(scoped('src/enrichment-projection.js','EnrichmentProjection'));
+ vm.runInThisContext(scoped('src/owner-review-d1.js','OwnerReview'));
+ return vm.runInThisContext('({LifecycleReader,EnrichmentProjection,OwnerReview})');
+}
+const SANDBOXED=arg('vm','0')==='1';
+const projector=SANDBOXED?projectorContext({log:()=>{}}):directModules();
 const DICTIONARIES={films:JSON.parse(fs.readFileSync('data/film-titles.json','utf8')),people:JSON.parse(fs.readFileSync('data/person-names.json','utf8'))};
 const clone=value=>JSON.parse(JSON.stringify(value));
 // The store the projector hands to the reader, built from freshly cloned objects (cold per-object caches), the same way d1EnrichmentStore builds it.
@@ -193,13 +207,13 @@ export async function keysBreakdown(entities,{repeats=5}={}){
   nsPerChar:{stringifyReplacer:+(percentile(samples.stringifyReplacer,0.5)*1e6/total).toFixed(1),stringifyPlain:+(percentile(samples.stringifyPlain,0.5)*1e6/total).toFixed(1),hashTwoPasses:+(percentile(samples.hashTwoPasses,0.5)*1e6/total).toFixed(1)}};
 }
 async function main(){
- if(arg('keys-breakdown','0')==='1'&&arg('only','0')==='1'){console.log(JSON.stringify({environment:{node:process.version,gcExposed:!!global.gc},keysBreakdown:await keysBreakdown(toNumber(arg('entities',52000),52000),{repeats:toNumber(arg('repeats',5),5)})},null,1));return;}
+ if(arg('keys-breakdown','0')==='1'&&arg('only','0')==='1'){console.log(JSON.stringify({environment:{loading:SANDBOXED?'vm.createContext (sandboxed test helper)':'vm.runInThisContext (ordinary global scope)',node:process.version,gcExposed:!!global.gc},keysBreakdown:await keysBreakdown(toNumber(arg('entities',52000),52000),{repeats:toNumber(arg('repeats',5),5)})},null,1));return;}
  const sizes=String(arg('sizes','6500,13000,26000,52000,104000')).split(',').map(Number).filter(Boolean);
  const repeats=toNumber(arg('repeats',7),7),warmup=toNumber(arg('warmup',2),2);
  const headline=toNumber(arg('entities',52000),52000);
  if(!sizes.includes(headline))sizes.push(headline);
  sizes.sort((a,b)=>a-b);
- const environment={node:process.version,v8:process.versions.v8,platform:process.platform+' '+process.arch,cpu:os.cpus()[0]?.model,cores:os.cpus().length,gcExposed:!!global.gc};
+ const environment={loading:SANDBOXED?'vm.createContext (sandboxed test helper)':'vm.runInThisContext (ordinary global scope)',node:process.version,v8:process.versions.v8,platform:process.platform+' '+process.arch,cpu:os.cpus()[0]?.model,cores:os.cpus().length,gcExposed:!!global.gc};
  const results=[];
  for(const size of sizes){results.push(await runSize(size,{repeats,warmup}));process.stderr.write('size '+size+' done\n');}
  const scaling={};
