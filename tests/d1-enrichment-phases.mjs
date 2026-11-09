@@ -34,9 +34,10 @@ function sources(films){
 }
 const FILMS=Array.from({length:6},(_,index)=>listed(index,3));
 // A deterministic clock: every Date.now() call advances by `step` ms; `new Date(x)` is the real one.
-function clockedProjector(step){
+function clockedProjector(step,control=null){
  let now=1_800_000_000_000;
  class FakeDate extends Date{static now(){now+=step;return now;}}
+ if(control)control.advance=ms=>{now+=ms;};
  return projectorContext({log:()=>{},globals:{Date:FakeDate}});
 }
 const run=(projector,db,bucket,options={})=>projector.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:options.mode||'on'},{queryBudget:1e9,wallMs:1e12,...options.run});
@@ -52,7 +53,8 @@ const entryOk=item=>Object.keys(item).sort().join()==='ms,n,q,rows'&&Object.valu
  assert.equal(summary.outcome,'complete',JSON.stringify(summary));
  for(const key of ['loadMs','viewMs','durationMs','queries','films','people','changedFilms','changedPeople','writtenFilms','writtenPeople'])assert.ok(Number.isFinite(summary[key]),'the old field stays: '+key);
  const timing=summary.timing;
- for(const key of ['leaseMs','diffMs','writeGateMs','writeMs','preWriteMs','windowReleaseMs','leaseReleaseMs','runMs'])if(key!=='windowReleaseMs')assert.ok(Number.isInteger(timing[key])&&timing[key]>=0,key+' '+JSON.stringify(timing));
+ for(const key of ['leaseMs','diffMs','diffResidualMs','writeGateMs','writeMs','preTxnMs','preWriteMs','firstBatchPlanMs','firstBatchStatements','leaseReleaseMs','runMs'])assert.ok(Number.isInteger(timing[key])&&timing[key]>=0,key+' '+JSON.stringify(timing));
+ assert.equal(timing.preWriteMs,timing.preTxnMs+timing.firstBatchPlanMs,'the first batch is the first transaction entered plus its planning');
  assert.equal(timing.windowMs,undefined,'no window: no window time');assert.equal(timing.windowReleaseMs,undefined);
  assert.ok(timing.leaseMs+timing.diffMs+timing.writeGateMs+timing.writeMs<=timing.runMs,'the run in order adds up: '+JSON.stringify(timing));
  assert.ok(timing.preWriteMs<=timing.leaseMs+timing.diffMs+timing.writeGateMs+timing.writeMs,'the first batch is inside the run');
@@ -64,12 +66,13 @@ const entryOk=item=>Object.keys(item).sort().join()==='ms,n,q,rows'&&Object.valu
  assert.equal(summary.phases['diff.storedRead'].n,1);
  // additivity: the sequential phases never exceed the diff, the residual is the time no phase covers
  const covered=sum(summary.phases);
- assert.ok(covered<=timing.diffMs,'phases '+covered+' <= diff '+timing.diffMs);
- assert.ok(timing.diffMs-covered<=40*5,'the residual stays small on a 5 ms clock (only untimed glue): '+(timing.diffMs-covered));
+ assert.equal(covered+timing.diffResidualMs,timing.diffMs,'diffMs = the sum of phases + the named residual: '+JSON.stringify([covered,timing.diffResidualMs,timing.diffMs]));
+ assert.ok(timing.diffResidualMs<=40*5,'the residual stays small on a 5 ms clock (only untimed glue): '+timing.diffResidualMs);
  // a second run reads the checkpoints it wrote
  const again=await run(projector,db,bucket);
  assert.equal(again.phases['diff.storedRead'].rows,FILMS.length+summary.writtenPeople,'rows read = checkpoints written');
  assert.equal(again.timing.preWriteMs,undefined,'nothing to write: no first batch, no pre-write time');
+ assert.equal(again.timing.preTxnMs,undefined);assert.equal(again.timing.firstBatchPlanMs,undefined);
  assert.ok(Number.isInteger(again.timing.writeMs));
 }
 
@@ -102,6 +105,7 @@ const entryOk=item=>Object.keys(item).sort().join()==='ms,n,q,rows'&&Object.valu
  assert.equal([summary.outcome,summary.reason].join(),'failed,input_missing');
  assert.ok(summary.phases['store.writersIdle']&&summary.phases['store.readBlock'],'phases up to the failure');
  assert.ok(Number.isInteger(summary.timing.diffMs));
+ assert.equal(sum(summary.phases)+summary.timing.diffResidualMs,summary.timing.diffMs,'the accounting holds when the diff fails');
  assert.equal(summary.timing.writeMs,undefined);assert.equal(summary.timing.preWriteMs,undefined);assert.equal(summary.timing.writeGateMs,undefined);
  assert.equal(db.sql('SELECT COUNT(*) AS n FROM film')[0].n,0);
 }
@@ -110,10 +114,34 @@ const entryOk=item=>Object.keys(item).sort().join()==='ms,n,q,rows'&&Object.valu
 {
  const projector=clockedProjector(5),db=migrated(),bucket=sources(FILMS);
  const summary=await run(projector,db,bucket,{mode:'dry'});
- assert.equal(summary.outcome,'dry');assert.ok(Number.isInteger(summary.timing.diffMs));assert.equal(summary.timing.writeMs,undefined);
+ assert.equal(summary.outcome,'dry');assert.ok(Number.isInteger(summary.timing.diffMs));assert.equal(sum(summary.phases)+summary.timing.diffResidualMs,summary.timing.diffMs,'the accounting holds in a dry run');assert.equal(summary.timing.writeMs,undefined);
  assert.equal(db.sql('SELECT COUNT(*) AS n FROM film')[0].n,0);
  const off=await projector.runD1EnrichmentProjection({DB:db,BUCKET:bucket},{});
  assert.equal(JSON.stringify(off),JSON.stringify({mode:'off',skipped:'off'}));
+}
+
+// 6. preWriteMs is the first batch SUBMITTED to D1, not the first transaction entered: the repository's own planning (its reads and the statement
+// assembly) before binding.batch counts, and a batch that fails keeps its attempt.
+{
+ const control={},projector=clockedProjector(1,control),db=migrated(),bucket=sources(FILMS);
+ const real=projector.CanonicalRepository.createCanonicalRepository;
+ projector.CanonicalRepository.createCanonicalRepository=target=>{
+  const repository=real(target);
+  return {...repository,projectPerson:async input=>{control.advance(5000);return repository.projectPerson(input);},projectFilm:async input=>{control.advance(5000);return repository.projectFilm(input);}};
+ };
+ const summary=await run(projector,db,bucket);
+ assert.equal(summary.outcome,'complete',JSON.stringify(summary));
+ assert.ok(summary.timing.firstBatchPlanMs>=5000,'a 5 s planning delay before the first submission is in the measurement: '+JSON.stringify(summary.timing));
+ assert.equal(summary.timing.preWriteMs,summary.timing.preTxnMs+summary.timing.firstBatchPlanMs);
+ assert.ok(summary.timing.firstBatchStatements>=3,'the first batch carries the fence, the rows and the key');
+ // the first attempt is kept when that batch fails (the run goes on or stops by its existing rules)
+ const failing=clockedProjector(5),db2=migrated(),bucket2=sources(FILMS);
+ let thrown=false;
+ const binding={prepare:(...args)=>db2.prepare(...args),batch:async statements=>{if(!thrown){thrown=true;throw new Error('D1 unavailable');}return db2.batch(statements);}};
+ const failed=await failing.runD1EnrichmentProjection({DB:binding,BUCKET:bucket2,D1_ENRICHMENT_WRITE:'on'},{queryBudget:1e9,wallMs:1e12});
+ assert.ok(thrown,'the first submitted batch failed (the run retries a failed Person group one by one, as before)');
+ assert.ok(Number.isInteger(failed.timing.preWriteMs),'the attempt is kept when the batch fails: '+JSON.stringify(failed.timing));
+ assert.ok(failed.timing.firstBatchStatements>=3);
 }
 
 // 5. No payload, id, key, SQL or parameter in the measurements: a closed set of names, numbers only.

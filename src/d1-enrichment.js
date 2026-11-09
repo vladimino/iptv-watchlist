@@ -53,7 +53,7 @@ function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value
 
 // The repository's database interface over the D1 binding. Reads go out at once and count against the run's query budget.
 // Writes inside transaction() are collected and sent as one db.batch, which D1 applies atomically.
-function d1EnrichmentAdapter(binding){
+function d1EnrichmentAdapter(binding,marks=null){
  let buffer=null,queries=0;
  const statement=(sql,params)=>binding.prepare(sql).bind(...params);
  return {
@@ -65,7 +65,8 @@ function d1EnrichmentAdapter(binding){
    if(buffer)return fn();
    buffer=[];let statements;
    try{await fn();statements=buffer;}finally{buffer=null;}
-   if(statements.length){queries++;await binding.batch(statements);}
+   // AIR-392: the first batch the run SUBMITS (the instant before binding.batch is called, so a failing batch still has its attempt). Measurement only.
+   if(statements.length){queries++;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=statements.length;}await binding.batch(statements);}
   },
  };
 }
@@ -288,7 +289,8 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
  const begun=Date.now();let started=begun;
- const nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB),leaseId=crypto.randomUUID();
+ const marks={};
+ const nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB,marks),leaseId=crypto.randomUUID();
  const windowState={requested:false,granted:false,heldStarted:null};
  const summary={projection:D1_ENRICHMENT_PROJECTION,mode,trigger,startedAt:nowIso,version:EnrichmentProjection.ENRICHMENT_PROJECTION_VERSION};
  // AIR-392: `timing` partitions the run in order (lease, window request to grant, diff, pre-write guards, write loop, release); `phases` splits the
@@ -309,7 +311,13 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   }
   const diffAt=Date.now();
   let plan;
-  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer);}finally{timing.diffMs=Date.now()-diffAt;}
+  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer);}
+  finally{
+   timing.diffMs=Date.now()-diffAt;
+   // The named remainder of the additive accounting: diffMs = the sum of `phases` + diffResidualMs (untimed glue and CPU). `detail` overlaps and is not in it.
+   const covered=Object.values(timer.phases).reduce((total,item)=>total+item.ms,0);
+   timing.diffResidualMs=Math.max(0,timing.diffMs-covered);
+  }
   // More absences or lost watchlist memberships than a routine sync explains point at broken input: nothing is written.
   const guard=d1EnrichmentGuard(plan,summary);
   if(guard){summary.outcome=guard;return summary;}
@@ -319,13 +327,15 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   timing.writeGateMs=Date.now()-gateAt;
   if(summary.window?.outcome==='granted'&&writeGate&&Number.isFinite(writeGate.generation))summary.window.generationAtFirstBatch=writeGate.generation;
   const writeAt=Date.now();
-  const marks={};
   let written;
   try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null,marks});}
   finally{
    timing.writeMs=Date.now()-writeAt;
-   // From the budget clock's start (the grant, or the run start with no window) to the first batch the run sent; absent when it sent none.
-   if(marks.firstBatchAt!=null)timing.preWriteMs=marks.firstBatchAt-started;
+   // From the budget clock's start (the grant, or the run start with no window): to the first fenced transaction entered (`preTxnMs`), to the first
+   // batch SUBMITTED to D1 (`preWriteMs`, an attempt: kept if that batch fails), and the planning between the two (`firstBatchPlanMs`: the repository's
+   // own reads and the statement assembly). Each is absent when the run got that far never.
+   if(marks.firstTxnAt!=null)timing.preTxnMs=marks.firstTxnAt-started;
+   if(marks.firstBatchAt!=null){timing.preWriteMs=marks.firstBatchAt-started;timing.firstBatchStatements=marks.firstBatchStatements;if(marks.firstTxnAt!=null)timing.firstBatchPlanMs=marks.firstBatchAt-marks.firstTxnAt;}
   }
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   // A window that ended under the run is a deferred outcome with its own reason, never a success.
@@ -486,8 +496,8 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
  const repository=CanonicalRepository.createCanonicalRepository(db);
  const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false,windowLost:false};
  const fenced=async(write)=>{
-  // AIR-392: the time of the first batch this run sends, for the pre-write overhead. Measurement only.
-  if(marks.firstBatchAt==null)marks.firstBatchAt=Date.now();
+  // AIR-392: the instant the first fenced transaction is entered (its planning starts); the submission is marked by the adapter. Measurement only.
+  if(marks.firstTxnAt==null)marks.firstTxnAt=Date.now();
   try{
    await db.transaction(async()=>{
     // Inside a window every batch also asserts, in the same statement, that this run still owns an unexpired `held` window.
