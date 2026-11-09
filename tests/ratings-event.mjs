@@ -39,8 +39,10 @@ async function runOnce(R,env,clock,trigger='scheduled'){
  assert.equal(event.diary.written,run.diary.facts.written);assert.ok(event.diary.written>=1,'new facts were written');
  assert.equal(event.diary.unchanged,run.diary.facts.unchanged);
  assert.equal(event.coverage,'recent_window','page one is not the whole archive');
- assert.deepEqual(Object.keys(event).sort(),['at','cause','coverage','diary','id','key','removal','runId','state','trigger','type'].sort(),'a stable minimal contract');
- assert.doesNotMatch(JSON.stringify(event),/lid\d|letterboxd\.com|film/i,'no titles, ids, urls or raw data');
+ assert.deepEqual(Object.keys(event).sort(),['at','cause','coverage','details','diary','id','key','removal','runId','state','trigger','type'].sort(),'a stable contract: the summary plus the optional AIR-393 details');
+ assert.doesNotMatch(JSON.stringify({...event,details:undefined}),/lid\d|letterboxd\.com|film/i,'no titles, ids, urls or raw data in the aggregates');
+ assert.equal(event.details.added.length+event.details.more.added,event.diary.written,'every new fact is named or counted in more (the cap is 25 per group)');assert.equal(event.details.added.length,25);
+ assert.doesNotMatch(JSON.stringify(event.details),/letterboxd\.com|https?:/i,'no urls in the details');
  assert.ok(bucket.value(RUN).ratingsEventAt,'the run is marked delivered');
  // 2. The next successful run with nothing new: a new event for another runId with zero written.
  clock.now+=DAY;

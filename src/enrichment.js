@@ -649,6 +649,8 @@ async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBe
    if(next){event=await writeEvent(env,next);summary.written++;}
    const film=(event?.type==='watchlist'&&Array.isArray(event.removed)?event.removed:[]).find(value=>String(value?.id)===item.id);
    issue=!film?'film_not_in_event':removalRating(film)?null:'event_unrated';
+   // AIR-393: the films whose reference this step settled, with the title the removal event carries.
+   if(!issue)(summary.films||(summary.films=[])).push({id:item.id,title:film.title??null,year:film.year??null,rating:item.rating});
   }else issue='event_missing';
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
    const ref=removalQueueV2(q)?(q.films[item.id]?.refs||[]).find(value=>value.eventKey===item.eventKey):null;

@@ -366,7 +366,7 @@ function recordRatingChange(record,incoming,effective){
  // film whose projection already shows the same watched and rating is not written. One view-index projection for the batch.
  async function applyDiaryEvidence(env,evidence){
   const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
-  const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{}};
+  const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{},changes:[]};
   if(!items.length)return summary;
   const [{value:viewIndex},{value:filmsList},{value:watchlist}]=await Promise.all([readJSON(env,FACTS_KEYS.viewIndex),readJSON(env,FACTS_KEYS.filmsList),readJSON(env,FACTS_KEYS.watchlist)]);
   const view=viewIndex||{},due=items.filter(item=>!(view[item.lid]?.watched===true&&(item.rating==null||view[item.lid]?.actualRating===item.rating)));
@@ -397,7 +397,13 @@ function recordRatingChange(record,incoming,effective){
    const floors={...await summaryObservations('films-list',filmsList,item.lid,factKey),...await summaryObservations('watchlist',watchlist,item.lid,factKey)};
    const result=await recordObservations(env,factKey,{letterboxd:item.lid},observations,{floors});
    records.push(result.record);
-   if(result.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces'))summary.written++;
+   if(result.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces')){
+    summary.written++;
+    // AIR-393: what this write changed for the film, from the view as it stood before the writes (a new watched fact, or a different rating).
+    const before=view[item.lid]||{},previous=typeof before.actualRating==='number'&&Number.isFinite(before.actualRating)?before.actualRating:null;
+    if(before.watched!==true)summary.changes.push({lid:item.lid,tmdb:result.record?.links?.tmdb||null,kind:'added',rating:item.rating??null});
+    else if(item.rating!=null&&previous!==item.rating)summary.changes.push({lid:item.lid,tmdb:result.record?.links?.tmdb||null,kind:'updated',from:previous,rating:item.rating});
+   }
    else if(result.outcomes.some(o=>o.outcome==='older'))summary.older++;else summary.unchanged++;
   }
   for(const item of items){const record=records.find(r=>r?.links?.letterboxd===item.lid);const value=record?record.rating?.value:view[item.lid]?.actualRating;if(value!=null)summary.ratings[item.lid]=value;}
