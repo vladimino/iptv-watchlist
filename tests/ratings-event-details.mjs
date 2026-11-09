@@ -94,6 +94,47 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  await crashAt('before the step summary',value=>value?.phase==='removal',0);
 }
 
+// 1e. AIR-393: a plan is an intent, not a receipt. Only applied contributions reach the event; a replay keeps what the stored view still shows.
+{
+ const rows=()=>diaryPage([diaryRow('lidA',8,'2026-11-08','v1'),diaryRow('lidU',9,'2026-11-06','v3')]);
+ const base=()=>{const s=setup();migrated(s.bucket);s.bucket.set('enrichment/view-index.json',{lidU:{watched:true,actualRating:3}});s.bucket.set('metadata.json',{lidA:{id:'lidA',title:'Фильм А',year:2001,tmdbId:'111'},lidU:{id:'lidU',title:'Фильм У',year:1990,tmdbId:'222'}});s.net.diary.set(1,rows());return s;};
+ const stepAll=async(R,env,clock,runId)=>{let reply;for(let i=0;i<30;i++){try{reply=plain(await R.step(env,{runId}));}catch(error){clock.now+=4*60000;continue;}clock.now+=1000;if(reply.nextAction!=='continue')break;}return reply;};
+ // (i) A plan with no completed writes: the facts cannot be written, the page fails, the run ends in error. The plan stays a plan; the event has no details.
+ {
+  const {clock,bucket,env,R,ctx}=base();
+  const linksKey=g(ctx,'LetterboxdFacts').FACTS_KEYS.links;
+  bucket.hooks.beforePut=async key=>{if(key===linksKey)throw new Error('facts store down');};
+  const {runId,reply}=await runOnce(R,env,clock);
+  const record=bucket.value(RUN);assert.equal(record.diary.pageChanges?.['1']?.state,'planned','the plan was saved before the facts');
+  const found=ratings(bucket);assert.equal(found.length,1);assert.equal(found[0].state,'error');assert.equal(found[0].details,undefined,'a plan that never completed is not an event detail');
+ }
+ // (ii) A kill after the facts are written and before the page checkpoint, then another writer sets a newer rating for a planned film: the replay
+ // finds that write older, so only the effects the stored view still shows are claimed.
+ {
+  const {clock,bucket,env,R,ctx}=base();
+  let armed=true;bucket.hooks.beforePut=async(key,value)=>{if(armed&&key===RUN&&value?.checkpoint?.diaryPagesRead===1){armed=false;throw new Error('worker killed');}};
+  const started=plain(await R.start(env,{trigger:'scheduled'}));
+  await assert.rejects(()=>R.step(env,{runId:started.runId}),/worker killed/);
+  assert.equal(bucket.value(RUN).diary.pageChanges['1'].state,'planned','the plan survived the kill');
+  await g(ctx,'LetterboxdFacts').applyDiaryEvidence(env,[{lid:'lidU',watchedDate:'2026-11-09',rating:5,ratingState:'rated',readAt:at(T0)}]);
+  clock.now+=4*60000;
+  const reply=await stepAll(R,env,clock,started.runId);assert.equal(reply.state,'finished',JSON.stringify(reply));
+  const event=ratings(bucket)[0],d=plain(event.details||{});
+  eq((d.added||[]).map(f=>f.id),['lidA'],'the new watched fact is still shown');
+  assert.equal((d.updated||[]).length,0,'the rating another writer set later is not claimed by this page');
+  assert.equal(bucket.value(RUN).diary.pageChanges['1'].state,'applied');
+ }
+ // (iii) Capture that cannot be made is surfaced, never a complete-looking list: the facts are still written.
+ {
+  const {clock,bucket,env,R,ctx}=base();
+  const viewKey=g(ctx,'LetterboxdFacts').FACTS_KEYS.viewIndex;let reads=0;
+  bucket.hooks.beforeGet=async key=>{if(key===viewKey&&++reads===1)throw new Error('view unavailable');};
+  const {reply}=await runOnce(R,env,clock);assert.equal(reply.state,'finished',JSON.stringify(reply));
+  const event=ratings(bucket)[0];assert.equal(event.diary.written>=1,true,'the facts were written');
+  assert.equal(event.details?.incomplete,true,'the event says the list is incomplete');assert.equal(event.details.added,undefined,'and lists nothing it did not capture');
+ }
+}
+
 // 1d. A repeated merge of the same contribution is ignored, never added again.
 {
  const {R}=setup();
@@ -190,6 +231,8 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  assert.match(text,/Название недоступно · 4\.0 ★/);assert.doesNotMatch(text,/lid123/,'a technical id is never shown as a title');
  assert.doesNotMatch(text,/<img|<b>/,'values are escaped');assert.doesNotMatch(text,/<a href=[^>]*tmdb_1/,'a malformed TMDB id makes no link');assert.doesNotMatch(text,/4\.2/,'only half-star ratings are shown');
  text=html({added:[],more:{}});assert.doesNotMatch(text,/event-group/,'no empty group');
+ text=html({incomplete:true});assert.match(text,/Часть изменений не удалось назвать/,'an incomplete capture is stated');assert.doesNotMatch(text,/event-group/);
+ text=html({incomplete:true,added:[{id:'a',title:'Фильм А',year:2001,tmdb:null,rating:4}]});assert.match(text,/список неполный/);assert.match(text,/Фильм А \(2001\)/);
  text=html({added:'x',updated:{},rated:[null,1,'s'],more:{rated:-1}});assert.doesNotMatch(text,/event-group/,'malformed details draw nothing');
 }
 console.log('AIR-393 ratings event details: every group, caps, retry and delivery, checkpoint, no-change and legacy compatibility, links and unknown titles passed');

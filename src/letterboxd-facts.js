@@ -379,6 +379,13 @@ function recordRatingChange(record,incoming,effective){
   }
   return out;
  }
+ // AIR-393: which planned effects the stored view really shows now. A replay of a page cannot tell its own earlier writes from none, but it can
+// tell whether the effect is there: a film is watched, or carries exactly the planned rating. Another writer's different value, or a write the
+// page lost as older, is not confirmed.
+ async function confirmDiaryEffects(env,groups){
+  const {value}=await readJSON(env,FACTS_KEYS.viewIndex),view=value||{};
+  return {added:(groups?.added||[]).filter(item=>view[item.id]?.watched===true),updated:(groups?.updated||[]).filter(item=>view[item.id]?.actualRating===item.rating)};
+ }
  async function applyDiaryEvidence(env,evidence){
   const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
   const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{},changes:[]};
@@ -736,5 +743,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,planDiaryChanges,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();

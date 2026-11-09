@@ -2128,8 +2128,8 @@ function ratingsDetailsHTML(details){
   rated:f=>{const r=star(f.rating);return `${label(f)}${r?` · ${r} ★`:''}`;},
   resolved:f=>{const r=star(f.rating);return `${label(f)}${r?` · ${r} ★`:''}`;}
  };
- const more=details.more&&typeof details.more==='object'?details.more:{};
- return RATINGS_DETAIL_GROUPS.map(([key,title])=>{
+ const more=details.more&&typeof details.more==='object'?details.more:{},gap=details.incomplete===true?'<p class="event-note">Часть изменений не удалось назвать: список неполный.</p>':'';
+ return gap+RATINGS_DETAIL_GROUPS.map(([key,title])=>{
   const films=Array.isArray(details[key])?details[key].filter(f=>f&&typeof f==='object'):[],rest=Number.isInteger(more[key])&&more[key]>0?more[key]:0;
   if(!films.length&&!rest)return '';
   return `<details class="event-group" open><summary><h3>${title} · ${films.length+rest}</h3></summary><ul>${films.map(f=>`<li>${line[key](f)}</li>`).join('')}</ul>${rest?`<p class="event-note">ещё ${rest} без детализации</p>`:''}</details>`;

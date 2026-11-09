@@ -108,9 +108,10 @@ const LetterboxdRatings=(()=>{
  // AIR-393: optional `details`, only for the films this run changed. Absent for a run that changed none (or one recorded before this
  // field): the event is then the short summary it always was.
  function detailsOf(run){
-  const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]);
-  const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part):all,mergeChanges(null,null));
-  return changeCount(merged)?{details:{...Object.fromEntries(CHANGE_GROUPS.filter(group=>merged[group].length).map(group=>[group,merged[group]])),...(Object.keys(merged.more).length?{more:merged.more}:{})}}:{};
+  const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]).filter(page=>page&&page.state==='applied');
+  const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part):all,mergeChanges(null,null)),incomplete=pages.some(page=>page.incomplete===true);
+  if(incomplete&&!changeCount(merged))return {details:{incomplete:true}};
+  return changeCount(merged)?{details:{...(incomplete?{incomplete:true}:{}),...Object.fromEntries(CHANGE_GROUPS.filter(group=>merged[group].length).map(group=>[group,merged[group]])),...(Object.keys(merged.more).length?{more:merged.more}:{})}}:{};
  }
  async function deliverEvent(env,event){
   if(!event||typeof writeRatingsEvent!=='function')return false;
@@ -307,16 +308,18 @@ const LetterboxdRatings=(()=>{
   if((cp.diaryPagesRead||0)>=1)return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
   let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0,unratedLids=[];
-  // AIR-393: the films this page changes are planned from the view before any fact is written and saved on the run record under the
-  // page's own key (`diary.pageChanges[page]`), so a crash after the facts are written, or between the page checkpoint and the end of the
-  // step, cannot lose them, and a replay of the page replaces that contribution instead of adding to it. A replay finds the plan stored
-  // and keeps it; the first attempt narrows it to the writes that really happened and saves that with the page checkpoint.
-  const stored=prior?.pageChanges&&typeof prior.pageChanges==='object'?prior.pageChanges:{},pageNow={};
+  // AIR-393: the films this page changes are *planned* from the view before any fact is written and saved on the run record under the page's
+  // key (`diary.pageChanges[page]`, state `planned`), so a kill after the facts are written cannot lose them. A plan is an intent, not a
+  // receipt: only a contribution in state `applied` reaches the event, and it is made `applied` with the page checkpoint after the facts were
+  // applied. On the first attempt it is narrowed to the writes that really happened. On a replay of the page (a plan already stored) it keeps
+  // only what the stored view and queue show now, so a write another writer won or the page lost as older is not claimed. A page whose
+  // details could not be captured is saved as `incomplete`, and the event says so, never a complete-looking list.
+  const stored=prior?.pageChanges&&typeof prior.pageChanges==='object'?prior.pageChanges:{},pageNow={},planned={};
   const afterPage=async({page,rows,next,history,readAt})=>{
    const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
    const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
    for(const item of evidence)facts[item.ratingState]++;
-   const key=String(page??1);let plan=stored[key]||null;const fresh=!plan;
+   const key=String(page??1),earlier=stored[key]&&stored[key].state==='planned'?stored[key]:null;let plan=earlier,incomplete=false;const fresh=!earlier;
    if(fresh){
     try{
      const groups={added:[],updated:[],rated:[],resolved:[]};
@@ -324,10 +327,10 @@ const LetterboxdRatings=(()=>{
      const queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
      if(removalQueueV2(queue))for(const item of evidence)if(item.rating!=null&&half(item.rating)!=null&&queue.films[item.lid]&&queue.films[item.lid].state!=='rated')groups.rated.push({id:item.lid,rating:item.rating});
      if(changeCount(groups)){
-      plan=mergeChanges(null,await labelledChanges(env,groups));
+      plan={...mergeChanges(null,await labelledChanges(env,groups)),state:'planned'};planned[key]=plan;
       await own(current=>({...current,updatedAt:iso(clock()),diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),[key]:plan}}}));
      }
-    }catch(e){if(e instanceof LeaseLost){leaseLost=true;return;}plan=null;}
+    }catch(e){if(e instanceof LeaseLost){leaseLost=true;return;}plan=null;incomplete=true;}
    }
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
    for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
@@ -336,9 +339,15 @@ const LetterboxdRatings=(()=>{
    let resolvedLids=new Set();
    if(proved.length){const at=iso(clock());await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{let changed=false;resolvedLids=new Set();for(const item of proved)if(resolveRemovalByDiary(q,item.lid,item.rating,at)){changed=true;resolved++;resolvedLids.add(item.lid);}return changed?q:null;});}
    if(plan){
-    if(fresh){const written=new Set((result.changes||[]).map(change=>change.lid));plan={...plan,added:plan.added.filter(item=>written.has(item.id)),updated:plan.updated.filter(item=>written.has(item.id)),rated:plan.rated.filter(item=>resolvedLids.has(item.id))};}
-    pageNow[key]=plan;
-   }
+    try{
+     if(fresh){const written=new Set((result.changes||[]).map(change=>change.lid));plan={...plan,added:plan.added.filter(item=>written.has(item.id)),updated:plan.updated.filter(item=>written.has(item.id)),rated:plan.rated.filter(item=>resolvedLids.has(item.id))};}
+     else{
+      const shown=await LetterboxdFacts.confirmDiaryEffects(env,plan),queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
+      plan={...plan,...shown,rated:plan.rated.filter(item=>removalQueueV2(queue)&&queue.films[item.id]?.state==='rated'&&queue.films[item.id]?.lastResult==='diary'&&queue.films[item.id]?.rating===item.rating)};
+     }
+     pageNow[key]={...plan,state:'applied'};
+    }catch{pageNow[key]={added:[],updated:[],rated:[],resolved:[],more:{},state:'applied',incomplete:true};}
+   }else if(incomplete)pageNow[key]={added:[],updated:[],rated:[],resolved:[],more:{},state:'applied',incomplete:true};
   };
   const onPage=async({next})=>{
    pagesRead++;stepPages++;
@@ -349,7 +358,7 @@ const LetterboxdRatings=(()=>{
   if(leaseLost)throw new LeaseLost();
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
-   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,...(Object.keys({...stored,...pageNow}).length?{pageChanges:{...stored,...pageNow}}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
+   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,...(Object.keys({...stored,...planned,...pageNow}).length?{pageChanges:{...stored,...planned,...pageNow}}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
