@@ -234,9 +234,9 @@ const LetterboxdRatings=(()=>{
     const next=await own(run=>released({...run,phase:diary.more?'diary':'removal',diary:diary.summary,checkpoint:{...run.checkpoint,diaryNextPage:diary.next?.page??null,diaryMode:diary.next?.mode??run.checkpoint.diaryMode}}));
     return reply(next,'continue','more_work',{step:stepInfo,summary:{diary:next.diary,removal:next.removal}});
    }
-   const removal=await removalPhase(env,owned.run,{own,remaining,clock});
+   const removal=await removalPhase(env,owned.run,{own,remaining,clock,stepId});
    stepInfo.lookups=removal.lookup.checked;
-   const merged=run=>({...run,removal:{settled:addCounts(run.removal?.settled,removal.settled),lookup:addCounts(run.removal?.lookup,removal.lookup),pausedUntil:removal.lookup.pausedUntil||run.removal?.pausedUntil||null,...removalChangeFields(run,removal.changes,stepId)}});
+   const merged=run=>({...run,removal:{settled:addCounts(run.removal?.settled,removal.settled),lookup:addCounts(run.removal?.lookup,removal.lookup),pausedUntil:removal.lookup.pausedUntil||run.removal?.pausedUntil||null,...(run.removal?.intents?.length?{intents:run.removal.intents}:{}),...removalChangeFields(run,removal.changes,stepId)}});
    const next=await own(run=>removal.more?released(merged(run)):finish(merged(run),clock()));
    if(!removal.more)await reconcileEvent(env).catch(()=>null);
    return reply(next,removal.more?'continue':'stop',removal.more?'more_work':next.state,{step:stepInfo,summary:{diary:next.diary,removal:next.removal}});
@@ -250,7 +250,7 @@ const LetterboxdRatings=(()=>{
  // Groups: `added` (a new watched fact, with its rating when the entry has one), `updated` (a different rating; `from` only when the
  // earlier one was a stored number), `rated` (a removed film whose rating was found in this run) and `resolved` (a removal reference of
  // the Events Log settled with a rating). A film appears once per group. Over the cap the rest are only counted in `more`.
- const CHANGE_GROUPS=['added','updated','rated','resolved'],CHANGES_CAP=25,STORE_CAP=100;
+ const CHANGE_GROUPS=['added','updated','rated','resolved'],CHANGES_CAP=25,STORE_CAP=100,REMOVAL_INTENTS_MAX=200;
  const half=value=>typeof value==='number'&&Number.isFinite(value)&&value>=0.5&&value<=5&&value*2%1===0?value:null;
  function changeEntry(raw){
   const id=String(raw?.id??'').trim();if(!id||id.length>64)return null;
@@ -383,34 +383,59 @@ const LetterboxdRatings=(()=>{
  // lookups for this run. The retired binding does not (ADR 0077). A confirmed stored rating resolves a due entry
  // first, at most five probes, with no claim and no member-page GET, including one a new reference just reopened.
  // A film not probed in this step is not requested. No legacy candidate means no event list.
- async function removalPhase(env,run,{own,remaining,clock}){
+ async function removalPhase(env,run,{own,remaining,clock,stepId}){
+  // AIR-393: what this step settles or finds is written to the run record as an *intent* before the effect, and confirmed against the stored
+  // queue afterwards, so a kill after the lookup or the settlement cannot lose the film. A step that died leaves its intents; the next step
+  // confirms them before it starts. A film is claimed only when the queue (or the reference) shows the effect now, so an intent whose effect never
+  // happened is dropped. Like the Diary replay this is a check of the stored state, not of the writer.
+  const planned=[],intentKey=item=>item.kind+'|'+item.id+'|'+(item.eventKey||'');
+  const plan=async list=>{
+   if(!list.length)return;
+   planned.push(...list);
+   await own(current=>({...current,updatedAt:iso(clock()),removal:{...(current.removal||{}),intents:[...(current.removal?.intents||[]),...list].slice(-REMOVAL_INTENTS_MAX)}}));
+  };
+  const confirm=async(list,tag)=>{
+   if(!list.length)return;
+   const queue=(await read(env,REMOVAL_LOOKUP_KEY)).value,groups={added:[],updated:[],rated:[],resolved:[]};
+   for(const item of list){
+    const entry=removalQueueV2(queue)?queue.films[item.id]:null;
+    if(item.kind==='rated'){if(entry?.state==='rated'&&half(entry.rating)!=null)groups.rated.push({id:item.id,rating:entry.rating});}
+    else{const ref=(entry?.refs||[]).find(value=>value.eventKey===item.eventKey);if(ref&&ref.resolved===true&&half(item.rating)!=null)groups.resolved.push({id:item.id,rating:item.rating});}
+   }
+   let labelled=groups;if(changeCount(groups)){try{labelled=await labelledChanges(env,groups);}catch{}}
+   const done=new Set(list.map(intentKey));
+   await own(current=>({...current,updatedAt:iso(clock()),removal:{...(current.removal||{}),intents:(current.removal?.intents||[]).filter(item=>!done.has(intentKey(item))),...removalChangeFields(current,labelled,tag)}}));
+  };
+  const left=Array.isArray(run.removal?.intents)?run.removal.intents:[];
+  if(left.length)await confirm(left,'recover:'+stepId);
+  const planResolved=list=>plan(list.map(item=>({kind:'resolved',...item})));
   const legacyLink=await linkLegacyRemovalRefs(env,{limit:LEGACY_LINK_PAGE,now:clock()});
   // The counter moves only when this step's queue write committed. A lost compare-and-swap does not count another scan's page.
   if(legacyLink.advanced)await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,legacyPagesLinked:(current.checkpoint.legacyPagesLinked||0)+1}}));
-  const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP,now:clock(),checkedBefore:run.startedAt});
-  const seen={added:[],updated:[],rated:[],resolved:[...(settled.films||[])]};delete settled.films;
-  const changesOf=async()=>changeCount(seen)?labelledChanges(env,seen).catch(()=>null):null;
+  const settled=await settleRemovalRefs(env,{limit:SETTLE_PER_STEP,now:clock(),checkedBefore:run.startedAt,onPlan:planResolved});
+  const finish=async value=>{await confirm(planned,'step:'+stepId);return value;};
   const lookup={checked:0,rated:0,notRated:0,failed:0,refused:0,stoppedBy:null,pausedUntil:null};
   let more=false;
-  if(settled.left>0||legacyLink.more){lookup.stoppedBy=settled.left>0?'settling':'legacy_link';return {settled,lookup,more:true,changes:await changesOf()};}
+  if(settled.left>0||legacyLink.more){lookup.stoppedBy=settled.left>0?'settling':'legacy_link';return finish({settled,lookup,more:true});}
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&pruneRemovalQueue(q,clock())?q:null);
   const budget=STEP_LOOKUPS;
   const started=clock();
   let queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
-  if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return {settled,lookup,more,changes:await changesOf()};}
-  if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>started){lookup.stoppedBy=queue.pausedBy||'blocked';lookup.pausedUntil=queue.pausedUntil;return {settled,lookup,more,changes:await changesOf()};}
+  if(!removalQueueV2(queue)){lookup.stoppedBy='queue_not_migrated';return finish({settled,lookup,more});}
+  if(queue.pausedUntil&&Date.parse(queue.pausedUntil)>started){lookup.stoppedBy=queue.pausedBy||'blocked';lookup.pausedUntil=queue.pausedUntil;return finish({settled,lookup,more});}
   const facts=await resolveDueRemovalFacts(env,started,{skip:run.diary?.unratedLids||[],limit:REMOVAL_FACT_BATCH,getBudget:budget,beforeEach:()=>remaining()>LEASE_MARGIN_MS});
   queue=facts.queue||queue;
   for(const id of facts.gettable){
    if(!(remaining()>LEASE_MARGIN_MS)){more=true;break;}
    const t=clock(),at=iso(t),token=crypto.randomUUID();
+   await plan([{kind:'rated',id}]);
    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>removalQueueV2(q)&&claimRemovalEntry(q,id,t,at,token)?q:null);
    if(!removalClaimHeld(queue,id,at,token))continue;
    let result=null,error=null;try{result=await refreshPersonalRating(env,{id,url:queue.films[id].url});}catch(e){error=String(e.message);}
    let accepted=false;
    queue=await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{accepted=applyRemovalOutcome(q,id,result,error,at,t,token);return accepted?q:null;});
    const entry=queue.films[id];lookup.checked++;if(!accepted)lookup.refused++;
-   if(accepted&&entry?.state==='rated'){lookup.rated++;seen.rated.push({id,rating:entry.rating});const inline=await settleRemovalRefs(env,{ids:[id]});for(const key of ['written','resolved','waiting','mismatched'])settled[key]+=inline[key];seen.resolved.push(...(inline.films||[]));}else if(accepted&&entry?.lastResult==='not_rated')lookup.notRated++;else if(error)lookup.failed++;
+   if(accepted&&entry?.state==='rated'){lookup.rated++;const inline=await settleRemovalRefs(env,{ids:[id],onPlan:planResolved});for(const key of ['written','resolved','waiting','mismatched'])settled[key]+=inline[key];}else if(accepted&&entry?.lastResult==='not_rated')lookup.notRated++;else if(error)lookup.failed++;
    await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,removalChecked:(current.checkpoint.removalChecked||0)+1}}));
    if(accepted&&(entry?.lastResult==='blocked'||entry?.lastResult==='rate_limited')){lookup.stoppedBy=entry.lastResult;lookup.pausedUntil=queue.pausedUntil;break;}
   }
@@ -418,7 +443,7 @@ const LetterboxdRatings=(()=>{
    const after=(await read(env,REMOVAL_LOOKUP_KEY)).value;
    if(removalQueueV2(after)&&!(after.pausedUntil&&Date.parse(after.pausedUntil)>clock())&&removalDue(after,clock(),1).length)more=true;
   }
-  return {settled,lookup,more,changes:await changesOf()};
+  return finish({settled,lookup,more});
  }
 
  // ratings_storage_migrate. `dry_run` writes nothing. `apply` converts the queue by one compare-and-swap, records it in

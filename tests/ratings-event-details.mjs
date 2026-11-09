@@ -169,6 +169,52 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  }
 }
 
+// 1g. AIR-393 durability of the removal groups: a step killed after its lookup or its settlement, before anything is confirmed, is recovered
+// from the stored intents on the next step; the event names the exact films, once each, and the counters keep their meaning.
+{
+ const build=()=>{
+  const {clock,net,bucket,env,R}=setup();
+  const eventAt=at(T0-3*H),k1=eventKeyOf(eventAt,'run-1-watchlist'),eventAt2=at(T0-2*H),k2=eventKeyOf(eventAt2,'run-2-watchlist');
+  const removed=['gone0','gone1','gone2','settled1'].map((id,i)=>({id,title:'Удалён '+i,year:2000+i}));
+  bucket.set(k1,removalEvent('run-1-watchlist',removed));bucket.set(k2,{...removalEvent('run-2-watchlist',[removed[0]]),at:eventAt2});
+  const films={
+   gone0:{...queueEntry('gone0',k1,eventAt),refs:[{eventKey:k1,sourceRunId:'run-1',at:eventAt,resolved:false},{eventKey:k2,sourceRunId:'run-2',at:eventAt2,resolved:false}]},
+   gone1:queueEntry('gone1',k1,eventAt),gone2:queueEntry('gone2',k1,eventAt),unrated1:queueEntry('unrated1',k1,eventAt),
+   // Already rated, reference not yet settled: the batch settlement writes the event.
+   settled1:{...queueEntry('settled1',k1,eventAt),state:'rated',rating:3.5,lastResult:'diary',checkedAt:at(T0-H),nextAttemptAt:null},
+   // Rated, but its removal event is not stored: the settlement cannot resolve the reference, so nothing may be claimed for it.
+   noevent1:{...queueEntry('noevent1','events/items/9999999999999-missing.json',eventAt),state:'rated',rating:3,lastResult:'diary',checkedAt:at(T0-H),nextAttemptAt:null},
+  };
+  migrated(bucket,{films});for(const id of ['gone0','gone1','gone2'])net.members.set(id,4);net.members.set('unrated1','none');
+  bucket.set('enrichment/view-index.json',{lidx:{watched:true,actualRating:4}});net.diary.set(1,diaryPage([diaryRow('lidx',8,'2026-11-08','v1')]));
+  return {clock,net,bucket,env,R};
+ };
+ const resume=async(R,env,clock,runId)=>{let reply;for(let i=0;i<30;i++){try{reply=plain(await R.step(env,{runId}));}catch(error){assert.match(String(error.message),/killed/);clock.now+=4*60000;continue;}clock.now+=1000;if(reply.nextAction!=='continue')break;}return reply;};
+ for(const [label,when] of [
+  ['after the first lookup, before its checkpoint',value=>value?.checkpoint?.removalChecked===1],
+  ['after the batch settlement, before anything is confirmed',value=>Array.isArray(value?.removal?.changeSteps)&&value.removal.changeSteps.some(id=>String(id).startsWith('step:'))],
+ ]){
+  const {clock,bucket,env,R}=build();
+  let armed=true;bucket.hooks.beforePut=async(key,value)=>{if(armed&&key===RUN&&when(value)){armed=false;throw new Error('worker killed '+label);}};
+  const started=plain(await R.start(env,{trigger:'scheduled'}));assert.equal(started.created,true);
+  let killedOnce=false,reply;
+  for(let i=0;i<30;i++){
+   try{reply=plain(await R.step(env,{runId:started.runId}));}catch(error){assert.match(String(error.message),/killed/);killedOnce=true;clock.now+=4*60000;continue;}
+   clock.now+=1000;if(reply.nextAction!=='continue')break;
+  }
+  assert.equal(killedOnce,true,label+': the step was killed');assert.equal(reply.state,'finished',label+': '+JSON.stringify(reply));
+  const event=ratings(bucket)[0],d=plain(event.details||{});
+  eq((d.rated||[]).map(f=>f.id).sort(),['gone0','gone1','gone2'],label+': every rating found by a lookup is named');
+  eq((d.resolved||[]).map(f=>f.id).sort(),['gone0','gone1','gone2','settled1'],label+': every settled reference is named, a film with two references once');
+  assert.equal(d.resolved.find(f=>f.id==='gone0').title,'Удалён 0',label);assert.equal(d.resolved.find(f=>f.id==='settled1').rating,3.5,label);
+  assert.equal(bucket.value(RUN).removal.intents?.length||0,0,label+': no intent is left behind');
+  // Nothing is claimed twice and the queue semantics are unchanged: every reference ended resolved.
+  const queue=bucket.value(QUEUE);assert.ok(Object.entries(queue.films).filter(([id])=>id!=='unrated1'&&id!=='noevent1').every(([,entry])=>(entry.refs||[]).every(ref=>ref.resolved===true)),label);
+  assert.equal(JSON.stringify(d).includes('unrated1'),false,label+': a looked-up film that was not rated is not claimed (the intent is dropped, the effect never happened)');
+  assert.equal(JSON.stringify(d.resolved).includes('noevent1'),false,label+': a reference that could not be settled is not claimed as resolved');
+ }
+}
+
 // 1d. A repeated merge of the same contribution is ignored, never added again.
 {
  const {R}=setup();

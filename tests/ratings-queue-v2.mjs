@@ -109,8 +109,7 @@ assert.ok([T0,T0+H].some(ms=>bucket.value(eventKeyOf(at(ms),'run-'+(ms===T0?1:2)
 assert.equal(bucket.value(QUEUE).films.s.refs.filter(item=>item.resolved).length,0,'the reference is not resolved yet');
 const writesBefore=bucket.writes().filter(item=>item.key.startsWith('events/items/')).length;
 const settled=await fn('settleRemovalRefs')(env,{});
-eq(plain({...settled,films:undefined}),{written:1,resolved:2,waiting:1,mismatched:0,left:0});
-assert.equal(JSON.stringify(settled.films.map(film=>film.id)),'["s","s"]','AIR-393: the films whose references were settled, once per reference');
+eq(plain(settled),{written:1,resolved:2,waiting:1,mismatched:0,left:0});
 assert.equal(bucket.writes().filter(item=>item.key.startsWith('events/items/')).length,writesBefore+1,'the event written before the kill is not written again; the other is written once');
 assert.equal(bucket.value(eventKeyOf(at(T0),'run-1-watchlist')).removed[0].rating,3.5);
 assert.equal(bucket.value(eventKeyOf(at(T0+H),'run-2-watchlist')).removed.find(item=>item.id==='s').rating,3.5);
