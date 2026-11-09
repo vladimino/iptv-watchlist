@@ -108,7 +108,8 @@ const LetterboxdRatings=(()=>{
  // AIR-393: optional `details`, only for the films this run changed. Absent for a run that changed none (or one recorded before this
  // field): the event is then the short summary it always was.
  function detailsOf(run){
-  const merged=mergeChanges(run?.diary?.changes,run?.removal?.changes);
+  const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]);
+  const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part):all,mergeChanges(null,null));
   return changeCount(merged)?{details:{...Object.fromEntries(CHANGE_GROUPS.filter(group=>merged[group].length).map(group=>[group,merged[group]])),...(Object.keys(merged.more).length?{more:merged.more}:{})}}:{};
  }
  async function deliverEvent(env,event){
@@ -226,7 +227,7 @@ const LetterboxdRatings=(()=>{
    }
    const removal=await removalPhase(env,owned.run,{own,remaining,clock});
    stepInfo.lookups=removal.lookup.checked;
-   const merged=run=>({...run,removal:{settled:addCounts(run.removal?.settled,removal.settled),lookup:addCounts(run.removal?.lookup,removal.lookup),pausedUntil:removal.lookup.pausedUntil||run.removal?.pausedUntil||null,...(removal.changes||run.removal?.changes?{changes:mergeChanges(run.removal?.changes,removal.changes)}:{})}});
+   const merged=run=>({...run,removal:{settled:addCounts(run.removal?.settled,removal.settled),lookup:addCounts(run.removal?.lookup,removal.lookup),pausedUntil:removal.lookup.pausedUntil||run.removal?.pausedUntil||null,...removalChangeFields(run,removal.changes,stepId)}});
    const next=await own(run=>removal.more?released(merged(run)):finish(merged(run),clock()));
    if(!removal.more)await reconcileEvent(env).catch(()=>null);
    return reply(next,removal.more?'continue':'stop',removal.more?'more_work':next.state,{step:stepInfo,summary:{diary:next.diary,removal:next.removal}});
@@ -257,6 +258,12 @@ const LetterboxdRatings=(()=>{
    out[group]=list;if(carried+extra+over>0)out.more[group]=carried+extra+over;
   }
   return out;
+ }
+ // The removal contribution of a step is merged once: a step id already recorded is skipped, so a repeated merge cannot count the same films twice.
+ function removalChangeFields(run,incoming,stepId){
+  const steps=Array.isArray(run.removal?.changeSteps)?run.removal.changeSteps:[];
+  if(!incoming||steps.includes(stepId))return run.removal?.changes?{changes:run.removal.changes,changeSteps:steps}:{};
+  return {changes:mergeChanges(run.removal?.changes,incoming),changeSteps:[...steps,stepId].slice(-60)};
  }
  const changeCount=changes=>CHANGE_GROUPS.reduce((n,group)=>n+(changes?.[group]?.length||0)+(changes?.more?.[group]||0),0);
  // The title of a removed film is the one its removal event carries (the event that listed it when it left the watchlist).
@@ -300,31 +307,49 @@ const LetterboxdRatings=(()=>{
   if((cp.diaryPagesRead||0)>=1)return {pages:0,more:false,next:null,summary:prior};
   const facts={films:0,written:0,unchanged:0,older:0,skipped:0,conflicts:0,rated:0,unrated:0,ambiguous:0,partial:0};
   let pagesRead=cp.diaryPagesRead||0,stepPages=0,leaseLost=false,resolved=0,unratedLids=[];
-  let changes=null;
+  // AIR-393: the films this page changes are planned from the view before any fact is written and saved on the run record under the
+  // page's own key (`diary.pageChanges[page]`), so a crash after the facts are written, or between the page checkpoint and the end of the
+  // step, cannot lose them, and a replay of the page replaces that contribution instead of adding to it. A replay finds the plan stored
+  // and keeps it; the first attempt narrows it to the writes that really happened and saves that with the page checkpoint.
+  const stored=prior?.pageChanges&&typeof prior.pageChanges==='object'?prior.pageChanges:{},pageNow={};
   const afterPage=async({page,rows,next,history,readAt})=>{
    const lids=new Set(rows.filter(row=>row.lid&&row.key).map(row=>row.lid));if(!lids.size)return;
    const evidence=LetterboxdDiary.ratingEvidence(history,lids,{page,rows,next}).map(item=>({...item,readAt}));
    for(const item of evidence)facts[item.ratingState]++;
+   const key=String(page??1);let plan=stored[key]||null;const fresh=!plan;
+   if(fresh){
+    try{
+     const groups={added:[],updated:[],rated:[],resolved:[]};
+     for(const change of await LetterboxdFacts.planDiaryChanges(env,evidence))(change.kind==='added'?groups.added:groups.updated).push({id:change.lid,rating:change.rating,...(change.kind==='updated'?{from:change.from}:{})});
+     const queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
+     if(removalQueueV2(queue))for(const item of evidence)if(item.rating!=null&&half(item.rating)!=null&&queue.films[item.lid]&&queue.films[item.lid].state!=='rated')groups.rated.push({id:item.lid,rating:item.rating});
+     if(changeCount(groups)){
+      plan=mergeChanges(null,await labelledChanges(env,groups));
+      await own(current=>({...current,updatedAt:iso(clock()),diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),[key]:plan}}}));
+     }
+    }catch(e){if(e instanceof LeaseLost){leaseLost=true;return;}plan=null;}
+   }
    const result=await LetterboxdFacts.applyDiaryEvidence(env,evidence);
    for(const key of ['films','written','unchanged','older','skipped','conflicts'])facts[key]+=result[key];
-   const seen={added:[],updated:[],rated:[],resolved:[]};
-   for(const change of result.changes||[])(change.kind==='added'?seen.added:seen.updated).push({id:change.lid,tmdb:change.tmdb,rating:change.rating,...(change.kind==='updated'?{from:change.from}:{})});
    unratedLids=[...new Set(evidence.filter(item=>item.rating==null&&item.lid).map(item=>item.lid))];
    const proved=evidence.filter(item=>item.rating!=null).map(item=>({lid:item.lid,rating:result.ratings[item.lid]??item.rating}));
-   if(proved.length){const at=iso(clock());await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{let changed=false;seen.rated=[];for(const item of proved)if(resolveRemovalByDiary(q,item.lid,item.rating,at)){changed=true;resolved++;seen.rated.push({id:item.lid,rating:item.rating});}return changed?q:null;});}
-   // The names are read once, for the films that changed, and kept with the change; nothing here reads Diary again or calls a service.
-   if(changeCount(seen)){try{changes=mergeChanges(changes,await labelledChanges(env,seen));}catch{}}
+   let resolvedLids=new Set();
+   if(proved.length){const at=iso(clock());await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{let changed=false;resolvedLids=new Set();for(const item of proved)if(resolveRemovalByDiary(q,item.lid,item.rating,at)){changed=true;resolved++;resolvedLids.add(item.lid);}return changed?q:null;});}
+   if(plan){
+    if(fresh){const written=new Set((result.changes||[]).map(change=>change.lid));plan={...plan,added:plan.added.filter(item=>written.has(item.id)),updated:plan.updated.filter(item=>written.has(item.id)),rated:plan.rated.filter(item=>resolvedLids.has(item.id))};}
+    pageNow[key]=plan;
+   }
   };
   const onPage=async({next})=>{
    pagesRead++;stepPages++;
-   try{await own(current=>({...current,updatedAt:iso(clock()),checkpoint:{...current.checkpoint,diaryPagesRead:pagesRead,diaryNextPage:next?.page??null,diaryMode:next?.mode??current.checkpoint.diaryMode}}));return true;}
+   try{await own(current=>({...current,updatedAt:iso(clock()),...(Object.keys(pageNow).length?{diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),...pageNow}}}:{}),checkpoint:{...current.checkpoint,diaryPagesRead:pagesRead,diaryNextPage:next?.page??null,diaryMode:next?.mode??current.checkpoint.diaryMode}}));return true;}
    catch(e){if(e instanceof LeaseLost){leaseLost=true;return false;}throw e;}
   };
   const diary=await LetterboxdDiary.syncHistory(env,{now:clock(),afterPage,beforePage:async()=>remaining()>LEASE_MARGIN_MS,onPage,writer:{runId:run.runId,step:stepId},progressWrites:true});
   if(leaseLost)throw new LeaseLost();
   const failed=DIARY_ERRORS.includes(diary.lastOutcome),more=!failed&&!!diary.next;
   const summary={outcome:diary.lastOutcome,stopReason:diary.stopReason,pagesRead,historicalCoverage:'incomplete',counts:addCounts(prior?.counts,{pages:diary.counts.pages,rows:diary.counts.rows,added:diary.counts.added,updated:diary.counts.updated,conflicts:diary.counts.conflicts,overflowSuspected:diary.counts.overflowSuspected?1:0}),
-   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,...(changes||prior?.changes?{changes:mergeChanges(prior?.changes,changes)}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
+   facts:addCounts(prior?.facts,{...facts,enabled:true}),removalResolved:(prior?.removalResolved||0)+resolved,...(Object.keys({...stored,...pageNow}).length?{pageChanges:{...stored,...pageNow}}:{}),unratedLids,resumePage:diary.cursor.resumePage??null,coverage:diary.cursor.coverage||null,at:diary.lastAttemptAt};
   return {pages:stepPages,more,next:diary.next,summary};
  }
 
@@ -490,5 +515,5 @@ const LetterboxdRatings=(()=>{
   const fe=gated.fenceEnv;
   return {status:200,body:await (action==='start'?start(fe,body):action==='step'?step(fe,body):migrate(fe,body))};
  }
- return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();

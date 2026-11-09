@@ -46,7 +46,7 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  // The aggregates are untouched by the details: written/unchanged/rated/resolved keep their meaning.
  assert.equal(event.diary.rows,4);assert.equal(event.diary.unchanged,0);
  // The details live on the committed run record, so a repeated delivery is the same event and writes nothing new.
- const run=bucket.value(RUN);assert.ok(run.diary.changes&&run.diary.changes.updated.length===1,'kept on the run record');
+ const run=bucket.value(RUN);assert.ok(run.diary.pageChanges?.['1']?.updated.length===1,'kept on the run record under the page key');
  const before=JSON.stringify(ratings(bucket));await R.reconcileEvent(env);assert.equal(JSON.stringify(ratings(bucket)),before,'a repeat is the same event');
  assert.equal(ratings(bucket).length,1,'one event per run');
 }
@@ -61,6 +61,49 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  await runOnce(R,env,clock);
  const event=ratings(bucket)[0];
  assert.equal(event.removal.resolved,2,'two references settled');assert.equal(event.details.resolved.length,1,'the film is named once');assert.equal(event.details.rated.length,1);
+}
+
+// 1c. AIR-393 durability: a crash at every point between the facts and the end of the step still gives the event the exact films, and a replay of a
+// capped page does not inflate the remainder.
+{
+ const lids=Array.from({length:40},(_,i)=>'lid'+String(i).padStart(2,'0'));
+ const crashAt=async(label,when,rows)=>{
+  const {clock,net,bucket,env,R}=setup();
+  migrated(bucket);
+  bucket.set('metadata.json',{lid00:{id:'lid00',title:'Первый',year:2001,tmdbId:'100'}});
+  net.diary.set(1,diaryPage(lids.map((lid,i)=>diaryRow(lid,8,'2026-11-08','v'+i))));
+  let armed=true;bucket.hooks.beforePut=async(key,value)=>{if(armed&&key===RUN&&when(value)){armed=false;throw new Error('worker killed '+label);}};
+  const started=plain(await R.start(env,{trigger:'scheduled'}));assert.equal(started.created,true);
+  let killed=0,reply;
+  for(let i=0;i<30;i++){
+   try{reply=plain(await R.step(env,{runId:started.runId}));}catch(error){assert.match(String(error.message),/worker killed/);killed++;clock.now+=4*60000;continue;}
+   clock.now+=1000;if(reply.nextAction!=='continue')break;
+  }
+  assert.equal(killed,1,label+': the step really was killed once');
+  const found=ratings(bucket);assert.equal(found.length,1,label+': one event');
+  const d=plain(found[0].details);
+  assert.equal(d.added.length,25,label+': the visible films');assert.equal(d.more.added,15,label+': the remainder is exact, not doubled');
+  assert.equal(d.added.find(f=>f.id==='lid00').title,'Первый',label);assert.equal(d.added.find(f=>f.id==='lid00').tmdb,'100',label);
+  assert.equal(found[0].diary.rows,rows,label+': the aggregates keep their existing semantics');
+  return {found,bucket};
+ };
+ // After the facts, before the page checkpoint: the page is read again, its facts are already written (unchanged), the stored plan is the details.
+ await crashAt('before the page checkpoint',value=>value?.checkpoint?.diaryPagesRead===1,40);
+ // After the page checkpoint, before the step's summary: the step ends with the stored page contribution.
+ // (The counters of the page are saved with the step summary, as before this card: that step's counts are the ones a kill loses, never the films.)
+ await crashAt('before the step summary',value=>value?.phase==='removal',0);
+}
+
+// 1d. A repeated merge of the same contribution is ignored, never added again.
+{
+ const {R}=setup();
+ const capped={added:Array.from({length:25},(_,i)=>({id:'x'+i,rating:4})),updated:[],rated:[],resolved:[],more:{added:15}};
+ const once=plain(R.mergeChanges(null,capped));eq(once.more,{added:15});
+ const run={removal:{}};
+ const first=plain(R.removalChangeFields(run,capped,'step-1'));eq(first.changeSteps,['step-1']);eq(first.changes.more,{added:15});
+ const again=plain(R.removalChangeFields({removal:first},capped,'step-1'));eq(again.changes.more,{added:15},'the same step is not merged twice');eq(again.changeSteps,['step-1']);
+ const other=plain(R.removalChangeFields({removal:first},{added:[],updated:[],rated:[{id:'r',rating:3.5}],resolved:[],more:{}},'step-2'));
+ eq(other.changes.rated.map(f=>f.id),['r']);eq(other.changes.more,{added:15},'another step adds its own films');eq(other.changeSteps,['step-1','step-2']);
 }
 
 // 2. A run that changed nothing carries no details and no empty groups.
@@ -96,7 +139,7 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  let fail=true;bucket.hooks.beforePut=async(key,value)=>{if(fail&&key.startsWith('events/items/')&&value?.type==='ratings')throw new Error('events log down');};
  await runOnce(R,env,clock);
  assert.equal(ratings(bucket).length,0,'not delivered yet');
- const record=bucket.value(RUN);assert.equal(record.ratingsEventAt,undefined,'still owed');assert.equal(record.diary.changes.added[0].id,'lidA','the committed record keeps what the event needs');
+ const record=bucket.value(RUN);assert.equal(record.ratingsEventAt,undefined,'still owed');assert.equal(record.diary.pageChanges['1'].added[0].id,'lidA','the committed record keeps what the event needs');
  fail=false;clock.now+=DAY;await R.reconcileEvent(env);
  const found=ratings(bucket);assert.equal(found.length,1);
  eq(found[0].details.added.map(f=>[f.id,f.title,f.tmdb]),[['lidA','Фильм А','111']],'the delivered event has the details the run recorded');

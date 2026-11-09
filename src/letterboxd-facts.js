@@ -364,6 +364,21 @@ function recordRatingChange(record,incoming,effective){
  // of a different rating on that same date replaces the earlier diary observation, and a late write of an earlier read
  // does not. `ingestedAt` is not part of the observation id, so a reread of the same value is the same observation. A
  // film whose projection already shows the same watched and rating is not written. One view-index projection for the batch.
+ // AIR-393: what a Diary page is about to change, read from the view index before anything is written (a new watched fact, or a different
+ // rating). The ratings run saves this plan on its record before applying the page, so a crash after the facts are written cannot lose it.
+ async function planDiaryChanges(env,evidence){
+  const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
+  if(!items.length)return [];
+  const {value:viewIndex}=await readJSON(env,FACTS_KEYS.viewIndex),view=viewIndex||{},out=[];
+  for(const item of items){
+   const before=view[item.lid]||{};
+   if(before.watched===true&&(item.rating==null||before.actualRating===item.rating))continue;
+   const previous=typeof before.actualRating==='number'&&Number.isFinite(before.actualRating)?before.actualRating:null;
+   if(before.watched!==true)out.push({lid:item.lid,kind:'added',rating:item.rating??null});
+   else if(item.rating!=null&&previous!==item.rating)out.push({lid:item.lid,kind:'updated',from:previous,rating:item.rating});
+  }
+  return out;
+ }
  async function applyDiaryEvidence(env,evidence){
   const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
   const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{},changes:[]};
@@ -721,5 +736,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,planDiaryChanges,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();
