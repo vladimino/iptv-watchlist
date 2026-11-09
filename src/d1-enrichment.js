@@ -27,11 +27,33 @@ const D1_ENRICHMENT_WINDOW_FENCE='INSERT INTO projection_fence (held) SELECT COU
 function d1EnrichmentWindowMode(env){return env?.D1_ENRICHMENT_WINDOW==='on'?'on':'off';}
 const D1_ENRICHMENT_STATE="INSERT INTO projection_state (projection,kind,id,change_key,projected_at) VALUES (?,?,?,?,?) ON CONFLICT(projection,kind,id) DO UPDATE SET change_key=excluded.change_key,projected_at=excluded.projected_at";
 
+// AIR-392: additive phase timing of one run, for the log line and projection_run.summary_json. It only measures: it reads the clock around
+// calls the run already makes, in the same order, and never changes what a call does, returns or throws. `phases` is a sequential partition
+// of the time between the window grant and the first write (so its entries do not overlap and add up, with an explicit residual); `detail` holds
+// timings that overlap or are nested (the individual R2 and discovery reads run concurrently), and must not be added to `phases`. Each entry
+// is {ms, n calls, q D1 queries of the adapter, rows read}. No payload, id, key, SQL or parameter is recorded: only fixed phase names and counts.
+// Date.now() in a Worker advances only across I/O, so pure CPU work between two calls shows as 0 ms and appears in the I/O phase that follows it.
+function d1EnrichmentPhases(db){
+ const groups={phases:{},detail:{}};
+ const entry=(group,name)=>groups[group][name]||(groups[group][name]={ms:0,n:0,q:0,rows:0});
+ const done=(group,name,at,queries,rows)=>{const item=entry(group,name);item.ms+=Date.now()-at;item.n++;item.q+=(db?db.queries:0)-queries;if(Number.isFinite(rows))item.rows+=rows;};
+ return {
+  ...groups,
+  async time(name,fn,{detail=false,rows=null}={}){
+   const at=Date.now(),queries=db?db.queries:0;let count=null;
+   try{const value=await fn();if(rows){try{count=rows(value);}catch{count=null;}}return value;}
+   finally{done(detail?'detail':'phases',name,at,queries,count);}
+  },
+  sync(name,fn){const at=Date.now(),queries=db?db.queries:0;try{return fn();}finally{done('phases',name,at,queries,null);}},
+ };
+}
+const D1_ENRICHMENT_NO_TIMER={phases:{},detail:{},time:(name,fn)=>fn(),sync:(name,fn)=>fn()};
+
 function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value==='on'?'on':value==='dry'?'dry':'off';}
 
 // The repository's database interface over the D1 binding. Reads go out at once and count against the run's query budget.
 // Writes inside transaction() are collected and sent as one db.batch, which D1 applies atomically.
-function d1EnrichmentAdapter(binding){
+function d1EnrichmentAdapter(binding,marks=null){
  let buffer=null,queries=0;
  const statement=(sql,params)=>binding.prepare(sql).bind(...params);
  return {
@@ -43,7 +65,8 @@ function d1EnrichmentAdapter(binding){
    if(buffer)return fn();
    buffer=[];let statements;
    try{await fn();statements=buffer;}finally{buffer=null;}
-   if(statements.length){queries++;await binding.batch(statements);}
+   // AIR-392: the first batch the run SUBMITS (the instant before binding.batch is called, so a failing batch still has its attempt). Measurement only.
+   if(statements.length){queries++;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=statements.length;}await binding.batch(statements);}
   },
  };
 }
@@ -65,7 +88,17 @@ class D1EnrichmentInputError extends Error{constructor(reason,key,cause){super(r
 const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable','window_busy','window_not_granted','window_lost'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
+// AIR-392: the fixed label of an input for the phase timing: never the key itself (the catalog key carries a run id).
+function d1EnrichmentReadLabel(key){
+ const names={'watchlist.json':'watchlist','metadata.json':'metadata','titles.json':'titles','people.json':'people','epg/discovery-resolution.json':'resolution','letterboxd/diary/history.json':'diary','enrichment/view-index.json':'viewIndex','letterboxd/admissions/verified-films.json':'verifiedFilms','admin/owner-reviews.json':'ownerMirror'};
+ if(Object.prototype.hasOwnProperty.call(names,key))return names[key];
+ if(key===TMDB_RETIREMENTS_KEY)return 'retirements';
+ return /\/programme\.json$/.test(key)?'programme':/\/discovered-films\.json$/.test(key)?'catalog':'other';
+}
 async function d1EnrichmentRead(env,etags,key,shape,required=true){
+ return (etags.timer||D1_ENRICHMENT_NO_TIMER).time('read.'+d1EnrichmentReadLabel(key),()=>d1EnrichmentReadObject(env,etags,key,shape,required),{detail:true});
+}
+async function d1EnrichmentReadObject(env,etags,key,shape,required){
  const object=await env.BUCKET.get(key);
  etags.set(key,object?.etag??null);
  if(!object){if(required)throw new D1EnrichmentInputError('input_missing',key);return null;}
@@ -115,7 +148,7 @@ async function d1EnrichmentDiscoveryRead(env,etags,key,gate,missing){
  // the authority moved away from D1 since the first read, defers; an R2 copy of the key is never consulted, however fresh it looks.
  if(typeof DiscoveryAuthority.routeRead!=='function')throw new D1EnrichmentInputError('authority_unavailable','discovery_authority');
  let routed;
- try{routed=await DiscoveryAuthority.routeRead(env,key);}
+ try{routed=await (etags.timer||D1_ENRICHMENT_NO_TIMER).time('read.'+d1EnrichmentReadLabel(key),()=>DiscoveryAuthority.routeRead(env,key),{detail:true});}
  catch(error){const defer=D1_ENRICHMENT_DISCOVERY_DEFER.includes(error?.code);throw new D1EnrichmentInputError(defer?'authority_unavailable':'input_invalid',defer?'discovery_authority':key,typeof error?.code==='string'&&error.code.startsWith('discovery_')?error.code:'discovery_read_failed');}
  if(!routed?.handled)throw new D1EnrichmentInputError('authority_unavailable','discovery_authority');
  if(routed.value==null)throw new D1EnrichmentInputError(missing,missing==='generation_pending'?'discovery_authority':key);
@@ -127,10 +160,11 @@ async function d1EnrichmentWritersIdle(env,now=Date.now()){
  if(Number(lease?.expiresAt)>now)throw new D1EnrichmentInputError('writer_active',DISCOVERY_LEASE_KEY);
  if(['metadata','epg'].includes(sync?.stage)&&now-Date.parse(sync.updatedAt)<15*60000)throw new D1EnrichmentInputError('writer_active','sync.json');
 }
-async function d1EnrichmentStore(env){
+async function d1EnrichmentStore(env,timer=D1_ENRICHMENT_NO_TIMER){
  const etags=new Map();
- await d1EnrichmentWritersIdle(env);
- const published=typeof PublishedEpg==='undefined'?null:await PublishedEpg.authoritativeSnapshot(env);
+ etags.timer=timer;
+ await timer.time('store.writersIdle',()=>d1EnrichmentWritersIdle(env));
+ const published=typeof PublishedEpg==='undefined'?null:await timer.time('store.publishedSnapshot',()=>PublishedEpg.authoritativeSnapshot(env));
  let runId,watchlist,programme;
  if(published){
   if(!published.programmeRunId||!d1EnrichmentFilmList(published.programme)||!d1EnrichmentFilmList(published.watchlist))throw new D1EnrichmentInputError('generation_unpublished','published_epg');
@@ -140,8 +174,9 @@ async function d1EnrichmentStore(env){
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);
   runId=pointer.programmeRunId;
  }
- const authority=await d1EnrichmentHandoffGuard(env,runId);
- const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await Promise.all([
+ const authority=await timer.time('store.handoffGuard',()=>d1EnrichmentHandoffGuard(env,runId));
+ // The reads run together; `store.readBlock` is their wall time, each read's own time is `detail` (recorded by d1EnrichmentRead).
+ const [watchlistObject,programmeObject,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,viewIndex,archiveDocument]=await timer.time('store.readBlock',()=>Promise.all([
   published?null:d1EnrichmentRead(env,etags,'watchlist.json',d1EnrichmentFilmList),
   published?null:d1EnrichmentRead(env,etags,epgGenerationKey(runId,'programme.json'),d1EnrichmentFilmList),
   d1EnrichmentRead(env,etags,'metadata.json',d1EnrichmentRecord),
@@ -153,30 +188,32 @@ async function d1EnrichmentStore(env){
   d1EnrichmentRead(env,etags,TMDB_RETIREMENTS_KEY,d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,'enrichment/view-index.json',d1EnrichmentRecord,false),
   d1EnrichmentRead(env,etags,'letterboxd/admissions/verified-films.json',value=>d1EnrichmentRecord(value)&&value.schemaVersion===1&&d1EnrichmentRecord(value.films),false),
- ]);
+ ]));
  if(!published){watchlist=watchlistObject;programme=programmeObject;}
  let ownerGate=null,ownerMirror=null,ownerDocument=null;
  if(typeof OwnerReview!=='undefined'){
-  ownerGate=await OwnerReview.readAuthority(env);
-  if(ownerGate.failClosed)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
-  if(!ownerGate.legacy&&ownerGate.mode==='r2')ownerMirror=await d1EnrichmentRead(env,etags,'admin/owner-reviews.json',value=>!!value&&typeof value==='object'&&!Array.isArray(value)&&value.contractVersion===1&&plainOwner(value),false);
+  await timer.time('store.ownerReview',async()=>{
+   ownerGate=await OwnerReview.readAuthority(env);
+   if(ownerGate.failClosed)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
+   if(!ownerGate.legacy&&ownerGate.mode==='r2')ownerMirror=await d1EnrichmentRead(env,etags,'admin/owner-reviews.json',value=>!!value&&typeof value==='object'&&!Array.isArray(value)&&value.contractVersion===1&&plainOwner(value),false);
+  });
  }
- for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);
+ await timer.time('store.etagRecheck',async()=>{for(const [key,etag] of etags)if(((await env.BUCKET.head(key))?.etag??null)!==etag)throw new D1EnrichmentInputError('input_changed',key);},{rows:()=>etags.size});
  if(published){
-  const again=await PublishedEpg.authoritativeSnapshot(env);
+  const again=await timer.time('store.publishedSnapshot',()=>PublishedEpg.authoritativeSnapshot(env));
   if(!again||again.generation!==published.generation||again.programmeRunId!==runId)throw new D1EnrichmentInputError('input_changed','published_epg');
  }
- await d1EnrichmentWritersIdle(env);
+ await timer.time('store.writersIdle',()=>d1EnrichmentWritersIdle(env));
  if(ownerGate&&!ownerGate.legacy){
   ownerDocument=ownerMirror;
   if(ownerGate.mode==='d1'){
-   const snap=await OwnerReview.readFenced(env);
+   const snap=await timer.time('store.ownerReview',()=>OwnerReview.readFenced(env));
    if(!snap.ok||snap.mode!=='d1'||snap.generation!==ownerGate.generation)throw new D1EnrichmentInputError('owner_review_unavailable','owner_review');
    ownerDocument=snap.body;
   }
   if(ownerDocument){OwnerReview.stampLocalized(programme,ownerDocument);OwnerReview.stampLocalized(watchlist,ownerDocument);}
  }
- const store=EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),archiveAdmissions:archiveDocument?EnrichmentProjection.archiveAdmissionsFromDocument(archiveDocument):null,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}});
+ const store=timer.sync('store.build',()=>EnrichmentProjection.enrichmentStore({watchlist,programme,metadata,titles,people,discoveredFilms,discoveryResolution,diaryHistory,tmdbRetirements,watchlistAdmissions:EnrichmentProjection.watchlistAdmissionsFromIndex(viewIndex),archiveAdmissions:archiveDocument?EnrichmentProjection.archiveAdmissionsFromDocument(archiveDocument):null,filmTitles:FILM_TITLE_DICTIONARY,personNames:PERSON_NAME_DICTIONARY,personOverrides:{'actor/chris-pratt':REVIEWED_PEOPLE['actor/chris-pratt']}}));
  if(ownerDocument)store.ownerReviews=ownerDocument;
  return {store,programmeRunId:runId,discoveryGate:d1EnrichmentAuthoritySnapshot(authority)};
 }
@@ -252,23 +289,54 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
  const begun=Date.now();let started=begun;
- const nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB),leaseId=crypto.randomUUID();
+ const marks={};
+ const nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB,marks),leaseId=crypto.randomUUID();
  const windowState={requested:false,granted:false,heldStarted:null};
  const summary={projection:D1_ENRICHMENT_PROJECTION,mode,trigger,startedAt:nowIso,version:EnrichmentProjection.ENRICHMENT_PROJECTION_VERSION};
- if(mode==='on'&&!(await d1EnrichmentLease(db,leaseId)))return {...summary,skipped:'lease_held'};
+ // AIR-392: `timing` partitions the run in order (lease, window request to grant, diff, pre-write guards, write loop, release); `phases` splits the
+ // diff and `detail` its overlapping reads. Measurement only; see d1EnrichmentPhases.
+ const timer=d1EnrichmentPhases(db),timing={};
+ summary.timing=timing;summary.phases=timer.phases;summary.detail=timer.detail;
+ const leaseAt=Date.now();
+ const leased=mode==='on'?await d1EnrichmentLease(db,leaseId):null;
+ timing.leaseMs=Date.now()-leaseAt;
+ if(mode==='on'&&!leased)return {...summary,skipped:'lease_held'};
  try{
   if(mode==='on'&&d1EnrichmentWindowMode(env)==='on'){
-   const window=await d1EnrichmentWindowAcquire(env,leaseId,windowOptions,windowState);
-   if(window){summary.window=window;started=Date.now();}
+   const windowAt=Date.now();
+   try{
+    const window=await d1EnrichmentWindowAcquire(env,leaseId,windowOptions,windowState);
+    if(window){summary.window=window;started=Date.now();}
+   }finally{timing.windowMs=Date.now()-windowAt;}
   }
-  const plan=await d1EnrichmentDiff(env,db,now,summary);
+  const diffAt=Date.now();
+  let plan;
+  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer);}
+  finally{
+   timing.diffMs=Date.now()-diffAt;
+   // The named remainder of the additive accounting: diffMs = the sum of `phases` + diffResidualMs (untimed glue and CPU). `detail` overlaps and is not in it.
+   const covered=Object.values(timer.phases).reduce((total,item)=>total+item.ms,0);
+   timing.diffResidualMs=Math.max(0,timing.diffMs-covered);
+  }
   // More absences or lost watchlist memberships than a routine sync explains point at broken input: nothing is written.
   const guard=d1EnrichmentGuard(plan,summary);
   if(guard){summary.outcome=guard;return summary;}
   if(mode==='dry'){summary.outcome='dry';return summary;}
+  const gateAt=Date.now();
   const writeGate=await d1EnrichmentHandoffGuard(env,summary.programmeRunId,summary.discoveryGate);
+  timing.writeGateMs=Date.now()-gateAt;
   if(summary.window?.outcome==='granted'&&writeGate&&Number.isFinite(writeGate.generation))summary.window.generationAtFirstBatch=writeGate.generation;
-  const written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null});
+  const writeAt=Date.now();
+  let written;
+  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null,marks});}
+  finally{
+   timing.writeMs=Date.now()-writeAt;
+   // From the budget clock's start (the grant, or the run start with no window): to the first fenced transaction entered (`preTxnMs`), to the first
+   // batch SUBMITTED to D1 (`preWriteMs`, an attempt: kept if that batch fails), and the planning between the two (`firstBatchPlanMs`: the repository's
+   // own reads and the statement assembly). Each is absent when the run got that far never.
+   if(marks.firstTxnAt!=null)timing.preTxnMs=marks.firstTxnAt-started;
+   if(marks.firstBatchAt!=null){timing.preWriteMs=marks.firstBatchAt-started;timing.firstBatchStatements=marks.firstBatchStatements;if(marks.firstTxnAt!=null)timing.firstBatchPlanMs=marks.firstBatchAt-marks.firstTxnAt;}
+  }
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   // A window that ended under the run is a deferred outcome with its own reason, never a success.
   if(written.windowLost&&!written.leaseLost){summary.outcome='deferred';summary.reason='window_lost';summary.inputKey='projector_window';}
@@ -283,18 +351,24 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   if(windowState.requested){
    if(summary.window&&windowState.heldStarted!=null)summary.window.heldMs=Date.now()-windowState.heldStarted;
    if(!summary.window)summary.window={outcome:summary.reason&&D1_ENRICHMENT_DEFERRED.includes(summary.reason)&&summary.reason.startsWith('window_')?summary.reason:'released'};
+   const releaseAt=Date.now();
    await DiscoveryAuthority.releaseProjectorWindow(env,{owner:leaseId}).catch(()=>{});
+   timing.windowReleaseMs=Date.now()-releaseAt;
   }
+  // The stored summary_json is written by the lease release below, so the lease release time can only be in the log line.
+  const leaseReleaseAt=Date.now();
   if(mode==='on')await d1EnrichmentRelease(db,leaseId,summary).catch(()=>{});
+  timing.leaseReleaseMs=Date.now()-leaseReleaseAt;
+  timing.runMs=Date.now()-begun;
   console.log(JSON.stringify({event:'d1_enrichment_projection',...summary}));
  }
 }
 
 // The R2 records, the view and every input live only inside this function: once it returns, only the changed entries remain,
 // so the write phase does not hold the whole view (about 50 MB of heap on the 2026-10-29 snapshot, ADR 0056).
-async function d1EnrichmentDiff(env,db,now,summary){
+async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER){
  const started=Date.now(),nowIso=new Date(now).toISOString();
- const {store,programmeRunId,discoveryGate}=await d1EnrichmentStore(env);
+ const {store,programmeRunId,discoveryGate}=await d1EnrichmentStore(env,timer);
  summary.programmeRunId=programmeRunId;summary.discoveryGeneration=discoveryGate?discoveryGate.generation:null;
  // The full snapshot guards the write but stays out of the logged summary.
  Object.defineProperty(summary,'discoveryGate',{value:discoveryGate,enumerable:false});
@@ -310,15 +384,15 @@ async function d1EnrichmentDiff(env,db,now,summary){
  // Owner reviews are a separate marker. Before their tables exist the view is unchanged.
  // Once they exist, a reviewed owner localization replaces a dictionary value on the view
  // and a d1 read does not use the R2 mirror.
- const version=(await db.get('SELECT version FROM schema_contract WHERE id=1'))?.version??null;
+ const version=(await timer.time('diff.schemaContract',()=>db.get('SELECT version FROM schema_contract WHERE id=1')))?.version??null;
  summary.schemaVersion=version;
  if(Number(version)>=6){
-  try{await MetadataCache.useAuthoritativeMetadata(db,store);}
+  try{await timer.time('diff.metadataCache',()=>MetadataCache.useAuthoritativeMetadata(db,store));}
   catch(error){if(error?.code==='metadata_cache_unavailable')throw new D1EnrichmentInputError('metadata_cache_unavailable','metadata_cache');throw error;}
  }
  if(Number(version)>=7){
   try{
-   const authority=await PredictionD1.readPredictionAuthority(db,env);
+   const authority=await timer.time('diff.predictionAuthority',()=>PredictionD1.readPredictionAuthority(db,env));
    if(authority.domain!=='absent'){
     if(!authority.tables)throw new D1EnrichmentInputError('prediction_domain_unavailable','prediction_domain');
     summary.predictionMode=authority.mode;
@@ -329,31 +403,32 @@ async function d1EnrichmentDiff(env,db,now,summary){
    throw error;
   }
  }
- const view=LifecycleReader.readLifecycle(store,now,{entitiesOnly:true}),retirements=view.tmdbRetirements||null;
- if(store.ownerReviews&&typeof OwnerReview!=='undefined')OwnerReview.applyViewOverlay(view,store.ownerReviews);
+ const view=timer.sync('diff.lifecycle',()=>LifecycleReader.readLifecycle(store,now,{entitiesOnly:true})),retirements=view.tmdbRetirements||null;
+ if(store.ownerReviews&&typeof OwnerReview!=='undefined')timer.sync('diff.ownerOverlay',()=>OwnerReview.applyViewOverlay(view,store.ownerReviews));
  if(retirements){
   summary.tmdbRetirements={valid:retirements.valid,applied:retirements.applied.length,held:retirements.held.slice(0,20),reasons:retirements.reasons.slice(0,20)};
   if(!retirements.valid)throw new D1EnrichmentInputError('input_invalid',TMDB_RETIREMENTS_KEY);
  }
- const inputs=EnrichmentProjection.enrichmentInputs({view,store});
+ const inputs=timer.sync('diff.inputs',()=>EnrichmentProjection.enrichmentInputs({view,store}));
  summary.viewMs=Date.now()-started-summary.loadMs;
- const stored=new Map((await db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])).map(row=>[row.kind+'\n'+row.id,row.change_key]));
+ const storedRows=await timer.time('diff.storedRead',()=>db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION]),{rows:value=>value.length});
+ const stored=new Map(storedRows.map(row=>[row.kind+'\n'+row.id,row.change_key]));
  const held=new Set((retirements?.held||[]).map(item=>item.filmId));
- const plan=d1EnrichmentPlan(inputs,stored,nowIso,held);
- const prioritized=d1EnrichmentAdmittedFirst(plan.films,store,stored);
+ const plan=timer.sync('diff.plan',()=>d1EnrichmentPlan(inputs,stored,nowIso,held));
+ const prioritized=timer.sync('diff.admittedFirst',()=>d1EnrichmentAdmittedFirst(plan.films,store,stored));
  plan.films=prioritized.films;summary.admittedFirst=prioritized.count;
  // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist. A held Film keeps its row.
  const listed=new Set(inputs.films.filter(film=>film.watchlist).map(film=>film.id));
- const members=(await db.all('SELECT film_id FROM watchlist_film')).map(row=>row.film_id);
+ const members=(await timer.time('diff.membersRead',()=>db.all('SELECT film_id FROM watchlist_film'),{rows:value=>value.length})).map(row=>row.film_id);
  plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)&&!held.has(id)).length};
  Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
  // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written when the contract
  // is version 5 or 6 and film_sync_state exists. A version without the table does not write them.
  // The film change key is not involved, so a v4 database does not rewrite its Films because these fields exist.
- plan.syncReady=Number(version)>=5&&!!(await db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'"));
+ plan.syncReady=Number(version)>=5&&!!(await timer.time('diff.syncProbe',()=>db.get("SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='film_sync_state'")));
  plan.sync=[];
  if(plan.syncReady){
-  const storedSync=new Map((await db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION])).map(row=>[row.id,row.change_key]));
+  const storedSync=new Map((await timer.time('diff.storedSyncRead',()=>db.all("SELECT id,change_key FROM projection_state WHERE projection=? AND kind='film'",[METADATA_SYNC_PROJECTION]),{rows:value=>value.length})).map(row=>[row.id,row.change_key]));
   const viewed=new Set();
   for(const entry of inputs.films){
    if(held.has(entry.id))continue;
@@ -368,9 +443,9 @@ async function d1EnrichmentDiff(env,db,now,summary){
   // Leaving the view releases membership only. metadata.json keeps the cache, and beginSync reads it if the Film returns,
   // so the sync row follows that entry. The foreign key is an existing film.id: a metadata.json key with no Film row
   // does not mint a Film and does not get a row. A held Film is left untouched.
-  const known=new Set((await db.all('SELECT id FROM film')).map(row=>row.id));
+  const known=new Set((await timer.time('diff.knownFilmsRead',()=>db.all('SELECT id FROM film'),{rows:value=>value.length})).map(row=>row.id));
   const aliases=new Map();
-  for(const row of await db.all("SELECT film_id,value FROM film_external_id WHERE scheme='letterboxd'")){
+  for(const row of await timer.time('diff.aliasesRead',()=>db.all("SELECT film_id,value FROM film_external_id WHERE scheme='letterboxd'"),{rows:value=>value.length})){
    if(!aliases.has(row.film_id))aliases.set(row.film_id,[]);
    aliases.get(row.film_id).push(row.value);
   }
@@ -417,10 +492,12 @@ async function d1EnrichmentRelease(db,leaseId,summary){
 
 // One batch per Film and one per group of Persons. Each starts with the fence, writes the rows, stores the change keys and
 // clears the fence row. A failed batch writes nothing and its entities keep their old keys, so the next run tries them again.
-async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null}){
+async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={}}){
  const repository=CanonicalRepository.createCanonicalRepository(db);
  const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false,windowLost:false};
  const fenced=async(write)=>{
+  // AIR-392: the instant the first fenced transaction is entered (its planning starts); the submission is marked by the adapter. Measurement only.
+  if(marks.firstTxnAt==null)marks.firstTxnAt=Date.now();
   try{
    await db.transaction(async()=>{
     // Inside a window every batch also asserts, in the same statement, that this run still owns an unexpired `held` window.

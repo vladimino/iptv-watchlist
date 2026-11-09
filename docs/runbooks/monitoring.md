@@ -48,3 +48,34 @@ When `on`, one tick is a handful of small R2 reads, one conditional R2 write and
 | `timeout`, `network`, `http_5xx`, `malformed_response` | Telegram or the network is failing; messages are kept and retried (two attempts per tick while it fails) |
 
 A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching the owner even though the monitor is alive: the dead-man heartbeat will not show this. Telegram cannot deduplicate, so after a Worker crash the owner may see one message twice (same `Ref`). Switch back to the webhook by removing `MONITOR_TRANSPORT`.
+
+## D1 projector run: phase timing (AIR-392)
+
+The D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)) logs one `event: d1_enrichment_projection` line per hourly run and keeps the same summary in `projection_run.summary_json` (also `GET /api/d1/status`, `projector.lastRun.summary`). Since [AIR-392](https://trello.com/c/ivMqVpKC) the summary carries three additive measurement groups. They only read the clock around calls the run already makes; no run, fence, budget, retry or write depends on them. They hold fixed names and whole numbers only: no payload, id, key, SQL or parameter. All times are milliseconds on the Worker's `Date.now()`, which advances only across I/O: pure CPU work between two calls shows as 0 ms and lands in the I/O phase that follows it, so a CPU-local share cannot be separated by these fields.
+
+**`timing`: the run in order.** `leaseMs` (taking the projector lease), `windowMs` (ADR 0103 request to grant, only when a window was taken; the existing `window.waitMs` is the part spent waiting for quiet), `diffMs` (load, view and diff, see `phases`), `diffResidualMs` (the named remainder of the diff, see below), `writeGateMs` (the pre-write authority check), `writeMs` (the write loop), `windowReleaseMs`, `leaseReleaseMs` and `runMs` (log line only: they are measured after `summary_json` is stored). `leaseMs`, `windowMs`, `diffMs`, `writeGateMs` and `writeMs` are consecutive and add up to at most `runMs`.
+
+The first write is measured on the budget clock's start (the grant when a window is held, otherwise the run start), at two boundaries, and each is absent when the run never reached it: `preTxnMs` to the moment the first fenced transaction is **entered** (its planning starts), `preWriteMs` to the moment the first batch is **submitted** to D1 (the instant before `binding.batch`, so it is an attempt, kept when that batch fails, not a confirmation of success), and `firstBatchPlanMs` = `preWriteMs - preTxnMs`, the repository's own planning (its reads and statement assembly) before that submission; `firstBatchStatements` is the size of that first batch.
+
+**`phases`: a sequential partition of the diff.** Entries do not overlap, so they add up. Each is `{ms, n, q, rows}`: wall time, calls, D1 adapter queries and rows read.
+
+| Name | What it covers |
+| --- | --- |
+| `store.writersIdle` | The writer-idle checks (two R2 reads each), before and after the reads |
+| `store.publishedSnapshot` | The published EPG generation read, before and again after the reads |
+| `store.handoffGuard` | The Discovery authority handoff guard |
+| `store.readBlock` | The whole block of R2 and discovery reads (they run together, see `detail`) |
+| `store.ownerReview` | The owner-review authority and its fenced read |
+| `store.etagRecheck` | The repeated etag check of every object read (`rows` = objects) |
+| `store.build` | Building the store (CPU) |
+| `diff.schemaContract`, `diff.metadataCache`, `diff.predictionAuthority` | The D1 reads of the schema version, the metadata cache and the prediction authority |
+| `diff.lifecycle`, `diff.ownerOverlay`, `diff.inputs` | Building the view and the entity inputs (CPU) |
+| `diff.storedRead` | The read of every checkpoint in `projection_state` (`rows` = checkpoints) |
+| `diff.plan`, `diff.admittedFirst` | The change keys and the plan (CPU) |
+| `diff.membersRead`, `diff.syncProbe`, `diff.storedSyncRead`, `diff.knownFilmsRead`, `diff.aliasesRead` | The remaining D1 reads of the diff, each with its row count |
+
+`diffMs` = the sum of `phases` + `diffResidualMs` exactly (the residual is the untimed glue and CPU, never negative; it is emitted for every run whose diff was attempted, including `failed`, `deferred` and `dry`). `detail` is not part of this equation. `loadMs` (the `store.*` part) and `viewMs` keep their old meaning.
+
+**`detail`: overlapping reads.** `read.watchlist`, `read.programme`, `read.metadata`, `read.titles`, `read.people`, `read.catalog`, `read.resolution`, `read.diary`, `read.retirements`, `read.viewIndex`, `read.verifiedFilms`, `read.ownerMirror` (only under the `r2` owner-review authority): the time of each individual read inside `store.readBlock`. They run concurrently, so their sum exceeds the block's wall time; never add `detail` to `phases`. `read.catalog` and `read.resolution` are routed through the Discovery authority (D1 under authority `d1`).
+
+How to read a run: `preWriteMs` is the overhead before the first write; it is `preTxnMs` (the diff, the write gate and the glue before the first transaction) plus `firstBatchPlanMs`. With a window the wait is in `windowMs`, not in it (the budget clock restarts at the grant). In a slow run find the largest `phases` entry first, and compare it with `diffResidualMs`; if it is `store.readBlock`, the largest `detail` read names the object; if it is a `diff.*Read`, compare its `rows` and `q` with its `ms`; if `firstBatchPlanMs` is large, the repository planning before the first submission is the overhead. Judge several runs, fast and slow, never one. An entry that is missing means the run ended before it (`failed`, `deferred`, `dry`).

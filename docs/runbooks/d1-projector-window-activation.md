@@ -73,7 +73,7 @@ Idempotency and unknown outcome: the file refuses a second apply (its first stat
 
 Order: after C is read back, set the Worker variable `D1_ENRICHMENT_WINDOW=on` (owner action, one GO), read it back with `feature_flags`, then observe the normal hourly ticks only, with D1 `SELECT`s of `projection_run` and `projector_window` and no manual run.
 
-For each tick record, without payload: `window.outcome` (`granted`, `window_busy`, `not_granted`, `lost`, `too_late`), `waitMs`, `heldMs`, `generationAtGrant` against `generationAtFirstBatch` (equal for a fenced run), `writtenPeople`, `writtenFilms`, `remaining`, the deferred reason, `leaseLost`, the age of the last write, and afterwards the discovery generation moving again.
+For each tick record, without payload: `window.outcome` (`granted`, `window_busy`, `not_granted`, `lost`, `too_late`), `waitMs`, `heldMs`, `generationAtGrant` against `generationAtFirstBatch` (equal for a fenced run), `writtenPeople`, `writtenFilms`, `remaining`, the deferred reason, `leaseLost`, the age of the last write, and afterwards the discovery generation moving again. Since AIR-392 also `timing` and `phases` of the run ([monitoring runbook](monitoring.md#d1-projector-run-phase-timing-air-392)).
 
 Accepted when, over at least three consecutive ticks that fall in a busy Discovery stretch, the runs write Persons or Films with a falling or explained `remaining`, no `leaseLost`, no `window_lost`, the window is idle again after each run, and Discovery resumes within its deadline.
 

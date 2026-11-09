@@ -317,6 +317,10 @@ const setup=(opts={})=>{const {db,file}=migrated(18,opts);open(db);const bucket=
  assert.deepEqual({...windowRow(db)},{state:'idle',owner:null,expiresAt:0});
  assert.ok((await Authority.acquireLease({...env},{})).lease,'Discovery resumes');
  assert.equal(logs.at(-1).window.outcome,'granted');assert.ok(!JSON.stringify(logs.at(-1)).includes('Heat'),'no payload in the log');
+ // AIR-392: the window shows in the run's timing: the request to grant (diff excluded), the diff, the first batch and the window release.
+ assert.ok(Number.isInteger(summary.timing.windowMs)&&summary.timing.windowMs>=0,JSON.stringify(summary.timing));
+ assert.ok(Number.isInteger(logs.at(-1).timing.windowReleaseMs),'the release of the window is in the log line');
+ assert.ok(Number.isInteger(summary.timing.preWriteMs)&&summary.timing.preWriteMs>=0,'pre-write time is measured from the grant');
 }
 
 // 7c. An in-flight chunk at the request: the run waits (polls, no busy loop, no failure) until the lease is free, then it is granted.
