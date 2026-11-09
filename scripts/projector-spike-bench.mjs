@@ -7,18 +7,40 @@
 // The group cycle of variant C (`bulkGroup`) is exported for tests/projector-bulk-spike.mjs, which proves its read-validity guards.
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
-import {DatabaseSync} from 'node:sqlite';
+import os from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {MemoryBucket} from '../tests/memory-bucket.mjs';
 import {projectorContext} from '../tests/d1-enrichment-context.mjs';
 
+// node:sqlite (Node 22) is used when it exists and SPIKE_SQLITE is not `cli`; otherwise the sqlite3 CLI, as tests/d1-standin.mjs does (CI runs Node 20).
+let DatabaseSync=null;
+if(process.env.SPIKE_SQLITE!=='cli'){try{({DatabaseSync}=await import('node:sqlite'));}catch{DatabaseSync=null;}}
+const literal=value=>{
+ if(value===undefined)throw new Error('undefined bound');
+ if(value==null)return 'NULL';
+ if(typeof value==='number'){if(!Number.isFinite(value))throw new Error('bad number');return String(value);}
+ if(typeof value==='boolean')return value?'1':'0';
+ return "'"+String(value).replace(/'/g,"''")+"'";
+};
+const inline=(sql,params)=>{let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('missing parameter');return literal(params[index++]);});if(index!==params.length)throw new Error('parameter count');return text;};
+class CliDatabase{
+ constructor(){this.file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'iptv-spike-')),'db.sqlite');}
+ script(sql,json){const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',this.file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(String(result.stderr||'sqlite3 failed').trim());return result.stdout;}
+ exec(sql){this.script(sql,false);}
+ rows(sql,params){const out=this.script(inline(sql,params)+';',true).trim();return out?JSON.parse(out):[];}
+ prepare(sql){return {get:(...params)=>this.rows(sql,params)[0],all:(...params)=>this.rows(sql,params),run:(...params)=>{this.script(inline(sql,params)+';',false);}};}
+ // a write batch is one script in one transaction: a failing statement stops it and the open transaction is discarded with the connection
+ batchScript(statements){this.script('BEGIN;\n'+statements.map(item=>inline(item.sql,item.params)+';').join('\n')+'\nCOMMIT;',false);}
+}
 export const MIGRATIONS=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state'];
 const isRead=sql=>/^\s*SELECT/i.test(sql);
 
 // D1 stand-in over node:sqlite. Counts every round trip and statement; the virtual clock is derived from the counters afterwards.
 // `film_person_authority` is a one-row stand-in of the marker of migration 0013 (mode, cutover, generation).
 export function standin(){
- const sqlite=new DatabaseSync(':memory:');
- sqlite.exec('PRAGMA foreign_keys=ON;');
+ const sqlite=DatabaseSync?new DatabaseSync(':memory:'):new CliDatabase();
+ if(DatabaseSync)sqlite.exec('PRAGMA foreign_keys=ON;');
  for(const name of MIGRATIONS)sqlite.exec(fs.readFileSync('migrations/'+name+'.sql','utf8'));
  sqlite.exec("CREATE TABLE film_person_authority (id INTEGER PRIMARY KEY, mode TEXT NOT NULL, cutover TEXT NOT NULL, generation INTEGER NOT NULL); INSERT INTO film_person_authority VALUES (1,'r2','open',0);");
  const calls={reads:0,singleWrites:0,batches:0,batchStatements:0,batchReads:0};
@@ -36,6 +58,10 @@ export function standin(){
   prepare(sql){return {bind:(...params)=>statement(sql,params)};},
   async batch(statements){
    calls.batches++;calls.batchStatements+=statements.length;calls.batchReads+=statements.filter(item=>isRead(item.sql)).length;
+   if(!DatabaseSync){
+    if(statements.every(item=>isRead(item.sql)))return statements.map(item=>exec(item.sql,item.params));
+    timed(()=>sqlite.batchScript(statements));return statements.map(()=>({results:[]}));
+   }
    sqlite.exec('BEGIN');
    try{const out=statements.map(item=>exec(item.sql,item.params));sqlite.exec('COMMIT');return out;}
    catch(error){sqlite.exec('ROLLBACK');throw error;}
