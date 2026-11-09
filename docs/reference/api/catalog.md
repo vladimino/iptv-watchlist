@@ -199,7 +199,9 @@ A watchlist film is «Пересмотр» when its loaded view entry has `watch
 | `Origin` header present and equal to the Worker's origin (stricter than the shared check, which lets a request without `Origin` through) | `403` |
 | `Content-Type` is `application/json` | `415` |
 | Body is at most 512 characters of JSON, an object with exactly `tmdbId` (a string of digits) and `watched` (a boolean) | `400`, `code: invalid_request` for a wrong shape |
-| The published generation's catalog copy holds a record with that `tmdbId` and `canonicalIdentity` exactly `tmdb:<tmdbId>` (no published generation, an observation key or a conflicting identity is refused) | `409`, `code: film_not_in_catalog` |
+| A catalog is readable for the published generation, by the same pinned, authority-aware read as `GET /api/catalog/available`: Discovery on D1 reads the D1-owned catalog (no R2 copy exists), Discovery on R2 reads the generation's own R2 copy. There is never a fallback to another source. It holds a record with that `tmdbId` and `canonicalIdentity` exactly `tmdb:<tmdbId>` (an observation key, a pending or superseded admission or a conflicting identity does not) | `409`, `code: film_not_in_catalog` |
+| The catalog could be read at all. Technical unavailability is never reported as a missing film | `503` with `code`: `catalog_not_published` (no published generation), `catalog_generation_unavailable` (no catalog for the published generation, including a D1 authority on another generation), `discovery_fence` (cutover held), `discovery_incomplete`, `discovery_unavailable`, `discovery_not_authoritative`, `catalog_read_failed` |
+| The publication and the Discovery authority are unchanged between that read and the write | `503`, `code: catalog_generation_changed` (publication moved, or authority on another generation), or `discovery_fence` |
 
 **Response** `200`: `{"outcome": "saved" | "unchanged" | "older", "watched": <current value>}`, and nothing else from the record.
 - `unchanged`: the value already was the current effective value, and nothing was written.
