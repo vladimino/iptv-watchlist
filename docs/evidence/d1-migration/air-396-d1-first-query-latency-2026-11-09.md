@@ -17,7 +17,7 @@
 | 19:01 | `diff.checkpointCount` | 14,400 | 24,800 | 12,961 | 61,929 | AIR-395 + telemetry |
 | 20:01 | `diff.checkpointCount` | 17,978 | 26,724 | 17,481 | 87,063 | `summary_json` + telemetry |
 
-The 20:00 UTC run (the only one whose full stored summary is still in D1; `projection_run` holds one row) took the whole-table path (`checkpointMode: full`, `checkpointBuckets: {expected: 7520, missing: 18542, skipped: backlog}`), so its `diff.storedRead` (520 ms, 7 queries, 33,221 rows) includes a second `SELECT COUNT(*) FROM projection_state WHERE projection=?`, the same statement as the 18 s phase. The phases before the count are small (`store.*` 6.9 s, `diff.schemaContract` 66 ms, `diff.metadataCache` 259 ms, `diff.predictionAuthority` 151 ms) and the three CPU-only phases between them and the count (`diff.lifecycle`, `diff.inputs`, `diff.keys`) read 0 ms.
+The 20:00 UTC run (its full `summary_json` was captured earlier from D1; `projection_run` stores a single row that each run replaces, so the 22:00 UTC summary below was read later and was not retained alongside it) took the whole-table path (`checkpointMode: full`, `checkpointBuckets: {expected: 7520, missing: 18542, skipped: backlog}`), so its `diff.storedRead` (520 ms, 7 queries, 33,221 rows) includes a second `SELECT COUNT(*) FROM projection_state WHERE projection=?`, the same statement as the 18 s phase. The phases before the count are small (`store.*` 6.9 s, `diff.schemaContract` 66 ms, `diff.metadataCache` 259 ms, `diff.predictionAuthority` 151 ms) and the three CPU-only phases between them and the count (`diff.lifecycle`, `diff.inputs`, `diff.keys`) read 0 ms.
 
 ## First natural run with D1 `meta` (22:00 UTC, N = 1)
 
@@ -68,8 +68,8 @@ PR #455 added to the projector adapter a sum of the D1 `meta` of each read (the 
 ## Limitations
 
 - **D1 `meta` exists for one run (N = 1)**, in slow mode. A fast-mode run, a different day or a Discovery burst may differ; the distribution of `ms - sqlUs/1000` needs its own sample.
-- Seven runs of one day without `meta`; only the 20:00 UTC run has its full summary available (the table keeps one row). The 14:00 to 17:00 UTC figures are the AIR-392 evidence, the 19:00 UTC figures are those reported by AIR-395.
-- D1 analytics does not list the projector's `COUNT(*)` or checkpoint page reads at all (25 to 31 query groups per run, none on `projection_state`), so the database-side duration of that statement is **not** known; the statement that it is small rests on H1's second run of the same statement and on the other reads.
+- Seven runs of one day without `meta`. `projection_run` keeps a single row that each run replaces: the 20:00 UTC summary was captured before the 22:00 UTC run replaced it, and the 22:00 UTC summary was read afterwards, so only one summary was available at a time and the other is quoted from that capture. The 14:00 to 17:00 UTC figures are the AIR-392 evidence, the 19:00 UTC figures are those reported by AIR-395.
+- D1 analytics does not list the projector's `COUNT(*)` or checkpoint page reads at all (25 to 31 query groups per run, none on `projection_state`), so for the runs without `meta` (14:00 to 20:00 UTC) the database-side duration of that statement is **not** known; there the statement that it is small rests on H1's second run of the same statement and on the other reads. For the 22:00 UTC run it is measured directly (`sqlUs` 6,137 for `diff.checkpointCount`).
 - The CPU figures are per invocation (all jobs of the cron), not per phase.
 - No code path was changed to test H2 (no experiment, by scope).
 - The statement that nothing but SQL excluded is limited to the SQL of that one read: queueing, transport and CPU are not separated.
