@@ -70,7 +70,7 @@ The first write is measured on the budget clock's start (the grant when a window
 | `store.build` | Building the store (CPU) |
 | `diff.schemaContract`, `diff.metadataCache`, `diff.predictionAuthority` | The D1 reads of the schema version, the metadata cache and the prediction authority |
 | `diff.lifecycle`, `diff.ownerOverlay`, `diff.inputs` | Building the view and the entity inputs (CPU) |
-| `diff.storedRead` | The read of every checkpoint in `projection_state` (`rows` = checkpoints) |
+| `diff.storedRead` | The read of every checkpoint in `projection_state` (`rows` = checkpoints). Since AIR-395 a table of up to 6,000 rows is one query (`q` 1), as before; a larger one is read as pages by the primary key order, the first alone, then a count and the remaining pages together, at most six at a time (`q` = 2 + pages - 1, `n` still 1), and is accepted only when the rows add up to the count with no duplicate, otherwise the table is read whole (one more query). The rows and the result are the same as the single query |
 | `diff.plan`, `diff.admittedFirst` | The change keys and the plan (CPU) |
 | `diff.membersRead`, `diff.syncProbe`, `diff.storedSyncRead`, `diff.knownFilmsRead`, `diff.aliasesRead` | The remaining D1 reads of the diff, each with its row count |
 
