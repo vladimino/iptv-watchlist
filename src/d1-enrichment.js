@@ -238,15 +238,15 @@ function d1EnrichmentAdmittedFirst(films,store,stored){
 // no longer has. A Film's own Persons are written just before it (see d1EnrichmentWrite). A held Film (a TMDB retirement under owner review,
 // ADR 0057) is neither written nor released, whether or not the view still has it: D1 keeps it as it is until the review
 // settles.
-function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set()){
+function d1EnrichmentPlan(inputs,stored,nowIso,held=new Set(),keys=null){
  const people=[],films=[],absent=[],seen=new Set();
  for(const entry of inputs.people){
-  const key=EnrichmentProjection.personChangeKey(entry,nowIso);
+  const key=keys?keys.get(entry):EnrichmentProjection.personChangeKey(entry,nowIso);
   seen.add('person\n'+entry.id);
   if(stored.get('person\n'+entry.id)!==key)people.push({...entry,key});
  }
  for(const entry of inputs.films){
-  const key=EnrichmentProjection.filmChangeKey(entry,nowIso);
+  const key=keys?keys.get(entry):EnrichmentProjection.filmChangeKey(entry,nowIso);
   seen.add('film\n'+entry.id);
   if(held.has(entry.id))continue;
   if(stored.get('film\n'+entry.id)!==key)films.push({...entry,key});
@@ -309,7 +309,72 @@ async function d1EnrichmentStoredRows(db,{page=D1_ENRICHMENT_STORED_PAGE,concurr
  if(rows.length!==total||new Set(rows.map(row=>row.kind+'\n'+row.id)).size!==total)return whole();
  return rows;
 }
-async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE}={}){
+// AIR-395: checkpoint reconciliation by buckets. The diff needs to know, for every entity of the view, whether D1 already holds its fresh change key. Shipping all ~32,000
+// stored keys to the Worker costs 6 to 11 s; D1 can instead summarize them where they are (about 40 ms). The view and the table are cut into the same buckets (kind and a hash of the last four
+// characters of the id, 4,096 buckets); for each bucket D1 returns the number of stored keys and two sums of 32-bit slices of the hash part of the key (the last 28 characters, two 53-bit hashes in hex,
+// see projectionKey), and the Worker computes the same from the fresh keys. A bucket whose count and both sums agree holds exactly the view's entities with their fresh keys and no
+// other live entity, so none of them is changed or absent; a collision of a changed key needs both 32-bit sums to agree (about 2^-64 for one change, owner-accepted). Only the buckets that
+// differ are read row by row, and the unchanged plan function runs over those entities and rows. When too many buckets differ (a backlog) or the key is not of the expected shape, the whole
+// table is read as before. `absent` rows are left out of the sums, so an entity whose stored key is `absent` always makes its bucket differ.
+const D1_ENRICHMENT_BUCKET_MIN_ENTITIES=5000,D1_ENRICHMENT_BUCKET_PARAMS=90,D1_ENRICHMENT_BUCKET_MAX_SHARE=0.4,D1_ENRICHMENT_BUCKET_MAX_MISSING=0.25,D1_ENRICHMENT_BUCKET_WAVE=6,D1_ENRICHMENT_HEX='0123456789abcdef',D1_ENRICHMENT_BUCKETS=4096;
+// The bucket number of an id: a multiplicative hash of its last four characters, the same integer arithmetic in SQL and in JavaScript (an id always has more than four characters: `film:`, `person:`).
+// 4,096 buckets hold about 8 stored keys each, so the digest is small and a changed entity pulls in few rows (the two-character suffix of the first version put 240 numeric ids in one bucket).
+const D1_ENRICHMENT_BUCKET_EXPR="((unicode(substr(id,-1,1))*1664525+unicode(substr(id,-2,1))*22695477+unicode(substr(id,-3,1))*48271+unicode(substr(id,-4,1))*69069)%4096)";
+const d1EnrichmentBucketSlice=from=>Array.from({length:8},(_,j)=>`(instr('0123456789abcdef',substr(change_key,${-from+j},1))-1)*${16**(7-j)}`).join('+');
+const D1_ENRICHMENT_BUCKET_SQL=`SELECT kind||':'||${D1_ENRICHMENT_BUCKET_EXPR} AS b,COUNT(*) AS n,SUM(${d1EnrichmentBucketSlice(28)}) AS a,SUM(${d1EnrichmentBucketSlice(20)}) AS c FROM projection_state WHERE projection=? AND change_key<>'absent' GROUP BY b`;
+const d1EnrichmentBucketOf=(kind,id)=>{
+ const at=id.length;
+ return kind+':'+((id.charCodeAt(at-1)*1664525+id.charCodeAt(at-2)*22695477+id.charCodeAt(at-3)*48271+id.charCodeAt(at-4)*69069)%D1_ENRICHMENT_BUCKETS);
+};
+// The two 32-bit slices of a key, as the SQL above computes them (a character outside the hex digits counts -1, as instr()-1 does). Null for a key too short to have them.
+function d1EnrichmentKeySums(key){
+ if(typeof key!=='string'||key.length<28)return null;
+ const slice=from=>{let total=0;for(let j=0;j<8;j++)total+=D1_ENRICHMENT_HEX.indexOf(key[key.length-from+j])*16**(7-j);return total;};
+ return [slice(28),slice(20)];
+}
+// Returns {stored,inputs,total,mode}: `stored` the checkpoint Map the plan needs and `inputs` the entities it has to look at. mode `full`: every checkpoint and every entity (the previous behaviour);
+// mode `buckets`: only the differing buckets' rows and entities.
+async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES,summary}){
+ const full=async()=>{
+  const rows=await timer.time('diff.storedRead',()=>d1EnrichmentStoredRows(db,{page:storedPage}),{rows:value=>value.length});
+  return {stored:new Map(rows.map(row=>[row.kind+'\n'+row.id,row.change_key])),inputs,total:rows.length,mode:'full'};
+ };
+ if(!keys||inputs.people.length+inputs.films.length<bucketMin)return full();
+ const expected=new Map();
+ for(const [kind,list] of [['person',inputs.people],['film',inputs.films]])for(const entry of list){
+  const sums=d1EnrichmentKeySums(keys.get(entry));
+  if(!sums)return full();
+  const bucket=d1EnrichmentBucketOf(kind,entry.id),item=expected.get(bucket)||[0,0,0];
+  item[0]++;item[1]+=sums[0];item[2]+=sums[1];expected.set(bucket,item);
+ }
+ // A backlog cannot gain: entities the table has never stored each make a bucket differ, so when the view has far more entities than the table has rows the buckets would all differ. One count
+ // (also the `stored` of the summary) tells it before any digest is asked for, and the whole table is read as before.
+ const total=Number((await timer.time('diff.checkpointCount',()=>db.get('SELECT COUNT(*) AS n FROM projection_state WHERE projection=?',[D1_ENRICHMENT_PROJECTION])))?.n);
+ if(!Number.isInteger(total))return full();
+ const missing=Math.max(0,inputs.people.length+inputs.films.length-total);
+ if(missing>expected.size*D1_ENRICHMENT_BUCKET_MAX_MISSING){summary.checkpointBuckets={expected:expected.size,missing,skipped:'backlog'};return full();}
+ const digest=await timer.time('diff.checkpointDigest',()=>db.all(D1_ENRICHMENT_BUCKET_SQL,[D1_ENRICHMENT_PROJECTION]),{rows:value=>value.length});
+ const actual=new Map(digest.map(row=>[row.b,[Number(row.n),Number(row.a),Number(row.c)]]));
+ const differing=new Set();
+ for(const [bucket,item] of expected){const found=actual.get(bucket);if(!found||found[0]!==item[0]||found[1]!==item[1]||found[2]!==item[2])differing.add(bucket);}
+ for(const bucket of actual.keys())if(!expected.has(bucket))differing.add(bucket);
+ summary.checkpointBuckets={expected:expected.size,stored:actual.size,differing:differing.size};
+ if(differing.size>expected.size*D1_ENRICHMENT_BUCKET_MAX_SHARE)return full();
+ const byKind={person:[],film:[]};
+ for(const bucket of differing){const at=bucket.indexOf(':');byKind[bucket.slice(0,at)]?.push(bucket.slice(at+1));}
+ const statements=[];
+ for(const kind of ['person','film'])for(let from=0;from<byKind[kind].length;from+=D1_ENRICHMENT_BUCKET_PARAMS){
+  const part=byKind[kind].slice(from,from+D1_ENRICHMENT_BUCKET_PARAMS);
+  statements.push(()=>db.all('SELECT kind,id,change_key FROM projection_state WHERE projection=? AND kind=? AND '+D1_ENRICHMENT_BUCKET_EXPR+' IN ('+part.map(()=>'?').join(',')+')',[D1_ENRICHMENT_PROJECTION,kind,...part.map(Number)]));
+ }
+ const rows=[];
+ await timer.time('diff.checkpointRows',async()=>{
+  for(let from=0;from<statements.length;from+=D1_ENRICHMENT_BUCKET_WAVE)for(const part of await Promise.all(statements.slice(from,from+D1_ENRICHMENT_BUCKET_WAVE).map(run=>run())))for(const row of part)rows.push(row);
+ },{rows:()=>rows.length});
+ const look=(kind,list)=>list.filter(entry=>differing.has(d1EnrichmentBucketOf(kind,entry.id)));
+ return {stored:new Map(rows.map(row=>[row.kind+'\n'+row.id,row.change_key])),inputs:{...inputs,people:look('person',inputs.people),films:look('film',inputs.films)},total,mode:'buckets'};
+}
+async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES}={}){
  const mode=d1EnrichmentMode(env);
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
@@ -336,7 +401,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   }
   const diffAt=Date.now();
   let plan;
-  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer,{storedPage});}
+  try{plan=await d1EnrichmentDiff(env,db,now,summary,timer,{storedPage,bucketMin});}
   finally{
    timing.diffMs=Date.now()-diffAt;
    // The named remainder of the additive accounting: diffMs = the sum of `phases` + diffResidualMs (untimed glue and CPU). `detail` overlaps and is not in it.
@@ -391,7 +456,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
 
 // The R2 records, the view and every input live only inside this function: once it returns, only the changed entries remain,
 // so the write phase does not hold the whole view (about 50 MB of heap on the 2026-10-29 snapshot, ADR 0056).
-async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER,{storedPage=D1_ENRICHMENT_STORED_PAGE}={}){
+async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER,{storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES}={}){
  const started=Date.now(),nowIso=new Date(now).toISOString();
  const {store,programmeRunId,discoveryGate}=await d1EnrichmentStore(env,timer);
  summary.programmeRunId=programmeRunId;summary.discoveryGeneration=discoveryGate?discoveryGate.generation:null;
@@ -436,17 +501,20 @@ async function d1EnrichmentDiff(env,db,now,summary,timer=D1_ENRICHMENT_NO_TIMER,
  }
  const inputs=timer.sync('diff.inputs',()=>EnrichmentProjection.enrichmentInputs({view,store}));
  summary.viewMs=Date.now()-started-summary.loadMs;
- const storedRows=await timer.time('diff.storedRead',()=>d1EnrichmentStoredRows(db,{page:storedPage}),{rows:value=>value.length});
- const stored=new Map(storedRows.map(row=>[row.kind+'\n'+row.id,row.change_key]));
+ // AIR-395: the fresh change keys are computed once here when the buckets can be used, and the plan reuses them; below the bucket threshold the plan computes them as before.
+ const bucketed=inputs.people.length+inputs.films.length>=bucketMin;
+ const keys=bucketed?timer.sync('diff.keys',()=>{const map=new Map();for(const entry of inputs.people)map.set(entry,EnrichmentProjection.personChangeKey(entry,nowIso));for(const entry of inputs.films)map.set(entry,EnrichmentProjection.filmChangeKey(entry,nowIso));return map;}):null;
+ const checkpoint=await d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMin,summary});
+ const stored=checkpoint.stored;summary.checkpointMode=checkpoint.mode;
  const held=new Set((retirements?.held||[]).map(item=>item.filmId));
- const plan=timer.sync('diff.plan',()=>d1EnrichmentPlan(inputs,stored,nowIso,held));
+ const plan=timer.sync('diff.plan',()=>d1EnrichmentPlan(checkpoint.inputs,stored,nowIso,held,keys));
  const prioritized=timer.sync('diff.admittedFirst',()=>d1EnrichmentAdmittedFirst(plan.films,store,stored));
  plan.films=prioritized.films;summary.admittedFirst=prioritized.count;
  // Membership is guarded on its own: a Film can stay in the view and still drop off the watchlist. A held Film keeps its row.
  const listed=new Set(inputs.films.filter(film=>film.watchlist).map(film=>film.id));
  const members=(await timer.time('diff.membersRead',()=>db.all('SELECT film_id FROM watchlist_film'),{rows:value=>value.length})).map(row=>row.film_id);
  plan.membership={members:members.length,removed:members.filter(id=>!listed.has(id)&&!held.has(id)).length};
- Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:stored.size,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
+ Object.assign(summary,{members:plan.membership.members,membershipRemoved:plan.membership.removed,films:inputs.films.length,people:inputs.people.length,stored:checkpoint.total,changedPeople:plan.people.length,changedFilms:plan.films.length,absent:plan.absent.length,unmatchedCreditFilms:inputs.films.filter(film=>film.unmatched).length});
  // Schema v4 keeps the plan above and writes nothing else. Sync clocks are written when the contract
  // is version 5 or 6 and film_sync_state exists. A version without the table does not write them.
  // The film change key is not involved, so a v4 database does not rewrite its Films because these fields exist.
