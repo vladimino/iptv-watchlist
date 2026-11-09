@@ -49,6 +49,22 @@ When `on`, one tick is a handful of small R2 reads, one conditional R2 write and
 
 A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching the owner even though the monitor is alive: the dead-man heartbeat will not show this. Telegram cannot deduplicate, so after a Worker crash the owner may see one message twice (same `Ref`). Switch back to the webhook by removing `MONITOR_TRANSPORT`.
 
+## D1 projector grouped write path
+
+With `D1_ENRICHMENT_BULK=on` ([ADR 0106](../adr/0106-bulk-projector-write-path.md), [reference](../reference/data/d1-schema.md)) the projector run summary (the `d1_enrichment_projection` log line, `projection_run.summary_json`, `GET /api/d1/status` `projector.lastRun.summary`) carries a `bulk` object. With the flag off, `bulk` is absent and the summary is what it was. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
+
+| Field | Meaning |
+| --- | --- |
+| `groups`, `filmGroups`, `personGroups`, `groupSize` | Group cycles of the run, by lane, and the configured group size |
+| `applied`, `fallbacks`, `fallbackReasons` | Groups written by their one batch, and groups sent to the per-entity path by reason (`guard_refused`, `prefetch_miss`, `undigestable_read`, `plan_error`, `too_large`, `constraint`, `batch_error`, `digest_unusable`) |
+| `guardRefusals`, `constraintFallbacks`, `prefetchMisses` | Groups the in-batch assertions refused, groups a constraint rolled back, reads the collecting pass issued that the trace had not |
+| `prefetchReads`, `guards`, `prefetchStatements`, `statements` | Traced reads, assertions in the write batches, statements of the read batches and of the write batches |
+| `prefetchMs`, `applyMs` | Time in the read batches and in the write batches |
+| `films`, `people`, `perWindowSecond` | Films and Persons the groups wrote and the rate over the seconds since the budget clock started (the window grant, or the run start) |
+| `stop`, `errors` | Why the grouped path ended before the run did: `batch_error`, `fallback_rate`, `budget` (no group fits the clock or the statement budget left), or the reason a run was stopped (`lease_lost`, `window_lost`, `authority_moved`, `authority_unavailable`); up to five error samples |
+
+How to read it. The healthy picture is `fallbacks` 0 and `prefetchMisses` 0, `guards` equal to `prefetchReads`, and `statements` around 95 per Film. Stop conditions during the first observed runs after activation (each needs the owner and a decision brief, never a retry loop): a fallback share above 5 % of `groups`; any `constraint` fallback whose error names a unique or foreign key violation that the per-entity path does not also report; a dangling credit (`film_person_credit` rows with no `person`); an outcome `deferred` with `authority_moved` or `authority_unavailable` (the Film/Person marker moved, is absent or left `r2` and `prepared`: the projector must not write, and the marker is the owner's); a D1 error that names a batch or statement size (`batch_error`, check `errors`); a window that ran past its absolute deadline; throughput below half of the offline model. The run itself latches the grouped path off for the rest of the run at a fallback share above 5 % after ten groups, or an unknown batch outcome, and then continues per entity (each of those writes still asserts the marker). Switching the flag off restores the per-entity path on the next run and undoes no row.
+
 ## D1 projector run: phase timing (AIR-392)
 
 The D1 enrichment projector ([ADR 0056](../adr/0056-d1-enrichment-write-through.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)) logs one `event: d1_enrichment_projection` line per hourly run and keeps the same summary in `projection_run.summary_json` (also `GET /api/d1/status`, `projector.lastRun.summary`). Since [AIR-392](https://trello.com/c/ivMqVpKC) the summary carries three additive measurement groups. They only read the clock around calls the run already makes; no run, fence, budget, retry or write depends on them. They hold fixed names and whole numbers only: no payload, id, key, SQL or parameter. All times are milliseconds on the Worker's `Date.now()`, which advances only across I/O: pure CPU work between two calls shows as 0 ms and lands in the I/O phase that follows it, so a CPU-local share cannot be separated by these fields.

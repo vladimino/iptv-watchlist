@@ -63,7 +63,9 @@ function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value
 // The repository's database interface over the D1 binding. Reads go out at once and count against the run's query budget.
 // Writes inside transaction() are collected and sent as one db.batch, which D1 applies atomically.
 function d1EnrichmentAdapter(binding,marks=null){
- let buffer=null,queries=0;
+ let buffer=null,queries=0,sent=0,limit=Infinity;
+ // ADR 0106: an optional hard cap on statements sent. A read, a single write or a batch that would pass it is NOT sent: the check runs before submission, on the actual statement count.
+ const room=count=>{if(sent+count>limit){const error=new Error('statement_budget');error.budget=true;throw error;}};
  // AIR-396: the D1 `meta` of every read, summed (whole numbers only): the database's own sql_duration_ms in microseconds, rows_read, how many reads
  // carried a meta and how many of those were served by a replica. Measurement only: a read returns what it returned before.
  const meter={sqlUs:0,rowsRead:0,metas:0,replica:0};
@@ -72,15 +74,22 @@ function d1EnrichmentAdapter(binding,marks=null){
  return {
   get queries(){return queries;},
   meter,
-  async get(sql,params=[]){queries++;const result=await statement(sql,params).all();sample(result);return (result.results||[])[0]??null;},
-  async all(sql,params=[]){queries++;const result=await statement(sql,params).all();sample(result);return result.results||[];},
-  async run(sql,params=[]){if(buffer){buffer.push(statement(sql,params));return;}queries++;await statement(sql,params).run();},
+  // ADR 0106: statements sent to D1 (a read or a single write is one, a batch is the number of its statements). The grouped path accounts its lanes in this unit.
+  get statements(){return sent;},
+  setStatementLimit(value){limit=Number.isFinite(value)&&value>0?value:Infinity;},
+  async get(sql,params=[]){room(1);queries++;sent++;const result=await statement(sql,params).all();sample(result);return (result.results||[])[0]??null;},
+  async all(sql,params=[]){room(1);queries++;sent++;const result=await statement(sql,params).all();sample(result);return result.results||[];},
+  async run(sql,params=[]){if(buffer){buffer.push(statement(sql,params));return;}room(1);queries++;sent++;await statement(sql,params).run();},
+  // ADR 0106: one round trip for several reads (a D1 batch is one query); the rows of each statement, in order.
+  async readBatch(list){room(list.length);queries++;sent+=list.length;const out=await binding.batch(list.map(item=>statement(item.sql,item.params)));return out.map(item=>{sample(item);return item?.results||[];});},
+  // ADR 0106: one atomic batch of already collected writes. Marks the first batch submitted exactly as transaction() does.
+  async writeBatch(list){room(list.length);queries++;sent+=list.length;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=list.length;}await binding.batch(list.map(item=>statement(item.sql,item.params)));},
   async transaction(fn){
    if(buffer)return fn();
    buffer=[];let statements;
    try{await fn();statements=buffer;}finally{buffer=null;}
    // AIR-392: the first batch the run SUBMITS (the instant before binding.batch is called, so a failing batch still has its attempt). Measurement only.
-   if(statements.length){queries++;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=statements.length;}await binding.batch(statements);}
+   if(statements.length){room(statements.length);queries++;sent+=statements.length;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=statements.length;}await binding.batch(statements);}
   },
  };
 }
@@ -99,7 +108,7 @@ function d1EnrichmentAdapter(binding,marks=null){
 //   catalog and the resolution are updated in place, so the same programmeRunId does not prove the same content. Any change
 //   defers the run before any D1 write; the next hourly run reads again.
 class D1EnrichmentInputError extends Error{constructor(reason,key,cause){super(reason+(key?': '+key:''));this.reason=reason;this.key=key||null;this.inputCause=cause||null;}}
-const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable','window_busy','window_not_granted','window_lost'];
+const D1_ENRICHMENT_DEFERRED=['writer_active','input_changed','generation_pending','authority_unavailable','window_busy','window_not_granted','window_lost','authority_moved'];
 const d1EnrichmentRecord=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const d1EnrichmentFilmList=value=>d1EnrichmentRecord(value)&&Array.isArray(value.films);
 // AIR-392: the fixed label of an input for the phase timing: never the key itself (the catalog key carries a run id).
@@ -385,7 +394,7 @@ async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMi
  const look=(kind,list)=>list.filter(entry=>differing.has(d1EnrichmentBucketOf(kind,entry.id)));
  return {stored:new Map(rows.map(row=>[row.kind+'\n'+row.id,row.change_key])),inputs:{...inputs,people:look('person',inputs.people),films:look('film',inputs.films)},total,mode:'buckets'};
 }
-async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES}={}){
+async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES,bulk:bulkOverrides={}}={}){
  const mode=d1EnrichmentMode(env);
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
@@ -393,6 +402,8 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
  const marks={};
  const nowIso=new Date(now).toISOString(),db=d1EnrichmentAdapter(env.DB,marks),leaseId=crypto.randomUUID();
  const windowState={requested:false,granted:false,heldStarted:null};
+ // ADR 0106: null unless a write run and D1_ENRICHMENT_BULK is `on`; the held window's absolute expiry bounds every group.
+ const bulk=mode==='on'?d1EnrichmentBulkOptions(env,bulkOverrides):null;
  const summary={projection:D1_ENRICHMENT_PROJECTION,mode,trigger,startedAt:nowIso,version:EnrichmentProjection.ENRICHMENT_PROJECTION_VERSION};
  // AIR-392: `timing` partitions the run in order (lease, window request to grant, diff, pre-write guards, write loop, release); `phases` splits the
  // diff and `detail` its overlapping reads. Measurement only; see d1EnrichmentPhases.
@@ -409,6 +420,13 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
     const window=await d1EnrichmentWindowAcquire(env,leaseId,windowOptions,windowState);
     if(window){summary.window=window;started=Date.now();}
    }finally{timing.windowMs=Date.now()-windowAt;}
+  }
+  // ADR 0106: the Film/Person marker the plan is made under, read BEFORE the diff and carried into every group and batch. An absent, unreadable or foreign marker writes nothing.
+  if(bulk){
+   let marker=null;
+   try{marker=await db.get(D1_ENRICHMENT_MARKER_READ,[]);}catch{marker=null;}
+   if(!marker||!['r2','prepared'].includes(marker.mode)||marker.cutover!=='open'||!Number.isInteger(Number(marker.generation))){summary.outcome='deferred';summary.reason='authority_unavailable';summary.inputKey='film_person_authority';summary.bulk={stop:'authority_unavailable'};return summary;}
+   bulk.expectedMarker={mode:marker.mode,cutover:marker.cutover,generation:Number(marker.generation)};
   }
   const diffAt=Date.now();
   let plan;
@@ -429,7 +447,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   if(summary.window?.outcome==='granted'&&writeGate&&Number.isFinite(writeGate.generation))summary.window.generationAtFirstBatch=writeGate.generation;
   const writeAt=Date.now();
   let written;
-  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null,marks});}
+  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null,marks,bulk,windowExpiresAt:windowState.granted&&Number.isFinite(summary.window?.expiresAt)?summary.window.expiresAt:null});}
   finally{
    timing.writeMs=Date.now()-writeAt;
    // From the budget clock's start (the grant, or the run start with no window): to the first fenced transaction entered (`preTxnMs`), to the first
@@ -441,6 +459,8 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   Object.assign(summary,written,{outcome:written.leaseLost?'lease_lost':written.errorCount?'partial':written.remaining?'budget':'complete'});
   // A window that ended under the run is a deferred outcome with its own reason, never a success.
   if(written.windowLost&&!written.leaseLost){summary.outcome='deferred';summary.reason='window_lost';summary.inputKey='projector_window';}
+  // ADR 0106: the Film/Person authority marker is no longer the projector's: nothing more is written through any path.
+  if(written.authorityMoved&&!written.leaseLost&&!written.windowLost){summary.outcome='deferred';summary.reason=written.authorityReason||'authority_moved';summary.inputKey='film_person_authority';}
   return summary;
  }catch(error){
   summary.outcome='failed';summary.error=String(error?.message||error).slice(0,200);
@@ -594,9 +614,141 @@ async function d1EnrichmentRelease(db,leaseId,summary){
  await db.run('UPDATE projection_run SET lease_id=NULL,lease_until=NULL,finished_at=?,outcome=?,summary_json=? WHERE projection=? AND lease_id=?',[new Date().toISOString(),summary.outcome||null,JSON.stringify(summary),D1_ENRICHMENT_PROJECTION,leaseId]);
 }
 
+// ADR 0106 (stage a, inert). Behind D1_ENRICHMENT_BULK (off by default; only a D1_ENRICHMENT_WRITE=on run reads it) the projector writes in groups. One cycle:
+// (a) the repository's own planning is run once against a recording database that answers every read with nothing: that is the TRACE of the reads the group depends on;
+// (b) the traced reads and a digest of each, plus the Film/Person authority marker, go out as ONE read batch;
+// (c) the unchanged repository plans again, now reading only from that answer, and its writes are collected instead of sent;
+// (d) the collected writes go out as ONE atomic batch that first asserts the lease (or the held window), the marker (mode r2 or prepared, cutover open, the generation planned under) and
+//     that every traced read still digests to what the prefetch saw. The two batches are two round trips and NOT one snapshot, so nothing is assumed from their timing: any difference fails a
+//     CHECK and rolls the whole batch back, and the group is written again by the per-entity path (one fenced transaction per Person group and per Film, unchanged). The same fallback applies to a
+//     read shape that cannot be digested, a read the second pass issues that the trace did not (a data-dependent branch), a planning error of any entity, a batch over the statement cap and any
+//     constraint (a trusted external id another Film of the group takes, a missing Person, a unique role id). Nothing is kept from one cycle to the next, so no plan outlives its group.
+// A Film that carries redirects (its link writes depend on rows an earlier item of the group may retire) never joins a group: it takes the per-entity path. With the flag off none of this runs.
+const D1_ENRICHMENT_BULK_GROUP=10,D1_ENRICHMENT_BULK_PERSON_GROUP=25,D1_ENRICHMENT_BULK_MAX_STATEMENTS=1500,D1_ENRICHMENT_BULK_RESERVE_MS=15000,D1_ENRICHMENT_BULK_FIRST_GROUP_MS=5000;
+const D1_ENRICHMENT_BULK_DIGEST_MAX=8000,D1_ENRICHMENT_BULK_MAX_PARAMS=99;
+const D1_ENRICHMENT_BULK_FALLBACK_SHARE=0.05,D1_ENRICHMENT_BULK_FALLBACK_MIN_GROUPS=10;
+const D1_ENRICHMENT_MARKER_READ='SELECT mode,cutover,generation FROM film_person_authority WHERE id=1';
+const D1_ENRICHMENT_MARKER_GUARD="INSERT INTO projection_fence (held) SELECT COUNT(*) FROM film_person_authority WHERE id=1 AND mode IN ('r2','prepared') AND cutover='open' AND generation=?";
+const D1_ENRICHMENT_READ_GUARD='INSERT INTO projection_fence (held) SELECT CASE WHEN ';
+function d1EnrichmentBulkMode(env){return env?.D1_ENRICHMENT_BULK==='on'?'on':'off';}
+// The options of a run: defaults plus the run's own overrides. Null when the grouped path is not selected.
+function d1EnrichmentBulkOptions(env,overrides){
+ if(d1EnrichmentBulkMode(env)!=='on')return null;
+ const o=overrides||{},positive=(value,fallback)=>Number.isInteger(value)&&value>0?value:fallback;
+ return {groupSize:positive(o.groupSize,D1_ENRICHMENT_BULK_GROUP),personGroupSize:positive(o.personGroupSize,D1_ENRICHMENT_BULK_PERSON_GROUP),maxStatements:positive(o.maxStatements,D1_ENRICHMENT_BULK_MAX_STATEMENTS),
+  reserveMs:Number.isFinite(o.reserveMs)&&o.reserveMs>=0?o.reserveMs:D1_ENRICHMENT_BULK_RESERVE_MS,firstGroupMs:Number.isFinite(o.firstGroupMs)&&o.firstGroupMs>=0?o.firstGroupMs:D1_ENRICHMENT_BULK_FIRST_GROUP_MS,
+  statementBudget:Number.isInteger(o.statementBudget)&&o.statementBudget>0?o.statementBudget:null,
+  fallbackShare:Number.isFinite(o.fallbackShare)?o.fallbackShare:D1_ENRICHMENT_BULK_FALLBACK_SHARE,fallbackMinGroups:positive(o.fallbackMinGroups,D1_ENRICHMENT_BULK_FALLBACK_MIN_GROUPS)};
+}
+const d1EnrichmentReadKey=(sql,params)=>sql+'\u0000'+JSON.stringify(params);
+// The digest expression of a plain `SELECT <columns> FROM ...`: the rows as one JSON text, in the row order of the query. A function call in the column list, GROUP BY or UNION cannot be digested (null).
+function d1EnrichmentDigestSql(sql){
+ const match=/^\s*SELECT\s+(.+?)\s+FROM\s+/is.exec(sql);
+ if(!match||match[1].includes('(')||/\bGROUP\b|\bUNION\b/i.test(sql))return null;
+ const names=match[1].split(',').map(item=>{const parts=item.trim().split(/\s+AS\s+/i);return (parts[1]||parts[0]).trim();});
+ return `(SELECT COALESCE(json_group_array(json_array(${names.join(',')})),'[]') FROM (${sql}))`;
+}
+// One group cycle (see above). items: [{kind:'person'|'film',entry,pending?}] in write order (a Film's own Persons before it). Returns {outcome:'applied'|'fallback'|'stop',reason,...stats}.
+// `stop` is a lost lease, a lost window or an authority marker that is no longer the projector's: the run must write nothing more through any path.
+async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStatements=D1_ENRICHMENT_BULK_MAX_STATEMENTS,marks={},expectedMarker=null,statementsLeft=Infinity}){
+ const stats={reads:0,guards:0,prefetchMisses:0,statements:0,prefetchStatements:0,prefetchMs:0,applyMs:0};
+ const fallback=(reason,extra)=>({...stats,outcome:'fallback',reason,...extra});
+ // The marker the run was planned under (read before the diff). Without it nothing is written: the authority is unknown, never assumed.
+ if(!expectedMarker||!Number.isInteger(expectedMarker.generation))return {...stats,outcome:'stop',reason:'authority_unavailable'};
+ if(marks.firstTxnAt==null)marks.firstTxnAt=Date.now();
+ const stateWrite=(db2,projection,kind,id,key)=>db2.run(D1_ENRICHMENT_STATE,[projection,kind,id,key,new Date().toISOString()]);
+ // What one item asks of the repository: exactly the calls the per-entity path makes (without redirect links: such a Film is never grouped).
+ const apply=async(db2,repository,item)=>{
+  const entry=item.entry;
+  if(item.kind==='person'){await repository.projectPerson({person:entry.person});await stateWrite(db2,D1_ENRICHMENT_PROJECTION,'person',entry.id,entry.key);return;}
+  await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
+  if(item.pending){await repository.projectFilmSyncState({filmId:item.pending.id,sync:item.pending.sync});await stateWrite(db2,METADATA_SYNC_PROJECTION,'film',item.pending.id,item.pending.key);}
+  await stateWrite(db2,D1_ENRICHMENT_PROJECTION,'film',entry.id,entry.key);
+ };
+ // (a) the trace
+ const seen=new Map();let tracedWrites=0;
+ const tracer={async get(sql,params=[]){seen.set(d1EnrichmentReadKey(sql,params),{sql,params});return null;},async all(sql,params=[]){seen.set(d1EnrichmentReadKey(sql,params),{sql,params});return [];},async run(){tracedWrites++;},async transaction(fn){return fn();}};
+ try{const traced=CanonicalRepository.createCanonicalRepository(tracer);for(const item of items)await apply(tracer,traced,item);}
+ catch{return fallback('plan_error');}
+ const reads=[...seen.values()],digests=reads.map(read=>d1EnrichmentDigestSql(read.sql));
+ if(digests.some(digest=>digest===null)||reads.some(read=>read.params.length>D1_ENRICHMENT_BULK_MAX_PARAMS))return fallback('undigestable_read');
+ // the statement cap covers the prefetch (the marker read and two statements per read) and the write batch (two fences, a guard per read, the writes, the fence delete); an estimate before any round trip
+ const prefetchStatements=1+2*reads.length,estimatedWrites=3+reads.length+tracedWrites;
+ stats.reads=reads.length;
+ if(Math.max(prefetchStatements,estimatedWrites)>maxStatements)return fallback('too_large',{estimate:Math.max(prefetchStatements,estimatedWrites)});
+ // The run's statement budget admits a group only for its whole cost: the read batch, the write batch and, should the group be refused, the per-entity replay (about its writes plus its reads).
+ const wholeCost=prefetchStatements+estimatedWrites+tracedWrites+reads.length;
+ if(wholeCost>statementsLeft)return fallback('over_budget',{estimate:wholeCost});
+ // (b) one read batch
+ const batch=[{sql:D1_ENRICHMENT_MARKER_READ,params:[]}];
+ reads.forEach((read,index)=>{batch.push({sql:read.sql,params:read.params});batch.push({sql:'SELECT '+digests[index]+' AS d',params:read.params});});
+ let out;const prefetchAt=Date.now();
+ try{out=await db.readBatch(batch);}
+ catch(error){stats.prefetchMs=Date.now()-prefetchAt;stats.prefetchStatements=prefetchStatements;if(error?.budget)return {...stats,outcome:'stop',reason:'budget'};return {...stats,outcome:'stop',reason:'authority_unavailable',error:String(error?.message||error).slice(0,160)};}
+ stats.prefetchMs=Date.now()-prefetchAt;stats.prefetchStatements=prefetchStatements;
+ const marker=out[0]?.[0];
+ if(!marker)return {...stats,outcome:'stop',reason:'authority_unavailable'};
+ // The generation observed at prefetch must be the one the run was planned under: a transition between the diff and here fails closed.
+ const generation=expectedMarker.generation;
+ if(!['r2','prepared'].includes(marker.mode)||marker.cutover!=='open'||Number(marker.generation)!==generation)return {...stats,outcome:'stop',reason:'authority_moved'};
+ const answers=new Map(),expected=[];
+ for(let index=0;index<reads.length;index++){
+  answers.set(d1EnrichmentReadKey(reads[index].sql,reads[index].params),out[1+index*2]);
+  const digest=out[2+index*2]?.[0]?.d;
+  if(typeof digest!=='string'||digest.length>D1_ENRICHMENT_BULK_DIGEST_MAX)return fallback('digest_unusable');
+  expected.push(digest);
+ }
+ // (c) the second planning pass, reading the answer only, collecting its writes
+ const writes=[windowOwner?{sql:D1_ENRICHMENT_WINDOW_FENCE,params:[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString(),windowOwner,Date.now()]}:{sql:D1_ENRICHMENT_FENCE,params:[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]},
+  {sql:D1_ENRICHMENT_MARKER_GUARD,params:[generation]}];
+ reads.forEach((read,index)=>{writes.push({sql:D1_ENRICHMENT_READ_GUARD+digests[index]+'=? THEN 1 ELSE 0 END',params:[...read.params,expected[index]]});stats.guards++;});
+ const collector={
+  async get(sql,params=[]){const rows=answers.get(d1EnrichmentReadKey(sql,params));if(rows)return rows[0]??null;stats.prefetchMisses++;return null;},
+  async all(sql,params=[]){const rows=answers.get(d1EnrichmentReadKey(sql,params));if(rows)return rows;stats.prefetchMisses++;return [];},
+  async run(sql,params=[]){writes.push({sql,params});},
+  async transaction(fn){return fn();}};
+ try{const repository=CanonicalRepository.createCanonicalRepository(collector);for(const item of items)await apply(collector,repository,item);}
+ catch{return fallback('plan_error');}
+ if(stats.prefetchMisses)return fallback('prefetch_miss');
+ writes.push({sql:'DELETE FROM projection_fence',params:[]});
+ if(writes.length>maxStatements)return fallback('too_large',{estimate:writes.length});
+ // (d) one atomic batch
+ const applyAt=Date.now();
+ try{await db.writeBatch(writes);}
+ catch(error){
+  stats.applyMs=Date.now()-applyAt;
+  if(error?.budget)return {...stats,outcome:'stop',reason:'budget'};
+  const message=String(error?.message||error);
+  if(/CHECK constraint failed/i.test(message)){
+   // Which assertion failed is told by re-reading, never by the error text.
+   const lease=await db.get('SELECT 1 AS ok FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?',[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]).catch(()=>null);
+   if(!lease)return {...stats,outcome:'stop',reason:'lease_lost'};
+   if(windowOwner){
+    const held=await db.get("SELECT 1 AS ok FROM projector_window WHERE state='held' AND owner=? AND expires_at>?",[windowOwner,Date.now()]).catch(()=>null);
+    if(!held)return {...stats,outcome:'stop',reason:'window_lost'};
+   }
+   const now=await db.get(D1_ENRICHMENT_MARKER_READ,[]).catch(()=>null);
+   if(!now||!['r2','prepared'].includes(now.mode)||now.cutover!=='open'||Number(now.generation)!==generation)return {...stats,outcome:'stop',reason:'authority_moved'};
+   return fallback('guard_refused');
+  }
+  // A constraint the per-entity path reports on its own (a trusted external id taken by another Film of the group, a missing Person, a unique role id): the batch rolled back whole, the group is replayed one by one.
+  if(/constraint failed|UNIQUE|FOREIGN KEY/i.test(message))return fallback('constraint',{error:message.slice(0,160)});
+  // Any other failure (a D1 limit, a network error) leaves the outcome unknown; the per-entity replay writes the same rows (idempotent) and the grouped path is switched off for the rest of the run.
+  return fallback('batch_error',{error:message.slice(0,160),latch:true});
+ }
+ stats.applyMs=Date.now()-applyAt;stats.statements=writes.length;
+ return {...stats,outcome:'applied',reason:null};
+}
+
 // One batch per Film and one per group of Persons. Each starts with the fence, writes the rows, stores the change keys and
 // clears the fence row. A failed batch writes nothing and its entities keep their old keys, so the next run tries them again.
-async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={}}){
+async function d1EnrichmentWrite(db,plan,options){
+ // ADR 0106: with a run statement budget the cap is enforced by the adapter on every statement of the write phase, whatever path sends it; it is lifted for the lease release that follows.
+ if(options.bulk?.statementBudget!=null&&typeof db.setStatementLimit==='function')db.setStatementLimit(options.bulk.statementBudget);
+ try{return await d1EnrichmentWriteRun(db,plan,options);}
+ finally{if(typeof db.setStatementLimit==='function')db.setStatementLimit(Infinity);}
+}
+async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={},bulk=null,windowExpiresAt=null}){
  const repository=CanonicalRepository.createCanonicalRepository(db);
  const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false,windowLost:false};
  const fenced=async(write)=>{
@@ -607,10 +759,16 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
     // Inside a window every batch also asserts, in the same statement, that this run still owns an unexpired `held` window.
     if(windowOwner)await db.run(D1_ENRICHMENT_WINDOW_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString(),windowOwner,Date.now()]);
     else await db.run(D1_ENRICHMENT_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]);
+    // ADR 0106: with the grouped path selected every write, grouped or not, asserts the marker the run was planned under.
+    if(bulk?.expectedMarker)await db.run(D1_ENRICHMENT_MARKER_GUARD,[bulk.expectedMarker.generation]);
     await write();
     await db.run('DELETE FROM projection_fence');
    });
   }catch(error){
+   if(bulk?.expectedMarker&&/CHECK constraint failed/i.test(String(error?.message||error))){
+    const now=await db.get(D1_ENRICHMENT_MARKER_READ,[]).catch(()=>null);
+    if(!now||!['r2','prepared'].includes(now.mode)||now.cutover!=='open'||Number(now.generation)!==bulk.expectedMarker.generation){try{error.fenceCause='authority';}catch{}throw error;}
+   }
    // A refused fence is told apart by re-reading, never by the error text: the lease lost and the window lost are different outcomes.
    if(windowOwner&&/CHECK constraint failed/i.test(String(error?.message||error))){
     const held=await db.get('SELECT 1 AS ok FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?',[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]).catch(()=>null);
@@ -622,10 +780,12 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
  const state=(kind,id,key)=>db.run(D1_ENRICHMENT_STATE,[D1_ENRICHMENT_PROJECTION,kind,id,key,new Date().toISOString()]);
  const syncState=(id,key)=>db.run(D1_ENRICHMENT_STATE,[METADATA_SYNC_PROJECTION,'film',id,key,new Date().toISOString()]);
  const writeSync=async item=>{await repository.projectFilmSyncState({filmId:item.id,sync:item.sync});await syncState(item.id,item.key);};
- const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs;
+ const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs&&(!bulk||bulk.statementBudget==null||db.statements<bulk.statementBudget);
  const failed=(kind,id,error)=>{
+  // A step the statement budget refused was not sent: nothing failed, the entity keeps its old checkpoint and the run ends with work left.
+  if(error?.budget){result.budgetStop=true;if(result.bulk)result.bulk.stop=result.bulk.stop||'budget';return;}
   const message=String(error?.message||error);
-  if(/CHECK constraint failed/i.test(message)){if(error?.fenceCause==='window')result.windowLost=true;else result.leaseLost=true;}
+  if(/CHECK constraint failed/i.test(message)){if(error?.fenceCause==='authority'){result.authorityMoved=true;result.authorityReason='authority_moved';}else if(error?.fenceCause==='window')result.windowLost=true;else result.leaseLost=true;}
   result.errorCount++;
   if(result.errors.length<20)result.errors.push({kind,id,error:message.slice(0,160)});
  };
@@ -656,12 +816,66 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
   for(const entry of items)tried.add(entry.id);
   try{await writePeople(items);}
   catch(error){
+   if(error?.budget){result.budgetStop=true;if(result.bulk)result.bulk.stop=result.bulk.stop||'budget';return;}
    if(items.length===1||/CHECK constraint failed/i.test(String(error?.message||error))){for(const entry of items)failed('person',entry.id,error);return;}
    for(const entry of items){if(result.leaseLost||result.windowLost||!budgetLeft())break;try{await writePeople([entry]);}catch(single){failed('person',entry.id,single);}}
   }
  };
  const takePeople=limit=>{const items=[];skipTried();while(personAt<personOrder.length&&items.length<limit){const id=personOrder[personAt++];if(!tried.has(id))items.push(personById.get(id));}return items;};
  const remaining=()=>untriedPeople()+(plan.films.length-filmAt)+(housekeeping.length-houseAt);
+ // ADR 0106: the grouped path (null `bulk`: not selected, none of the following runs). Lanes are then accounted in statements sent, the unit of ADR 0106 decision 6; `bulkOff` switches the grouped path off for the rest of the run
+ // (an unknown batch outcome, an unreadable marker, a fallback share over the stop share); `perEntityFilms` is how many Films of a refused group the per-entity path must still take one by one.
+ let bulkOff=!bulk,perEntityFilms=0,groupMaxMs=0;
+ const bulkStats=bulk?(result.bulk={groups:0,filmGroups:0,personGroups:0,groupSize:bulk.groupSize,applied:0,fallbacks:0,fallbackReasons:{},guardRefusals:0,constraintFallbacks:0,prefetchReads:0,guards:0,prefetchMisses:0,statements:0,prefetchStatements:0,prefetchMs:0,applyMs:0,films:0,people:0,stop:null,errors:[]}):null;
+ if(bulk)result.authorityMoved=false;
+ const cost=()=>bulk?db.statements:db.queries;
+ // The clock left for a step: the run's wall budget or the held window's absolute expiry (whichever is first), minus the reserve (release, one group's latency and margin).
+ const bulkFits=()=>Math.min(started+wallMs,windowExpiresAt??Infinity)-Date.now()-bulk.reserveMs>=(groupMaxMs||bulk.firstGroupMs)&&(bulk.statementBudget==null||db.statements<bulk.statementBudget);
+ const bulkBook=(kind,cycle)=>{
+  bulkStats.groups++;bulkStats[kind==='film'?'filmGroups':'personGroups']++;
+  bulkStats.prefetchReads+=cycle.reads;bulkStats.guards+=cycle.guards;bulkStats.prefetchMisses+=cycle.prefetchMisses;bulkStats.statements+=cycle.statements;bulkStats.prefetchStatements+=cycle.prefetchStatements;bulkStats.prefetchMs+=cycle.prefetchMs;bulkStats.applyMs+=cycle.applyMs;
+  groupMaxMs=Math.max(groupMaxMs,cycle.prefetchMs+cycle.applyMs);
+  if(cycle.outcome==='applied'){bulkStats.applied++;return;}
+  if(cycle.outcome==='stop')return;
+  bulkStats.fallbacks++;bulkStats.fallbackReasons[cycle.reason]=(bulkStats.fallbackReasons[cycle.reason]||0)+1;
+  if(cycle.reason==='guard_refused')bulkStats.guardRefusals++;
+  if(cycle.reason==='constraint')bulkStats.constraintFallbacks++;
+  if(cycle.error&&bulkStats.errors.length<5)bulkStats.errors.push({reason:cycle.reason,error:cycle.error});
+  if(cycle.latch){bulkOff=true;bulkStats.stop='batch_error';}
+  else if(bulkStats.groups>=bulk.fallbackMinGroups&&bulkStats.fallbacks/bulkStats.groups>bulk.fallbackShare){bulkOff=true;bulkStats.stop='fallback_rate';}
+ };
+ const bulkStop=reason=>{if(reason==='budget')result.budgetStop=true;else if(reason==='lease_lost')result.leaseLost=true;else if(reason==='window_lost')result.windowLost=true;else{result.authorityMoved=true;result.authorityReason=reason;}bulkStats.stop=reason;};
+ const cycleOptions=()=>({leaseId,windowOwner,maxStatements:bulk.maxStatements,marks,expectedMarker:bulk.expectedMarker||null,statementsLeft:bulk.statementBudget==null?Infinity:Math.max(0,bulk.statementBudget-db.statements)});
+ // The items of a Film group in write order: every still unwritten Person its Films credit (once), then the Films.
+ const bulkItems=films=>{
+  const items=[],seen=new Set();
+  for(const entry of films)for(const id of new Set((entry.credits||[]).map(credit=>credit.personId)))if(personById.has(id)&&!tried.has(id)&&!seen.has(id)){seen.add(id);items.push({kind:'person',entry:personById.get(id)});}
+  for(const entry of films)items.push({kind:'film',entry,pending:syncById.get(entry.id)||null});
+  return items;
+ };
+ // One group of Films (stopping at a Film that carries redirects), shrunk by halves until it fits the statement cap, written by one cycle. Returns 'applied', 'fallback' or 'stop'.
+ const bulkFilms=async()=>{
+  const films=[];
+  for(let at=filmAt;at<plan.films.length&&films.length<bulk.groupSize;at++){const entry=plan.films[at];if((entry.film?.redirects||[]).length)break;films.push(entry);}
+  let count=films.length,items,cycle;
+  for(;;){
+   items=bulkItems(films.slice(0,count));
+   cycle=await d1EnrichmentGroupCycle(db,items,cycleOptions());
+   if((cycle.reason==='too_large'||cycle.reason==='over_budget')&&count>1){count=Math.ceil(count/2);continue;}
+   break;
+  }
+  // Not even one Film fits what is left of the run's statement budget: the grouped path ends the run, it does not spend past it.
+  if(cycle.reason==='over_budget'){bulkStats.stop=bulkStats.stop||'budget';return 'stop';}
+  bulkBook('film',cycle);
+  if(cycle.outcome==='stop'){bulkStop(cycle.reason);return 'stop';}
+  if(cycle.outcome!=='applied'){perEntityFilms=count;return 'fallback';}
+  for(const item of items){
+   if(item.kind==='person'){tried.add(item.entry.id);result.writtenPeople++;peopleForFilms++;bulkStats.people++;}
+   else{result.writtenFilms++;bulkStats.films++;if(item.pending)result.syncWrites++;}
+  }
+  filmAt+=count;
+  return 'applied';
+ };
  while(true){
   skipTried();
   const available=[];
@@ -669,16 +883,36 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
   if(personAt<personOrder.length)available.push('people');
   if(houseAt<housekeeping.length)available.push('housekeeping');
   if(!available.length)break;
-  if(result.leaseLost||result.windowLost||!budgetLeft()){result.remaining=remaining();break;}
+  if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){result.remaining=remaining();if(result.budgetStop)result.remaining=Math.max(1,result.remaining);break;}
   let lane=available[0],best=Infinity;
   for(const name of available){const score=(spent[name]+1)/WEIGHT[name];if(score<best){best=score;lane=name;}}
-  const before=db.queries;
+  // The grouped path starts no step it cannot finish inside the reserve (the held window's absolute expiry included).
+  if(bulk&&!bulkOff&&lane!=='housekeeping'&&!bulkFits()){bulkStats.stop=bulkStats.stop||'budget';result.remaining=remaining();break;}
+  const before=cost();
   let task=null;
   try{
    if(lane==='people'){
-    task={kind:'people',items:takePeople(D1_ENRICHMENT_PERSON_BATCH)};
-    await writePeopleGroup(task.items);
+    task={kind:'people',items:takePeople(bulk&&!bulkOff?bulk.personGroupSize:D1_ENRICHMENT_PERSON_BATCH)};
+    let grouped=false;
+    if(bulk&&!bulkOff&&task.items.length){
+     const cycle=await d1EnrichmentGroupCycle(db,task.items.map(entry=>({kind:'person',entry})),cycleOptions());
+     if(cycle.reason==='over_budget'){bulkStats.stop=bulkStats.stop||'budget';result.remaining=remaining();break;}
+     bulkBook('person',cycle);
+     if(cycle.outcome==='stop'){bulkStop(cycle.reason);result.remaining=remaining();break;}
+     if(cycle.outcome==='applied'){for(const entry of task.items)tried.add(entry.id);result.writtenPeople+=task.items.length;bulkStats.people+=task.items.length;grouped=true;}
+    }
+    if(!grouped)await writePeopleGroup(task.items);
    }else if(lane==='film'){
+    // ADR 0106: a group of Films first, when the grouped path is selected, still on, and the next Film carries no redirect. A refused group leaves its Films to the per-entity code below, one by one.
+    let grouped=false;
+    if(bulk&&!bulkOff&&perEntityFilms===0&&!(plan.films[filmAt].film?.redirects||[]).length){
+     const outcome=await bulkFilms();
+     if(outcome==='stop'){result.remaining=remaining();break;}
+     grouped=outcome==='applied';
+    }
+    if(grouped)task={kind:'bulk'};
+    else{
+    const consumed=perEntityFilms>0;if(consumed)perEntityFilms--;
     const entry=plan.films[filmAt++];
     task={kind:'film',item:entry};
     // This Film's own Persons first (see above); a failure there is recorded by writePeopleGroup and does not stop the Film attempt.
@@ -690,7 +924,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
     // The Film's own batch starts only inside the budget and only with the lease and the window: the Persons just written can have used
     // what was left. A Film not attempted for that reason stays in the lane (the next run finds it again, its Persons already
     // checkpointed) and counts as remaining; it is not an error.
-    if(result.leaseLost||result.windowLost||!budgetLeft()){filmAt--;continue;}
+    if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){filmAt--;if(consumed)perEntityFilms++;continue;}
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
      await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
@@ -700,6 +934,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
     });
     result.writtenFilms++;
     if(pending)result.syncWrites++;
+    }
    }else{
     task=housekeeping[houseAt++];
     if(task.kind==='sync'){
@@ -722,10 +957,12 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
    else if(task?.kind==='people')for(const entry of task.items)failed('person',entry.id,error);
    else failed('film',null,error);
   }finally{
-   spent[lane]+=Math.max(1,db.queries-before);
+   spent[lane]+=Math.max(1,cost()-before);
   }
  }
+ if(result.budgetStop&&!result.remaining)result.remaining=1;
  result.laneQueries={...spent};result.peopleForFilms=peopleForFilms;
+ if(bulkStats){const seconds=Math.max(0.001,(Date.now()-started)/1000);bulkStats.perWindowSecond={films:+(bulkStats.films/seconds).toFixed(2),people:+(bulkStats.people/seconds).toFixed(2)};}
  return result;
 }
 
