@@ -2,7 +2,7 @@
 
 **Captured:** 2026-11-09, four natural hourly runs at 14:01, 15:01, 16:01 and 17:01 UTC, read-only: Worker logs (`event=d1_enrichment_projection`) and one D1 `SELECT` of `projection_run.summary_json`. Code at `779e9931` ([PR #447](https://github.com/vladimino/iptv-watchlist/pull/447)), deployed by CI/CD #1950 (both jobs success, 2026-11-09 13:58 UTC). No manual projector, Discovery or EPG run, no flag, Task, cron, lease, window or budget change, no production write.
 **Scope:** [AIR-392](https://trello.com/c/ivMqVpKC). What the 14 to 49 s between the window grant and the first batch consist of, using the additive `timing`, `phases` and `detail` fields of the run summary (see the [monitoring runbook](../../runbooks/monitoring.md#d1-projector-run-phase-timing-air-392)). It does not change any budget or schedule and is not an acceptance of any projector throughput.
-**Verdict:** **MEASURED, SMALL SAMPLE.** The overhead is large in both modes and is made of a few D1 and Discovery-authority reads, not of CPU or the write path. One read of every checkpoint (`projection_state`, about 32,000 rows) costs 6 to 11 s in every run; the read of the discovery decisions (`read.resolution`) costs 1.2 s in fast runs and 16.5 to 19 s in slow runs and is the main difference between the modes. The accounting is exact: `diffMs` equals the sum of the `phases` plus `diffResidualMs` (0 ms) in all four runs.
+**Verdict:** **MEASURED, SMALL SAMPLE.** The time before the first write is large in both modes and falls almost entirely inside a few measured D1, R2 and Discovery-authority read boundaries (latency attributed to those reads), not in the repository's planning before the first batch (`firstBatchPlanMs` 26 to 683 ms). The Worker clock advances only across I/O, so these fields cannot separate CPU, parsing or routing inside a measured read from storage latency: CPU is not ruled out, and the cause of the slow mode is not established. One read of every checkpoint (`projection_state`, about 32,000 rows) costs 6 to 11 s in every run; the read of the discovery decisions (`read.resolution`) costs 1.2 s in fast runs and 16.5 to 19 s in slow runs and is the main difference between the modes. The accounting is exact: `diffMs` equals the sum of the `phases` plus `diffResidualMs` (0 ms) in all four runs.
 **Used by:** [ADR 0106](../../adr/0106-bulk-projector-write-path.md) (the pre-write overhead that every window pays), [AIR-391 spike evidence](air-391-bulk-projector-spike-2026-11-09.md).
 
 ## What was measured
@@ -20,7 +20,7 @@ The two slow runs spent 43.7 and 49.2 s before their first write and had 11.9 an
 
 ## Where the pre-write time goes
 
-Phases (sequential, additive), in milliseconds, per run. Phases below 0.1 s in every run (`store.build`, `diff.lifecycle`, `diff.ownerOverlay`, `diff.inputs`, `diff.plan`, `diff.admittedFirst`, `diff.schemaContract`, `diff.syncProbe`, `diff.storedSyncRead`, `diff.knownFilmsRead`, `diff.aliasesRead`) add 0.3 to 1.4 s together and are left out; the CPU phases measure 0 ms (the Worker clock does not advance during CPU work, see the runbook).
+Phases (sequential, additive), in milliseconds, per run. Phases below 0.1 s in every run (`store.build`, `diff.lifecycle`, `diff.ownerOverlay`, `diff.inputs`, `diff.plan`, `diff.admittedFirst`, `diff.schemaContract`, `diff.syncProbe`, `diff.storedSyncRead`, `diff.knownFilmsRead`, `diff.aliasesRead`) add 0.3 to 1.4 s together and are left out; the CPU-only phases measure 0 ms (the Worker clock does not advance during CPU work, see the runbook, so that is not evidence that they cost nothing).
 
 | Phase | 14:01 fast | 16:01 fast | 15:01 slow | 17:01 slow |
 | --- | --- | --- | --- | --- |
@@ -42,7 +42,7 @@ Minimum, median and maximum per mode (two runs each, so the median is the mean o
 
 ## What the four runs show
 
-1. **The overhead is I/O to D1, R2 and the Discovery authority.** Every CPU phase is 0 ms and `firstBatchPlanMs` is small. The slow mode multiplies the I/O phases (`read.resolution` 2.4 to 16 times, `publishedSnapshot` 3 to 20 times, `metadataCache` 5 to 20 times, depending on which fast run is compared), which looks like a slower D1 or storage path for that run and not like more data: the rows read are the same in fast and slow runs.
+1. **The time falls inside the measured D1, R2 and Discovery-authority read boundaries.** The CPU-only phases read 0 ms, which this clock cannot tell from CPU work (it advances only across I/O); CPU, parsing or routing inside a read (for example `read.resolution`) is part of that read's time, so these runs do not show whether the latency is storage, transport or CPU. `firstBatchPlanMs` is small, so the repository's planning before the first batch is not the overhead. The slow mode multiplies the I/O phases (`read.resolution` 2.4 to 16 times, `publishedSnapshot` 3 to 20 times, `metadataCache` 5 to 20 times, depending on which fast run is compared), a pattern that fits latency at those read boundaries better than more data (the rows read are the same in fast and slow runs); it is an attribution to those boundaries, not a cause.
 2. **`diff.storedRead` is large in every mode and grows with the data.** One query for about 32,000 checkpoints takes 6 to 11 s whatever the mode (43 to 48 % of the pre-write time in the two fast runs, 15 to 23 % in the two slow runs). The count rises with the Films and Persons projected, so this read gets slower as the projection grows.
 3. **`read.resolution` explains most of the difference between the modes.** The discovery decisions (`epg/discovery-resolution.json`) are read through the Discovery authority from D1 under authority `d1`: 1.2 s in the fast run of 16:01 and 6.8 s in the fast run of 14:01, against 16.5 to 19 s in the slow runs. It is the longest single read in every run and the whole `store.readBlock` wall time.
 4. **`diff.membersRead` is erratic.** The same 393 rows took 0.5, 5.2, 6.4 and 2.4 s: a latency effect, not a volume effect.
@@ -54,7 +54,7 @@ Minimum, median and maximum per mode (two runs each, so the median is the mean o
 - Four runs of one day, two per mode; the modes are classified by `loadMs` (fast below 12 s, slow from 17 s). Nothing here is a distribution: no percentile is given, and a different day or a Discovery burst may differ.
 - `read.resolution` is measured as one read through the Discovery authority; the measurement does not separate its D1 query time from the work around it (the routing, parsing of the document).
 - The phases show where the time is, not why a mode is slow: whether the slow runs are a D1, R2 or platform effect is not established; the fields do not record D1 `served_by` or `sql_duration_ms`.
-- The Worker clock advances only across I/O, so CPU-local work is not separated and appears as 0 ms or inside the next I/O phase.
+- The Worker clock advances only across I/O, so CPU-local work appears as 0 ms or inside the next I/O phase, and CPU, parsing and routing inside a measured read cannot be separated from storage latency. CPU is not ruled out as part of the slow mode.
 - The `summary_json` of the run holds the same numbers without `leaseReleaseMs` and `runMs` (checked once on the stored row of the 14:01 run; 2,699 bytes).
 
 ## Candidate follow-ups (not decisions)
@@ -63,5 +63,5 @@ These are what the measurement points at; each needs its own card, review and GO
 
 - Avoid reading every checkpoint on every run (the largest phase in fast runs and growing): for example by reading only what the run needs, or by a change-key digest. It changes the projector's diff and needs its own design.
 - Look at how the discovery decisions are read for the projector (`read.resolution`, the main difference between the modes): its payload and path, and whether the projector needs the whole document.
-- Record D1 `served_by` and the per-query `sql_duration_ms` in the diff reads to tell database time from transport time (a further additive diagnostic).
+- Possible diagnostics, not conclusions: record D1 `served_by` and the per-query `sql_duration_ms` in the diff reads to tell database time from transport time, and read the Workers CPU-time metric for the same runs, to see whether CPU is part of the slow mode.
 - The grouped write path and the single 300 s window of ADR 0106 stay as accepted; this evidence only refines the overhead assumption they use.
