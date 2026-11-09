@@ -163,7 +163,7 @@ const links=()=>records.get('letterboxd/facts/links.json')||{};
  assert.equal(snapshot(),before,'no refusal writes anything');
  // Without a published generation nothing is written.
  records.delete('epg/published-generation.json');
- assert.equal((await mark({tmdbId:'10',watched:true})).body.code,'film_not_in_catalog');
+ assert.deepEqual([(await mark({tmdbId:'10',watched:true})).status,(await mark({tmdbId:'10',watched:true})).body.code],[503,'catalog_not_published'],'no publication is unavailability, not a missing film');
  assert.equal((await available()).watchedMarkEnabled,undefined);
 }
 // The Finds response always offers the mark. The retired FINDS_WATCHED_MARK (ADR 0042) and LETTERBOXD_FACTS (ADR 0055)

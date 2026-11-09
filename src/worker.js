@@ -384,11 +384,40 @@ async function catalogWatchedRoute(request,env,url){
  let body;try{body=JSON.parse(text);}catch{return json({error:'Invalid JSON'},400);}
  const keys=body&&typeof body==='object'&&!Array.isArray(body)?Object.keys(body).sort():[];
  if(keys.join()!=='tmdbId,watched'||typeof body.tmdbId!=='string'||!FINDS_WATCHED_TMDB.test(body.tmdbId)||typeof body.watched!=='boolean')return json({error:'Expected exactly tmdbId (digits) and watched (boolean)',code:'invalid_request'},400);
+ // The same pinned, authority-aware read as GET /api/catalog/available (`catalogGenerationCopy`): with Discovery on D1 the generation
+ // catalog is D1-owned and there is no R2 copy. Anything that stops the catalog from being read is unavailability (503, its own
+ // code), never `film_not_in_catalog`; only a catalog that was read and does not hold the verified film is that 409.
+ const unavailable=(code,error='The catalog is not readable right now')=>json({error,code},503);
  const publication=await epgPublication(env);
  const runId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
- const object=runId?await env.BUCKET.get(epgGenerationKey(runId,'discovered-films.json')):null,catalog=object?await object.json():null;
- const film=Object.values(catalog||{}).find(item=>item&&String(item.tmdbId)===body.tmdbId&&item.canonicalIdentity==='tmdb:'+body.tmdbId);
+ if(!runId)return unavailable('catalog_not_published','No published catalog generation');
+ // The Discovery authority the verdict is read under, captured before the read: mode, cutover, generation, programme run and transfer.
+ const discoveryState=gate=>gate?[gate.mode,gate.cutover,gate.generation,gate.programmeRunId,gate.transfer,gate.ready,gate.held].join('|'):'none';
+ let catalog,opened=null;
+ try{
+  if(typeof DiscoveryAuthority!=='undefined'){
+   opened=await DiscoveryAuthority.readAuthority(env);
+   if(opened.ready&&opened.transfer==='loading'){const error=new Error('discovery_incomplete');error.code='discovery_incomplete';throw error;}
+  }
+  catalog=await catalogGenerationCopy(env,publication,runId,'discovered-films.json');
+ }
+ catch(error){return unavailable(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'].includes(error?.code)?error.code:'catalog_read_failed');}
+ if(!catalog||typeof catalog!=='object'||Array.isArray(catalog))return unavailable('catalog_generation_unavailable','The catalog copy of the published generation is not in place');
+ const film=Object.values(catalog).find(item=>item&&String(item.tmdbId)===body.tmdbId&&item.canonicalIdentity==='tmdb:'+body.tmdbId);
  if(!film)return json({error:'Film is not a verified record of the published catalog',code:'film_not_in_catalog'},409);
+ // Fence: the verdict above holds only while the publication and the Discovery authority are still the ones it was read under.
+ try{
+  const again=await epgPublicationReadOnly(env);
+  if(again.programmeRunId!==runId||again.phase!==publication.phase||again.fence!==publication.fence||again.authority!==publication.authority)return unavailable('catalog_generation_changed','The published generation changed; try again');
+  if(typeof DiscoveryAuthority!=='undefined'){
+   // Immediately before the write the authority must still be the one the catalog was read under: same mode and cutover (a D1 to R2
+   // switch is a change), same generation, same published run, not held and not loading. The R2-owned path (not ready) stays R2.
+   const gate=await DiscoveryAuthority.readAuthority(env);
+   if(gate.held)return unavailable('discovery_fence');
+   if(gate.ready&&gate.transfer==='loading')return unavailable('discovery_incomplete');
+   if(discoveryState(gate)!==discoveryState(opened)||gate.ready&&gate.programmeRunId!==runId)return unavailable('catalog_generation_changed','The published generation changed; try again');
+  }
+ }catch{return unavailable('catalog_read_failed');}
  try{
   const result=await LetterboxdFacts.recordOwnerWatchedMark(env,body.tmdbId,body.watched,{observedAt:new Date().toISOString()});
   return json({outcome:result.outcome,watched:result.watched});
