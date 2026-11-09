@@ -63,7 +63,9 @@ function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value
 // The repository's database interface over the D1 binding. Reads go out at once and count against the run's query budget.
 // Writes inside transaction() are collected and sent as one db.batch, which D1 applies atomically.
 function d1EnrichmentAdapter(binding,marks=null){
- let buffer=null,queries=0,sent=0;
+ let buffer=null,queries=0,sent=0,limit=Infinity;
+ // ADR 0106: an optional hard cap on statements sent. A read, a single write or a batch that would pass it is NOT sent: the check runs before submission, on the actual statement count.
+ const room=count=>{if(sent+count>limit){const error=new Error('statement_budget');error.budget=true;throw error;}};
  // AIR-396: the D1 `meta` of every read, summed (whole numbers only): the database's own sql_duration_ms in microseconds, rows_read, how many reads
  // carried a meta and how many of those were served by a replica. Measurement only: a read returns what it returned before.
  const meter={sqlUs:0,rowsRead:0,metas:0,replica:0};
@@ -74,19 +76,20 @@ function d1EnrichmentAdapter(binding,marks=null){
   meter,
   // ADR 0106: statements sent to D1 (a read or a single write is one, a batch is the number of its statements). The grouped path accounts its lanes in this unit.
   get statements(){return sent;},
-  async get(sql,params=[]){queries++;sent++;const result=await statement(sql,params).all();sample(result);return (result.results||[])[0]??null;},
-  async all(sql,params=[]){queries++;sent++;const result=await statement(sql,params).all();sample(result);return result.results||[];},
-  async run(sql,params=[]){if(buffer){buffer.push(statement(sql,params));return;}queries++;sent++;await statement(sql,params).run();},
+  setStatementLimit(value){limit=Number.isFinite(value)&&value>0?value:Infinity;},
+  async get(sql,params=[]){room(1);queries++;sent++;const result=await statement(sql,params).all();sample(result);return (result.results||[])[0]??null;},
+  async all(sql,params=[]){room(1);queries++;sent++;const result=await statement(sql,params).all();sample(result);return result.results||[];},
+  async run(sql,params=[]){if(buffer){buffer.push(statement(sql,params));return;}room(1);queries++;sent++;await statement(sql,params).run();},
   // ADR 0106: one round trip for several reads (a D1 batch is one query); the rows of each statement, in order.
-  async readBatch(list){queries++;sent+=list.length;const out=await binding.batch(list.map(item=>statement(item.sql,item.params)));return out.map(item=>{sample(item);return item?.results||[];});},
+  async readBatch(list){room(list.length);queries++;sent+=list.length;const out=await binding.batch(list.map(item=>statement(item.sql,item.params)));return out.map(item=>{sample(item);return item?.results||[];});},
   // ADR 0106: one atomic batch of already collected writes. Marks the first batch submitted exactly as transaction() does.
-  async writeBatch(list){queries++;sent+=list.length;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=list.length;}await binding.batch(list.map(item=>statement(item.sql,item.params)));},
+  async writeBatch(list){room(list.length);queries++;sent+=list.length;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=list.length;}await binding.batch(list.map(item=>statement(item.sql,item.params)));},
   async transaction(fn){
    if(buffer)return fn();
    buffer=[];let statements;
    try{await fn();statements=buffer;}finally{buffer=null;}
    // AIR-392: the first batch the run SUBMITS (the instant before binding.batch is called, so a failing batch still has its attempt). Measurement only.
-   if(statements.length){queries++;sent+=statements.length;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=statements.length;}await binding.batch(statements);}
+   if(statements.length){room(statements.length);queries++;sent+=statements.length;if(marks&&marks.firstBatchAt==null){marks.firstBatchAt=Date.now();marks.firstBatchStatements=statements.length;}await binding.batch(statements);}
   },
  };
 }
@@ -681,7 +684,7 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
  reads.forEach((read,index)=>{batch.push({sql:read.sql,params:read.params});batch.push({sql:'SELECT '+digests[index]+' AS d',params:read.params});});
  let out;const prefetchAt=Date.now();
  try{out=await db.readBatch(batch);}
- catch(error){stats.prefetchMs=Date.now()-prefetchAt;stats.prefetchStatements=prefetchStatements;return {...stats,outcome:'stop',reason:'authority_unavailable',error:String(error?.message||error).slice(0,160)};}
+ catch(error){stats.prefetchMs=Date.now()-prefetchAt;stats.prefetchStatements=prefetchStatements;if(error?.budget)return {...stats,outcome:'stop',reason:'budget'};return {...stats,outcome:'stop',reason:'authority_unavailable',error:String(error?.message||error).slice(0,160)};}
  stats.prefetchMs=Date.now()-prefetchAt;stats.prefetchStatements=prefetchStatements;
  const marker=out[0]?.[0];
  if(!marker)return {...stats,outcome:'stop',reason:'authority_unavailable'};
@@ -714,6 +717,7 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
  try{await db.writeBatch(writes);}
  catch(error){
   stats.applyMs=Date.now()-applyAt;
+  if(error?.budget)return {...stats,outcome:'stop',reason:'budget'};
   const message=String(error?.message||error);
   if(/CHECK constraint failed/i.test(message)){
    // Which assertion failed is told by re-reading, never by the error text.
@@ -738,7 +742,13 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
 
 // One batch per Film and one per group of Persons. Each starts with the fence, writes the rows, stores the change keys and
 // clears the fence row. A failed batch writes nothing and its entities keep their old keys, so the next run tries them again.
-async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={},bulk=null,windowExpiresAt=null}){
+async function d1EnrichmentWrite(db,plan,options){
+ // ADR 0106: with a run statement budget the cap is enforced by the adapter on every statement of the write phase, whatever path sends it; it is lifted for the lease release that follows.
+ if(options.bulk?.statementBudget!=null&&typeof db.setStatementLimit==='function')db.setStatementLimit(options.bulk.statementBudget);
+ try{return await d1EnrichmentWriteRun(db,plan,options);}
+ finally{if(typeof db.setStatementLimit==='function')db.setStatementLimit(Infinity);}
+}
+async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={},bulk=null,windowExpiresAt=null}){
  const repository=CanonicalRepository.createCanonicalRepository(db);
  const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false,windowLost:false};
  const fenced=async(write)=>{
@@ -772,6 +782,8 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
  const writeSync=async item=>{await repository.projectFilmSyncState({filmId:item.id,sync:item.sync});await syncState(item.id,item.key);};
  const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs&&(!bulk||bulk.statementBudget==null||db.statements<bulk.statementBudget);
  const failed=(kind,id,error)=>{
+  // A step the statement budget refused was not sent: nothing failed, the entity keeps its old checkpoint and the run ends with work left.
+  if(error?.budget){result.budgetStop=true;if(result.bulk)result.bulk.stop=result.bulk.stop||'budget';return;}
   const message=String(error?.message||error);
   if(/CHECK constraint failed/i.test(message)){if(error?.fenceCause==='authority'){result.authorityMoved=true;result.authorityReason='authority_moved';}else if(error?.fenceCause==='window')result.windowLost=true;else result.leaseLost=true;}
   result.errorCount++;
@@ -804,6 +816,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
   for(const entry of items)tried.add(entry.id);
   try{await writePeople(items);}
   catch(error){
+   if(error?.budget){result.budgetStop=true;if(result.bulk)result.bulk.stop=result.bulk.stop||'budget';return;}
    if(items.length===1||/CHECK constraint failed/i.test(String(error?.message||error))){for(const entry of items)failed('person',entry.id,error);return;}
    for(const entry of items){if(result.leaseLost||result.windowLost||!budgetLeft())break;try{await writePeople([entry]);}catch(single){failed('person',entry.id,single);}}
   }
@@ -831,7 +844,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
   if(cycle.latch){bulkOff=true;bulkStats.stop='batch_error';}
   else if(bulkStats.groups>=bulk.fallbackMinGroups&&bulkStats.fallbacks/bulkStats.groups>bulk.fallbackShare){bulkOff=true;bulkStats.stop='fallback_rate';}
  };
- const bulkStop=reason=>{if(reason==='lease_lost')result.leaseLost=true;else if(reason==='window_lost')result.windowLost=true;else{result.authorityMoved=true;result.authorityReason=reason;}bulkStats.stop=reason;};
+ const bulkStop=reason=>{if(reason==='budget')result.budgetStop=true;else if(reason==='lease_lost')result.leaseLost=true;else if(reason==='window_lost')result.windowLost=true;else{result.authorityMoved=true;result.authorityReason=reason;}bulkStats.stop=reason;};
  const cycleOptions=()=>({leaseId,windowOwner,maxStatements:bulk.maxStatements,marks,expectedMarker:bulk.expectedMarker||null,statementsLeft:bulk.statementBudget==null?Infinity:Math.max(0,bulk.statementBudget-db.statements)});
  // The items of a Film group in write order: every still unwritten Person its Films credit (once), then the Films.
  const bulkItems=films=>{
@@ -870,7 +883,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
   if(personAt<personOrder.length)available.push('people');
   if(houseAt<housekeeping.length)available.push('housekeeping');
   if(!available.length)break;
-  if(result.leaseLost||result.windowLost||result.authorityMoved||!budgetLeft()){result.remaining=remaining();break;}
+  if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){result.remaining=remaining();if(result.budgetStop)result.remaining=Math.max(1,result.remaining);break;}
   let lane=available[0],best=Infinity;
   for(const name of available){const score=(spent[name]+1)/WEIGHT[name];if(score<best){best=score;lane=name;}}
   // The grouped path starts no step it cannot finish inside the reserve (the held window's absolute expiry included).
@@ -911,7 +924,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
     // The Film's own batch starts only inside the budget and only with the lease and the window: the Persons just written can have used
     // what was left. A Film not attempted for that reason stays in the lane (the next run finds it again, its Persons already
     // checkpointed) and counts as remaining; it is not an error.
-    if(result.leaseLost||result.windowLost||result.authorityMoved||!budgetLeft()){filmAt--;if(consumed)perEntityFilms++;continue;}
+    if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){filmAt--;if(consumed)perEntityFilms++;continue;}
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
      await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
@@ -947,6 +960,7 @@ async function d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,win
    spent[lane]+=Math.max(1,cost()-before);
   }
  }
+ if(result.budgetStop&&!result.remaining)result.remaining=1;
  result.laneQueries={...spent};result.peopleForFilms=peopleForFilms;
  if(bulkStats){const seconds=Math.max(0.001,(Date.now()-started)/1000);bulkStats.perWindowSecond={films:+(bulkStats.films/seconds).toFixed(2),people:+(bulkStats.people/seconds).toFixed(2)};}
  return result;

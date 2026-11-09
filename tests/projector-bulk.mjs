@@ -371,6 +371,40 @@ const bigPlan=await planned(Array.from({length:7},(_,index)=>filmRecord(index+1,
  assert.equal(capped.result.writtenFilms,0,'a spent statement budget starts no group');assert.ok(capped.result.remaining>0);assert.equal(cap.db.calls.batches,0);
 }
 
+// 11b. The statement budget is a hard cap on EVERY path: a read, a single write or a batch that would pass it is not sent (checked before submission, on the actual count).
+{
+ const budgets=[3,12,60,200,600,1600];
+ const extras=plan=>{for(let index=0;index<30;index++){const base=plan.people[0];plan.people.push({...base,id:'person:actor/extra'+index,key:'extra'+index,person:{...base.person,id:'person:actor/extra'+index,roleId:'actor/extra'+index}});}};
+ const redirect=plan=>{const entry=plan.films[3];entry.film.redirects=[{from:'film:old-one',to:entry.film.id,at:T}];};
+ const housekeeping=plan=>{plan.absent=[{kind:'film',id:'film:gone1'},{kind:'film',id:'film:gone2'},{kind:'person',id:'person:actor/gone'}];};
+ const scenarios=[
+  ['a Film with a redirect (per entity inside the grouped run)',redirect,{groupSize:7}],
+  ['every group too large: the per-entity fallback of Films and their Persons',null,{groupSize:7,maxStatements:12}],
+  ['Person replay: Person groups too large',extras,{groupSize:2,personGroupSize:10,maxStatements:12}],
+  ['housekeeping next to groups',housekeeping,{groupSize:3}],
+  ['plain groups',null,{groupSize:3}],
+ ];
+ for(const [label,mutate,bulk] of scenarios){
+  const base=migrated(),basePlan=clone(bigPlan.plan);if(mutate)mutate(basePlan);
+  const baseline=await writeWith(base.db,basePlan,{bulk:{...bulk,statementBudget:100000}});
+  assert.equal(baseline.result.remaining,0,label);
+  let partial=0;
+  for(const budget of budgets){
+   const m=migrated(),plan=clone(bigPlan.plan);if(mutate)mutate(plan);
+   const r=await writeWith(m.db,plan,{bulk:{...bulk,statementBudget:budget}});
+   assert.ok(r.adapter.statements<=budget,label+': budget '+budget+' but '+r.adapter.statements+' statements were sent');
+   assert.ok(r.result.errorCount<=baseline.result.errorCount,label+': a refused step is not an error ('+budget+')');
+   assert.equal(danglingCredits(m.db),0,label);assert.equal(fkProblems(m.db),0,label);
+   if(r.result.remaining>0){partial++;assert.ok(r.result.budgetStop===true||r.result.bulk?.stop==='budget'||budget<=5,label+': an unfinished run says why ('+budget+') '+JSON.stringify(r.result.bulk?.stop));}
+  }
+  assert.ok(partial>=2,label+': the cap actually bound the run for several budgets ('+partial+')');
+ }
+ // one statement of room: nothing of any kind is sent past it
+ const one=migrated();
+ const tight=await writeWith(one.db,clone(bigPlan.plan),{bulk:{groupSize:7,statementBudget:3}});
+ assert.ok(tight.adapter.statements<=3);assert.equal(tight.result.writtenFilms,0);assert.ok(tight.result.remaining>0);
+}
+
 // 12. The fallback share: a path that refuses every group is switched off after the minimum number of groups; the rest is per-entity and the rows are the same.
 // (The write creates its own repository first; each group then creates two: the trace pass and the collecting pass, the latter an odd call from 3 on.)
 try{
