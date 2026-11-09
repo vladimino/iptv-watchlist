@@ -489,6 +489,21 @@ function confirmedHalfStar(value){const rating=Number(value);return Number.isFin
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
 const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:(film.titleAuthority==='owner'&&(film.titleRu||film.title))||reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
 function eventRemovedFilm(film,titles=new Map()){const rating=removalRating(film);return {...eventFilm(film,titles),...(rating||{})};}
+// AIR-393: titles of the films a Ratings run changed, from what is already stored (the metadata cache and the title dictionary): no
+// external lookup. An id the stores do not know has no label. A TMDB link is given only where every stored id agrees (`catalogLidTmdb`).
+async function ratingsFilmLabels(env,ids){
+ const wanted=[...new Set((ids||[]).map(String).filter(Boolean))],out=new Map();
+ if(!wanted.length)return out;
+ const [metadata,titles]=await Promise.all([loadJSON(env,'metadata.json').catch(()=>null),loadJSON(env,'titles.json').catch(()=>null)]);
+ const meta=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata:{},names=titles&&typeof titles==='object'&&!Array.isArray(titles)?titles:{},bridge=catalogLidTmdb({metadata:meta});
+ for(const id of wanted){
+  const film=meta[id],cached=names[id];
+  const named=film&&typeof film==='object'?eventFilm({...film,id}):null;
+  const title=(named&&typeof named.title==='string'&&named.title.trim())||(cached&&typeof cached.title==='string'&&cached.title.trim())||null;
+  out.set(id,{title,year:named&&Number.isInteger(named.year)?named.year:null,tmdb:bridge.get(id)||null});
+ }
+ return out;
+}
 const eventTitles=report=>new Map((report?.films||[]).map(f=>[String(f.id),f.title]));
 function removalEventKey(event){return 'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';}
 function mergeRemovalEvent(stored,incoming){

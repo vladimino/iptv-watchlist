@@ -631,7 +631,7 @@ async function linkLegacyRemovalRefs(env,{limit=LEGACY_LINK_PAGE,now=Date.now()}
 // first, so references that never resolve cannot starve later ones; `checkedBefore` skips references already checked
 // since that time (one ratings run visits each reference once).
 const REMOVAL_REF_ISSUES=['event_missing','film_not_in_event','event_unrated'];
-async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBefore=null}={}){
+async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBefore=null,onPlan=null}={}){
  const at=new Date(now).toISOString(),summary={written:0,resolved:0,waiting:0,mismatched:0,left:0};
  const queue=await loadJSON(env,REMOVAL_LOOKUP_KEY);
  if(!removalQueueV2(queue))return summary;
@@ -642,6 +642,8 @@ async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBe
  }
  work.sort((a,b)=>a.checkedAt<b.checkedAt?-1:a.checkedAt>b.checkedAt?1:a.id<b.id?-1:a.id>b.id?1:a.eventKey<b.eventKey?-1:a.eventKey>b.eventKey?1:0);
  summary.left=Math.max(0,work.length-limit);
+ // AIR-393: the references this call is about to settle are handed to the caller first, so a kill after a settlement can still be recovered from a stored intent.
+ if(onPlan&&work.length)await onPlan(work.slice(0,limit).map(item=>({id:item.id,eventKey:item.eventKey,rating:item.rating})));
  for(const item of work.slice(0,limit)){
   let event=await loadJSON(env,item.eventKey),issue=null;
   if(event){
@@ -649,6 +651,7 @@ async function settleRemovalRefs(env,{ids=null,limit=20,now=Date.now(),checkedBe
    if(next){event=await writeEvent(env,next);summary.written++;}
    const film=(event?.type==='watchlist'&&Array.isArray(event.removed)?event.removed:[]).find(value=>String(value?.id)===item.id);
    issue=!film?'film_not_in_event':removalRating(film)?null:'event_unrated';
+
   }else issue='event_missing';
   await mergeStoredJSON(env,REMOVAL_LOOKUP_KEY,REMOVAL_QUEUE_EMPTY,q=>{
    const ref=removalQueueV2(q)?(q.films[item.id]?.refs||[]).find(value=>value.eventKey===item.eventKey):null;

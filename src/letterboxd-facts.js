@@ -364,9 +364,31 @@ function recordRatingChange(record,incoming,effective){
  // of a different rating on that same date replaces the earlier diary observation, and a late write of an earlier read
  // does not. `ingestedAt` is not part of the observation id, so a reread of the same value is the same observation. A
  // film whose projection already shows the same watched and rating is not written. One view-index projection for the batch.
+ // AIR-393: what a Diary page is about to change, read from the view index before anything is written (a new watched fact, or a different
+ // rating). The ratings run saves this plan on its record before applying the page, so a crash after the facts are written cannot lose it.
+ async function planDiaryChanges(env,evidence){
+  const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
+  if(!items.length)return [];
+  const {value:viewIndex}=await readJSON(env,FACTS_KEYS.viewIndex),view=viewIndex||{},out=[];
+  for(const item of items){
+   const before=view[item.lid]||{};
+   if(before.watched===true&&(item.rating==null||before.actualRating===item.rating))continue;
+   const previous=typeof before.actualRating==='number'&&Number.isFinite(before.actualRating)?before.actualRating:null;
+   if(before.watched!==true)out.push({lid:item.lid,kind:'added',rating:item.rating??null});
+   else if(item.rating!=null&&previous!==item.rating)out.push({lid:item.lid,kind:'updated',from:previous,rating:item.rating});
+  }
+  return out;
+ }
+ // AIR-393: which planned effects the stored view really shows now. A replay of a page cannot tell its own earlier writes from none, but it can
+// tell whether the effect is there: a film is watched, or carries exactly the planned rating. Another writer's different value, or a write the
+// page lost as older, is not confirmed.
+ async function confirmDiaryEffects(env,groups){
+  const {value}=await readJSON(env,FACTS_KEYS.viewIndex),view=value||{};
+  return {added:(groups?.added||[]).filter(item=>view[item.id]?.watched===true),updated:(groups?.updated||[]).filter(item=>view[item.id]?.actualRating===item.rating)};
+ }
  async function applyDiaryEvidence(env,evidence){
   const items=(evidence||[]).filter(item=>LID.test(String(item?.lid||''))&&/^\d{4}-\d{2}-\d{2}$/.test(String(item.watchedDate||'')));
-  const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{}};
+  const summary={films:items.length,written:0,unchanged:0,older:0,skipped:0,conflicts:0,ratings:{},changes:[]};
   if(!items.length)return summary;
   const [{value:viewIndex},{value:filmsList},{value:watchlist}]=await Promise.all([readJSON(env,FACTS_KEYS.viewIndex),readJSON(env,FACTS_KEYS.filmsList),readJSON(env,FACTS_KEYS.watchlist)]);
   const view=viewIndex||{},due=items.filter(item=>!(view[item.lid]?.watched===true&&(item.rating==null||view[item.lid]?.actualRating===item.rating)));
@@ -397,7 +419,13 @@ function recordRatingChange(record,incoming,effective){
    const floors={...await summaryObservations('films-list',filmsList,item.lid,factKey),...await summaryObservations('watchlist',watchlist,item.lid,factKey)};
    const result=await recordObservations(env,factKey,{letterboxd:item.lid},observations,{floors});
    records.push(result.record);
-   if(result.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces'))summary.written++;
+   if(result.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces')){
+    summary.written++;
+    // AIR-393: what this write changed for the film, from the view as it stood before the writes (a new watched fact, or a different rating).
+    const before=view[item.lid]||{},previous=typeof before.actualRating==='number'&&Number.isFinite(before.actualRating)?before.actualRating:null;
+    if(before.watched!==true)summary.changes.push({lid:item.lid,tmdb:result.record?.links?.tmdb||null,kind:'added',rating:item.rating??null});
+    else if(item.rating!=null&&previous!==item.rating)summary.changes.push({lid:item.lid,tmdb:result.record?.links?.tmdb||null,kind:'updated',from:previous,rating:item.rating});
+   }
    else if(result.outcomes.some(o=>o.outcome==='older'))summary.older++;else summary.unchanged++;
   }
   for(const item of items){const record=records.find(r=>r?.links?.letterboxd===item.lid);const value=record?record.rating?.value:view[item.lid]?.actualRating;if(value!=null)summary.ratings[item.lid]=value;}
@@ -715,5 +743,5 @@ function recordRatingChange(record,incoming,effective){
    throw error;
   }
  }
- return {FACTS_KEYS,applyDiaryEvidence,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
+ return {FACTS_KEYS,applyDiaryEvidence,planDiaryChanges,confirmDiaryEffects,validateBaselineRequest,previewBaselineChunk,plannedKey,commitBaselineChunk,rollbackBaselineChunk,unlinkBaselineFilm,handleBaselineRequest,SOURCE_RANK,FACT_NAMES,recordKey,FactsError,factKeyFor,aliasesOf,projectionIds,emptyRecord,observation,compareObservations,applyObservation,rollbackFact,overlay,mergeRatingHistories,summaryObservations,linkFilm,resolveAlias,confirmedFilmRating,recordObservations,projectRecords,applyFilmsListScan,applyWatchlistScan,recordFilmFacts,knownMovieIds,linkTmdbOnly,recordOwnerWatchedMark};
 })();
