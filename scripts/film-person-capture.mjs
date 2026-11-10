@@ -344,6 +344,36 @@ export function verifyManifest(manifest,bodies){
  return reasons;
 }
 
+// ---------- source identity and derived-payload binding ----------
+// The D1 identity a manifest was captured against: every field that decides which D1 generation the derived inputs and the ledger describe. A parity run compares
+// it with a FRESH read and refuses on any difference, naming the field and never a value. Leases and windows are not identity: they are refused while live.
+const IDENTITY_FIELDS=['schema','marker','fence','baseline','discovery','published','owner'];
+export const identityOf=gate=>Object.fromEntries(IDENTITY_FIELDS.map(name=>[name,gate?.[name]??null]));
+const leaves=(value,prefix='',out=new Map())=>{if(value&&typeof value==='object'&&!Array.isArray(value)){for(const key of Object.keys(value))leaves(value[key],prefix?prefix+'.'+key:key,out);}else out.set(prefix,stable(value));return out;};
+export function identityMoved(recorded,fresh,suffix=''){
+ const a=leaves(identityOf(recorded)),b=leaves(identityOf(fresh)),reasons=[];
+ for(const key of new Set([...a.keys(),...b.keys()]))if(a.get(key)!==b.get(key))reasons.push('d1_identity_moved'+suffix+':'+key);
+ return reasons.sort();
+}
+const DERIVED_DIGEST={publishedEpg:v=>stable({programme:v.programme,watchlist:v.watchlist}),discoveryCatalog:v=>stable(v),discoveryResolution:v=>stable(v),ownerReviews:v=>stable(v)};
+// Every routed derived payload must match its recorded digest AND the recorded source generation / run identity; nothing may be missing or extra.
+export function verifyDerived(manifest,derivedValues){
+ const reasons=[],recorded=manifest.derived||{},supplied=derivedValues||{},after=manifest.d1?.after;
+ for(const id of Object.keys(recorded)){
+  if(!(id in DERIVED_DIGEST)){reasons.push('derived_unknown:'+id);continue;}
+  if(!(id in supplied)||supplied[id]===null||supplied[id]===undefined){reasons.push('derived_missing:'+id);continue;}
+  const value=supplied[id];
+  let digest;try{digest=sha(DERIVED_DIGEST[id](value));}catch{reasons.push('derived_digest:'+id);continue;}
+  if(digest!==recorded[id].sha256)reasons.push('derived_digest:'+id);
+  if(id==='publishedEpg'&&(value.generation!==recorded[id].generation||value.programmeRunId!==recorded[id].programmeRunId||recorded[id].generation!==after?.published?.generation||recorded[id].programmeRunId!==after?.published?.programmeRunId||recorded[id].programmeRunId!==manifest.runId))reasons.push('derived_identity:'+id);
+  if(id==='ownerReviews'&&(recorded[id].generation!==after?.owner?.generation))reasons.push('derived_identity:'+id);
+ }
+ for(const id of Object.keys(supplied))if(!(id in recorded))reasons.push('derived_extra:'+id);
+ const routed={publishedEpg:manifest.routes?.publishedEpg,discoveryCatalog:manifest.routes?.discovery,discoveryResolution:manifest.routes?.discovery,ownerReviews:manifest.routes?.ownerReview};
+ for(const id of Object.keys(routed))if(!!routed[id]!==(id in recorded))reasons.push('derived_route_mismatch:'+id);
+ return [...new Set(reasons)].sort();
+}
+
 // ---------- the expected side: the projector's own view ----------
 // The inputs of d1EnrichmentStore, rebuilt from a verified manifest, its bodies and the D1-derived values; then the same calls the projector makes.
 export function buildExpected({manifest,bodies,derivedValues,asOf}){
@@ -457,15 +487,31 @@ export async function diagnoseChangedFilms({inputs,actual,factsOf,asOf}){
 // manifest + bodies + derivedValues come from a successful capture; db is the D1 binding for the stage A stable cut (which takes the projector lease: the ONE D1
 // write of a parity run, kept apart from the capture and under its own owner GO). The result is a measurement report: its source is never `verified`, so
 // baselineGate refuses it.
-export async function runParity({manifest,bodies,derivedValues,db,client,leaseId,asOf,exceptions=[],personExceptions=[],now=()=>new Date().toISOString()}){
+export async function runParity({manifest,bodies,derivedValues,db,client,leaseId,asOf,exceptions=[],personExceptions=[],now=()=>new Date().toISOString(),hooks={}}){
  const bad=verifyManifest(manifest,bodies);
  if(bad.length)return {ok:false,reasons:bad.map(item=>'manifest_invalid:'+item)};
+ const unbound=verifyDerived(manifest,derivedValues);
+ if(unbound.length)return {ok:false,reasons:unbound.map(item=>'derived_invalid:'+item)};
+ // the manifest's recorded D1 identity must still be the live one, before the cut and again after it (fail closed on any difference)
  const reasons=[];
+ const binding=readOnlyBinding(db);
+ let fresh0;try{fresh0=await readCaptureGate(binding,{now});}catch{return {ok:false,reasons:['gate_unreadable_before_cut']};}
+ const moved0=identityMoved(manifest.d1?.after,fresh0);
+ if(fresh0.lease.held)moved0.push('projector_lease_live');
+ if(fresh0.window.live)moved0.push('window_live');
+ if(fresh0.discoveryLease.live)moved0.push('discovery_lease_live');
+ if(moved0.length)return {ok:false,reasons:moved0};
+ let witnessA=null;try{witnessA=await readWitness(readerOf(binding));}catch{}
  let built;
  try{built=buildExpected({manifest,bodies,derivedValues,asOf});}catch(error){return {ok:false,reasons:[error instanceof CaptureError?error.reason:'view_failed']};}
  const classes=expectedFromInputs(built.inputs,extraClasses({...built,asOf}));
+ if(hooks.beforeCut)await hooks.beforeCut();
  const cut=await readStableCut(readerOf(db),{leaseId,now});
+ if(hooks.afterCut)await hooks.afterCut();
  if(!cut.consistent)return {ok:false,reasons:['cut_not_consistent',...cut.reasons]};
+ let fresh1;try{fresh1=await readCaptureGate(binding,{now});}catch{return {ok:false,reasons:['gate_unreadable_after_cut']};}
+ const moved1=identityMoved(manifest.d1?.after,fresh1,'_after_cut');
+ if(moved1.length)return {ok:false,reasons:moved1};
  // the ETags once more, after the D1 cut
  const limited=limitedClient(client,()=>manifest.runId);
  for(const entry of manifest.objects){
@@ -476,11 +522,17 @@ export async function runParity({manifest,bodies,derivedValues,db,client,leaseId
  const actual={classes:cut.entries,unavailable:cut.unavailable,consistent:reasons.length===0};
  const context=contextFromActual({classes:cut.entries},{air286:cut.air286.verified,personExceptions});
  const {ledger}=await buildParityLedger({expected,actual,exceptions,context,source:{aggregateSha256:manifest.digest,verified:false,kind:'projector-input-capture'}});
- const reader=readerOf(readOnlyBinding(db));
+ // The diagnostics run AFTER the cut released its lease: they are a SEPARATE observation, witnessed before and after so a write in between is flagged.
+ const reader=readerOf(binding);
+ if(hooks.afterLedger)await hooks.afterLedger();
+ let witnessB=null;
  const factsOf=async id=>(await reader.all(factsSql(),PREDICTION_FACT_TABLES.map(()=>id))).map(row=>row.held);
  let redirectRows=[];try{redirectRows=await reader.all('SELECT from_id, to_film_id, at FROM film_redirect ORDER BY from_id');}catch{}
  const exp={classes},act={classes:cut.entries};
- const diagnostics={personKeys:diagnosePersonKeys({expected:exp,actual:act}),redirects:diagnoseRedirects({expected:exp,actual:act,redirectRows}),changedFilms:await diagnoseChangedFilms({inputs:built.inputs,actual:act,factsOf,asOf}),note:'diagnostics classify and count; none is an exception'};
+ const diagnostics={cut:'separate_observation',personKeys:diagnosePersonKeys({expected:exp,actual:act}),redirects:diagnoseRedirects({expected:exp,actual:act,redirectRows}),changedFilms:await diagnoseChangedFilms({inputs:built.inputs,actual:act,factsOf,asOf}),note:'diagnostics classify and count; none is an exception'};
+ try{witnessB=await readWitness(reader);}catch{}
+ diagnostics.stable=!!witnessA&&!!witnessB&&stable(witnessA)===stable(witnessB);
+ if(!diagnostics.stable)diagnostics.note+='; D1 moved during the diagnostics reads: they describe a different state than the ledger';
  const coverage=Object.fromEntries(CLASSES.map(item=>{const entry=ledger.classes[item.name];return [item.name,entry.unavailable?{unavailable:true}:{expected:entry.expected.count,actual:entry.actual.count,missing:entry.missing,extra:entry.extra,differs:entry.differs,explained:entry.explained.total,unexplained:entry.unexplained.total,expectedDigest:entry.expected.digest,actualDigest:entry.actual.digest}];}));
  const core={reportVersion:REPORT_VERSION,measurement:true,authorizes:'nothing',manifestDigest:manifest.digest,ledgerDigest:ledger.digest,ledgerVersion:LEDGER_VERSION,asOf,totals:ledger.totals,coverage,diagnostics,notCovered:NOT_COVERED,consistent:reasons.length===0};
  return {ok:reasons.length===0,reasons,ledger,report:{...core,digest:sha(stable(core))}};

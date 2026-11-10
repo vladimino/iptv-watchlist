@@ -398,7 +398,7 @@ const enc=values=>JSON.stringify(values);
  assert.equal(doctored.ok,false);assert.ok(doctored.reasons[0].startsWith('manifest_invalid'));assert.equal(reads.length,0);
  // a foreign live lease or a concurrent writer during the cut makes the read inconsistent (stage A guard) and the run refuses
  sql(file,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','foreign','2999-01-01T00:00:00.000Z','2026-11-10T11:59:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='foreign',lease_until='2999-01-01T00:00:00.000Z',started_at='2026-11-10T11:59:00.000Z'");
- const blocked=await go();assert.equal(blocked.ok,false);assert.ok(blocked.reasons.includes('lease_unavailable'));
+ const blocked=await go();assert.equal(blocked.ok,false);assert.ok(blocked.reasons.includes('projector_lease_live'),'a live lease is refused before the cut');
  bucket.close();
 }
 // incomplete coverage: a class that cannot be read is unavailable, never empty, and the gate stays closed
@@ -420,5 +420,84 @@ const enc=values=>JSON.stringify(values);
  assert.ok(out.ledger.totals.unexplained>0);assert.equal(out.report.diagnostics.note,'diagnostics classify and count; none is an exception');
  assert.equal(out.ledger.explainedSample.filter(item=>item.rule==='owner_exception').length,0);
  bucket.close();
+}
+
+// 12. corrected consistency contract: the recorded D1 identity must still be the live one, and every derived payload is bound to its manifest
+{
+ const fresh=async(seed=()=>{})=>{const bucket=await fakeBucket(INPUT);const file=database();gateRowsOk(file);seed(file);const cap=await C.captureProjectorInputs({client:bucket.client(),db:d1Standin(file),now:NOW});assert.equal(cap.ok,true,cap.reasons);return {bucket,file,cap,go:(over={})=>C.runParity({manifest:cap.manifest,bodies:cap.bodies,derivedValues:cap.derivedValues,db:d1Standin(file),client:bucket.client(),leaseId:'capture:test',asOf:AT,now:NOW,...over})};};
+ const base=await fresh();
+ assert.equal((await base.go()).ok,true,'an unchanged identity passes');
+ base.bucket.close();
+ const MOVES=[
+  ['discovery generation',"UPDATE discovery_authority SET generation=generation+1",'d1_identity_moved:discovery.generation'],
+  ['published run id',"UPDATE published_epg_authority SET programme_run_id='run-9'",'d1_identity_moved:published.programmeRunId'],
+  ['published generation',"UPDATE published_epg_authority SET generation=generation+1",'d1_identity_moved:published.generation'],
+  ['owner-review generation',"UPDATE owner_review_authority SET generation=generation+1",'d1_identity_moved:owner.generation'],
+  ['marker generation',"UPDATE film_person_authority SET generation=generation+1",'d1_identity_moved:marker.generation'],
+  ['schema version',"UPDATE schema_contract SET version=version+1",'d1_identity_moved:schema.version'],
+  ['baseline state',"UPDATE film_person_baseline SET state='loading'",'d1_identity_moved:baseline.state'],
+  ['live lease',"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','other','2999-01-01T00:00:00.000Z','2026-11-10T11:59:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='other',lease_until='2999-01-01T00:00:00.000Z'",'projector_lease_live'],
+  ['live window',"UPDATE projector_window SET state='held',owner='x',requested_at="+(Date.parse(AT)-1000)+",expires_at="+(Date.parse(AT)+60000),'window_live'],
+ ];
+ for(const [name,statement,reason] of MOVES){
+  const run=await fresh();sql(run.file,statement);
+  const out=await run.go();
+  assert.equal(out.ok,false,name);assert.ok(out.reasons.includes(reason),name+': '+out.reasons.join());
+  assert.doesNotMatch(out.reasons.join(),/run-9|film:|Film /,'the reason names the field, never a value: '+name);
+  assert.equal(out.report,undefined,'no report is produced: '+name);
+  run.bucket.close();
+ }
+ // a move that lands DURING the cut window (after the cut, before the identity recheck) is caught by the second comparison
+ for(const [name,statement,reason] of [['discovery generation after cut',"UPDATE discovery_authority SET generation=generation+1",'d1_identity_moved_after_cut:discovery.generation'],['owner generation after cut',"UPDATE owner_review_authority SET generation=generation+1",'d1_identity_moved_after_cut:owner.generation']]){
+  const run=await fresh();
+  const out=await run.go({hooks:{afterCut:async()=>sql(run.file,statement)}});
+  assert.equal(out.ok,false,name);assert.ok(out.reasons.includes(reason),name+': '+out.reasons.join());run.bucket.close();
+ }
+ // identity helpers: only the named fields count, in a stable order
+ assert.deepEqual(C.identityMoved(base.cap.manifest.d1.after,base.cap.manifest.d1.after),[]);
+ assert.deepEqual(C.identityMoved({...base.cap.manifest.d1.after,lease:{held:true}},base.cap.manifest.d1.after),[],'leases are not identity');
+
+ // ---- derived payload binding ----
+ const man=(derived,routes,after={published:{generation:3,programmeRunId:'run-1'},owner:{generation:2}})=>({runId:'run-1',routes,derived,d1:{after}});
+ const sha256=v=>createHash('sha256').update(JSON.stringify(v,(_k,val)=>val&&typeof val==='object'&&!Array.isArray(val)?Object.fromEntries(Object.keys(val).sort().map(k=>[k,val[k]])):val)).digest('hex');
+ const catalog={b:1,a:{y:2,x:1}},resolution={r:1},owner={o:1},pub={generation:3,programmeRunId:'run-1',programme:{films:[1]},watchlist:{films:[2]}};
+ const derived={publishedEpg:{generation:3,programmeRunId:'run-1',sha256:sha256({programme:pub.programme,watchlist:pub.watchlist})},discoveryCatalog:{sha256:sha256(catalog)},discoveryResolution:{sha256:sha256(resolution)},ownerReviews:{generation:2,sha256:sha256(owner)}};
+ const routes={publishedEpg:true,discovery:true,ownerReview:true};
+ const good={publishedEpg:pub,discoveryCatalog:catalog,discoveryResolution:resolution,ownerReviews:owner};
+ assert.deepEqual(C.verifyDerived(man(derived,routes),good),[]);
+ // canonical, order-independent serialization: the same object with its keys in another order verifies
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,discoveryCatalog:{a:{x:1,y:2},b:1}}),[]);
+ for(const id of ['publishedEpg','discoveryCatalog','discoveryResolution','ownerReviews']){
+  const mutated={...good,[id]:id==='publishedEpg'?{...pub,watchlist:{films:[3]}}:{...good[id],extra:1}};
+  assert.deepEqual(C.verifyDerived(man(derived,routes),mutated),['derived_digest:'+id],'a well-formed but mutated '+id+' is refused');
+  const missing={...good};delete missing[id];
+  assert.deepEqual(C.verifyDerived(man(derived,routes),missing),['derived_missing:'+id],id+' missing');
+ }
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,publishedEpg:{...pub,generation:4}}),['derived_identity:publishedEpg'],'a payload from another generation is refused');
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,publishedEpg:{...pub,programmeRunId:'run-2'}}),['derived_identity:publishedEpg']);
+ assert.deepEqual(C.verifyDerived(man(derived,routes,{published:{generation:3,programmeRunId:'run-1'},owner:{generation:9}}),good),['derived_identity:ownerReviews'],'owner payload bound to the recorded owner generation');
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,surprise:{}}),['derived_extra:surprise']);
+ assert.deepEqual(C.verifyDerived(man({},{publishedEpg:false,discovery:false,ownerReview:false}),{discoveryCatalog:{}}),['derived_extra:discoveryCatalog']);
+ assert.ok(C.verifyDerived(man({...derived},{...routes,discovery:false}),good).some(item=>item.startsWith('derived_route_mismatch')),'a payload recorded for a route the manifest says is closed');
+ // end to end: runParity refuses a tampered derived set before any D1 read
+ const routed=await fresh(f=>sql(f,"UPDATE discovery_authority SET mode='d1',cutover='open',programme_run_id='run-1'"));
+ assert.equal((await routed.go()).ok,true);
+ const reads=[];
+ const tampered=await C.runParity({manifest:routed.cap.manifest,bodies:routed.cap.bodies,derivedValues:{...routed.cap.derivedValues,discoveryCatalog:{...routed.cap.derivedValues.discoveryCatalog,'film:extra':{}}},db:d1Standin(routed.file,{onQuery:async t=>reads.push(t)}),client:routed.bucket.client(),leaseId:'x',asOf:AT,now:NOW});
+ assert.equal(tampered.ok,false);assert.deepEqual(tampered.reasons,['derived_invalid:derived_digest:discoveryCatalog']);assert.equal(reads.length,0);
+ const dropped=await routed.go({derivedValues:{discoveryCatalog:routed.cap.derivedValues.discoveryCatalog}});
+ assert.deepEqual(dropped.reasons,['derived_invalid:derived_missing:discoveryResolution']);
+ const extra=await routed.go({derivedValues:{...routed.cap.derivedValues,ownerReviews:{}}});
+ assert.deepEqual(extra.reasons,['derived_invalid:derived_extra:ownerReviews']);
+ routed.bucket.close();
+
+ // ---- diagnostics: a separate observation, flagged when D1 moved under it ----
+ const diag=await fresh();
+ const calm=await diag.go();
+ assert.equal(calm.report.diagnostics.cut,'separate_observation');assert.equal(calm.report.diagnostics.stable,true);
+ const moved=await diag.go({hooks:{afterLedger:async()=>sql(diag.file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:between',1,'B','"+AT+"')")}});
+ assert.equal(moved.ok,true);assert.equal(moved.report.diagnostics.cut,'separate_observation');assert.equal(moved.report.diagnostics.stable,false,'a write between the ledger read and the diagnostics read is flagged');
+ assert.match(moved.report.diagnostics.note,/different state than the ledger/);
+ diag.bucket.close();
 }
 console.log('film-person-capture: ok');
