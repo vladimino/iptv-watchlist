@@ -279,24 +279,62 @@ resetAll();seed({count:3});
  assert.equal(eventKeys().length,1);
 }
 
-// 7c. Several failed replacements accumulate in the outbox and are all delivered; the outbox is bounded.
+// 7c. Several failed replacements accumulate in the outbox and every one of them is recovered: nine failed replacements, nine events.
+const gen=i=>`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`;
+async function replaceChain(count){
+ // elect() builds the first record; each step replaces the previous generation while event puts fail.
+ elect(0,gen(0));
+ const record=workflowRecord();record.tick={...call('newDiscoveryTick')(gen(0),Date.now()-600000),chunks:1,checked:5,remaining:9,cheapRemaining:0};set('epg/discovery-workflow.json',record);
+ const replacedTickIds=[],answers=[];
+ for(let i=1;i<count;i++){
+  const state=await call('readWorkflowState')(env);
+  const answer=await call('createWorkflowInstance')(env,gen(i),0,`discovery_${gen(i).replace(/-/g,'')}_0`,state.etag,null,state.record);
+  answers.push(answer);
+  if(answer.started)replacedTickIds.push(state.record.tick.id);
+ }
+ return {replacedTickIds,answers};
+}
 resetAll();seed({count:3});
 {
- const ids=Array.from({length:10},(_,i)=>`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`);
- elect(0,ids[0]);
- let record=workflowRecord();record.tick={...call('newDiscoveryTick')(ids[0],Date.now()-600000),chunks:1,checked:5,remaining:9,cheapRemaining:0};set('epg/discovery-workflow.json',record);
  failEventPuts=true;
- const firstTickIds=[];
- for(let i=1;i<ids.length;i++){
-  const state=await call('readWorkflowState')(env);firstTickIds.push(state.record.tick.id);
-  await call('createWorkflowInstance')(env,ids[i],0,`discovery_${ids[i].replace(/-/g,'')}_0`,state.etag,null,state.record);
- }
- assert.equal(workflowRecord().outbox.length,8,'nine replacements, a bound of eight');
- assert.deepEqual(workflowRecord().outbox.map(entry=>entry.id),firstTickIds.slice(-8),'the newest eight are kept');
+ const {replacedTickIds,answers}=await replaceChain(10);
+ assert.ok(answers.every(answer=>answer.started===true),'a failed put never blocks a replacement while the outbox has room');
+ assert.equal(workflowRecord().outbox.length,9,'nine replaced ticks, nine entries, none dropped');
+ assert.deepEqual(workflowRecord().outbox.map(entry=>entry.id),replacedTickIds,'every replaced tick, oldest first');
+ assert.equal(discoveryEvents().length,0);
  failEventPuts=false;
  const delivery=await call('deliverDiscoveryTick')(env);
- assert.equal(delivery.delivered,true);assert.equal(discoveryEvents().length,8);assert.deepEqual(workflowRecord().outbox,[]);
- assert.equal(new Set(discoveryEvents().map(event=>event.id)).size,8,'one event per tick');
+ assert.equal(delivery.delivered,true);assert.equal(discoveryEvents().length,9,'all nine are recovered as nine events');
+ assert.deepEqual(workflowRecord().outbox,[]);
+ assert.deepEqual(new Set(discoveryEvents().map(event=>event.id)),new Set(replacedTickIds.map(id=>'discovery-'+id)),'one event per tick, with its own id');
+ await call('deliverDiscoveryTick')(env);assert.equal(discoveryEvents().length,9,'a repeat writes nothing');
+}
+
+// 7c-2. Saturation fails closed: at the limit the replacement is refused, nothing is dropped, and the outbox drains when the puts work again.
+resetAll();seed({count:3});
+{
+ const limit=call('DISCOVERY_TICK_OUTBOX_LIMIT');assert.equal(typeof limit,'number');assert.ok(limit>=9);
+ failEventPuts=true;
+ const {replacedTickIds,answers}=await replaceChain(limit+3);
+ const started=answers.filter(answer=>answer.started===true),refused=answers.filter(answer=>answer.started===false);
+ assert.equal(started.length,limit,'replacements go through while the outbox has room');
+ assert.ok(refused.length>=2&&refused.every(answer=>answer.reason==='events_outbox_full'),'then every replacement is refused, with a named reason');
+ const held=workflowRecord();
+ assert.equal(held.outbox.length,limit,'the outbox holds exactly its limit and drops nothing');
+ assert.deepEqual(held.outbox.map(entry=>entry.id),replacedTickIds.slice(0,limit),'the oldest entries are still there');
+ assert.equal(held.programmeRunId,gen(limit),'the record is still the last generation that fit: the refused replacements wrote nothing');
+ assert.equal(discoveryEvents().length,0);
+ failEventPuts=false;
+ const blockedStillSaturated=await call('reconcileDiscoveryWorkflow')(env);
+ assert.equal(discoveryEvents().length,limit,'the reconcile delivers the whole outbox before it looks at the generation');
+ assert.deepEqual(workflowRecord().outbox,[]);
+ assert.ok(blockedStillSaturated);
+ // The refused replacement now goes through and its replaced tick is delivered too: nothing was lost on the way.
+ const state=await call('readWorkflowState')(env);
+ const next=await call('createWorkflowInstance')(env,gen(limit+1),0,`discovery_${gen(limit+1).replace(/-/g,'')}_0`,state.etag,null,state.record);
+ assert.equal(next.started,true);
+ assert.equal(discoveryEvents().length,limit+1,'one event per replaced tick, the refused one included');
+ assert.equal(new Set(discoveryEvents().map(event=>event.id)).size,limit+1);
 }
 
 // 7d. A partly failing delivery keeps exactly the entries whose put failed.

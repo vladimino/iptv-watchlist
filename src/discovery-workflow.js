@@ -96,19 +96,22 @@ async function deliverDiscoveryTick(env){
 }
 // A new generation replaces the record, so the tick of the one it replaces (as superseded when it was still open) is written first. An entry
 // whose put is not confirmed is NOT dropped: it goes to the `outbox` of the new record, which every later write keeps, and the next scheduled
-// reconcile delivers it. The outbox holds at most DISCOVERY_TICK_OUTBOX_LIMIT entries (the oldest is dropped past that), and a failed put never
-// blocks the new generation.
-const DISCOVERY_TICK_OUTBOX_LIMIT=8;
+// reconcile delivers it. The outbox never discards an entry. It holds at most DISCOVERY_TICK_OUTBOX_LIMIT entries (about 350 bytes each); when
+// the entries still undelivered would exceed that, the replacement FAILS CLOSED: `createWorkflowInstance` answers `events_outbox_full` and leaves
+// the record as it is, so no tick is lost. The hourly reconcile delivers the outbox before it looks at the generation, so the replacement goes
+// through at a later firing as soon as the event puts succeed again. A failed put alone never blocks the new generation.
+const DISCOVERY_TICK_OUTBOX_LIMIT=64;
 async function replacedDiscoveryOutbox(env,previous,programmeRunId,now){
+ let pending;
  try{
-  const pending=(Array.isArray(previous?.outbox)?previous.outbox:[]).filter(entry=>entry&&typeof entry==='object'&&entry.settled);
+  pending=(Array.isArray(previous?.outbox)?previous.outbox:[]).filter(entry=>entry&&typeof entry==='object'&&entry.settled);
   const tick=previous?.tick;
   // An open tick of the same generation is carried by the successor, never delivered here.
   if(tick&&typeof tick==='object'&&tick.delivered!==true&&!(previous.programmeRunId===programmeRunId&&!tick.settled)&&!pending.some(entry=>entry.id===tick.id))pending.push(tick.settled?tick:{...tick,settled:{at:new Date(now).toISOString(),reason:'stale_generation'},delivered:false});
-  const left=[];
-  for(const entry of pending){const written=await putDiscoveryEvent(env,discoveryTickEvent(entry));if(written!=='written'&&written!=='exists')left.push(entry);}
-  return left.slice(-DISCOVERY_TICK_OUTBOX_LIMIT);
- }catch{return Array.isArray(previous?.outbox)?previous.outbox.slice(-DISCOVERY_TICK_OUTBOX_LIMIT):[];}
+ }catch{return {outbox:null,full:true};}
+ const left=[];
+ for(const entry of pending){const written=await putDiscoveryEvent(env,discoveryTickEvent(entry));if(written!=='written'&&written!=='exists')left.push(entry);}
+ return left.length>DISCOVERY_TICK_OUTBOX_LIMIT?{outbox:null,full:true}:{outbox:left,full:false};
 }
 // A scheduled firing that finds the queue confirmed empty. Not claimed unless the last saved status and the continuation both say so for the
 // published generation; an unknown, blocked, busy or unstarted pipeline writes nothing.
@@ -344,7 +347,10 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  // delivered and this chain starts its own.
  const startedAtMs=Date.now();
  const carried=previous?.programmeRunId===programmeRunId&&previous.tick&&typeof previous.tick==='object'&&!previous.tick.settled?previous.tick:null;
- const outbox=carried?(Array.isArray(previous?.outbox)?previous.outbox:[]):await replacedDiscoveryOutbox(env,previous,programmeRunId,startedAtMs);
+ const replaced=carried?{outbox:Array.isArray(previous?.outbox)?previous.outbox:[],full:false}:await replacedDiscoveryOutbox(env,previous,programmeRunId,startedAtMs);
+ // AIR-410: saturated outbox. Nothing is written and nothing is dropped; the reconcile delivers the outbox and a later firing replaces the record.
+ if(replaced.full)return {started:false,reason:'events_outbox_full',programmeRunId,instanceId,series};
+ const outbox=replaced.outbox;
  const next={schemaVersion:1,...(same?previous:{}),tick:carried||newDiscoveryTick(programmeRunId,startedAtMs),outbox,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
  const first=await writeWorkflowStateSoft(env,next,etag);
  if(first.windowBusy)return {started:false,reason:'projector_window',windowUntil:first.window.expiresAt??null,programmeRunId,instanceId,series};
