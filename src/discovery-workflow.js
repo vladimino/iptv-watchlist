@@ -518,7 +518,7 @@ async function reconcileDiscoveryWorkflow(env,options={}){
   outcome=await reconcileDiscoveryWorkflowAttempt(env,options);
   logDiscoveryReconcile(outcome,{scheduled,attempt});
   if(!scheduled||outcome?.reason!=='projector_window'||attempt>=RECONCILE_WINDOW_ATTEMPTS)return outcome;
-  await waitReconcileWindow(outcome,options,Number.isFinite(options.now)?options.now:Date.now());
+  await waitReconcileWindow(outcome,options,Date.now());
  }while(attempt<RECONCILE_WINDOW_ATTEMPTS);
  return outcome;
 }

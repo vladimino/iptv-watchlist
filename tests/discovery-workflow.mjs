@@ -1063,6 +1063,16 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
   assert.equal(stubborn.reason,'projector_window');assert.equal(creates.length,0);assert.equal(logs.length,3);
 
   halt();
+  const scheduledTime=Date.now()-400000,holdMs=60000;
+  windowUntil=Date.now()+holdMs;holdWindow();
+  const delayed=[];
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'),{scheduled:true,now:scheduledTime,wait:async(outcome,now)=>{delayed.push({now,windowUntil:outcome.windowUntil,waitMs:outcome.windowUntil-now});windowUntil=0;}});
+  assert.equal(result.started,true);assert.equal(creates.length,1);
+  assert.equal(delayed.length,1);
+  assert.ok(delayed[0].now-scheduledTime>350000,'wait clock is Date.now, not the stale scheduledTime');
+  assert.ok(delayed[0].waitMs>10000&&delayed[0].waitMs<120000,'remaining window from wall clock, not the 330s cap from scheduledTime: '+delayed[0].waitMs);
+
+  halt();
   context.DiscoveryAuthority.readAuthority=async()=>{throw Object.assign(new Error('d1'),{code:'d1_unavailable'});};
   result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
   assert.equal(result.reason,'d1_unavailable');assert.equal(creates.length,0);assert.equal(logs[0].reason,'d1_unavailable');
