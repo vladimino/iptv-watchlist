@@ -82,18 +82,18 @@ One admin response must name its pin, and that pin must cover every object the p
 
 ## GET side effects and safe reads
 
-The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted). It supersedes the R2-only list that `tests/get-side-effects.mjs` kept: in D1 authority the published-generation pin also writes, so **`GET /api/programme`, `GET /api/watchlist`, `GET /api/catalog/available` and every `GET /api/admin/*` read can write** (the fenced D1 marker, and the R2 compatibility mirrors when they are missing or old) until [AIR-414](https://trello.com/c/GJefgNm8) lands. The four R2 writers named by `tests/get-side-effects.mjs` are:
+The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted; [ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). Programme, watchlist, catalog availability and Admin reads of the published generation are query-only; they do not repair R2 compatibility mirrors. The remaining writer named by `tests/get-side-effects.mjs` is:
 
 | Route | Why it can write | Admin use |
 | --- | --- | --- |
 | `GET /api/events` | Recovers an undelivered stop event, then may list `events/items/` | Do not call |
-| `GET /api/enrichment/view` | Can initialize a missing rating in the view index | Do not call |
-| `GET /api/enrichment/status` | Same stop-event recovery | Do not call. MCP `enrichment_status` calls this route |
-| `GET /api/enrichment/runs` | Writes diagnostic history | Do not call |
 
-These GETs do not write **in R2 authority**, and they still are not an admin query (see the note above for the D1 pin):
+`GET /api/enrichment/status` and `GET /api/enrichment/runs` no longer write ([AIR-415](https://trello.com/c/NHyIKM6z)). MCP `enrichment_status` is the same body as status.
+
+These GETs do not write, and they still are not an admin query:
 
 - `GET /api/catalog/available` loads the pinned programme, the catalog, the watchlist, the view index, the profile and the metadata cache, and derives the available catalog-only films in memory ([contract](../api/catalog.md)); it is a bounded read of fixed keys, not a search.
+- `GET /api/enrichment/view` overlays the compiled ratings seed in memory and does not persist it. It is the UI projection, too coarse for Admin search.
 - `GET /api/programme` and `GET /api/watchlist` load a few known keys and localize in memory. Safe to read, too coarse for quality queues, and they return the public catalogue shape rather than `filmView`.
 - `GET /api/status`, `GET /api/integrations/tmdb/status`, `GET /api/ui/filter-presets`, `GET /api/enrichment/schema`, `GET /api/enrichment/profile`, `GET /api/enrichment/runner`, `GET /api/enrichment/queue/status`, `GET /api/enrichment/footer/status`, `GET /api/enrichment/pipeline/status`, `GET /api/enrichment/discovery/status`, `GET /api/enrichment/moods/diagnostics`, and the frozen diagnostic snapshot/accuracy GETs are status reads. They do not search Film or Person.
 - `GET /api/started` lists the entire `started/` prefix. It does not write, and it is not bounded by a cursor. Do not copy that pattern.
@@ -305,7 +305,7 @@ Where the implementation fixes a point this section left open: the pin is one op
 
 | Risk | What would go wrong | Check before enablement |
 | --- | --- | --- |
-| Writing GET | An admin poll repairs events or seeds a rating | The route is not one of the four writing GETs. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
+| Writing GET | An admin poll repairs events or seeds a rating | The route is not `GET /api/events`. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
 | Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler reads only `epg/published-generation.json`, `epg/generations/<runId>/programme.json`, `titles.json`, `people.json` and `admin/owner-reviews.json`. Assert no `list` and no fallback to root `programme.json` |
 | Resolver interference | A search reads the lease, continuation, or resolution ledger and is mistaken for AIR-69 activity | Those keys are absent from the handler. AIR-69 is closed or explicitly still excluded |
 | `skew` treated as a failed read | A dictionary clock hides a valid page, or a page claims the clocks match | `skew: true` still returns `items`. A newer titles clock expects 200 and `titles_newer`. A missing clock expects `timestamp_missing` |

@@ -84,7 +84,7 @@ for(const eventId of ['remove-29','remove-31']){
  const stored=bucket.value(eventKeyOf(eventId==='remove-29'?FIRST:SECOND,eventId));
  assert.equal(stored.removed[0].rating,4);
  const html=eventHTML(stored);
- assert.match(html,/Вероятно просмотрены · 1/);
+ assert.match(html,/Просмотрены · 1/);
  assert.match(html,/Supergirl \(2026\) · 4\.0 ★/);
  assert.doesNotMatch(html,/Остальные удаления/);
 }

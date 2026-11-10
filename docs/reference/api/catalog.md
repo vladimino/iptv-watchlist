@@ -19,7 +19,7 @@ The route does not change `GET /api/programme` or `GET /api/watchlist`, which ke
 
 When `published_epg_authority.mode` is `d1`, the pin is that D1 generation ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md)). `programme.json` and `watchlist.json` are not a fallback, and a stale `epg/published-generation.json` is not the pin. The catalog copy is still `epg/generations/<run>/discovered-films.json` for that same run. A missing copy fails closed and is not replaced by another run. Until the marker is activated, the table above is the live read. Production has not applied migration `0008`.
 
-The ratings seed compiled into the Worker is applied to an in-memory copy of the view index. Unlike `GET /api/enrichment/view`, this route never writes that seed back. `started/` markers are not consulted: they belong to the watchlist UI and are not a watched signal for catalog films.
+The ratings seed compiled into the Worker is applied to an in-memory copy of the view index. `GET /api/enrichment/view` uses the same overlay and neither route persists it. `started/` markers are not consulted: they belong to the watchlist UI and are not a watched signal for catalog films.
 
 ## Eligibility
 

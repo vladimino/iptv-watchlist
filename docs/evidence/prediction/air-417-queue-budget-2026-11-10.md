@@ -47,3 +47,34 @@ Capture: Cloudflare telemetry (events view, service `iptv`, 15:34:00–15:36:30 
 Change: the overlay reads the prediction rows in keyset pages of 300 and applies those of indexed films. Local result on the SQLite stand-in with 8704 index keys, 3254 fingerprint rows and 3255 pointer rows: 25 queries against about 221 (including the authority marker reads), 58 ms; parity with a per-film reading on 900 keys, page boundaries 0/299/300/301/600, a table at and above 20000 rows (refused with `guard: overlay_rows`), a damaged row of an indexed film (fails closed), rows of films outside the index (ignored). A failed start now writes one sanitized line with the stage, code and guard; each pre-`next` stage was fault-injected in a test and the lease semantics checked.
 
 Limits: the overlay is the guard that production telemetry named, but it is not proven to be the last blocker on the start path. CPU and wall time of the rebuild with the full 8704-film catalogue in the Worker were not measured (the test harness has no D1-backed Worker). The queue rebuild, the dict1 write and the first `next` on production are verified only by a start the owner approves; until then the persisted queue is unchanged.
+
+## Owner-approved start after the overlay change, 10 November 2026
+
+Capture: the Trello handoff, read-only MCP, Cloudflare telemetry (events view, service `iptv`, 16:41:30–16:45:00 UTC, 44 events) and an R2 object-size listing. The owner ran the paused Task once (16:41:56–16:44:23 UTC) on `e49d7ef`.
+
+- The queue was rebuilt on the published generation `e38e3f5c…` (`refreshedAt` 16:43:13 UTC, `consistent: true`, 5450 outstanding: 3974 hot, 1476 cold) and run `0a55802d…` was saved at 16:43:23 UTC. The overlay and the `dict1` write therefore work at production volume.
+- The Task reported that it could not serialize the `prediction_start` answer. Telemetry shows why: exactly one `POST /mcp` invocation in the window ended with `outcome: exceededMemory`, HTTP 503, wall 48.9 s, CPU 12.7 s, logged at 16:43:42 UTC. Every other `/mcp` invocation is `ok`. There is no `prediction_boundary_failed` and no `prediction_domain_budget` event in the window. The caller received a platform 503, not a start answer; the answer itself is about 3.3 thousand characters and plain JSON. The invocation is tied to the start by time and by being the only failed request; the log carries no run id.
+- The start read its large inputs repeatedly in one request: the catalog three times (batch selection, queue rebuild, start event), the view index twice (each with its D1 overlay) and the programme up to three times. The isolate ended after the run was saved, in the steps that read them again for the start event.
+- Sizes at capture: `view-index.json` 8.59 MB, generation `programme.json` 2.36 MB, shared `epg/discovered-films.json` 7.67 MB (last modified 4 Nov; whether the start's catalog is this object or a larger D1-assembled one was not established).
+
+Change: the queue rebuild hands the inputs it read to the start, which reuses them for the batch selection and the start event. `scripts/prediction-start-heap-profile.mjs` (synthetic data: catalog 23.1 MB for 8704 films, index 10.3 MB, programme 1.9 MB; live V8 heap after a forced collection at every storage call) gives:
+
+| Version | Catalog / index / programme reads | Peak live heap above the idle Worker |
+| --- | --- | --- |
+| before (`e49d7ef`) | 3 / 2 / 3 | 96.3 MB |
+| after | 1 / 1 / 2 | 66.6 MB |
+
+Limits: Node's heap ranks the versions; it is not workerd's 128 MB isolate limit, and the synthetic catalog size is an assumption. The profile has no D1, so the overlay's own allocations and the D1-assembled programme are not in it. Whether the reduced start fits the production isolate is shown only by the next owner-approved start. The run `0a55802d…` was left to the ordinary lease recovery.
+
+## Start during an EPG seal, 10 November 2026
+
+Capture: the Trello handoff, Cloudflare telemetry (events view, service `iptv`, 13:37–17:37 UTC) and read-only MCP. The owner ran the paused Task once on `1898fec` (17:30:11–17:32:35 UTC); `prediction_start` answered 502 `storage_error`, request `afb03a95…`, run `c9544245…`.
+
+- The log line added earlier names the failure exactly, with the same request and run ids: `{"event":"prediction_boundary_failed","boundary":"start","stage":"queue_refresh","code":"discovery_fence","kind":"error"}` at 17:31:42.932 UTC. No `prediction_domain_budget` event after 15:35 UTC and no `exceededMemory` on a `/mcp` invocation in that minute: this failure is neither the budget nor the memory limit.
+- The natural EPG Workflow of 10 November was sealing at the time (`seal/catalog` at 17:19 UTC, then `finalize`; the published generation moved from `e38e3f5c…` to `6d9e3c36…`). While a publication holds the Discovery authority a catalog read is refused with `discovery_fence`, so the queue rebuild of the start could not read its catalog. The start treated that wait as a storage failure, after taking the runner lease.
+- At 17:35:43 UTC the queue was rebuilt on `6d9e3c36…` (`consistent: true`, 5450 outstanding: 4047 hot, 1403 cold). The EPG Workflow instance `epg_20261110_0` then ended with `exceededMemory` at 17:36:04 UTC (wall 1137 s); that is an EPG observation outside this change and was not investigated here.
+- Whether the reduced-memory start of the previous section fits the production isolate is still untested: this start failed before it could show it.
+
+Change: `start` reads the Discovery authority before the runner lease and answers `503 blocked` `prediction_catalog_held` when it is held or loading; a rebuild refused with `discovery_fence` or `discovery_incomplete` after the lease releases it and gives the same answer. No stop Event, no change to the queue or retries. `tests/prediction-start-diagnostics.mjs` covers both causes on both paths, an unrelated rebuild failure staying 502, and the start after the publication rebuilding the queue on the new generation with its retry record kept and a working first `next`.
+
+Limits: `next`, `submit` and `complete` of a running run also rebuild the queue and are not changed; a seal that begins during a run can still stop it with `storage_error`, which the next start recovers. The external Task prompt was not changed; how it words a `blocked` start is its own behaviour.

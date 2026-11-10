@@ -18,7 +18,6 @@ const loadJSON=async(env,key,options=null)=>{
    if(key==='programme.json'||key==='watchlist.json'){
     if(!run)return null;
     const generation=env.epgPin?.authority==='d1'?env.epgPin.generation:live.generation;
-    await PublishedEpg.repairMirrors(env).catch(()=>{});
     const document=await PublishedEpg.readDocumentAt(env,run,key==='watchlist.json'?'watchlist':'programme',generation);
     if(key==='programme.json'&&!document){const error=new Error('published_epg_unavailable');error.code='published_epg_unavailable';throw error;}
     return document;
@@ -54,20 +53,10 @@ async function publishedOwnerReviews(env){
  return OwnerReview.loadForRead(env);
 }
 async function epgPublication(env){
- if(typeof PublishedEpg!=='undefined'){
-  const live=await PublishedEpg.currentGeneration(env);
-  if(live){
-   if(live.programmeRunId)await PublishedEpg.repairMirrors(env).catch(()=>{});
-   const again=await PublishedEpg.currentGeneration(env);
-   const current=again||live;
-   return {authority:'d1',programmeRunId:current.programmeRunId,phase:current.phase,etag:current.fence,fence:current.fence,generation:current.generation};
-  }
- }
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
+ return epgPublicationReadOnly(env);
 }
-// The publication as `epgPublication` reports it (authority, run, phase, fence, generation), read with SELECTs only. `epgPublication` repairs the
-// R2 compatibility mirrors of a D1 generation (an R2 write) before it answers; a route that promises to be a pure read uses this one instead.
+// The publication as `epgPublication` reports it (authority, run, phase, fence, generation), SELECTs only. Compatibility mirrors
+// are reconciled by the EPG writer (`EpgOrchestration.ensure` on the hourly tick and the publication/revert tails), never here.
 // The generation fence is kept: the caller reads its documents at this exact generation (`readDocumentAt` re-checks it before and after).
 async function epgPublicationReadOnly(env){
  if(typeof PublishedEpg!=='undefined'){
@@ -502,8 +491,8 @@ async function catalogAvailableRoute(env){
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
- // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
- const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
+ // The ratings seed is applied to an in-memory copy. GET /api/enrichment/view uses the same overlay and neither persists it.
+ const seeded=overlayRatingsSeed(index);
  return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
@@ -655,7 +644,35 @@ async function persistScan(env,run,report){
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
 // AIR-390: the journal written with the watchlist and the scan is every event except the `epg` one. The `epg` event is written
 // by flushEpgEvent once the run is complete, so its `at` is the completion time that sync.json also carries.
-async function persistEvents(env,run,report){for(const event of run.events)if(event?.type!=='epg')await writeEvent(env,event);}
+// AIR-379. Before a watchlist event that reports removals is written, the confirmed ratings that the fact store ALREADY holds are put on its
+// removed films, so a film rated before the publication is shown with its rating at the first display. It reads stored facts only (the same
+// `LetterboxdFacts.confirmedFilmRating` the removal queue uses, ADR 0077): no Diary, no Letterboxd request, no wait, no lookup, and the EPG
+// publication never depends on it. At most REMOVAL_PUBLICATION_PROBES films are probed (one record read each, after one read of the link
+// index and the films-list floor); a film not probed or without a confirmed rating stays unrated, and a failed read leaves the event exactly as
+// it was. A null or absent rating is never read as "watched". A later rating still arrives through `settleRemovalRefs` on the same key.
+const REMOVAL_PUBLICATION_PROBES=25;
+async function storedRemovalRatings(env,event){
+ if(event?.type!=='watchlist'||!Array.isArray(event.removed)||typeof LetterboxdFacts==='undefined')return {event,probed:0,rated:0};
+ const ids=[...new Set(event.removed.filter(film=>film&&!removalRating(film)).map(film=>String(film.id??'')).filter(Boolean))].slice(0,REMOVAL_PUBLICATION_PROBES);
+ if(!ids.length)return {event,probed:0,rated:0};
+ try{
+  const cache={links:(await loadJSON(env,LetterboxdFacts.FACTS_KEYS.links))||{},filmsList:await loadJSON(env,LetterboxdFacts.FACTS_KEYS.filmsList)};
+  const found={};
+  for(const id of ids){const rating=await LetterboxdFacts.confirmedFilmRating(env,id,cache);if(rating!=null)found[id]=rating;}
+  return {event:withRemovalRatings(event,found,null)||event,probed:ids.length,rated:Object.keys(found).length};
+ }catch{return {event,probed:ids.length,rated:0,failed:true};}
+}
+async function persistEvents(env,run,report){
+ for(let index=0;index<run.events.length;index++){
+  const event=run.events[index];
+  if(event?.type==='epg')continue;
+  const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
+  await writeEvent(env,probe.event);
+  if(probe.event!==event)run.events[index]=probe.event;
+  // `ms` is the wall time of the stored-fact reads alone, so the cost inside the publication can be read from sync.json after a natural run.
+  if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
+ }
+}
 // One `epg` event per run, written only after the run is durably `complete`. `prepareEpgCompletion` fixes `run.completedAt` and
 // parks the finished event in `run.epgEventPending`; the caller saves the complete run record (with `updatedAt = completedAt`) and
 // only then `flushEpgEvent` puts the event and clears the mark. A failed save of the complete record therefore exposes no event, and a
@@ -1277,7 +1294,7 @@ function sealAdvance(run,phase){delete run.seal.units;delete run.seal.attempts;r
 // the one atomic unit. Before it the previous generation stays published and its fence is checked (a changed fence
 // refuses the step); a repeat after it finds the generation published and skips it, so the pointer moves exactly once
 // whatever is cancelled. A failed mirror write or copy is retried and then reported as degraded; the mirrors are also
-// repaired by the readers (`PublishedEpg.repairMirrors`), and the watchlist fallback below is written when they failed.
+// repaired by the EPG writer's hourly `ensure` (`PublishedEpg.repairMirrors`), and the watchlist fallback below is written when they failed.
 async function sealPublishStep(env,run,lease,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;

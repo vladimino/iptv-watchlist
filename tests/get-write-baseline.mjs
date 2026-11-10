@@ -39,41 +39,11 @@ export const MCP_WRITE_TOOLS=['epg_sync_start','epg_sync_step','ratings_sync_sta
 // ---- baseline ----
 // Every entry is a writer that exists today, found by the audit and not fixed by it (AIR-412 changes no behaviour). `effects` is the exact ordered effect list per scenario
 // (a scenario that is not listed has none), `sql` the distinct statements the request ran, in order. `owner` is the card that removes the entry.
-const G='22222222-2222-4222-8222-222222222222';
-const MARKER=['d1:UPDATE published_epg_authority','d1:UPDATE published_epg_cas'];
-const MIRRORS=[`put:epg/generations/${G}/programme.json`,'put:programme.json','put:watchlist.json',`put:epg/generations/${G}/watchlist.json`,'put:epg/published-generation.json'];
-const MIRROR_SQL=['UPDATE published_epg_authority SET mirror_programme_run_id=?, mirror_etag=?, mirror_watchlist_etag=COALESCE(?, mirror_watchlist_etag) WHERE id=? AND mode=? AND cutover=? AND programme_run_id=? AND generation=?','UPDATE published_epg_cas SET ok=changes() WHERE id=?'];
-const DRIFTED=['d1','d1-pending','d1-mirror-missing','d1-mirror-stale'];
-// One repair of the compatibility mirrors: with mirrors that are current it still writes the D1 marker (see the summary), with mirrors that are missing or old it also writes R2.
-const repair=times=>({
- d1:MARKER.concat(...Array(times-1).fill(MARKER)),'d1-pending':MARKER.concat(...Array(times-1).fill(MARKER)),
- 'd1-mirror-missing':[...MIRRORS,...Array(times).fill(MARKER).flat()],'d1-mirror-stale':[...MIRRORS,...Array(times).fill(MARKER).flat()],
-});
-const repairSql=Object.fromEntries(DRIFTED.map(name=>[name,MIRROR_SQL]));
 const PREDICTION_D1=['d1:UPDATE prediction_domain_authority','d1:UPDATE prediction_domain_cas','d1:INSERT INTO prediction_domain_intent','d1:DELETE FROM prediction_domain_intent','d1:UPDATE prediction_domain_cas'];
 const PREDICTION_SQL=['UPDATE prediction_domain_authority SET generation=? WHERE id=? AND mode=? AND writes=? AND generation=?','UPDATE prediction_domain_cas SET ok=changes() WHERE id=?','INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)','DELETE FROM prediction_domain_intent WHERE key=? AND token=?'];
 const STOP_PUTS=['put:enrichment/runs/run-stopped.json','put:enrichment/run-diagnostics/<ts>-run-stopped.json','put:events/items/<ts>-stop-run-stopped.json','put:enrichment/stop-events/run-stopped.json'];
-const EXPIRED_PUTS=['put:enrichment/runs/run-expired.json','put:enrichment/run-diagnostics/<ts>-run-expired.json'];
 
 export const BASELINE=[
- {id:'epg-mirror-repair-pin',owner:'AIR-414',kind:'r2-d1-write',
-  summary:'The published-generation pin of a D1-authority read calls PublishedEpg.repairMirrors. With mirrors that are current it still runs the fenced UPDATE of the mirror marker, because currentGeneration() does not return mirrorWatchlistEtag and the alignment test compares the watchlist etag with undefined; with mirrors missing or from an older generation it rewrites the five R2 compatibility objects first. cutover held does not repair.',
-  routes:['GET /api/catalog/available','GET /api/admin/overview','GET /api/admin/films?q=hot','GET /api/admin/people?queue=localization-missing','GET /api/admin/films?q=hot&queue=localization-missing','GET /api/admin/films/film:w1','GET /api/admin/people/person:director/one','GET /api/admin/health','GET /api/admin/limbo','GET /api/admin/limbo?cause=backoff&subsystem=prediction&kind=film&age=14&limit=5'],
-  effects:repair(1),sql:repairSql},
- {id:'epg-mirror-repair-presentation',owner:'AIR-414',kind:'r2-d1-write',
-  summary:'The programme and watchlist reads repair the mirrors twice per request (the pin and the presentation helper); same writes as epg-mirror-repair-pin, doubled.',
-  routes:['GET /api/programme','GET /api/watchlist'],effects:repair(2),sql:repairSql},
- {id:'enrichment-view-seed',owner:'AIR-413, AIR-414',kind:'r2-d1-write',
-  summary:'ensureInitialRatings merges the personal-ratings seed into enrichment/view-index.json from a read when a private build carries a seed and the index lacks a seeded rating; in D1 mode the pin repairs the mirrors as well.',
-  routes:['GET /api/enrichment/view'],effects:{...repair(1),'r2-pending':['put:enrichment/view-index.json'],'d1-pending':['put:enrichment/view-index.json',...MARKER]},sql:repairSql},
- {id:'enrichment-runs-recovery',owner:'AIR-415',kind:'r2-d1-write',
-  summary:'diagnosticHistory settles a run whose diagnostic row says running but whose lease expired: it rewrites the run record and the diagnostic row (R2); in D1 prediction-domain mode every saveJSON of a prediction object is a fenced D1 intent.',
-  routes:['GET /api/enrichment/runs'],effects:{'r2-pending':EXPIRED_PUTS,'d1-pending':[...EXPIRED_PUTS,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
- {id:'enrichment-status-recovery',owner:'AIR-415, AIR-416, AIR-414',kind:'r2-d1-write',
-  summary:'The status read runs recoverStopEvents (delivers an undelivered stop event: run record, diagnostic row, journal item, delivered flag), then diagnosticHistory (expired-lease settlement), then the D1 pin repair. Same effects through the MCP alias enrichment_status, which is annotated readOnlyHint false for this reason.',
-  routes:['GET /api/enrichment/status'],
-  effects:{...repair(1),'r2-pending':[...STOP_PUTS,...EXPIRED_PUTS],'d1-pending':[...STOP_PUTS,...EXPIRED_PUTS,...PREDICTION_D1,...PREDICTION_D1,...MARKER]},
-  sql:{...repairSql,'d1-pending':[...PREDICTION_SQL,...MIRROR_SQL]}},
  {id:'events-recovery',owner:'AIR-416',kind:'r2-d1-write',
   summary:'The journal read runs recoverStopEvents before the page is read: an undelivered stop event is written into the journal and its record is marked delivered.',
   routes:['GET /api/events'],effects:{'r2-pending':STOP_PUTS,'d1-pending':[...STOP_PUTS,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
@@ -81,11 +51,4 @@ export const BASELINE=[
   summary:'The TMDB status route sends one GET to TMDB (movie 11) with the Worker secret. It changes nothing of ours and spends provider quota; it is listed so a second or a non-GET request cannot appear unnoticed.',
   routes:['GET /api/integrations/tmdb/status'],effects:Object.fromEntries(['r2','r2-pending','empty','d1','d1-mirror-missing','d1-mirror-stale','d1-held','d1-pending'].map(name=>[name,['fetch:GET https://api.themoviedb.org/3/movie/11']])),sql:{}},
 ];
-export const MCP_BASELINE=[
- {id:'mcp-enrichment-status',owner:'AIR-415, AIR-416, AIR-414',kind:'r2-d1-write',
-  summary:'enrichment_status is the same body as GET /api/enrichment/status and writes the same things; its annotation readOnlyHint false says so.',
-  routes:['MCP enrichment_status'],effects:{...repair(1),'r2-pending':[...STOP_PUTS,...EXPIRED_PUTS],'d1-pending':[...STOP_PUTS,...EXPIRED_PUTS,...PREDICTION_D1,...PREDICTION_D1,...MARKER]},sql:{...repairSql,'d1-pending':[...PREDICTION_SQL,...MIRROR_SQL]}},
- {id:'mcp-prediction-overview-pin',owner:'AIR-414',kind:'r2-d1-write',
-  summary:'prediction_queue_overview and prediction_film_diagnostics are annotated readOnlyHint true and read the published generation through the same pin: in D1 mode they run the mirror repair. The annotation is wrong until AIR-414 lands.',annotationDefect:true,
-  routes:['MCP prediction_queue_overview','MCP prediction_film_diagnostics'],effects:repair(1),sql:repairSql},
-];
+export const MCP_BASELINE=[];

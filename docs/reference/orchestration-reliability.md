@@ -56,7 +56,7 @@ Defaults apply unless a domain row below sets a stricter value. Loosening a defa
 | `unsafe` scope | The domain, until an explicit owner-approved clear |
 | Reset of `consecutive` | Only on durable progress for the same run key and epoch |
 | Reset of `total` | Only with a new run key |
-| `ensure` cost | At most a few reads per domain per firing; at most one `create` |
+| `ensure` cost | At most a few reads per domain per firing; at most one `create`. The EPG `ensure` also reconciles R2 compatibility mirrors of the published D1 generation (idempotent; no write when aligned, held, switching, or a step lease is live) |
 
 With the defaults, a fault that never clears quarantines after cooldowns of about 1 h 21 min plus four attempts.
 

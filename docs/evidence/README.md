@@ -61,6 +61,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-188 extended future EPG fixture measurements | [epg-extended-future-air-188-2026-11-05.md](epg-extended-future-air-188-2026-11-05.md) |
 | AIR-359 EPG event versus published generation | [epg-event-publication-air-359-2026-11-06.md](epg-event-publication-air-359-2026-11-06.md) |
 | AIR-361 Ratings run result event | [ratings-event-air-361-2026-11-06.md](ratings-event-air-361-2026-11-06.md) |
+| AIR-379 When a rating reaches a watchlist removal event | [watchlist-removal-ratings-air-379-2026-11-10.md](watchlist-removal-ratings-air-379-2026-11-10.md) |
 | AIR-349 monitor offline evidence | [monitoring/monitor-air-349-2026-11-06.md](monitoring/monitor-air-349-2026-11-06.md) |
 | AIR-365 monitor Telegram transport offline evidence | [monitoring/telegram-air-365-2026-11-07.md](monitoring/telegram-air-365-2026-11-07.md) |
 | AIR-375 D1 enrichment projector `input_missing` under D1 discovery authority (RCA and fix) | [d1-migration/air-375-projector-input-missing-2026-11-07.md](d1-migration/air-375-projector-input-missing-2026-11-07.md) |
@@ -90,6 +91,8 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-366 monitor `dry` mode removal and pre-merge gate | [monitoring/dry-removal-air-366-2026-11-07.md](monitoring/dry-removal-air-366-2026-11-07.md) |
 | AIR-378 test runner profile, isolation audit and parallel timings | [ci/test-runner-air-378-2026-11-07.md](ci/test-runner-air-378-2026-11-07.md) |
 | AIR-408 full test suite back to two or three minutes: persistent sqlite session, uncleared timer, jobs 6 | [ci/test-suite-air-408-2026-11-10.md](ci/test-suite-air-408-2026-11-10.md) |
+| AIR-418 full test suite under 180 s again: slow `sqlite3 -json` on large values, `generation-stage` in three files | [ci/test-suite-air-418-2026-11-10.md](ci/test-suite-air-418-2026-11-10.md) |
 | AIR-412 GET and HEAD read side-effect audit: R2 and D1 instrumentation, route inventory, baseline of the reads that write | [api/air-412-get-head-audit-2026-11-10.md](api/air-412-get-head-audit-2026-11-10.md) |
+| AIR-414 EPG compatibility mirrors: GET no longer repairs; hourly `ensure` reconciles (offline tests only) | [api/air-414-epg-mirror-reconciliation-2026-11-10.md](api/air-414-epg-mirror-reconciliation-2026-11-10.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

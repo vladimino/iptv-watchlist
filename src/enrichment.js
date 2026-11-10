@@ -353,6 +353,7 @@ async function updateViewIndex(env,id,changes){
  }
  throw new Error('Stored JSON changed during write');
 }
+// Writers that already mutate the view index persist a missing compiled seed. GET /api/enrichment/view overlays in memory and does not call this.
 async function ensureInitialRatings(env){
  return mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},index=>applyRatingsSeed(index)?index:null);
 }
@@ -944,8 +945,8 @@ async function runnerProgress(env,run,queue,final=false){
  await savePredictionRun(env,run);
 }
 const START_EVENT_PREFIX=ENRICHMENT_KEY+'start-events/';
-async function runnerStarted(env,run,resumed,queue){
- const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),runState=run.startResult==='recovered_stale_lease'?'recovered':resumed?'resumed':'started';
+async function runnerStarted(env,run,resumed,queue,inputs=null){
+ const snapshot=await predictionEventSnapshot(env,queue,run.batchSize,inputs),runState=run.startResult==='recovered_stale_lease'?'recovered':resumed?'resumed':'started';
  run.coverageStartCurrentPredictions=snapshot.coverage?.currentPredictionsTotal??null;await savePredictionRun(env,run);
  const event={id:'prediction-start-'+run.runId,type:'enrichment',at:run.createdAt,startedAt:run.createdAt,stage:resumed?'resumed':'started',runState,title:runState==='recovered'?'Прогнозы восстановлены':resumed?'Прогнозы продолжены':'Прогнозы запущены',queueSchemaVersion:6,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:run.batchSize,delta:{added:0,updated:0,failed:0,predictionGain:0},snapshot};
  const key=START_EVENT_PREFIX+run.runId+'.json';await saveJSON(env,key,{event});await flushStopEvent(env,{event},key);
@@ -1062,7 +1063,7 @@ async function observedPrediction(env,body,work,stage,requestId){
  }
  const normal=['queue_empty','eligible_queue_empty','retry_backoff'];
  // A start that cannot write the previous run's retries took no lease and created no run: it is not a stop of anything.
- const stop=data.code==='prediction_retry_heal_pending'?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
+ const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
  const errorClass=stop==='lease_lost'||stop==='storage_error'||stop==='format_error_storm'?stop:null;
  const produced=predictionStep({step:stage,requestId:correlation,attemptedAt,completedAt:new Date().toISOString(),outcome:'produced',httpStatus:response.status,elapsedMs:Date.now()-started,errorClass});
  if(stop){const id=stopId();const final=await recordRunStop(env,id,stop,{...data,start:stage==='start',trigger:body?.trigger});await safeAppendStep(env,traceId||id,produced);return withPredictionCorrelation(json({...data,...final,stage:stage==='start'?'blocked':final.stage,status:stage==='start'?'blocked':data.status||'partial'},response.status),correlation);}
@@ -1131,25 +1132,28 @@ async function settlePreviousRun(env){
 }
 // `beforeWrite` lets a lease-holding caller renew its lease immediately before each queue write; `amend` changes the rebuilt
 // queue inside the same conditional write (run bookkeeping), so a conflict re-applies it to the fresh rebuild.
-async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrite=null,amend=null}={}){
+// `capture` (an object) receives the inputs of the rebuild that was written (report, profile, index, catalog), so a caller that needs them
+// next does not read the same large objects again in the same request.
+async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrite=null,amend=null,capture=null}={}){
  for(let attempt=0;attempt<PREDICTION_QUEUE_ATTEMPTS;attempt++){
   await predictionQueuePause(attempt);
   // The queue is read before its inputs, so a rebuild never rests on a profile, index or programme older than the queue it
   // replaces. A caller's programme of another generation than the stored queue is replaced by the published one.
   const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openQueue(env),object=head?head.object:await env.BUCKET.get(predictionQueueKey),previous=head?head.queue:(object?await object.json():null);
   const source=previous?.programmeRunId&&previous.programmeRunId!==report?.runId?await loadJSON(env,'programme.json')||report:report;
-  const queue=await buildPredictionQueue(env,source,trigger,previous);if(!queue)return null;
+  const queue=await buildPredictionQueue(env,source,trigger,previous,capture);if(!queue)return null;
   const next=amend?amend(queue)||queue:queue;
   if(beforeWrite)await beforeWrite();
   if((head?await PredictionD1.writeQueue(env,head,next):await putPredictionQueue(env,object,next))!==null)return next;
  }
  throw new PredictionQueueConflictError(trigger);
 }
-async function buildPredictionQueue(env,report,trigger,previous){
+async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
  const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(pinned,'epg/discovered-films.json')]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile||!report?.films)return null;
+ if(capture)Object.assign(capture,{report,profile,index,catalog});
  const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
  const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
@@ -1298,8 +1302,9 @@ function predictionQueueSlices(queue,now=Date.now()){
  const outstanding=[...new Set([...queue.hotPending,...queue.coldPending])],deferred=outstanding.filter(id=>queue.retries?.[id]?.retryAt>now),nextMs=deferred.map(id=>queue.retries[id].retryAt).filter(value=>typeof value==='number').sort((a,b)=>a-b)[0];
  return {hotPending:queue.hotPending.length,coldPending:queue.coldPending.length,outstanding:outstanding.length,eligibleNow:queueReadyIds(queue,now).length,deferredByRetry:deferred.length,nextRetryAt:Number.isFinite(nextMs)?new Date(nextMs).toISOString():null};
 }
-async function predictionEventSnapshot(env,queue,batchSize=null){
- const safe=async key=>{try{return await loadJSON(pinned,key);}catch{return null;}},pinned=await pinEpg(env),[profile,index,report,catalog,persistedQueue]=await Promise.all([safe(profileKey),safe(ENRICHMENT_KEY+'view-index.json'),safe('programme.json'),safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
+// `inputs` are the objects a queue rebuild of this request already read; with them nothing large is read again.
+async function predictionEventSnapshot(env,queue,batchSize=null,inputs=null){
+ const safe=async key=>{try{return await loadJSON(pinned,key);}catch{return null;}},given=inputs?.report&&inputs.profile&&inputs.index!==undefined&&inputs.catalog!==undefined,pinned=given?env:await pinEpg(env),[profile,index,report,catalog,persistedQueue]=await Promise.all([given?inputs.profile:safe(profileKey),given?inputs.index:safe(ENRICHMENT_KEY+'view-index.json'),given?inputs.report:safe('programme.json'),given?inputs.catalog:safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
  const coverage=canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile));
  return {coverage:{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal)},queue:predictionQueueSlices(persistedQueue),...(Number.isInteger(batchSize)&&batchSize>0?{currentBatchSize:batchSize}:{})};
 }
@@ -1425,7 +1430,7 @@ function footerGuard(env,degraded){
  };
 }
 // The published programme and watchlist of a D1 generation, read with SELECTs only and fenced at the pinned generation. `loadJSON` reads the same documents
-// but first runs `PublishedEpg.repairMirrors`, an R2 write; a status read must not write, and two parallel reads must not run two repairs.
+// without writing; R2 compatibility mirrors are reconciled by the EPG writer, not by a status GET.
 async function footerPublishedDocument(pinned,key){
  if(pinned.epgPin?.authority==='d1'&&typeof PublishedEpg!=='undefined'){
   const run=pinned.epgPin.programmeRunId;
@@ -1479,6 +1484,8 @@ function queueBatchIds(queue,ready,slots){
  return taken;
 }
 const RUN_DIAGNOSTICS_PREFIX=ENRICHMENT_KEY+'run-diagnostics/';
+const RUN_DIAGNOSTICS_SETTLE_KEY=ENRICHMENT_KEY+'run-diagnostics-settle.json';
+const RUN_DIAGNOSTICS_SETTLE_LIMIT=100;
 function diagnosticKey(id,at){return RUN_DIAGNOSTICS_PREFIX+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-'+id+'.json';}
 async function diagnosticCheckpoint(env,run,patch={}){
  if(run.runId.startsWith('blocked-'))return null; // Aggregate stop Events are not additional trigger attempts.
@@ -1486,19 +1493,60 @@ async function diagnosticCheckpoint(env,run,patch={}){
  const value={runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',startedAt:at,endedAt:run.completedAt||null,state:run.status==='complete'?'completed':run.status==='partial'?'blocked':run.status||'running',startResult:old?.startResult||run.startResult||'running',stopReason:run.stopReason||run.reason||null,leaseAcquiredAt:old?.leaseAcquiredAt||run.leaseAcquiredAt||null,leaseExpiredAt:lease?.runId===run.runId?new Date(lease.expiresAt||Date.parse(old?.leaseExpiredAt||at)).toISOString():old?.leaseExpiredAt||null,lastHeartbeatAt:run.lastHeartbeatAt||old?.lastHeartbeatAt||null,firstNextAt:run.firstNextAt||old?.firstNextAt||null,firstSubmitAt:run.firstSubmitAt||old?.firstSubmitAt||null,added:summary.added,failed:summary.failed,hotRemaining:queue?.priorityCount??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??run.coldRemaining??null,batchesProcessed:Math.max(0,(run.batchCount||1)-1)+(run.selectedIds?.length&&run.selectedIds.every(id=>run.results?.[id])?1:0),...patch,steps:Array.isArray(old?.steps)?old.steps.slice(-8):[],lastAttemptedStep:old?.lastAttemptedStep||null,lastCompletedStep:old?.lastCompletedStep||null,serverFault:old?.serverFault||null,callerFault:run.callerFault||old?.callerFault||null,itemValidation:run.itemValidation||old?.itemValidation||null,delivery:'unconfirmed'};
  await saveJSON(env,key,value);return value;
 }
+function leaseExpiredDiagnostic(row,now=Date.now()){
+ return !!(row&&row.state==='running'&&row.leaseExpiredAt&&Date.parse(row.leaseExpiredAt)<=now);
+}
+function projectedDiagnostic(row,now=Date.now()){
+ if(!leaseExpiredDiagnostic(row,now))return row;
+ return {...row,state:'interrupted',stopReason:row.leaseAcquiredAt?'lease_expired':'runner_aborted',endedAt:row.endedAt||row.leaseExpiredAt};
+}
+async function persistExpiredDiagnostic(env,itemKey,row,now=Date.now()){
+ if(!leaseExpiredDiagnostic(row,now))return;
+ const run=await checkedRun(env,row.runId);
+ if(run&&['running','interrupted'].includes(run.status)){
+  if(run.status==='interrupted'&&run.stopReason==='lease_expired'&&row.state==='interrupted')return;
+  run.status='interrupted';run.recoverable=true;run.stopReason='lease_expired';run.reason='lease_expired';run.completedAt=run.completedAt||row.leaseExpiredAt;
+  await saveJSON(env,runKey(run.runId),run);await diagnosticCheckpoint(env,run);return;
+ }
+ await saveJSON(env,itemKey,projectedDiagnostic(row,now));
+}
+async function settleExpiredDiagnostics(env,now=Date.now()){
+ // One R2 list page per authorized start, with a durable resume cursor. A list/get/put error leaves the cursor
+ // unchanged so the next start retries the same page; already-settled rows are no-ops. Admission of the new run
+ // does not wait on a full history scan (AIR-415).
+ try{
+  const state=await loadJSON(env,RUN_DIAGNOSTICS_SETTLE_KEY)||{};
+  const page=await env.BUCKET.list({prefix:RUN_DIAGNOSTICS_PREFIX,limit:RUN_DIAGNOSTICS_SETTLE_LIMIT,...(state.cursor?{cursor:state.cursor}:{})});
+  for(const item of page.objects||[]){const row=await loadJSON(env,item.key);if(row)await persistExpiredDiagnostic(env,item.key,row,now);}
+  const next=page.truncated?page.cursor||null:null;
+  if(next===null&&!state.cursor)return;
+  await saveJSON(env,RUN_DIAGNOSTICS_SETTLE_KEY,{cursor:next,at:new Date(now).toISOString()});
+ }catch{}
+}
 async function diagnosticHistory(env,limit=10){
  const page=await env.BUCKET.list({prefix:RUN_DIAGNOSTICS_PREFIX,limit}),rows=[];
- for(const item of page.objects){let row=await loadJSON(env,item.key);if(!row)continue;if(row.state==='running'&&row.leaseExpiredAt&&Date.parse(row.leaseExpiredAt)<=Date.now()){const run=await checkedRun(env,row.runId);if(run){run.status='interrupted';run.recoverable=true;run.stopReason='lease_expired';run.reason='lease_expired';run.completedAt=row.leaseExpiredAt;await saveJSON(env,runKey(run.runId),run);row=await diagnosticCheckpoint(env,run);}else{row={...row,state:'interrupted',stopReason:row.leaseAcquiredAt?'lease_expired':'runner_aborted',endedAt:row.leaseExpiredAt};await saveJSON(env,item.key,row);}}rows.push(row);}
+ for(const item of page.objects){const row=await loadJSON(env,item.key);if(row)rows.push(projectedDiagnostic(row));}
  return {runs:rows.sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt)||b.runId.localeCompare(a.runId)).slice(0,limit).map(presentDiagnostic)};
+}
+// AIR-417. While an EPG publication holds or loads the Discovery authority, the catalog cannot be read and the queue cannot be rebuilt.
+// That is a wait, not a storage failure: the start answers 503 blocked `prediction_catalog_held`, keeps no lease and writes no stop Event,
+// and the next start tries again. `cause` is the Discovery code that refused the read.
+const CATALOG_HELD_CODES=['discovery_fence','discovery_incomplete'];
+const catalogHeldResponse=cause=>json({status:'blocked',reason:'catalog_held',code:'prediction_catalog_held',cause,...scheduledRunFields()},503);
+async function catalogHeldCause(env){
+ if(typeof DiscoveryAuthority==='undefined')return null;
+ const gate=await DiscoveryAuthority.readAuthority(env);
+ return gate.held?'discovery_fence':gate.ready&&gate.transfer==='loading'?'discovery_incomplete':null;
 }
 async function diagnosedStart(env,body,requestId){
  const runId=crypto.randomUUID(),at=new Date().toISOString(),shell={runId,createdAt:at,diagnosticStartedAt:at,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
  await diagnosticCheckpoint(env,shell,{startResult:'error'});
  const response=await observedPrediction(env,{...body,diagnosticRunId:runId},async()=>{
   const unsettled=await atStage('settle_previous',()=>settlePreviousRun(env));if(unsettled)return unsettled;
+  const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
   const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));if(lease.status!=='owned')return json(lease);
   shell.leaseAcquiredAt=lease.heartbeatAt;shell.lastHeartbeatAt=lease.heartbeatAt;const previous=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;shell.startResult=previous&&['running','interrupted'].includes(previous.status)?'recovered_stale_lease':'running';await diagnosticCheckpoint(env,shell,{state:'running',startResult:shell.startResult});
-  try{const result=await atStage('writer_lease',()=>predictionWriter(env,()=>enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult})));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');throw error;}
+  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
  },'start',requestId);
  const data=await response.clone().json();if(data.status!=='running'){shell.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';shell.completedAt=new Date().toISOString();shell.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,shell,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:shell.leaseAcquiredAt||null,lastHeartbeatAt:shell.lastHeartbeatAt||null});}
  return response;
@@ -1508,7 +1556,9 @@ async function enrichmentStart(env,body,acquired=null){
  const mode=body.mode||'queued';if(!['watchlist_available','watchlist_all'].includes(body?.scope)||(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1))||!['queued','legacy'].includes(mode)||(body.batchSize!==undefined&&(!Number.isInteger(body.batchSize)||body.batchSize<1||body.batchSize>MAX_PREDICTION_BATCH)))return json({error:'Invalid scope, mode or batchSize'},400);
  if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
  const [profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);if(!profile)return json({error:'Taste profile is not configured'},409);if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return json({error:'No completed programme snapshot'},409);
- const catalog=mode==='queued'?await loadJSON(env,'epg/discovered-films.json'):null,eligible=mode==='queued'?allEnrichmentFilms(report,catalog):eligibleEnrichmentFilms(report),queue=mode==='queued'?await atStage('queue_refresh',()=>refreshPredictionQueue(env,report,body.trigger==='scheduled'?'scheduled':'manual')):null,plan=mode==='queued'?adaptivePredictionBatch(queue,body.capacity):null;
+ // The rebuild already read the programme, the catalog and the index of this generation; the start reuses them instead of reading each again
+ // (AIR-417: three copies of the catalog and programme and two of the index in one request exceeded the isolate memory).
+ const inputs={},queue=mode==='queued'?await atStage('queue_refresh',()=>refreshPredictionQueue(env,report,body.trigger==='scheduled'?'scheduled':'manual',{capture:inputs})):null,reused=mode==='queued'&&inputs.report?.runId===report.runId&&inputs.catalog!==undefined,catalog=mode!=='queued'?null:reused?inputs.catalog:await loadJSON(env,'epg/discovered-films.json'),eligible=mode==='queued'?allEnrichmentFilms(report,catalog):eligibleEnrichmentFilms(report),plan=mode==='queued'?adaptivePredictionBatch(queue,body.capacity):null;
  // Explicit small nonlegacy diagnostics batches remain possible. The old scheduled 4 is a legacy hint, not a throughput cap.
  const batchSize=mode==='queued'?Math.min(plan.batchSize,body.batchSize!==undefined&&!(body.trigger==='scheduled'&&body.batchSize===4)?body.batchSize:MAX_PREDICTION_BATCH):eligible.length;
  const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');
@@ -1521,7 +1571,7 @@ async function enrichmentStart(env,body,acquired=null){
  const states=await atStage('film_state',()=>Promise.all(selected.map(f=>readFilmState(env,f.id)))),baseline=Object.fromEntries(selected.map((f,i)=>[String(f.id),states[i].predictions?.current?.generatedAt||null])),freshness=await predictionFreshness(env,profile),pendingCount=mode==='queued'?queue.pending.length:states.filter((s,i)=>!freshness.state(s.predictions?.current,s.fingerprint,selected[i].genres)).length;
 
  const createdAt=new Date().toISOString(),run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,status:'running',mode,trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:acquired?.diagnosticStartedAt||createdAt,leaseAcquiredAt:acquired?.heartbeatAt||createdAt,startResult:acquired?.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:freshness.registryDigest??(await fingerprintRegistryDigests()).registry,eligibleCount:eligible.length,batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(f=>String(f.id)),selectionKind:Object.fromEntries(selected.map(f=>[String(f.id),mode==='queued'&&queue.priority[f.id]?.hot?'hot':'cold'])),baseline,failures:{},results:{}};
- await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(f=>[String(f.id),modelMetadata(f)])));await atStage('run_save',()=>savePredictionRun(env,run));await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue));return json({...runSummary(run),pendingCount,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields(),runner:predictionRunnerContract()});
+ await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(f=>[String(f.id),modelMetadata(f)])));await atStage('run_save',()=>savePredictionRun(env,run));await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,reused?inputs:null));return json({...runSummary(run),pendingCount,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields(),runner:predictionRunnerContract()});
 }
 function predictionRunnerContract(){return {pipelineVersion:5,continuous:true,itemFailures:{reportVia:'submit items[].failure.kind',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,stopAfterConsecutive:5,validation:{preflight:'GET /api/enrichment/schema contract',reportedVia:'submit results[].validation {stage, reportedBy, issues[{path, code}]}',stages:['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema'],issueCodes:ISSUE_CODES}},maxBatchFilms:20,maxRunFilms:null,maxRunMinutes:null,leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',read:'/api/enrichment/runner',modelBatching:{enabled:false,readyFingerprintsPerCall:1},instructions:['Start returns already_running: exit immediately, do not adopt its runId.','Repeat next/submit continuously across adaptive batches until queue empty or real quota/API/storage failure. No time or total-film cap.','Keep profile and scoring rules unchanged; reuse valid fingerprints and predictions. Submit each film immediately.','Lease TTL is 15 minutes. Heartbeat before model calls and after checkpoints; renew concurrently every 10 minutes during long calls. Expired ownership is replaced atomically and start returns running in the same trigger.','Malformed/invalid per-film outputs: submit {filmId,failure:{kind:parse_error}} as valid JSON, then continue next/submit. Never complete for one item parse_error.','Before submit, check the fingerprint and prediction against the schema contract (required execution dimensions, enum values, moodLabels 2–4). A Worker schema rejection is still a retryable parse_error for that film and returns results[].validation.issues [{path, code}] naming the field; fix that field for the following films, do not resubmit the deferred one in this run.','Stop only on mustComplete/systemic quota/API/storage/lease failure; complete with stopReason. Five consecutive distinct item format failures trigger format_error_storm.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on queue_empty or another normal completion is rejected.']};}
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}
@@ -1638,7 +1688,7 @@ async function enrichmentComplete(env,body){
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,catalog,discovery,lease]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,RUNNER_LEASE_KEY)]);const films=report?allEnrichmentFilms(report,catalog):[];const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue};}
-async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),ensureInitialRatings(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
+async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
  const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json')]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS,groups:MOOD_GROUPS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,moodGroups:moodPresentationGroups(facet.mapping),fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,...(Object.hasOwn(p,'confidenceAssessment')?{confidenceAssessment:p.confidenceAssessment,fingerprintHash:p.fingerprintHash??null}:{}),stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}
 
@@ -1760,6 +1810,14 @@ function applyRatingsSeed(index){
  let changed=false;
  for(const [id,rating] of Object.entries(typeof INITIAL_PERSONAL_RATINGS==='undefined'?{}:INITIAL_PERSONAL_RATINGS))if(!Object.hasOwn(index[id]||{},'actualRating')){index[id]={...(index[id]||{}),actualRating:rating};changed=true;}
  return changed;
+}
+function overlayRatingsSeed(index){
+ const next=cloneJSON(index||{});
+ applyRatingsSeed(next);
+ return next;
+}
+async function readViewIndex(env){
+ return overlayRatingsSeed(await loadJSON(env,ENRICHMENT_KEY+'view-index.json'));
 }
 async function readableRatings(env){
  const [pointer,pending]=await Promise.all([loadJSON(env,RATINGS_POINTER_KEY),loadJSON(env,RATINGS_PENDING_KEY)]);
@@ -1923,7 +1981,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body)),'next',requestId);
  if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body)),'submit',requestId);
  if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body)),'complete',requestId);
- if(path==='/api/enrichment/status'&&request.method==='GET'){await recoverStopEvents(env);return json(await enrichmentStatus(env));}
+ if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']});

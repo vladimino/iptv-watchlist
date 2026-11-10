@@ -12,8 +12,9 @@
 // D1 batch by src/published-epg.js, so a commit admitted before the owner closed admission cannot land after it.
 // The executor reuses the existing pipeline: one action is one `/api/sync/start` or one `/api/sync/metadata|epg` step, called
 // in-process through postSync with the caller `internal`. It never fetches a source itself and never repeats a publication
-// blind: after an unknown outcome the next action reads sync.json and the D1 pointer first. The cron `ensure` only reads a
-// document and creates at most one Workflow instance per Madrid day and series; it does not download, step or publish.
+// blind: after an unknown outcome the next action reads sync.json and the D1 pointer first. The cron `ensure` reconciles the
+// R2 compatibility mirrors of the published D1 generation (idempotent, generation-fenced) and, separately, creates at most one
+// Workflow instance per Madrid day and series; it does not download, step or publish. GET never repairs those mirrors.
 // Discovery gets its intent from the existing commit-time handoff (queueDiscovery inside the completing step). Read model:
 // readModel(). Contract: docs/reference/orchestration-reliability.md.
 // Concatenated into the Worker like the other server modules: one global.
@@ -409,10 +410,39 @@ const EpgOrchestration=(()=>{
   }catch{return {recorded:false,reason};}
  }
 
+ // ---- published-generation compatibility mirrors (hourly, not GET) --------------------------------------------
+ // R2 first, D1 marker last, under the published-EPG generation fence (`PublishedEpg.repairMirrors`). Aligned mirrors write
+ // nothing. A live EPG step lease, a switching mode, an unreadable lease or a held cutover write nothing. Failures are
+ // returned, not thrown, so the rest of the hourly tick (projector, Ratings, Discovery, Monitor) still runs.
+ async function reconcileMirrors(env,{now=Date.now()}={}){
+  if(typeof PublishedEpg?.repairMirrors!=='function')return {ran:false,reason:'unavailable'};
+  try{
+   const mode=await readMode(env);
+   if(mode.schema&&mode.record?.mode==='switching')return {ran:false,reason:'switch_in_progress'};
+  }catch{return {ran:false,reason:'mode_unreadable'};}
+  try{
+   const held=await readLease(env);
+   if(held.malformed)return {ran:false,reason:'lease_unreadable'};
+   if(leaseLive(held.record,now))return {ran:false,reason:'step_lease_live'};
+  }catch{return {ran:false,reason:'lease_unreadable'};}
+  try{
+   const result=await PublishedEpg.repairMirrors(env);
+   return {ran:true,mirrored:!!result?.mirrored,aligned:!!result?.aligned,wrote:!!result?.wrote,reason:result?.reason??(result?.aligned?'aligned':result?.mirrored?'written':'not_mirrored')};
+  }catch(error){
+   return {ran:true,mirrored:false,aligned:false,wrote:false,reason:error?.code||'error'};
+  }
+ }
+
  // ---- the cron `ensure` ---------------------------------------------------------------------------------------
- // At most a few reads, at most one create. Safe under duplicate and overlapping firings: the control record is claimed by
+ // Mirror reconcile on every hourly tick (even when the daily publication is not due), then at most a few reads and at
+ // most one Workflow create. Safe under duplicate and overlapping firings: the control record is claimed by
  // compare-and-swap on the run key and series before the create, and a second create attaches to the same instance id.
  async function ensure(env,{now=Date.now(),random=Math.random}={}){
+  const mirrors=await reconcileMirrors(env,{now});
+  const result=await ensureWorkflow(env,{now,random});
+  return {...result,mirrors};
+ }
+ async function ensureWorkflow(env,{now=Date.now(),random=Math.random}={}){
   let mode;
   try{mode=await readMode(env);}catch{return {started:false,reason:'mode_unreadable'};}
   if(!mode.schema)return {started:false,reason:'external'};
@@ -494,6 +524,6 @@ const EpgOrchestration=(()=>{
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,health,sideEffects:'none'};
  }
- return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,readModel,drainState,classifyThrown,checkpointKey,progressCount};
+ return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount};
 })();
 async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}
