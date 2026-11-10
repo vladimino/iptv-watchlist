@@ -329,6 +329,55 @@ function catalogFilmState(records,tmdbId){
  if(verified.length&&verified.every(record=>record.state==='superseded'))return {state:'retired'};
  return {state:'conflict'};
 }
+// AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted.
+// Read only, only when Discovery says "absent" and only while the Film/Person authority names R2 (legacy, r2, prepared; ADR 0099): `held`, `open` and an
+// unreadable marker fail closed and never fall back to R2. The receipt is the R2 identity decision, so it is bounded by the owner's R2 retirements
+// object and by D1 contradictions (a conflicting or second trusted TMDB id, a redirected Film); a Film whose projection is still pending is found. The entry must verify exactly as the rated-archive admission rules require (key tmdb_<n>, tmdb equal to the key,
+// short code, sha256 digest, verification time, no watchlist field); anything else is not a Film here. Nothing is scanned: one key of one object.
+const CATALOG_ADMISSION_KEY='letterboxd/admissions/verified-films.json';
+const CATALOG_ADMISSION_SHORT=/^[A-Za-z0-9_-]{1,40}$/,CATALOG_ADMISSION_HEX=/^[0-9a-f]{64}$/;
+function catalogAdmittedFilm(document,tmdbId){
+ if(!document||typeof document!=='object'||Array.isArray(document)||document.schemaVersion!==1||!document.films||typeof document.films!=='object'||Array.isArray(document.films)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+ const key='tmdb_'+tmdbId;
+ if(!Object.prototype.hasOwnProperty.call(document.films,key))return null;
+ const item=document.films[key];
+ if(!item||typeof item!=='object'||Array.isArray(item)||Object.prototype.hasOwnProperty.call(item,'watchlist'))return null;
+ if(String(item.tmdb)!==tmdbId||typeof item.sourceCode!=='string'||!CATALOG_ADMISSION_SHORT.test(item.sourceCode)||typeof item.archiveSha256!=='string'||!CATALOG_ADMISSION_HEX.test(item.archiveSha256)||typeof item.verifiedAt!=='string'||!Number.isFinite(Date.parse(item.verifiedAt)))return null;
+ const person=value=>Array.isArray(value)?value.filter(entry=>entry&&typeof entry==='object'&&entry.id!=null&&(entry.name||entry.original)):[];
+ return {id:key,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:typeof item.title==='string'&&item.title?item.title:null,original:null,year:Number.isInteger(item.year)?item.year:null,runtime:Number.isInteger(item.runtime)?item.runtime:null,genres:Array.isArray(item.genres)?item.genres.filter(g=>typeof g==='string'):[],url:typeof item.url==='string'&&item.url.startsWith('https://')?item.url:null,directors:person(item.directors),actors:person(item.actors),shows:[]};
+}
+async function catalogArchiveFallback(env,tmdbId){
+ const gate=await FilmPersonAuthority.readAuthority(env);
+ if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
+ const retirements=await loadJSON(env,'identity/tmdb-retirements.json');
+ if(retirements!=null){
+  const set=tmdbRetirementSet(retirements);
+  if(!set.ok){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+  if(set.retirements.some(item=>String(item.movieId)===tmdbId))return {state:'retired'};
+ }
+ const archive=await loadJSON(env,CATALOG_ADMISSION_KEY);
+ if(archive==null)return {state:'absent'};
+ const film=catalogAdmittedFilm(archive,tmdbId);
+ if(!film)return {state:'absent'};
+ if(gate.state!=='legacy'){
+  // D1 is a projection here and need not hold the Film yet; it can only contradict the receipt.
+  let rows;
+  try{rows=await FilmPersonAuthority.many(FilmPersonAuthority.database(env),"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[tmdbId]);}
+  catch{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+  // The rule of the admission writer (resolveAdmissionFilm): ALL claims of this typed id are read, and any claim that is not the one owner's own
+  // trusted, non-conflicting row (an untrusted or conflicting claim, on this or another Film, even beside a trusted owner) holds the identity.
+  const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0,owner=rows.find(isOwn)?.film_id??null;
+  if(rows.some(row=>!(isOwn(row)&&row.film_id===owner)))return {state:'conflict'};
+  const trusted=owner===null?[]:[owner];
+  if(trusted.length===1){
+   let redirected;
+   try{redirected=await FilmPersonAuthority.one(FilmPersonAuthority.database(env),'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[trusted[0]]);}
+   catch{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+   if(redirected)return {state:'retired'};
+  }
+ }
+ return {state:'found',film};
+}
 async function catalogFilmRoute(env,tmdbId){
  if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
  const now=Date.now();
@@ -343,9 +392,10 @@ async function catalogFilmRoute(env,tmdbId){
    if(!shared||typeof shared!=='object'||Array.isArray(shared)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
    found=catalogFilmState(Object.entries(shared||{}).filter(([,film])=>film&&String(film.tmdbId)===tmdbId).map(([filmId,film])=>({filmId,state:'current',canonicalIdentity:film.canonicalIdentity,tmdbId:String(film.tmdbId),film})),tmdbId);
   }
+ if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
-  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
   return json({status:'error',error:'The catalog lookup failed'},500);
  }
  if(found.state==='absent')return json({status:'absent'},404);

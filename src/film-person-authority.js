@@ -2,7 +2,7 @@
 // States: no table (legacy), r2, prepared, open (mode d1, cutover open) and held (mode d1, cutover held). Only `open` lets a
 // fenced canonical mutation write. Once the marker table exists, a missing or malformed row, a failed read, `held` and a failed
 // baseline gate fail closed: this module never answers "go back to R2" for them. R2 is allowed only in the verified legacy, r2
-// and prepared states. Nothing here is bundled into the Worker yet, moves the marker on its own, or writes a Film or a Person.
+// and prepared states. The Worker bundles it only for `readAuthority` (AIR-409, the catalog film route); nothing here moves the marker on its own or writes a Film or a Person.
 export const FILM_PERSON_MIN_VERSION=13;
 export const FILM_PERSON_TABLES=['film_person_authority','film_person_cas','film_person_baseline','canonical_revision'];
 const STATES=['legacy','r2','prepared','open','held'];
