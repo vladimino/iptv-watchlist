@@ -43,3 +43,70 @@ Nothing below is done by this stage; each is a separate owner GO after the previ
 ## Boundaries
 
 A passing gate is evidence, not a permission, and a ledger digest names one measurement: a later write by the projector or a producer makes it stale. Unmeasured by this stage: the real expected side (R2), per-entity hashes of production, the class-C exceptions and the real counts. The producer writes no fenced mutation covers yet ([AIR-371 evidence](../evidence/d1-migration/air-371-producer-routing-offline-2026-11-07.md)) block the cutover, not this baseline. A code rollback reverts neither the baseline row nor any D1 row.
+
+## Stage B: the narrow projector-input capture (offline code, nothing executed)
+
+**Decision.** On 10 Nov 2026 the owner chose option A for [AIR-373](https://trello.com/c/ugu3sQmp): measure the parity ledger from a **narrow snapshot of the projector's own inputs**, not from a full bucket export. That decision covers offline development only. It is not a GO for any production R2 GET or HEAD, any D1 read or lease, baseline writes, migrations, flags, cron, Tasks or `r2` to `prepared`.
+
+Tooling: [`scripts/film-person-capture.mjs`](../../scripts/film-person-capture.mjs), tested by `tests/film-person-capture.mjs` (synthetic data, the sqlite stand-in and a fake read-only S3 server on loopback) and `tests/film-person-capture-mutation.mjs` (22 mutants, each removing one guard; every one must be killed). **Inactive:** the file is not bundled (`build.mjs` does not list it), no Worker imports it, nothing calls it, and importing it has no side effect. It reuses the stage A toolkit (`readStableCut`, `expectedFromInputs`, `buildParityLedger`) and the projector's real code (`enrichmentStore`, `enrichmentInputs`, the `LifecycleReader` view through the vm loader of `scripts/d1-projection-seed.mjs`, `OwnerReview.applyViewOverlay`); it adds no second model of authority and no second view builder.
+
+### The allowlist (one constant, `ALLOWLIST`)
+
+Derived from `d1EnrichmentStore` in `src/d1-enrichment.js`; a test fails when the loader names a key the allowlist lacks or an allowlist key is not found in the code. There is no bucket listing and no prefix scan; a key outside the list (or a generation key of another run) is refused before any request is built (`key_not_allowlisted`).
+
+| Id | Key | Required | D1 gate that can reroute it | Missing / malformed |
+| --- | --- | --- | --- | --- |
+| `discoveryLease` | `epg/resolver-lease.json` | no | none (read as the projector reads it) | absent is fine; a live `expiresAt` refuses `writer_active:discoveryLease`; malformed refuses |
+| `sync` | `sync.json` | no | none | a stage `metadata` or `epg` updated within 15 minutes refuses `writer_active:sync` |
+| `publishedPointer` | `epg/published-generation.json` | yes | `published_epg_authority` d1/open: not requested, the run comes from the D1 row | `missing:` / `malformed:` (phase `published`, safe run id) |
+| `watchlist` | `watchlist.json` | yes | same | `missing:` / `malformed:` |
+| `programme` | `epg/generations/{runId}/programme.json` | yes | same | `missing:` / `malformed:`; the run id must match a strict pattern |
+| `metadata`, `titles`, `people` | `metadata.json`, `titles.json`, `people.json` | yes | none | `missing:` / `malformed:` |
+| `catalog` | `epg/generations/{runId}/discovered-films.json` | yes | `discovery_authority` d1/open: read from D1 through `DiscoveryAuthority.routeRead`, no R2 copy; held means unknown | `missing:` / `malformed:` or `generation_pending` |
+| `resolution` | `epg/discovery-resolution.json` | yes | same | same |
+| `diary` | `letterboxd/diary/history.json` | no | none | absent is fine; malformed refuses |
+| `retirements` | `identity/tmdb-retirements.json` | no | none | absent is fine; a present but invalid object refuses (`retirements_invalid` when the view is built) |
+| `viewIndex` | `enrichment/view-index.json` | no | none | absent admits nobody, as in the projector |
+| `verifiedFilms` | `letterboxd/admissions/verified-films.json` | no | none | absent admits nobody; otherwise `schemaVersion` 1 and a `films` record, else `malformed:` |
+| `ownerMirror` | `admin/owner-reviews.json` | no | `owner_review_authority` mode d1: not requested, read by `OwnerReview.readFenced` | `malformed:` when present with a wrong shape |
+
+The projector treats a malformed fence object (`discoveryLease`, `sync`) as absent; the capture refuses it. That is stricter, never looser. The D1-derived inputs (`D1_DERIVED`) are read by the projector's own readers (`PublishedEpg.authoritativeSnapshot`, `DiscoveryAuthority.routeRead`, `OwnerReview.readFenced`) behind a guard that lets one read-only `SELECT` through and refuses every other statement; their bucket refuses every read. The metadata cache (`film_metadata`) is not an input: the projector writes it, and the stage A witness covers it. `tmdb_retirement_current` (migration `0016`) is the **actual** side of the retirement class; the expected side comes from `identity/tmdb-retirements.json`.
+
+### Capture protocol and manifest
+
+1. **D1 gate, before** (read-only `SELECT`s, `GATE_STATEMENTS`): schema version, `film_person_authority`, `film_person_cas`, `film_person_baseline`, the `enrichment` row of `projection_run`, `projector_window` (migration `0018`), `discovery_authority` (generation), `discovery_lease`, `published_epg_authority`, `owner_review_authority`; plus the stage A content witness (`readWitness`). Refusals before any R2 request: schema other than 18, marker not `r2`/`prepared` and `open`, fence not 1, a live projector lease, a live window, a live discovery lease, a held discovery or published cutover, an unknown authority mode, owner writes held.
+2. **R2, per allowlisted key:** `HEAD` (ETag, size), `GET` with `If-Match` and `Accept-Encoding: identity`, `HEAD` again; sha256 of the bytes; a size over the cap (`MAX_OBJECT_BYTES`, `MAX_TOTAL_BYTES`) refuses before the `GET`; a missing required object, malformed JSON or a wrong shape refuses. The client is the read-only client of `scripts/r2-snapshot-export.mjs` (it can only build `GET` and `HEAD`).
+3. **D1-derived inputs** through the guarded readers, each recorded by generation and digest.
+4. **D1 gate and witness, after;** then every ETag once more by `HEAD` (the projector's own `etagRecheck`, now after the D1 reads).
+5. **Manifest** (`manifestVersion` 1): source identity (bucket only, no account id), the allowlist digest, the run id, the D1-routed inputs, per key `{state: present|absent, etag, size, sha256, role}`, the D1 gate before and after, the witness before and after, the digest of the whole (no timestamp inside it, so two captures of the same state have the same digest) and `notCovered`. Raw objects are held by the caller and checked against the manifest (`verifyManifest`) before use.
+6. **Resume** (`checkpoint`, `maxKeys`): a checkpoint is used only when the D1 gate is unchanged, the allowlist digest is the same and every stored key is still at its stored ETag; otherwise it is discarded whole and the capture starts again. One manifest never mixes two cuts.
+
+Every failure is a stable reason and fails closed: `missing:<id>`, `malformed:<id>`, `size_cap:<id>`, `etag_changed:<id>`, `etag_changed_after:<id>`, `probe_failed:<id>`, `probe_malformed:<id>`, `gate_unreadable:<id>`, `marker_moved`, `baseline_moved`, `fence_moved`, `discovery_generation_moved`, `published_moved`, `witness_moved`, `projector_lease_live`, `window_live`, `writer_active:<id>`, `key_not_allowlisted`, `d1_statement_refused`, `r2_read_in_d1_derived`.
+
+### What "the cut" is, and what it is not
+
+The cut is: each R2 object at one ETag across two or three `HEAD`s and a conditional `GET`; the D1 gate rows and the witness equal before and after the reads; and, for the D1 side of the parity run, the stage A stable cut (the projector's lease, renewed per page, plus the witness). **Equal R2 ETags alone do not prove a consistent snapshot across R2 and D1:** they prove only that an object did not change between two requests. The cut does not cover writers that bypass the projector lease (owner operations, Admin routes, the AIR-286 credits script) beyond what the witness fingerprints, and it does not cover inputs that move between the R2 reads and the D1 reads, or a D1-owned input that changes after its read and before the stage A cut. The capture itself holds no lease (it writes nothing), so the projector can run while it reads. A report that says "consistent" says only that every guard held; it is a measurement of one moment, not a proof.
+
+### Parity run and report
+
+`runParity` takes a verified manifest, builds the expected classes with the projector's real view, reads D1 with `readStableCut` (the one D1 write of a parity run: the lease row), re-checks every ETag after the D1 cut (`etag_changed_after_cut:<id>`), builds the ledger and a report: coverage per class (expected and actual counts, missing / extra / differs, explained / unexplained, class digests), the ledger digest and the report digest. `ownerLink` (identity link and state classified by the D1 writer) cannot be derived offline and is reported **unavailable**, so the ledger is incomplete and `baselineGate` stays closed. The report's source is never `verified`: **a stage B report can never record a baseline**, and it says so (`measurement: true`, `authorizes: nothing`). Reports carry counts and 12-hex hashes only, never an id, title or name.
+
+### Diagnostics (never automatic exceptions)
+
+They classify and count; none is an exception and none changes the ledger. An exception keeps the existing owner shape (`class`, `key`, `reason`, `approvedBy`).
+
+- **(a) Person keys stored in D1 and absent from the view** (`diagnosePersonKeys`; 48,807 keys against 48,804 view people on 10 Nov 2026). Candidate cause, first match wins: `key_without_person_row`, `renamed_id` (the view holds another id with the same `role_id`), `merged_or_deduplicated` (an external id the view assigns to another Person), `retired` (all credits on retired or redirected Films), `removed_from_sources`.
+- **(b) The fifth redirect** (`diagnoseRedirects`; five `film_redirect` rows written in one batch at 2026-11-10T02:00:42Z against four owner-confirmed retirements). Each redirect: `expected_redirect`, `corresponds_to_retirement` or `no_expected_source`, with its batch time; and the retirements that have no redirect.
+- **(c) Changed Films a complete run does not write** (`diagnoseChangedFilms`; `retainedFilms` reason `duplicate_film_retained`). A Film whose change key differs from `projection_state`: `retained_duplicate` (an expected redirect whose old Film D1 still holds, with prediction facts, using the projector's own SQL `factsSql`, drift-tested against `src/canonical-repository.js`), `changed_but_unwritten` (the same without facts) or `other`.
+
+### Stage B production GO PLAN (plan, not executed, authorizes nothing)
+
+This section is a plan for a later owner decision. It authorizes no read and no write.
+
+- **Allowlist:** exactly `ALLOWLIST` above; no bucket listing or export; the D1-routed inputs only through the guarded readers.
+- **Credential:** only the read-only, bucket-scoped `R2_SNAPSHOT_*` set, loaded as the [`iptv-credentials` skill](../../.claude/skills/iptv-credentials/SKILL.md) describes and never printed. `R2_INSTALL_*` (the writer key) is never used.
+- **Order and guards:** the D1 gate read first (a refusal means no R2 request at all), then the capture of the manifest, then the D1-derived reads, then the gate and ETags again; the parity run (stage A cut, the projector lease) only as a separate step after the manifest verifies.
+- **Maximum volume (from the code):** at most 15 R2 keys, each at most four requests (`HEAD`, `GET`, `HEAD`, final `HEAD`), no list request; about 10 gate `SELECT`s and one witness set (about 20 aggregates) before and after, plus the paged D1-derived reads. Refusal caps: 64 MiB per object and 512 MiB in total (thresholds, not measurements). Stage A cut: pages of 500 rows, a lease term of 10 minutes, at most 5,000 pages; by arithmetic on the 10 Nov counts (about 9.3k Films, 49.8k Persons, 98k credits) that is on the order of a few hundred page queries. **Real object sizes, request latency, D1 time and the metadata size are unmeasured.**
+- **STOP conditions:** any reason above; a live foreign lease or window; an authority marker, schema, baseline or generation that moved; an ETag that changed; a size over a cap; any HTTP status other than 200, 404 or 412; any attempt to build a request that is not a `GET` or `HEAD` of an allowlisted key; a rate or quota error. On STOP nothing is retried automatically and the owner decides.
+- **Bans:** no bucket export, no listing, no mutation of R2 or D1 except the one stage A lease row of a parity run, no flag, cron, Task, migration, marker or baseline write, no `r2` to `prepared`.
+- **Measured parity report:** the report fields above (coverage, hashes, missing / extra / differs, explained / unexplained, the three diagnostics, `notCovered`), published only as sanitized evidence under `docs/evidence/d1-migration/`, with no id list and no payload.
