@@ -409,6 +409,7 @@ function recordRatingChange(record,incoming,effective){
   const records=[];
   for(const item of due){
    const factKey=keys.get(item.lid);if(!factKey)continue;
+   const tmdbFromKey=/^tmdb-([1-9]\d{0,11})$/.exec(factKey)?.[1]||null;
    const base={factKey,observedAt:item.watchedDate+'T00:00:00.000Z',source:'letterboxd_diary',sourceRef:item.sourceRef||null};
    const observations=[{fact:'watched',observation:await observation({...base,fact:'watched',value:true})}];
    if(item.rating!=null){
@@ -417,7 +418,7 @@ function recordRatingChange(record,incoming,effective){
     observations.push({fact:'rating',observation:{...rating,ingestedAt}});
    }
    const floors={...await summaryObservations('films-list',filmsList,item.lid,factKey),...await summaryObservations('watchlist',watchlist,item.lid,factKey)};
-   const result=await recordObservations(env,factKey,{letterboxd:item.lid},observations,{floors});
+   const result=await recordObservations(env,factKey,{letterboxd:item.lid,...(tmdbFromKey?{tmdb:tmdbFromKey}:{})},observations,{floors});
    records.push(result.record);
    if(result.outcomes.some(o=>o.outcome==='new'||o.outcome==='replaces')){
     summary.written++;
