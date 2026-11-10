@@ -1,6 +1,6 @@
 # Read paths and repair owners
 
-This page shows what a GET, a HEAD or an MCP read tool may touch, which reads **still write today** and which writer owns each repair. It follows [ADR 0107](../adr/0107-get-head-read-side-effect-boundary.md) (Proposed) and the dated [audit](../evidence/api/air-412-get-head-audit-2026-11-10.md). Solid arrows are current behavior verified by `tests/get-write-audit.mjs`; the dashed arrows are the **target** that [AIR-413](https://trello.com/c/orvuzDW5) to [AIR-416](https://trello.com/c/f7FX4Elk) deliver one by one. Nothing here authorizes a production operation.
+This page shows what a GET, a HEAD or an MCP read tool may touch, which reads **still write today** and which writer owns each repair. It follows [ADR 0107](../adr/0107-get-head-read-side-effect-boundary.md) (Accepted) and the dated [audit](../evidence/api/air-412-get-head-audit-2026-11-10.md). Solid arrows are current behavior verified by `tests/get-write-audit.mjs`; the dashed arrows are the **target** that [AIR-413](https://trello.com/c/orvuzDW5) to [AIR-416](https://trello.com/c/f7FX4Elk) deliver one by one. Nothing here authorizes a production operation.
 
 ```mermaid
 flowchart LR
