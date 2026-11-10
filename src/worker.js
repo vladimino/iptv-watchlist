@@ -330,7 +330,7 @@ function catalogFilmState(records,tmdbId){
  return {state:'conflict'};
 }
 // AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted.
-// Read only, and only when Discovery says "absent". The entry must verify exactly as film-admission.js requires (key tmdb_<n>, tmdb equal to the key,
+// Read only, and only when Discovery says "absent". The entry must verify exactly as the rated-archive admission rules require (key tmdb_<n>, tmdb equal to the key,
 // short code, sha256 digest, verification time, no watchlist field); anything else is not a Film here. Nothing is scanned: one key of one object.
 const CATALOG_ADMISSION_KEY='letterboxd/admissions/verified-films.json';
 const CATALOG_ADMISSION_SHORT=/^[A-Za-z0-9_-]{1,40}$/,CATALOG_ADMISSION_HEX=/^[0-9a-f]{64}$/;
