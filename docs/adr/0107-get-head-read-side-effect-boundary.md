@@ -1,9 +1,9 @@
 # ADR 0107: GET and HEAD are query-only; repair belongs to a named, fenced, idempotent writer
 
-**Status:** Proposed (owner approval pending; this ADR changes no runtime behavior and authorizes no operation)  
-**Original decision date:** unknown (proposal recorded 2026-11-10)  
+**Status:** Accepted (owner-approved 2026-11-10; this ADR changes no runtime behavior and authorizes no operation)  
+**Original decision date:** 2026-11-10  
 **Recorded at:** 2026-11-10  
-**Approval source:** not documented. The scope was approved by the owner on card [AIR-412](https://trello.com/c/TuRMtgFF) (umbrella [AIR-411](https://trello.com/c/6abdVoGq)); the target model below is a proposal for the owner's acceptance  
+**Approval source:** Explicit Product Owner acceptance in the [IPTV Tuning conversation](https://chatgpt.com/g/g-p-6a6e3dca6ef88191bb93fca610381c84-movies/c/6af3280b-2aac-83eb-95af-95d135acc0b4), 2026-11-10, recorded in the [AIR-412 Trello acceptance comment](https://trello.com/c/TuRMtgFF) (comment ID `6af3369a17dfc39d93953bb6`). The owner approved ADR 0107 unchanged and authorized completion of PR #477 after rendered Mermaid QA and ordinary delivery gates.  
 **Related work:** [AIR-411](https://trello.com/c/6abdVoGq), [AIR-412](https://trello.com/c/TuRMtgFF), [AIR-413](https://trello.com/c/orvuzDW5), [AIR-414](https://trello.com/c/GJefgNm8), [AIR-415](https://trello.com/c/NHyIKM6z), [AIR-416](https://trello.com/c/f7FX4Elk); dated audit [GET/HEAD read side effects, 2026-11-10](../evidence/api/air-412-get-head-audit-2026-11-10.md); [ADR 0008](0008-atomic-epg-publication.md), [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0100](0100-epg-cloudflare-workflow-executor.md)  
 **Supersedes:** None. It adds a rule that no earlier ADR states; it does not change the authority of any domain.  
 **Superseded by:** None
@@ -59,7 +59,7 @@ This ADR and its audit change no runtime code, data, flag, schedule or marker; r
 
 ## Evidence
 
-- **Original decision:** not documented; scope on [AIR-412](https://trello.com/c/TuRMtgFF).
+- **Original decision:** Product Owner approved this decision unchanged on 2026-11-10 in the [IPTV Tuning conversation](https://chatgpt.com/g/g-p-6a6e3dca6ef88191bb93fca610381c84-movies/c/6af3280b-2aac-83eb-95af-95d135acc0b4), recorded in the [AIR-412 card](https://trello.com/c/TuRMtgFF).
 - **Implementation:** the audit harness and baseline in the AIR-412 pull request (`tests/get-write-audit.mjs`, `tests/get-write-audit-lib.mjs`, `tests/get-write-audit-harness.mjs`, `tests/get-write-baseline.mjs`).
 - **Dated verification:** [audit 2026-11-10](../evidence/api/air-412-get-head-audit-2026-11-10.md) (offline, no production request).
 - **Uncertainty:** the audit runs the D1 branches of the published EPG, discovery and owner-review authorities and of the prediction domain on the production marker values as the scenarios build them; the ratings, metadata-cache and Film/Person authorities stay on R2 in every scenario. A production-only state (a private ratings seed, a different marker) can add a writer the scenarios do not reproduce. The repository's empty seed is replaced in the scenarios with pending work.
