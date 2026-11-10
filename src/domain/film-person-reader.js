@@ -333,16 +333,16 @@ function personFacts(person,store,now){
 function orderedFilmIndex(films){
  let counter=0;
  const sequence=new Map(),byTmdb=new Map(),byStored=new Map();
- const add=(index,value,key,seq)=>{let bucket=index.get(value);if(!bucket){bucket=new Map();index.set(value,bucket);}bucket.set(key,seq);};
- const drop=(index,value,key)=>{const bucket=index.get(value);if(!bucket)return;bucket.delete(key);if(!bucket.size)index.delete(value);};
+ const add=(index,value,key,seq)=>{let group=index.get(value);if(!group){group=new Map();index.set(value,group);}group.set(key,seq);};
+ const drop=(index,value,key)=>{const group=index.get(value);if(!group)return;group.delete(key);if(!group.size)index.delete(value);};
  const tmdbValues=film=>{const values=[];for(const item of film.externalIds||[])if(item.scheme==='tmdb'&&item.trusted&&!item.conflicting&&item.value===item.value)values.push(item.value);return values;};
  const place=(key,film,seq)=>{for(const value of tmdbValues(film))add(byTmdb,value,key,seq);add(byStored,storedFilmId(film),key,seq);};
  const remove=(key,film)=>{for(const value of tmdbValues(film))drop(byTmdb,value,key);drop(byStored,storedFilmId(film),key);};
  const first=(index,value)=>{
-  const bucket=index.get(value);
-  if(!bucket)return null;
+  const group=index.get(value);
+  if(!group)return null;
   let found,lowest=Infinity;
-  for(const [key,seq] of bucket)if(seq<lowest){found=key;lowest=seq;}
+  for(const [key,seq] of group)if(seq<lowest){found=key;lowest=seq;}
   return films.get(found)||null;
  };
  for(const [key,film] of films){const seq=counter++;sequence.set(key,seq);place(key,film,seq);}

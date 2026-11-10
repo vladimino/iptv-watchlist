@@ -143,7 +143,7 @@ for(const seed of [1,2,3,4,5,6,7,8])assert.ok(modelHolds(indexed,seed),'the Film
 // 3. deliberate defects in the indexed code: each must break the store comparison or the index model somewhere
 const replaceOnce=(text,from,to)=>{assert.ok(text.includes(from),'missing: '+from);return text.replace(from,to);};
 const defects=[
- {name:'last Film wins in the TMDB bucket',reader:replaceOnce(currentReader,'for(const [key,seq] of bucket)if(seq<lowest){found=key;lowest=seq;}','for(const [key,seq] of bucket)if(true){found=key;lowest=seq;}')},
+ {name:'last Film wins in the TMDB bucket',reader:replaceOnce(currentReader,'for(const [key,seq] of group)if(seq<lowest){found=key;lowest=seq;}','for(const [key,seq] of group)if(true){found=key;lowest=seq;}')},
  {name:'a key set again moves to the end',reader:replaceOnce(currentReader,'films.set(key,film);place(key,film,sequence.get(key));return;','films.set(key,film);place(key,film,counter++);return;')},
  {name:'a deleted Film stays in the index',reader:replaceOnce(currentReader,'delete(key){if(!films.has(key))return;remove(key,films.get(key));','delete(key){if(!films.has(key))return;')},
  {name:'records not restored to list order',projection:replaceOnce(currentProjection,'placed.sort((a,b)=>a[0]-b[0]);','')},
