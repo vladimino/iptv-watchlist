@@ -14,13 +14,14 @@ import * as Authority from '../src/discovery-authority.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-l1-budget-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 let databases=0;
 const migrated=(opts={})=>{
  const file=path.join(root,'b-'+(databases++)+'.sqlite');
- const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
  return {file,db:d1Standin(file,opts)};
 };

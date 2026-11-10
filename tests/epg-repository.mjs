@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {createEpgRepository} from '../src/epg-repository.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-repo-'));
 const database=path.join(root,'epg.sqlite');
@@ -178,11 +179,11 @@ function openSqlite(file){
  };
 }
 function exec(file,sql){
- const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
 }
 function query(file,sql,params){
- const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});
+ const result=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
  const text=result.stdout.trim();
  return text?JSON.parse(text):[];

@@ -9,6 +9,7 @@ import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {mutateFilm,mutatePerson,mergeFilms} from '../src/canonical-mutations.js';
 import {resolveLocalization,loadLocalizationInputs,readLocalization,compareLocalization,recordLocalizationSources,AUTOMATIC_SOURCE_ORDER} from '../src/localization-sources.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-localization-sources-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
@@ -16,8 +17,8 @@ const NEW='0014_localization_source';
 assert.ok(names.includes(NEW),'0014 exists');
 const chain=names.filter(name=>name<NEW);
 let n=0;
-const sqlite=(file,text)=>spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
-const rows=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
+const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const sql=name=>fs.readFileSync('migrations/'+name+'.sql','utf8');
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.status,0,'expected a refusal: '+text);if(pattern)assert.match(r.stderr,pattern);};

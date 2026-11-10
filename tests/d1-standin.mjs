@@ -1,6 +1,6 @@
 // A D1 binding stand-in over the sqlite3 CLI for tests (AIR-275): prepare().bind() with first(), all() and run(), and batch()
 // applied as one transaction that rolls back whole when a statement fails, as D1 does. Foreign keys are on, as in D1.
-import {spawnSync} from 'node:child_process';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const literal=value=>{
  if(value===undefined)throw new Error('D1_TYPE_ERROR: undefined bound');
@@ -12,7 +12,7 @@ const literal=value=>{
 // `rewrite(sql)` (tests only) changes the text of every statement before it runs: the way a test makes the database compute something other than the Worker expects.
 export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=null,rewrite=null}={}){
  const calls={queries:0,batches:0,statements:0};
- const sqlite=(sql,json)=>{const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr.trim()||'sqlite failed');return result.stdout;};
+ const sqlite=(sql,json)=>{const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql});if(result.status!==0)throw new Error(result.stderr.trim()||'sqlite failed');return result.stdout;};
  const rows=text=>{const out=sqlite(text+';',true).trim();return out?JSON.parse(out):[];};
  const statement=(sql,params)=>{
   if(maxBinds!=null&&params.length>maxBinds)throw new Error('D1_ERROR: too many SQL variables at offset 0: SQLITE_ERROR');

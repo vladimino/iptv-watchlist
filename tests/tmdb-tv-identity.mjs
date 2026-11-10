@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {CONFIRMED_RETIREMENTS,RETIREMENTS_KEY,buildPlan,d1Expected,d1Holders,d1Readback,d1State,loadDomain,r2References,sqliteReader} from '../scripts/tmdb-tv-identity-plan.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 // AIR-297: the domain file is in the Worker bundle (tests/tmdb-tv-runtime.mjs covers the runtime); the planner still neither
 // requests nor writes.
@@ -138,7 +139,7 @@ assert.deepEqual(refs.map(ref=>[ref.key,ref.id,ref.kind]).sort(),[
 
 // 6. The planner over a D1 stand-in and an AIR-286-shaped artifact for the four confirmed Films.
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-tmdb-tv-')),file=path.join(root,'d1.sqlite'),artifact=path.join(root,'air286');
-const sqlite=(sql,json=false)=>{const r=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
+const sqlite=(sql,json=false)=>{const r=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const rows=sql=>{const out=sqlite(sql,true).trim();return out?JSON.parse(out):[];};
 for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity'])sqlite(fs.readFileSync('migrations/'+name+'.sql','utf8'));
 const T='2026-10-29T00:00:00.000Z';

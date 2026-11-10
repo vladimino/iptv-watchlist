@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {mkdtemp} from 'node:fs/promises';
 import {BATCH_BYTES, createCacheBinding, migrationStatements, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, runMetadataCacheProduction, STATEMENT_BYTES} from '../scripts/metadata-cache-production.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const NOW=Date.parse('2026-11-01T10:00:00.000Z');
 const TOKEN='test-token-value';
@@ -15,7 +16,7 @@ const script=path.resolve('scripts/metadata-cache-production.mjs');
 const roots=[];
 
 function sql(file, input, {json=false}={}){
- const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8',maxBuffer:1<<26});
+ const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8',maxBuffer:1<<26});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
  if(!json)return result.stdout;
  const text=result.stdout.trim();
@@ -24,7 +25,7 @@ function sql(file, input, {json=false}={}){
 function applyMigrations(file, count){
  const names=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache'];
  for(const name of names.slice(0,count)){
-  const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/'+name+'.sql','utf8'),encoding:'utf8'});
+  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/'+name+'.sql','utf8'),encoding:'utf8'});
   if(result.status!==0)throw new Error(name+'\n'+result.stderr);
  }
 }
@@ -65,13 +66,13 @@ async function install(options={}){
    if(armed==='load-empty')return responseJson({success:true,result:[{success:true,results:[]}]});
    if(armed==='activate-stale')return responseJson({success:true,result:[{success:true,results:[{mode:'r2',cacheGeneration:1,mirrorGeneration:1,mirrorEtag:'stale'}]}]});
   }
-  const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
+  const result=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   const text=result.stdout.trim();
   return responseJson({success:true,result:[{success:true,results:text?JSON.parse(text):[]}]});
  }
  function runBatch(file, statements){
-  const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+statements.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
+  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+statements.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   return responseJson({success:true,result:statements.map(()=>({success:true,results:[]}))});
  }

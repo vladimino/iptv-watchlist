@@ -5,7 +5,7 @@ import path from 'node:path';
 
 // AIR-378. Runs every self-contained test file in its own Node process (process isolation is kept), a bounded number at a time.
 //
-//   npm test                          default: min(4, CPUs) files at a time
+//   npm test                          default: min(6, ceil(1.5 x CPUs)) files at a time (AIR-408: the suite waits more than it computes)
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
@@ -28,20 +28,21 @@ const FIXTURE_DEPENDENT=new Set([
 const SERIAL_ONLY=new Set([
  'local-dev-smoke.mjs',
 ]);
-// Scheduling hint only: the slowest files (measured sequentially, docs/evidence/ci/test-runner-air-378-2026-11-07.md) start first so the
+// Scheduling hint only: the slowest files (measured with the persistent sqlite session of AIR-408, docs/evidence/ci/test-suite-air-408-2026-11-10.md) start first so the
 // long ones do not end up alone at the tail. A name that no longer exists, or a new slow file that is missing here, changes the wall time and
 // nothing else: every file still runs exactly once.
 const START_FIRST=[
  'generation-stage.mjs',
+ 'projector-bulk.mjs',
  'discovery-chunk-budget.mjs',
- 'discovery-production.mjs',
- 'd1-enrichment.mjs',
  'epg-r2-known-length.mjs',
- 'discovery-authority.mjs',
- 'prediction-domain-production.mjs',
- 'film-person-authority.mjs',
- 'd1-backfill.mjs',
- 'offline-importer.mjs',
+ 'discovery-decisions-read.mjs',
+ 'discovery-production.mjs',
+ 'film-person-baseline.mjs',
+ 'epg-orchestration.mjs',
+ 'run-tests-runner.mjs',
+ 'd1-enrichment.mjs',
+ 'events-type-filter.mjs',
 ];
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
@@ -99,7 +100,9 @@ async function main(){
  const directory=option(args,'dir','TEST_DIR','tests');
  const serialOnly=new Set((option(args,'serial-only','TEST_SERIAL_ONLY','')||'').split(',').filter(Boolean));
  const requestedSerial=args.includes('--serial')||process.env.TEST_JOBS==='1';
- const jobs=requestedSerial?1:positive(option(args,'jobs','TEST_JOBS',undefined),'--jobs',Math.max(1,Math.min(4,availableParallelism())));
+ // AIR-408: most files wait (timers, child processes, workerd) more than they compute, so a few more files than CPUs run at once. Measured on 4 vCPU:
+ // jobs 4 = 149 s, 6 = 119 s, 8 = 115 s (docs/evidence/ci/test-suite-air-408-2026-11-10.md); 6 is the default cap, `--jobs` overrides it.
+ const jobs=requestedSerial?1:positive(option(args,'jobs','TEST_JOBS',undefined),'--jobs',Math.max(1,Math.min(6,Math.ceil(availableParallelism()*1.5))));
  const timeoutMs=positive(option(args,'timeout-ms','TEST_TIMEOUT_MS',undefined),'--timeout-ms',300000);
  const plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY});
  // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.

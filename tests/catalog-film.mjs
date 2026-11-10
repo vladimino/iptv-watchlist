@@ -11,6 +11,7 @@ import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import * as PublishedEpgModule from '../src/published-epg.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 // ---- 1. readFilmAdmission against a real schema (sqlite stand-in) ----
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-film-'));
@@ -18,7 +19,7 @@ let databases=0;const seen=[];
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=11).sort();
 const migrated=()=>{
  const file=path.join(root,'film-'+(databases++)+'.sqlite');
- const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
  return d1Standin(file,{onQuery:async text=>{seen.push(text);}});
 };

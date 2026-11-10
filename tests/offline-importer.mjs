@@ -9,7 +9,10 @@ import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {acceptanceClasses,classifyObject,identityResolver,importBatch,inventory,parityClaim,projectSource,r2OnlyFamily,readDiscovery,refusal,verifyParity} from '../src/offline-importer.js';
 import {manifestFor} from '../scripts/migration-export.mjs';
-import {loadDomainRules,openSqlite as snapshotSqlite} from '../scripts/offline-import.mjs';
+import {loadDomainRules,openSqlite as snapshotSqliteProcess} from '../scripts/offline-import.mjs';
+import {sqliteSync,sqliteRunner} from './sqlite-session.mjs';
+// AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
+const snapshotSqlite=file=>snapshotSqliteProcess(file,{runner:sqliteRunner});
 
 const source=fs.readFileSync('src/offline-importer.js','utf8');
 assert.doesNotMatch(source,/d1_databases|\bBUCKET\b|\bfetch\b|\bwrangler\b|INSERT INTO film\s|INSERT INTO prediction_current|INSERT INTO fingerprint_payload/);
@@ -713,7 +716,7 @@ function openSqlite(file){
  const state={buffer:null};
  return {run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},get(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return Promise.resolve(query(file,sql,params)[0]??null);},all(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return Promise.resolve(query(file,sql,params));},async transaction(fn){if(state.buffer)return fn();state.buffer=[];try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}finally{state.buffer=null;}}};
 }
-function exec(file,sql){const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');}
-function query(file,sql,params){const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');const text=result.stdout.trim();return text?JSON.parse(text):[];}
+function exec(file,sql){const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');}
+function query(file,sql,params){const result=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');const text=result.stdout.trim();return text?JSON.parse(text):[];}
 function render(sql,params=[]){let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('Missing SQL parameter');return literal(params[index++]);});if(index!==params.length)throw new Error('Unused SQL parameter');return text;}
 function literal(value){if(value==null)return 'NULL';if(typeof value==='number'){if(!Number.isFinite(value))throw new Error('Bad SQL number');return String(value);}if(typeof value==='boolean')return value?'1':'0';return "'"+String(value).replaceAll("'","''")+"'";}
