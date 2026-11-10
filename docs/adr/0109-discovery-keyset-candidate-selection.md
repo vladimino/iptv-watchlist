@@ -1,9 +1,9 @@
 # ADR 0109: A D1 paged discovery chunk selects candidates by keyset, not by walking the ledger
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-10  
 **Recorded at:** 2026-11-10  
-**Approval source:** pending owner acceptance on AIR-425  
+**Approval source:** Product Owner explicit approval on [AIR-425](https://trello.com/c/oxFXx6Bn), 2026-11-10, accepting the same-evidence `excluded_nonfilm` / title-screen-only change limitation as a follow-up  
 **Related work:** [AIR-425](https://trello.com/c/oxFXx6Bn), [ADR 0085](0085-d1-authoritative-discovery.md), [AIR-352 budget](../evidence/d1-migration/air-352-chunk-budget-2026-11-05.md)  
 **Supersedes:** None (the paged walk remains for status counts)  
 **Superseded by:** None
