@@ -14,6 +14,9 @@
 
 export const DOCUMENT_BYTES=60000;
 export const CONTRACT=10;
+// Keyset pages, same bound as the prediction overlay: D1 `.all()` without LIMIT is not a complete table.
+export const RATINGS_OVERLAY_PAGE=300;
+export const RATINGS_OVERLAY_ROWS=20000;
 const FENCE_SQL='UPDATE ratings_domain_cas SET ok=changes() WHERE id=1';
 const TABLES=['ratings_domain_authority','ratings_domain_cas','ratings_document','ratings_view'];
 const EXACT=new Set([
@@ -274,11 +277,22 @@ export async function projectView(env,records){
  return {owned:true,changed:statements.length};
 }
 
+async function overlayViewRows(db){
+ const rows=[];let after='',total=0;
+ for(;;){
+  const page=await many(db,'SELECT alias_id, watched, actual_rating, watchlist, rating_known FROM ratings_view WHERE alias_id>? ORDER BY alias_id LIMIT ?',[after,RATINGS_OVERLAY_PAGE]);
+  total+=page.length;
+  if(total>RATINGS_OVERLAY_ROWS)throw failed('ratings_domain_unavailable');
+  rows.push(...page);
+  if(page.length<RATINGS_OVERLAY_PAGE)return rows;
+  after=page[page.length-1].alias_id;
+ }
+}
 export async function overlayView(env,index){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);
  if(!authority.ready)return index;
- const rows=await many(db,'SELECT alias_id, watched, actual_rating, watchlist, rating_known FROM ratings_view');
+ const rows=await overlayViewRows(db);
  const base=index&&typeof index==='object'&&!Array.isArray(index)?index:{};
  const next={};
  for(const [id,item] of Object.entries(base)){

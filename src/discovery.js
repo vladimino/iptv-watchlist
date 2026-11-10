@@ -618,61 +618,53 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   try{return await write();}
   catch(e){if(e?.code!=='discovery_fence')throw e;try{await fence();}catch(le){throw lost(le,'write');}return null;}
  };
- const decisions=(await loadJSON(env,'epg/discovery-resolution.json'))||{};
- const films=(await loadJSON(pinned,'epg/discovered-films.json'))||{};
+ const selectAfter=typeof last?.selectAfter==='string'?last.selectAfter:'';
+ const touchAfter=typeof last?.touchAfter==='string'?last.touchAfter:'';
  const watchlist=report.films||[],knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
- for(const film of [...Object.values(films),...watchlist])indexFilm(film);
- // The cheap pass, folded into the one walk: a candidate the screen rejects gets an excluded decision, one with a
- // confirmed TMDB id and no standing decision is verified by that alias, and a hot verified Film takes the candidate's
- // airings. Its effect decides what is still actionable, but only a bounded part is written per chunk; the rest is
- // counted and left for the next one, which finds it again. Nothing is written during the walk.
  const cheap={decisions:new Map(),decisionTotal:0,films:new Set(),before:new Map()};
- const pending=[];
- let remaining=0,seen=0,maxPage=0,error=null,retryAt=null;
+ const pending=[],decisions={};
+ let error=null,retryAt=null;
  const walkStarted=Date.now();
- const walked=await DiscoveryAuthority.walkObservationPages(env,{concurrency:PAGED_WALK_CONCURRENCY,shouldStop:()=>Date.now()>=walkDeadline,beforeBatch:heartbeat,onPage:items=>{
-  maxPage=Math.max(maxPage,items.length);
-  seen+=items.length;
-  const now=Date.now();
-  for(const candidate of items){
-   const stored=decisions[candidate.key];
-   let decision=stored;
-   const reason=screenedNonfilmReason(candidate,stored);
-   if(reason){
-    if(stored?.status!=='excluded_nonfilm'){decision={status:'excluded_nonfilm',reason,checkedAt:startedAt};cheap.decisionTotal++;if(cheap.decisions.size<PAGED_CHEAP_DECISIONS)cheap.decisions.set(candidate.key,{previous:stored??null,next:decision,kind:'screened'});}
-   }else{
-    if(candidate.confirmedTmdbId&&(!stored||stored.status==='excluded_nonfilm')&&!ownerRejected(stored,candidate.confirmedTmdbId)){
-     decision={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};
-     cheap.decisionTotal++;if(cheap.decisions.size<PAGED_CHEAP_DECISIONS)cheap.decisions.set(candidate.key,{previous:stored??null,next:decision,kind:'alias'});
-    }
-    if(decision?.status==='verified'){
-     const filmKey='tmdb_'+decision.tmdbId,film=films[filmKey];
-     if(film&&candidateIsHot(candidate,now)){
-      if(!cheap.before.has(filmKey))cheap.before.set(filmKey,JSON.stringify(film));
-      films[filmKey]=touchCanonicalFilm(film,candidate,source.programmeRunId);
-      cheap.films.add(filmKey);
-     }
+ const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,touchAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
+ timings.walkMs=Date.now()-walkStarted;timings.pages=selected.queries;timings.concurrency=1;
+ const maxPage=selected.items.length;
+ const walkComplete=selected.complete===true||selected.items.length>0;
+ if(!selected.items.length&&selected.remaining>0&&!walkComplete){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
+ const films=(await loadJSON(pinned,'epg/discovered-films.json'))||{};
+ for(const film of [...Object.values(films),...watchlist])indexFilm(film);
+ const nowSelect=Date.now();
+ for(const row of [...selected.items,...selected.touches]){
+  const candidate=row.candidate,stored=row.decision||null;
+  decisions[candidate.key]=stored;
+  let decision=stored;
+  const reason=screenedNonfilmReason(candidate,stored);
+  if(reason){
+   if(stored?.status!=='excluded_nonfilm'){decision={status:'excluded_nonfilm',reason,checkedAt:startedAt};cheap.decisionTotal++;if(cheap.decisions.size<PAGED_CHEAP_DECISIONS)cheap.decisions.set(candidate.key,{previous:stored??null,next:decision,kind:'screened'});}
+  }else{
+   if(candidate.confirmedTmdbId&&(!stored||stored.status==='excluded_nonfilm')&&!ownerRejected(stored,candidate.confirmedTmdbId)){
+    decision={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};
+    cheap.decisionTotal++;if(cheap.decisions.size<PAGED_CHEAP_DECISIONS)cheap.decisions.set(candidate.key,{previous:stored??null,next:decision,kind:'alias'});
+   }
+   if(decision?.status==='verified'){
+    const filmKey='tmdb_'+decision.tmdbId,film=films[filmKey];
+    if(film&&candidateIsHot(candidate,nowSelect)){
+     if(!cheap.before.has(filmKey))cheap.before.set(filmKey,JSON.stringify(film));
+     films[filmKey]=touchCanonicalFilm(film,candidate,source.programmeRunId);
+     cheap.films.add(filmKey);
     }
    }
-   if(!resolutionActionability(candidate,decision,now))continue;
-   remaining++;
-   pending.push(candidate);
-   pending.sort((a,b)=>(candidateIsHot(b,now)?1:0)-(candidateIsHot(a,now)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
-   if(pending.length>limit)pending.pop();
   }
- }});
- timings.walkMs=Date.now()-walkStarted;timings.pages=walked.pages;
- // A walk that ran out of budget has not seen the whole ledger, so no candidate can be chosen and no count is exact.
- // The chunk says so and backs off instead of repeating the same slow read: a bounded selection for a ledger this
- // large needs a query-side selection, which this walk is not.
- const walkComplete=walked.complete!==false;
- if(walkComplete&&seen!==source.itemCount)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
- if(!walkComplete){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
+  if(!resolutionActionability(candidate,decision,nowSelect))continue;
+  pending.push(candidate);
+ }
+ pending.sort((a,b)=>(candidateIsHot(b,nowSelect)?1:0)-(candidateIsHot(a,nowSelect)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
+ const queued=new Set(pending.map(candidate=>candidate.key));
+ if(pending.length>limit)pending.length=limit;
  let checked=0,added=0,tmdbCalls=0,screenedOut=0,knownAliases=0,touchedWritten=0,cheapRemaining=0;
  const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
  const cheapStarted=Date.now();
- if(walkComplete){
+ if(selected.items.length||selected.touches.length){
   // Decisions first, then the touched Films, in small atomic groups. The clock is checked between groups, so a slow D1
   // stops the cheap pass with what is already written kept and the rest counted in `cheapRemaining`.
   const planned=[...cheap.decisions];
@@ -795,10 +787,24 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  timings.tmdbMs=Date.now()-tmdbStarted;
  // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
  // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
- // The preview is the last scored chunk's outcomes; a chunk that never read the whole ledger has none to replace it with.
- if(walkComplete&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){throw lost(e,'preview');}}
+ // The preview is this chunk's scored outcomes. remaining is the SQL actionable set minus what this chunk settled, not the page.
+ if((walkComplete||checked>0)&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){throw lost(e,'preview');}}
  timings.writeMaxMs=writeCostMs;
- const summary={schemaVersion:2,stage:error||remaining>checked||cheapRemaining>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining:walkComplete?Math.max(0,remaining-checked):null,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,timings};
+ const settled=checked+screenedOut+knownAliases;
+ const remaining=Number.isInteger(selected.remaining)?Math.max(0,selected.remaining-settled):null;
+ // Cursor losslessness: advance only through a key-ordered prefix that this chunk handled (cheap skip or TMDB
+ // checked). Unprocessed pending keys stay at or after the cursor; a wrap revisits them. Hot-sort never skips.
+ const handled=new Set();
+ for(const row of selected.items)if(!queued.has(row.candidate.key))handled.add(row.candidate.key);
+ for(const candidate of pending.slice(0,checked))handled.add(candidate.key);
+ let nextAfter=selectAfter;
+ for(const row of selected.items){
+  if(!handled.has(row.candidate.key))break;
+  nextAfter=row.candidate.key;
+ }
+ if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
+ const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
+ const summary={schemaVersion:2,stage:error||cheapRemaining>0||remaining==null||remaining>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
@@ -1231,7 +1237,7 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  if(result.stage==='error')return {stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null};
  if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
- if(!result.remaining&&!result.cheapRemaining)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ if(result.remaining===0&&!(result.cheapRemaining>0)&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
  return {stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
 }
