@@ -36,6 +36,10 @@ assert.match(fs.readFileSync('src/discovery.js','utf8'),/PublishedEpg\.currentGe
 assert.doesNotMatch(fs.readFileSync('src/published-epg.js','utf8'),/INTO candidate |INTO film |prediction_domain|film_person_credit|watchlist_film/);
 assert.doesNotMatch(fs.readFileSync('src/admin/read.js','utf8'),/env\.DB\b/);
 assert.match(fs.readFileSync('src/admin/read.js','utf8'),/PublishedEpg\.currentGeneration\(env\)/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/PublishedEpg\.repairMirrors\(/);
+assert.doesNotMatch(fs.readFileSync('src/admin/read.js','utf8'),/PublishedEpg\.repairMirrors\(/);
+assert.match(fs.readFileSync('src/epg-orchestration.js','utf8'),/PublishedEpg\.repairMirrors/);
+assert.match(fs.readFileSync('src/published-epg.js','utf8'),/mirrorWatchlistEtag:authority\.mirrorWatchlistEtag/);
 assert.match(fs.readFileSync('src/admin/posters.js','utf8'),/PublishedEpg\.currentGeneration\(env\)/);
 assert.match(fs.readFileSync('src/letterboxd-ratings.js','utf8'),/PublishedEpg\.currentGeneration\(env\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/gate\.cutover==='held'/);
@@ -411,6 +415,18 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(repaired.mirrored,true);
  assert.equal(JSON.parse(bucket.objects.get('watchlist.json').text).films[0].id,'film:heat');
  assert.equal(JSON.parse(bucket.objects.get('epg/published-generation.json').text).programmeRunId,'run-mix');
+ const live=await currentGeneration({DB:db,BUCKET:flaky});
+ assert.equal(live.mirrors.aligned,true);
+ assert.ok(live.mirrorWatchlistEtag);
+ let alignedPuts=0;
+ const counting={
+  async get(key){return bucket.get(key);},
+  async put(){alignedPuts++;throw new Error('aligned repair must not write');},
+ };
+ const aligned=await repairMirrors({DB:db,BUCKET:counting});
+ assert.equal(aligned.aligned,true);
+ assert.equal(aligned.wrote,false);
+ assert.equal(alignedPuts,0);
 }
 
 {

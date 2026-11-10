@@ -6,7 +6,7 @@ Offline helper: [`scripts/schema-preflight.mjs`](../../scripts/schema-preflight.
 
 ## 1. Read-only preflight (immediately before any apply)
 
-Every statement is one `SELECT` (the helper refuses anything else). Run them in this order and keep the rows as evidence; write nothing, run no write-bearing GET (`GET /api/programme`, `GET /api/watchlist` and Admin can call `repairMirrors`).
+Every statement is one `SELECT` (the helper refuses anything else). Run them in this order and keep the rows as evidence; write nothing. Do not call `GET /api/enrichment/view`, `GET /api/events`, `GET /api/enrichment/status` or `GET /api/enrichment/runs` as a probe.
 
 1. **Code and target.** The current `main` SHA and the deployed Worker version (a Workers deployments list or the post-merge `Deploy to Cloudflare` run), and that the target is the D1 database named `iptv` (database id from the account listing).
 2. **Schema.** `preflightSteps()` gives `version` (`schema_contract`: exactly one row), `prerequisites` (the twelve tables of a complete v12), `inventory` (which of the objects of `0013` to `0016` exist) and `projector_lease`. When the version is at least 13 and the `0013` tables exist, `MARKER_STEPS` gives `marker`, `fence` and `baseline`.

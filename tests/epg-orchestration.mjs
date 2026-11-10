@@ -20,6 +20,7 @@ const H=3600000,MIN=60000;
 const at=ms=>new Date(ms).toISOString();
 const plain=value=>JSON.parse(JSON.stringify(value));
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
+const start=result=>{const {mirrors,...rest}=result;return rest;};
 const source=fs.readFileSync('src/epg-orchestration.js','utf8');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-orchestration-'));
 let databases=0;
@@ -71,7 +72,7 @@ function load({sync,pipeline,authority={ready:true},workflow=null,db}){
  const context=vm.createContext({console,Date,Math,JSON,Promise,Intl,URL,crypto:webcrypto});
  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
  context.loadJSON=async(env,key)=>key==='sync.json'?(state.sync?JSON.parse(JSON.stringify(state.sync)):null):null;
- context.PublishedEpg={readAuthority:async()=>{if(state.authority.throws)throw new Error('unavailable');return state.authority;}};
+ context.PublishedEpg={readAuthority:async()=>{if(state.authority.throws)throw new Error('unavailable');return state.authority;},repairMirrors:async()=>({mirrored:true,aligned:true,wrote:false})};
  context.postSync=async(env,execution,pathname,body,caller)=>{
   state.calls.push({pathname,body,caller,fence:env?.epgFence??null});
   const reply=await pipeline(pathname,body,state,env);
@@ -115,7 +116,7 @@ const idle=()=>({body:{}});
  for(const db of [undefined,noTable]){
   const wf=binding();
   const {epg,env}=load({pipeline:idle,workflow:wf,db});
-  eq(await epg.ensure(env,{now:Date.parse('2026-11-07T17:00:00Z')}),{started:false,reason:'external'});
+  eq(start(await epg.ensure(env,{now:Date.parse('2026-11-07T17:00:00Z')})),{started:false,reason:'external'});
   eq(await epg.externalGate(env),{reason:null,fence:null});
   assert.equal(wf.creates.length,0);
   const model=await epg.readModel(env,Date.parse('2026-11-07T17:00:00Z'));
@@ -125,7 +126,7 @@ const idle=()=>({body:{}});
  const external=database();
  const wf=binding();
  const {epg,env}=load({pipeline:idle,workflow:wf,db:external});
- eq(await epg.ensure(env,{now:Date.parse('2026-11-07T17:00:00Z')}),{started:false,reason:'external'},'the table applied, the mode absent: still external');
+ eq(start(await epg.ensure(env,{now:Date.parse('2026-11-07T17:00:00Z')})),{started:false,reason:'external'},'the table applied, the mode absent: still external');
  eq(await epg.externalGate(env),{reason:null,fence:{revision:null}},'the external path carries a fence on the absent mode document');
  assert.equal(wf.creates.length,0);
  assert.equal(one(external,'SELECT COUNT(*) FROM epg_orchestration_document'),0,'reads write nothing');
@@ -192,18 +193,18 @@ const control=async harness=>(await harness.epg.readControl(harness.env)).record
  const h=cloudflare();
  const {epg,env,wf,state}=h;
  const before=Date.parse('2026-11-07T15:59:00Z'),due=Date.parse('2026-11-07T16:00:00Z');
- eq(await epg.ensure(env,{now:before}),{started:false,reason:'not_due',dueAt:'2026-11-07T16:00:00.000Z'});
+ eq(start(await epg.ensure(env,{now:before})),{started:false,reason:'not_due',dueAt:'2026-11-07T16:00:00.000Z'});
  // Two overlapping firings at the due time create exactly one instance.
  const [a,b]=await Promise.all([epg.ensure(env,{now:due}),epg.ensure(env,{now:due})]);
  const results=[a,b].sort((x,y)=>String(x.reason||'').localeCompare(String(y.reason||'')));
  assert.equal(results.filter(r=>r.started===true).length,1,'one firing starts');
  assert.equal(wf.creates.length,1);eq(wf.creates[0],{id:'epg_20261107_0',params:{runKey:'2026-11-07',series:0,epoch:1}});
  assert.equal((await control(h)).phase,'starting');
- eq(await epg.ensure(env,{now:due+MIN}),{started:false,reason:'in_progress',instanceId:'epg_20261107_0'});
+ eq(start(await epg.ensure(env,{now:due+MIN})),{started:false,reason:'in_progress',instanceId:'epg_20261107_0'});
  // A platform status that cannot be read is not an ended instance.
  const unreadable={...wf,get:async()=>{throw new Error('platform')}};
  env.EPG_WORKFLOW=unreadable;
- eq(await epg.ensure(env,{now:due+2*MIN}),{started:false,reason:'status_unknown',instanceId:'epg_20261107_0'});
+ eq(start(await epg.ensure(env,{now:due+2*MIN})),{started:false,reason:'status_unknown',instanceId:'epg_20261107_0'});
  env.EPG_WORKFLOW=wf;
  // The instance ended with the run unfinished: a counted transient failure, a cooldown, then a successor series under the same day key.
  wf.instances.set('epg_20261107_0','errored');
@@ -216,7 +217,7 @@ const control=async harness=>(await harness.epg.readControl(harness.env)).record
  // A held published authority starts nothing.
  state.authority={ready:false};
  const nextDay=Date.parse('2026-11-08T16:00:00Z');
- eq(await epg.ensure(env,{now:nextDay}),{started:false,reason:'authority_held'});
+ eq(start(await epg.ensure(env,{now:nextDay})),{started:false,reason:'authority_held'});
  state.authority={ready:true};
  // A created instance that answers exists attaches; a lost create response reads the platform before anything else.
  wf.createFails='exists';
@@ -237,16 +238,16 @@ const control=async harness=>(await harness.epg.readControl(harness.env)).record
  const record=await control(h2);assert.equal(record.stopReason,'create_uncertain');assert.equal(record.budget.consecutive,1);
  // No Workflow binding: nothing runs.
  const h3=cloudflare();h3.env.EPG_WORKFLOW=null;
- eq(await h3.epg.ensure(h3.env,{now:due}),{started:false,reason:'workflow_unavailable'});
+ eq(start(await h3.epg.ensure(h3.env,{now:due})),{started:false,reason:'workflow_unavailable'});
  // A run of this Madrid date that is complete: nothing more to start.
  const h4=cloudflare();
  await h4.epg.ensure(h4.env,{now:due});
  const stored=await h4.epg.readControl(h4.env);
  await h4.db.prepare('UPDATE epg_orchestration_document SET body=?, revision=revision+1 WHERE key=?').bind(JSON.stringify({...stored.record,doneAt:at(due),phase:'done'}),'control').run();
- eq(await h4.epg.ensure(h4.env,{now:due+H}),{started:false,reason:'complete'});
+ eq(start(await h4.epg.ensure(h4.env,{now:due+H})),{started:false,reason:'complete'});
  // A run quarantine stops starts for that date and ends with the date.
  await h4.db.prepare('UPDATE epg_orchestration_document SET body=?, revision=revision+1 WHERE key=?').bind(JSON.stringify({...stored.record,quarantine:{reason:'repeated_failure',scope:'run'}}),'control').run();
- eq(await h4.epg.ensure(h4.env,{now:due+H}),{started:false,reason:'quarantined',scope:'run'});
+ eq(start(await h4.epg.ensure(h4.env,{now:due+H})),{started:false,reason:'quarantined',scope:'run'});
  const tomorrow=await h4.epg.ensure(h4.env,{now:Date.parse('2026-11-08T16:00:00Z')});
  assert.equal(tomorrow.started,true,'a run quarantine ends with its run key');
 }
@@ -310,7 +311,7 @@ function runner(h,{startAt}){
  assert.ok(r.log.some(n=>n.startsWith('sleep')),'a busy seal sleeps until its own catch-up time and does not spin');
  assert.ok(r.log.filter(n=>n.startsWith('act')).length<=14);
  // A second ensure on the same date starts nothing: the date is done.
- eq(await epg.ensure(env,{now:r.clock()}),{started:false,reason:'complete'});
+ eq(start(await epg.ensure(env,{now:r.clock()})),{started:false,reason:'complete'});
  const model=await epg.readModel(env,r.clock());
  assert.equal(model.health,'healthy');assert.equal(model.published,'run-1');assert.equal(model.mode,'cloudflare');assert.equal(model.sideEffects,'none');
 }
@@ -378,7 +379,7 @@ for(const stage of ['epg','seal']){
  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
  assert.notEqual(outcome.reason,'complete');
  const rec=await control(h);assert.ok(rec.quarantine,'an unsafe failure quarantines');assert.equal(rec.failure.class,'unsafe');assert.equal(rec.failure.code,'owner_conflict');
- eq(await h.epg.ensure(h.env,{now:due+H}),{started:false,reason:'quarantined',scope:'domain'});
+ eq(start(await h.epg.ensure(h.env,{now:due+H})),{started:false,reason:'quarantined',scope:'domain'});
  // The owner clears it by an explicit action that runs no step; the next ensure may start a successor.
  const calls=h.state.calls.length;
  eq(await h.epg.clearQuarantine(h.env,due+H),{action:'clear_quarantine',cleared:{control:true}});
@@ -758,7 +759,7 @@ for(const stage of ['epg','seal']){
   const outcome=await epg.run(env,{runKey:'2026-11-07',series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
   assert.equal(outcome.reason,'complete');
   assert.ok((await control(h)).doneAt,'the day is done once');
-  eq(await epg.ensure(env,{now:due+11*MIN}),{started:false,reason:'complete'});
+  eq(start(await epg.ensure(env,{now:due+11*MIN})),{started:false,reason:'complete'});
  }
 }
 console.log('epg-orchestration: ok');

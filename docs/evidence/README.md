@@ -92,5 +92,6 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-378 test runner profile, isolation audit and parallel timings | [ci/test-runner-air-378-2026-11-07.md](ci/test-runner-air-378-2026-11-07.md) |
 | AIR-408 full test suite back to two or three minutes: persistent sqlite session, uncleared timer, jobs 6 | [ci/test-suite-air-408-2026-11-10.md](ci/test-suite-air-408-2026-11-10.md) |
 | AIR-412 GET and HEAD read side-effect audit: R2 and D1 instrumentation, route inventory, baseline of the reads that write | [api/air-412-get-head-audit-2026-11-10.md](api/air-412-get-head-audit-2026-11-10.md) |
+| AIR-414 EPG compatibility mirrors: GET no longer repairs; hourly `ensure` reconciles (offline tests only) | [api/air-414-epg-mirror-reconciliation-2026-11-10.md](api/air-414-epg-mirror-reconciliation-2026-11-10.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.

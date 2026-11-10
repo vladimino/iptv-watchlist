@@ -47,3 +47,21 @@ Capture: Cloudflare telemetry (events view, service `iptv`, 15:34:00–15:36:30 
 Change: the overlay reads the prediction rows in keyset pages of 300 and applies those of indexed films. Local result on the SQLite stand-in with 8704 index keys, 3254 fingerprint rows and 3255 pointer rows: 25 queries against about 221 (including the authority marker reads), 58 ms; parity with a per-film reading on 900 keys, page boundaries 0/299/300/301/600, a table at and above 20000 rows (refused with `guard: overlay_rows`), a damaged row of an indexed film (fails closed), rows of films outside the index (ignored). A failed start now writes one sanitized line with the stage, code and guard; each pre-`next` stage was fault-injected in a test and the lease semantics checked.
 
 Limits: the overlay is the guard that production telemetry named, but it is not proven to be the last blocker on the start path. CPU and wall time of the rebuild with the full 8704-film catalogue in the Worker were not measured (the test harness has no D1-backed Worker). The queue rebuild, the dict1 write and the first `next` on production are verified only by a start the owner approves; until then the persisted queue is unchanged.
+
+## Owner-approved start after the overlay change, 10 November 2026
+
+Capture: the Trello handoff, read-only MCP, Cloudflare telemetry (events view, service `iptv`, 16:41:30–16:45:00 UTC, 44 events) and an R2 object-size listing. The owner ran the paused Task once (16:41:56–16:44:23 UTC) on `e49d7ef`.
+
+- The queue was rebuilt on the published generation `e38e3f5c…` (`refreshedAt` 16:43:13 UTC, `consistent: true`, 5450 outstanding: 3974 hot, 1476 cold) and run `0a55802d…` was saved at 16:43:23 UTC. The overlay and the `dict1` write therefore work at production volume.
+- The Task reported that it could not serialize the `prediction_start` answer. Telemetry shows why: exactly one `POST /mcp` invocation in the window ended with `outcome: exceededMemory`, HTTP 503, wall 48.9 s, CPU 12.7 s, logged at 16:43:42 UTC. Every other `/mcp` invocation is `ok`. There is no `prediction_boundary_failed` and no `prediction_domain_budget` event in the window. The caller received a platform 503, not a start answer; the answer itself is about 3.3 thousand characters and plain JSON. The invocation is tied to the start by time and by being the only failed request; the log carries no run id.
+- The start read its large inputs repeatedly in one request: the catalog three times (batch selection, queue rebuild, start event), the view index twice (each with its D1 overlay) and the programme up to three times. The isolate ended after the run was saved, in the steps that read them again for the start event.
+- Sizes at capture: `view-index.json` 8.59 MB, generation `programme.json` 2.36 MB, shared `epg/discovered-films.json` 7.67 MB (last modified 4 Nov; whether the start's catalog is this object or a larger D1-assembled one was not established).
+
+Change: the queue rebuild hands the inputs it read to the start, which reuses them for the batch selection and the start event. `scripts/prediction-start-heap-profile.mjs` (synthetic data: catalog 23.1 MB for 8704 films, index 10.3 MB, programme 1.9 MB; live V8 heap after a forced collection at every storage call) gives:
+
+| Version | Catalog / index / programme reads | Peak live heap above the idle Worker |
+| --- | --- | --- |
+| before (`e49d7ef`) | 3 / 2 / 3 | 96.3 MB |
+| after | 1 / 1 / 2 | 66.6 MB |
+
+Limits: Node's heap ranks the versions; it is not workerd's 128 MB isolate limit, and the synthetic catalog size is an assumption. The profile has no D1, so the overlay's own allocations and the D1-assembled programme are not in it. Whether the reduced start fits the production isolate is shown only by the next owner-approved start. The run `0a55802d…` was left to the ordinary lease recovery.
