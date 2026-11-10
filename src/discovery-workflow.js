@@ -44,8 +44,10 @@ function addChunkToDiscoveryTick(tick,summary){
  }
  return next;
 }
-// The queue is empty only when every part of it is a confirmed zero; an unknown part is never a zero.
-function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&(cheapRemaining===0||cheapRemaining==null)&&!error;}
+// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
+// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
+function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
+function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&cheapRemaining===0&&!error;}
 // The tick of a record with the settlement applied (kept as is when it is already settled), or null when there is no open tick to settle.
 function settledDiscoveryTick(record,reason,now){
  const tick=record?.tick;
@@ -76,23 +78,37 @@ async function putDiscoveryEvent(env,event){
 async function deliverDiscoveryTick(env){
  try{
   const state=await readWorkflowState(env),record=state.record,tick=record?.tick;
-  if(!tick?.settled||tick.delivered===true)return {delivered:false,reason:'nothing_to_deliver'};
-  const written=await putDiscoveryEvent(env,discoveryTickEvent(tick));
-  if(written!=='written'&&written!=='exists')return {delivered:false,reason:'event_'+written};
-  const marked=await writeWorkflowStateSoft(env,{...record,tick:{...tick,delivered:true}},state.etag);
-  return {delivered:true,event:written,marked:marked.saved===true};
+  const outbox=Array.isArray(record?.outbox)?record.outbox.filter(entry=>entry&&typeof entry==='object'&&entry.settled):[];
+  const open=tick?.settled&&tick.delivered!==true?tick:null;
+  if(!open&&!outbox.length)return {delivered:false,reason:'nothing_to_deliver'};
+  // The outbox holds the settled ticks of replaced generations whose event write failed. Each is written create-only and leaves the outbox
+  // only after its put is confirmed; the rest stay for the next call. The open tick is delivered the same way.
+  const left=[];let delivered=0,event=null;
+  for(const entry of outbox){const written=await putDiscoveryEvent(env,discoveryTickEvent(entry));if(written==='written'||written==='exists')delivered++;else left.push(entry);}
+  let tickDone=false;
+  if(open){const written=await putDiscoveryEvent(env,discoveryTickEvent(open));tickDone=written==='written'||written==='exists';event=written;if(tickDone)delivered++;}
+  if(!delivered)return {delivered:false,reason:'event_failed'};
+  const next={...record,tick:tickDone?{...open,delivered:true}:record.tick};
+  if(Array.isArray(record.outbox))next.outbox=left;
+  const marked=await writeWorkflowStateSoft(env,next,state.etag);
+  return {delivered:true,event,count:delivered,marked:marked.saved===true};
  }catch{return {delivered:false,reason:'error'};}
 }
-// A new generation replaces the record, so the tick of the one it replaces is delivered first (as superseded when it was still open).
-async function deliverReplacedDiscoveryTick(env,previous,programmeRunId,now){
+// A new generation replaces the record, so the tick of the one it replaces (as superseded when it was still open) is written first. An entry
+// whose put is not confirmed is NOT dropped: it goes to the `outbox` of the new record, which every later write keeps, and the next scheduled
+// reconcile delivers it. The outbox holds at most DISCOVERY_TICK_OUTBOX_LIMIT entries (the oldest is dropped past that), and a failed put never
+// blocks the new generation.
+const DISCOVERY_TICK_OUTBOX_LIMIT=8;
+async function replacedDiscoveryOutbox(env,previous,programmeRunId,now){
  try{
+  const pending=(Array.isArray(previous?.outbox)?previous.outbox:[]).filter(entry=>entry&&typeof entry==='object'&&entry.settled);
   const tick=previous?.tick;
-  if(!tick||typeof tick!=='object'||tick.delivered===true)return null;
   // An open tick of the same generation is carried by the successor, never delivered here.
-  if(previous.programmeRunId===programmeRunId&&!tick.settled)return null;
-  const settled=tick.settled?tick:{...tick,settled:{at:new Date(now).toISOString(),reason:'stale_generation'}};
-  return await putDiscoveryEvent(env,discoveryTickEvent(settled));
- }catch{return null;}
+  if(tick&&typeof tick==='object'&&tick.delivered!==true&&!(previous.programmeRunId===programmeRunId&&!tick.settled)&&!pending.some(entry=>entry.id===tick.id))pending.push(tick.settled?tick:{...tick,settled:{at:new Date(now).toISOString(),reason:'stale_generation'},delivered:false});
+  const left=[];
+  for(const entry of pending){const written=await putDiscoveryEvent(env,discoveryTickEvent(entry));if(written!=='written'&&written!=='exists')left.push(entry);}
+  return left.slice(-DISCOVERY_TICK_OUTBOX_LIMIT);
+ }catch{return Array.isArray(previous?.outbox)?previous.outbox.slice(-DISCOVERY_TICK_OUTBOX_LIMIT):[];}
 }
 // A scheduled firing that finds the queue confirmed empty. Not claimed unless the last saved status and the continuation both say so for the
 // published generation; an unknown, blocked, busy or unstarted pipeline writes nothing.
@@ -101,7 +117,7 @@ async function emitEmptyDiscoveryTick(env,programmeRunId,now){
   const stored=await readContinuation(env),last=await loadJSON(env,'epg/discovery-status.json');
   const record=stored?.record;
   if(!record||record.programmeRunId!==programmeRunId||record.stage!=='complete')return {emitted:false,reason:'not_confirmed'};
-  if(!last||last.programmeRunId!==programmeRunId||!discoveryQueueEmpty(Number.isInteger(last.remaining)?last.remaining:null,Number.isInteger(last.cheapRemaining)?last.cheapRemaining:0,last.error))return {emitted:false,reason:'not_confirmed'};
+  if(!last||last.programmeRunId!==programmeRunId||!discoveryQueueEmpty(discoveryCount(last.remaining),discoveryCount(last.cheapRemaining),last.error))return {emitted:false,reason:'not_confirmed'};
   const written=await putDiscoveryEvent(env,discoveryEmptyTickEvent(programmeRunId,now));
   return {emitted:written==='written'||written==='exists',event:written};
  }catch{return {emitted:false,reason:'error'};}
@@ -328,8 +344,8 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  // delivered and this chain starts its own.
  const startedAtMs=Date.now();
  const carried=previous?.programmeRunId===programmeRunId&&previous.tick&&typeof previous.tick==='object'&&!previous.tick.settled?previous.tick:null;
- if(!carried)await deliverReplacedDiscoveryTick(env,previous,programmeRunId,startedAtMs);
- const next={schemaVersion:1,...(same?previous:{}),tick:carried||newDiscoveryTick(programmeRunId,startedAtMs),programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
+ const outbox=carried?(Array.isArray(previous?.outbox)?previous.outbox:[]):await replacedDiscoveryOutbox(env,previous,programmeRunId,startedAtMs);
+ const next={schemaVersion:1,...(same?previous:{}),tick:carried||newDiscoveryTick(programmeRunId,startedAtMs),outbox,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
  const first=await writeWorkflowStateSoft(env,next,etag);
  if(first.windowBusy)return {started:false,reason:'projector_window',windowUntil:first.window.expiresAt??null,programmeRunId,instanceId,series};
  let wrote=first.saved;

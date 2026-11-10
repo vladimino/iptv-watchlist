@@ -121,9 +121,10 @@ function chunkStub(plan){
  context.advanceDiscovery=async()=>{
   const spec=plan[Math.min(context.chunks,plan.length-1)];context.chunks++;
   const last=context.chunks>=plan.length,at=new Date().toISOString();
-  set('epg/discovery-status.json',{schemaVersion:2,stage:last?'complete':'partial',programmeRunId:GENERATION,remaining:spec.remaining,cheapRemaining:0,checked:spec.checked,error:spec.error||null,at});
+  const cheap=Object.hasOwn(spec,'cheap')?spec.cheap:0;
+  set('epg/discovery-status.json',{schemaVersion:2,stage:last?'complete':'partial',programmeRunId:GENERATION,remaining:spec.remaining,cheapRemaining:cheap,checked:spec.checked,error:spec.error||null,at});
   set('epg/resolver-continuation.json',last?{stage:'complete',reason:null,at,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}:{stage:'paused',reason:null,at,hopId:'hop-'+context.chunks,remainingChunks:plan.length-context.chunks,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
-  return {stage:last?'complete':'partial',checked:spec.checked,added:spec.added,reused:spec.reused,screenedOut:spec.screenedOut,touched:0,tmdbCalls:spec.tmdbCalls,remaining:spec.remaining,cheapRemaining:0,error:spec.error||null,programmeRunId:GENERATION,diagnostic:{saved:{owned:true}},discovery:{reason:null,nextCatchUpAt:null}};
+  return {stage:last?'complete':'partial',checked:spec.checked,added:spec.added,reused:spec.reused,screenedOut:spec.screenedOut,touched:0,tmdbCalls:spec.tmdbCalls,remaining:spec.remaining,cheapRemaining:cheap,error:spec.error||null,programmeRunId:GENERATION,diagnostic:{saved:{owned:true}},discovery:{reason:null,nextCatchUpAt:null}};
  };
 }
 const PLAN=[
@@ -251,6 +252,70 @@ resetAll();seed({count:3});
  const next=workflowRecord().tick;assert.equal(next.programmeRunId,OTHER);assert.notEqual(next.id,oldTickId);assert.equal(next.chunks,0);assert.equal(next.settled,null);
 }
 
+// 7b. A failed event put at the replacement is not a lost event: the settled tick stays durable in the outbox of the new record, and the next
+// scheduled reconcile delivers exactly one superseded event.
+resetAll();seed({count:3});
+{
+ elect(0);
+ const record=workflowRecord();record.tick={...call('newDiscoveryTick')(GENERATION,Date.now()-60000),chunks:2,checked:20,added:2,remaining:30,cheapRemaining:0};set('epg/discovery-workflow.json',record);
+ const oldTickId=record.tick.id;
+ const stored=await call('readWorkflowState')(env);
+ failEventPuts=true;
+ const created=await call('createWorkflowInstance')(env,OTHER,0,`discovery_${OTHER.replace(/-/g,'')}_0`,stored.etag,null,stored.record);
+ assert.equal(created.started,true,'a failed event put never blocks the new generation');
+ assert.equal(discoveryEvents().length,0,'the put failed');
+ const held=workflowRecord();
+ assert.equal(held.outbox.length,1,'the old tick is kept in the outbox, not dropped');assert.equal(held.outbox[0].id,oldTickId);assert.equal(held.outbox[0].settled.reason,'stale_generation');assert.equal(held.tick.programmeRunId,OTHER);
+ // The new record keeps the outbox through the owner's own writes.
+ await call('settleWorkflowIfOwner')(env,`discovery_${OTHER.replace(/-/g,'')}_0`,{phase:'running',reason:'started'});
+ assert.equal(workflowRecord().outbox.length,1,'an ordinary write of the record keeps the outbox');
+ failEventPuts=false;
+ await call('reconcileDiscoveryWorkflow')(env);
+ const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1,'recovered exactly once');
+ assert.equal(event.id,'discovery-'+oldTickId);assert.equal(event.status,'superseded');assert.equal(event.checked,20);
+ assert.deepEqual(workflowRecord().outbox,[],'the entry leaves the outbox only after its put is confirmed');
+ await call('reconcileDiscoveryWorkflow')(env);
+ assert.equal(discoveryEvents().length,1,'a second reconcile writes nothing more');
+ assert.equal(eventKeys().length,1);
+}
+
+// 7c. Several failed replacements accumulate in the outbox and are all delivered; the outbox is bounded.
+resetAll();seed({count:3});
+{
+ const ids=Array.from({length:10},(_,i)=>`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`);
+ elect(0,ids[0]);
+ let record=workflowRecord();record.tick={...call('newDiscoveryTick')(ids[0],Date.now()-600000),chunks:1,checked:5,remaining:9,cheapRemaining:0};set('epg/discovery-workflow.json',record);
+ failEventPuts=true;
+ const firstTickIds=[];
+ for(let i=1;i<ids.length;i++){
+  const state=await call('readWorkflowState')(env);firstTickIds.push(state.record.tick.id);
+  await call('createWorkflowInstance')(env,ids[i],0,`discovery_${ids[i].replace(/-/g,'')}_0`,state.etag,null,state.record);
+ }
+ assert.equal(workflowRecord().outbox.length,8,'nine replacements, a bound of eight');
+ assert.deepEqual(workflowRecord().outbox.map(entry=>entry.id),firstTickIds.slice(-8),'the newest eight are kept');
+ failEventPuts=false;
+ const delivery=await call('deliverDiscoveryTick')(env);
+ assert.equal(delivery.delivered,true);assert.equal(discoveryEvents().length,8);assert.deepEqual(workflowRecord().outbox,[]);
+ assert.equal(new Set(discoveryEvents().map(event=>event.id)).size,8,'one event per tick');
+}
+
+// 7d. A partly failing delivery keeps exactly the entries whose put failed.
+resetAll();seed({count:3});
+{
+ elect(0);
+ const mk=(n)=>({...call('newDiscoveryTick')(GENERATION,Date.now()-n*60000),chunks:1,checked:n,remaining:1,cheapRemaining:0,settled:{at:new Date(Date.now()-n*30000).toISOString(),reason:'stale_generation'},delivered:false});
+ const a=mk(5),b=mk(7);
+ const record=workflowRecord();record.outbox=[a,b];set('epg/discovery-workflow.json',record);
+ const realWrite=context.writeDiscoveryEvent;
+ context.writeDiscoveryEvent=async(environment,event)=>{if(event.id==='discovery-'+a.id)throw new Error('put failed');return realWrite(environment,event);};
+ const first=await call('deliverDiscoveryTick')(env);
+ assert.equal(first.delivered,true);assert.equal(discoveryEvents().length,1);assert.equal(discoveryEvents()[0].id,'discovery-'+b.id);
+ assert.deepEqual(workflowRecord().outbox.map(entry=>entry.id),[a.id],'the failed entry stays');
+ context.writeDiscoveryEvent=realWrite;
+ await call('deliverDiscoveryTick')(env);
+ assert.equal(discoveryEvents().length,2);assert.deepEqual(workflowRecord().outbox,[]);
+}
+
 // 8. Empty queue: a scheduled firing that starts no chain and finds a confirmed zero writes one event per hour.
 resetAll();seed({stage:'complete',remaining:0,reason:null,count:3});
 set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
@@ -284,6 +349,8 @@ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:
  await claim('remaining unknown',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:null,cheapRemaining:0,error:null,at:iso}));
  await claim('remaining not zero',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:4,cheapRemaining:0,error:null,at:iso}));
  await claim('cheap pass pending',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:3,error:null,at:iso}));
+ for(const [label,value] of [['cheap remainder missing',undefined],['cheap remainder null',null],['cheap remainder a string','0'],['cheap remainder negative',-1],['cheap remainder fractional',0.5]])
+  await claim(label,()=>{const status={schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,error:null,at:iso};if(value!==undefined)status.cheapRemaining=value;set('epg/discovery-status.json',status);});
  await claim('status carries an error',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,error:'boom',at:iso}));
  await claim('status of another generation',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:OTHER,remaining:0,cheapRemaining:0,error:null,at:iso}));
  await claim('no status at all',()=>records.delete('epg/discovery-status.json'));
@@ -293,6 +360,20 @@ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:
  await claim('executor external',()=>{env.DISCOVERY_EXECUTOR='external';});
  env.DISCOVERY_EXECUTOR='workflow';
  context.advanceDiscovery=advanceWasCalled;
+}
+
+// 8b. An aggregated run is claimed empty only when its last saved chunk proved BOTH remainders to be zero.
+for(const [label,spec,expected] of [
+ ['both proven zero',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:0},true],
+ ['cheap remainder not reported',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:undefined},false],
+ ['cheap remainder null',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:null},false],
+ ['cheap remainder pending',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:2},false],
+ ['remaining unknown',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:null,cheap:0},false],
+]){
+ resetAll();seed({count:3});elect();chunkStub([spec]);
+ await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+ const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1,label);
+ assert.equal(event.queueEmpty,expected,label);
 }
 
 // 9. A firing that starts a chain, or finds one running, is not an empty tick.
@@ -322,7 +403,9 @@ await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step
  const added=call('addChunkToDiscoveryTick')(base,{checked:5,added:'7',reused:-1,screenedOut:null,tmdbCalls:Infinity,remaining:null,cheapRemaining:0,error:null});
  assert.equal(added.chunks,1);assert.equal(added.checked,5);assert.equal(added.added,0);assert.equal(added.reused,0);assert.equal(added.screenedOut,0);assert.equal(added.tmdbCalls,0);
  assert.equal(call('discoveryQueueEmpty')(added.remaining,added.cheapRemaining,added.error),false,'unknown remaining is not empty');
- assert.equal(call('discoveryQueueEmpty')(0,0,null),true);assert.equal(call('discoveryQueueEmpty')(0,null,null),true);
+ assert.equal(call('discoveryQueueEmpty')(0,0,null),true);
+ for(const unknown of [null,undefined,-1,0.5,'0',NaN])assert.equal(call('discoveryQueueEmpty')(0,unknown,null),false,'an unproven cheap remainder is not a zero: '+String(unknown));
+ for(const unknown of [null,undefined,-1,'0'])assert.equal(call('discoveryQueueEmpty')(unknown,0,null),false,'an unproven remaining is not a zero: '+String(unknown));
  assert.equal(call('discoveryQueueEmpty')(0,2,null),false);assert.equal(call('discoveryQueueEmpty')(0,0,'x'),false);assert.equal(call('discoveryQueueEmpty')(3,0,null),false);
  assert.equal(base.id.length>10&&base.id.includes('-'),true);
 }
