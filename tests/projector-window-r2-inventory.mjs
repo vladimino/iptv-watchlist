@@ -197,8 +197,7 @@ for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '
 // 2. Every function in the two closures that names a projector input that is not Discovery's, and what each one is. A new one fails.
 const naming=set=>[...set.keys()].filter(key=>notDiscovery.some(name=>set.get(key).d.body.includes("'"+name+"'"))).sort();
 const NAMING={
- 'loadJSON@src/worker.js':'a read; for the published documents it calls PublishedEpg.repairMirrors (read-repair, below)',
- 'repairMirrors@src/published-epg.js':'read-repair of the R2 mirrors of a D1-owned published document',
+ 'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
  'sealPublishStep@src/worker.js':'publication path, under the sealStep lease',
@@ -207,14 +206,16 @@ const seen=new Set([...naming(chunk),...naming(publication)]);
 for(const key of seen)assert.ok(NAMING[key],'a reachable function names a projector input and is not classified: '+key);
 for(const key of Object.keys(NAMING))assert.ok(seen.has(key),'stale: '+key);
 
-// 3. The lease-free path that writes a projector-input key is the read-repair of the published mirrors (loadJSON, repairMirrors,
-// writeMirrors, putStable): it writes only R2 copies of a document that D1 owns. The projector reads that document from the D1 published
+// 3. The lease-free path that writes a projector-input key is the EPG writer's mirror reconcile (repairMirrors,
+// writeMirrors, putStable): it writes only R2 copies of a document that D1 owns. GET does not call it. The projector reads that document from the D1 published
 // snapshot whenever one exists, and only otherwise from R2, so a mirror write cannot change what a run reads under a D1 published authority.
 assert.match(projector,/published\?null:d1EnrichmentRead\(env,etags,'watchlist\.json'/,'watchlist is read from R2 only without a published D1 snapshot');
 assert.match(projector,/published\?null:d1EnrichmentRead\(env,etags,epgGenerationKey\(runId,'programme\.json'\)/,'programme is read from R2 only without a published D1 snapshot');
 assert.match(projector,/PublishedEpg\.authoritativeSnapshot\(env\)/,'the published snapshot is the D1 authority');
 const chunkNaming=new Set(naming(chunk));
-for(const key of ['repairMirrors@src/published-epg.js','writeMirrors@src/published-epg.js','loadJSON@src/worker.js'])assert.ok(chunkNaming.has(key),key+' is the chunk-reachable path that names a projector input');
+assert.ok(chunkNaming.has('loadJSON@src/worker.js'),'loadJSON still names a projector input as a read');
+assert.equal(chunkNaming.has('repairMirrors@src/published-epg.js'),false,'GET and the chunk path no longer call repairMirrors');
+assert.equal(chunkNaming.has('writeMirrors@src/published-epg.js'),false,'writeMirrors is the publication path, not the chunk');
 for(const key of ['persistWatchlist@src/worker.js','sealPublishStep@src/worker.js'])assert.equal(chunkNaming.has(key),false,key+' is not reachable from a chunk or an admin route, only from the publication paths');
 
 // 4. The publication entries take the Discovery lease (through leaseOrWindowBusy or acquireLease, which the window refuses) before their
@@ -239,4 +240,4 @@ for(const [name,list] of defs){
  }
 }
 
-console.log('Projector window R2 side effects: whole-bundle inventory of '+inventory.sites+' write sites in '+inventory.files+' files with the '+inventory.inputSites+' sites that name a non-Discovery projector input frozen; best-effort named-path graph: '+reached.size+' writer functions from '+CHUNK.length+' chunk/admin and '+PUBLICATION.length+' publication entry points classified; the lease-free path found on those named paths that writes a projector-input key is the read-repair of D1 published mirrors; every publication entry takes the lease before its first write');
+console.log('Projector window R2 side effects: whole-bundle inventory of '+inventory.sites+' write sites in '+inventory.files+' files with the '+inventory.inputSites+' sites that name a non-Discovery projector input frozen; best-effort named-path graph: '+reached.size+' writer functions from '+CHUNK.length+' chunk/admin and '+PUBLICATION.length+' publication entry points classified; GET does not repair D1 published mirrors; every publication entry takes the lease before its first write');
