@@ -409,7 +409,7 @@ async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMi
  const look=(kind,list)=>list.filter(entry=>differing.has(d1EnrichmentBucketOf(kind,entry.id)));
  return {stored:new Map(rows.map(row=>[row.kind+'\n'+row.id,row.change_key])),inputs:{...inputs,people:look('person',inputs.people),films:look('film',inputs.films)},total,mode:'buckets'};
 }
-async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs=D1_ENRICHMENT_WALL_MS,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES,bulk:bulkOverrides={}}={}){
+async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs:wallOption,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES,bulk:bulkOverrides={}}={}){
  const mode=d1EnrichmentMode(env);
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
@@ -462,7 +462,11 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   if(summary.window?.outcome==='granted'&&writeGate&&Number.isFinite(writeGate.generation))summary.window.generationAtFirstBatch=writeGate.generation;
   const writeAt=Date.now();
   let written;
-  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner:windowState.granted?leaseId:null,marks,bulk,windowExpiresAt:windowState.granted&&Number.isFinite(summary.window?.expiresAt)?summary.window.expiresAt:null});}
+  // ADR 0106 L1: the wall budget of this write phase (60 s unless the grouped path runs inside a held window with its marker), and the window's absolute expiry that bounds it.
+  const windowExpiresAt=windowState.granted&&Number.isFinite(summary.window?.expiresAt)?summary.window.expiresAt:null;
+  const wallPolicy=d1EnrichmentWallPolicy({bulk,windowGranted:windowState.granted,windowExpiresAt,wallOption});
+  if(bulk)summary.bulkBudget={wallMs:wallPolicy.wallMs,policy:wallPolicy.policy,effectiveMs:windowExpiresAt==null?wallPolicy.wallMs:Math.max(0,Math.min(wallPolicy.wallMs,windowExpiresAt-started))};
+  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs:wallPolicy.wallMs,windowOwner:windowState.granted?leaseId:null,marks,bulk,windowExpiresAt});}
   finally{
    timing.writeMs=Date.now()-writeAt;
    // From the budget clock's start (the grant, or the run start with no window): to the first fenced transaction entered (`preTxnMs`), to the first
@@ -642,6 +646,10 @@ async function d1EnrichmentRelease(db,leaseId,summary){
 const D1_ENRICHMENT_BULK_GROUP=10,D1_ENRICHMENT_BULK_PERSON_GROUP=25,D1_ENRICHMENT_BULK_MAX_STATEMENTS=1500,D1_ENRICHMENT_BULK_RESERVE_MS=15000,D1_ENRICHMENT_BULK_FIRST_GROUP_MS=5000;
 const D1_ENRICHMENT_BULK_DIGEST_MAX=8000,D1_ENRICHMENT_BULK_MAX_PARAMS=99;
 const D1_ENRICHMENT_BULK_FALLBACK_SHARE=0.05,D1_ENRICHMENT_BULK_FALLBACK_MIN_GROUPS=10;
+// ADR 0106 decision 7 (L1), the wall budget candidate: with the grouped path selected AND a window actually held AND the Film/Person marker read, the write phase of a run may last 180 s from the grant instead of 60 s; the deadline
+// is always the earlier of that and the window's own absolute expiry (300 s from the request, ADR 0103: waiting and release are inside it), and a group is started only with the reserve left. Without the grouped path, without a
+// held window or without the marker the budget is the 60 s it always was. The cap of 300 s is never exceeded by this value (it is clamped), and an explicit `wallMs` option of the caller wins over the policy.
+const D1_ENRICHMENT_L1_WALL_MS=180000,D1_ENRICHMENT_L1_WALL_MAX_MS=300000;
 const D1_ENRICHMENT_MARKER_READ='SELECT mode,cutover,generation FROM film_person_authority WHERE id=1';
 const D1_ENRICHMENT_MARKER_GUARD="INSERT INTO projection_fence (held) SELECT COUNT(*) FROM film_person_authority WHERE id=1 AND mode IN ('r2','prepared') AND cutover='open' AND generation=?";
 const D1_ENRICHMENT_READ_GUARD='INSERT INTO projection_fence (held) SELECT CASE WHEN ';
@@ -651,9 +659,18 @@ function d1EnrichmentBulkOptions(env,overrides){
  if(d1EnrichmentBulkMode(env)!=='on')return null;
  const o=overrides||{},positive=(value,fallback)=>Number.isInteger(value)&&value>0?value:fallback;
  return {groupSize:positive(o.groupSize,D1_ENRICHMENT_BULK_GROUP),personGroupSize:positive(o.personGroupSize,D1_ENRICHMENT_BULK_PERSON_GROUP),maxStatements:positive(o.maxStatements,D1_ENRICHMENT_BULK_MAX_STATEMENTS),
+  l1WallMs:Math.min(positive(o.l1WallMs,D1_ENRICHMENT_L1_WALL_MS),D1_ENRICHMENT_L1_WALL_MAX_MS),
   reserveMs:Number.isFinite(o.reserveMs)&&o.reserveMs>=0?o.reserveMs:D1_ENRICHMENT_BULK_RESERVE_MS,firstGroupMs:Number.isFinite(o.firstGroupMs)&&o.firstGroupMs>=0?o.firstGroupMs:D1_ENRICHMENT_BULK_FIRST_GROUP_MS,
   statementBudget:Number.isInteger(o.statementBudget)&&o.statementBudget>0?o.statementBudget:null,
   fallbackShare:Number.isFinite(o.fallbackShare)?o.fallbackShare:D1_ENRICHMENT_BULK_FALLBACK_SHARE,fallbackMinGroups:positive(o.fallbackMinGroups,D1_ENRICHMENT_BULK_FALLBACK_MIN_GROUPS)};
+}
+// The wall budget of a write run, as a pure function of what the run has at that point. `wallOption` is the caller's explicit `wallMs` (it always wins). Returns {wallMs, policy}: `l1` only with the grouped path,
+// a held window with a finite absolute expiry and the planning marker; `l1_unavailable` is the grouped path without one of them (the old 60 s); `default` is every run without the grouped path.
+function d1EnrichmentWallPolicy({bulk=null,windowGranted=false,windowExpiresAt=null,wallOption}){
+ if(wallOption!==undefined)return {wallMs:wallOption,policy:'explicit'};
+ if(!bulk)return {wallMs:D1_ENRICHMENT_WALL_MS,policy:'default'};
+ if(!bulk.expectedMarker||!windowGranted||!Number.isFinite(windowExpiresAt))return {wallMs:D1_ENRICHMENT_WALL_MS,policy:'l1_unavailable'};
+ return {wallMs:bulk.l1WallMs??D1_ENRICHMENT_L1_WALL_MS,policy:'l1'};
 }
 const d1EnrichmentReadKey=(sql,params)=>sql+'\u0000'+JSON.stringify(params);
 // The digest expression of a plain `SELECT <columns> FROM ...`: the rows as one JSON text, in the row order of the query. A function call in the column list, GROUP BY or UNION cannot be digested (null).
@@ -795,7 +812,8 @@ async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,
  const state=(kind,id,key)=>db.run(D1_ENRICHMENT_STATE,[D1_ENRICHMENT_PROJECTION,kind,id,key,new Date().toISOString()]);
  const syncState=(id,key)=>db.run(D1_ENRICHMENT_STATE,[METADATA_SYNC_PROJECTION,'film',id,key,new Date().toISOString()]);
  const writeSync=async item=>{await repository.projectFilmSyncState({filmId:item.id,sync:item.sync});await syncState(item.id,item.key);};
- const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs&&(!bulk||bulk.statementBudget==null||db.statements<bulk.statementBudget);
+ // With the grouped path selected the held window's absolute expiry (less the reserve) bounds every step, the per-entity ones too; without it nothing here changes.
+ const budgetLeft=()=>db.queries<queryBudget&&Date.now()-started<wallMs&&(!bulk||windowExpiresAt==null||Date.now()<windowExpiresAt-bulk.reserveMs)&&(!bulk||bulk.statementBudget==null||db.statements<bulk.statementBudget);
  const failed=(kind,id,error)=>{
   // A step the statement budget refused was not sent: nothing failed, the entity keeps its old checkpoint and the run ends with work left.
   if(error?.budget){result.budgetStop=true;if(result.bulk)result.bulk.stop=result.bulk.stop||'budget';return;}
@@ -898,7 +916,11 @@ async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,
   if(personAt<personOrder.length)available.push('people');
   if(houseAt<housekeeping.length)available.push('housekeeping');
   if(!available.length)break;
-  if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){result.remaining=remaining();if(result.budgetStop)result.remaining=Math.max(1,result.remaining);break;}
+  if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){
+   // the grouped path says why it ended: the wall budget, the window's expiry or the statement budget ran out
+   if(bulkStats&&!result.leaseLost&&!result.windowLost&&!result.authorityMoved&&!result.budgetStop)bulkStats.stop=bulkStats.stop||'budget';
+   result.remaining=remaining();if(result.budgetStop)result.remaining=Math.max(1,result.remaining);break;
+  }
   let lane=available[0],best=Infinity;
   for(const name of available){const score=(spent[name]+1)/WEIGHT[name];if(score<best){best=score;lane=name;}}
   // The grouped path starts no step it cannot finish inside the reserve (the held window's absolute expiry included).
