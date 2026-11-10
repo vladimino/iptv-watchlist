@@ -1,9 +1,9 @@
 # ADR 0108: EPG compatibility mirrors are reconciled by the existing EPG writer, never by GET
 
-**Status:** Proposed  
+**Status:** Accepted (Product Owner approval 2026-11-10)  
 **Original decision date:** 2026-11-10  
 **Recorded at:** 2026-11-10  
-**Approval source:** not documented (implementation of Accepted [ADR 0107](0107-get-head-read-side-effect-boundary.md) item 3 for EPG mirrors; owner acceptance of this record is a merge gate)  
+**Approval source:** Explicit Product Owner acceptance of ADR 0108 and both Mermaid diagrams without changes in [IPTV Tuning](https://chatgpt.com/g/g-p-6a6e3dca6ef88191bb93fca610381c84-movies/c/6af3280b-2aac-83eb-95af-95d135acc0b4) on 2026-11-10, recorded on [AIR-414](https://trello.com/c/GJefgNm8). Implements Accepted [ADR 0107](0107-get-head-read-side-effect-boundary.md), item 3; no additional production operation is authorized.  
 **Related work:** [AIR-414](https://trello.com/c/GJefgNm8), [AIR-411](https://trello.com/c/6abdVoGq), [AIR-412](https://trello.com/c/TuRMtgFF); [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0100](0100-epg-cloudflare-workflow-executor.md), [ADR 0107](0107-get-head-read-side-effect-boundary.md)  
 **Supersedes:** [ADR 0096](0096-bounded-seal-publication-steps.md) item 4 only in the claim that readers also repair R2 mirrors. The seal-unit retry, `gave_up` recording and watchlist fallback are unchanged.  
 **Superseded by:** None
@@ -42,7 +42,7 @@ This ADR authorizes no production operation. A merge and deploy enable the hourl
 
 ## Evidence
 
-- **Original decision:** [ADR 0107](0107-get-head-read-side-effect-boundary.md) item 3 (EPG mirrors).
+- **Original decision:** [ADR 0107](0107-get-head-read-side-effect-boundary.md) item 3 (EPG mirrors); explicit Product Owner acceptance of ADR 0108 and both diagrams on 2026-11-10 in [IPTV Tuning](https://chatgpt.com/g/g-p-6a6e3dca6ef88191bb93fca610381c84-movies/c/6af3280b-2aac-83eb-95af-95d135acc0b4), recorded on [AIR-414](https://trello.com/c/GJefgNm8).
 - **Implementation:** AIR-414 pull request (`src/published-epg.js`, `src/epg-orchestration.js`, GET helpers in `src/worker.js` and `src/admin/read.js`).
 - **Dated verification:** [offline AIR-414 evidence](../evidence/api/air-414-epg-mirror-reconciliation-2026-11-10.md).
 - **Uncertainty:** production mirror lag after deploy is not measured here.
