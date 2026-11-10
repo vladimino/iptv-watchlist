@@ -33,5 +33,5 @@ The queue text is stored plain while it fits and in the `dict1` encoding above t
 
 - The refusing limit in production is unproven until the next rebuild runs on the new Worker and either lands or reports `prediction_domain_budget:<guard>`.
 - Not measured: D1 wall time and query count on production; the stand-in has no network latency.
-- A Worker without `dict1` support cannot read an encoded queue and fails closed; code rollback does not rewrite D1 rows ([runbook](../../runbooks/prediction-operations.md#prediction-queue-conflicts)).
+- A Worker without `dict1` support fails closed on an encoded queue (the stored text starts with `dict1:` and is not valid JSON) and cannot rebuild it; the independent review found that a plain-rewrite needs a compatible build. The first build with `dict1` wrote the encoded text without the prefix; reads accept both forms and every new write carries the prefix. Code rollback does not rewrite D1 rows ([runbook](../../runbooks/prediction-operations.md#prediction-queue-conflicts)).
 - This delivery does not show that the persisted queue is repaired. That needs a successful writer after deploy, which needs the owner's operation-specific approval.
