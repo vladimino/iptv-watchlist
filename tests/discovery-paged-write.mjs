@@ -122,7 +122,8 @@ const uncertain=(extra={})=>({status:'no_confident_match',attempts:1,retryAt:'20
  const result=await Authority.upsertAdmissions(env,films);
  assert.equal(result.written.length,45);
  assert.deepEqual(result.refused,[]);
- assert.equal(generation(file),g+3,'45 films are three batches of at most 19');
+ assert.equal(generation(file),g+1,'45 films are one packed batch: one round trip and one generation step');
+ assert.equal(result.batches,1);assert.equal(result.reads,1);assert.deepEqual(result.carried,{generation:g+1,programmeRunId:result.carried.programmeRunId});
  assert.equal(Object.keys((await Authority.routeRead(env,'epg/discovered-films.json')).value).length,45);
  // An update to one film keeps the others.
  await Authority.upsertAdmissions(env,{tmdb_7:film(7,{title:'Renamed'})});
