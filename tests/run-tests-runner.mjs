@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {capture, HEAD_LIMIT, TAIL_LIMIT} from '../scripts/run-tests.mjs';
+import {capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -242,8 +242,48 @@ fs.unlinkSync(me);`;
     assert.equal(result.code, 0, result.stderr);
     assert.match(fs.readFileSync(summary, 'utf8'), /### Test runner[\s\S]*1 of 1 files run, jobs 2[\s\S]*\| a\.mjs \|/);
   }
+
+  // 12. AIR-418 shards: every file is in exactly one shard, for any count; the shards of the real suite are disjoint, cover it and split the slow files; a
+  // shard runs only its files, the serial-only ones included; a malformed shard is refused before anything runs.
+  {
+    const names = Array.from({length: 11}, (_, index) => 'f' + String(index).padStart(2, '0') + '.mjs');
+    const dir = suite(Object.fromEntries(names.map(name => [name, "console.log('x');"])));
+    for (const count of [1, 2, 3, 5, 11, 12]) {
+      const seen = [];
+      for (let index = 1; index <= count; index++) {
+        const plan = planTests({directory: dir, serialOnly: new Set(['f03.mjs']), shard: {index, count}});
+        assert.equal(plan.total, plan.parallel.length + plan.serial.length);
+        assert.equal(plan.suite, names.length);
+        seen.push(...plan.parallel, ...plan.serial);
+      }
+      assert.deepEqual(seen.sort(), names, `shards of ${count}: every file exactly once`);
+    }
+    const whole = planTests({directory: 'tests'});
+    const halves = [1, 2].map(index => planTests({directory: 'tests', shard: {index, count: 2}}));
+    assert.deepEqual([...halves[0].parallel, ...halves[0].serial, ...halves[1].parallel, ...halves[1].serial].sort(), [...whole.parallel, ...whole.serial].sort(), 'the two shards of the real suite are the whole suite, once');
+    assert.ok(Math.abs(halves[0].total - halves[1].total) <= 2, 'the shards have the same number of files');
+    // the first files of the plan are the slow ones (START_FIRST): they alternate
+    assert.deepEqual(whole.parallel.slice(0, 6).map(file => halves[0].parallel.includes(file) ? 1 : 2), [1, 2, 1, 2, 1, 2]);
+    assert.deepEqual(parseShard('2/3'), {index: 2, count: 3});
+    assert.equal(parseShard(undefined), null);
+    assert.equal(parseShard(''), null);
+    for (const bad of ['0/2', '3/2', '1', '1/0', 'a/b', '1/2/3', '-1/2', '1.5/2']) assert.equal(parseShard(bad), undefined, bad);
+    const first = await run(['--dir', dir, '--jobs', '2', '--shard', '1/2', '--serial-only', 'f03.mjs']);
+    const second = await run(['--dir', dir, '--jobs', '2', '--serial-only', 'f03.mjs'], {TEST_SHARD: '2/2'});
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(second.code, 0, second.stderr);
+    const ran = out => [...out.matchAll(/^ok   (\S+)/gm)].map(match => match[1]);
+    assert.deepEqual([...ran(first.stdout), ...ran(second.stdout)].sort(), names, 'the two runs together ran every file once');
+    assert.match(first.stdout, /shard 1\/2 of 11 files/);
+    assert.match(second.stdout, /Passed \d+ self-contained test files \(shard 2\/2 of 11 files\)/);
+    for (const bad of ['3/2', 'x']) {
+      const result = await run(['--dir', dir, '--shard', bad]);
+      assert.equal(result.code, 2, bad);
+      assert.doesNotMatch(result.stdout, /ok   f/);
+    }
+  }
 } finally {
   fs.rmSync(root, {recursive: true, force: true});
 }
 
-console.log('Test runner: output kept per file, exit code, signal and timeout named, no new file after a failure, no orphan, bounded concurrency, serial-only files alone, name order with --serial and bad options refused passed');
+console.log('Test runner: output kept per file, exit code, signal and timeout named, no new file after a failure, no orphan, bounded concurrency, serial-only files alone, name order with --serial, shards that cover the suite once and bad options refused passed');
