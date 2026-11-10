@@ -19,7 +19,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-projected-link-'));
 let databases=0;
 const NOW='2026-10-13T09:30:00.000Z',FRESH='2026-10-01T09:30:00.000Z';
 const migrated=()=>{
- const db=d1Standin(path.join(root,'d1-'+(databases++)+'.sqlite'));
+ const db=d1Standin(path.join(root,'d1-'+(databases++)+'.sqlite'),{onBatch:process.env.DEBUG_BATCH?async list=>{for(const item of list)if(/film_person_credit|film_redirect/.test(item.text))console.log(item.text.slice(0,230));}:null});
  for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state'])db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
  return db;
 };
@@ -82,6 +82,35 @@ const add=(db,id,scheme,value)=>{
  assert.deepEqual(rows(db,'SELECT from_id FROM film_redirect ORDER BY from_id').map(row=>row.from_id),['film:legacy-lb','film:tmdb:1656']);
  assert.equal(rows(db,"SELECT COUNT(*) AS n FROM film_external_id WHERE trusted=1 AND conflicting=0 AND film_id<>'"+survivor.id+"'")[0].n,0,'every trusted id belongs to the survivor');
  const done=state(db);await write(db,repository,{redirects:[redirectA,redirectB]});assert.equal(state(db),done);
+}
+// 2b. The credits, aliases and membership only the retired Films hold survive the whole transaction and a repeated write (the review of AIR-405): two distinct retiring Films, each with a
+// TMDB credit and an alias the incoming roster does not list; the later link does not erase what the earlier one adopted, and the ordinals of the adopted credits never meet (before AIR-405
+// a retired Film with several credits of a role, some taken and some not, made the unique index refuse the whole write). The survivor is a watchlist Film, as the projector's listed Films are.
+{
+ const db=migrated(),repository=await setup(db);
+ add(db,'film:legacy-lb','letterboxd','28nq');
+ for(const id of ['person:tmdb_actor/8','person:tmdb_actor/9','person:tmdb_actor/10'])db.sql("INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('"+id+"','"+id.slice(7)+"',1,'"+NOW+"')");
+ db.sql("INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('film:tmdb:1656','person:tmdb_actor/8','actor',0),('film:legacy-lb','person:tmdb_actor/9','actor',0),('film:legacy-lb','person:tmdb_actor/10','actor',1)");
+ db.sql("INSERT INTO film_alias (film_id,kind,value) VALUES ('film:tmdb:1656','title','Alias of the catalog Film'),('film:legacy-lb','title','Alias of the legacy Film')");
+ db.sql("INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:legacy-lb','"+NOW+"')");
+ const redirectB={from:'film:legacy-lb',to:survivor.id,at:NOW};
+ await write(db,repository,{redirects:[redirectA,redirectB],watchlist:true});
+ const credits=()=>rows(db,"SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id='"+survivor.id+"' ORDER BY role,ordinal");
+ const held=credits();
+ const ofRole=role=>held.filter(item=>item.role===role).map(item=>item.person_id);
+ assert.deepEqual(ofRole('director'),[person.id],'the roster credit, once');
+ assert.deepEqual(ofRole('actor').sort(),['person:tmdb_actor/10','person:tmdb_actor/8','person:tmdb_actor/9'],'every credit only a retired Film held is on the survivor');
+ assert.equal(new Set(held.map(item=>item.person_id+'/'+item.role)).size,held.length,'no duplicate credit');
+ assert.equal(new Set(held.map(item=>item.role+'/'+item.ordinal)).size,held.length,'no two credits share an ordinal of a role');
+ assert.equal(rows(db,"SELECT COUNT(*) AS n FROM film_person_credit c LEFT JOIN film f ON f.id=c.film_id LEFT JOIN person p ON p.id=c.person_id WHERE f.id IS NULL OR p.id IS NULL")[0].n,0,'no dangling credit');
+ const aliases=rows(db,"SELECT value FROM film_alias WHERE film_id='"+survivor.id+"'").map(item=>item.value);
+ assert.ok(aliases.includes('Alias of the catalog Film')&&aliases.includes('Alias of the legacy Film'),'both aliases moved');
+ assert.deepEqual(rows(db,'SELECT film_id FROM watchlist_film').map(item=>item.film_id),[survivor.id],'membership of either retired Film moved');
+ const done=state(db);
+ await write(db,repository,{redirects:[redirectA,redirectB],watchlist:true});
+ assert.equal(state(db),done,'a repeated write keeps all of it');
+ await write(db,repository,{redirects:[redirectA,redirectB],watchlist:true});
+ assert.equal(state(db),done,'and again');
 }
 // 3. An unrelated owner (not named by any redirect): refused, nothing written, the uniqueness holds.
 {
