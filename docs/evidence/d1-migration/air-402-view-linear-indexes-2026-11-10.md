@@ -1,6 +1,6 @@
 # D1 enrichment projector: linear indexes in the view build (byte-for-byte parity and offline benchmark)
 
-**Captured:** 2026-11-10, offline on one machine (Intel(R) Xeon(R) Processor at 2.30 GHz, 4 cores, Node v22.23.4, V8 12.4.254.21-node.57), deterministic synthetic fixtures. No production read or write of any kind (no D1, no R2, no Cloudflare, no personal data), no manual projector, Discovery or EPG run, no flag, Task, cron, window, lease or budget change. The natural-run observation that the card also asks for comes after the release and is a separate, dated section below.
+**Captured:** 2026-11-10, offline on one machine (Intel(R) Xeon(R) Processor at 2.30 GHz, 4 cores, Node v22.23.4, V8 12.4.254.21-node.57), deterministic synthetic fixtures. No production read or write of any kind (no D1, no R2, no Cloudflare, no personal data), no manual projector, Discovery or EPG run, no flag, Task, cron, window, lease or budget change. Local `npm test` passed 275 of 275 files and `npm run build` succeeded on the committed code. The natural-run observation that the card also asks for comes after the release and is a separate, dated section below.
 **Scope:** [AIR-402](https://trello.com/c/EIWn61UG): replace the per-Film scans of the projector's CPU-only build (`readLifecycle`, `enrichmentInputs`) by indexes built once per build, with no change to the result, its order, the first match or the change keys. It follows the [AIR-400 profile](air-400-view-cpu-profile-offline-2026-11-09.md), which found the two phases quadratic. It does not touch D1, the query order, the writers, the budgets, the hashes or the checkpoint path.
 **Verdict:** **BYTE-FOR-BYTE PARITY ON 144 SEEDED STORES AND A MODEL TEST OF THE INDEX; THE TWO QUADRATIC PHASES ARE NOW LINEAR AND THE BUILD TAKES ABOUT 0.8 TO 0.9 S INSTEAD OF 4.8 S AT 52,000 ENTITIES ON THIS NODE MACHINE; NOTHING IS CLAIMED ABOUT WORKERD OR ABOUT THE FIRST D1 READ.** `diff.lifecycle` went from a log-log slope of 1.90 to 1.95 to 1.06 to 1.10 and `diff.inputs` from 2.06 to 2.08 to 1.05 to 1.15; the change keys (linear before and after) are now about half of the build.
 **Used by:** [ADR 0106](../../adr/0106-bulk-projector-write-path.md) (the pre-write overhead every window pays); [AIR-396 RCA](air-396-d1-first-query-latency-2026-11-09.md) (H2); [AIR-400 profile](air-400-view-cpu-profile-offline-2026-11-09.md).
@@ -64,6 +64,11 @@ The coefficient of variation of the total is 0.021 to 0.157 (the highest is the 
 | total | 1.81 / 1.79 | 1.05 / 1.08 |
 
 The slopes include the fixed per-phase costs at the small sizes, so they are fits and not exact exponents; the overlay slope of 1.2 is the unchanged code on a few tens of milliseconds.
+
+### Parity at benchmark scale, and where the time goes now
+
+- **Byte-for-byte at 52,000 and 104,000 entities.** The same fixtures as the benchmark go through the baseline and the indexed code (separate scopes, separate clones of the store): the SHA-256 of the JSON of the view, of the inputs (61.8 MB at 52,000 entities, 123.8 MB at 104,000) and of the list of every change key are equal, with 9,880 and 19,760 Films and 42,120 and 84,240 Persons. This was a one-off check in a scratch script, not committed; the committed test is the 144-store comparison above.
+- **A V8 sampling profile of one indexed build at 52,000 entities** (sampled total 1,158 ms; its largest frame, 237 ms in `post` at `node:inspector`, is the profiler's own stop call and not part of the build): `projectionKey` 217 ms (19 %), `personChangeKey` 96 ms, garbage collection 89 ms, `readLifecycle` 74 ms (self time; 2,055 ms in the AIR-400 profile), `stamp` 61 ms, `filmChangeKey` 50 ms, `hash53` 42 ms, `personView` 30 ms. `orderedRecords` and `metadataRecord` (827 and 503 ms in AIR-400) are no longer among the top frames. What is left is the change keys and the view's own object building.
 
 ## What this does not show
 
