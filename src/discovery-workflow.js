@@ -203,7 +203,7 @@ async function writeWorkflowState(env,record,etag){
 // ADR 0103: a held projector window refuses every Discovery state write inside its own statement. These writers turn that typed
 // refusal into a value, never into a step failure: nothing is written, no stall or recovery budget is charged, and the caller
 // sleeps until the window's absolute expiry (the one deadline the window was granted with; a missing expiry waits a short fixed time).
-const WINDOW_WAKE_FALLBACK_MS=10000,WINDOW_WAKE_CAP_MS=330000,WINDOW_RETRY_LIMIT=24,WRITE_CONFLICT_RETRY_LIMIT=3;
+const WINDOW_WAKE_FALLBACK_MS=10000,WINDOW_WAKE_CAP_MS=330000,WINDOW_RETRY_LIMIT=24,WRITE_CONFLICT_RETRY_LIMIT=3,RECONCILE_WINDOW_ATTEMPTS=3;
 async function writeWorkflowStateSoft(env,record,etag){
  try{return {saved:await writeWorkflowState(env,record,etag),windowBusy:false,window:null};}
  catch(error){if(error?.code==='discovery_window')return {saved:false,windowBusy:true,window:error.window||{expiresAt:null,state:null}};throw error;}
@@ -211,6 +211,17 @@ async function writeWorkflowStateSoft(env,record,etag){
 function windowWakeAt(source,now=Date.now()){
  const at=Number(source?.window?.expiresAt??source?.windowUntil);
  return Number.isFinite(at)&&at>0?Math.min(at,now+WINDOW_WAKE_CAP_MS):now+WINDOW_WAKE_FALLBACK_MS;
+}
+function logDiscoveryReconcile(outcome,meta){
+ try{
+  console.log(JSON.stringify({event:'discovery_workflow_reconcile',scheduled:meta?.scheduled===true,attempt:Number.isInteger(meta?.attempt)?meta.attempt:null,started:outcome?.started===true,reason:typeof outcome?.reason==='string'?outcome.reason.slice(0,48):null,programmeRunId:typeof outcome?.programmeRunId==='string'?outcome.programmeRunId.slice(0,64):null,instanceId:typeof outcome?.instanceId==='string'?outcome.instanceId.slice(0,80):null,series:Number.isInteger(outcome?.series)?outcome.series:null,windowUntil:Number.isFinite(outcome?.windowUntil)?outcome.windowUntil:null,dueAt:typeof outcome?.dueAt==='string'?outcome.dueAt.slice(0,40):null,attached:outcome?.attached===true||undefined,uncertain:outcome?.uncertain===true||undefined}));
+ }catch{}
+}
+async function waitReconcileWindow(outcome,options,now){
+ if(typeof options?.wait==='function')return options.wait(outcome,now);
+ const ms=Math.min(WINDOW_WAKE_CAP_MS,Math.max(0,windowWakeAt(outcome,now)-now));
+ if(!ms)return;
+ if(typeof scheduler!=='undefined'&&typeof scheduler.wait==='function')await scheduler.wait(ms);
 }
 function publishedProgrammeRunId(generation){return generation?.phase==='published'?generation.programmeRunId||null:null;}
 function workflowFailure(previous,reason,now){
@@ -457,7 +468,7 @@ async function ensureDiscoveryWorkflow(env){
 }
 // AIR-410: `options.scheduled` is set only by the hourly cron firing, with `options.now` its scheduled time. Only such a firing may report an
 // empty queue; every other caller (a test, an admin path) reconciles exactly as before and writes no event of its own.
-async function reconcileDiscoveryWorkflow(env,options={}){
+async function reconcileDiscoveryWorkflowAttempt(env,options={}){
  try{
  if(discoveryExecutorMode(env)==='workflow')await deliverDiscoveryTick(env);
  const admitted=await discoveryWorkflowAdmission(env);
@@ -495,6 +506,21 @@ async function reconcileDiscoveryWorkflow(env,options={}){
  if(options?.scheduled===true&&ensured?.started===false&&ensured.reason==='stopped'&&Number.isFinite(options.now))await emitEmptyDiscoveryTick(env,programmeRunId,options.now);
  return ensured;
  }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:{})};}
+}
+// AIR-428: a scheduled firing retries a projector-window refusal in the same tick, after the window's one expiry.
+// An unscheduled caller still returns the typed refusal immediately. Each attempt, including a refusal, is logged;
+// a green cron is not a Discovery recovery.
+async function reconcileDiscoveryWorkflow(env,options={}){
+ const scheduled=options?.scheduled===true;
+ let attempt=0,outcome;
+ do{
+  attempt++;
+  outcome=await reconcileDiscoveryWorkflowAttempt(env,options);
+  logDiscoveryReconcile(outcome,{scheduled,attempt});
+  if(!scheduled||outcome?.reason!=='projector_window'||attempt>=RECONCILE_WINDOW_ATTEMPTS)return outcome;
+  await waitReconcileWindow(outcome,options,Number.isFinite(options.now)?options.now:Date.now());
+ }while(attempt<RECONCILE_WINDOW_ATTEMPTS);
+ return outcome;
 }
 async function rolloverDiscoveryWorkflow(env,pinned,ownSeries){
  const state=await readWorkflowState(env);
