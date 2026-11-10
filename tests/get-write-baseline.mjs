@@ -37,16 +37,10 @@ export const MCP_READ_TOOLS={
 export const MCP_WRITE_TOOLS=['epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step','ratings_storage_migrate','prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete'];
 
 // ---- baseline ----
-// Every entry is a writer that exists today, found by the audit and not fixed by it (AIR-412 changes no behaviour). `effects` is the exact ordered effect list per scenario
+// Every entry is an effect a read has today. After AIR-413 to AIR-416 no read writes storage: the only entry left is the registered outbound read. `effects` is the exact ordered effect list per scenario
 // (a scenario that is not listed has none), `sql` the distinct statements the request ran, in order. `owner` is the card that removes the entry.
-const PREDICTION_D1=['d1:UPDATE prediction_domain_authority','d1:UPDATE prediction_domain_cas','d1:INSERT INTO prediction_domain_intent','d1:DELETE FROM prediction_domain_intent','d1:UPDATE prediction_domain_cas'];
-const PREDICTION_SQL=['UPDATE prediction_domain_authority SET generation=? WHERE id=? AND mode=? AND writes=? AND generation=?','UPDATE prediction_domain_cas SET ok=changes() WHERE id=?','INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)','DELETE FROM prediction_domain_intent WHERE key=? AND token=?'];
-const STOP_PUTS=['put:enrichment/runs/run-stopped.json','put:enrichment/run-diagnostics/<ts>-run-stopped.json','put:events/items/<ts>-stop-run-stopped.json','put:enrichment/stop-events/run-stopped.json'];
 
 export const BASELINE=[
- {id:'events-recovery',owner:'AIR-416',kind:'r2-d1-write',
-  summary:'The journal read runs recoverStopEvents before the page is read: an undelivered stop event is written into the journal and its record is marked delivered.',
-  routes:['GET /api/events'],effects:{'r2-pending':STOP_PUTS,'d1-pending':[...STOP_PUTS,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
  {id:'tmdb-status-probe',owner:'(none: outbound read, documented)',kind:'outbound-read',
   summary:'The TMDB status route sends one GET to TMDB (movie 11) with the Worker secret. It changes nothing of ours and spends provider quota; it is listed so a second or a non-GET request cannot appear unnoticed.',
   routes:['GET /api/integrations/tmdb/status'],effects:Object.fromEntries(['r2','r2-pending','empty','d1','d1-mirror-missing','d1-mirror-stale','d1-held','d1-pending'].map(name=>[name,['fetch:GET https://api.themoviedb.org/3/movie/11']])),sql:{}},

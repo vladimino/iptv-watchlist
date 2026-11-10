@@ -46,6 +46,11 @@ Evaluated during the audit; none was discussed with the owner beyond the card's 
 - **Fail reads that need repair.** Rejected: a stale mirror or an expired lease is a state to show, not an error; a degraded but correct answer is the conservative behavior.
 - **A runtime guard that makes any write inside a GET throw.** Not adopted now: it would turn today's silent self-healing into production errors before the writers exist. The audit is that guard at test time; a runtime guard can follow once the baseline is empty.
 
+
+## Subsequent AIR-416 decision (2026-11-10)
+
+The Product Owner explicitly selected the existing authorized **`prediction_start` write path**, not a separate hourly `ensure`, for the bounded, idempotent delivery of run start/stop events. This resolves the outbox placement choice intentionally left open at the original acceptance of this ADR. Delivery occurs under the Predictions writer lease; an undelivered event may wait until the next authorized prediction start. No new cron, Scheduled Task, authority, or production replay is authorized. The owner simultaneously accepted the updated [read paths and repair owners](../architecture/read-side-effects.md) Mermaid diagram unchanged. Evidence: [AIR-416](https://trello.com/c/f7FX4Elk) and [PR #492](https://github.com/vladimino/iptv-watchlist/pull/492) owner acceptance comment dated 2026-11-10.
+
 ## Consequences
 
 - Reads become safe to cache, to probe and to call from clients and from MCP without a side effect; diagnostics stop changing the state they report.

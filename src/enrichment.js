@@ -949,7 +949,7 @@ async function runnerStarted(env,run,resumed,queue,inputs=null){
  const snapshot=await predictionEventSnapshot(env,queue,run.batchSize,inputs),runState=run.startResult==='recovered_stale_lease'?'recovered':resumed?'resumed':'started';
  run.coverageStartCurrentPredictions=snapshot.coverage?.currentPredictionsTotal??null;await savePredictionRun(env,run);
  const event={id:'prediction-start-'+run.runId,type:'enrichment',at:run.createdAt,startedAt:run.createdAt,stage:resumed?'resumed':'started',runState,title:runState==='recovered'?'Прогнозы восстановлены':resumed?'Прогнозы продолжены':'Прогнозы запущены',queueSchemaVersion:6,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:run.batchSize,delta:{added:0,updated:0,failed:0,predictionGain:0},snapshot};
- const key=START_EVENT_PREFIX+run.runId+'.json';await saveJSON(env,key,{event});await flushStopEvent(env,{event},key);
+ const key=START_EVENT_PREFIX+run.runId+'.json';await saveJSON(env,key,{event});if(!await flushStopEvent(env,{event},key))await noteEventOutbox(env,key);
 }
 const STOP_EVENT_PREFIX=ENRICHMENT_KEY+'stop-events/';
 function systemicReason(reason){
@@ -972,10 +972,74 @@ async function recordRunStop(env,id,reason,fallback={}){
  run.status='partial';run.reason=record.event.reason;run.stopReason=record.event.reason;run.completedAt=record.event.at;run.event=record.event;run.counts={created:record.event.added,recalculated:record.event.updated,failed:record.event.failed,pending:(record.event.hotRemaining||0)+(record.event.coldRemaining||0)};
  if(fallback.callerFault&&!run.callerFault)run.callerFault=fallback.callerFault;
  await saveJSON(env,runKey(id),run);await diagnosticCheckpoint(env,run);const latest=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json');if(!latest||latest.runId===id||fallback.start)await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);
- const written=await flushStopEvent(env,record,key);await runnerLease(env,id,'release');return {...record.event,status:'partial',mustComplete:true,eventPending:!written,counts:run.counts,...(settled?{}:{retryHeal:'pending'})};
+ const written=await flushStopEvent(env,record,key);if(!written&&!fallback.outbox)await noteEventOutbox(env,key);await runnerLease(env,id,'release');return {...record.event,status:'partial',mustComplete:true,eventPending:!written,counts:run.counts,...(settled?{}:{retryHeal:'pending'})};
 }
-async function recoverStopEvents(env){
- for(const prefix of [STOP_EVENT_PREFIX,START_EVENT_PREFIX]){let cursor;do{const page=await env.BUCKET.list({prefix,limit:100,...(cursor?{cursor}:{})});for(const item of page.objects){const record=await loadJSON(env,item.key);if(record&&!record.delivered){if(prefix===STOP_EVENT_PREFIX)await recordRunStop(env,record.event.runId,record.event.reason);else await flushStopEvent(env,record,item.key);}}cursor=page.truncated?page.cursor:null;}while(cursor);}
+// AIR-416 (ADR 0107): delivery of a run's start and stop events to the Events Log belongs to the Predictions writer, never to a read. The durable record of an
+// event is its `start-events/` or `stop-events/` object (`delivered` says whether the journal has it); the journal key is derived from the event's id and time,
+// so a repeated delivery rewrites the same item and cannot duplicate it. `deliverPendingEvents` runs inside the writer lease of an authorized prediction start:
+// it looks at the records of the latest run (an interrupted delivery leaves them undelivered) and at the small outbox index of earlier failures, delivers what
+// is undelivered, and keeps what still fails in the index with an attempt count. After EVENT_OUTBOX_ATTEMPTS failures an entry is quarantined: it is no longer
+// retried, stays visible in the status read, and its record is kept. Nothing here lists a prefix, so the cost of a start does not grow with history.
+const EVENT_OUTBOX_KEY=ENRICHMENT_KEY+'event-outbox.json',EVENT_OUTBOX_LIMIT=20,EVENT_OUTBOX_ATTEMPTS=8;
+const eventOutboxKey=key=>typeof key==='string'&&key.length<=200&&(key.startsWith(STOP_EVENT_PREFIX)||key.startsWith(START_EVENT_PREFIX))&&key.endsWith('.json');
+function logEventOutbox(fields){try{console.log(JSON.stringify({event:'prediction_event_outbox',...fields}));}catch{}}
+// Records one failed delivery at the moment it fails, so the next start retries it even when a newer run has become the latest one by then.
+async function noteEventOutbox(env,key,now=Date.now()){
+ if(!eventOutboxKey(key))return false;
+ try{await mergeStoredJSON(env,EVENT_OUTBOX_KEY,{pending:{}},index=>{const pending=isObject(index?.pending)?index.pending:{};if(pending[key])return null;return {pending:{...pending,[key]:{since:new Date(now).toISOString(),attempts:0,lastAttemptAt:null,quarantined:false}},updatedAt:new Date(now).toISOString()};});return true;}catch{return false;}
+}
+async function deliverPendingEvents(env,now=Date.now()){
+ const report={checked:0,delivered:0,failed:0,quarantined:0};
+ try{
+  const [index,latest]=await Promise.all([loadJSON(env,EVENT_OUTBOX_KEY),loadJSON(env,ENRICHMENT_KEY+'latest-run.json')]);
+  const pending=isObject(index?.pending)?index.pending:{},indexed=Object.keys(pending).filter(eventOutboxKey);
+  // Quarantined entries stay in the index and in the status read; they are counted here and never take a delivery slot, so any number of them cannot keep a
+  // later event from being delivered. The budget of one start goes, in this order, to the two records of the latest run (not yet noted anywhere when a
+  // process ended between the record and the journal), then to the pending index entries, oldest first.
+  report.quarantined=indexed.filter(key=>pending[key]?.quarantined).length;
+  const latestKeys=isText(latest?.runId,100)?[START_EVENT_PREFIX+latest.runId+'.json',STOP_EVENT_PREFIX+latest.runId+'.json'].filter(key=>!pending[key]?.quarantined):[];
+  const waiting=indexed.filter(key=>!pending[key]?.quarantined&&!latestKeys.includes(key)).sort((a,b)=>String(pending[a]?.since||'').localeCompare(String(pending[b]?.since||''))||a.localeCompare(b));
+  const outcome={};
+  for(const key of [...latestKeys,...waiting].slice(0,EVENT_OUTBOX_LIMIT)){
+   let result='failed';
+   try{
+    const record=await loadJSON(env,key);
+    if(!record?.event)result='absent';
+    else if(record.delivered)result='delivered';
+    else{
+     report.checked++;
+     // A stop is completed as a whole (run record, diagnostic row, journal item): the same idempotent path the stop itself took.
+     if(key.startsWith(STOP_EVENT_PREFIX)){const stop=await recordRunStop(env,record.event.runId,record.event.reason,{outbox:true});result=stop.status==='superseded'||stop.eventPending===false?'delivered':'failed';}
+     else result=await flushStopEvent(env,record,key)?'delivered':'failed';
+     if(result==='delivered')report.delivered++;
+    }
+   }catch{}
+   if(result==='failed')report.failed++;
+   outcome[key]=result;
+  }
+  // The index changes only when an entry leaves it or a delivery failed; a start with nothing pending writes nothing here.
+  const changed=Object.keys(outcome).some(key=>outcome[key]==='failed'||pending[key]);
+  if(changed)await mergeStoredJSON(env,EVENT_OUTBOX_KEY,{pending:{}},stored=>{
+   const next={...(isObject(stored?.pending)?stored.pending:{})};
+   for(const [key,result] of Object.entries(outcome)){
+    if(result!=='failed'){delete next[key];continue;}
+    const attempts=(Number.isInteger(next[key]?.attempts)?next[key].attempts:0)+1;
+    next[key]={since:next[key]?.since||new Date(now).toISOString(),attempts,lastAttemptAt:new Date(now).toISOString(),quarantined:attempts>=EVENT_OUTBOX_ATTEMPTS};
+    if(next[key].quarantined)report.quarantined++;
+   }
+   return {pending:next,updatedAt:new Date(now).toISOString()};
+  });
+ }catch{report.failed++;}
+ if(report.checked||report.failed||report.quarantined)logEventOutbox(report);
+ return report;
+}
+// The read side of the outbox: counts only, one small object, no write.
+async function eventOutboxStatus(env){
+ try{
+  const index=await loadJSON(env,EVENT_OUTBOX_KEY),entries=Object.entries(isObject(index?.pending)?index.pending:{}).filter(([key])=>eventOutboxKey(key));
+  const since=entries.map(([,entry])=>entry?.since).filter(value=>typeof value==='string').sort()[0]||null;
+  return {pending:entries.filter(([,entry])=>!entry?.quarantined).length,quarantined:entries.filter(([,entry])=>entry?.quarantined).length,oldestSince:since,maxAttempts:EVENT_OUTBOX_ATTEMPTS};
+ }catch{return {pending:null,quarantined:null,oldestSince:null,maxAttempts:EVENT_OUTBOX_ATTEMPTS};}
 }
 const PREDICTION_STEP_NAMES=['start','next','submit','heartbeat','complete'];
 const CALLER_FAULT_ORIGINS=['worker_http','transport','model_provider','orchestrator','unknown'];
@@ -1559,7 +1623,7 @@ async function diagnosedStart(env,body,requestId){
   const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
   const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));if(lease.status!=='owned')return json(lease);
   shell.leaseAcquiredAt=lease.heartbeatAt;shell.lastHeartbeatAt=lease.heartbeatAt;const previous=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;shell.startResult=previous&&['running','interrupted'].includes(previous.status)?'recovered_stale_lease':'running';await diagnosticCheckpoint(env,shell,{state:'running',startResult:shell.startResult});
-  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);await deliverPendingEvents(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
  },'start',requestId);
  const data=await response.clone().json();if(data.status!=='running'){shell.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';shell.completedAt=new Date().toISOString();shell.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,shell,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:shell.leaseAcquiredAt||null,lastHeartbeatAt:shell.lastHeartbeatAt||null});}
  return response;
@@ -1701,7 +1765,7 @@ async function enrichmentComplete(env,body,requestId){
  }
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
-async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,catalog,discovery,lease]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,RUNNER_LEASE_KEY)]);const films=report?allEnrichmentFilms(report,catalog):[];const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue};}
+async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,catalog,discovery,lease,eventOutbox]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovered-films.json'),loadJSON(env,'epg/discovery-status.json'),loadJSON(env,RUNNER_LEASE_KEY),eventOutboxStatus(env)]);const films=report?allEnrichmentFilms(report,catalog):[];const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:films.length,pendingCount:queue?.pendingCount??null,discovery:discovery||null,queue,eventOutbox};}
 async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
  const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json')]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS,groups:MOOD_GROUPS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,moodGroups:moodPresentationGroups(facet.mapping),fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,...(Object.hasOwn(p,'confidenceAssessment')?{confidenceAssessment:p.confidenceAssessment,fingerprintHash:p.fingerprintHash??null}:{}),stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}

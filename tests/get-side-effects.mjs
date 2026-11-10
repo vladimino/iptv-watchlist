@@ -4,9 +4,8 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 
-// GET routes that may write to R2 in this R2-only harness. D1 published-EPG GETs are covered by tests/get-write-audit.mjs.
-// Each remaining writer is documented in docs/reference/api/read-side-effects.md; extend both together.
-const WRITING_GET_ROUTES=['/api/events'];
+// GET routes that may write to R2: none since AIR-416 (the journal read no longer delivers stop events). tests/get-write-audit.mjs is the full audit (R2 and D1).
+const WRITING_GET_ROUTES=[];
 
 const sources=['src/worker.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/letterboxd-ratings.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n');
 const routes=new Set([...sources.matchAll(/(?:url\.pathname|path)==='(\/api\/[^']+)'&&request\.method==='GET'/g)].map(m=>m[1]));
@@ -96,4 +95,4 @@ reads.length=0;puts=[];{const response=await context.worker.fetch(new Request('h
 reads.length=0;puts=[];fetches=[];{const response=await context.worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/admin/discovery-recovery/identity-receipt?idempotencyKey=idem-000000000000001'),env,execution);assert.equal(response.status,404);assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);assert.deepEqual(reads,['admin/actions/discovery_identity_correct/v1/idem-000000000000001.json']);}
 bucket.get=trackedGet;
 
-console.log(`GET side effects: ${routes.size} routes, writers limited to ${WRITING_GET_ROUTES.join(', ')}, no background work or hidden requests`);
+console.log(`GET side effects: ${routes.size} routes, ${WRITING_GET_ROUTES.length?'writers limited to '+WRITING_GET_ROUTES.join(', '):'no GET writes'}, no background work or hidden requests`);
