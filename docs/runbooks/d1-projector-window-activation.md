@@ -16,7 +16,7 @@ Stop, change nothing and report if any of these holds:
 - a readback of the previous step is missing or does not match, or the outcome of a write is unknown (read back first, never repeat blindly);
 - the owner withdraws the GO.
 
-Read only with proven read-only sources: D1 `SELECT`s, the `feature_flags` readback, repository files. Do not call `epg_sync_step`, `GET /api/programme` or `GET /api/watchlist` as a probe (they can write), and do not use `epg_pipeline_status` as a probe while a fence can be held.
+Read only with proven read-only sources: D1 `SELECT`s, the `feature_flags` readback, repository files. Do not call `epg_sync_step` as a probe, and do not use `epg_pipeline_status` as a probe while a fence can be held. Programme and watchlist GET are query-only of the published generation; they are still too coarse to use as a projector-window probe.
 
 ## Decision table
 

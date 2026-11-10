@@ -19,7 +19,7 @@ export const QUERY_BUDGET=400;
 export const UNIT_PEOPLE=25;
 const SEP='\u001f';
 export const keyOf=(...parts)=>parts.map(String).join(SEP);
-const stable=value=>JSON.stringify(value,(_k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
+export const stable=value=>JSON.stringify(value,(_k,v)=>v&&typeof v==='object'&&!Array.isArray(v)?Object.fromEntries(Object.keys(v).sort().map(k=>[k,v[k]])):v);
 export async function sha256Hex(text){
  const bytes=new TextEncoder().encode(text);
  return [...new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256',bytes))].map(b=>b.toString(16).padStart(2,'0')).join('');

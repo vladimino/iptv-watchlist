@@ -702,7 +702,13 @@ const e2eLedger=async file=>{
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-person-baseline'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.filter(file=>!file.endsWith('film-person-baseline.js')),[],'no source file imports film-person-baseline');
+ // the separate cutover_minimum gate (AIR-373) is the only other file that names it; nothing else imports that gate either
+ assert.deepEqual(importers.filter(file=>!file.endsWith('film-person-baseline.js')&&!file.endsWith('film-person-cutover-minimum.js')),[],'no source file imports film-person-baseline');
+ const gateImporters=[];
+ const walkGate=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walkGate(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-person-cutover-minimum'))gateImporters.push(full);}};
+ walkGate('src');
+ assert.deepEqual(gateImporters.filter(file=>!file.endsWith('film-person-cutover-minimum.js')),[],'no source file imports the cutover_minimum gate');
+ for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-person-cutover-minimum'),file+' does not bundle the gate');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-person-baseline'),file+' does not bundle it');
  const text=fs.readFileSync('src/film-person-baseline.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bR2\b|BUCKET|\.json['"]|fetch\(|child_process|process\.env/.test(text),'no R2, network, shell or environment access');
