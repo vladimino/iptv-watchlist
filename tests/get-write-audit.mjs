@@ -26,7 +26,7 @@ const readRoutes=[...exact].sort().map(withQuery).concat(Object.values(PREFIX_RO
 assert.equal(new Set(readRoutes).size,readRoutes.length,'a read route is listed twice');
 
 // ---- the matrix ----
-const observed={},statuses={};
+const observed={},statuses={},viewProbe={};
 const key=(method,route,scenario)=>method+' '+route.replace(/\?.*$/,'')+(route.includes('?')?' ?'+route.split('?')[1]:'')+' @ '+scenario;
 const names=Object.keys(SCENARIOS);
 const failures=[];
@@ -36,12 +36,14 @@ const baselineFor=(table,method,route,scenario)=>{
  const entry=table.find(item=>item.routes.includes(method+' '+route));
  return entry?{entry,effects:entry.effects[scenario]||[],sql:entry.sql?.[scenario]||[]}:{entry:null,effects:[],sql:[]};
 };
+const scenarios={};
 for(const name of names){
- const scenario=await buildScenario(name);
+ const scenario=scenarios[name]=await buildScenario(name);
  for(const route of readRoutes)for(const method of ['GET','HEAD']){
   const result=await probe.run(scenario,[route,{method}]);
   const found=effectsOf(result);
   observed[key(method,route,name)]=found;statuses[key(method,route,name)]=result.status;
+  if(method==='GET'&&route==='/api/enrichment/view')viewProbe[name]=result;
   const {entry,effects,sql}=baselineFor(BASELINE,method,route,name),statements=[...new Set(result.statements)];
   if(entry&&effects.length&&same(found,effects)&&same(statements,sql))consumed.add(entry.id+'@'+name);
   if(!same(found,effects))failures.push(key(method,route,name)+'\n   observed: '+JSON.stringify(found)+'\n   baseline: '+JSON.stringify(effects));
@@ -95,7 +97,7 @@ for(const name of names){
   assert.equal(result.workflows,0);
   assert.ok(!effectsOf(result).some(item=>item.includes('view-index')),'view index write: '+effectsOf(result).join(', '));
  };
- const missing=await buildScenario('r2-pending');
+ const missing=scenarios['r2-pending'];
  const [first,second]=await Promise.all([probe.run(missing,['/api/enrichment/view',{method:'GET'}]),probe.run(missing,['/api/enrichment/view',{method:'GET'}])]);
  assert.equal(first.status,200);assert.equal(second.status,200);
  noPersist(first);noPersist(second);
@@ -109,8 +111,7 @@ for(const name of names){
  assert.equal(partial.status,200);noPersist(partial);assert.deepEqual(effectsOf(partial),[]);
  const partialFilms=JSON.parse(partial.body).films;
  assert.equal(partialFilms.kept.actualRating,null);assert.equal(partialFilms.kept.watched,true);assert.equal(partialFilms.w1.actualRating,4);
- const d1Pending=await buildScenario('d1-pending');
- const d1View=await probe.run(d1Pending,['/api/enrichment/view',{method:'GET'}]);
+ const d1View=viewProbe['d1-pending'];
  assert.equal(d1View.status,200);noPersist(d1View);
  assert.equal(JSON.parse(d1View.body).films.w1.actualRating,4);
 }
