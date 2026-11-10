@@ -38,7 +38,8 @@ function previous(file,total){
  sql(file,"UPDATE discovery_authority SET programme_run_id='run-old', published_programme_run_id='run-old' WHERE id=1");
  sql(file,"UPDATE discovery_transfer SET state='committed', programme_run_id='run-old' WHERE id=1");
 }
-const worker=(file,hooks={})=>({DB:d1Standin(file,hooks),BUCKET:new MemoryBucket(),discoveryLease:null});
+// Every stand-in here refuses a statement with more than 100 bound parameters, as D1 does.
+const worker=(file,hooks={})=>({DB:d1Standin(file,{maxBinds:100,...hooks}),BUCKET:new MemoryBucket(),discoveryLease:null});
 async function lease(env,file){
  sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');
  const taken=await Authority.acquireLease(env,{programmeRunId:null});
@@ -74,7 +75,6 @@ const invariant=file=>{
  const env=worker(file);const l=await lease(env,file);
  await begin(env,l,total);
  assert.equal(count(file,"residence='retiring'"),overlap+gone);
- sql(file,"UPDATE discovery_seal SET cursor_items=0 WHERE id=1");
  const before={trips:trips(env),statements:env.DB.calls.statements,batches:env.DB.calls.batches};
  const started=Date.now();
  let cursor=0,carried=null,batches=0;
@@ -203,8 +203,31 @@ async function fresh(){const file=migrate();previous(file,600);const env=worker(
  // A transfer that is not loading refuses the carried batch too.
  sql(file,"UPDATE discovery_transfer SET state='committed' WHERE id=1");
  const good=[a,b].find(r=>r.status==='fulfilled').value;
- await assert.rejects(()=>Authority.sealWrite(other,{jobId:'job-1',expectedCursor:cursor,items:entries(cursor,cursor+50),lease:l2,carried:good.carried}),error=>error.code==='discovery_incomplete'||error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.sealWrite(other,{jobId:'job-1',expectedCursor:cursor,items:entries(cursor,cursor+50),lease:l2,carried:good.carried}),error=>error.code==='discovery_incomplete','the carried batch is refused by its fence and the fresh read names the reason');
+ await assert.rejects(()=>Authority.sealWrite(other,{jobId:'job-1',expectedCursor:cursor,items:entries(cursor,cursor+50),lease:l2}),error=>error.code==='discovery_incomplete');
  assert.equal(invariant(file),cursor);
+}
+
+// 5b. A carried `cursorBytes` that is a valid number but wrong cannot move the durable byte cursor: the database adds the bytes of the
+//     batch to its own value, and the next step reads the cursor from D1. An out-of-band generation move at the same time is refused first.
+{
+ const {file,env,l}=await fresh();
+ const first=await writeAll(env,l,0,TOTAL,{stopAfter:1});
+ const before=seal(file);
+ const batch=entries(first.cursor,first.cursor+50);
+ const bytes=batch.reduce((n,e)=>n+e.bytes,0);
+ const wrong={...first.carried,cursorBytes:first.carried.cursorBytes+123456};
+ const result=await Authority.sealWrite(env,{jobId:'job-1',expectedCursor:first.cursor,items:batch,lease:l,carried:wrong});
+ assert.equal(result.written,50);
+ const after=seal(file);
+ assert.equal(Number(after.cursor_bytes),Number(before.cursor_bytes)+bytes,'the durable byte cursor moved by the bytes of the batch only');
+ assert.equal(Number(after.cursor_items),first.cursor+50);
+ assert.equal((await Authority.sealState(env)).cursorBytes,Number(before.cursor_bytes)+bytes,'what the next step reads is the durable value');
+ // The wrong value and a moved generation together: nothing is written by the carried batch, and the fresh path returns the true cursor.
+ sql(file,'UPDATE discovery_authority SET generation=generation+1 WHERE id=1');
+ const next=await Authority.sealWrite(env,{jobId:'job-1',expectedCursor:first.cursor+50,items:entries(first.cursor+50,first.cursor+60),lease:l,carried:{...result.carried,cursorBytes:1}});
+ assert.equal(next.cursorBytes,Number(seal(file).cursor_bytes),'a refused carried batch falls back to the durable byte cursor');
+ assert.equal(invariant(file),first.cursor+60);
 }
 
 // 6. Idempotency and packing bounds: the same observations written by a restarted job give the same rows; a very large payload gets
@@ -215,11 +238,14 @@ async function fresh(){const file=migrate();previous(file,600);const env=worker(
  await begin(env,l,30);
  const big=i=>{const value=item(i);value.note='y'.repeat(150000);return {item:value,bytes:JSON.stringify(value).length+1};};
  const many=i=>{const value=item(i);value.shows=Array.from({length:300},(_,k)=>({channelId:'c'+k,channel:'C',start:1793000000000+k,end:1793000001000+k}));return {item:value,bytes:JSON.stringify(value).length+1};};
- const list=[...Array.from({length:10},(_,i)=>big(i)),...Array.from({length:5},(_,i)=>many(10+i)),...entries(15,30)];
+ // One observation larger than the whole batch byte cap still goes out, alone.
+ const huge=i=>{const value=item(i);value.note='я'.repeat(300000);return {item:value,bytes:new TextEncoder().encode(JSON.stringify(value)).byteLength+1};};
+ const list=[...Array.from({length:9},(_,i)=>big(i)),huge(9),...Array.from({length:5},(_,i)=>many(10+i)),...entries(15,30)];
  let cursor=0,carried=null,batches=0,statements=[];
  const counting=worker(file,{onBatch(batch){statements.push(batch.length);}});counting.discoveryLease=l;
  while(cursor<30){const r=await Authority.sealWrite(counting,{jobId:'job-1',expectedCursor:cursor,items:list.slice(cursor),lease:l,carried});cursor=r.cursorItems;carried=r.carried;batches++;}
  assert.ok(batches>=3,'large payloads and many shows split the batch: '+batches);
+ assert.ok(Number(one(file,"SELECT LENGTH(payload_json) AS n FROM discovery_observation WHERE source_key='active' AND observation_key='"+keyOf(9)+"'").n)>300000,'the oversized observation is stored whole');
  assert.ok(statements.every(size=>size<=Authority.STATEMENT_CAP),'no batch exceeds the statement cap: '+statements.join(','));
  assert.equal(count(file,"source_key='active' AND residence='active' AND programme_run_id='run-new'"),30);
  assert.equal(shows(file,"source_key='active' AND observation_key='"+keyOf(12)+"'"),300);

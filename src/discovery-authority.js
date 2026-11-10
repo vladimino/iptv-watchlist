@@ -657,7 +657,9 @@ const SEAL_KEYS_PER_DELETE=80;
 const SEAL_ROWS_PER_UPSERT=Math.floor(BIND_CAP/OBSERVATION_ROW_BINDS);
 const SEAL_UPSERT_BYTES=200000;
 const SEAL_ITEMS_PER_BATCH=400;
-const SEAL_BATCH_BYTES=1000000;
+// A batch of the production ledger is about 190 kB (10 November 2026); the cap keeps a ledger of much larger payloads near that.
+const SEAL_BATCH_BYTES=400000;
+const SEAL_ENCODER=new TextEncoder();
 export async function sealSupported(env){
  try{return !!await one(database(env),"SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='discovery_seal'");}
  catch{return false;}
@@ -732,7 +734,8 @@ async function sealWriteBatch(env,spec,lease,known){
  const cost=(upserts,count,rows)=>SEAL_BATCH_OVERHEAD+upserts+Math.ceil(count/SEAL_KEYS_PER_DELETE)+Math.ceil(rows/SEAL_SHOW_ROWS);
  for(const entry of spec.items){
   const built=observationUpsert(entry.item,run);
-  const size=String(built.values[built.values.length-1]).length;
+  // Bytes on the wire, not UTF-16 units: a Cyrillic title is two bytes a letter.
+  const size=SEAL_ENCODER.encode(String(built.values[built.values.length-1])).byteLength;
   const joins=!!group&&group.rows.length<SEAL_ROWS_PER_UPSERT&&group.size+size<=SEAL_UPSERT_BYTES;
   const upserts=groups.length+(joins?0:1),rows=showRows.length+built.shows.length;
   if(written.length>0&&(written.length+1>SEAL_ITEMS_PER_BATCH||payloadBytes+size>SEAL_BATCH_BYTES||cost(upserts,written.length+1,rows)>STATEMENT_CAP))break;

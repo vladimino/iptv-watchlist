@@ -1,6 +1,6 @@
 # AIR-420: the ledger seal pays for D1 round trips, not for SQL
 
-**Captured:** 2026-11-10, 17:05 to 17:40 UTC. **Method:** read-only only: MCP `epg_status`, Worker observability (`epg_phase` events), the Workflow instance records of `iptv-epg`, D1 query analytics (`d1QueriesAdaptiveGroups`), two D1 `SELECT`s on `discovery_seal` and `discovery_observation`, and an offline measurement on the sqlite stand-in. No write, start, step, retry, lease change, flag, Task or cron change. No Film or observation id is recorded here.
+**Captured:** 2026-11-10, 17:05 to 18:45 UTC. **Method:** read-only only: MCP `epg_status`, Worker observability (`epg_phase` events), the Workflow instance records of `iptv-epg`, D1 query analytics (`d1QueriesAdaptiveGroups`), two D1 `SELECT`s on `discovery_seal` and `discovery_observation`, and an offline measurement on the sqlite stand-in. No write, start, step, retry, lease change, flag, Task or cron change. No Film or observation id is recorded here.
 
 ## The incident
 
@@ -46,8 +46,56 @@ The seal batch now packs its rows (several observations in one upsert statement,
 
 The model for the slow day (40 min for 40,000) agrees with the 64 minutes observed for 47,059 including the gaps between steps. Estimated ledger time after the change on a slow instance: about 350 batches, 2 to 4 steps, two to three minutes; on a fast instance one step.
 
-**Limits.** The stand-in has no network; the "after" figures for production are a model, not a measurement. If the slow part were the write batch alone and not every round trip, the gain on a slow instance would be the batch density only (about 4.5 times, 64 min to about 14 min). The step log now carries `batches`, `writeMs`, `items`, `archives` and `archiveMs`, so the next natural run measures this directly. The catalog and publication phases were not changed; on 10 November they took from 17:17 to after 17:34 UTC and are the next thing to read on a slow instance.
+**Limits.** The stand-in has no network; the "after" figures for production are a model, not a measurement. If the slow part were the write batch alone and not every round trip, the gain on a slow instance would be the batch density only (about 4.5 times, 64 min to about 14 min). The step log now carries `batches`, `writeMs`, `items`, `archives` and `archiveMs`, so the next natural run measures this directly. The catalog and publication phases were not changed (see below). The size caps of a batch (400 kB of payload, 200 kB a statement) are untested against the real D1 request limits; a production batch is about 190 kB against about 36 kB before.
+
+## What the seal carries, and what changed between 9 and 10 November
+
+Read-only D1 aggregates after the publication (18:38 UTC) and MCP `epg_pipeline_status`:
+
+| Quantity | Value |
+| --- | --- |
+| (a) Observations transferred by the seal | 47,059 (44,924 the day before) |
+| Keys new on 10 November | 2,135 (no row stayed `retiring`, so every key of 9 November was written again) |
+| Seen in the latest scan (`seen_in_latest=1`) | 20,568; their payload changes every generation (`lastSeenProgrammeRunId`, shows) |
+| Not seen in the latest scan | 26,491 (56 %); their payload is byte-stable after their first absent generation, only the row's run changes |
+| (d) Retiring for good, archived | 0 (the archive has no item) |
+| (b) Unresolved Discovery candidates | 12,069, of which 4,603 ready now and 6,177 in retry backoff; 12 chunks left in the series |
+| Payload | 34.8 MB in total, 739 bytes on average, 1,545 bytes at most |
+| Shows | 39,425 rows, 0.84 an observation; 56 % of observations have none, 0.1 % have more than 20, the largest has 96 |
+
+The seal's 47,059 is the size of the active ledger, not Discovery work: the resolver's work is (b) and is bounded per chunk. Which of the 26,491 not-seen rows became not-seen on 10 November (and so changed once) cannot be read from D1, because the previous payloads were overwritten by this seal; it needs the two immutable generation ledgers in R2, which were not read. The daily cost is recurring, not a backlog: the whole active ledger is written on every generation.
+
+## The same round trips in the catalog phase
+
+The `catalog` phase of the same run confirms the reading with a different mix of reads and writes. It wrote 8,312 films in 25 steps from 17:17 to 17:33 UTC (**16 minutes**, 285 to 399 films a step); on 9 November one step wrote 6,884 films in 31 s. A catalog batch is 19 films and 5 round trips (four gate reads and one write): about 360 batches a step on 9 November (17 ms a round trip) and 19 on 10 November (about 300 ms), the same two latencies as the ledger. The publication, finalize and queue steps took 3 min 2 s on 10 November against 39 s the day before.
+
+## Packing on the production distribution
+
+`sealWrite` itself, fed 47,059 observations with the payload sizes and show counts of the production ledger (the aggregates above, Cyrillic text, random order) and with heavier tails. The ledger time adds 20 round trips of fixed reads a step and 10 s between steps.
+
+| Input | Batches | Observations a batch (p5 / p50 / p95) | Batch size (p50 / max) | Ledger at 17 / 100 / 200 / 350 ms a round trip |
+| --- | --- | --- | --- | --- |
+| Production distribution | 245 | 174 / 194 / 207 | 187 / 209 kB | 5 s / 27 s / 67 s / 144 s |
+| Payloads three times larger | 257 | 171 / 183 / 192 | 443 / 448 kB | 5 s / 28 s / 69 s / 148 s |
+| Payloads ten times larger (byte cap decides) | 867 | 49 / 54 / 59 | 405 / 416 kB | 15 s / 113 s / 261 s / 514 s |
+| Four times the shows | 467 | 77 / 102 / 124 | 121 / 161 kB | 8 s / 61 s / 139 s / 272 s |
+| Every observation 8 shows | 872 | 54 / 54 / 54 | 86 / 93 kB | 15 s / 113 s / 262 s / 516 s |
+| Every observation 40 shows, payloads three times larger | 3,922 | 12 / 12 / 12 | 72 / 84 kB | 88 s / 550 s / 1,180 s / 2,315 s |
+
+The statement count never exceeds 40. Shows are the tail that costs (16 rows a statement); the last row is about fifty times the production show volume. Before the change the production distribution cost 1,569 batches and 9,414 round trips: 47 minutes at 300 ms.
+
+## What remains after this change on a slow instance
+
+| Part | 9 Nov (fast) | 10 Nov (slow) | Slow, after this change |
+| --- | --- | --- | --- |
+| Start, metadata, wait for the source, EPG commit, staging | 8 min | 8 min | 8 min |
+| Ledger | 7 min (with a 4.5 min wait) | 64 min | 1 to 3 min (model) |
+| Catalog | 0.6 min | 16 min | 16 min (unchanged) |
+| Publish, finalize, queue | 0.7 min | 3 min | 3 min |
+| Due to published | 15 min | 96 min | about 30 min |
+
+So the 15-minute target is **not** met on a slow instance by this change alone. The catalog phase is the next bound, with the same cause and the same remedy (carry the gate instead of four reads a batch; pack the films), as a separate change.
 
 ## The live run
 
-No intervention was needed or made. The ledger completed at 17:12:42 UTC; one Workflow step attempt failed with an internal Workflows error at 17:17 UTC and was retried by the platform; at 17:34 UTC the run was in `seal/finalize` with no failure counted.
+No intervention was needed or made. The ledger completed at 17:12:42 UTC; one Workflow step attempt failed with an internal Workflows error at 17:17 UTC and was retried by the platform; the generation was published and the instance completed at 17:36:20 UTC, 96 minutes after the due time, with no failure counted.
