@@ -524,7 +524,10 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     if(outcome.busy){
      const until=Date.parse(outcome.until||'')||Date.now()+1000;
      const settledBusy=await doStep('busy',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
-     await step.sleepUntil(stepName('busy-sleep'),new Date(settledBusy?.reason==='projector_window'?Math.max(until,windowWakeAt(settledBusy)):until));
+     // ADR 0103: a busy checkpoint refused by a held projector window waits for that window's one expiry (capped like every window wait), not for the
+     // hourly gate the busy chunk carries in `until`. A refusal that names no readable deadline keeps the later of `until` and the fallback, as before.
+     const windowKnown=settledBusy?.reason==='projector_window'&&Number.isFinite(Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil))&&Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil)>0;
+     await step.sleepUntil(stepName('busy-sleep'),new Date(windowKnown?windowWakeAt(settledBusy):settledBusy?.reason==='projector_window'?Math.max(until,windowWakeAt(settledBusy)):until));
      continue;
     }
     if(!outcome.progress){
