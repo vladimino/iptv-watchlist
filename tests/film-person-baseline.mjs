@@ -707,7 +707,12 @@ const e2eLedger=async file=>{
  const gateImporters=[];
  const walkGate=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walkGate(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-person-cutover-minimum'))gateImporters.push(full);}};
  walkGate('src');
- assert.deepEqual(gateImporters.filter(file=>!file.endsWith('film-person-cutover-minimum.js')),[],'no source file imports the cutover_minimum gate');
+ // The recorder names the gate in exactly one place: the dynamic import inside its explicit, versioned cutover_minimum recording path (AIR-373). It has no
+ // static import of the gate, and no other source file names it, so the Worker bundle (which does not reach film-person-baseline.js at all) cannot contain it.
+ assert.deepEqual(gateImporters.filter(file=>!file.endsWith('film-person-cutover-minimum.js')).map(file=>file.split(path.sep).join('/')),['src/film-person-baseline.js'],'only the recorder names the cutover_minimum gate');
+ const recorderText=fs.readFileSync('src/film-person-baseline.js','utf8').replace(/\/\/.*$/gm,'');
+ assert.equal((recorderText.match(/film-person-cutover-minimum/g)||[]).length,1,'the recorder names the gate once');
+ assert.ok(recorderText.includes("await import('./film-person-cutover-minimum.js')")&&!/^import[^;]*film-person-cutover-minimum/m.test(recorderText),'and only through the dynamic import of the explicit path');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-person-cutover-minimum'),file+' does not bundle the gate');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-person-baseline'),file+' does not bundle it');
  const text=fs.readFileSync('src/film-person-baseline.js','utf8').replace(/\/\/.*$/gm,'');
