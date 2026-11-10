@@ -27,6 +27,7 @@ flowchart LR
     epg -.->|"target: mirror reconciliation, fenced"| r2
     epg -.-> d1
     pred -.->|"target: run and lease settlement"| r2
+    pred -.->|"target: fenced D1 prediction intent"| d1
     outbox -.->|"target: idempotent delivery"| r2
 ```
 
