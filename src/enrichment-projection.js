@@ -98,6 +98,52 @@ export function listedOnWatchlist(store,film){
  return !!letterboxd&&(store.watchlist?.films||[]).some(item=>String(item.id)===letterboxd);
 }
 
+// AIR-402: the per-Film lookups of enrichmentInputs, answered from indexes built once per call (one build, never kept between runs).
+// Each returns what the linear function it replaces returns, for the same store.
+// metadataLookup(body)(film) is metadataRecord(body,film): the first entry of Object.entries(body) whose key or whose String(value?.id) is one of the Film's ids.
+// The index keeps, for each string, the position of the first entry that offers it; a Film takes the lowest position over its ids. The entries are parsed JSON.
+function metadataLookup(body){
+ if(!body||typeof body!=='object')return ()=>null;
+ const entries=Object.entries(body),first=new Map();
+ entries.forEach(([key,value],at)=>{
+  if(!first.has(key))first.set(key,at);
+  const other=String(value?.id);
+  if(!first.has(other))first.set(other,at);
+ });
+ return film=>{
+  const ids=new Set([film.id.replace(/^film:/,'')]);
+  const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
+  if(letterboxd)ids.add(String(letterboxd));
+  let best=-1;
+  for(const id of ids){const at=first.get(id);if(at!==undefined&&(best<0||at<best))best=at;}
+  return best<0?null:entries[best][1];
+ };
+}
+// listLookups(store) answers listedOnWatchlist(store,film) and onCurrentList(store,lid) from Sets of String(item.id), built on first use. The linear
+// listedOnWatchlist throws on a null item it reaches, which the Set would hide, so a watchlist holding a null or undefined item keeps the linear function.
+function listLookups(store){
+ let listed=null,current=null;
+ return {
+  listedOnWatchlist(film){
+   const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;
+   if(!letterboxd)return false;
+   if(listed===null){
+    const items=store.watchlist?.films||[];
+    listed=items.some(item=>item==null)?false:new Set(items.map(item=>String(item.id)));
+   }
+   return listed===false?listedOnWatchlist(store,film):listed.has(letterboxd);
+  },
+  onCurrentList(lid){
+   if(!lid)return false;
+   if(current===null){
+    current=new Set();
+    for(const item of [...(store.watchlist?.films||[]),...(store.programme?.films||[])])if(item)current.add(String(item.id));
+   }
+   return current.has(String(lid));
+  }
+ };
+}
+
 // The store the enrichment view is built from. Fingerprints, predictions, the profile, the sync state and the discovery ledger
 // change only dimensions the enrichment writer does not own, so they are left out: the view is smaller and the change keys do
 // not move when a prediction does. The Worker projector and the offline seed both build their store here.
@@ -150,11 +196,6 @@ export function enrichmentStore({watchlist=null,programme=null,metadata=null,tit
 // the projector and its seed pass none, so a projected film_metadata row carries content_sha256 NULL: it comes from a live read,
 // not from a pinned object version, and no checksum of another Film's change ever lands on it (ADR 0056).
 function letterboxdOf(film){return (film?.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value||null;}
-function onCurrentList(store,lid){
- if(!lid)return false;
- const same=item=>item&&String(item.id)===String(lid);
- return (store.watchlist?.films||[]).some(same)||(store.programme?.films||[]).some(same);
-}
 // A cache row whose id names another film is not usable. A missing id is this key's row.
 function usableMetadata(record,lid){
  if(!record||typeof record!=='object'||Array.isArray(record))return null;
@@ -162,16 +203,16 @@ function usableMetadata(record,lid){
  return record;
 }
 export function enrichmentInputs({view,store,metadataSha256=null}){
- const sources=sourceIndex(store);
+ const sources=sourceIndex(store),metadataOf=metadataLookup(store.metadata),lists=listLookups(store);
  const films=view.films.map(film=>{
   const {fingerprint,prediction,predictionHistory,availability,...owned}=film;
   const lid=letterboxdOf(film);
-  const body=usableMetadata(metadataRecord(store.metadata,film),lid);
+  const body=usableMetadata(metadataOf(film),lid);
   // An admitted lid with no usable cache is not a new body. The writer keeps the stored Film and only moves membership.
-  const withhold=!!lid&&typeof store.watchlistAdmissions?.[lid]==='boolean'&&!onCurrentList(store,lid)&&!body;
+  const withhold=!!lid&&typeof store.watchlistAdmissions?.[lid]==='boolean'&&!lists.onCurrentList(lid)&&!body;
   const roster=withhold?null:creditRoster(sources(film));
   const metadata=withhold?undefined:catalogMetadata(body,'metadata.json',metadataSha256);
-  return {id:film.id,film:owned,watchlist:listedOnWatchlist(store,film),credits:withhold||roster.unmatched.length?undefined:roster.credits,unmatched:roster?roster.unmatched.length:0,metadata,sync:withhold?null:filmSyncState(body),preserveCanonical:withhold||undefined};
+  return {id:film.id,film:owned,watchlist:lists.listedOnWatchlist(film),credits:withhold||roster.unmatched.length?undefined:roster.credits,unmatched:roster?roster.unmatched.length:0,metadata,sync:withhold?null:filmSyncState(body),preserveCanonical:withhold||undefined};
  });
  return {films,people:view.people.map(person=>({id:person.id,person}))};
 }
@@ -186,12 +227,18 @@ function sourceIndex(store){
   if(!byId.has(key))byId.set(key,[]);
   byId.get(key).push(record);
  }
+ // The order orderedRecords restores: where each record sits in the source lists, once per call (a record listed twice keeps both places).
+ const positions=new Map();
+ [...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})].forEach((record,at)=>{
+  const places=positions.get(record);
+  if(places)places.push(at);else positions.set(record,[at]);
+ });
  return film=>{
   const ids=new Set([film.id.replace(/^film:/,'')]);
   const letterboxd=(film.externalIds||[]).find(item=>item.scheme==='letterboxd')?.value;
   if(letterboxd)ids.add(letterboxd);
   for(const item of film.externalIds||[])if(item.scheme==='tmdb'&&item.trusted===true&&!item.conflicting&&/^\d+$/.test(String(item.value)))ids.add('tmdb_'+item.value);
-  return orderedRecords(store,byId,ids);
+  return orderedRecords(positions,byId,ids);
  };
 }
 function archiveCreditRecords(store){
@@ -199,14 +246,15 @@ function archiveCreditRecords(store){
  if(!admissions||typeof admissions!=='object'||Array.isArray(admissions))return [];
  return Object.entries(admissions).filter(([,item])=>item&&typeof item==='object'&&!Object.prototype.hasOwnProperty.call(item,'watchlist')).map(([id,item])=>({...item,id}));
 }
-function orderedRecords(store,byId,ids){
+function orderedRecords(positions,byId,ids){
  const wanted=new Set();
  for(const id of ids)for(const record of byId.get(String(id))||[])wanted.add(record);
  if(wanted.size<2)return [...wanted];
- const order=[...(store.watchlist?.films||[]),...(store.programme?.films||[]),...Object.values(store.metadata||{}),...Object.values(store.discoveredFilms||{})];
- const listed=order.filter(record=>wanted.has(record));
- for(const record of wanted)if(!listed.includes(record))listed.push(record);
- return listed;
+ // The records the source lists hold come out in list order (once for each place they sit in); the rest, which only the archive adds, follow in the order they were found.
+ const placed=[],rest=[];
+ for(const record of wanted){const places=positions.get(record);if(places)for(const at of places)placed.push([at,record]);else rest.push(record);}
+ placed.sort((a,b)=>a[0]-b[0]);
+ return [...placed.map(entry=>entry[1]),...rest];
 }
 
 // The change key of one input. Values equal to the run's own clock are replaced first: the lifecycle reader stamps a dimension
