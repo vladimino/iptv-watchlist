@@ -4,31 +4,31 @@ This page shows what a GET, a HEAD or an MCP read tool may touch, which reads **
 
 ```mermaid
 flowchart LR
-    client["Browser, admin page or MCP client"]
-    subgraph Read["GET and HEAD handlers"]
-        pure["Pure read: stored state plus the clock"]
-        helper["Shared helpers that still settle state: run history, stop-event recovery, ratings seed"]
+    client["Browser, admin or MCP client"]
+    subgraph Read["GET and HEAD"]
+        pure["Pure read"]
+        helper["Helpers that still write:<br/>run history, stop events, ratings seed"]
     end
     subgraph Writers["Named writers"]
-        epg["EPG executor and its hourly ensure"]
-        pred["Predictions writer: start and complete"]
-        outbox["Event outbox of the Predictions writer"]
+        epg["EPG hourly ensure"]
+        pred["Predictions writer"]
+        outbox["Predictions event outbox"]
     end
     subgraph Storage["Storage"]
-        d1[("D1 authority: published generation, prediction domain")]
-        r2[("R2: compatibility mirrors, run records, journal")]
+        d1[("D1: published generation,<br/>prediction domain")]
+        r2[("R2: compatibility mirrors,<br/>runs, journal")]
     end
     client --> pure
     client --> helper
     pure -->|"SELECT and get only"| d1
     pure -->|"get only"| r2
-    helper -->|"UPDATE of the prediction fence"| d1
-    helper -->|"put of run and journal objects"| r2
-    epg -->|"mirror reconciliation, fenced"| r2
+    helper -->|"prediction fence UPDATE"| d1
+    helper -->|"put run and journal"| r2
+    epg -->|"fenced mirror reconcile"| r2
     epg --> d1
-    pred -.->|"target: run and lease settlement"| r2
-    pred -.->|"target: fenced D1 prediction intent"| d1
-    outbox -.->|"target: idempotent delivery"| r2
+    pred -.->|"target: run and lease"| r2
+    pred -.->|"target: D1 prediction intent"| d1
+    outbox -.->|"target: event delivery"| r2
 ```
 
 ## How to read it

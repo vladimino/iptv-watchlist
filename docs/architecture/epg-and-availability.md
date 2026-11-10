@@ -11,13 +11,13 @@ flowchart TD
     pointer[("Published generation pointer:<br/>D1 published_epg_authority (d1 / open);<br/>R2 pointer is a compatibility mirror")]
     readers["Programme / film page / availability readers"]
     window["Availability projection:<br/>past 72h, future 24h for hot"]
+    ensure["Hourly ensure: R2 mirrors"]
     previous["Prior published generation remains readable"]
     stale{"Writer still owns pinned generation?"}
     update["Apply generation-scoped catalogue/decision update"]
     reject["Abort stale update without touching newer generation"]
     source --> parse --> staging --> seal --> pointer
     pointer --> readers --> window
-    ensure["Hourly EPG ensure: fenced R2 compatibility mirrors"]
     pointer --> ensure
     seal -.->|until pointer switch| previous
     pointer --> stale
