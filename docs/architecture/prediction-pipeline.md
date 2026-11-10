@@ -24,6 +24,8 @@ sequenceDiagram
         MCP-->>Client: Run already active
     else New run
         MCP->>Queue: Acquire lease
+        MCP->>R2: Persist interrupted state for the recovered lease and at most one diagnostic list page
+        Note over MCP,D1: Settlement resumes from enrichment/run-diagnostics-settle.json. GET /api/enrichment/status, GET /api/enrichment/runs and MCP enrichment_status project an expired lease from the diagnostic row and the clock. They write nothing. Event delivery stays on GET /api/events until AIR-416.
         loop While eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
