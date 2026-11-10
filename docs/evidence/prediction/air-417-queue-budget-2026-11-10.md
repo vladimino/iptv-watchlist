@@ -65,3 +65,16 @@ Change: the queue rebuild hands the inputs it read to the start, which reuses th
 | after | 1 / 1 / 2 | 66.6 MB |
 
 Limits: Node's heap ranks the versions; it is not workerd's 128 MB isolate limit, and the synthetic catalog size is an assumption. The profile has no D1, so the overlay's own allocations and the D1-assembled programme are not in it. Whether the reduced start fits the production isolate is shown only by the next owner-approved start. The run `0a55802d…` was left to the ordinary lease recovery.
+
+## Start during an EPG seal, 10 November 2026
+
+Capture: the Trello handoff, Cloudflare telemetry (events view, service `iptv`, 13:37–17:37 UTC) and read-only MCP. The owner ran the paused Task once on `1898fec` (17:30:11–17:32:35 UTC); `prediction_start` answered 502 `storage_error`, request `afb03a95…`, run `c9544245…`.
+
+- The log line added earlier names the failure exactly, with the same request and run ids: `{"event":"prediction_boundary_failed","boundary":"start","stage":"queue_refresh","code":"discovery_fence","kind":"error"}` at 17:31:42.932 UTC. No `prediction_domain_budget` event after 15:35 UTC and no `exceededMemory` on a `/mcp` invocation in that minute: this failure is neither the budget nor the memory limit.
+- The natural EPG Workflow of 10 November was sealing at the time (`seal/catalog` at 17:19 UTC, then `finalize`; the published generation moved from `e38e3f5c…` to `6d9e3c36…`). While a publication holds the Discovery authority a catalog read is refused with `discovery_fence`, so the queue rebuild of the start could not read its catalog. The start treated that wait as a storage failure, after taking the runner lease.
+- At 17:35:43 UTC the queue was rebuilt on `6d9e3c36…` (`consistent: true`, 5450 outstanding: 4047 hot, 1403 cold). The EPG Workflow instance `epg_20261110_0` then ended with `exceededMemory` at 17:36:04 UTC (wall 1137 s); that is an EPG observation outside this change and was not investigated here.
+- Whether the reduced-memory start of the previous section fits the production isolate is still untested: this start failed before it could show it.
+
+Change: `start` reads the Discovery authority before the runner lease and answers `503 blocked` `prediction_catalog_held` when it is held or loading; a rebuild refused with `discovery_fence` or `discovery_incomplete` after the lease releases it and gives the same answer. No stop Event, no change to the queue or retries. `tests/prediction-start-diagnostics.mjs` covers both causes on both paths, an unrelated rebuild failure staying 502, and the start after the publication rebuilding the queue on the new generation with its retry record kept and a working first `next`.
+
+Limits: `next`, `submit` and `complete` of a running run also rebuild the queue and are not changed; a seal that begins during a run can still stop it with `storage_error`, which the next start recovers. The external Task prompt was not changed; how it words a `blocked` start is its own behaviour.
