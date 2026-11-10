@@ -1,6 +1,6 @@
 # AIR-423: what changes between two generations of the discovery ledger
 
-**Captured:** 2026-11-10, 20:40 to 21:00 UTC. **Method:** read-only. The two immutable generation documents `epg/generations/<run>/discovery-latest.json` of 9 November (`e38e3f5c…`) and 10 November (`6d9e3c36…`) and a `HEAD` of the archive pointer, read from R2 with the Object Read token (2 `GET`, 1 `HEAD`, no list); MCP `feature_flags`; the code at `main` `6d2ab29`. The documents were compared in a private scratch directory and deleted; only aggregates are recorded, no key, title or id. No write, start, step, flag or migration.
+**Captured:** 2026-11-10, 20:40 to 21:00 UTC. **Method:** read-only. The two immutable generation documents `epg/generations/<run>/discovery-latest.json` of 9 November (`e38e3f5c…`) and 10 November (`6d9e3c36…`) and a `HEAD` of the archive pointer, read from R2 with the Object Read token (2 `GET`, 1 `HEAD`, no list); MCP `feature_flags` and `epg_pipeline_status` (the reading of 10 November recorded in the [AIR-420 evidence](../d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md), with the D1 aggregates of that record); the code at `main` `6d2ab29`. Card: [AIR-423](https://trello.com/c/NpeuCGhK); follows [PR #490](https://github.com/vladimino/iptv-watchlist/pull/490). The documents were compared in a private scratch directory and deleted; only aggregates are recorded, no key, title or id. No write, start, step, flag or migration.
 
 This is the investigation the card asks for before any design. It records no decision.
 
@@ -32,19 +32,19 @@ The seal's 47,059 is the evidence ledger. It is not Discovery work: the resolver
 
 ## What reuse would save, after PR #490
 
-Statements of the packed seal for this generation: 5,229 upserts (9 observations each), 589 show deletes (80 keys each), 2,464 show inserts (16 rows each), about 245 batches of 40 statements.
+Statements of the packed seal for this generation: 5,229 upserts (9 observations each), 589 show deletes (80 keys each), 2,465 show inserts (16 rows each), 8,283 in all. The packing simulation of the [AIR-420 evidence](../d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md) put them in 245 batches (a batch holds 35 statements besides its fences, and is not always full); that simulation is also the source of the ledger times below.
 
-Re-attributing the 21,673 byte-identical observations by key (`UPDATE … SET residence='active', programme_run_id=? WHERE … observation_key IN (…)`, 98 keys a statement) replaces 2,408 upserts and 271 deletes by 222 updates:
+Re-attributing the 21,673 byte-identical observations by key (`UPDATE … SET residence='active', programme_run_id=? WHERE … observation_key IN (…)`, 98 keys a statement) replaces 2,408 upserts and 271 deletes by 222 updates. The batches and times with reuse are the simulated baseline scaled by the statement count (5,826 / 8,283 = 0.70):
 
 | | Packed seal (now) | With reuse of identical rows |
 | --- | --- | --- |
-| Statements | 8,282 | 5,825 |
-| Batches (round trips) | about 245 | about 167 (−32 %) |
+| Statements | 8,283 | 5,826 |
+| Batches (round trips) | about 245 | about 172 (−30 %) |
 | Payload uploaded | 49.9 MB | 26.1 MB (−48 %) |
 | Rows written in `discovery_observation` | 47,059 | 47,059 (the same; a row is still updated) |
-| Ledger phase at 17 / 200 / 350 ms a round trip | 5 s / 67 s / 144 s | about 4 s / 46 s / 98 s |
+| Ledger phase at 17 / 200 / 350 ms a round trip | 5 s / 67 s / 144 s | about 4 s / 47 s / 101 s |
 
-So the gain in publication time is about 20 to 45 seconds on a slow instance and nothing measurable on a fast one. The gain in uploaded bytes is about 24 MB a day. Both are models from the document diff, not measurements.
+So the gain in publication time is about 20 to 43 seconds on a slow instance and nothing measurable on a fast one. The gain in uploaded bytes is about 24 MB a day. Both are models from the document diff, not measurements.
 
 ## What the growth costs
 
@@ -54,4 +54,5 @@ In `frozen` mode the active ledger only grows: +2,135 keys from 9 to 10 November
 
 - One pair of generations. The share of identical rows depends on how many observations are absent, which depends on the mode.
 - The comparison is of the R2 documents. The D1 rows of 9 November were overwritten by the seal of 10 November and were not compared; the seal writes the document's items, so they should agree.
-- The savings table assumes the reuse statement and its fence cost one statement per 98 keys and no extra read.
+- The savings table assumes the reuse statement and its fence cost one statement per 98 keys and no extra read, and that batches scale with statements.
+- The code references were read at `main` `6d2ab29`; the cited expressions are unchanged at the head of this change.
