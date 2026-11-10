@@ -82,7 +82,7 @@ One admin response must name its pin, and that pin must cover every object the p
 
 ## GET side effects and safe reads
 
-The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Proposed). It supersedes the R2-only list that `tests/get-side-effects.mjs` kept: in D1 authority the published-generation pin also writes, so **`GET /api/programme`, `GET /api/watchlist`, `GET /api/catalog/available` and every `GET /api/admin/*` read can write** (the fenced D1 marker, and the R2 compatibility mirrors when they are missing or old) until [AIR-414](https://trello.com/c/GJefgNm8) lands. The four R2 writers named by `tests/get-side-effects.mjs` are:
+The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted). It supersedes the R2-only list that `tests/get-side-effects.mjs` kept: in D1 authority the published-generation pin also writes, so **`GET /api/programme`, `GET /api/watchlist`, `GET /api/catalog/available` and every `GET /api/admin/*` read can write** (the fenced D1 marker, and the R2 compatibility mirrors when they are missing or old) until [AIR-414](https://trello.com/c/GJefgNm8) lands. The four R2 writers named by `tests/get-side-effects.mjs` are:
 
 | Route | Why it can write | Admin use |
 | --- | --- | --- |
