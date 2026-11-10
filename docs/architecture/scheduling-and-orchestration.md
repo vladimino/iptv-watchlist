@@ -125,7 +125,7 @@ sequenceDiagram
     end
     opt DISCOVERY_EXECUTOR is workflow
         Cron->>Worker: reconcileDiscoveryWorkflow
-        Note over Worker,D1: Reads only unless a missing intent or a dead instance needs one create. No chunk, no TMDB. A projector_window refusal is retried in this tick after the window expiry (AIR-428); each attempt is logged.
+        Note over Worker,D1: No chunk, no TMDB. Missing intent or a dead instance may create one.<br/>projector_window retries in this tick after expiry (AIR-428) and is logged.
     end
 ```
 
