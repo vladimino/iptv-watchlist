@@ -8,8 +8,8 @@ const ctx=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,JSON,console,d
 vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 const plain=v=>JSON.parse(JSON.stringify(v));
-const retained=(updatedAt,extra={})=>({updatedAt:new Date(updatedAt).toISOString(),cutoff:updatedAt,window:{from:updatedAt-72*hour,to:updatedAt+168*hour,hotTo:updatedAt+24*hour},stats:{epgEnd:updatedAt+160*hour},...extra});
-const legacy=updatedAt=>({updatedAt:new Date(updatedAt).toISOString(),cutoff:updatedAt,window:{from:updatedAt-72*hour,to:updatedAt+24*hour},stats:{epgEnd:updatedAt+20*hour}});
+const retained=(updatedAt,extra={})=>({updatedAt:new Date(updatedAt).toISOString(),publishedAt:new Date(updatedAt).toISOString(),cutoff:updatedAt,window:{from:updatedAt-72*hour,to:updatedAt+168*hour,hotTo:updatedAt+24*hour},stats:{epgEnd:updatedAt+160*hour},...extra});
+const legacy=updatedAt=>({updatedAt:new Date(updatedAt).toISOString(),publishedAt:new Date(updatedAt).toISOString(),cutoff:updatedAt,window:{from:updatedAt-72*hour,to:updatedAt+24*hour},stats:{epgEnd:updatedAt+20*hour}});
 const setup=(snapshot,clock)=>{ctx.snap=snapshot;run(`report=snap;viewClock=${clock}`);};
 const show=(start,channel='Кино')=>({channelId:'c',channel,start,end:start+2*hour});
 const film=(shows)=>{ctx.f={id:'f',title:'Фильм',original:'Film',year:2001,genres:['Драма'],runtime:100,directors:[],actors:[],shows};return ctx.f;};

@@ -2088,7 +2088,7 @@ function programmeStatus(model=viewingWindow()){
  const archive=model.archive?`Архив с ${madridStamp(model.archive.from)} · `:'';
  // The retained future runs to the last show the feed really had (never past the saved window); a skipped refresh keeps it until
  // those shows start, with the data age said out loud so an old programme is never passed off as a fresh one.
- const savedAt=finiteTime(report?.updatedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
+ const savedAt=finiteTime(report?.publishedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
  const ageText=age===null?'':`Обновлено ${ageWords(age)} назад · `,stale=age!==null&&age>PROGRAMME_STALE_MS;
  // Known future programming comes from the feed's real last show, never from the saved window's edge. When that show has already
  // started the schedule ahead is unknown, whatever the window still allows; nothing is extended to the retention edge.
@@ -2105,7 +2105,7 @@ function updateProgrammeStatus(){
  const badge=$('#connection-badge'),coverage=$('#snapshot-coverage'),updated=$('#snapshot-updated'),note=$('#window-note');
  if(!report){if(badge&&programmeRefreshError){badge.textContent='Ошибка обновления';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}return;}
  const status=programmeStatus();
- if(updated)updated.textContent=`Обновлено ${madridStamp(Date.parse(report.updatedAt))}`;
+ if(updated){const published=Date.parse(report.publishedAt);updated.textContent=Number.isFinite(published)?`Обновлено ${madridStamp(published)}`:'Обновлено — нет данных';}
  if(coverage){coverage.textContent=status.coverage;coverage.title=status.title;}
  if(badge){badge.classList?.remove('is-ok','is-warning','is-critical','is-error');if(programmeRefreshError){badge.textContent='Ошибка обновления';badge.title='Последний снимок сохранён. Ошибка обновления не заменяет состояние окна.';badge.classList?.add('is-error');}else{badge.textContent=status.badge;badge.title=status.title;badge.classList?.add(status.level==='ok'?'is-ok':status.level==='warning'?'is-warning':'is-critical');}}
  if(note){note.hidden=!blackZone();note.textContent=state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет. Фильтры не изменены.':'Окно программы закончилось. Показаны фильмы из watchlist без расписания. Архив и следующие сутки пусты, пока не придёт новый снимок.';}

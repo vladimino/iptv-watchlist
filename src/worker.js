@@ -621,7 +621,8 @@ async function beginSync(env){
  const gate=await ratingsGate(env);
  if(gate.active&&current)await flushRemovalHandover(env,current);
  const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
- const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ const lastEpgPublishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(current,null):null;
+ const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
 async function metadataSync(env,run){
@@ -1595,7 +1596,11 @@ async fetch(request,env,execution){
     const titles=await loadJSON(pinned,'titles.json')||{};
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
-    return json(presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body));
+    const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body);
+    const sync=await loadJSON(env,'sync.json');
+    const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
+    if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
+    return json(presented);
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
