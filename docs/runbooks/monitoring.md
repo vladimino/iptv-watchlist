@@ -22,6 +22,7 @@ Read `GET /api/monitor/status` first (a pure read), then the domain's own status
 | Issue key | Read | Meaning and next step |
 | --- | --- | --- |
 | `epg_stale`, `epg_failed` | MCP `epg_status`, `epg_pipeline_status` | No generation published since the Madrid 17:00 due time. See the deployment runbook |
+| (no alert) EPG `health: late` | MCP `epg_status`: `orchestration.seal` (`cursorItems` of `itemTotal`, `updatedAt`) and `orchestration.publication.overdueMs` | The publication is more than 15 min past due and not waiting or cooling down. A cursor that moves between two reads is a slow seal, not a stopped one: read the `epg_phase` exit events (`writeMs / batches` is the D1 round trip) before anything else, and do not step or retry the run by hand. See the [AIR-420 evidence](../evidence/d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md) |
 | `epg_authority` | the published EPG authority marker | Held or unreadable: owner |
 | `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch` | `epg_pipeline_status` | A backlog without allowed progress. Check the executor mode and the Workflow before any resolver call |
 | `discovery_quarantined`, `discovery_executor_invalid` | `feature_flags`, the Workflow readout | The retry budget is exhausted or the flag value is invalid: owner |

@@ -41,7 +41,8 @@ function bucket(chunk=7){
 const item=(key,title)=>({key,title,normalizedTitle:title.toLowerCase(),year:2001,durations:[100],shows:[{channelId:'c',channel:'Канал',start:1793000000000,end:1793000100000},{channelId:'d',channel:'D',start:1793000200000,end:1793000300000}],seenInLatestSnapshot:true,lastAiring:1793000000000});
 const TITLES=['Брат','Сталкер','Солярис','Зеркало','Кин-дза-дза','Ирония судьбы','Кавычки "цитата"','Скобка {блок}','Descripción — ñ','日本語のタイトル'];
 const keys=(a,b)=>Array.from({length:b-a},(_,i)=>'k'+String(a+i).padStart(5,'0'));
-const NEW=keys(20,270).map((key,i)=>item(key,TITLES[i%TITLES.length]+' '+i));
+// AIR-420: a batch now carries about 140 observations, so the ledger is large enough to need several steps.
+const NEW=keys(20,720).map((key,i)=>item(key,TITLES[i%TITLES.length]+' '+i));
 
 // Builds the immutable generation document exactly as the commit does, with the Worker's own framing.
 async function stageDocument(bkt,items,runId){
@@ -73,9 +74,9 @@ async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_
  let steps=0,killed=0,done=false,lastCursor=-1;
  while(!done&&steps<60){
   steps++;
-  // Every third step is cancelled in the middle of a batch.
+  // Every third step is cancelled at its write batch (the first batch of a step is the lease; a step with its time spent sends one write).
   let seen=0;const dying=steps%3===0;
-  const env=stepEnv(file,bkt,dying?{onBatch(){seen++;if(seen===3){killed++;throw new Error('cancelled');}}}:{});
+  const env=stepEnv(file,bkt,dying?{onBatch(){seen++;if(seen===2){killed++;throw new Error('cancelled');}}}:{});
   const lease=await takeLease(env,file);
   try{
    // A step with its time already spent does one flush of at least SEAL_FLUSH_ITEMS and stops.
@@ -193,6 +194,8 @@ for(const mode of ['document','emit']){
   assert.equal(response.status,200);
   assert.equal(body.stage,'seal');assert.equal(body.discovery.nextAction,'continue');
   Object.assign(run,JSON.parse(await (await bkt.get('sync.json')).text()));
+  // AIR-420: a ledger step leaves the cursor it reached on the run document (what the read model and the progress count read).
+  assert.equal(body.seal.cursor,run.seal.cursor);assert.ok(run.seal.cursor>0&&run.seal.cursor<=NEW.length);assert.ok(['items','archive','done'].includes(run.seal.ledgerPhase));
   const mismatch=await context.syncStep(env,'/api/sync/epg',{runId:'other-run'},{});
   assert.equal(mismatch.status,409);
  }

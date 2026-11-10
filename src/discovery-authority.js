@@ -399,11 +399,16 @@ function itemStatements(item,run){
  for(const show of shows)statements.push(['INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES (\'active\',?,?,?,?,?,?)',[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end]]);
  return statements;
 }
+const OBSERVATION_INSERT='INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES ';
+const OBSERVATION_ROW='(\'active\',?,\'active\',?,?,?,?,?,?,?,?,?,?)';
+const OBSERVATION_ROW_BINDS=11;
+const OBSERVATION_CONFLICT=' ON CONFLICT(source_key, observation_key) DO UPDATE SET residence=\'active\', programme_run_id=excluded.programme_run_id, normalized_title=excluded.normalized_title, title=excluded.title, year=excluded.year, evidence_key=excluded.evidence_key, seen_in_latest=excluded.seen_in_latest, last_seen_at=excluded.last_seen_at, last_airing=excluded.last_airing, confirmed_tmdb_id=excluded.confirmed_tmdb_id, payload_json=excluded.payload_json';
 function observationUpsert(item,run){
  const shows=showsOf(item);
  const payload={...item};delete payload.shows;
- const upsert=['INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES (\'active\',?,\'active\',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_key, observation_key) DO UPDATE SET residence=\'active\', programme_run_id=excluded.programme_run_id, normalized_title=excluded.normalized_title, title=excluded.title, year=excluded.year, evidence_key=excluded.evidence_key, seen_in_latest=excluded.seen_in_latest, last_seen_at=excluded.last_seen_at, last_airing=excluded.last_airing, confirmed_tmdb_id=excluded.confirmed_tmdb_id, payload_json=excluded.payload_json',[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,evidenceKey(item),item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,Number.isFinite(Number(item.lastAiring))?Number(item.lastAiring):null,item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),JSON.stringify(payload)]];
- return {upsert,shows:shows.map(show=>[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end])};
+ const values=[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,evidenceKey(item),item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,Number.isFinite(Number(item.lastAiring))?Number(item.lastAiring):null,item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),JSON.stringify(payload)];
+ const upsert=[OBSERVATION_INSERT+OBSERVATION_ROW+OBSERVATION_CONFLICT,values];
+ return {upsert,values,shows:shows.map(show=>[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end])};
 }
 function loadingFence(generation,lease){
  return [
@@ -644,7 +649,15 @@ export async function walkObservationPages(env,options={}){
 // observation is written and every retiring row is archived; the commit is the last batch.
 const SEAL_BATCH_OVERHEAD=5;
 const SEAL_SHOW_ROWS=16;
-const SEAL_KEYS_PER_BATCH=80;
+const SEAL_KEYS_PER_DELETE=80;
+// AIR-420. A batch is one D1 round trip, and the round trip, not the SQL, is what a seal step pays for (on 10 November 2026 a
+// batch of about 30 observations cost about 9 round trips of about 200 ms each while its SQL took milliseconds). So the rows of a
+// batch are packed: several observations in one upsert statement (11 binds a row under D1's 100) bounded by the size of their
+// payloads, and the keys of the show delete in slices of 80. The statement cap of a batch is unchanged.
+const SEAL_ROWS_PER_UPSERT=Math.floor(BIND_CAP/OBSERVATION_ROW_BINDS);
+const SEAL_UPSERT_BYTES=200000;
+const SEAL_ITEMS_PER_BATCH=400;
+const SEAL_BATCH_BYTES=1000000;
 export async function sealSupported(env){
  try{return !!await one(database(env),"SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='discovery_seal'");}
  catch{return false;}
@@ -691,41 +704,64 @@ export async function sealBegin(env,spec){
 // One atomic batch: the fence, a lease renewal, the observation rows of as many of `items` as fit, and the cursor move.
 // `items` are `{item,bytes}` where `bytes` is the length the item takes in the source document including its separator.
 // Returns how many were written. A cursor that is not `expectedCursor` is a lost race and writes nothing.
+//
+// AIR-420. `spec.carried` is what the previous batch of the SAME step returned in `carried` ({generation, programmeRunId,
+// cursorBytes}). With it the batch is sent without reading the authority and the job first: those reads only chose the values the
+// batch itself checks, atomically, by compare-and-set (the generation with the lease and the loading transfer, then the job id,
+// the phase and the cursor). A carried value that is stale therefore writes nothing, and the batch is then tried once more from
+// fresh reads, which is exactly the path without `carried`; a real lost race or a changed job still fails there.
 export async function sealWrite(env,spec){
  const lease=spec.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
+ const carried=spec.carried&&Number.isInteger(spec.carried.generation)&&typeof spec.carried.programmeRunId==='string'&&spec.carried.programmeRunId&&Number.isFinite(spec.carried.cursorBytes)?spec.carried:null;
+ if(carried){
+  try{return await sealWriteBatch(env,spec,lease,carried);}
+  catch(error){if(error?.code!=='discovery_fence')throw error;}
+ }
  const gate=await readAuthority(env);
  if(!gate.ready||gate.transfer!=='loading')throw failed('discovery_incomplete');
  const state=await readSeal(env);
  if(!state||state.job_id!==spec.jobId||state.phase!=='items'||Number(state.cursor_items)!==spec.expectedCursor)throw failed('discovery_fence');
- const run=state.programme_run_id;
- // One upsert per observation, one delete of all their shows, and the shows as multi-row inserts (6 binds a row, 100 bind
- // limit): about 1.2 statements an observation instead of 3 to 4, so a batch carries about three times as many.
- const written=[],upserts=[],showRows=[],keys=[];
- let bytes=0;
- const cost=(count,rows)=>SEAL_BATCH_OVERHEAD+count+1+Math.ceil(rows/SEAL_SHOW_ROWS);
+ return await sealWriteBatch(env,spec,lease,{generation:gate.generation,programmeRunId:state.programme_run_id,cursorBytes:Number(state.cursor_bytes)});
+}
+async function sealWriteBatch(env,spec,lease,known){
+ const run=known.programmeRunId;
+ // The observations of a batch go out as multi-row upserts, their shows as one delete per 80 keys and multi-row inserts.
+ const written=[],groups=[],showRows=[],keys=[];
+ let bytes=0,group=null,payloadBytes=0;
+ const cost=(upserts,count,rows)=>SEAL_BATCH_OVERHEAD+upserts+Math.ceil(count/SEAL_KEYS_PER_DELETE)+Math.ceil(rows/SEAL_SHOW_ROWS);
  for(const entry of spec.items){
   const built=observationUpsert(entry.item,run);
-  const rows=showRows.length+built.shows.length;
-  if(written.length>0&&(written.length+1>SEAL_KEYS_PER_BATCH||cost(written.length+1,rows)>STATEMENT_CAP))break;
-  if(cost(1,built.shows.length)>STATEMENT_CAP)throw failed('discovery_bounded');
-  upserts.push(built.upsert);showRows.push(...built.shows);keys.push(entry.item.key);bytes+=entry.bytes;written.push(entry);
+  const size=String(built.values[built.values.length-1]).length;
+  const joins=!!group&&group.rows.length<SEAL_ROWS_PER_UPSERT&&group.size+size<=SEAL_UPSERT_BYTES;
+  const upserts=groups.length+(joins?0:1),rows=showRows.length+built.shows.length;
+  if(written.length>0&&(written.length+1>SEAL_ITEMS_PER_BATCH||payloadBytes+size>SEAL_BATCH_BYTES||cost(upserts,written.length+1,rows)>STATEMENT_CAP))break;
+  if(cost(1,1,built.shows.length)>STATEMENT_CAP)throw failed('discovery_bounded');
+  if(joins){group.rows.push(built.values);group.size+=size;}
+  else{group={rows:[built.values],size};groups.push(group);}
+  showRows.push(...built.shows);keys.push(entry.item.key);bytes+=entry.bytes;payloadBytes+=size;written.push(entry);
  }
- const statements=[...upserts,['DELETE FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key IN ('+keys.map(()=>'?').join(',')+')',keys]];
+ if(!written.length)return {written:0,cursorItems:spec.expectedCursor,cursorBytes:known.cursorBytes,carried:known};
+ const statements=groups.map(item=>[OBSERVATION_INSERT+item.rows.map(()=>OBSERVATION_ROW).join(',')+OBSERVATION_CONFLICT,item.rows.flat()]);
+ for(let at=0;at<keys.length;at+=SEAL_KEYS_PER_DELETE){
+  const slice=keys.slice(at,at+SEAL_KEYS_PER_DELETE);
+  statements.push(['DELETE FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key IN ('+slice.map(()=>'?').join(',')+')',slice]);
+ }
  for(let at=0;at<showRows.length;at+=SEAL_SHOW_ROWS){
   const slice=showRows.slice(at,at+SEAL_SHOW_ROWS);
   statements.push(['INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES '+slice.map(()=>'(\'active\',?,?,?,?,?,?)').join(','),slice.flatMap(row=>row)]);
  }
- if(!written.length)return {written:0,cursorItems:spec.expectedCursor,cursorBytes:Number(state.cursor_bytes)};
  const now=nowMs();
  await commit(database(env),[
-  ...loadingFence(gate.generation,lease),
+  ...loadingFence(known.generation,lease),
   ['UPDATE discovery_lease SET expires_at=? WHERE id=1 AND lease_id=? AND expires_at>?',[now+LEASE_TTL_MS,lease.id,now]],
   ...statements,
   ['UPDATE discovery_seal SET cursor_items=cursor_items+?, cursor_bytes=cursor_bytes+?, updated_at=? WHERE id=1 AND job_id=? AND phase=\'items\' AND cursor_items=?',[written.length,bytes,new Date(now).toISOString(),spec.jobId,spec.expectedCursor]],
   [FENCE_SQL,[]],
  ]);
- return {written:written.length,cursorItems:spec.expectedCursor+written.length,cursorBytes:Number(state.cursor_bytes)+bytes};
+ const cursorBytes=known.cursorBytes+bytes;
+ // The fence of this batch moved the generation by exactly one; the next batch of this step may start from that.
+ return {written:written.length,cursorItems:spec.expectedCursor+written.length,cursorBytes,statements:statements.length+SEAL_BATCH_OVERHEAD,carried:{generation:known.generation+1,programmeRunId:run,cursorBytes}};
 }
 // Archives up to `limit` retiring observations (and their shows) in one batch, then commits the seal when none are
 // left. The first call moves the job to `archive` only when every observation is written.
