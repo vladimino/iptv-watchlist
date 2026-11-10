@@ -32,11 +32,12 @@ const SERIAL_ONLY=new Set([
 // long ones do not end up alone at the tail. A name that no longer exists, or a new slow file that is missing here, changes the wall time and
 // nothing else: every file still runs exactly once.
 const START_FIRST=[
- 'generation-stage.mjs',
  'film-person-capture-mutation.mjs',
+ 'generation-stage.mjs',
+ 'epg-r2-known-length.mjs',
+ 'generation-stage-withheld.mjs',
  'projector-bulk.mjs',
  'discovery-chunk-budget.mjs',
- 'epg-r2-known-length.mjs',
  'discovery-decisions-read.mjs',
  'discovery-production.mjs',
  'film-person-baseline.mjs',

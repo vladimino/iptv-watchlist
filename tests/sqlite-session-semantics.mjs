@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {needsOneShot,sqliteSync} from './sqlite-session.mjs';
+import {needsOneShot,quoteToJson,sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-sqlite-session-'));
 const db=name=>path.join(root,name+'.sqlite');
@@ -131,4 +131,37 @@ const same=(file,input,json=false)=>{
  for(let index=0;index<30;index++)assert.equal(session(db('many-'+index),'SELECT a FROM t;',true).stdout.trim(),'[{"a":'+index+'}]','database '+index);
 }
 
-console.log('sqlite session: same results and failures as a process per call, no state between calls, replaced files, shared files, large answers and many databases passed');
+// AIR-418: a `-json` call may be answered in quote mode and converted (the CLI's JSON writer is slow on large values). The conversion must be the JSON text the
+// CLI prints: same names (a duplicate name included), NULL, the empty string, numbers digit for digit (large integers, reals, the infinities), text with quotes,
+// backslashes, commas, line breaks, tabs and non-ASCII, text that looks like a number or like NULL, and nothing at all for no row.
+{
+ const TYPED="SELECT 1 AS i, -2.5 AS r, 1e300 AS big, 0.1+0.2 AS f, 9007199254740993 AS huge, NULL AS n, '' AS e, 'it''s \"q\" \\ back, with a comma' AS t, 'line1'||char(10)||'line2'||char(13)||char(9)||'x' AS nl, '12' AS numtext, 1.0 AS one, 'ünï☃' AS u, 'NULL' AS nulltext, 'X''00''' AS blobtext, 1e999 AS inf, -1e999 AS ninf, 'a' AS \"we,ird'col\", 2 AS i UNION ALL SELECT 2,3.25,-1e-300,0.5,-9007199254740993,'n','e','''','','0',2.0,'','null','',0,0,'',3;";
+ const viaQuote=spawnSync('sqlite3',['-quote','-header','-bail',':memory:'],{input:TYPED,encoding:'utf8'}),viaJson=spawnSync('sqlite3',['-json','-bail',':memory:'],{input:TYPED,encoding:'utf8'});
+ assert.equal(viaQuote.status,0,viaQuote.stderr);assert.equal(viaJson.status,0,viaJson.stderr);
+ assert.equal(quoteToJson(viaQuote.stdout),viaJson.stdout,'the converted quote output is the JSON text of the CLI, byte for byte');
+ assert.equal(quoteToJson(spawnSync('sqlite3',['-quote','-header',':memory:'],{input:'SELECT 1 AS a WHERE 0;',encoding:'utf8'}).stdout),'','no row is no output, as in JSON mode');
+ assert.equal(quoteToJson(''),'');
+ assert.throws(()=>quoteToJson("'a'\n'unterminated"),/unterminated/);
+ // The adaptive path end to end: a statement shape that returns large values is answered in quote mode from its second call on, with the same parsed rows; a
+ // shape with many small rows stays in JSON mode; both agree with a process per call at every call.
+ const file=db('large-values');
+ const chunk=index=>JSON.stringify({index,text:('it\'s "chunk" '+index+' \\ line\n').repeat(4000)});
+ assert.equal(session(file,'CREATE TABLE doc (seq INTEGER PRIMARY KEY, chunk_text TEXT, n INTEGER);'+[0,1,2].map(index=>"INSERT INTO doc VALUES ("+index+",'"+chunk(index).replaceAll("'","''")+"',"+index+");").join('')).status,0);
+ const expected=JSON.parse(once(file,'SELECT chunk_text AS chunk, n FROM doc ORDER BY seq;',true).stdout);
+ assert.ok(expected[0].chunk.length>90000);
+ for(let call=0;call<4;call++){
+  const rows=JSON.parse(session(file,'SELECT chunk_text AS chunk, n FROM doc ORDER BY seq;',true).stdout);
+  assert.deepEqual(rows,expected,'call '+call+' of a large-value shape');
+  // a small answer in between, on the same connection, is unaffected by the mode the large one used
+  assert.equal(session(file,'SELECT n FROM doc WHERE seq=1;',true).stdout.trim(),'[{"n":1}]');
+  assert.equal(session(file,'SELECT n FROM doc WHERE seq=2;').stdout.trim(),'2','a text-mode call on the same file keeps its own connection and format');
+ }
+ // the same shape answering small values again (the rows were replaced) is still right, whatever mode it runs in
+ assert.equal(session(file,"UPDATE doc SET chunk_text='s'||seq;").status,0);
+ for(let call=0;call<3;call++)same(file,'SELECT chunk_text AS chunk, n FROM doc ORDER BY seq;',true);
+ // one-shot scripts (here: a PRAGMA) take the same conversion
+ const shot=()=>JSON.parse(session(file,"PRAGMA cache_size=100; SELECT printf('%.*c',120000,'z') AS chunk;",true).stdout);
+ assert.equal(shot()[0].chunk.length,120000);assert.equal(shot()[0].chunk.length,120000);
+}
+
+console.log('sqlite session: same results and failures as a process per call, no state between calls, replaced files, shared files, large answers, many databases and the quote-mode answer of large values passed');
