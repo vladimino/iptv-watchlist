@@ -860,6 +860,47 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
   assert.equal(h.slept[0].name.startsWith('sleep'),true);assert.equal(h.slept[0].at,waitExpiry,'the wait sleeps to the later expiry');
   assert.equal(h.names.findIndex(name=>name.startsWith('chunk'))>h.names.findIndex(name=>name.startsWith('wait')),true,'no chunk runs before the wait');assert.equal(record().recovery??null,null);
 
+  // (b2) A busy chunk carries the hourly gate in its `until`; its checkpoint is refused by a held window. The wake is the window's one expiry (capped),
+  // not that hour. Without a window, with an unreadable deadline and with a window beyond the cap the other waits are unchanged.
+  const busyRun=async({openMs=0,unreadable=false}={})=>{
+   fresh();
+   const hour=new Date(Date.now()+3600000).toISOString();
+   context.advanceDiscovery=async()=>({stage:'busy',discovery:{reason:'busy',nextCatchUpAt:hour}});
+   let expiry=0,owners=0;const chunkAt=[];
+   if(unreadable)context.DiscoveryAuthority.writeWorkflow=async()=>{if(!expiry){expiry=-1;throw Object.assign(new Error('discovery_window'),{code:'discovery_window',window:{expiresAt:null,state:'held'}});}return {handled:false,saved:false};};
+   const h=harness({before:async name=>{
+    if(name.startsWith('busy')&&!expiry&&openMs)expiry=open(openMs);
+    if(name.startsWith('chunk'))chunkAt.push(h.slept.length);
+    if(name.startsWith('owner')&&++owners>2)throw new Error('stop the loop');
+   }});
+   const started=Date.now();
+   await assert.rejects(run(h),/stop the loop/);
+   return {h,hour:Date.parse(hour),expiry,chunkAt,started};
+  };
+  {
+   const r=await busyRun({openMs:300000});
+   assert.equal(r.h.slept[0].name.startsWith('busy-sleep'),true,JSON.stringify(r.h.slept));
+   assert.equal(r.h.slept[0].at,r.expiry,'the busy checkpoint refused by a window sleeps to the window expiry, not to the hourly gate');
+   assert.ok(r.h.slept[0].at<r.hour-1800000,'well before the next hour');
+   assert.equal(r.chunkAt[0],0);assert.ok(r.chunkAt.length<2||r.chunkAt[1]>=1,'no second chunk starts before the first sleep: '+JSON.stringify(r.chunkAt));
+   assert.equal(r.h.slept.length,2,'no busy loop: one sleep per busy round');
+   assert.equal(r.h.slept[1].at,r.hour,'after the window the ordinary busy wait is the hourly gate');
+   assert.equal(record().recovery??null,null,'nothing is charged to the stall or recovery budget');
+  }
+  {
+   const r=await busyRun();
+   assert.equal(r.h.slept[0].name.startsWith('busy-sleep'),true);assert.equal(r.h.slept[0].at,r.hour,'a normal busy still waits for the hourly gate');
+  }
+  {
+   const r=await busyRun({unreadable:true});
+   assert.equal(r.h.slept[0].at,r.hour,'a window refusal without a readable deadline keeps the previous wait');
+  }
+  {
+   const r=await busyRun({openMs:1200000});
+   assert.ok(r.h.slept[0].at<=r.started+330000+5000,'a window beyond the cap is capped like every window wait: '+(r.h.slept[0].at-r.started));
+   assert.ok(r.h.slept[0].at<r.expiry&&r.h.slept[0].at<r.hour);
+  }
+
   // (c) The start refused by a window: no throw, no create, no recovery state; the next reconcile after the expiry starts it.
   fresh({elected:false});
   records.delete('epg/discovery-workflow.json');etags.delete('epg/discovery-workflow.json');
