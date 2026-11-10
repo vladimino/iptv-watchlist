@@ -209,7 +209,7 @@ These are the design constraints the live route satisfies; `src/admin/read.js` i
 - `/api/admin/people?q=&queue=&limit=&cursor=&pin=`
 - `/api/admin/people/:id?pin=`
 
-The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds library records from that programme and those dictionaries, then calls the library functions with an explicit `limit`. It does not import a write path, does not call `recoverStopEvents`, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
+The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds library records from that programme and those dictionaries, then calls the library functions with an explicit `limit`. It does not import a write path, delivers no event, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
 
 The catalogue body is `epg/generations/<programmeRunId>/programme.json`, not the live root `programme.json`. `loadJSON` already prefers the generation object after reading the published pointer. Root `programme.json` can still hold the previous generation until `copyEpgGeneration` finishes, so reading the new pointer together with the root file would join two generations. AIR-124 does not fall back to the root key.
 
