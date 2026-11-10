@@ -139,7 +139,8 @@ assert.ok(workflowReceipt.has('epg/discovery-workflow.json'),'the Workflow loop 
 assert.equal(decidedCount(),60,'the Workflow loop made full progress');
 
 // Each receipt is classified on its own: every key is one the classification knows, none is a non-Discovery projector input.
-const KNOWN=[/^epg\/discovery-resolution\.json$/,/^epg\/discovery-status\.json$/,/^epg\/discovery-score-preview\.json$/,/^epg\/discovered-films\.json$/,/^epg\/resolver-lease\.json$/,/^epg\/resolver-continuation\.json$/,/^epg\/resolver-continuation-diagnostics\.json$/,/^epg\/discovery-workflow\.json$/,/^epg\/discovery-observations\//,/^epg\/discovery-index\//,/^epg\/generations\/[^/]+\/discovered-films\.json$/,/^epg\/generations\/[^/]+\/programme\.json$/,/^programme\.json$/];
+// AIR-410: the one `discovery` Events Log entry of a settled tick (events/items/<reverse time>-discovery-<tick id>.json). It is not a projector input; any other event key stays unknown.
+const KNOWN=[/^events\/items\/\d{13}-discovery-[0-9A-Za-z-]+\.json$/,/^epg\/discovery-resolution\.json$/,/^epg\/discovery-status\.json$/,/^epg\/discovery-score-preview\.json$/,/^epg\/discovered-films\.json$/,/^epg\/resolver-lease\.json$/,/^epg\/resolver-continuation\.json$/,/^epg\/resolver-continuation-diagnostics\.json$/,/^epg\/discovery-workflow\.json$/,/^epg\/discovery-observations\//,/^epg\/discovery-index\//,/^epg\/generations\/[^/]+\/discovered-films\.json$/,/^epg\/generations\/[^/]+\/programme\.json$/,/^programme\.json$/];
 const projectorInputs=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','enrichment/view-index.json','letterboxd/admissions/verified-films.json','admin/owner-reviews.json'];
 for(const [label,keys] of [['direct chunk',chunkReceipt],['Workflow loop',workflowReceipt]]){
  const unknown=[...keys].filter(key=>!KNOWN.some(re=>re.test(key)));

@@ -25,9 +25,9 @@ const app = fs.readFileSync('public/app.js', 'utf8');
   assert.match(panel, /role="group" aria-label="Тип событий"/, 'a button group');
   const buttons = [...panel.matchAll(/<button type="button" data-event-type="([a-z_]+)" aria-pressed="(true|false)">([^<]+)<\/button>/g)].map(match => match.slice(1, 4));
   assert.deepEqual(buttons, [
-    ['all', 'true', 'Все события'], ['watchlist', 'false', 'Watchlist и просмотр'], ['epg', 'false', 'Программа'],
+    ['all', 'true', 'Все события'], ['watchlist', 'false', 'Watchlist и просмотр'], ['epg', 'false', 'Программа'], ['discovery', 'false', 'Находки'],
     ['ratings', 'false', 'Оценки'], ['enrichment', 'false', 'Прогнозы'], ['taste_profile', 'false', 'Модель вкуса'],
-  ], 'six buttons, «Все события» pressed by default');
+  ], 'seven buttons, «Все события» pressed by default');
 }
 
 // 2. CSS: the grid is never replaced, so the sidebar keeps its width and position on every route.
@@ -50,8 +50,8 @@ vm.runInContext(fs.readFileSync('public/return-home.js', 'utf8') + '\n' + app.re
 const pureRun = code => vm.runInContext(code, pure);
 {
   const mapping = {
-    all: ['watchlist', 'started', 'unstarted', 'epg', 'ratings', 'enrichment', 'taste_profile', 'diary_viewing', 'some_future_type', undefined, ''],
-    watchlist: ['watchlist', 'started', 'unstarted'], epg: ['epg'], ratings: ['ratings'], enrichment: ['enrichment'], taste_profile: ['taste_profile'],
+    all: ['watchlist', 'started', 'unstarted', 'epg', 'discovery', 'ratings', 'enrichment', 'taste_profile', 'diary_viewing', 'some_future_type', undefined, ''],
+    watchlist: ['watchlist', 'started', 'unstarted'], epg: ['epg'], discovery: ['discovery'], ratings: ['ratings'], enrichment: ['enrichment'], taste_profile: ['taste_profile'],
   };
   const everything = mapping.all;
   for (const [id, expected] of Object.entries(mapping)) {
@@ -84,7 +84,7 @@ function node(selector, extra = {}) {
 const filters = node('#filters'), eventsMain = node('#events-screen', {hidden: true}), activity = node('.activity'), list = node('#activity-list'), status = node('#activity-status');
 const more = node('#activity-more', {hidden: true, textContent: 'Более давние события'}), typePanel = node('#events-types', {hidden: true}), expand = node('#activity-expand'), returnLink = node('#return-home', {hidden: true});
 filters.appendChild(activity);
-const typeButtons = ['all', 'watchlist', 'epg', 'ratings', 'enrichment', 'taste_profile'].map(id => node('[data-event-type=' + id + ']', {dataset: {eventType: id}}));
+const typeButtons = ['all', 'watchlist', 'epg', 'discovery', 'ratings', 'enrichment', 'taste_profile'].map(id => node('[data-event-type=' + id + ']', {dataset: {eventType: id}}));
 const classes = new Set();
 const document = {
   hidden: false, addEventListener() {}, removeEventListener() {},
@@ -162,10 +162,10 @@ const chain = (ratingsPerPage, size = 6) => {
 };
 
 // 4.1 «Все события»: the first page, no scan, the feed moves to the main column, the sidebar shows the types.
-await reset({first: {events: [ev('e1', 'epg'), ev('r1', 'ratings'), ev('s1', 'started'), ev('t1', 'taste_profile'), ev('p1', 'enrichment'), ev('w1', 'watchlist'), ev('u1', 'unstarted'), ev('x1', 'some_future_type')], cursor: 'c1'}, c1: {events: [ev('e0', 'epg')], cursor: null}});
+await reset({first: {events: [ev('e1', 'epg'), ev('d1', 'discovery'), ev('r1', 'ratings'), ev('s1', 'started'), ev('t1', 'taste_profile'), ev('p1', 'enrichment'), ev('w1', 'watchlist'), ev('u1', 'unstarted'), ev('x1', 'some_future_type')], cursor: 'c1'}, c1: {events: [ev('e0', 'epg')], cursor: null}});
 assert.equal(await run('loadEvents(false)'), true);
 assert.equal(requests.length, 1, 'one request loads the feed');
-assert.deepEqual(shownTypes(), ['epg', 'ratings', 'started', 'taste_profile', 'enrichment', 'watchlist', 'unstarted', 'some_future_type'], 'the compact feed shows every event, unknown types included');
+assert.deepEqual(shownTypes(), ['epg', 'discovery', 'ratings', 'started', 'taste_profile', 'enrichment', 'watchlist', 'unstarted', 'some_future_type'], 'the compact feed shows every event, unknown types included');
 assert.equal(more.hidden, false, 'the older-events button offers the next page');
 await onEvents();
 assert.equal(new URL(win.location.href).pathname, '/events');
@@ -174,20 +174,20 @@ assert.equal(activity.parentNode, eventsMain, 'the one feed node is now in the m
 assert.equal(filters.children.includes(activity), false, 'and no longer in the sidebar: it is never rendered twice');
 assert.equal(typePanel.hidden, false);
 assert.equal(eventsMain.hidden, false);
-assert.deepEqual(pressed(), ['true', 'false', 'false', 'false', 'false', 'false']);
-assert.equal(shownIds().length, 8);
+assert.deepEqual(pressed(), ['true', 'false', 'false', 'false', 'false', 'false', 'false']);
+assert.equal(shownIds().length, 9);
 assert.equal(requests.length, 1, '«Все события» does not scan the archive');
 await sleep(30);
 assert.equal(requests.length, 1, 'and nothing happens by itself later');
 
 // 4.2 Each type is a single selection; the choice is in the URL of the same history entry next to the return target.
 const entries = stack.length;
-const expectations = {watchlist: ['s1', 'w1', 'u1'], epg: ['e1', 'e0'], ratings: ['r1'], enrichment: ['p1'], taste_profile: ['t1']};
+const expectations = {watchlist: ['s1', 'w1', 'u1'], epg: ['e1', 'e0'], discovery: ['d1'], ratings: ['r1'], enrichment: ['p1'], taste_profile: ['t1']};
 for (const [id, expected] of Object.entries(expectations)) {
   run(`selectEventType(${JSON.stringify(id)})`);
   await settle();
   assert.deepEqual(shownIds().sort(), [...expected].sort(), id);
-  assert.deepEqual(pressed(), ['all', 'watchlist', 'epg', 'ratings', 'enrichment', 'taste_profile'].map(name => String(name === id)), id + ': exactly one button is active');
+  assert.deepEqual(pressed(), ['all', 'watchlist', 'epg', 'discovery', 'ratings', 'enrichment', 'taste_profile'].map(name => String(name === id)), id + ': exactly one button is active');
   const url = new URL(win.location.href);
   assert.equal(url.pathname, '/events');
   assert.equal(url.searchParams.get('type'), id);
@@ -198,7 +198,7 @@ assert.equal(maxInFlight, 1, 'never two requests at once');
 run("selectEventType('all')");
 await settle();
 assert.equal(new URL(win.location.href).searchParams.has('type'), false, 'back to the default removes the parameter');
-assert.equal(shownIds().length, 9, 'every loaded event, nothing duplicated');
+assert.equal(shownIds().length, 10, 'every loaded event, nothing duplicated');
 run("selectEventType('nonsense')");
 assert.equal(run('eventTypeFilterId'), 'all', 'an unknown button value changes nothing');
 
@@ -314,7 +314,7 @@ await reset(chain([0, 0, 4, 8]));
 win.history.replaceState(null, '', 'https://iptv.example/events?return=' + encodeURIComponent('/?q=x') + '&type=ratings');
 run('eventsScreen=false;applyEventsScreen(true)');
 assert.equal(run('eventTypeFilterId'), 'ratings', 'the type comes from the URL');
-assert.equal(pressed()[3], 'true');
+assert.equal(pressed()[4], 'true');
 assert.equal(requests.length, 0, 'nothing is requested before the feed has loaded');
 await run('loadEvents(false)');
 await settle();
@@ -327,7 +327,7 @@ await settle();
 assert.equal(run('eventTypeFilterId'), 'epg');
 win.history.back();
 assert.equal(run('eventTypeFilterId'), 'ratings', 'Back restores the previous choice and its button');
-assert.equal(pressed()[3], 'true');
+assert.equal(pressed()[4], 'true');
 win.history.forward();
 assert.equal(run('eventTypeFilterId'), 'epg', 'Forward restores the next one');
 await settle();
@@ -415,4 +415,4 @@ assert.equal(more.textContent, 'Повторить');
   assert.match(app, /if\(filmIdFromLocation\(\)\)\{syncFilmReturn\(\);return;\}/);
 }
 
-console.log('Events type filter: shared frame, six single-select types, URL parameter with deep link and Back/Forward, guarded sequential automatic pagination (zero-match pages, exhausted cursor, cancellation, error with retry, repeated cursor, reuse of loaded events) and one feed node passed');
+console.log('Events type filter: shared frame, seven single-select types, URL parameter with deep link and Back/Forward, guarded sequential automatic pagination (zero-match pages, exhausted cursor, cancellation, error with retry, repeated cursor, reuse of loaded events) and one feed node passed');
