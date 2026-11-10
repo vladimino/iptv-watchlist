@@ -641,27 +641,40 @@ export async function walkObservationPages(env,options={}){
  return {programmeRunId:opened.programmeRunId,pages:starts.length,items,complete};
 }
 
+// Mirrors resolutionActionability except the title non-film screen (JavaScript only). Same-evidence
+// excluded_nonfilm rows stay out: a screen-rule change without an evidence_key change is a follow-up.
+// A missing decision evidence_key is "same", as in JS. Verified rows are never TMDB-actionable.
+const ACTIONABLE_SAME=`(d.evidence_key IS NULL OR d.evidence_key=o.evidence_key)`;
 const ACTIONABLE_FROM=`FROM discovery_observation o
 LEFT JOIN discovery_decision d ON d.observation_key=o.observation_key
 WHERE o.source_key='active' AND o.residence='active'
  AND o.seen_in_latest=1
  AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
+ AND IFNULL(d.status,'')<>'verified'
  AND (
   d.observation_key IS NULL
+  OR NOT ${ACTIONABLE_SAME}
   OR (
-   IFNULL(d.status,'')<>'verified'
-   AND IFNULL(d.status,'')<>'excluded_nonfilm'
-   AND (d.evidence_key IS NULL OR o.evidence_key IS NULL OR d.evidence_key<>o.evidence_key
-    OR ((d.terminal_reason IS NULL OR d.terminal_reason='') AND (d.retry_at IS NULL OR d.retry_at<=?)))
+   IFNULL(d.status,'')<>'excluded_nonfilm'
+   AND (d.terminal_reason IS NULL OR d.terminal_reason='')
+   AND (d.retry_at IS NULL OR d.retry_at<=?)
   )
  )`;
+const TOUCH_FROM=`FROM discovery_observation o
+JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND d.status='verified'
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)`;
+export const ACTIONABLE_COUNT_SQL='SELECT COUNT(*) AS n '+ACTIONABLE_FROM;
+export const ACTIONABLE_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+ACTIONABLE_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+export const TOUCH_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+TOUCH_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
 export const SELECT_PAGE=80;
 export const SELECT_QUERIES=6;
 
-// A paged chunk's candidate set: current-window observations that are not a standing verified
-// decision, as a keyset, never the whole ledger. `remaining` is that SQL set's size. `touches`
-// are a bounded page of current verified rows so the cheap pass can still copy airings without
-// walking every verified observation. The same generation fence as the full walk.
+// A paged chunk's candidate set: current-window observations that JS would still treat as
+// resolution-actionable (without the title screen), as a keyset, never the whole ledger.
+// `remaining` is that SQL set's size at selection time. `touches` are a keyset page of current
+// verified rows so the cheap pass can copy airings without walking every verified observation.
+// `touchAfter` is the last key of that page (wraps once). The same generation fence as the full walk.
 export async function selectActionableObservations(env,options={}){
  const opened=await readAuthority(env);
  if(opened.held)throw failed('discovery_fence');
@@ -675,7 +688,7 @@ export async function selectActionableObservations(env,options={}){
  const db=database(env);
  const windowParams=[from,to,nowIso];
  if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'count'});
- const counted=await one(db,'SELECT COUNT(*) AS n '+ACTIONABLE_FROM,windowParams);
+ const counted=await one(db,ACTIONABLE_COUNT_SQL,windowParams);
  const remaining=Number(counted?.n||0);
  const items=[];
  let cursor=startAfter,wrapped=false,queries=0,complete=false;
@@ -683,7 +696,7 @@ export async function selectActionableObservations(env,options={}){
   if(options.shouldStop&&options.shouldStop())break;
   if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor});
   const take=pageSize-items.length;
-  const rows=await many(db,'SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+ACTIONABLE_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?',[...windowParams,cursor,take]);
+  const rows=await many(db,ACTIONABLE_PAGE_SQL,[...windowParams,cursor,take]);
   queries++;
   if(!rows.length){
    if(!cursor||wrapped){complete=true;break;}
@@ -701,20 +714,30 @@ export async function selectActionableObservations(env,options={}){
  }
  if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor,phase:'touches'});
  const touchLimit=Math.max(0,Number.isInteger(options.touchLimit)?options.touchLimit:0);
- const touchRows=touchLimit?await many(db,`SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json
-FROM discovery_observation o
-JOIN discovery_decision d ON d.observation_key=o.observation_key
-WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND d.status='verified'
- AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
- ORDER BY o.observation_key LIMIT ?`,[from,to,touchLimit]):[];
+ const startTouchAfter=typeof options.touchAfter==='string'?options.touchAfter:'';
+ let touchCursor=startTouchAfter,touchWrapped=false,touchRows=[];
+ if(touchLimit){
+  touchRows=await many(db,TOUCH_PAGE_SQL,[from,to,touchCursor,touchLimit]);
+  queries++;
+  if(!touchRows.length&&touchCursor){
+   touchCursor='';
+   touchWrapped=true;
+   if(options.beforeQuery)await options.beforeQuery({query:queries,after:touchCursor,phase:'touches'});
+   touchRows=await many(db,TOUCH_PAGE_SQL,[from,to,touchCursor,touchLimit]);
+   queries++;
+  }
+ }
  const touches=[];
  if(touchRows.length){
-  const shows=await loadPageShows(env,'',touchRows[touchRows.length-1].observation_key,pageKeySet(touchRows));
-  for(const row of touchRows)touches.push({candidate:observationFromRow(row,shows.get(row.observation_key)||[]),decision:decisionFromRow({payload_json:row.decision_json})});
+  const shows=await loadPageShows(env,touchCursor,touchRows[touchRows.length-1].observation_key,pageKeySet(touchRows));
+  for(const row of touchRows){
+   touchCursor=row.observation_key;
+   touches.push({candidate:observationFromRow(row,shows.get(row.observation_key)||[]),decision:decisionFromRow({payload_json:row.decision_json})});
+  }
  }
  const closed=await readAuthority(env);
  if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
- return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,wrapped,queries,remaining,complete};
+ return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,complete};
 }
 
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity

@@ -20,6 +20,17 @@ Two earlier owner-reported chunks (19:41 and 19:47 Madrid) had the same shape (`
 
 **Not established:** Cloudflare Workers log lines for those hops; a monitor issue key for the Integrations health warning; Events Log absence (AIR-410, out of scope).
 
-**Offline:** `tests/discovery-chunk-budget.mjs` — keyset wrap, held fence, no `ROW_NUMBER` from the chunk, `selectAfter` advances, existing cheap-pass / TMDB / lease tests.
+**Offline:** `tests/discovery-chunk-budget.mjs` — keyset wrap, held fence, no `ROW_NUMBER` from the chunk, global `remaining` / `partial` with `limit=1` on 80 extra current rows, handled-prefix `selectAfter`, SQL eligibility (evidence change, retry, terminal, owner rejection, standing vs changed excluded_nonfilm, historical), verified `touchAfter` rotation, sqlite `EXPLAIN QUERY PLAN` of `ACTIONABLE_COUNT_SQL` on migrations through `0018`. Existing cheap-pass / TMDB / lease tests.
 
-**Verdict:** implement query-side keyset selection in the paged chunk. Do not close the card on tests alone; production acceptance is later natural chunks with non-zero work while `readyNow>0`.
+**COUNT plan (sqlite stand-in, schema 18):** `EXPLAIN QUERY PLAN` of `ACTIONABLE_COUNT_SQL`:
+
+```
+SEARCH o USING INDEX discovery_observation_residence (residence=?)
+CORRELATED SCALAR SUBQUERY 1
+  SEARCH s USING INDEX sqlite_autoindex_discovery_observation_show_1 (source_key=? AND observation_key=?)
+SEARCH d USING INDEX sqlite_autoindex_discovery_decision_1 (observation_key=?) LEFT-JOIN
+```
+
+Local file only; **not** a production D1 latency measurement. The show check is a correlated subquery per observation. Do not treat this as proof the count fits the 40 s budget on 47k live rows.
+
+**Verdict:** implement query-side keyset selection in the paged chunk. Do not close the card on tests alone; production acceptance is later natural chunks with non-zero work while `readyNow>0`, and `stage=partial` while global `remaining > 0`.

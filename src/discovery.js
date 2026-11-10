@@ -619,13 +619,14 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   catch(e){if(e?.code!=='discovery_fence')throw e;try{await fence();}catch(le){throw lost(le,'write');}return null;}
  };
  const selectAfter=typeof last?.selectAfter==='string'?last.selectAfter:'';
+ const touchAfter=typeof last?.touchAfter==='string'?last.touchAfter:'';
  const watchlist=report.films||[],knownTmdb=new Map(watchlist.filter(f=>f.tmdbId).map(f=>[String(f.tmdbId),String(f.id)])),aliasIndex=new Map();
  const indexFilm=film=>{if(!film?.tmdbId)return;for(const alias of new Set([film.title,film.original,...(film.aliases||[])])){const key=epgTitleParts(alias).normalizedTitle;if(!key)continue;const entries=aliasIndex.get(key)||new Map();entries.set(String(film.tmdbId),film);aliasIndex.set(key,entries);}};
  const cheap={decisions:new Map(),decisionTotal:0,films:new Set(),before:new Map()};
  const pending=[],decisions={};
  let error=null,retryAt=null;
  const walkStarted=Date.now();
- const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
+ const selected=await DiscoveryAuthority.selectActionableObservations(env,{after:selectAfter,touchAfter,now:Date.now(),pageSize:Math.max(limit,DiscoveryAuthority.SELECT_PAGE),touchLimit:PAGED_CHEAP_FILMS,shouldStop:()=>Date.now()>=walkDeadline,beforeQuery:heartbeat});
  timings.walkMs=Date.now()-walkStarted;timings.pages=selected.queries;timings.concurrency=1;
  const maxPage=selected.items.length;
  const walkComplete=selected.complete===true||selected.items.length>0;
@@ -658,7 +659,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   pending.push(candidate);
  }
  pending.sort((a,b)=>(candidateIsHot(b,nowSelect)?1:0)-(candidateIsHot(a,nowSelect)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
- const pageActionable=pending.length;
+ const queued=new Set(pending.map(candidate=>candidate.key));
  if(pending.length>limit)pending.length=limit;
  let checked=0,added=0,tmdbCalls=0,screenedOut=0,knownAliases=0,touchedWritten=0,cheapRemaining=0;
  const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
@@ -786,14 +787,24 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  timings.tmdbMs=Date.now()-tmdbStarted;
  // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
  // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
- // The preview is this chunk's scored outcomes. A keyset page is a complete selection of that page, not of the ledger.
+ // The preview is this chunk's scored outcomes. remaining is the SQL actionable set minus what this chunk settled, not the page.
  if((walkComplete||checked>0)&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){throw lost(e,'preview');}}
  timings.writeMaxMs=writeCostMs;
- const remaining=walkComplete?Math.max(0,pageActionable-checked):null;
+ const settled=checked+screenedOut+knownAliases;
+ const remaining=Number.isInteger(selected.remaining)?Math.max(0,selected.remaining-settled):null;
+ // Cursor losslessness: advance only through a key-ordered prefix that this chunk handled (cheap skip or TMDB
+ // checked). Unprocessed pending keys stay at or after the cursor; a wrap revisits them. Hot-sort never skips.
+ const handled=new Set();
+ for(const row of selected.items)if(!queued.has(row.candidate.key))handled.add(row.candidate.key);
+ for(const candidate of pending.slice(0,checked))handled.add(candidate.key);
  let nextAfter=selectAfter;
- if(checked>0||screenedOut||knownAliases||touchedWritten)nextAfter=selected.after||selectAfter;
- else if(!pending.length)nextAfter=selected.after||'';
- const summary={schemaVersion:2,stage:error||cheapRemaining>0||(remaining==null?selected.remaining>0:remaining>0)?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,timings};
+ for(const row of selected.items){
+  if(!handled.has(row.candidate.key))break;
+  nextAfter=row.candidate.key;
+ }
+ if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
+ const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
+ const summary={schemaVersion:2,stage:error||cheapRemaining>0||remaining==null||remaining>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
@@ -1226,7 +1237,7 @@ function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  if(result.stage==='error')return {stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null};
  if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
- if(!result.remaining&&!result.cheapRemaining)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
+ if(result.remaining===0&&!(result.cheapRemaining>0)&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
  if(budget<=1)return {stage:'paused',reason:'chunk_budget',at,hopId,remainingChunks:0,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:result.programmeRunId??null};
  return {stage:'paused',reason:null,at,hopId,remainingChunks:budget-1,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
 }

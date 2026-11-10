@@ -471,7 +471,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  const {context}=chunkContext({clock:{offset:0},respond:()=>({results:[]})});
  const continuation=()=>{const row=sql(file,'SELECT payload_json FROM discovery_continuation')[0];return row?.payload_json?JSON.parse(row.payload_json):null;};
  const first=await context.advanceDiscovery(env,{});
- assert.equal(first.remaining,0,'every candidate is decided');
+ assert.equal(first.remaining,5,'unscreened current rows remain; remaining is the SQL set, not the page');
  assert.ok(first.cheapRemaining>0,'and cheap work is left: '+first.cheapRemaining);
  assert.equal(continuation().stage,'paused');
  assert.equal(continuation().reason,null);
@@ -598,4 +598,101 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(secondKey.length,1,'the second chunk writes a different key');
  await Authority.releaseLease(env,lease.lease);
 }
+
+// 18. remaining and stage follow the global SQL set, not the selected page. 80 extra current rows and limit=1:
+// the first chunk stays partial, remaining stays above zero, and later chunks do not rewrite a decided key.
+{
+ const {file,env}=await fixture({extraHot:80});
+ const respond=()=>({results:[]});
+ const keys=new Set();
+ let remaining=null;
+ for(let n=0;n<3;n++){
+  const {context}=chunkContext({clock:{offset:0},respond});
+  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+  const result=await context.resolveDiscoveryChunk(env,{films:[]},1,lease.lease);
+  assert.equal(result.checked,1);
+  assert.equal(result.stage,'partial');
+  assert.ok(result.remaining>1,'global remaining, not the processed page: '+result.remaining);
+  const written=sql(file,'SELECT observation_key AS k FROM discovery_decision').map(row=>row.k);
+  assert.equal(written.length,n+1,'each chunk adds one decision');
+  for(const key of written)keys.add(key);
+  remaining=result.remaining;
+  await Authority.releaseLease(env,lease.lease);
+ }
+ assert.equal(keys.size,3);
+ assert.ok(remaining<=80+HOT.length-3);
+ const jumped=chunkContext({clock:{offset:0},respond});
+ sql(file,"UPDATE discovery_status SET payload_json=json_set(payload_json,'$.selectAfter','zzz')");
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const wrapped=await jumped.context.resolveDiscoveryChunk(env,{films:[]},1,lease.lease);
+ assert.equal(wrapped.checked,1);
+ const afterWrap=sql(file,'SELECT observation_key AS k FROM discovery_decision').map(row=>row.k);
+ assert.equal(new Set(afterWrap).size,4,'wrap does not rewrite a decided key');
+ await Authority.releaseLease(env,lease.lease);
+}
+
+// 19. SQL eligibility matches resolutionActionability for evidence, retry, terminal, owner rejection and
+// standing exclusions. Same-evidence excluded_nonfilm stays out (screen-rule follow-up). Verified rows are
+// touches, not the TMDB page. Historical (no current show) is out.
+{
+ const historical={key:'hist1',title:'Film hist1',normalizedTitle:'film hist1',year:1991,durations:[100],shows:[{channelId:'c',channel:'C',start:1,end:2}],seenInLatestSnapshot:true,lastAiring:1};
+ const {file,env}=await fixture({items:[historical]});
+ const now=Date.now(),future=new Date(now+86400000).toISOString();
+ const ev=row=>sql(file,`SELECT evidence_key AS k FROM discovery_observation WHERE observation_key='${row}'`)[0].k;
+ const write=(key,decision)=>sql(file,`INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('${key}','${RUN}',1,'${decision.status}',${decision.attempts??'NULL'},${decision.evidence_key==null?'NULL':`'${decision.evidence_key}'`},${decision.terminal_reason==null?'NULL':`'${decision.terminal_reason}'`},${decision.retry_at==null?'NULL':`'${decision.retry_at}'`},NULL,NULL,NULL,'hash','${JSON.stringify(decision.payload)}')`);
+ write('h-a',{status:'no_confident_match',attempts:5,evidence_key:ev('h-a'),terminal_reason:'repeated_uncertain_match',retry_at:null,payload:{status:'no_confident_match',terminalReason:'repeated_uncertain_match',evidenceKey:ev('h-a')}});
+ write('h-b',{status:'no_confident_match',attempts:1,evidence_key:ev('h-b'),terminal_reason:null,retry_at:future,payload:{status:'no_confident_match',retryAt:future,evidenceKey:ev('h-b')}});
+ write('h-c',{status:'excluded_nonfilm',attempts:1,evidence_key:ev('h-c'),terminal_reason:null,retry_at:null,payload:{status:'excluded_nonfilm',evidenceKey:ev('h-c')}});
+ write('h-d',{status:'excluded_nonfilm',attempts:1,evidence_key:'old-evidence',terminal_reason:null,retry_at:null,payload:{status:'excluded_nonfilm',evidenceKey:'old-evidence'}});
+ write('h-e',{status:'no_confident_match',attempts:1,evidence_key:ev('h-e'),terminal_reason:null,retry_at:null,payload:{status:'no_confident_match',rejectedTmdbIds:['9'],evidenceKey:ev('h-e')}});
+ const selected=await Authority.selectActionableObservations(env,{now,pageSize:80});
+ const keys=new Set(selected.items.map(row=>row.candidate.key));
+ assert.equal(keys.has('hist1'),false,'historical current-flag without a window show is out');
+ assert.equal(keys.has('h-a'),false,'same-evidence terminal is out');
+ assert.equal(keys.has('h-b'),false,'same-evidence retry fence is out');
+ assert.equal(keys.has('h-c'),false,'same-evidence excluded_nonfilm is out');
+ assert.equal(keys.has('h-d'),true,'excluded_nonfilm with a new evidence_key is in');
+ assert.equal(keys.has('h-e'),true,'an owner rejection on an uncertain decision stays selectable');
+ sql(file,"UPDATE discovery_observation SET evidence_key='changed' WHERE observation_key='h-a'");
+ const changed=await Authority.selectActionableObservations(env,{now,pageSize:80});
+ assert.ok(changed.items.some(row=>row.candidate.key==='h-a'),'a new evidence_key lifts the terminal fence');
+}
+
+// 20. Verified touch cursor rotates: more than 38 current verified rows, two chunks, later keys get a turn.
+{
+ const items=[],decisions={},catalog={};
+ for(let index=0;index<45;index++){
+  const key='v'+String(index).padStart(2,'0'),tmdb=String(3000+index);
+  items.push(hotItem({key,year:1995,lastAiring:hotStart+400000+index}));
+  decisions[key]={status:'verified',filmId:'tmdb_'+tmdb,tmdbId:tmdb,identitySource:'tmdb_detail'};
+  catalog['tmdb_'+tmdb]={id:'tmdb_'+tmdb,tmdbId:tmdb,canonicalIdentity:'tmdb:'+tmdb,title:'Film '+key,original:'Film '+key,year:1995};
+ }
+ const {file,env}=await fixture({items,decisions,catalog});
+ const run=()=>chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const one=await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.ok(one.touched>0);
+ const firstTouched=sql(file,"SELECT film_id AS id FROM discovery_admission WHERE payload_json LIKE '%showsProgrammeRunId%' ORDER BY film_id");
+ await Authority.releaseLease(env,lease.lease);
+ lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const two=await run().context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ const secondTouched=sql(file,"SELECT film_id AS id FROM discovery_admission WHERE payload_json LIKE '%showsProgrammeRunId%' ORDER BY film_id");
+ assert.ok(secondTouched.length>firstTouched.length,'the second chunk touches a later verified page');
+ assert.notEqual(one.touchAfter,two.touchAfter);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+// 21. EXPLAIN QUERY PLAN of the COUNT on schema 13+ is recorded; sqlite stand-in time is not production D1.
+{
+ const file=path.join(root,'chunk-explain.sqlite');
+ const migrations=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority','0012_discovery_seal','0013_film_person_authority','0014_localization_source','0015_film_admission','0016_tmdb_retirement_decision','0017_epg_orchestration','0018_projector_window'];
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+migrations.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
+ if(result.status!==0)throw new Error(result.stderr||'explain migration failed');
+ const plan=sqliteSync(['-bail',file],{input:'EXPLAIN QUERY PLAN '+Authority.ACTIONABLE_COUNT_SQL.replace(/\?/g,'0')+';',encoding:'utf8'});
+ if(plan.status!==0)throw new Error(plan.stderr||'explain failed');
+ const text=String(plan.stdout||'');
+ assert.match(text,/SCAN|SEARCH/i);
+ fs.writeFileSync(path.join(root,'air-425-count-plan.txt'),text);
+}
+
 console.log('discovery chunk budget ok');
