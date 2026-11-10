@@ -2,7 +2,9 @@
 
 **Captured:** 2026-11-10, 20:40 to 21:00 UTC. **Method:** read-only. The two immutable generation documents `epg/generations/<run>/discovery-latest.json` of 9 November (`e38e3f5c…`) and 10 November (`6d9e3c36…`) and a `HEAD` of the archive pointer, read from R2 with the Object Read token (2 `GET`, 1 `HEAD`, no list); MCP `feature_flags` and `epg_pipeline_status` (the reading of 10 November recorded in the [AIR-420 evidence](../d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md), with the D1 aggregates of that record); the code at `main` `6d2ab29`. Card: [AIR-423](https://trello.com/c/NpeuCGhK); follows [PR #490](https://github.com/vladimino/iptv-watchlist/pull/490). The documents were compared in a private scratch directory and deleted; only aggregates are recorded, no key, title or id. No write, start, step, flag or migration.
 
-This is the investigation the card asks for before any design. It records no decision.
+This is the investigation the card asks for before any design. At capture time no decision had been made, and the measurements below were taken without one.
+
+**Decision after the capture.** On 10 November 2026 the owner decided on [AIR-423](https://trello.com/c/NpeuCGhK) **not** to implement incremental reuse: the modelled gain of 20 to 43 seconds on a slow instance does not justify changing the seal's transaction, recovery and compare-and-set contract, and it does not stop the growth of a frozen ledger. This record is the whole result of the card. Two separate follow-ups carry the other findings: [AIR-426](https://trello.com/c/Jf6G2IiP) (offline preparation of `frozen` to `bounded`, with its own owner approval before any production operation) and [AIR-427](https://trello.com/c/aDqfFIH1) (the false `ledgerMode: bounded` and the misleading archive counters in the status, without a change of mode).
 
 ## The ledger mode: `frozen`, and the status label is not the mode
 
@@ -48,7 +50,7 @@ So the gain in publication time is about 20 to 43 seconds on a slow instance and
 
 ## What the growth costs
 
-In `frozen` mode the active ledger only grows: +2,135 keys from 9 to 10 November (+4.8 %), 42,566 on 8 November. Every seal, every ledger walk and the generation document (57 MB) grow with it, whether or not rows are reused. The mode that stops the growth exists (`bounded`, [ADR 0034](../../adr/0034-bounded-discovery-ledger.md)): on 10 November it would keep the 20,568 observations of the latest scan active and archive the rest. It is a flag and an operation of its own, with its own preconditions; this record does not propose or authorize it. Its behaviour under the D1 authority (the seal archives the rows left `retiring`) is covered by tests and has not run in production.
+In `frozen` mode the active ledger only grows: +2,135 keys from 9 to 10 November (+4.8 %), 42,566 on 8 November. Every seal, every ledger walk and the generation document (57 MB) grow with it, whether or not rows are reused. The mode that stops the growth exists (`bounded`, [ADR 0034](../../adr/0034-bounded-discovery-ledger.md)): on 10 November it would keep the 20,568 observations of the latest scan active and archive the rest. It is a flag and an operation of its own, with its own preconditions; this record does not propose or authorize it (see AIR-426 above). Its behaviour under the D1 authority (the seal archives the rows left `retiring`) is covered by tests and has not run in production.
 
 ## Limits
 
