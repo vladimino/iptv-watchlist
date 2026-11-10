@@ -1,6 +1,6 @@
 # GET and HEAD read side effects
 
-The maintained inventory of the read routes of the Worker, of its pages and of its MCP read tools, and the **baseline of the reads that still write**. The decision is [ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md) (Accepted); the dated findings are in the [audit of 2026-11-10](../../evidence/api/air-412-get-head-audit-2026-11-10.md); the picture is [read paths and repair owners](../../architecture/read-side-effects.md). The contract is executable: `tests/get-write-audit.mjs` (inventory, scenarios, comparison), `tests/get-write-audit-lib.mjs` (instrumented R2 and D1, scenario builder), `tests/get-write-audit-harness.mjs` (proves the instruments see every kind of effect) and `tests/get-write-baseline.mjs` (registry and baseline). This page grants no production access: the audit never calls Cloudflare, TMDB or production.
+The maintained inventory of the read routes of the Worker, of its pages and of its MCP read tools, and the **baseline of what a read may still do** (since AIR-416: nothing in storage). The decision is [ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md) (Accepted); the dated findings are in the [audit of 2026-11-10](../../evidence/api/air-412-get-head-audit-2026-11-10.md); the picture is [read paths and repair owners](../../architecture/read-side-effects.md). The contract is executable: `tests/get-write-audit.mjs` (inventory, scenarios, comparison), `tests/get-write-audit-lib.mjs` (instrumented R2 and D1, scenario builder), `tests/get-write-audit-harness.mjs` (proves the instruments see every kind of effect) and `tests/get-write-baseline.mjs` (registry and baseline). This page grants no production access: the audit never calls Cloudflare, TMDB or production.
 
 ## Contract
 
@@ -39,16 +39,15 @@ The routes are derived from the production bundle by the audit, then checked aga
 
 Every probe starts from a copy of the scenario's database file and a fresh bucket, so a request never sees what an earlier one wrote and a repeat is a separate, equal probe. The `*-pending` scenarios run a build of the same bundle with a non-empty personal-ratings seed (the repository ships an empty one for a private build to replace). The ratings, metadata-cache and Film/Person authorities stay on R2 in every scenario.
 
-## Baseline: the reads that write today
+## Baseline: what a read still does
 
-Exact ordered effects per scenario are in `tests/get-write-baseline.mjs`; nothing outside this table writes in any scenario.
+No read writes storage in any scenario ([AIR-413](https://trello.com/c/orvuzDW5) to [AIR-416](https://trello.com/c/f7FX4Elk) removed the last writers). The only entry left in `tests/get-write-baseline.mjs` is the registered outbound read; the audit fails on any other effect.
 
 | Baseline entry | Reads | Effects | Removed by |
 | --- | --- | --- | --- |
-| `events-recovery` | `GET /api/events` | Stop-event recovery before the page is read: the four R2 objects above and, in D1, the prediction fence statements | AIR-416 |
 | `tmdb-status-probe` | `GET /api/integrations/tmdb/status` | One outbound `GET https://api.themoviedb.org/3/movie/11` with the Worker secret; no storage write | none (registered outbound read) |
 
-The compiled ratings seed on `GET /api/enrichment/view` and catalog reads is now a pure in-memory overlay; an explicit stored `actualRating: null` wins over the seed. With the ratings marker open, that GET also replaces personal fields from `ratings_view` in keyset pages; those statements are SELECTs. The published-generation pin is query-only: GET never repairs R2 compatibility mirrors ([ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). The remaining D1 statements of the prediction fence are `UPDATE prediction_domain_authority SET generation=? WHERE id=? AND mode=? AND writes=? AND generation=?`, `UPDATE prediction_domain_cas SET ok=changes() WHERE id=?`, `INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)` and `DELETE FROM prediction_domain_intent WHERE key=? AND token=?`.
+The compiled ratings seed on `GET /api/enrichment/view` and catalog reads is now a pure in-memory overlay; an explicit stored `actualRating: null` wins over the seed. With the ratings marker open, that GET also replaces personal fields from `ratings_view` in keyset pages; those statements are SELECTs. The published-generation pin is query-only: GET never repairs R2 compatibility mirrors ([ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). `GET /api/events` reads the journal page and nothing else: delivery of an undelivered run event belongs to `prediction_start` ([events](../domain/events.md), [AIR-416](https://trello.com/c/f7FX4Elk)).
 
 ## Changing a read route or a writer
 

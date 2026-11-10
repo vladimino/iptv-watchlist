@@ -84,9 +84,7 @@ One admin response must name its pin, and that pin must cover every object the p
 
 The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted; [ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). Programme, watchlist, catalog availability and Admin reads of the published generation are query-only; they do not repair R2 compatibility mirrors. The remaining writer named by `tests/get-side-effects.mjs` is:
 
-| Route | Why it can write | Admin use |
-| --- | --- | --- |
-| `GET /api/events` | Recovers an undelivered stop event, then may list `events/items/` | Do not call |
+No GET route writes storage since [AIR-416](https://trello.com/c/f7FX4Elk): `GET /api/events` reads the journal page and no longer delivers a stop event (the Predictions writer does, on `prediction_start`).
 
 `GET /api/enrichment/status` and `GET /api/enrichment/runs` no longer write ([AIR-415](https://trello.com/c/NHyIKM6z)). MCP `enrichment_status` is the same body as status.
 
@@ -211,7 +209,7 @@ These are the design constraints the live route satisfies; `src/admin/read.js` i
 - `/api/admin/people?q=&queue=&limit=&cursor=&pin=`
 - `/api/admin/people/:id?pin=`
 
-The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds library records from that programme and those dictionaries, then calls the library functions with an explicit `limit`. It does not import a write path, does not call `recoverStopEvents`, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
+The handler loads only `epg/published-generation.json`, the generation programme object, `titles.json`, and `people.json`. It builds library records from that programme and those dictionaries, then calls the library functions with an explicit `limit`. It does not import a write path, delivers no event, and does not read the resolver lease, the continuation, the resolution ledger, or `discovery-latest.json`.
 
 The catalogue body is `epg/generations/<programmeRunId>/programme.json`, not the live root `programme.json`. `loadJSON` already prefers the generation object after reading the published pointer. Root `programme.json` can still hold the previous generation until `copyEpgGeneration` finishes, so reading the new pointer together with the root file would join two generations. AIR-124 does not fall back to the root key.
 
@@ -305,7 +303,7 @@ Where the implementation fixes a point this section left open: the pin is one op
 
 | Risk | What would go wrong | Check before enablement |
 | --- | --- | --- |
-| Writing GET | An admin poll repairs events or seeds a rating | The route is not `GET /api/events`. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
+| Writing GET | An admin poll repairs events or seeds a rating | The admin handlers call no writer and not `enrichmentView` (a test checks the source), and `tests/get-write-audit.mjs` holds every GET to no effect |
 | Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler reads only `epg/published-generation.json`, `epg/generations/<runId>/programme.json`, `titles.json`, `people.json` and `admin/owner-reviews.json`. Assert no `list` and no fallback to root `programme.json` |
 | Resolver interference | A search reads the lease, continuation, or resolution ledger and is mistaken for AIR-69 activity | Those keys are absent from the handler. AIR-69 is closed or explicitly still excluded |
 | `skew` treated as a failed read | A dictionary clock hides a valid page, or a page claims the clocks match | `skew: true` still returns `items`. A newer titles clock expects 200 and `titles_newer`. A missing clock expects `timestamp_missing` |
