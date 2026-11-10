@@ -1,8 +1,8 @@
 // AIR-416 (ADR 0107): delivery of a prediction run's start and stop events to the Events Log is owned by the Predictions writer. No read delivers anything;
 // the next authorized start does, under the writer lease. Covered here: an empty outbox costs no write, a failed start event and a failed stop event are
 // delivered by the next start without a page visit, a crash between the durable record and the journal, duplicate and concurrent deliveries, a partial
-// success, bounded retries ending in a visible quarantine that keeps the record, a failing index write that does not block a run, a superseded stop, and
-// index entries that are not event records. In-memory storage; nothing here calls Cloudflare or production.
+// success, bounded retries ending in a visible quarantine that keeps the record, a failing index write that does not block a run, a superseded stop,
+// index entries that are not event records, and a full page of quarantined entries that must not starve newer events. In-memory storage; nothing here calls Cloudflare or production.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 const records=new Map(),etags=new Map();let revision=0,writes=[],gets=[];
 // `blocked(key)` makes a put of that key fail: the way a journal or index outage is simulated.
@@ -134,6 +134,47 @@ await stopRun(run);
  const seen=await status();assert.equal(seen.pending,Object.keys(outbox()).filter(key=>key.startsWith(START)||key.startsWith(STOP)).length,'the status counts event entries only');
 }
 
+// 10. Review of PR #492: quarantined entries never take a delivery slot. A full page (and more) of OLDER quarantined entries, one newer pending event in the
+// index and an interrupted event of the latest run that nothing noted: ONE authorized start delivers both, the old entries stay quarantined and stored, nothing
+// is duplicated, and a start still looks at no more than its limit of actionable entries.
+{const iso=offset=>new Date(now+offset).toISOString(),entry=(offset,extra={})=>({since:iso(offset),attempts:0,lastAttemptAt:null,quarantined:false,...extra});
+ const eventOf=(id,offset)=>({id:'prediction-start-'+id,type:'enrichment',at:iso(offset),startedAt:iso(offset),stage:'started',runState:'started',title:'Прогнозы запущены',queueSchemaVersion:6,delta:{added:0,updated:0,failed:0,predictionGain:0},snapshot:{}});
+ const quarantined=Array.from({length:LIMIT+7},(_,index)=>'old-'+String(index).padStart(2,'0'));
+ for(const [index,id] of quarantined.entries())records.set(START+id+'.json',{event:eventOf(id,-100000+index)});
+ const pendingId='newer-pending';records.set(START+pendingId+'.json',{event:eventOf(pendingId,5000)});
+ records.set(OUTBOX,{pending:{...Object.fromEntries(quarantined.map((id,index)=>[START+id+'.json',entry(-100000+index,{attempts:MAX,quarantined:true,lastAttemptAt:iso(-50000)})])),[START+pendingId+'.json']:entry(5000)}});
+ // the latest run: its start event was recorded and never delivered or noted (the process ended in between)
+ const live=await startRun();await stopRun(live);
+ records.get(START+live+'.json').delivered=false;for(const key of [...records.keys()])if(key.startsWith('events/items/')&&key.includes('prediction-start-'+live))records.delete(key);
+ assert.equal(outbox()[START+live+'.json'],undefined,'the latest run\'s event is in no index');
+ assert.equal((await status()).quarantined,quarantined.length);
+ const before=gets.length,next=await startRun();
+ const read=gets.slice(before);
+ assert.equal(journalOf('prediction-start-'+pendingId).length,1,'the newer pending event was delivered by one start, behind more than a page of quarantined entries');
+ assert.equal(journalOf('prediction-start-'+live).length,1,'the latest run\'s unnoted event was delivered by the same start');
+ assert.equal(records.get(START+pendingId+'.json').delivered,true);
+ assert.equal(outbox()[START+pendingId+'.json'],undefined);
+ for(const id of quarantined){assert.equal(outbox()[START+id+'.json'].quarantined,true,id+' stays quarantined');assert.equal(outbox()[START+id+'.json'].attempts,MAX);assert.equal(records.get(START+id+'.json').event.id,'prediction-start-'+id,'its record is kept');assert.equal(journalOf('prediction-start-'+id).length,0);assert.equal(read.includes(START+id+'.json'),false,'a quarantined record is not even read');}
+ const seen=await status();assert.equal(seen.quarantined,quarantined.length);assert.equal(seen.pending,0);
+ // repeated starts neither duplicate what was delivered nor touch the quarantined entries
+ await stopRun(next);const again=await startRun();await stopRun(again);
+ assert.equal(journalOf('prediction-start-'+pendingId).length,1);assert.equal(journalOf('prediction-start-'+live).length,1);
+ assert.equal(Object.values(outbox()).filter(item=>item.quarantined).length,quarantined.length);
+ // the budget of one start: more actionable entries than the limit, still behind the quarantined page; the oldest go first and the rest waits
+ const bulk=Array.from({length:LIMIT+4},(_,index)=>'wait-'+String(index).padStart(2,'0'));
+ for(const [index,id] of bulk.entries())records.set(START+id+'.json',{event:eventOf(id,20000+index)});
+ records.set(OUTBOX,{pending:{...outbox(),...Object.fromEntries(bulk.map((id,index)=>[START+id+'.json',entry(20000+index)]))}});
+ const mark=gets.length,report=await sweep();
+ const looked=gets.slice(mark).filter(key=>key.startsWith(START+'wait-'));
+ assert.ok(looked.length<=LIMIT,'one start reads at most its limit of actionable entries, saw '+looked.length);
+ assert.equal(report.delivered,looked.length);assert.equal(report.quarantined,quarantined.length);
+ assert.equal(journalOf('prediction-start-'+bulk[0]).length,1,'oldest first');
+ assert.equal(journalOf('prediction-start-'+bulk.at(-1)).length,0,'the newest waits for the next start');
+ await sweep();
+ for(const id of bulk)assert.equal(journalOf('prediction-start-'+id).length,1,id+' delivered exactly once after the second start');
+ assert.equal(Object.keys(outbox()).filter(key=>key.startsWith(START+'wait-')).length,0);
+}
+
 // The journal read is pure whatever is pending.
 {const before=writes.length;for(let read=0;read<3;read++)await readEvents();await api('status',undefined,'GET');assert.equal(writes.length,before);}
-console.log('Event outbox: no write when nothing is pending, failed start and stop events delivered by the next start, crash between record and journal, duplicates and concurrent deliveries, partial success, bounded retries with a visible quarantine, a failing index, a superseded stop and non-event index entries passed');
+console.log('Event outbox: no write when nothing is pending, failed start and stop events delivered by the next start, crash between record and journal, duplicates and concurrent deliveries, partial success, bounded retries with a visible quarantine, a failing index, a superseded stop, non-event index entries and a page of quarantined entries that starves nothing passed');

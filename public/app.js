@@ -583,8 +583,22 @@ function applySearchInput(value){
 }
 function availabilityTime(film,now=viewingClock()){const model=viewingWindow(now);const starts=(film?.shows||[]).map(show=>inArchive(model,show)||inFuture(model,show)?showStart(show):null).filter(start=>start!==null);return starts.length?Math.max(...starts)+72*3600000:null;}
 function isLastChance(film,now=viewingClock()){const until=availabilityTime(film,now);return until!==null&&until>now&&until-now<8*3600000;}
-function hasActualRating(film){const rating=enrichment.films[String(film.id)]?.actualRating;return rating!==null&&rating!==undefined;}
-function filmFacets(film){const item=enrichment.films[String(film.id)]||{},fingerprint=item.fingerprint||{},mechanics=(fingerprint.plotMechanics||[]).filter(m=>Object.hasOwn(MECHANIC_LABELS,m)),moods=(item.moodIds||fingerprint.moodIds||item.prediction?.moodIds||[]).filter(id=>Object.hasOwn(MOOD_LABELS,id));return {mechanics:new Set(mechanics),moods:new Set(moods)};}
+function filmTmdbViewKey(film){const tmdb=String(film?.tmdbId??'');return /^[1-9]\d{0,11}$/.test(tmdb)?'tmdb_'+tmdb:null;}
+// Watchlist cards key films by Letterboxd lid; ratings_view also projects the verified tmdb_<n> of the same record. Titles are not compared.
+function filmEnrichmentItem(film){
+ const films=enrichment.films||{},id=String(film?.id??''),primary=films[id],alias=filmTmdbViewKey(film),secondary=alias&&alias!==id?films[alias]:null;
+ if(!secondary||typeof secondary!=='object')return primary&&typeof primary==='object'?primary:{};
+ if(!primary||typeof primary!=='object')return secondary;
+ const item={...secondary,...primary};
+ const primaryRating=Object.hasOwn(primary,'actualRating')?primary.actualRating:undefined,secondaryRating=Object.hasOwn(secondary,'actualRating')?secondary.actualRating:undefined;
+ const primaryKnown=primaryRating!==undefined&&primaryRating!==null,secondaryKnown=secondaryRating!==undefined&&secondaryRating!==null;
+ if(primaryKnown&&secondaryKnown&&Number(primaryRating)!==Number(secondaryRating))delete item.actualRating;
+ else if(!primaryKnown&&secondaryKnown)item.actualRating=secondaryRating;
+ if(!(primary.watched===true||primary.watched===false)&&(secondary.watched===true||secondary.watched===false))item.watched=secondary.watched;
+ return item;
+}
+function hasActualRating(film){const rating=filmEnrichmentItem(film).actualRating;return rating!==null&&rating!==undefined;}
+function filmFacets(film){const item=filmEnrichmentItem(film),fingerprint=item.fingerprint||{},mechanics=(fingerprint.plotMechanics||[]).filter(m=>Object.hasOwn(MECHANIC_LABELS,m)),moods=(item.moodIds||fingerprint.moodIds||item.prediction?.moodIds||[]).filter(id=>Object.hasOwn(MOOD_LABELS,id));return {mechanics:new Set(mechanics),moods:new Set(moods)};}
 function filterMoodOptions(){const search=$('#mood-search'),count=$('#mood-option-count');if(!search||!count)return;const query=normalizeMood(search.value);let visible=0;document.querySelectorAll('#moods label').forEach(label=>{const show=!query||normalizeMood(moodLabel(label.querySelector('input').value)).replace(/ё/g,'е').includes(query.replace(/ё/g,'е'));label.hidden=!show;if(show)visible++;});count.textContent=query?`${visible} из ${moods.length} вариантов`:`${moods.length} вариантов · частые выше`;}
 function updateFacetOptions(){
  const counts={mechanics:new Map(),moods:new Map()};
@@ -600,7 +614,7 @@ function updateFacetOptions(){
  const mechanicsEmpty=$('#mechanics-empty'),moodsEmpty=$('#moods-empty');
  if(mechanicsEmpty)mechanicsEmpty.hidden=mechanics.length>0;if(moodsEmpty)moodsEmpty.hidden=moods.length>0;filterMoodOptions();updateExecutionOptions();
 }
-function storedExecution(film){const value=enrichment.films[String(film.id)]?.fingerprint?.execution;return value&&typeof value==='object'?value:null;}
+function storedExecution(film){const value=filmEnrichmentItem(film).fingerprint?.execution;return value&&typeof value==='object'?value:null;}
 function matchesExecution(film){const stored=storedExecution(film);for(const dimension of EXECUTION_FILTERS){const selected=state.execution[dimension.id];if(!selected?.size)continue;if(!selected.has(stored?.[dimension.id]))return false;}return true;}
 function scopedChannels(film){return new Set(periodShows(film).map(show=>show.channel).filter(Boolean));}
 function matchesChannels(film){if(!state.channels?.size)return true;const names=scopedChannels(film);return [...state.channels].some(channel=>names.has(channel));}
@@ -793,7 +807,7 @@ function setFilmHtml(id,html){const node=$('#'+id);if(node)node.innerHTML=html;}
 function availableShows(film,now=viewingClock()){const model=viewingWindow(now);return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show))).sort((a,b)=>a.start-b.start||String(a.channel||'').localeCompare(String(b.channel||''),'ru'));}
 function nearestAvailable(shows,now){const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now),upcoming=shows.find(show=>show.start>now);if(live&&upcoming)return {show:live,also:upcoming,label:'Сейчас в эфире',nextLabel:'Следующий показ'};if(live)return {show:live,label:'Сейчас в эфире'};if(upcoming)return {show:upcoming,label:'Ближайший показ'};return shows.length?{show:shows[shows.length-1],label:'Последний доступный показ'}:null;}
 // A catalog page carries its own current prediction and fingerprint (null when none is current); a watchlist film reads the view index.
-function filmItem(film){return film?.catalogRoute?{prediction:film.prediction||undefined,fingerprint:film.fingerprint||undefined,moodIds:film.fingerprint?.moodIds}:(enrichment.films?.[String(film.id)]||{});}
+function filmItem(film){return film?.catalogRoute?{prediction:film.prediction||undefined,fingerprint:film.fingerprint||undefined,moodIds:film.fingerprint?.moodIds}:filmEnrichmentItem(film);}
 function filmScore(film){const item=filmItem(film),actual=item.actualRating,prediction=item.prediction;const rating=actual!==null&&actual!==undefined&&Number.isFinite(Number(actual))?`<article class="film-score-card"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></article>`:`<article class="film-score-card is-empty"><span>Оценка Letterboxd</span><p class="film-missing">Оценка Letterboxd не сохранена</p></article>`;const forecast=prediction&&Number.isFinite(prediction.predictedRating)?(()=>{const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence),assessed=evidenceConfidenceHtml(prediction.confidenceAssessment,prediction.fingerprintHash),model=confidence?(assessed?`уверенность модели ${escapeHTML(confidence)}`:`уверенность ${escapeHTML(confidence)}`):'';return `<article class="film-score-card"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong><p>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${model?`<span>${model}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>${assessed}</article>`;})():'<article class="film-score-card is-empty"><span>Прогноз</span><p class="film-missing">Прогноз ещё не готов</p></article>';return `<section class="film-score" aria-label="Оценка и прогноз"><div class="film-score-row">${forecast}${film.catalogRoute?'':rating}</div>${filmWhy(prediction)}</section>`;}
 function filmSynopsis(film){const text=String(film.synopsis||'').trim();return `<section class="film-section"><h2>Синопсис</h2>${text?`<p class="film-page-synopsis">${escapeHTML(text)}</p>`:'<p class="film-missing">Синопсис не сохранён</p>'}</section>`;}
 function filmPeople(label,people,key){if(!people?.length)return '';return `<div class="film-people-row"><h3>${label}</h3><div class="film-people">${creditLinks(people,key)}</div></div>`;}
@@ -974,18 +988,18 @@ function synopsis(film){
  const cut=text.slice(0,max).lastIndexOf(' '),short=text.slice(0,cut>180?cut:max).trimEnd();
  return `<details class="film-synopsis"><summary><span>${escapeHTML(short)}…</span><strong>Читать полностью</strong></summary><p>${escapeHTML(text)}</p></details>`;
 }
-function personal(film){const item=enrichment.films[String(film.id)]||{},actual=Number.isFinite(item.actualRating),prediction=item.prediction;return {rating:actual?item.actualRating:Number.isFinite(prediction?.predictedRating)?prediction.predictedRating:null,actual,probability:Number.isFinite(prediction?.probability4Plus)?prediction.probability4Plus:0};}
+function personal(film){const item=filmEnrichmentItem(film),actual=Number.isFinite(item.actualRating),prediction=item.prediction;return {rating:actual?item.actualRating:Number.isFinite(prediction?.predictedRating)?prediction.predictedRating:null,actual,probability:Number.isFinite(prediction?.probability4Plus)?prediction.probability4Plus:0};}
 // P(4.0+) as a whole percent, only for a current forecast with a finite probability in [0, 1]; otherwise null.
 function chance4Plus(prediction){const value=prediction?.probability4Plus;return Number.isFinite(prediction?.predictedRating)&&Number.isFinite(value)&&value>=0&&value<=1?Math.round(value*100):null;}
 function recommendation(film){
- const item=enrichment.films[String(film.id)]||{},p=item.prediction,actual=item.actualRating;
+ const item=filmEnrichmentItem(film),p=item.prediction,actual=item.actualRating;
  if(actual===null||actual===undefined){if(!p)return '';}
  const actualBadge=actual===null||actual===undefined?'':`<div class="score-badge score-actual" aria-label="Моя оценка ${Number(actual).toFixed(1)} из 5"><span>МОЯ ОЦЕНКА</span><strong>${Number(actual).toFixed(1)}</strong></div>`;
  const chance=p&&!p.stale?chance4Plus(p):null;
  const predictedBadge=p?`<div class="score-badge score-predicted${p.stale?' is-stale':''}" aria-label="Прогноз ${Number(p.predictedRating).toFixed(1)} из 5${p.stale?', ожидает пересчёта':chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${Number(p.predictedRating).toFixed(1)}</strong>${p.stale?'<small>ожидает пересчёта</small>':chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'';
  return `<div class="film-score-badges">${actualBadge}${predictedBadge}</div>`;
 }
-function presentationGroups(film){const item=enrichment.films[String(film.id)]||{};if(Array.isArray(item.moodGroups))return item.moodGroups.filter(group=>Array.isArray(group)).map(group=>group.filter(id=>Object.hasOwn(MOOD_LABELS,id)));return [...filmFacets(film).moods].map(id=>[id]);}
+function presentationGroups(film){const item=filmEnrichmentItem(film);if(Array.isArray(item.moodGroups))return item.moodGroups.filter(group=>Array.isArray(group)).map(group=>group.filter(id=>Object.hasOwn(MOOD_LABELS,id)));return [...filmFacets(film).moods].map(id=>[id]);}
 function presentationChips(film){
  const lists={tone:[],theme:[],style:[],property:[]},seen={tone:new Set(),theme:new Set(),style:new Set(),property:new Set()};
  for(const ids of presentationGroups(film)){const same=new Set(ids),list=same.has('funny')&&same.has('black_humor')?ids.filter(id=>id!=='funny'):ids;for(const id of list){const bucket=moodBucket(id);if(!bucket||seen[bucket].has(id))continue;seen[bucket].add(id);lists[bucket].push(id);}}
@@ -996,7 +1010,7 @@ function presentationChips(film){
  if(genres.has('Исторический'))themes=themes.filter(id=>id!=='historical');
  const chips=[];
  if(genres.has('Телефильм'))chips.push({bucket:'format',label:'Телефильм'});
- const mechanic=(enrichment.films[String(film.id)]?.fingerprint?.plotMechanics||[]).find(id=>Object.hasOwn(MECHANIC_LABELS,id));
+ const mechanic=(filmEnrichmentItem(film).fingerprint?.plotMechanics||[]).find(id=>Object.hasOwn(MECHANIC_LABELS,id));
  if(mechanic)chips.push({bucket:'mechanic',id:mechanic,label:MECHANIC_LABELS[mechanic]});
  if(themes[0])chips.push({bucket:'theme',id:themes[0],label:moodLabel(themes[0])});
  if(lists.style[0])chips.push({bucket:'style',id:lists.style[0],label:moodLabel(lists.style[0])});
@@ -1012,7 +1026,7 @@ function lastChanceBadge(film){
  return `<span class="last-chance-badge" title="До ${escapeHTML(label)}" aria-label="Последний шанс: до ${escapeHTML(label)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Последний шанс</span>`;
 }
 function card(film){
- const item=enrichment.films[String(film.id)]||{},hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
+ const item=filmEnrichmentItem(film),hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
  return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
 }
 function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
@@ -2088,7 +2102,7 @@ function programmeStatus(model=viewingWindow()){
  const archive=model.archive?`Архив с ${madridStamp(model.archive.from)} · `:'';
  // The retained future runs to the last show the feed really had (never past the saved window); a skipped refresh keeps it until
  // those shows start, with the data age said out loud so an old programme is never passed off as a fresh one.
- const savedAt=finiteTime(report?.updatedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
+ const savedAt=finiteTime(report?.publishedAt),age=savedAt===null?null:Math.max(0,model.now-savedAt);
  const ageText=age===null?'':`Обновлено ${ageWords(age)} назад · `,stale=age!==null&&age>PROGRAMME_STALE_MS;
  // Known future programming comes from the feed's real last show, never from the saved window's edge. When that show has already
  // started the schedule ahead is unknown, whatever the window still allows; nothing is extended to the retention edge.
@@ -2105,7 +2119,7 @@ function updateProgrammeStatus(){
  const badge=$('#connection-badge'),coverage=$('#snapshot-coverage'),updated=$('#snapshot-updated'),note=$('#window-note');
  if(!report){if(badge&&programmeRefreshError){badge.textContent='Ошибка обновления';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}return;}
  const status=programmeStatus();
- if(updated)updated.textContent=`Обновлено ${madridStamp(Date.parse(report.updatedAt))}`;
+ if(updated){const published=Date.parse(report.publishedAt);updated.textContent=Number.isFinite(published)?`Обновлено ${madridStamp(published)}`:'Обновлено — нет данных';}
  if(coverage){coverage.textContent=status.coverage;coverage.title=status.title;}
  if(badge){badge.classList?.remove('is-ok','is-warning','is-critical','is-error');if(programmeRefreshError){badge.textContent='Ошибка обновления';badge.title='Последний снимок сохранён. Ошибка обновления не заменяет состояние окна.';badge.classList?.add('is-error');}else{badge.textContent=status.badge;badge.title=status.title;badge.classList?.add(status.level==='ok'?'is-ok':status.level==='warning'?'is-warning':'is-critical');}}
  if(note){note.hidden=!blackZone();note.textContent=state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет. Фильтры не изменены.':'Окно программы закончилось. Показаны фильмы из watchlist без расписания. Архив и следующие сутки пусты, пока не придёт новый снимок.';}

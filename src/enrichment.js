@@ -992,11 +992,15 @@ async function deliverPendingEvents(env,now=Date.now()){
  const report={checked:0,delivered:0,failed:0,quarantined:0};
  try{
   const [index,latest]=await Promise.all([loadJSON(env,EVENT_OUTBOX_KEY),loadJSON(env,ENRICHMENT_KEY+'latest-run.json')]);
-  const pending=isObject(index?.pending)?index.pending:{},keys=Object.keys(pending).filter(eventOutboxKey).sort((a,b)=>String(pending[a]?.since||'').localeCompare(String(pending[b]?.since||'')));
-  if(isText(latest?.runId,100))for(const key of [START_EVENT_PREFIX+latest.runId+'.json',STOP_EVENT_PREFIX+latest.runId+'.json'])if(!keys.includes(key))keys.push(key);
+  const pending=isObject(index?.pending)?index.pending:{},indexed=Object.keys(pending).filter(eventOutboxKey);
+  // Quarantined entries stay in the index and in the status read; they are counted here and never take a delivery slot, so any number of them cannot keep a
+  // later event from being delivered. The budget of one start goes, in this order, to the two records of the latest run (not yet noted anywhere when a
+  // process ended between the record and the journal), then to the pending index entries, oldest first.
+  report.quarantined=indexed.filter(key=>pending[key]?.quarantined).length;
+  const latestKeys=isText(latest?.runId,100)?[START_EVENT_PREFIX+latest.runId+'.json',STOP_EVENT_PREFIX+latest.runId+'.json'].filter(key=>!pending[key]?.quarantined):[];
+  const waiting=indexed.filter(key=>!pending[key]?.quarantined&&!latestKeys.includes(key)).sort((a,b)=>String(pending[a]?.since||'').localeCompare(String(pending[b]?.since||''))||a.localeCompare(b));
   const outcome={};
-  for(const key of keys.slice(0,EVENT_OUTBOX_LIMIT)){
-   if(pending[key]?.quarantined){report.quarantined++;continue;}
+  for(const key of [...latestKeys,...waiting].slice(0,EVENT_OUTBOX_LIMIT)){
    let result='failed';
    try{
     const record=await loadJSON(env,key);
@@ -1371,6 +1375,14 @@ async function predictionEventSnapshot(env,queue,batchSize=null,inputs=null){
 function predictionEventDelta(run,summary,snapshot){const current=snapshot?.coverage?.currentPredictionsTotal,start=run.coverageStartCurrentPredictions;return {added:summary.added,updated:summary.updated,failed:summary.failed,predictionGain:Number.isInteger(current)&&Number.isInteger(start)?current-start:null};}
 const INTEGRATION_STALE_MS=48*3600000;
 function integrationTime(value){const ms=Date.parse(value);return Number.isFinite(ms)?new Date(ms).toISOString():null;}
+// Owner-facing “программа обновлена”: the successful end of the published run (`completedAt` / complete `sync.json`
+// `updatedAt`), the same instant the `epg` event stores as `at`. Not scan `report.updatedAt`, not `startedAt`/`dueAt`,
+// not D1 `published_epg_generation.published_at` (that column still copies the scan clock at pointer switch). An
+// in-flight or failed later run keeps `lastEpgPublishedAt` from the last complete record. Missing or invalid → null.
+function epgUxPublishedAt(sync,report){
+ if(sync?.stage==='complete'&&!sync.error&&(!report?.runId||!sync.runId||sync.runId===report.runId))return integrationTime(sync.completedAt||sync.updatedAt);
+ return integrationTime(sync?.lastEpgPublishedAt);
+}
 function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return {id,role,state,code,lastSuccessAt:lastSuccessAt||null,lastFailureAt:lastFailureAt||null};}
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
@@ -1408,12 +1420,12 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
   return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
- const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgPrevious=integrationTime(report?.updatedAt),epgSuccess=sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):epgFailure&&epgPrevious&&Date.parse(epgPrevious)<Date.parse(epgFailure)?epgPrevious:null;
+ const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgSuccess=epgUxPublishedAt(sync,report);
  const epg=(()=>{
   if(sync?.error){const code=/HTTP/i.test(sync.error)?'epg_http':/cover the current window/i.test(sync.error)?'epg_window':/parse|xml|unexpected/i.test(sync.error)?'epg_parse':'epg_failed';return integrationEntry('epg','source','failed',code,epgSuccess,epgFailure);}
-  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(sync.updatedAt),freshCode(sync.updatedAt),integrationTime(sync.updatedAt),null);
-  if(sync&&['metadata','epg'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
-  return integrationEntry('epg','source','unknown','no_data',null,null);
+  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);
+  if(sync&&['metadata','epg','seal'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
+  return integrationEntry('epg','source','unknown','no_data',epgSuccess,null);
  })();
  const reportRunId=report?.runId||null,resolverConfirmed=[];
  if(discoveryStatus?.stage==='complete'&&!discoveryStatus.error){const at=integrationTime(discoveryStatus.finishedAt||discoveryStatus.at);if(at)resolverConfirmed.push({at,current:resolverMatches(discoveryStatus.programmeRunId,reportRunId)});}
@@ -1588,15 +1600,20 @@ async function diagnosticHistory(env,limit=10){
  for(const item of page.objects){const row=await loadJSON(env,item.key);if(row)rows.push(projectedDiagnostic(row));}
  return {runs:rows.sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt)||b.runId.localeCompare(a.runId)).slice(0,limit).map(presentDiagnostic)};
 }
-// AIR-417. While an EPG publication holds or loads the Discovery authority, the catalog cannot be read and the queue cannot be rebuilt.
-// That is a wait, not a storage failure: the start answers 503 blocked `prediction_catalog_held`, keeps no lease and writes no stop Event,
-// and the next start tries again. `cause` is the Discovery code that refused the read.
+// AIR-417 / AIR-424. While an EPG publication holds or loads the Discovery authority, the catalog cannot be read and the queue cannot be rebuilt.
+// That is a wait, not a storage failure: start answers 503 blocked `prediction_catalog_held`, keeps no lease and writes no stop Event.
+// next, submit and complete of an owned run answer the same 503, keep the lease and do not stop. `cause` is the Discovery code that refused the read.
 const CATALOG_HELD_CODES=['discovery_fence','discovery_incomplete'];
-const catalogHeldResponse=cause=>json({status:'blocked',reason:'catalog_held',code:'prediction_catalog_held',cause,...scheduledRunFields()},503);
+const catalogHeldResponse=(cause,extra={})=>json({status:'blocked',reason:'catalog_held',code:'prediction_catalog_held',cause,...extra,...scheduledRunFields()},503);
 async function catalogHeldCause(env){
  if(typeof DiscoveryAuthority==='undefined')return null;
  const gate=await DiscoveryAuthority.readAuthority(env);
  return gate.held?'discovery_fence':gate.ready&&gate.transfer==='loading'?'discovery_incomplete':null;
+}
+function catalogHeldQueueError(error){return CATALOG_HELD_CODES.includes(error?.code)&&error.stage==='queue_refresh'?error:null;}
+function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
+ logPredictionFailure(boundary,error,requestId,runId);
+ return catalogHeldResponse(error.code,{runId,leaseTtlMs:RUNNER_LEASE_TTL,...extra});
 }
 async function diagnosedStart(env,body,requestId){
  const runId=crypto.randomUUID(),at=new Date().toISOString(),shell={runId,createdAt:at,diagnosticStartedAt:at,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
@@ -1644,7 +1661,7 @@ async function runContractChanged(run){
  return run.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||(run.fingerprintPromptVersion??1)!==FINGERPRINT_PROMPT_VERSION||run.predictionPromptVersion!==PREDICTION_PROMPT_VERSION||(run.fingerprintRegistryDigest??registry)!==registry;
 }
 const contractChangedResponse=()=>json({error:'Contract changed; start a new run',code:'contract_changed'},409);
-async function enrichmentNext(env,body){
+async function enrichmentNext(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);run.firstNextAt||=new Date().toISOString();await savePredictionRun(env,run);const requestSize=body.batchSize??run.batchSize??MAX_PREDICTION_BATCH;if(!Number.isInteger(requestSize)||requestSize<1||requestSize>20)return json({error:'Invalid batchSize'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({runId:run.runId,items:[],mustComplete:true,stopReason:run.systemicStopReason});
@@ -1662,7 +1679,8 @@ async function enrichmentNext(env,body){
  for(let i=0;i<run.selectedIds.length;i++){const id=run.selectedIds[i],s=states[i],p=s.predictions?.current;if(run.failures[id]&&fresh(id,s)){delete run.failures[id];run.results[id]=p.generatedAt!==run.baseline[id]?(run.baseline[id]?'recalculated':'created'):'already_current';runRepair=true;}}
  if(repairs.length)await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},current=>{for(const item of repairs)current[item.id]={...(current[item.id]||{}),prediction:item.prediction,fingerprintHash:item.fingerprintHash,fingerprint:item.fingerprint,impactFeatures:item.impactFeatures};return current;});if(runRepair)await savePredictionRun(env,run);
  if(run.mode==='queued'){
-  const report=await loadJSON(env,'programme.json'),queue=await refreshPredictionQueue(env,report,'next_priority'),catalog=await loadJSON(env,'epg/discovered-films.json'),films=new Map(allEnrichmentFilms(report,catalog).map(f=>[String(f.id),f])),completed=run.selectedIds.filter((id,i)=>fresh(id,states[i])||run.results?.[id]);
+  const report=await loadJSON(env,'programme.json');let queue;try{queue=await atStage('queue_refresh',()=>refreshPredictionQueue(env,report,'next_priority'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('next',held,requestId,run.runId);throw error;}
+  const catalog=await loadJSON(env,'epg/discovered-films.json'),films=new Map(allEnrichmentFilms(report,catalog).map(f=>[String(f.id),f])),completed=run.selectedIds.filter((id,i)=>fresh(id,states[i])||run.results?.[id]);
   let slots=Math.max(0,run.batchSize-completed.filter(id=>(run.batchIds||run.selectedIds).includes(id)).length),newBatch=false;
   if(!slots){const plan=adaptivePredictionBatch(queue,body.capacity||run.capacity);run.adaptivePlan=plan;run.batchSize=plan.batchSize;slots=plan.batchSize;run.batchIds=[];newBatch=true;}
   const ready=queueBatchIds(queue,queueReadyIds(queue).filter(id=>!run.failures[id]),slots);run.batchIds=[...new Set([...(run.batchIds||completed),...ready])];const selected=[...new Set([...(newBatch?[]:completed),...ready])];if(newBatch&&ready.length)run.batchCount++;
@@ -1677,7 +1695,7 @@ async function enrichmentNext(env,body){
  for(let i=0;i<run.selectedIds.length;i++){const id=run.selectedIds[i],s=states[i];if(fresh(id,s)||run.failures[id])continue;pendingCount++;if(items.length>=requestSize)continue;const film=source[id];if(!film)continue;const requiredWork=freshness.fingerprintUsable(s.fingerprint,source[id]?.genres)?'prediction_only':'fingerprint_and_prediction',item={filmId:id,requiredWork};if(requiredWork==='prediction_only')item.fingerprint=s.fingerprint;else item.metadata=film;items.push(item);}
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
-async function enrichmentSubmit(env,body){
+async function enrichmentSubmit(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({...runSummary(run),mustComplete:true,stopReason:run.systemicStopReason});
@@ -1717,10 +1735,10 @@ async function enrichmentSubmit(env,body){
    if(record&&(record.attempts!==failure.attempts||record.retryAt!==failure.retryAt)){failure.attempts=record.attempts;failure.retryAt=record.retryAt;const answer=results.findLast(r=>r.filmId===id);if(answer?.retryAt!==undefined)answer.retryAt=record.retryAt;await savePredictionRun(env,run);}}
   if(run.systemicStopReason)break;
  }
- let queue=null;if(run.mode==='queued')queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_progress');await runnerProgress(env,run,queue);
+ let queue=null;if(run.mode==='queued'){try{queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_progress'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('submit',held,requestId,run.runId,{results,committed:results.some(r=>['created','recalculated','already_current'].includes(r.status)),identicalSubmit:'idempotent'});throw error;}}await runnerProgress(env,run,queue);
  return json({...runSummary(run),results,mustComplete:!!run.systemicStopReason,stopReason:run.systemicStopReason||null,remaining:queue?.pending.length??null,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields()});
 }
-async function enrichmentComplete(env,body){
+async function enrichmentComplete(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);
  if(run.status==='complete'||run.status==='partial'){if(run.event)await writeEvent(env,run.event);else await writeEvent(env,{id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts});await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...(run.event||{})});}
  const fault=readCallerFault(body);if(fault.rejected)return json({error:'Invalid fault'},400);
@@ -1731,7 +1749,7 @@ async function enrichmentComplete(env,body){
  if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
  if(!body.reason&&await runContractChanged(run))return contractChangedResponse();
- if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check');if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
+ if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){let queue;try{queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
  const states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id)));let created=0,recalculated=0,pending=0;
  const freshness=await predictionFreshness(env,profile),source=freshness.needsGenres?await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{}:{};
  for(let i=0;i<states.length;i++){const s=states[i],p=s.predictions?.current,id=run.selectedIds[i];if(p?.generatedAt&&p.generatedAt!==run.baseline[id]&&p.tasteProfileHash===run.tasteProfileHash&&p.predictionPromptVersion===run.predictionPromptVersion){run.baseline[id]?recalculated++:created++;if(!['created','recalculated'].includes(run.results?.[id]))run.results[id]=run.baseline[id]?'recalculated':'created';}else if(!run.failures[id]&&!freshness.state(p,s.fingerprint,source[id]?.genres))pending++;}
@@ -1740,7 +1758,7 @@ async function enrichmentComplete(env,body){
  if(run.mode==='queued'){
   // Retries, the batch summary and the counter go into the rebuild's own conditional write; the counter moves once per run.
   const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason,perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
-  const queue=await refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend});if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
+  let queue;try{queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend}));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
   if(queue&&!run.reason&&!pending)run.stopReason=queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty';
@@ -2038,9 +2056,9 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
  if(path==='/api/enrichment/footer/status'&&request.method==='GET')return json(await footerStatus(env));
- if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body)),'next',requestId);
- if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body)),'submit',requestId);
- if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body)),'complete',requestId);
+ if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body,requestId)),'next',requestId);
+ if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body,requestId)),'submit',requestId);
+ if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body,requestId)),'complete',requestId);
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));

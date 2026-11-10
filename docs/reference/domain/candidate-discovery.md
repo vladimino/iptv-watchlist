@@ -72,7 +72,7 @@ The exceptions apply only when the loading transfer is a ledger seal: previous o
 
 ## Resumable ledger seal ([ADR 0092](../adr/0092-resumable-bounded-ledger-seal.md), Proposed)
 
-With D1-authoritative discovery and migration `0012` applied, the EPG commit stages the generation instead of sealing inline. The run moves to stage `seal`; each `epg_sync_step` does one bounded part of the job (about 30 s, at least one atomic unit):
+With D1-authoritative discovery and migration `0012` applied, the EPG commit stages the generation instead of sealing inline. The run moves to stage `seal`; each `epg_sync_step` does one bounded part of the job (about 30 s, at least one atomic unit). Since [AIR-420](https://trello.com/c/J0dit94i) a ledger batch packs about 140 observations (multi-row upserts under the same 40-statement cap) and the batches of one step after the first are sent without re-reading the fence values, which the batch itself checks by compare-and-set; a refused carried batch is sent once more from fresh reads:
 
 1. `ledger`: reads the immutable generation ledger from R2 by byte offset and writes observation rows with the cursor in `discovery_seal` in the **same D1 batch** (compare-and-set on the previous cursor, lease and generation fence). The first step of a job flips the previous active ledger to `retiring` once; the same job never flips again. The retiring rows are then archived in batches of at most 500, and the last batch commits the transfer and the authority programme.
 2. `catalog`: updates the catalog by its difference to D1 in bounded parts; the phase is done when a step finds nothing to write. Departed films are superseded.

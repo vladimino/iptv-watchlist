@@ -134,4 +134,132 @@ for(const key of ['pending','priority','work','films','index','catalog'])assert.
  const nextAfter=await api('next',{runId:after.data.runId,batchSize:3});assert.equal(nextAfter.status,200);assert.ok(nextAfter.data.items.length>0);
 }
 
+const EXECUTION=JSON.parse(JSON.stringify(vm.runInContext('EXECUTION',ctx)));
+const execution=Object.fromEntries(Object.entries(EXECUTION).map(([key,values])=>[key,values.includes('unknown')?'unknown':values[0]]));
+const fingerprint={fingerprintSchemaVersion:1,plotMechanics:['heist','investigation'],execution,moodLabels:['мрачный','напряжённый'],strengths:['A causal puzzle'],risks:['Mixed payoff'],confidence:'medium',sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']};
+const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
+const eventKeys=()=>[...records.keys()].filter(key=>key.startsWith('events/')||key.includes('stop-events/')).sort();
+const versionKeys=filmId=>[...records.keys()].filter(key=>key.includes('/'+filmId+'/predictions/versions/'));
+
+function assertCatalogHeld(result,boundary,cause,runId){
+ assert.equal(result.status,503,cause);
+ assert.equal(result.data.code,'prediction_catalog_held',cause);
+ assert.equal(result.data.cause,cause);
+ assert.equal(result.data.runId,runId);
+ assert.equal(result.data.leaseTtlMs,15*60000);
+ assert.ok(!result.data.error,'not a storage_error');
+ assert.ok(!result.data.mustComplete);
+ const found=lines();assert.equal(found.length,1,cause);assert.equal(found[0].boundary,boundary);assert.equal(found[0].stage,'queue_refresh');assert.equal(found[0].code,cause);
+}
+
+// 6. A catalog hold during next is the same wait, not a 502 that stops the run (production request 0c093130…, code discovery_fence, stage was unknown).
+{
+ resetLease();logs.length=0;faults.get.clear();faults.put.clear();
+ const running=await api('start',START);assert.equal(running.status,200);assert.equal(running.data.status,'running');
+ const first=await api('next',{runId:running.data.runId,batchSize:1});assert.equal(first.status,200);assert.ok(first.data.items.length>0);
+ const resultsWas=JSON.stringify(records.get('enrichment/runs/'+running.data.runId+'.json').results);
+ const beforeEvents=eventKeys();
+ for(const cause of ['discovery_fence','discovery_incomplete']){
+  logs.length=0;
+  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
+  const held=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
+  assertCatalogHeld(held,'next',cause,running.data.runId);
+  assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').status,'running',cause);
+  assert.equal(JSON.stringify(records.get('enrichment/runs/'+running.data.runId+'.json').results),resultsWas,cause+': committed results stay');
+  assert.deepEqual(eventKeys(),beforeEvents,cause+': no stop Event');
+ }
+ const concurrent=await api('start',{...START,trigger:'scheduled'});
+ assert.equal(concurrent.data.status,'already_running');
+ faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
+ const other=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
+ assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+}
+
+// 7. Submit: catalog hold after the film is written is 503 with results; identical retry is already_current; a fence off queue_refresh stays 502.
+{
+ resetLease();logs.length=0;faults.get.clear();faults.put.clear();
+ const running=await api('start',START);assert.equal(running.status,200);
+ const first=await api('next',{runId:running.data.runId,batchSize:1});assert.equal(first.status,200);
+ const filmId=first.data.items[0].filmId,payload={runId:running.data.runId,items:[{filmId,fingerprint,prediction}]};
+ const beforeEvents=eventKeys();
+ for(const cause of ['discovery_fence','discovery_incomplete']){
+  logs.length=0;
+  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
+  const held=await api('submit',payload);faults.get.clear();
+  assertCatalogHeld(held,'submit',cause,running.data.runId);
+  assert.equal(held.data.identicalSubmit,'idempotent',cause);
+  assert.equal(held.data.committed,true,cause);
+  assert.ok(['created','already_current'].includes(held.data.results[0].status),cause);
+  assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').status,'running',cause);
+  assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').results[filmId],'created',cause);
+  assert.equal(versionKeys(filmId).length,1,cause+': one version object');
+  const bundle=records.get('enrichment/films/'+filmId+'/predictions.json');
+  assert.equal(bundle.history.length,0,cause);
+  assert.deepEqual(eventKeys(),beforeEvents,cause);
+ }
+ const retry=await api('submit',payload);
+ assert.equal(retry.status,200);
+ assert.equal(retry.data.results[0].status,'already_current');
+ assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').results[filmId],'created');
+ assert.equal(versionKeys(filmId).length,1,'no second version');
+ assert.equal(records.get('enrichment/films/'+filmId+'/predictions.json').history.length,0);
+ const nextBatch=await api('next',{runId:running.data.runId,batchSize:1});
+ const nextFilm=nextBatch.data.items.find(item=>item.filmId!==filmId);
+ assert.ok(nextFilm,JSON.stringify(nextBatch.data));
+ logs.length=0;
+ faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
+ const other=await api('submit',{runId:running.data.runId,items:[{filmId:nextFilm.filmId,fingerprint,prediction}]});faults.get.clear();
+ assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+}
+
+// 8. Complete: catalog hold on completion_check or batch_complete does not finish the run; after the hold, complete once.
+{
+ resetLease();logs.length=0;faults.get.clear();faults.put.clear();
+ const catalog={tmdb_complete_1:film('tmdb_complete_1',now)};
+ records.set('programme.json',{runId:'complete-held',films:[]});records.set('sync.json',{runId:'complete-held',stage:'complete'});records.set('epg/discovered-films.json',catalog);
+ const running=await api('start',START);assert.equal(running.status,200,JSON.stringify(running.data));assert.equal(running.data.status,'running');
+ const first=await api('next',{runId:running.data.runId,batchSize:1});assert.equal(first.status,200,JSON.stringify(first.data));
+ const filmId=first.data.items[0].filmId;
+ const submitted=await api('submit',{runId:running.data.runId,items:[{filmId,fingerprint,prediction}]});assert.equal(submitted.status,200);
+ const drained=await api('next',{runId:running.data.runId,batchSize:1});assert.equal(drained.data.mustComplete,true);
+ const beforeEvents=eventKeys();
+ const metricsWas=records.get('enrichment/prediction-queue.json').metrics.hotProcessedTotal;
+ for(const cause of ['discovery_fence','discovery_incomplete']){
+  logs.length=0;
+  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
+  const held=await api('complete',{runId:running.data.runId});faults.get.clear();
+  assertCatalogHeld(held,'complete',cause,running.data.runId);
+  const stored=records.get('enrichment/runs/'+running.data.runId+'.json');
+  assert.equal(stored.status,'running',cause);
+  assert.equal(stored.results[filmId],'created',cause);
+  assert.deepEqual(eventKeys(),beforeEvents,cause+': no completion Event');
+  assert.equal(records.get('enrichment/prediction-queue.json').metrics.hotProcessedTotal,metricsWas,cause+': counters unchanged');
+ }
+ faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
+ const other=await api('complete',{runId:running.data.runId});faults.get.clear();
+ assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+ resetLease();logs.length=0;faults.get.clear();
+ const catalog2={tmdb_complete_2:film('tmdb_complete_2',now)};
+ records.set('programme.json',{runId:'complete-held-ok',films:[]});records.set('sync.json',{runId:'complete-held-ok',stage:'complete'});records.set('epg/discovered-films.json',catalog2);
+ const again=await api('start',START);assert.equal(again.status,200,JSON.stringify(again.data));assert.equal(again.data.status,'running');
+ const item=(await api('next',{runId:again.data.runId,batchSize:1})).data.items[0];
+ await api('submit',{runId:again.data.runId,items:[{filmId:item.filmId,fingerprint,prediction}]});
+ const empty=await api('next',{runId:again.data.runId,batchSize:1});assert.equal(empty.data.mustComplete,true);
+ const done=await api('complete',{runId:again.data.runId});
+ assert.equal(done.status,200);assert.ok(['complete','partial'].includes(done.data.status));
+ assert.equal(records.get('enrichment/runs/'+again.data.runId+'.json').status,done.data.status);
+}
+
+// 9. A discovery_fence that is not the tagged queue rebuild stays 502.
+{
+ resetLease();logs.length=0;faults.get.clear();faults.put.clear();
+ records.set('programme.json',{runId:'untagged-fence',films:[]});records.set('sync.json',{runId:'untagged-fence',stage:'complete'});
+ const catalog={};for(let i=1;i<=20;i++)catalog['tmdb_'+i]=film('tmdb_'+i,now);records.set('epg/discovered-films.json',catalog);
+ const running=await api('start',START);assert.equal(running.status,200);
+ faults.get.set('enrichment/films/',()=>Object.assign(new Error('fence'),{code:'discovery_fence'}));
+ const failed=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
+ assert.equal(failed.status,502);assert.equal(failed.data.error,'storage_error');
+ const found=lines();assert.equal(found.length,1);assert.equal(found[0].code,'discovery_fence');assert.notEqual(found[0].stage,'queue_refresh');
+}
+
 console.log('prediction start diagnostics tests passed');

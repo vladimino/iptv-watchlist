@@ -399,11 +399,16 @@ function itemStatements(item,run){
  for(const show of shows)statements.push(['INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES (\'active\',?,?,?,?,?,?)',[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end]]);
  return statements;
 }
+const OBSERVATION_INSERT='INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES ';
+const OBSERVATION_ROW='(\'active\',?,\'active\',?,?,?,?,?,?,?,?,?,?)';
+const OBSERVATION_ROW_BINDS=11;
+const OBSERVATION_CONFLICT=' ON CONFLICT(source_key, observation_key) DO UPDATE SET residence=\'active\', programme_run_id=excluded.programme_run_id, normalized_title=excluded.normalized_title, title=excluded.title, year=excluded.year, evidence_key=excluded.evidence_key, seen_in_latest=excluded.seen_in_latest, last_seen_at=excluded.last_seen_at, last_airing=excluded.last_airing, confirmed_tmdb_id=excluded.confirmed_tmdb_id, payload_json=excluded.payload_json';
 function observationUpsert(item,run){
  const shows=showsOf(item);
  const payload={...item};delete payload.shows;
- const upsert=['INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES (\'active\',?,\'active\',?,?,?,?,?,?,?,?,?,?) ON CONFLICT(source_key, observation_key) DO UPDATE SET residence=\'active\', programme_run_id=excluded.programme_run_id, normalized_title=excluded.normalized_title, title=excluded.title, year=excluded.year, evidence_key=excluded.evidence_key, seen_in_latest=excluded.seen_in_latest, last_seen_at=excluded.last_seen_at, last_airing=excluded.last_airing, confirmed_tmdb_id=excluded.confirmed_tmdb_id, payload_json=excluded.payload_json',[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,evidenceKey(item),item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,Number.isFinite(Number(item.lastAiring))?Number(item.lastAiring):null,item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),JSON.stringify(payload)]];
- return {upsert,shows:shows.map(show=>[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end])};
+ const values=[item.key,run,item.normalizedTitle??null,item.title??null,Number.isInteger(item.year)?item.year:null,evidenceKey(item),item.seenInLatestSnapshot===true?1:item.seenInLatestSnapshot===false?0:null,item.lastSeenAt??null,Number.isFinite(Number(item.lastAiring))?Number(item.lastAiring):null,item.confirmedTmdbId==null?null:String(item.confirmedTmdbId),JSON.stringify(payload)];
+ const upsert=[OBSERVATION_INSERT+OBSERVATION_ROW+OBSERVATION_CONFLICT,values];
+ return {upsert,values,shows:shows.map(show=>[item.key,show.ordinal,show.channelId,show.channel,show.start,show.end])};
 }
 function loadingFence(generation,lease){
  return [
@@ -636,6 +641,105 @@ export async function walkObservationPages(env,options={}){
  return {programmeRunId:opened.programmeRunId,pages:starts.length,items,complete};
 }
 
+// Mirrors resolutionActionability except the title non-film screen (JavaScript only). Same-evidence
+// excluded_nonfilm rows stay out: a screen-rule change without an evidence_key change is a follow-up.
+// A missing decision evidence_key is "same", as in JS. Verified rows are never TMDB-actionable.
+const ACTIONABLE_SAME=`(d.evidence_key IS NULL OR d.evidence_key=o.evidence_key)`;
+const ACTIONABLE_FROM=`FROM discovery_observation o
+LEFT JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active'
+ AND o.seen_in_latest=1
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
+ AND IFNULL(d.status,'')<>'verified'
+ AND (
+  d.observation_key IS NULL
+  OR NOT ${ACTIONABLE_SAME}
+  OR (
+   IFNULL(d.status,'')<>'excluded_nonfilm'
+   AND (d.terminal_reason IS NULL OR d.terminal_reason='')
+   AND (d.retry_at IS NULL OR d.retry_at<=?)
+  )
+ )`;
+const TOUCH_FROM=`FROM discovery_observation o
+JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND d.status='verified'
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)`;
+export const ACTIONABLE_COUNT_SQL='SELECT COUNT(*) AS n '+ACTIONABLE_FROM;
+export const ACTIONABLE_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+ACTIONABLE_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+export const TOUCH_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+TOUCH_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+export const SELECT_PAGE=80;
+export const SELECT_QUERIES=6;
+
+// A paged chunk's candidate set: current-window observations that JS would still treat as
+// resolution-actionable (without the title screen), as a keyset, never the whole ledger.
+// `remaining` is that SQL set's size at selection time. `touches` are a keyset page of current
+// verified rows so the cheap pass can copy airings without walking every verified observation.
+// `touchAfter` is the last key of that page (wraps once). The same generation fence as the full walk.
+export async function selectActionableObservations(env,options={}){
+ const opened=await readAuthority(env);
+ if(opened.held)throw failed('discovery_fence');
+ if(!opened.ready)throw failed('discovery_not_authoritative');
+ if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ const now=Number.isFinite(options.now)?options.now:Date.now();
+ const from=now-72*3600000,to=now+24*3600000,nowIso=new Date(now).toISOString();
+ const pageSize=Math.min(LEDGER_PAGE,Math.max(1,Number.isInteger(options.pageSize)&&options.pageSize>0?options.pageSize:SELECT_PAGE));
+ const maxQueries=Math.max(1,Math.min(8,Number.isInteger(options.maxQueries)&&options.maxQueries>0?options.maxQueries:SELECT_QUERIES));
+ const startAfter=typeof options.after==='string'?options.after:'';
+ const db=database(env);
+ const windowParams=[from,to,nowIso];
+ if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'count'});
+ const counted=await one(db,ACTIONABLE_COUNT_SQL,windowParams);
+ const remaining=Number(counted?.n||0);
+ const items=[];
+ let cursor=startAfter,wrapped=false,queries=0,complete=false;
+ while(items.length<pageSize&&queries<maxQueries){
+  if(options.shouldStop&&options.shouldStop())break;
+  if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor});
+  const take=pageSize-items.length;
+  const rows=await many(db,ACTIONABLE_PAGE_SQL,[...windowParams,cursor,take]);
+  queries++;
+  if(!rows.length){
+   if(!cursor||wrapped){complete=true;break;}
+   cursor='';wrapped=true;continue;
+  }
+  const shows=await loadPageShows(env,cursor,rows[rows.length-1].observation_key,pageKeySet(rows));
+  for(const row of rows){
+   cursor=row.observation_key;
+   items.push({candidate:observationFromRow(row,shows.get(row.observation_key)||[]),decision:row.decision_json?decisionFromRow({payload_json:row.decision_json}):null});
+  }
+  if(rows.length<take){
+   if(wrapped||!startAfter){complete=true;break;}
+   cursor='';wrapped=true;
+  }
+ }
+ if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor,phase:'touches'});
+ const touchLimit=Math.max(0,Number.isInteger(options.touchLimit)?options.touchLimit:0);
+ const startTouchAfter=typeof options.touchAfter==='string'?options.touchAfter:'';
+ let touchCursor=startTouchAfter,touchWrapped=false,touchRows=[];
+ if(touchLimit){
+  touchRows=await many(db,TOUCH_PAGE_SQL,[from,to,touchCursor,touchLimit]);
+  queries++;
+  if(!touchRows.length&&touchCursor){
+   touchCursor='';
+   touchWrapped=true;
+   if(options.beforeQuery)await options.beforeQuery({query:queries,after:touchCursor,phase:'touches'});
+   touchRows=await many(db,TOUCH_PAGE_SQL,[from,to,touchCursor,touchLimit]);
+   queries++;
+  }
+ }
+ const touches=[];
+ if(touchRows.length){
+  const shows=await loadPageShows(env,touchCursor,touchRows[touchRows.length-1].observation_key,pageKeySet(touchRows));
+  for(const row of touchRows){
+   touchCursor=row.observation_key;
+   touches.push({candidate:observationFromRow(row,shows.get(row.observation_key)||[]),decision:decisionFromRow({payload_json:row.decision_json})});
+  }
+ }
+ const closed=await readAuthority(env);
+ if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,complete};
+}
+
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity
 // and cursor; every batch of observation rows moves the cursor in the SAME D1 batch (compare-and-set on `cursor_items`),
 // so a request that dies leaves the rows and the cursor agreeing. The batch itself is idempotent (an upsert and a
@@ -644,7 +748,17 @@ export async function walkObservationPages(env,options={}){
 // observation is written and every retiring row is archived; the commit is the last batch.
 const SEAL_BATCH_OVERHEAD=5;
 const SEAL_SHOW_ROWS=16;
-const SEAL_KEYS_PER_BATCH=80;
+const SEAL_KEYS_PER_DELETE=80;
+// AIR-420. A batch is one D1 round trip, and the round trip, not the SQL, is what a seal step pays for (on 10 November 2026 a
+// batch of about 30 observations cost about 9 round trips of about 200 ms each while its SQL took milliseconds). So the rows of a
+// batch are packed: several observations in one upsert statement (11 binds a row under D1's 100) bounded by the size of their
+// payloads, and the keys of the show delete in slices of 80. The statement cap of a batch is unchanged.
+const SEAL_ROWS_PER_UPSERT=Math.floor(BIND_CAP/OBSERVATION_ROW_BINDS);
+const SEAL_UPSERT_BYTES=200000;
+const SEAL_ITEMS_PER_BATCH=400;
+// A batch of the production ledger is about 190 kB (10 November 2026); the cap keeps a ledger of much larger payloads near that.
+const SEAL_BATCH_BYTES=400000;
+const SEAL_ENCODER=new TextEncoder();
 export async function sealSupported(env){
  try{return !!await one(database(env),"SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='discovery_seal'");}
  catch{return false;}
@@ -691,41 +805,65 @@ export async function sealBegin(env,spec){
 // One atomic batch: the fence, a lease renewal, the observation rows of as many of `items` as fit, and the cursor move.
 // `items` are `{item,bytes}` where `bytes` is the length the item takes in the source document including its separator.
 // Returns how many were written. A cursor that is not `expectedCursor` is a lost race and writes nothing.
+//
+// AIR-420. `spec.carried` is what the previous batch of the SAME step returned in `carried` ({generation, programmeRunId,
+// cursorBytes}). With it the batch is sent without reading the authority and the job first: those reads only chose the values the
+// batch itself checks, atomically, by compare-and-set (the generation with the lease and the loading transfer, then the job id,
+// the phase and the cursor). A carried value that is stale therefore writes nothing, and the batch is then tried once more from
+// fresh reads, which is exactly the path without `carried`; a real lost race or a changed job still fails there.
 export async function sealWrite(env,spec){
  const lease=spec.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
+ const carried=spec.carried&&Number.isInteger(spec.carried.generation)&&typeof spec.carried.programmeRunId==='string'&&spec.carried.programmeRunId&&Number.isFinite(spec.carried.cursorBytes)?spec.carried:null;
+ if(carried){
+  try{return await sealWriteBatch(env,spec,lease,carried);}
+  catch(error){if(error?.code!=='discovery_fence')throw error;}
+ }
  const gate=await readAuthority(env);
  if(!gate.ready||gate.transfer!=='loading')throw failed('discovery_incomplete');
  const state=await readSeal(env);
  if(!state||state.job_id!==spec.jobId||state.phase!=='items'||Number(state.cursor_items)!==spec.expectedCursor)throw failed('discovery_fence');
- const run=state.programme_run_id;
- // One upsert per observation, one delete of all their shows, and the shows as multi-row inserts (6 binds a row, 100 bind
- // limit): about 1.2 statements an observation instead of 3 to 4, so a batch carries about three times as many.
- const written=[],upserts=[],showRows=[],keys=[];
- let bytes=0;
- const cost=(count,rows)=>SEAL_BATCH_OVERHEAD+count+1+Math.ceil(rows/SEAL_SHOW_ROWS);
+ return await sealWriteBatch(env,spec,lease,{generation:gate.generation,programmeRunId:state.programme_run_id,cursorBytes:Number(state.cursor_bytes)});
+}
+async function sealWriteBatch(env,spec,lease,known){
+ const run=known.programmeRunId;
+ // The observations of a batch go out as multi-row upserts, their shows as one delete per 80 keys and multi-row inserts.
+ const written=[],groups=[],showRows=[],keys=[];
+ let bytes=0,group=null,payloadBytes=0;
+ const cost=(upserts,count,rows)=>SEAL_BATCH_OVERHEAD+upserts+Math.ceil(count/SEAL_KEYS_PER_DELETE)+Math.ceil(rows/SEAL_SHOW_ROWS);
  for(const entry of spec.items){
   const built=observationUpsert(entry.item,run);
-  const rows=showRows.length+built.shows.length;
-  if(written.length>0&&(written.length+1>SEAL_KEYS_PER_BATCH||cost(written.length+1,rows)>STATEMENT_CAP))break;
-  if(cost(1,built.shows.length)>STATEMENT_CAP)throw failed('discovery_bounded');
-  upserts.push(built.upsert);showRows.push(...built.shows);keys.push(entry.item.key);bytes+=entry.bytes;written.push(entry);
+  // Bytes on the wire, not UTF-16 units: a Cyrillic title is two bytes a letter.
+  const size=SEAL_ENCODER.encode(String(built.values[built.values.length-1])).byteLength;
+  const joins=!!group&&group.rows.length<SEAL_ROWS_PER_UPSERT&&group.size+size<=SEAL_UPSERT_BYTES;
+  const upserts=groups.length+(joins?0:1),rows=showRows.length+built.shows.length;
+  if(written.length>0&&(written.length+1>SEAL_ITEMS_PER_BATCH||payloadBytes+size>SEAL_BATCH_BYTES||cost(upserts,written.length+1,rows)>STATEMENT_CAP))break;
+  if(cost(1,1,built.shows.length)>STATEMENT_CAP)throw failed('discovery_bounded');
+  if(joins){group.rows.push(built.values);group.size+=size;}
+  else{group={rows:[built.values],size};groups.push(group);}
+  showRows.push(...built.shows);keys.push(entry.item.key);bytes+=entry.bytes;payloadBytes+=size;written.push(entry);
  }
- const statements=[...upserts,['DELETE FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key IN ('+keys.map(()=>'?').join(',')+')',keys]];
+ if(!written.length)return {written:0,cursorItems:spec.expectedCursor,cursorBytes:known.cursorBytes,carried:known};
+ const statements=groups.map(item=>[OBSERVATION_INSERT+item.rows.map(()=>OBSERVATION_ROW).join(',')+OBSERVATION_CONFLICT,item.rows.flat()]);
+ for(let at=0;at<keys.length;at+=SEAL_KEYS_PER_DELETE){
+  const slice=keys.slice(at,at+SEAL_KEYS_PER_DELETE);
+  statements.push(['DELETE FROM discovery_observation_show WHERE source_key=\'active\' AND observation_key IN ('+slice.map(()=>'?').join(',')+')',slice]);
+ }
  for(let at=0;at<showRows.length;at+=SEAL_SHOW_ROWS){
   const slice=showRows.slice(at,at+SEAL_SHOW_ROWS);
   statements.push(['INSERT INTO discovery_observation_show (source_key, observation_key, ordinal, channel_id, channel, start_ms, end_ms) VALUES '+slice.map(()=>'(\'active\',?,?,?,?,?,?)').join(','),slice.flatMap(row=>row)]);
  }
- if(!written.length)return {written:0,cursorItems:spec.expectedCursor,cursorBytes:Number(state.cursor_bytes)};
  const now=nowMs();
  await commit(database(env),[
-  ...loadingFence(gate.generation,lease),
+  ...loadingFence(known.generation,lease),
   ['UPDATE discovery_lease SET expires_at=? WHERE id=1 AND lease_id=? AND expires_at>?',[now+LEASE_TTL_MS,lease.id,now]],
   ...statements,
   ['UPDATE discovery_seal SET cursor_items=cursor_items+?, cursor_bytes=cursor_bytes+?, updated_at=? WHERE id=1 AND job_id=? AND phase=\'items\' AND cursor_items=?',[written.length,bytes,new Date(now).toISOString(),spec.jobId,spec.expectedCursor]],
   [FENCE_SQL,[]],
  ]);
- return {written:written.length,cursorItems:spec.expectedCursor+written.length,cursorBytes:Number(state.cursor_bytes)+bytes};
+ const cursorBytes=known.cursorBytes+bytes;
+ // The fence of this batch moved the generation by exactly one; the next batch of this step may start from that.
+ return {written:written.length,cursorItems:spec.expectedCursor+written.length,cursorBytes,statements:statements.length+SEAL_BATCH_OVERHEAD,carried:{generation:known.generation+1,programmeRunId:run,cursorBytes}};
 }
 // Archives up to `limit` retiring observations (and their shows) in one batch, then commits the seal when none are
 // left. The first call moves the job to `archive` only when every observation is written.
