@@ -481,8 +481,12 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
 // 11. The foundation stays inactive: it is not bundled, not imported by the Worker, and writes nothing it does not own.
 {
  const mutations=fs.readFileSync('src/canonical-mutations.js','utf8'),authority=fs.readFileSync('src/film-person-authority.js','utf8');
- assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/canonical-mutations|film-person-authority/);
- for(const file of ['src/worker.js','src/d1-enrichment.js','src/canonical-repository.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/canonical-mutations|film-person-authority/,file);
+ // AIR-409: only the marker READER is bundled (the catalog film route gates its R2 receipt fallback on it); no mutation module is.
+ assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/canonical-mutations/);
+ for(const file of ['src/worker.js','src/d1-enrichment.js','src/canonical-repository.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/canonical-mutations/,file);
+ for(const file of ['src/d1-enrichment.js','src/canonical-repository.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-authority/,file);
+ assert.match(fs.readFileSync('src/worker.js','utf8'),/FilmPersonAuthority\.readAuthority/);
+ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/FilmPersonAuthority\.(assertWritable|transitionAuthority)/,'the Worker reads the marker, it never writes or moves it');
  assert.doesNotMatch(mutations+authority,/\bBUCKET\b|\bfetch\b|wrangler/);
  const roster=mutations.slice(0,mutations.indexOf('export async function mergeFilms'));
  assert.doesNotMatch(roster,/INSERT INTO film_dimension|UPDATE film_dimension|INSERT INTO person_dimension|INSERT INTO film_metadata|UPDATE film_metadata|UPDATE watchlist_film/,'a film or person write touches no localization, dimension, metadata or prediction');
