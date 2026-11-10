@@ -10,13 +10,14 @@ import {d1Standin} from './d1-standin.mjs';
 import {mutateFilm,mutatePerson} from '../src/canonical-mutations.js';
 import {recordLocalizationSources} from '../src/localization-sources.js';
 import {canonicalReaderMode,readFilms,readPersons,resolveRedirects,ownerCandidatesFromEntries,CANONICAL_READ_MAX_IDS,CANONICAL_OWNER_ANCESTOR_CAP,CANONICAL_FILMOGRAPHY_CAP} from '../src/canonical-read-model.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-read-model-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 assert.ok(chain.includes('0014_localization_source'),'the chain includes 0014');
 let n=0;
-const sqlite=(file,text)=>{const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
-const rows=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
+const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const OPEN="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1";
 function database({upTo=chain.length,state='open'}={}){
  const file=path.join(root,'rm-'+(n++)+'.sqlite');

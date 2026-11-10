@@ -12,6 +12,7 @@ import {PRODUCTION_ACCOUNT_ID} from '../scripts/metadata-cache-production.mjs';
 import {fingerprintContentHash, fingerprintPointerAgrees, openLease, openQueue, writeLease, writeQueue} from '../src/prediction-d1.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const NOW=Date.parse('2026-11-01T10:00:00.000Z');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-prediction-production-'));
@@ -135,7 +136,7 @@ let bumped=false;
 const raced=d1Standin(racedFile,{onBatch(){
  if(bumped)return;
  bumped=true;
- const update=spawnSync('sqlite3',['-bail',racedFile],{input:'UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1;\n',encoding:'utf8'});
+ const update=sqliteSync(['-bail',racedFile],{input:'UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1;\n',encoding:'utf8'});
  if(update.status!==0)throw new Error(update.stderr);
 }});
 for(const name of names)raced.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
@@ -407,7 +408,7 @@ const TARGET='11111111-1111-4111-8111-111111111111';
 const QUEUE_TARGET='22222222-2222-4222-8222-222222222222';
 const DROP_TARGET='33333333-3333-4333-8333-333333333333';
 const ROLL_TARGET='44444444-4444-4444-8444-444444444444';
-function sqliteFile(file,input){const result=spawnSync('sqlite3',['-bail',file],{input,encoding:'utf8'});assert.equal(result.status,0,result.stderr);return result.stdout;}
+function sqliteFile(file,input){const result=sqliteSync(['-bail',file],{input,encoding:'utf8'});assert.equal(result.status,0,result.stderr);return result.stdout;}
 function httpDatabases(){
  const files={
   [TARGET]:migrated('0006_metadata_cache').file,
@@ -438,7 +439,7 @@ function fakeD1(files){
    calls.push(call);
    for(const hook of hooks){const verdict=await hook({...call,phase:'before'});if(typeof verdict==='number')return send(verdict,{success:false,errors:[{message:'Injected'}]});}
    const input='PRAGMA foreign_keys=ON;\n'+(call.write?'BEGIN;\n'+sql+'\nCOMMIT;\n':sql+'\n');
-   const result=spawnSync('sqlite3',['-json','-bail',files[match[2]]],{input,encoding:'utf8',maxBuffer:1<<28});
+   const result=sqliteSync(['-json','-bail',files[match[2]]],{input,encoding:'utf8',maxBuffer:1<<28});
    for(const hook of hooks){const after=await hook({...call,phase:'after',ok:result.status===0});if(after==='drop'){request.socket.destroy();return;}}
    if(result.status!==0)return send(400,{success:false,errors:[{message:(result.stderr||'SQL error').trim().slice(0,300)}]});
    const text=result.stdout.trim();

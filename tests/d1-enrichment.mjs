@@ -11,7 +11,10 @@ import path from 'node:path';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
-import {openSqlite} from '../scripts/offline-import.mjs';
+import {openSqlite as openSqliteProcess} from '../scripts/offline-import.mjs';
+import {sqliteRunner} from './sqlite-session.mjs';
+// AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
+const openSqlite=file=>openSqliteProcess(file,{runner:sqliteRunner});
 import {seedProjection} from '../scripts/d1-projection-seed.mjs';
 
 const source=fs.readFileSync('src/d1-enrichment.js','utf8');

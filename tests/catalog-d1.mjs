@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import {scopePersonIdentity} from '../scripts/bundle-scope.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const source=fs.readFileSync('src/catalog-d1.js','utf8');
 assert.doesNotMatch(source,/\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i,'the D1 catalog views never write');
@@ -16,7 +17,7 @@ assert.match(fs.readFileSync('src/worker.js','utf8'),/\/api\/d1\/'\)\)return awa
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"binding": "DB",\s*"database_name": "iptv"/);
 
 const file=path.join(fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-d1-')),'d1.sqlite');
-const sqlite=(sql,json=false)=>{const r=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
+const sqlite=(sql,json=false)=>{const r=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity'])sqlite(fs.readFileSync('migrations/'+name+'.sql','utf8'));
 const literal=v=>v==null?'NULL':typeof v==='number'?String(v):"'"+String(v).replace(/'/g,"''")+"'";
 const DB={prepare(sql){return {bind(...params){let i=0;const text=sql.replace(/\?/g,()=>literal(params[i++]));if(i!==params.length)throw new Error('parameter count');

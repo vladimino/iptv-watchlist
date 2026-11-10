@@ -7,8 +7,11 @@ import path from 'node:path';
 import {candidateShowIdentity,createEpgRepository,distinctCandidateShows} from '../src/epg-repository.js';
 import {publishStaged} from '../src/generation-stage.js';
 import {D1Error} from '../scripts/d1-backfill.mjs';
-import {openSqlite} from '../scripts/offline-import.mjs';
+import {openSqlite as openSqliteProcess} from '../scripts/offline-import.mjs';
 import {verifyParity} from '../src/offline-importer.js';
+import {sqliteSync,sqliteRunner} from './sqlite-session.mjs';
+// AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
+const openSqlite=file=>openSqliteProcess(file,{runner:sqliteRunner});
 
 // ADR-0025: a candidate show is the whole EPG entry (channel, start, end, title). Two entries for one slot with different titles
 // are both stored; an exact repeat is stored once; the legacy and the staged path write the same rows.
@@ -16,7 +19,7 @@ const sha256=text=>createHash('sha256').update(text,'utf8').digest('hex');
 const files=name=>fs.readFileSync('migrations/'+name,'utf8');
 const V2=files('0001_schema_v1.sql')+'\n'+files('0002_generation_stage.sql'),V3=V2+'\n'+files('0003_candidate_show_identity.sql');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-candidate-show-'));
-const sqlite=(file,input,{json=false}={})=>spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+input,encoding:'utf8'});
+const sqlite=(file,input,{json=false}={})=>sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+input,encoding:'utf8'});
 const ok=(file,input)=>{const result=sqlite(file,input);assert.equal(result.status,0,result.stderr);};
 const fails=(file,input,pattern)=>{const result=sqlite(file,input);assert.notEqual(result.status,0);assert.match(result.stderr,pattern);};
 const rows=(file,sql)=>{const result=sqlite(file,sql,{json:true});assert.equal(result.status,0,result.stderr);return result.stdout.trim()?JSON.parse(result.stdout):[];};

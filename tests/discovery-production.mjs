@@ -10,6 +10,7 @@ import {createD1Adapter} from '../scripts/d1-backfill.mjs';
 import {evidenceKey} from '../src/discovery-authority.js';
 import {activateDecision, activateSql, catalogEntries, decisionEntries, holdDecision, holdSql, importDecision, importIdentity, packImportBatches, resetImportDecision, resetImportSql, scoreEntries, staleEvidenceCount, valuePrefix} from '../scripts/discovery-cutover.mjs';
 import {applyDecision, commitSql, DISCOVERY_TABLES, discoveryStatements, LEDGER_MAX_BYTES, ledgerStatements, loadDecision, loadPrefix, migrationStatements, observationShape, packLoadSlice, parseLoadIdentity, PREREQUISITE, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, resetDecision, resetSql, runDiscoveryProduction} from '../scripts/discovery-production.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const TOKEN='test-token-value';
 const SECRET='test-secret-value';
@@ -179,7 +180,7 @@ assert.match(wrongReset.stdout,/confirm_required/);
 
 const NAMES=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority'];
 function sql(file, input, {json=false}={}){
- const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8',maxBuffer:1<<26});
+ const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8',maxBuffer:1<<26});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
  if(!json)return result.stdout;
  const text=result.stdout.trim();
@@ -187,7 +188,7 @@ function sql(file, input, {json=false}={}){
 }
 function applyMigrations(file, count){
  for(const name of NAMES.slice(0,count)){
-  const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/'+name+'.sql','utf8'),encoding:'utf8'});
+  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/'+name+'.sql','utf8'),encoding:'utf8'});
   if(result.status!==0)throw new Error(name+'\n'+result.stderr);
  }
 }
@@ -218,13 +219,13 @@ async function install(count){
   objects.set(key,{text, etag:options.etag??('etag-'+key+'-'+text.length), size:options.size??Buffer.byteLength(text)});
  }
  function runRead(statement){
-  const result=spawnSync('sqlite3',['-json','-bail',productionFile],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
+  const result=sqliteSync(['-json','-bail',productionFile],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   const text=result.stdout.trim();
   return responseJson({success:true,result:[{success:true,results:text?JSON.parse(text):[],meta:{rows_read:1,rows_written:0,bookmark:'sql-bookmark-value'}}]});
  }
  function runBatch(batch){
-  const result=spawnSync('sqlite3',['-bail',productionFile],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+batch.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
+  const result=sqliteSync(['-bail',productionFile],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+batch.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   return responseJson({success:true,result:batch.map(()=>({success:true,results:[],meta:{rows_written:1}}))});
  }

@@ -9,6 +9,7 @@ import {mkdtemp} from 'node:fs/promises';
 import {d1Standin} from './d1-standin.mjs';
 import {currentGeneration, repairMirrors, writeMirrors} from '../src/published-epg.js';
 import {applyDecision, migrationStatements, PREDICTION_TABLES, PRODUCTION_ACCOUNT_ID, PRODUCTION_DATABASE_ID, publishedEpgStatements, runPublishedEpgProduction} from '../scripts/published-epg-production.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const TOKEN='test-token-value';
 const SECRET='test-secret-value';
@@ -58,7 +59,7 @@ assert.match(badTarget.stderr,/target_invalid/);
 
 const NAMES=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache'];
 function sql(file, input, {json=false}={}){
- const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8',maxBuffer:1<<26});
+ const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8',maxBuffer:1<<26});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
  if(!json)return result.stdout;
  const text=result.stdout.trim();
@@ -69,7 +70,7 @@ function predict(file){
 }
 function applyMigrations(file, count){
  for(const name of NAMES.slice(0,count)){
-  const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/'+name+'.sql','utf8'),encoding:'utf8'});
+  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/'+name+'.sql','utf8'),encoding:'utf8'});
   if(result.status!==0)throw new Error(name+'\n'+result.stderr);
  }
 }
@@ -105,13 +106,13 @@ async function install(schema){
   objects.set(key,{text, etag:'etag-'+key+'-'+text.length});
  }
  function runRead(file, statement){
-  const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
+  const result=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+statement,encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   const text=result.stdout.trim();
   return responseJson({success:true,result:[{success:true,results:text?JSON.parse(text):[]}]});
  }
  function runBatch(file, batch){
-  const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+batch.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
+  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\nBEGIN;\n'+batch.join('\n')+'\nCOMMIT;\n',encoding:'utf8',maxBuffer:1<<26});
   if(result.status!==0)return responseJson({success:true,result:[{success:false,error:result.stderr.trim()||'statement failed'}]});
   return responseJson({success:true,result:batch.map(()=>({success:true,results:[]}))});
  }
@@ -225,12 +226,12 @@ function run(args, installed, env){
  const database=path.join(root,'local.sqlite');
  sql(database,'PRAGMA user_version=0;');
  applyMigrations(database,6);
- const blocked=spawnSync('sqlite3',['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
+ const blocked=sqliteSync(['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
  assert.notEqual(blocked.status,0);
  assert.equal(sql(database,'SELECT version FROM schema_contract;',{json:true})[0].version,6);
  assert.equal(sql(database,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade';",{json:true})[0].n,0);
  predict(database);
- const migrated=spawnSync('sqlite3',['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
+ const migrated=sqliteSync(['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(migrated.status,0,migrated.stderr);
  const bareOffline=spawnSync(process.execPath,[offline],{encoding:'utf8'});
  assert.equal(bareOffline.status,0,bareOffline.stderr);
@@ -331,7 +332,7 @@ function run(args, installed, env){
 
 {
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal(sql(installed.productionFile,'SELECT version FROM schema_contract;',{json:true})[0].version,7);
  const applied=await run(['--apply','--confirm','apply','--target','iptv'], installed);
@@ -399,7 +400,7 @@ function run(args, installed, env){
  assert.equal(built.status,0,built.stderr);
  const worker=(await import(pathToFileURL(path.resolve('dist/server/index.js')).href)).default;
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
  const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',watchlistCount:1,films:[{id:'film:heat',title:'Heat',shows:[]}]};
@@ -451,7 +452,7 @@ function run(args, installed, env){
 
 {
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
  const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat',title:'Heat',shows:[]}]};
@@ -539,7 +540,7 @@ async function holdAfterRefusal(installed){
 
 {
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
  await holdAfterRefusal(installed);
@@ -561,7 +562,7 @@ async function holdAfterRefusal(installed){
 
 {
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
  await holdAfterRefusal(installed);
@@ -586,7 +587,7 @@ async function holdAfterRefusal(installed){
 
 {
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
  const original=await holdAfterRefusal(installed);
@@ -615,7 +616,7 @@ async function holdAfterRefusal(installed){
 
 {
  const installed=await install(6);
- const chain=spawnSync('sqlite3',['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
+ const chain=sqliteSync(['-bail',installed.productionFile],{input:'PRAGMA foreign_keys=ON;\n'+fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(chain.status,0,chain.stderr);
  assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
  const programme={runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat',title:'Heat',shows:[]}]};

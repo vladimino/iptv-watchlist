@@ -9,12 +9,13 @@ import path from 'node:path';
 import * as Authority from '../src/discovery-authority.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-seal-reads-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
 let n=0;
-const sql=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
-const migrate=()=>{const file=path.join(root,'r-'+(n++)+'.sqlite');const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");return file;};
+const sql=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const migrate=()=>{const file=path.join(root,'r-'+(n++)+'.sqlite');const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");return file;};
 const item=(key,start)=>({key,title:'T '+key,normalizedTitle:'t '+key,year:2001,durations:[100],shows:[{channelId:'c',channel:'C',start,end:start+1000}],seenInLatestSnapshot:true,lastAiring:start});
 const keys=count=>Array.from({length:count},(_,i)=>'k'+String(i).padStart(4,'0'));
 const stream=(list)=>(async function*(){for(const key of list)yield item(key,Date.now()+3600000);})();

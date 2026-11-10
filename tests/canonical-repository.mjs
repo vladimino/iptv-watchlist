@@ -5,6 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {createCanonicalRepository} from '../src/canonical-repository.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const source=fs.readFileSync('src/canonical-repository.js','utf8');
 assert.doesNotMatch(source,/d1_databases|\bBUCKET\b|\bfetch\b|\bwrangler\b|INSERT INTO candidate|INSERT INTO programme_generation|INSERT INTO score_result|INSERT INTO prediction_history/);
@@ -213,11 +214,11 @@ function openSqlite(file){
  };
 }
 function exec(file,sql){
- const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
 }
 function query(file,sql,params){
- const result=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});
+ const result=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';',encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'sqlite failed');
  const text=result.stdout.trim();
  return text?JSON.parse(text):[];
