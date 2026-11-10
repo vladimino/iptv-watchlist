@@ -466,6 +466,12 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
   const windowExpiresAt=windowState.granted&&Number.isFinite(summary.window?.expiresAt)?summary.window.expiresAt:null;
   const wallPolicy=d1EnrichmentWallPolicy({bulk,windowGranted:windowState.granted,windowExpiresAt,wallOption});
   if(bulk)summary.bulkBudget={wallMs:wallPolicy.wallMs,policy:wallPolicy.policy,effectiveMs:windowExpiresAt==null?wallPolicy.wallMs:Math.max(0,Math.min(wallPolicy.wallMs,windowExpiresAt-started))};
+  // Diagnostic boundary, one structured line and nothing else: the diff is complete and the write starts next. Its presence proves the run reached the write; its
+  // absence proves nothing (a log line can be lost). It reads no clock and sends no query: only fields the run already holds, counts and timings, no id or payload.
+  console.log(JSON.stringify({event:'d1_enrichment_phase',stage:'diff_complete_write_start',projection:summary.projection,trigger:summary.trigger,mode:summary.mode,startedAt:summary.startedAt,
+   timing:{leaseMs:timing.leaseMs,windowMs:timing.windowMs,diffMs:timing.diffMs,writeGateMs:timing.writeGateMs},films:summary.films,people:summary.people,stored:summary.stored,
+   changedFilms:summary.changedFilms,changedPeople:summary.changedPeople,plan:{films:plan.films.length,people:plan.people.length,sync:(plan.sync||[]).length,absent:plan.absent.length},
+   queries:db.queries,bulk:Boolean(bulk),bulkBudget:summary.bulkBudget||null}));
   try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs:wallPolicy.wallMs,windowOwner:windowState.granted?leaseId:null,marks,bulk,windowExpiresAt});}
   finally{
    timing.writeMs=Date.now()-writeAt;
