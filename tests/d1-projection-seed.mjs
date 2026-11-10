@@ -10,11 +10,12 @@ import os from 'node:os';
 import path from 'node:path';
 import {createD1Adapter} from '../scripts/d1-backfill.mjs';
 import {seedProjectionD1} from '../scripts/d1-projection-seed.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-projection-seed-'));
 const UUID='3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb',BASELINE='a'.repeat(64),T='2026-10-29T19:58:26.568Z';
 const target={accountId:'0'.repeat(32),apiToken:'test',databaseId:UUID,databaseName:'iptv',endpoint:'https://d1.test/client/v4',maxBatchStatements:1000,maxBatchBytes:1<<20};
-const sqlite=(file,sql,json=false)=>{const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);return json?(result.stdout.trim()?JSON.parse(result.stdout):[]):result.stdout;};
+const sqlite=(file,sql,json=false)=>{const result=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);return json?(result.stdout.trim()?JSON.parse(result.stdout):[]):result.stdout;};
 let files=0;
 function database({migrations=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state']}={}){
  const file=path.join(root,'d1-'+(files++)+'.sqlite');

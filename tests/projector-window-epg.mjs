@@ -15,6 +15,7 @@ import * as Authority from '../src/discovery-authority.js';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const context=loadWorker();context.DiscoveryAuthority=Authority;
 let fetches=0;context.fetch=async()=>{fetches++;throw new Error('the EPG source must not be fetched while a window is open');};
@@ -24,7 +25,7 @@ vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8'),context);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-window-epg-'));
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const file=path.join(root,'e.sqlite');
-{const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);}
+{const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);}
 const db=d1Standin(file);
 db.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
 const bucket=new MemoryBucket();

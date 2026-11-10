@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {renderSql} from '../scripts/d1-backfill.mjs';
 import {ALIAS_PROVENANCE,applyPlan,buildPlan,coCreditReview,fetchCredits,letterboxdTmdbLinks,resolvedSource,filmStatements,tmdbCredits,tmdbPath,watchlistFilms} from '../scripts/tmdb-watchlist-credits.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const source=fs.readFileSync('scripts/tmdb-watchlist-credits.mjs','utf8');
 assert.doesNotMatch(source,/\bBUCKET\b|wrangler|env\.DB\b|\bDELETE\b|\bUPDATE\b|DO UPDATE|REPLACE INTO/,'the script only adds rows, never R2, never a Worker binding');
@@ -19,7 +20,7 @@ assert.match(discovery,/slice\(0,10\)\.map\(person=>\(\{id:prefix\+'\/'\+person\
 assert.equal(tmdbPath('949'),'movie/949?language=ru-RU&append_to_response=credits');
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-tmdb-credits-')),file=path.join(root,'d1.sqlite'),dir=path.join(root,'private');
-const sqlite=(sql,json=false)=>{const r=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
+const sqlite=(sql,json=false)=>{const r=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 for(const name of ['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity'])sqlite(fs.readFileSync('migrations/'+name+'.sql','utf8'));
 const db={statements:0,batches:0,buffer:null,
  async all(sql,params=[]){const out=sqlite(renderSql(sql,params)+';',true).trim();return out?JSON.parse(out):[];},

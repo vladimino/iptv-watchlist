@@ -11,13 +11,14 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped} from '../scripts/bundle-scope.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-catalog-watched-'));let databases=0;
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const lit=value=>"'"+String(value).replace(/'/g,"''")+"'";
 function migrated(options={}){
  const file=path.join(root,'w-'+(databases++)+'.sqlite');
- const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+ const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+names.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
  return d1Standin(file,options);
 }

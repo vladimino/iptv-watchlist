@@ -231,7 +231,7 @@ fs.unlinkSync(me);`;
   {
     const dir = suite({'a.mjs': "console.log('x');"});
     const result = await run(['--dir', dir]);
-    assert.match(result.stdout, /up to [1-4] at a time|serial/);
+    assert.match(result.stdout, /up to [1-6] at a time|serial/);
   }
 
   // 11. A GitHub step summary is written when the variable is set.

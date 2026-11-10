@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const migration=fs.readFileSync('migrations/0001_schema_v1.sql','utf8');
 const fixture=fs.readFileSync('tests/fixtures/d1-schema-v1.sql','utf8');
@@ -10,7 +11,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-'));
 const database=path.join(root,'schema.sqlite');
 
 function run(sql){
- const result=spawnSync('sqlite3',['-bail',database],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
+ const result=sqliteSync(['-bail',database],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
  return result;
 }
 function query(sql){

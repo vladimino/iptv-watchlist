@@ -7,12 +7,13 @@ import path from 'node:path';
 import * as Authority from '../src/discovery-authority.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-seal-resume-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority','0012_discovery_seal'];
 let n=0;
-const sql=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
-const migrate=()=>{const file=path.join(root,'q-'+(n++)+'.sqlite');const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");return file;};
+const sql=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const migrate=()=>{const file=path.join(root,'q-'+(n++)+'.sqlite');const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");return file;};
 const item=(key,start,title='T')=>({key,title:title+' '+key,normalizedTitle:'t '+key,year:2001,durations:[100],shows:[{channelId:'c',channel:'C',start,end:start+1000},{channelId:'d',channel:'D',start:start+5000,end:start+6000}],seenInLatestSnapshot:true,lastAiring:start});
 const keyList=(from,to)=>Array.from({length:to-from},(_,i)=>'k'+String(from+i).padStart(5,'0'));
 const entries=(list,title)=>list.map(key=>({item:item(key,Date.now()+3600000,title),bytes:JSON.stringify(item(key,0)).length+1}));
@@ -226,14 +227,14 @@ const invariant=(file)=>{
 // 10. Without the table the code reports the seal as unsupported and the old behaviour stands.
 {
  const file=path.join(root,'v11.sqlite');
- const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.slice(0,11).map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});
+ const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.slice(0,11).map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});
  assert.equal(r.status,0,r.stderr);
  const env={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null};
  assert.equal(await Authority.sealSupported(env),false);
  assert.deepEqual(await Authority.sealState(env),{supported:false});
  // 0012 refuses anything below version 11.
  const low=path.join(root,'v10.sqlite');
- const p=spawnSync('sqlite3',['-bail',low],{input:'PRAGMA foreign_keys=ON;\n'+chain.slice(0,10).map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n')+'\n'+fs.readFileSync('migrations/0012_discovery_seal.sql','utf8'),encoding:'utf8'});
+ const p=sqliteSync(['-bail',low],{input:'PRAGMA foreign_keys=ON;\n'+chain.slice(0,10).map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n')+'\n'+fs.readFileSync('migrations/0012_discovery_seal.sql','utf8'),encoding:'utf8'});
  assert.notEqual(p.status,0,'0012 must refuse a version 10');
 }
 
