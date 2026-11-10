@@ -132,7 +132,7 @@ for(const tool of tools){
  const properties=JSON.stringify(tool.inputSchema.properties||{});
  assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
 }
-assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,false);
+assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
 for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_pending']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);

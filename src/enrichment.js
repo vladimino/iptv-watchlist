@@ -1484,6 +1484,8 @@ function queueBatchIds(queue,ready,slots){
  return taken;
 }
 const RUN_DIAGNOSTICS_PREFIX=ENRICHMENT_KEY+'run-diagnostics/';
+const RUN_DIAGNOSTICS_SETTLE_KEY=ENRICHMENT_KEY+'run-diagnostics-settle.json';
+const RUN_DIAGNOSTICS_SETTLE_LIMIT=100;
 function diagnosticKey(id,at){return RUN_DIAGNOSTICS_PREFIX+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-'+id+'.json';}
 async function diagnosticCheckpoint(env,run,patch={}){
  if(run.runId.startsWith('blocked-'))return null; // Aggregate stop Events are not additional trigger attempts.
@@ -1491,9 +1493,39 @@ async function diagnosticCheckpoint(env,run,patch={}){
  const value={runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',startedAt:at,endedAt:run.completedAt||null,state:run.status==='complete'?'completed':run.status==='partial'?'blocked':run.status||'running',startResult:old?.startResult||run.startResult||'running',stopReason:run.stopReason||run.reason||null,leaseAcquiredAt:old?.leaseAcquiredAt||run.leaseAcquiredAt||null,leaseExpiredAt:lease?.runId===run.runId?new Date(lease.expiresAt||Date.parse(old?.leaseExpiredAt||at)).toISOString():old?.leaseExpiredAt||null,lastHeartbeatAt:run.lastHeartbeatAt||old?.lastHeartbeatAt||null,firstNextAt:run.firstNextAt||old?.firstNextAt||null,firstSubmitAt:run.firstSubmitAt||old?.firstSubmitAt||null,added:summary.added,failed:summary.failed,hotRemaining:queue?.priorityCount??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??run.coldRemaining??null,batchesProcessed:Math.max(0,(run.batchCount||1)-1)+(run.selectedIds?.length&&run.selectedIds.every(id=>run.results?.[id])?1:0),...patch,steps:Array.isArray(old?.steps)?old.steps.slice(-8):[],lastAttemptedStep:old?.lastAttemptedStep||null,lastCompletedStep:old?.lastCompletedStep||null,serverFault:old?.serverFault||null,callerFault:run.callerFault||old?.callerFault||null,itemValidation:run.itemValidation||old?.itemValidation||null,delivery:'unconfirmed'};
  await saveJSON(env,key,value);return value;
 }
+function leaseExpiredDiagnostic(row,now=Date.now()){
+ return !!(row&&row.state==='running'&&row.leaseExpiredAt&&Date.parse(row.leaseExpiredAt)<=now);
+}
+function projectedDiagnostic(row,now=Date.now()){
+ if(!leaseExpiredDiagnostic(row,now))return row;
+ return {...row,state:'interrupted',stopReason:row.leaseAcquiredAt?'lease_expired':'runner_aborted',endedAt:row.endedAt||row.leaseExpiredAt};
+}
+async function persistExpiredDiagnostic(env,itemKey,row,now=Date.now()){
+ if(!leaseExpiredDiagnostic(row,now))return;
+ const run=await checkedRun(env,row.runId);
+ if(run&&['running','interrupted'].includes(run.status)){
+  if(run.status==='interrupted'&&run.stopReason==='lease_expired'&&row.state==='interrupted')return;
+  run.status='interrupted';run.recoverable=true;run.stopReason='lease_expired';run.reason='lease_expired';run.completedAt=run.completedAt||row.leaseExpiredAt;
+  await saveJSON(env,runKey(run.runId),run);await diagnosticCheckpoint(env,run);return;
+ }
+ await saveJSON(env,itemKey,projectedDiagnostic(row,now));
+}
+async function settleExpiredDiagnostics(env,now=Date.now()){
+ // One R2 list page per authorized start, with a durable resume cursor. A list/get/put error leaves the cursor
+ // unchanged so the next start retries the same page; already-settled rows are no-ops. Admission of the new run
+ // does not wait on a full history scan (AIR-415).
+ try{
+  const state=await loadJSON(env,RUN_DIAGNOSTICS_SETTLE_KEY)||{};
+  const page=await env.BUCKET.list({prefix:RUN_DIAGNOSTICS_PREFIX,limit:RUN_DIAGNOSTICS_SETTLE_LIMIT,...(state.cursor?{cursor:state.cursor}:{})});
+  for(const item of page.objects||[]){const row=await loadJSON(env,item.key);if(row)await persistExpiredDiagnostic(env,item.key,row,now);}
+  const next=page.truncated?page.cursor||null:null;
+  if(next===null&&!state.cursor)return;
+  await saveJSON(env,RUN_DIAGNOSTICS_SETTLE_KEY,{cursor:next,at:new Date(now).toISOString()});
+ }catch{}
+}
 async function diagnosticHistory(env,limit=10){
  const page=await env.BUCKET.list({prefix:RUN_DIAGNOSTICS_PREFIX,limit}),rows=[];
- for(const item of page.objects){let row=await loadJSON(env,item.key);if(!row)continue;if(row.state==='running'&&row.leaseExpiredAt&&Date.parse(row.leaseExpiredAt)<=Date.now()){const run=await checkedRun(env,row.runId);if(run){run.status='interrupted';run.recoverable=true;run.stopReason='lease_expired';run.reason='lease_expired';run.completedAt=row.leaseExpiredAt;await saveJSON(env,runKey(run.runId),run);row=await diagnosticCheckpoint(env,run);}else{row={...row,state:'interrupted',stopReason:row.leaseAcquiredAt?'lease_expired':'runner_aborted',endedAt:row.leaseExpiredAt};await saveJSON(env,item.key,row);}}rows.push(row);}
+ for(const item of page.objects){const row=await loadJSON(env,item.key);if(row)rows.push(projectedDiagnostic(row));}
  return {runs:rows.sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt)||b.runId.localeCompare(a.runId)).slice(0,limit).map(presentDiagnostic)};
 }
 // AIR-417. While an EPG publication holds or loads the Discovery authority, the catalog cannot be read and the queue cannot be rebuilt.
@@ -1514,7 +1546,7 @@ async function diagnosedStart(env,body,requestId){
   const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
   const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));if(lease.status!=='owned')return json(lease);
   shell.leaseAcquiredAt=lease.heartbeatAt;shell.lastHeartbeatAt=lease.heartbeatAt;const previous=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;shell.startResult=previous&&['running','interrupted'].includes(previous.status)?'recovered_stale_lease':'running';await diagnosticCheckpoint(env,shell,{state:'running',startResult:shell.startResult});
-  try{const result=await atStage('writer_lease',()=>predictionWriter(env,()=>enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult})));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
  },'start',requestId);
  const data=await response.clone().json();if(data.status!=='running'){shell.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';shell.completedAt=new Date().toISOString();shell.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,shell,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:shell.leaseAcquiredAt||null,lastHeartbeatAt:shell.lastHeartbeatAt||null});}
  return response;
@@ -1949,7 +1981,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body)),'next',requestId);
  if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body)),'submit',requestId);
  if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body)),'complete',requestId);
- if(path==='/api/enrichment/status'&&request.method==='GET'){await recoverStopEvents(env);return json(await enrichmentStatus(env));}
+ if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']});

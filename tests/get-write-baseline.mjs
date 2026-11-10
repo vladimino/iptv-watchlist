@@ -42,17 +42,8 @@ export const MCP_WRITE_TOOLS=['epg_sync_start','epg_sync_step','ratings_sync_sta
 const PREDICTION_D1=['d1:UPDATE prediction_domain_authority','d1:UPDATE prediction_domain_cas','d1:INSERT INTO prediction_domain_intent','d1:DELETE FROM prediction_domain_intent','d1:UPDATE prediction_domain_cas'];
 const PREDICTION_SQL=['UPDATE prediction_domain_authority SET generation=? WHERE id=? AND mode=? AND writes=? AND generation=?','UPDATE prediction_domain_cas SET ok=changes() WHERE id=?','INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)','DELETE FROM prediction_domain_intent WHERE key=? AND token=?'];
 const STOP_PUTS=['put:enrichment/runs/run-stopped.json','put:enrichment/run-diagnostics/<ts>-run-stopped.json','put:events/items/<ts>-stop-run-stopped.json','put:enrichment/stop-events/run-stopped.json'];
-const EXPIRED_PUTS=['put:enrichment/runs/run-expired.json','put:enrichment/run-diagnostics/<ts>-run-expired.json'];
 
 export const BASELINE=[
- {id:'enrichment-runs-recovery',owner:'AIR-415',kind:'r2-d1-write',
-  summary:'diagnosticHistory settles a run whose diagnostic row says running but whose lease expired: it rewrites the run record and the diagnostic row (R2); in D1 prediction-domain mode every saveJSON of a prediction object is a fenced D1 intent.',
-  routes:['GET /api/enrichment/runs'],effects:{'r2-pending':EXPIRED_PUTS,'d1-pending':[...EXPIRED_PUTS,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
- {id:'enrichment-status-recovery',owner:'AIR-415, AIR-416',kind:'r2-d1-write',
-  summary:'The status read runs recoverStopEvents (delivers an undelivered stop event: run record, diagnostic row, journal item, delivered flag), then diagnosticHistory (expired-lease settlement). Same effects through the MCP alias enrichment_status, which is annotated readOnlyHint false for this reason.',
-  routes:['GET /api/enrichment/status'],
-  effects:{'r2-pending':[...STOP_PUTS,...EXPIRED_PUTS],'d1-pending':[...STOP_PUTS,...EXPIRED_PUTS,...PREDICTION_D1,...PREDICTION_D1]},
-  sql:{'d1-pending':PREDICTION_SQL}},
  {id:'events-recovery',owner:'AIR-416',kind:'r2-d1-write',
   summary:'The journal read runs recoverStopEvents before the page is read: an undelivered stop event is written into the journal and its record is marked delivered.',
   routes:['GET /api/events'],effects:{'r2-pending':STOP_PUTS,'d1-pending':[...STOP_PUTS,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
@@ -60,8 +51,4 @@ export const BASELINE=[
   summary:'The TMDB status route sends one GET to TMDB (movie 11) with the Worker secret. It changes nothing of ours and spends provider quota; it is listed so a second or a non-GET request cannot appear unnoticed.',
   routes:['GET /api/integrations/tmdb/status'],effects:Object.fromEntries(['r2','r2-pending','empty','d1','d1-mirror-missing','d1-mirror-stale','d1-held','d1-pending'].map(name=>[name,['fetch:GET https://api.themoviedb.org/3/movie/11']])),sql:{}},
 ];
-export const MCP_BASELINE=[
- {id:'mcp-enrichment-status',owner:'AIR-415, AIR-416',kind:'r2-d1-write',
-  summary:'enrichment_status is the same body as GET /api/enrichment/status and writes the same things; its annotation readOnlyHint false says so.',
-  routes:['MCP enrichment_status'],effects:{'r2-pending':[...STOP_PUTS,...EXPIRED_PUTS],'d1-pending':[...STOP_PUTS,...EXPIRED_PUTS,...PREDICTION_D1,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
-];
+export const MCP_BASELINE=[];
