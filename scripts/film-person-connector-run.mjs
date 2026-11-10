@@ -19,7 +19,7 @@ import {fileURLToPath} from 'node:url';
 import {RECORDING_PATHS,buildParityLedger,contextFromActual,expectedFromInputs,readStableCut,readWitness,readerOf,recordBaselineVerified} from '../src/film-person-baseline.js';
 import {transitionAuthority} from '../src/film-person-authority.js';
 import {OWNER_LINK_WAIVER} from '../src/film-person-cutover-minimum.js';
-import {ACCEPTED_DISCREPANCIES,CUTOVER_ACCEPTED_GATE,CUTOVER_ACCEPTED_VERSION,DISCOVERY_COPY_TABLES,OPERATOR_COPY_KIND,OPERATOR_COPY_PERMISSION,buildCutoverAcceptedLedger,cutoverAcceptedGate,movingStatement} from '../src/film-person-cutover-accepted.js';
+import {ACCEPTED_DISCREPANCIES,COPY_TABLES,CUTOVER_ACCEPTED_GATE,CUTOVER_ACCEPTED_VERSION,DISCOVERY_COPY_TABLES,OPERATOR_COPY_KIND,OPERATOR_COPY_PERMISSION,buildCutoverAcceptedLedger,cutoverAcceptedGate,movingStatement} from '../src/film-person-cutover-accepted.js';
 import {GATE_STATEMENTS,buildExpected,captureProjectorInputs,extraClasses,limitedClient,readCaptureGate,readOnlyBinding,runParity,verifyDerived,verifyManifest} from './film-person-capture.mjs';
 import {deriveEvidence,readOwnerFacts} from './film-person-cutover-run.mjs';
 import {assertReadOnly} from './schema-preflight.mjs';
@@ -40,7 +40,8 @@ export class ConnectorError extends Error{constructor(reason,detail){super(reaso
 const stop=(reason,detail)=>new ConnectorError(reason,detail);
 
 // ---------- the tables that are copied ----------
-// HOW THE LIST IS DERIVED. It is every table a statement of the run names: the witness and gate statements, the D1 readers of the capture with all three routes
+// COPY_TABLES is defined once, in src/film-person-cutover-accepted.js, where the gate also derives the statement set it requires from it (requiredStatementIds),
+// so the plan and the gate cannot drift. HOW THE LIST IS DERIVED. It is every table a statement of the run names: the witness and gate statements, the D1 readers of the capture with all three routes
 // in D1 (published EPG, Discovery, owner reviews), the stage A cut with its AIR-286 check, the owner-review facts and the diagnostics of `runParity` (their
 // prediction fact tables are read only for a changed Film with a retained duplicate; the test adds that one reviewed statement, `factsSql`, by its text). A view
 // counts as the tables it selects from (`tmdb_retirement_current` reads `tmdb_retirement_decision`). tests/film-person-connector.mjs runs exactly that code
@@ -48,15 +49,7 @@ const stop=(reason,detail)=>new ConnectorError(reason,detail);
 // test. The list is also safe when it is wrong: `load` creates EVERY table of the production DDL (the readers check that the published EPG and Discovery tables
 // exist), but the binding of the copy refuses a SELECT that names a table whose copy is not complete (`connector_table_not_copied`), so an uncopied table is
 // never read as empty. The Discovery tables come last: the Discovery Workflow keeps writing them, and the resync re-reads them.
-export const COPY_TABLES=Object.freeze([
- 'schema_contract','film_person_authority','film_person_cas','film_person_baseline','projection_run','projector_window',
- 'published_epg_authority','published_epg_document','owner_review_authority','owner_review_entry',
- 'film','person','film_external_id','person_external_id','film_alias','person_alias','film_person_credit','film_dimension','person_dimension','watchlist_film',
- 'film_redirect','tmdb_retirement_decision','film_rated_admission','film_retention','projection_state',
- 'canonical_revision','film_localization_source','person_localization_source','film_metadata',
- 'candidate_decision','candidate_decision_history','fingerprint_payload','prediction_current','prediction_history',
- ...DISCOVERY_COPY_TABLES,
-]);
+export {COPY_TABLES};
 const LOG_TABLES=['connector_copy_log','connector_copy_table'];
 
 // ---------- the statements, taken from the reviewed code ----------

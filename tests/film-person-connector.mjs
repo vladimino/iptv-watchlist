@@ -15,7 +15,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {RECORDING_PATHS,readWitness,recordBaselineVerified} from '../src/film-person-baseline.js';
 import {transitionAuthority} from '../src/film-person-authority.js';
-import {ACCEPTED_DISCREPANCIES,DISCOVERY_COPY_TABLES,cutoverAcceptedGate} from '../src/film-person-cutover-accepted.js';
+import {ACCEPTED_DISCREPANCIES,COPY_TABLES,DISCOVERY_COPY_TABLES,cutoverAcceptedGate,requiredStatementIds} from '../src/film-person-cutover-accepted.js';
 import {GATE_STATEMENTS,factsSql} from '../scripts/film-person-capture.mjs';
 import {runCutoverMinimum} from '../scripts/film-person-cutover-run.mjs';
 import {renderSql} from '../scripts/d1-backfill.mjs';
@@ -40,7 +40,7 @@ fs.copyFileSync(template,production);
 for(const trigger of rows(production,"SELECT name FROM sqlite_master WHERE type='trigger'"))sql(production,'DROP TRIGGER '+trigger.name+';');
 const q=value=>"'"+String(value).replace(/'/g,"''")+"'";
 const film=id=>({id,title:'Film '+id,original:'Film '+id,year:2001,tmdbId:String(500+id.length*7+id.charCodeAt(0)),url:'https://letterboxd.com/film/'+id+'/',directors:[{id:'director/'+id,name:'Dir '+id,original:'Dir '+id}],actors:[{id:'actor/'+id+'-a',name:'Act '+id,original:'Act '+id}]});
-const programme={films:[{...film('alpha'),shows:[]}]},watchlist={films:[film('alpha'),film('beta')]};
+const programme={films:[{...film('alpha'),shows:[]}]},watchlist={films:[film('alpha')]};
 const DAY='2026-11-10T00:00:00.000Z';
 sql(production,`INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-1','published','${DAY}','${'0'.repeat(64)}','${DAY}');
 INSERT INTO published_epg_document VALUES ('run-1','programme',0,${q(JSON.stringify(programme))}),('run-1','watchlist',0,${q(JSON.stringify(watchlist))});
@@ -100,6 +100,10 @@ const plan=await K.buildPlan({leaseId:LEASE});
  assert.equal(sent.length,20);
  assert.deepEqual(plan.statements.filter(item=>item.id.startsWith('count:')).map(item=>item.id),K.COPY_TABLES.map(table=>'count:'+table));
  assert.equal(plan.statements.length,20+10+K.COPY_TABLES.length);
+ // ONE table list: the plan copies and counts exactly the tables from which the gate derives the statement set it requires
+ assert.equal(K.COPY_TABLES,COPY_TABLES,'the tool re-exports the gate module\'s list, it has none of its own');
+ assert.deepEqual(plan.copyTables,[...COPY_TABLES]);
+ assert.deepEqual(plan.statements.map(item=>item.id),await requiredStatementIds(),'the plan asks exactly the statements the gate requires');
  // the three lease statements are the text of the stage A cut, character for character
  const source=fs.readFileSync('src/film-person-baseline.js','utf8');
  for(const text of Object.values(plan.lease))assert.ok(source.includes("'"+text+"'"),'in src/film-person-baseline.js: '+text.slice(0,40));
@@ -346,7 +350,7 @@ const sealed=await K.sealLedger({driver,plan,measurement:measured.measurement,fi
  await unverified({t2:at(files.t2,'gate:marker',r=>{r[0].generation=1;})},'production_moved:gate:marker');
  await unverified({t2:at(files.t2,'count:film_metadata',r=>{r[0].n=1;})},'production_moved:count:film_metadata');
  // the copy was compared with another T1 than the one presented
- const otherT1=await unverified({t1:at(files.t1,'witness:credit',r=>{r[0].n=5;})},'copy_mismatch:witness:film');
+ const otherT1=await unverified({t1:at(files.t1,'witness:credit',r=>{r[0].n=5;})},'copy_missing:witness:film');
  assert.ok(otherT1.report.verificationReasons.includes('production_moved:witness:credit'));
  // the Discovery resync: another file than the one applied, or none
  await unverified({resync:altered(files.resync,v=>{v.at=new Date(Date.parse(v.at)+1).toISOString();})},'discovery_resync_missing');
@@ -362,6 +366,8 @@ const sealed=await K.sealLedger({driver,plan,measurement:measured.measurement,fi
  await unverified({release:altered(files.release,v=>{v.at=t0.result.at;})},'lease_not_released');
  // the order of the evidence
  await unverified({t2:altered(files.t2,v=>{v.at=t0.result.at;})},'evidence_order');
+ // a check without one of the plan's counts is not a check of this plan
+ assert.deepEqual((await seal({t2:altered(files.t2,v=>{const at=v.ids.indexOf('count:film_metadata');v.ids.splice(at,1);v.rows.splice(at,1);})})).reasons,['check_malformed']);
  // unusable evidence files refuse the seal outright
  assert.deepEqual((await seal({t2:files.t1})).reasons,['check_label:t2']);
  assert.deepEqual((await seal({t0:path.join(root,'absent.json')})).reasons,['evidence_unreadable']);

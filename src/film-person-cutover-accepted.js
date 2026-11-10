@@ -3,9 +3,9 @@
 // `cutover_minimum` v1 gate are untouched; this gate is consulted by `recordBaselineVerified` only on its own explicit path
 // (`path: RECORDING_PATHS.cutover_accepted`, reference `cutover_accepted/v1:<acceptedDigest>`), with no fallback to or from the other paths.
 // It is `cutover_minimum` v1 with exactly two differences, each bound to one owner decision by a constant compared by deep equality:
-//  (1) ACCEPTED_DISCREPANCIES v1, owner decision "ignore the discrepancies and prepare the migration": unexplained missing / extra rows are accepted up to a
-//      per-class CAP taken from the measurement of 10 Nov 2026 plus headroom (10 percent rounded up, at least 2). A value that DIFFERS is never accepted, in any
-//      class. A class above its cap, a class the constant does not list, or any differing value fails.
+//  (1) ACCEPTED_DISCREPANCIES v1, owner decisions "ignore the discrepancies and prepare the migration" and "exact measured numbers": unexplained missing / extra
+//      rows are accepted up to a per-class CAP that is EXACTLY the count measured on 10 Nov 2026, with no headroom. A class above its measured count fails and
+//      needs a fresh owner approval (a new version of the constant). A value that DIFFERS is never accepted, in any class. A class the constant does not list fails.
 //  (2) OPERATOR_COPY_PERMISSION v1, owner decision "no token is needed, use the same path as before the pause": a source of kind `operator-copy` (the operator
 //      copies D1 through the Cloudflare API connector, the run is local) may be `verified`. The verdict is DERIVED here from the facts of the run's evidence
 //      files (operatorCopyReasons) and is not an argument of the builder.
@@ -19,13 +19,14 @@ export const CUTOVER_ACCEPTED_GATE='cutover_accepted';
 export const CUTOVER_ACCEPTED_VERSION=1;
 const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(freeze);Object.freeze(value);}return value;};
 // measured: the unexplained differences per class of the production measurement of 10 Nov 2026 (docs/evidence/d1-migration/air-373-measured-parity-2026-11-10.md).
-// caps: measured + max(2, ceil(measured / 10)). ownerLink is not listed: its values are waived by OWNER_LINK_WAIVER and its keys are checked by the v1 rules.
+// caps: exactly the measured counts (owner decision of 10 Nov 2026: "exact measured numbers"); one row more in any class fails. ownerLink is not listed: its
+// values are waived by OWNER_LINK_WAIVER and its keys are checked by the v1 rules.
 export const ACCEPTED_DISCREPANCIES=freeze({
  id:'AIR-373-accepted-discrepancies-2026-11-10',version:1,approver:'owner',
- decision:'AIR-373 owner decision of 2026-11-10: ignore the discrepancies and prepare the migration',
+ decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers',
  scope:'unexplained_missing_or_extra',differs:0,
  measured:{film:8,person:6,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},
- caps:{film:10,person:8,filmExternalId:18,personExternalId:5,filmAlias:160,personAlias:162,credit:146,filmLocalization:10,personLocalization:5,watchlist:6,redirect:6,retirement:6,ratedAdmission:779,retention:442,projectionKey:13},
+ caps:{film:8,person:6,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},
 });
 export const OPERATOR_COPY_KIND='operator-copy';
 export const OPERATOR_COPY_PERMISSION=freeze({
@@ -37,6 +38,17 @@ export const OPERATOR_COPY_PERMISSION=freeze({
 export const DISCOVERY_COPY_TABLES=Object.freeze(['discovery_authority','discovery_lease','discovery_transfer','discovery_admission','discovery_decision']);
 // The gate statements of the projector-input capture (its GATE_STATEMENTS constant), by id. A test pins this list to that constant.
 export const GATE_IDS=Object.freeze(['schema','marker','fence','baseline','lease','window','discovery','discoveryLease','published','owner']);
+// THE TABLES OF THE REVIEWED COPY PLAN, in copy order: the one source of both the connector tool's plan and the statement set this gate requires. It is every
+// table a statement of the run names (the tool's test traces the run and asserts equality). The Discovery tables come last.
+export const COPY_TABLES=Object.freeze([
+ 'schema_contract','film_person_authority','film_person_cas','film_person_baseline','projection_run','projector_window',
+ 'published_epg_authority','published_epg_document','owner_review_authority','owner_review_entry',
+ 'film','person','film_external_id','person_external_id','film_alias','person_alias','film_person_credit','film_dimension','person_dimension','watchlist_film',
+ 'film_redirect','tmdb_retirement_decision','film_rated_admission','film_retention','projection_state',
+ 'canonical_revision','film_localization_source','person_localization_source','film_metadata',
+ 'candidate_decision','candidate_decision_history','fingerprint_payload','prediction_current','prediction_history',
+ ...DISCOVERY_COPY_TABLES,
+]);
 const LEASE_ID='gate:lease';
 export const movingStatement=id=>id==='gate:discovery'||id==='gate:discoveryLease'||DISCOVERY_COPY_TABLES.some(table=>id==='count:'+table);
 const HEX64=/^[0-9a-f]{64}$/;
@@ -46,6 +58,9 @@ const same=(candidate,pinned)=>record(candidate)&&stable(candidate)===stable(pin
 const time=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))?Date.parse(value):NaN;
 // The witness names of readWitness, taken from the reviewed reader itself (a recording reader, no database).
 export async function witnessIds(){return Object.keys(await readWitness({get:async()=>({})})).map(name=>'witness:'+name);}
+// THE REQUIRED STATEMENT SET of an operator-copy check: every witness statement, every gate statement and one row count per copied table. It is fixed by
+// reviewed constants, never by the evidence: each id must be present at T0, T1, T2 and in the copy's answers at T1, and an id outside the set is refused.
+export async function requiredStatementIds(){return [...await witnessIds(),...GATE_IDS.map(id=>'gate:'+id),...COPY_TABLES.map(table=>'count:'+table)];}
 
 // Pure. facts: what the evidence files of ONE connector run say (built by the connector tool under scripts/, carried in the ledger):
 //  {version:1, leaseId, checks:{t0,t1,t2}: {at, digests:{<statement id>:sha256 of the rows}, lease:{id,startedAt,until}},
@@ -58,7 +73,7 @@ export async function operatorCopyReasons(facts,context){
  const reasons=[];
  const leaseId=typeof facts.leaseId==='string'&&facts.leaseId?facts.leaseId:null;
  if(!leaseId)reasons.push('lease_id_missing');
- const ids=[...await witnessIds(),...GATE_IDS.map(id=>'gate:'+id)];
+ const ids=await requiredStatementIds(),known=new Set(ids);
  const checks=facts.checks||{};
  const stages=['t0','t1','t2'];
  for(const stage of stages){
@@ -69,15 +84,17 @@ export async function operatorCopyReasons(facts,context){
   if(!(record(lease)&&leaseId&&lease.id===leaseId&&typeof lease.startedAt==='string'&&lease.startedAt===checks.t0?.lease?.startedAt&&time(lease.until)>time(check.at)))reasons.push('lease_not_held:'+stage);
  }
  if(!(time(checks.t0?.at)<time(checks.t1?.at)&&time(checks.t1?.at)<time(checks.t2?.at)))reasons.push('evidence_order');
- const counted=new Set(stages.flatMap(stage=>Object.keys(checks[stage]?.digests||{})).filter(id=>id.startsWith('count:')));
- for(const id of [...ids,...counted]){
-  if(id===LEASE_ID)continue;
+ // an id the reviewed set does not hold is refused, in any snapshot: the evidence never defines what is checked
+ for(const digests of [...stages.map(stage=>checks[stage]?.digests),facts.copy?.t1?.digests])for(const id of Object.keys(digests||{}))if(!known.has(id))reasons.push('check_unknown:'+id);
+ for(const id of ids){
   const values=stages.map(stage=>checks[stage]?.digests?.[id]);
   if(!values.every(hex)){reasons.push('check_missing:'+id);continue;}
-  if(movingStatement(id))continue;
+  const copied=facts.copy?.t1?.digests?.[id];
+  if(!hex(copied))reasons.push('copy_missing:'+id);
+  if(id===LEASE_ID||movingStatement(id))continue;
   if(values[0]!==values[1]||values[1]!==values[2])reasons.push('production_moved:'+id);
   // the local copy answers every statement as production did at T1
-  if(facts.copy?.t1?.digests?.[id]!==values[1])reasons.push('copy_mismatch:'+id);
+  if(hex(copied)&&copied!==values[1])reasons.push('copy_mismatch:'+id);
  }
  const copied=facts.copy?.t1?.lease;
  if(!(record(copied)&&leaseId&&copied.id===leaseId&&copied.startedAt===checks.t1?.lease?.startedAt))reasons.push('copy_mismatch:'+LEASE_ID);

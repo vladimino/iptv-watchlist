@@ -15,17 +15,18 @@ import {GATE_STATEMENTS} from '../scripts/film-person-capture.mjs';
 const B=await import(process.env.BASELINE_RECORD_MODULE?pathToFileURL(path.resolve(process.env.BASELINE_RECORD_MODULE)).href:'../src/film-person-baseline.js');
 const A=await import(process.env.ACCEPTED_MODULE?pathToFileURL(path.resolve(process.env.ACCEPTED_MODULE)).href:'../src/film-person-cutover-accepted.js');
 const {RECORDING_PATHS,baselineGate,keyOf,ledgerDigest,recordBaselineVerified,sha256Hex}=B;
-const {ACCEPTED_DISCREPANCIES,OPERATOR_COPY_PERMISSION,DISCOVERY_COPY_TABLES,GATE_IDS,acceptedDigest,buildCutoverAcceptedLedger,cutoverAcceptedGate,operatorCopyReasons,witnessIds}=A;
+const {ACCEPTED_DISCREPANCIES,COPY_TABLES,OPERATOR_COPY_PERMISSION,DISCOVERY_COPY_TABLES,GATE_IDS,requiredStatementIds,acceptedDigest,buildCutoverAcceptedLedger,cutoverAcceptedGate,operatorCopyReasons,witnessIds}=A;
 
 // ---------- the pinned constants ----------
 const MEASURED={film:8,person:6,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11};
-const CAPS={film:10,person:8,filmExternalId:18,personExternalId:5,filmAlias:160,personAlias:162,credit:146,filmLocalization:10,personLocalization:5,watchlist:6,redirect:6,retirement:6,ratedAdmission:779,retention:442,projectionKey:13};
-assert.deepEqual(JSON.parse(JSON.stringify(ACCEPTED_DISCREPANCIES)),{id:'AIR-373-accepted-discrepancies-2026-11-10',version:1,approver:'owner',decision:'AIR-373 owner decision of 2026-11-10: ignore the discrepancies and prepare the migration',scope:'unexplained_missing_or_extra',differs:0,measured:MEASURED,caps:CAPS});
+// owner decision of 10 Nov 2026, "exact measured numbers": the caps ARE the measurement, with no headroom
+const CAPS={...MEASURED};
+assert.deepEqual(JSON.parse(JSON.stringify(ACCEPTED_DISCREPANCIES)),{id:'AIR-373-accepted-discrepancies-2026-11-10',version:1,approver:'owner',decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers',scope:'unexplained_missing_or_extra',differs:0,measured:MEASURED,caps:CAPS});
 assert.deepEqual({...OPERATOR_COPY_PERMISSION},{id:'AIR-373-operator-copy-2026-11-10',kind:'operator-copy',version:1,approver:'owner',attestation:'operator',decision:'AIR-373 owner decision of 2026-11-10: no token is needed, use the same path as before the pause'});
 assert.ok(Object.isFrozen(ACCEPTED_DISCREPANCIES)&&Object.isFrozen(ACCEPTED_DISCREPANCIES.caps)&&Object.isFrozen(ACCEPTED_DISCREPANCIES.measured)&&Object.isFrozen(OPERATOR_COPY_PERMISSION));
-// the caps are the measurement plus 10 percent rounded up, at least 2; the measured total is the 1,600 of the evidence file; every required class has a cap
-for(const name of Object.keys(MEASURED))assert.equal(CAPS[name],MEASURED[name]+Math.max(2,Math.ceil(MEASURED[name]/10)),name);
-assert.equal(Object.values(MEASURED).reduce((a,b)=>a+b,0),1600);
+// the caps are exactly the measurement; the total is the 1,600 of the evidence file; every required class has a cap
+assert.deepEqual({...ACCEPTED_DISCREPANCIES.caps},{...ACCEPTED_DISCREPANCIES.measured});
+assert.equal(Object.values(ACCEPTED_DISCREPANCIES.caps).reduce((a,b)=>a+b,0),1600);
 assert.deepEqual(Object.keys(CAPS).sort(),[...REQUIRED_CLASSES].sort());
 assert.deepEqual([...GATE_IDS],Object.keys(GATE_STATEMENTS),'the gate ids are the reviewed GATE_STATEMENTS');
 assert.equal((await witnessIds()).length,20);
@@ -48,7 +49,10 @@ const classesFor=(unexplained={},differs=null)=>{
 };
 const AT={t0:'2026-11-10T18:00:00.000Z',t1:'2026-11-10T18:20:00.000Z',resync:'2026-11-10T18:25:00.000Z',t2:'2026-11-10T18:40:00.000Z',released:'2026-11-10T18:41:00.000Z'};
 const LEASE='connector:test-lease';
-const IDS=[...await witnessIds(),...GATE_IDS.map(id=>'gate:'+id),'count:film','count:discovery_decision'];
+const IDS=await requiredStatementIds();
+// the required statement set is fixed by reviewed constants: 20 witness, 10 gate and one count per table of the copy plan
+assert.deepEqual(IDS,[...await witnessIds(),...GATE_IDS.map(id=>'gate:'+id),...COPY_TABLES.map(table=>'count:'+table)]);
+assert.equal(COPY_TABLES.length,39);assert.equal(IDS.length,69);assert.ok(Object.isFrozen(COPY_TABLES)&&Object.isFrozen(GATE_IDS));
 const factsOf=async()=>{
  const digests=Object.fromEntries(await Promise.all(IDS.map(async id=>[id,await H(id)])));
  const lease={id:LEASE,startedAt:'2026-11-10T17:59:00.000Z',until:'2026-11-10T18:44:00.000Z'};
@@ -90,7 +94,7 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  assert.equal(measured.totals.unexplained,1600);assert.equal(measured.source.verified,true);
  // the acceptance, the counts and the caps are in the ledger, under its digest, and in the gate result
  assert.deepEqual(measured.cutoverAccepted.acceptance,JSON.parse(JSON.stringify(ACCEPTED_DISCREPANCIES)));
- assert.deepEqual(measured.cutoverAccepted.discrepancies.ratedAdmission,{unexplained:708,differs:0,cap:779});
+ assert.deepEqual(measured.cutoverAccepted.discrepancies.ratedAdmission,{unexplained:708,differs:0,cap:708});
  assert.deepEqual(gate.discrepancies,measured.cutoverAccepted.discrepancies);
  assert.deepEqual(gate.accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-10','AIR-373-operator-copy-2026-11-10']);
  for(const item of ['r2_d1_not_atomic_snapshot','owner_link_values_not_compared','unexplained_differences_accepted_not_repaired','d1_activation_gaps_open:ratedAdmission,retention,retirement','operator_copy_is_attestation_not_proof','d1_side_is_a_copy_not_a_live_read','discovery_copy_checked_by_aggregates_only'])assert.ok(gate.notProved.includes(item),item);
@@ -98,7 +102,7 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  assert.ok((await cutoverMinimumGate(measured)).reasons.includes('unexplained_total'));
  assert.ok((await baselineGate(measured)).reasons.includes('unexplained:1600'));
  // at the cap passes; one above fails, for every class
- assert.equal((await cutoverAcceptedGate(await build({unexplained:AT_CAP}))).pass,true,'every class exactly at its cap');
+ assert.equal((await cutoverAcceptedGate(await build({unexplained:AT_CAP}))).pass,true,'every class exactly at its cap, which is the measured count');
  for(const name of REQUIRED_CLASSES){
   const over=await failsWith(await build({unexplained:{...AT_CAP,[name]:CAPS[name]+1}}),'over_cap:'+name);
   assert.deepEqual(over.reasons,['over_cap:'+name],'the only reason');
@@ -165,14 +169,25 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  await has(f=>{f.checks.t0.digests['count:film']=other;},'production_moved:count:film');
  await has(f=>{delete f.checks.t2.digests['witness:person'];},'check_missing:witness:person');
  await has(f=>{delete f.checks.t1;},'check_missing:t1');
+ // THE STATEMENT SET IS REQUIRED, not taken from the evidence: a table count absent from EVERY snapshot and from the copy is still missing
+ await has(f=>{for(const item of [f.checks.t0,f.checks.t1,f.checks.t2,f.copy.t1])delete item.digests['count:film_metadata'];},'check_missing:count:film_metadata');
+ for(const table of COPY_TABLES)assert.deepEqual(await verdict(f=>{for(const item of [f.checks.t0,f.checks.t1,f.checks.t2,f.copy.t1])delete item.digests['count:'+table];}),['check_missing:count:'+table],table);
+ for(const stage of ['t0','t1','t2'])await has(f=>{delete f.checks[stage].digests['count:person_alias'];},'check_missing:count:person_alias');
+ await has(f=>{delete f.copy.t1.digests['count:person_alias'];},'copy_missing:count:person_alias');
+ await has(f=>{delete f.copy.t1.digests['count:discovery_decision'];},'copy_missing:count:discovery_decision');
+ await has(f=>{delete f.copy.t1.digests['gate:lease'];},'copy_missing:gate:lease');
+ await has(f=>{delete f.checks.t1.digests['gate:lease'];},'check_missing:gate:lease');
+ // an id outside the reviewed set is refused, wherever it appears (it is not ignored)
+ for(const place of [f=>f.checks.t0,f=>f.checks.t2,f=>f.copy.t1])assert.deepEqual(await verdict(f=>{place(f).digests['count:candidate']=other;}),['check_unknown:count:candidate']);
+ await has(f=>{for(const item of [f.checks.t0,f.checks.t1,f.checks.t2,f.copy.t1])item.digests['witness:extra']=other;},'check_unknown:witness:extra');
  await has(f=>{f.checks.t2.at='not a time';},'check_missing:t2');
  await has(f=>{f.checks.t1.at=AT.t0;},'evidence_order');
  // only the Discovery statements may move
  for(const id of ['gate:discovery','gate:discoveryLease','count:discovery_decision'])assert.deepEqual(await verdict(f=>{f.checks.t1.digests[id]=other;f.checks.t2.digests[id]=SRC;}),[],id+' may move');
  // the copy differs from production at T1
  await has(f=>{f.copy.t1.digests['witness:credit']=other;},'copy_mismatch:witness:credit');
- await has(f=>{delete f.copy.t1.digests['gate:baseline'];},'copy_mismatch:gate:baseline');
- await has(f=>{f.copy=null;},'copy_mismatch:witness:film');
+ await has(f=>{delete f.copy.t1.digests['gate:baseline'];},'copy_missing:gate:baseline');
+ await has(f=>{f.copy=null;},'copy_missing:witness:film');
  await has(f=>{f.copy.t1.lease.id='other';},'copy_mismatch:gate:lease');
  // the Discovery resync
  await has(f=>{f.discovery.generationLast=73044;},'discovery_generation_moved');
@@ -213,6 +228,19 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  // a ledger whose verdict was set by hand, with every digest recomputed, is still refused: the gate derives it again from the carried facts
  const forged=JSON.parse(JSON.stringify(movedLedger.ledger));forged.source.verified=true;
  const forgedGate=await failsWith(await redigest(forged),'operator_copy:production_moved:witness:film');assert.ok(!forgedGate.reasons.includes('source_unverified'));
+ // A DIGEST-CONSISTENT ledger in which one required count is missing from ALL snapshots and from the copy: the builder does not verify it, and with the
+ // verdict set by hand and every digest recomputed the gate still refuses it, because the required set comes from COPY_TABLES and not from the evidence.
+ const thin=await factsOf();for(const item of [thin.checks.t0,thin.checks.t1,thin.checks.t2,thin.copy.t1])delete item.digests['count:film_retention'];
+ const thinBuilt=await buildCutoverAcceptedLedger(await base({operatorCopy:thin}));
+ assert.equal(thinBuilt.verified,false);assert.deepEqual(thinBuilt.verification,['check_missing:count:film_retention']);
+ const thinForged=JSON.parse(JSON.stringify(thinBuilt.ledger));thinForged.source.verified=true;
+ const thinGate=await failsWith(await redigest(thinForged),'operator_copy:check_missing:count:film_retention');
+ assert.deepEqual(thinGate.reasons,['operator_copy:check_missing:count:film_retention'],'the only defect of that ledger, and it is enough');
+ const WHEN2='2026-11-10T19:00:00.000Z';
+ await assert.rejects(()=>recordBaselineVerified({prepare(){throw new Error('the recorder must not reach the database');}},{ledger:thinForged,expectedGeneration:0,at:WHEN2,path:RECORDING_PATHS.cutover_accepted}),error=>error.code==='baseline_gate_failed'&&error.reasons.includes('operator_copy:check_missing:count:film_retention'));
+ const padded=await factsOf();for(const item of [padded.checks.t0,padded.checks.t1,padded.checks.t2,padded.copy.t1])item.digests['count:candidate']=other;
+ const paddedForged=JSON.parse(JSON.stringify((await buildCutoverAcceptedLedger(await base({operatorCopy:padded}))).ledger));paddedForged.source.verified=true;
+ await failsWith(await redigest(paddedForged),'operator_copy:check_unknown:count:candidate');
  // the permission: only the pinned constant, only for this source kind
  for(const permission of [null,{},{...OPERATOR_COPY_PERMISSION,decision:'the operator says the copy is good'},{...OPERATOR_COPY_PERMISSION,approver:'operator'},{...OPERATOR_COPY_PERMISSION,extra:1},{...ACCEPTED_DISCREPANCIES},'use the connector']){
   const out=await buildCutoverAcceptedLedger(await base({permission}));

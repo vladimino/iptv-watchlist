@@ -182,10 +182,13 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 ## Connector path (offline code, nothing executed)
 
-**Authority.** Two owner decisions of 10 Nov 2026 for [AIR-373](https://trello.com/c/ugu3sQmp), recorded in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md):
+**Authority.** Owner decisions of 10 Nov 2026 for [AIR-373](https://trello.com/c/ugu3sQmp), recorded as inputs in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md), which is **Proposed**:
 
 1. *"ignore the discrepancies and prepare the migration"*: unexplained differences of the measured kind do not block recording the baseline and `r2` to `prepared`.
 2. *"no token is needed, use the same path as before the pause"*: the path of [the measurement of 10 Nov 2026](../evidence/d1-migration/air-373-measured-parity-2026-11-10.md) is the path to use. The operator copies D1 through the Cloudflare API connector and the run is local.
+3. *"exact measured numbers"* ([owner decision on PR #501](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358)): the caps are exactly the counts measured on 10 Nov 2026, with no headroom.
+
+**Recording a baseline through `cutover_accepted` stays blocked until ADR 0110 is `Accepted`.** By the owner decision on PR #501 that needs the fixed missing-evidence guard and a recorded, independent, successful re-review of the exact HEAD, linked from the ADR together with the owner decision. A review approval authorizes no discrepancy tolerance of its own. The block is procedural: the code does not read the ADR status, so no baseline-record GO is to be asked for or given while the ADR is `Proposed`.
 
 **Nothing in this section was executed against production, and the section authorizes nothing.** The measuring run with the production lease, the baseline record and `r2` to `prepared` are three separate owner GOs.
 
@@ -193,29 +196,30 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 - [`scripts/film-person-connector-run.mjs`](../../scripts/film-person-connector-run.mjs): the connector path as a reviewed tool, with a small CLI (`plan`, `load`, `verify`, `run`, `seal`, `sql`). **Inactive:** not bundled, no Worker or `src/` import. It never calls the connector (only the human-facing operator session can) and its only network is the read-only R2 client it is given (`R2_SNAPSHOT_*`). The D1 side is the local copy: one read-only `SELECT` at a time, plus the three projector-lease statements applied to the copy. Private files (the copy, the measurement, the ledger) must be outside the repository; the CLI refuses a path inside it.
 - [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js): the `cutover_accepted` version 1 gate and the two pinned permissions. **Inactive:** only the recorder names it, through a dynamic import inside its own path.
-- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (58 gate mutants, 6 recorder mutants and 39 connector mutants, every one killed; a mutant that does not parse or load fails the check).
+- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 39 connector mutants, every one killed; a mutant that does not parse or load fails the check).
 
 ### The `cutover_accepted` gate
 
 It is `cutover_minimum` version 1 with two differences. The gate calls the v1 gate and drops only its zero-unexplained reasons; the waiver of the owner-link values, the D1 identity, the witness, the fence, the lease and the probe rules apply unchanged. The strict gate and v1 are not modified and still refuse such a ledger.
 
-**Accepted discrepancies (`ACCEPTED_DISCREPANCIES` v1, decision 1).** Unexplained missing or extra rows are accepted up to a cap per class: the count measured on 10 Nov 2026 plus 10 percent rounded up, at least 2.
+**Accepted discrepancies (`ACCEPTED_DISCREPANCIES` v1, decisions 1 and 3).** Unexplained missing or extra rows are accepted up to a cap per class, and the cap is exactly the count measured on 10 Nov 2026 (`caps` equals `measured` in the constant). There is no headroom: one unexplained row more in any class fails, and passing it needs a fresh owner approval and a new version of the constant.
 
-| Class | Measured | Cap | Class | Measured | Cap |
-| --- | ---: | ---: | --- | ---: | ---: |
-| film | 8 | 10 | personLocalization | 3 | 5 |
-| person | 6 | 8 | watchlist | 4 | 6 |
-| filmExternalId | 16 | 18 | redirect | 4 | 6 |
-| personExternalId | 3 | 5 | retirement | 4 | 6 |
-| filmAlias | 145 | 160 | ratedAdmission | 708 | 779 |
-| personAlias | 147 | 162 | retention | 401 | 442 |
-| credit | 132 | 146 | projectionKey | 11 | 13 |
-| filmLocalization | 8 | 10 | **total** | **1,600** | **1,776** |
+| Class | Cap = measured | Class | Cap = measured |
+| --- | ---: | --- | ---: |
+| film | 8 | personLocalization | 3 |
+| person | 6 | watchlist | 4 |
+| filmExternalId | 16 | redirect | 4 |
+| personExternalId | 3 | retirement | 4 |
+| filmAlias | 145 | ratedAdmission | 708 |
+| personAlias | 147 | retention | 401 |
+| credit | 132 | projectionKey | 11 |
+| filmLocalization | 8 | **total** | **1,600** |
 
 A value that **differs** is never accepted: `differs` must be 0 in every class, explained or not. A class above its cap (`over_cap:<class>`), a differing value (`differs:<class>`), a class the constant does not list (`class_not_listed:<class>`) or a candidate acceptance that is not deeply equal to the constant (`acceptance_not_permitted`) fails. The acceptance, the per-class counts and the caps are in the ledger under `acceptedDigest`, and the gate result shows them (`accepted`, `notProved`, `discrepancies`).
 
 **The operator-copy source (`OPERATOR_COPY_PERMISSION` v1, decision 2).** For a source of kind `operator-copy`, `source.verified` is not an argument. `buildCutoverAcceptedLedger` derives it from the facts of the evidence files, and the gate derives it again from the facts the ledger carries. It is `true` only when all of this holds:
 
+- the statement set is complete: all 20 witness statements, all 10 gate statements and one row count for each of the 39 tables of the copy plan are present at T0, T1, T2 and in the copy comparison at T1. The set is `requiredStatementIds()`, derived from the same `COPY_TABLES` constant the plan copies from, not from the keys of the evidence. A missing one is `check_missing:<id>` or `copy_missing:<id>`; a statement outside the set is refused (`check_unknown:<id>`), not ignored;
 - production gave the same rows at T0, T1 and T2 for every witness, gate and table-count statement, except the Discovery statements (`gate:discovery`, `gate:discoveryLease` and the counts of the five Discovery tables);
 - the local copy gave the same rows as production at T1 for every one of those statements;
 - the resync request read the Discovery generation first and last with the same value, that generation is the one the run saw, and every Discovery table of the copy equals production on its aggregate;
@@ -253,14 +257,14 @@ Before step 1: an owner GO for the measuring run that names the production proje
 
 Then, each with its own owner GO and its own dated evidence:
 
-11. **Baseline record.** `sql` with the sealed ledger, the marker generation and a time writes `sql-baseline-record.json`: the exact batch `recordBaselineVerified` would send (obtained by running it against a recording binding over the copy), its two fence assertions, the three read-back `SELECT`s and the rows they must return. The operator sends the `sql` text as **one** request and then the read-back. `sql` emits nothing for a ledger that fails the gate.
+11. **Baseline record** (blocked while ADR 0110 is `Proposed`). `sql` with the sealed ledger, the marker generation and a time writes `sql-baseline-record.json`: the exact batch `recordBaselineVerified` would send (obtained by running it against a recording binding over the copy), its two fence assertions, the three read-back `SELECT`s and the rows they must return. The operator sends the `sql` text as **one** request and then the read-back. `sql` emits nothing for a ledger that fails the gate.
 12. **`r2` to `prepared`.** `sql-r2-to-prepared.json`, the batch of `transitionAuthority`, sent the same way after step 11 is read back. The trigger of migration `0013` refuses it without a verified baseline.
 
 **STOP conditions, no blind retry.** Any refusal of `load`, `verify`, `run` or `seal`; `verified:false`; a failing gate; a lease row that names another holder; a write whose outcome is unclear. After an unclear write, read the three read-back statements first; never send a batch twice. A stopped run is a new run with a new copy file, except the resync request, which may be sent again. `run` refuses with `capture:discovery_lease_live` when the resync caught the Discovery Workflow in the middle of a chunk: send the resync again after that lease has expired, then `run`. `run` itself changes nothing but the lease row of the copy, so it may be repeated on the same copy.
 
 ### What it proves and what it does not
 
-It proves that, by the operator's evidence, production did not change on any witnessed aggregate between three reads while this run held the projector lease, that the copy answered every check as production did, and that the reviewed parity code found no differing value and no more unexplained rows than the owner accepted.
+It proves that, by the operator's evidence, production did not change on any witnessed aggregate between three reads while this run held the projector lease, that the copy answered every check as production did, and that the reviewed parity code found no differing value and no more unexplained rows in any class than were measured on 10 Nov 2026.
 
 Not proved, and listed in every gate result:
 
