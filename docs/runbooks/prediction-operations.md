@@ -62,7 +62,7 @@ The production entry is `scripts/prediction-domain-production.mjs`. It is not a 
 
 Do not perform those production state changes without the applicable owner-approved L3 plan and its holdpoints. Safe read-only preflight/readback may be included in that plan without separate per-read approval. Applying `0007`, the load, the activation, the revert, the release and the reconcile are each their own approval. After any future activation or re-activation, the next check is a read of the queue, the active profile and one film pointer, plus the immutable object each pointer names. Do not start a model run to produce that read. The live queue length and the longest history were not measured for this delivery; an over-cap snapshot is an activation refusal, not a guess.
 
-While `mode` is `d1`, a prediction read that cannot verify the immutable body fails. Do not copy the mirror object back over the row. A queue conflict is still five attempts and then `prediction_queue_conflict`. The queue document is at most 900000 characters, and one film keeps at most 80 history rows. A larger write fails and changes nothing.
+While `mode` is `d1`, a prediction read that cannot verify the immutable body fails. Do not copy the mirror object back over the row. A queue conflict is still five attempts and then `prediction_queue_conflict`. The stored queue text is at most 900000 characters, and one film keeps at most 80 history rows. The queue is stored plain while its plain JSON fits and in the compact `dict1` encoding when it does not; readers always get the plain document ([reference](../reference/api/prediction-runner.md#queue-writes)). A write that does not fit even encoded fails and changes nothing.
 
 ## Prediction queue conflicts
 
@@ -78,7 +78,9 @@ Every writer of the prediction queue writes conditionally and rebuilds on confli
 
 Repeated conflicts across many hours are a finding for the owner. Look in the logs for which writers overlap; never fall back to an unconditional write.
 
-**Rollback.** A code revert restores the previous blind writes; the stored queue format is the same, so no data step is needed. A revert does not restore retry metadata that an earlier overwrite already lost. Continue with the ordinary schedule; do not reconcile or edit the queue to "repair" it without a separate owner approval.
+**Budget refusals.** `enrichmentQueueError: prediction_domain_budget:<guard>` in `epg_status` names the limit that refused the rebuild; the Worker also writes one log line `{"event":"prediction_domain_budget","guard":"<guard>"}` without film ids. `queue_chars` means the document is over 900000 characters even encoded; `index_limit` means the view index holds more than 5000 films; `statement_bytes`, `bind_limit`, `history_limit` and `mirror_list` are the other fixed limits. A refusal writes nothing, so the queue keeps its previous generation and `prediction_queue_overview` shows `queue_programme_differs`. Do not start a prediction run to test it: a start that cannot rebuild the queue still takes the runner lease.
+
+**Rollback.** A code revert restores the previous blind writes; the stored queue format is the same while the queue is plain, so no data step is needed. While the queue is stored in the `dict1` encoding, a build without that support cannot read it and fails closed (`prediction_domain_unavailable`); the next rebuild by a build that supports it, or by the older build once the plain document fits under the cap, replaces it. Do not edit or reset the queue rows to bypass this. A revert does not restore retry metadata that an earlier overwrite already lost. Continue with the ordinary schedule; do not reconcile or edit the queue to "repair" it without a separate owner approval.
 
 ## One film without a current prediction
 

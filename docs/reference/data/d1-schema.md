@@ -258,7 +258,7 @@ These tables are not `profile_version`, `fingerprint_payload`, `prediction_curre
 | `prediction_fingerprint` | One pointer per stored film id. The body stays at `fingerprints/<hash>.json`. `features_json` repeats the fields the view index uses. |
 | `prediction_pointer` | The current prediction pointer for one film id. `display_json` is the record the view index shows. |
 | `prediction_lineage` | Replaced predictions for that film, keyed by `film_id` and `replaced_at`. At most 80 rows are written for one film. |
-| `prediction_queue` | Ordered chunks of the queue document, including hot and cold work and retries. The joined text is at most 900000 characters. One replace is one transaction, and each rendered statement stays under 100 KB. |
+| `prediction_queue` | Ordered chunks of the queue document, including hot and cold work and retries. The joined text is at most 900000 characters. One replace is one transaction, and each rendered statement stays under 100 KB. The text is the plain JSON document while the plain document fits that cap, byte-identical to earlier writes. A document that does not fit is stored in the `dict1` encoding: each film id once in `$queueIds`, integer references in `pending`, `hotPending`, `coldPending`, and one entry per distinct per-film `priority` or `work` value in `$queueTable`. `loadQueue` expands it to the identical plain document, so no reader sees another shape, and the R2 mirror stays plain. A document over the cap even when encoded is refused with `prediction_domain_budget` and changes nothing. |
 | `prediction_lease` | The runner lease and the writer lease. The compare-and-swap is the row token. |
 | `prediction_run` | Run checkpoints. One row has `latest` 1. |
 
