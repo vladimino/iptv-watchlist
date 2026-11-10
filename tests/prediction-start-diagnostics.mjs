@@ -93,4 +93,45 @@ assert.ok(answer.length<8000,'start answer is '+answer.length+' characters');
 assert.match(ok.data.runId,/^[A-Za-z0-9_-]{1,100}$/);
 for(const key of ['pending','priority','work','films','index','catalog'])assert.ok(!Object.hasOwn(ok.data,key),'start answer carries '+key);
 
+// 5. A catalog that an EPG publication holds is a wait, not a storage failure (production: stage queue_refresh, code discovery_fence during a seal).
+{
+ await api('complete',{runId:ok.data.runId,reason:'quota'}).catch(()=>{});resetLease();faults.get.clear();faults.put.clear();
+ const eventKeys=()=>[...records.keys()].filter(key=>key.startsWith('events/')||key.includes('stop-events/')).sort();
+ for(const cause of ['discovery_fence','discovery_incomplete']){
+  resetLease();logs.length=0;const before=eventKeys(),queueWas=JSON.stringify(records.get('enrichment/prediction-queue.json'));
+  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
+  const held=await api('start',START);faults.get.clear();
+  assert.equal(held.status,503,cause);
+  assert.equal(held.data.status,'blocked');assert.equal(held.data.reason,'catalog_held');assert.equal(held.data.code,'prediction_catalog_held');assert.equal(held.data.cause,cause);
+  assert.ok(!held.data.error,'not a storage_error');
+  assert.ok(leaseExpired(),cause+': the runner lease is released');
+  assert.deepEqual(eventKeys(),before,cause+': no stop Event is written');
+  assert.equal(JSON.stringify(records.get('enrichment/prediction-queue.json')),queueWas,cause+': the queue, its pending and retries are untouched');
+  const found=lines();assert.equal(found.length,1);assert.equal(found[0].stage,'queue_refresh');assert.equal(found[0].code,cause);
+ }
+ // Any other failure of the rebuild is still 502 storage_error.
+ resetLease();faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
+ const other=await api('start',START);faults.get.clear();
+ assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+ // The gate is checked before the lease: a held or loading authority answers the wait without taking the runner lease or reading the catalog.
+ for(const [gate,cause] of [[{held:true,ready:true,transfer:'idle'},'discovery_fence'],[{held:false,ready:true,transfer:'loading'},'discovery_incomplete']]){
+  resetLease();logs.length=0;reads.clear();const leaseWas=JSON.stringify(records.get('enrichment/runner-lease.json'));
+  ctx.heldGate=gate;vm.runInContext('globalThis.DiscoveryAuthority={readAuthority:async()=>heldGate,routeRead:async()=>({handled:false}),routeWrite:async()=>({handled:false}),ownsKey:()=>false}',ctx);
+  let gated;try{gated=await api('start',START);}finally{vm.runInContext('delete globalThis.DiscoveryAuthority',ctx);}
+  assert.equal(gated.status,503,cause);assert.equal(gated.data.code,'prediction_catalog_held');assert.equal(gated.data.cause,cause);
+  assert.equal(JSON.stringify(records.get('enrichment/runner-lease.json')),leaseWas,cause+': no lease was taken');
+  assert.ok(!reads.get('epg/discovered-films.json'),cause+': the catalog was not read');
+  assert.equal(lines().length,0);
+ }
+ // After the publication: the next start rebuilds the queue on the new generation and runs through its first next, nothing lost.
+ resetLease();logs.length=0;
+ const retried='tmdb_3';const queue=records.get('enrichment/prediction-queue.json');queue.retries={[retried]:{kind:'parse_error',retryable:true,attempts:1,retryAt:1,failedAt:'2026-11-10T00:00:00.000Z',lastRunId:'r'}};
+ records.set('programme.json',{runId:'next-generation',films:[]});records.set('sync.json',{runId:'next-generation',stage:'complete'});
+ const after=await api('start',START);
+ assert.equal(after.status,200);assert.equal(after.data.status,'running');
+ const rebuilt=records.get('enrichment/prediction-queue.json');
+ assert.equal(rebuilt.programmeRunId,'next-generation');assert.equal(rebuilt.pending.length,20);assert.equal(rebuilt.retries[retried].attempts,1,'the retry record survived the wait and the generation change');
+ const nextAfter=await api('next',{runId:after.data.runId,batchSize:3});assert.equal(nextAfter.status,200);assert.ok(nextAfter.data.items.length>0);
+}
+
 console.log('prediction start diagnostics tests passed');
