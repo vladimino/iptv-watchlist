@@ -154,4 +154,31 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  assert.equal(net.fetches.length,0);assert.equal(bucket.writes().length,0,'listing writes nothing');
 }
 
-console.log('Watchlist event ratings: stored ratings at the first display, late rating on the same key, replay, stored rating wins, failed read, bounded probe, broken shapes and a listing that looks nothing up passed');
+// 10. The production shape of 10 November 2026 (PR #482, evidence report): one removed film; that day's Ratings run ingested its Diary rating
+// about four minutes before the event's `at` and about ninety minutes before the event was persisted; the stored event listed the film as unrated.
+// With the fact stored before persistEvents runs, the first stored event carries the rating; the film id is the Letterboxd code, joined through the
+// link index to the fact record (no title or year matching).
+{
+ const {bucket,env,ctx,net,Facts}=setup();
+ const ingestedAt=T0+69000,scanAt=at(T0+5*60000+56000),key=eventKeyOf(scanAt,'run-fixture-watchlist');
+ await Facts.recordFilmFacts(env,'1Vuo',{watched:true,rating:3.5},{observedAt:'2026-11-09T00:00:00.000Z',source:'letterboxd_diary',sourceRef:'diary:viewing:fixture'});
+ assert.ok(ingestedAt<Date.parse(scanAt),'the fact is stored before the event time');
+ const run={runId:'run-fixture',stage:'seal',events:[{id:'run-fixture-watchlist',type:'watchlist',at:scanAt,total:394,baseline:false,added:[],removed:[{id:'1Vuo',title:'Fixture',year:1991}]}],watchlist:[],pending:[]};
+ await ctx.persistEvents(env,run,{...report,runId:'run-fixture',updatedAt:scanAt});
+ const event=bucket.value(key);
+ assert.equal(ratingOf(event,'1Vuo'),3.5,'the removed film has its rating in the first stored event');
+ assert.equal(event.at,scanAt);assert.equal(event.total,394);assert.equal(event.removed.length,1);
+ assert.equal(net.fetches.length,0);
+ // The same shape with the fact store unreadable: unrated, and the existing late settlement still delivers it on the same key.
+ const second=setup();
+ await second.Facts.recordFilmFacts(second.env,'1Vuo',{watched:true,rating:3.5},{observedAt:'2026-11-09T00:00:00.000Z',source:'letterboxd_diary',sourceRef:'diary:viewing:fixture'});
+ second.bucket.hooks.beforeGet=async name=>{if(name.startsWith('letterboxd/facts/'))throw new Error('facts unavailable');};
+ await second.ctx.persistEvents(second.env,structuredClone({...run,events:[{...run.events[0],removed:[{id:'1Vuo',title:'Fixture',year:1991}]}]}),{...report,runId:'run-fixture',updatedAt:scanAt});
+ second.bucket.hooks.beforeGet=null;
+ assert.equal(ratingOf(second.bucket.value(key),'1Vuo'),undefined,'unreadable facts leave the film unrated');
+ migrated(second.bucket,{films:{'1Vuo':{url:'https://letterboxd.com/film/fixture/',state:'pending',attempts:0,enqueuedAt:scanAt,nextAttemptAt:scanAt,lastAttemptAt:null,lastResult:null,claim:null,refs:[{eventKey:key,sourceRunId:'run-fixture',at:scanAt,resolved:false}]}}});
+ await g(second.ctx,'resolveDueRemovalFacts')(second.env,T0+DAY);
+ assert.equal(ratingOf(second.bucket.value(key),'1Vuo'),3.5,'the late settlement reaches the same event');
+}
+
+console.log('Watchlist event ratings: stored ratings at the first display, late rating on the same key, replay, stored rating wins, failed read, bounded probe, broken shapes and a listing that looks nothing up and the 10 November production shape passed');
