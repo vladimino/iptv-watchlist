@@ -7,13 +7,14 @@ import path from 'node:path';
 import * as Authority from '../src/discovery-authority.js';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-decisions-read-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
 let n=0;
 function fresh(rows,{payload=null,onQuery=null}={}){
  const file=path.join(root,'d-'+(n++)+'.sqlite');
- const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
+ const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
  if(r.status!==0)throw new Error(r.stderr);
  const db=d1Standin(file,{onQuery});
  db.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-d', published_programme_run_id='run-d' WHERE id=1");

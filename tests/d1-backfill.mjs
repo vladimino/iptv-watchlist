@@ -8,6 +8,7 @@ import path from 'node:path';
 import {manifestFor} from '../scripts/migration-export.mjs';
 import {loadDomainRules} from '../scripts/offline-import.mjs';
 import {BackfillStop,D1Error,createD1Adapter,readTarget,renderSql,runBackfill,runStageCleanup,schemaTables,stageOwner,verifyTargetIdentity} from '../scripts/d1-backfill.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 // The executor never touches R2, a Worker binding or the deploy configuration, and the Worker bundle does not include it.
 const source=fs.readFileSync('scripts/d1-backfill.mjs','utf8');
@@ -30,7 +31,7 @@ const ACCOUNT='0123456789abcdef0123456789abcdef',TOKEN='test-d1-token';
 const TARGET='11111111-1111-4111-8111-111111111111';
 const at='2026-10-26T01:00:00.000Z',later='2026-10-26T05:00:00.000Z';
 
-function sqlite(file,input,{json=false}={}){return spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});}
+function sqlite(file,input,{json=false}={}){return sqliteSync([...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});}
 function freshDatabase(name,{schema=true}={}){const file=path.join(root,name+'.sqlite');fs.rmSync(file,{force:true});if(schema){const result=sqlite(file,'PRAGMA foreign_keys=ON;\n'+migration);assert.equal(result.status,0,result.stderr);}else{const result=sqlite(file,'SELECT 1;');assert.equal(result.status,0,result.stderr);}return file;}
 function count(file,sql){const result=sqlite(file,sql,{json:true});assert.equal(result.status,0,result.stderr);const rows=result.stdout.trim()?JSON.parse(result.stdout):[];return rows[0]?.n??0;}
 

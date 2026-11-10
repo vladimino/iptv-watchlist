@@ -13,11 +13,12 @@ import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-pipeline-status-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
 const file=path.join(root,'status.sqlite');
-const applied=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
+const applied=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
 if(applied.status!==0)throw new Error(applied.stderr||'migration failed');
 const db=d1Standin(file,{maxBinds:Authority.BIND_CAP});
 db.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-status', published_programme_run_id='run-status', generation=1 WHERE id=1");

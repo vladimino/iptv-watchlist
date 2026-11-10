@@ -6,7 +6,10 @@ import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {createEpgRepository} from '../src/epg-repository.js';
 import {createPredictionRepository} from '../src/prediction-repository.js';
 import {acceptanceClasses,fingerprintUnit,identityResolver,importBatch,predictionUnits,projectSource,supersededPayloads,verifyParity} from '../src/offline-importer.js';
-import {loadDomainRules,openSqlite} from '../scripts/offline-import.mjs';
+import {loadDomainRules,openSqlite as openSqliteProcess} from '../scripts/offline-import.mjs';
+import {sqliteRunner} from './sqlite-session.mjs';
+// AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
+const openSqlite=file=>openSqliteProcess(file,{runner:sqliteRunner});
 
 // ADR-0029: a fingerprint or prediction bundle of a retired Film id that a redirect maps to a survivor with its own strictly newer
 // payload is superseded by the canonical payload. Every other collision keeps the class A fail-closed path.

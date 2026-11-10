@@ -148,14 +148,22 @@ function readLifecycle(store,now){
 function record(family,kind,sourceKey,sourceSha256,targetTable,targetId,input){return {family,kind,sourceKey,sourceSha256,targetTable,targetId,unportable:false,input};}
 function unportable(sourceKey,sourceSha256,targetTable,targetId,reason,family){return {family,kind:'unportable',sourceKey,sourceSha256,targetTable,targetId,unportable:true,reason};}
 
-export function openSqlite(file){
+// `runner(args, input)` (tests only, AIR-408) replaces the process that is started for each statement: it has the shape of `spawnSync('sqlite3', args, {input})`
+// (`status`, `stdout`, `stderr`) and is what a test passes to keep one sqlite3 process open. Without it nothing changes.
+export function openSqlite(file,{runner=null}={}){
  const state={buffer:null};
- return {run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement);return Promise.resolve();},get(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return query(file,sql,params).then(rows=>rows[0]??null);},all(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return query(file,sql,params);},async transaction(fn){if(state.buffer)return fn();state.buffer=[];try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n');}finally{state.buffer=null;}}};
+ return {run(sql,params=[]){const statement=render(sql,params)+';';if(state.buffer)state.buffer.push(statement);else exec(file,statement,runner);return Promise.resolve();},get(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return query(file,sql,params,runner).then(rows=>rows[0]??null);},all(sql,params=[]){if(state.buffer)throw new Error('Read inside the import transaction');return query(file,sql,params,runner);},async transaction(fn){if(state.buffer)return fn();state.buffer=[];try{await fn();exec(file,'BEGIN;\n'+state.buffer.join('\n')+'\nCOMMIT;\n',runner);}finally{state.buffer=null;}}};
 }
-function exec(file,sql){const result=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');}
+function exec(file,sql,runner=null){const input='PRAGMA foreign_keys=ON;\n'+sql,result=runner?runner(['-bail',file],input):spawnSync('sqlite3',['-bail',file],{input,encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr||'sqlite failed');}
 // sqlite3 -json prints every row. spawnSync stops at 1MB of output, which is smaller than this archive's person table.
 // The stream has no byte cap: each chunk is kept until the process exits, then parsed. A larger table still returns every row.
-function query(file,sql,params){
+function query(file,sql,params,runner=null){
+ if(runner){
+  const result=runner(['-json','-bail',file],'PRAGMA foreign_keys=ON;\n'+render(sql,params)+';');
+  if(result.status!==0)return Promise.reject(new Error(result.stderr||'sqlite failed'));
+  const text=String(result.stdout).trim();
+  try{return Promise.resolve(text?JSON.parse(text):[]);}catch(error){return Promise.reject(error);}
+ }
  return new Promise((resolve,reject)=>{
   const child=spawn('sqlite3',['-json','-bail',file],{stdio:['pipe','pipe','pipe']});
   const stdout=[];

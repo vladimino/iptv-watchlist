@@ -1406,7 +1406,11 @@ function footerGuard(env,degraded){
   try{
    const pending=Promise.resolve().then(load);
    if(typeof setTimeout!=='function')return await pending;
-   return await Promise.race([pending,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('footer_source_timeout')),limit);})]);
+   return await Promise.race([pending,new Promise((_,reject)=>{
+    timer=setTimeout(()=>reject(new Error('footer_source_timeout')),limit);
+    // A host without clearTimeout (a test context that exposes only setTimeout) must not be kept alive by a timer nobody can clear.
+    if(typeof clearTimeout!=='function'&&timer&&typeof timer.unref==='function')timer.unref();
+   })]);
   }catch{if(!degraded.includes(name))degraded.push(name);return null;}
   finally{if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);}
  };

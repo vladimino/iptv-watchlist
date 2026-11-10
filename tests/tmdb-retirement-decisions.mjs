@@ -13,6 +13,7 @@ import {d1Standin} from './d1-standin.mjs';
 import {mutateFilm,mergeFilms} from '../src/canonical-mutations.js';
 import {CONFIRMED_RETIREMENTS,OWNER_CONFIRMATION} from '../scripts/tmdb-tv-identity-plan.mjs';
 import {checkRetirementEntry,prepareRetirementImport,normalizeDecision,recordRetirementDecision,retirementHistory,currentRetirements,compareRetirementImport,sha256Hex} from '../src/tmdb-retirement-decisions.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-retirement-decisions-'));
 const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
@@ -26,8 +27,8 @@ assert.equal(real15,'0015_film_admission','the real 0015 is in the tree');
 const v15=()=>sql(real15);
 assert.ok(chain.includes('0014_localization_source')&&chain.includes('0013_film_person_authority'));
 let n=0;
-const sqlite=(file,text)=>spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
-const rows=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
+const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const sql=name=>fs.readFileSync('migrations/'+name+'.sql','utf8');
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const refused=(file,text,pattern)=>{const r=sqlite(file,text);assert.notEqual(r.status,0,'expected a refusal: '+text);if(pattern)assert.match(r.stderr,pattern);};

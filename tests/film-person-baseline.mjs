@@ -8,12 +8,13 @@ import os from 'node:os';
 import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
 import {CLASSES,DEFAULT_EXPLANATIONS,LIST_CAP,buildParityLedger,baselineGate,contextFromActual,encodeValue,expectedFromInputs,keyOf,makeGate,markBaselineLoading,planReconciliation,readD1State,readGate,readStableCut,readWitness,readerOf,recordBaselineVerified,runImport,sha256Hex,verifyAir286,VALUE_COLUMNS} from '../src/film-person-baseline.js';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-baseline-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 let n=0;
-const sqlite=(file,text)=>spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
-const rows=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
+const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const sql=name=>fs.readFileSync('migrations/'+name+'.sql','utf8');
 const code=expected=>error=>error.code===expected;

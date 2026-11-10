@@ -58,6 +58,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {manifestFor} from '../scripts/migration-export.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 import {classifyObject,readDiscoveryArchive} from '../src/offline-importer.js';
 import {loadDomainRules} from '../scripts/offline-import.mjs';
 
@@ -120,7 +121,7 @@ function runImport(directory,database,status=0){
  assert.equal(result.status,status,result.stderr||result.stdout.slice(0,2000));
  return JSON.parse(result.stdout);
 }
-function rows(database,sql){const result=spawnSync('sqlite3',['-json',database,sql],{encoding:'utf8',maxBuffer:64*1024*1024});assert.equal(result.status,0,result.stderr);return result.stdout.trim()?JSON.parse(result.stdout):[];}
+function rows(database,sql){const result=sqliteSync(['-json',database,sql],{encoding:'utf8',maxBuffer:64*1024*1024});assert.equal(result.status,0,result.stderr);return result.stdout.trim()?JSON.parse(result.stdout):[];}
 
 // Every key either store writes is classified: nothing new is unknown.
 for(const key of bounded.records.keys())assert.notEqual(classifyObject(key),'unmapped',key);

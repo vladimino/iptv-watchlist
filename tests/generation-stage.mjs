@@ -8,7 +8,10 @@ import {createEpgRepository} from '../src/epg-repository.js';
 import {DEFAULT_CHUNK_BYTES,DEFAULT_CHUNK_STATEMENTS,MAX_ROW_STATEMENT_BYTES,STAGE_CLAIM_TTL_MS,STAGE_TABLES,StageStop,chunkStatements,claimStage,commitStage,discardStage,failStage,openStage,planGeneration,publishStaged,readStage,renderedBytes,stageChunk,validateStage} from '../src/generation-stage.js';
 import {D1Error} from '../scripts/d1-backfill.mjs';
 import {expectedStatements,measureGenerationUnit,syntheticGeneration} from '../scripts/d1-generation-size.mjs';
-import {openSqlite} from '../scripts/offline-import.mjs';
+import {openSqlite as openSqliteProcess} from '../scripts/offline-import.mjs';
+import {sqliteSync,sqliteRunner} from './sqlite-session.mjs';
+// AIR-408: the offline-import adapter keeps one sqlite3 process per database instead of starting one per statement.
+const openSqlite=file=>openSqliteProcess(file,{runner:sqliteRunner});
 
 // ADR-0021 implemented: a generation staged in bounded chunks and published by one commit writes exactly the final rows the
 // legacy publishGeneration writes, at 1.25x the production order of magnitude, and every interruption, refusal or mismatch
@@ -18,7 +21,7 @@ const schema=fs.readFileSync('migrations/0001_schema_v1.sql','utf8')+'\n'+fs.rea
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-generation-stage-'));
 const FINAL=['programme_generation','published_generation','film_generation','film_show','film_epg_last_airing','candidate','candidate_generation','candidate_show'];
 const PRODUCTION={films:2300,candidates:22199},SCALED={films:2300,candidates:27749};
-const sqlite=(file,input,{json=false}={})=>spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+input,encoding:'utf8',maxBuffer:1<<30});
+const sqlite=(file,input,{json=false}={})=>sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+input,encoding:'utf8',maxBuffer:1<<30});
 const ok=(file,input)=>{const result=sqlite(file,input);assert.equal(result.status,0,result.stderr);};
 const rows=(file,sql)=>{const result=sqlite(file,sql,{json:true});assert.equal(result.status,0,result.stderr);return result.stdout.trim()?JSON.parse(result.stdout):[];};
 const one=(file,sql)=>rows(file,sql)[0];

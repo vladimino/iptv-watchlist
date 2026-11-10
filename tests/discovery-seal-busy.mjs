@@ -9,13 +9,14 @@ import vm from 'node:vm';
 import * as Authority from '../src/discovery-authority.js';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const context=loadWorker();context.DiscoveryAuthority=Authority;
 const call=code=>vm.runInContext(code,context);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-seal-busy-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority','0012_discovery_seal'];
-const sql=(file,text)=>{const r=spawnSync('sqlite3',['-json','-bail',file],{input:text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
-const migrate=()=>{const file=path.join(root,'b.sqlite');fs.rmSync(file,{force:true});const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");return file;};
+const sql=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const migrate=()=>{const file=path.join(root,'b.sqlite');fs.rmSync(file,{force:true});const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(x=>fs.readFileSync('migrations/'+x+'.sql','utf8')).join('\n'),encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");return file;};
 const realNow=Date.now;let clock=realNow();Date.now=()=>clock;
 const TTL=Authority.LEASE_TTL_MS;
 const run={runId:'run-1',stage:'seal',seal:{jobId:'job-1',phase:'ledger'}};
