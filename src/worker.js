@@ -502,8 +502,8 @@ async function catalogAvailableRoute(env){
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
- // The ratings seed is applied to a copy: unlike `/api/enrichment/view`, this read never writes it back.
- const seeded=JSON.parse(JSON.stringify(index||{}));applyRatingsSeed(seeded);
+ // The ratings seed is applied to an in-memory copy. GET /api/enrichment/view uses the same overlay and neither persists it.
+ const seeded=overlayRatingsSeed(index);
  return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}

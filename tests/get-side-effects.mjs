@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 
-// GET routes that may write to R2. Each one is documented in README.md; extend both together.
-const WRITING_GET_ROUTES=['/api/enrichment/runs','/api/enrichment/status','/api/enrichment/view','/api/events'];
+// GET routes that may write to R2. The D1-aware inventory is tests/get-write-baseline.mjs.
+const WRITING_GET_ROUTES=['/api/enrichment/runs','/api/enrichment/status','/api/events'];
 
 const sources=['src/worker.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/letterboxd-ratings.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n');
 const routes=new Set([...sources.matchAll(/(?:url\.pathname|path)==='(\/api\/[^']+)'&&request\.method==='GET'/g)].map(m=>m[1]));

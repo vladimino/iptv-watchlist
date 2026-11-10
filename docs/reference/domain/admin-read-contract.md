@@ -87,7 +87,7 @@ The authoritative inventory is [GET and HEAD read side effects](../api/read-side
 | Route | Why it can write | Admin use |
 | --- | --- | --- |
 | `GET /api/events` | Recovers an undelivered stop event, then may list `events/items/` | Do not call |
-| `GET /api/enrichment/view` | Can initialize a missing rating in the view index | Do not call |
+| `GET /api/enrichment/view` | Overlays the compiled ratings seed in memory and does not persist it. In D1 published-EPG authority the shared generation pin can still repair the compatibility mirrors | Do not call |
 | `GET /api/enrichment/status` | Same stop-event recovery | Do not call. MCP `enrichment_status` calls this route |
 | `GET /api/enrichment/runs` | Writes diagnostic history | Do not call |
 
