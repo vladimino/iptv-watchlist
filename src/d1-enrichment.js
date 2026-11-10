@@ -337,14 +337,23 @@ async function d1EnrichmentStoredRows(db,{page=D1_ENRICHMENT_STORED_PAGE,concurr
 // differ are read row by row, and the unchanged plan function runs over those entities and rows. When too many buckets differ (a backlog) or the key is not of the expected shape, the whole
 // table is read as before. `absent` rows are left out of the sums, so an entity whose stored key is `absent` always makes its bucket differ.
 const D1_ENRICHMENT_BUCKET_MIN_ENTITIES=5000,D1_ENRICHMENT_BUCKET_PARAMS=90,D1_ENRICHMENT_BUCKET_MAX_SHARE=0.4,D1_ENRICHMENT_BUCKET_MAX_MISSING=0.25,D1_ENRICHMENT_BUCKET_WAVE=6,D1_ENRICHMENT_HEX='0123456789abcdef',D1_ENRICHMENT_BUCKETS=4096;
-// The bucket number of an id: a multiplicative hash of its last four characters, the same integer arithmetic in SQL and in JavaScript (an id always has more than four characters: `film:`, `person:`).
-// 4,096 buckets hold about 8 stored keys each, so the digest is small and a changed entity pulls in few rows (the two-character suffix of the first version put 240 numeric ids in one bucket).
-const D1_ENRICHMENT_BUCKET_EXPR="((unicode(substr(id,-1,1))*1664525+unicode(substr(id,-2,1))*22695477+unicode(substr(id,-3,1))*48271+unicode(substr(id,-4,1))*69069)%4096)";
+// The bucket number of an id: a multiplicative hash of the last four BYTES of its UTF-8 encoding, the same integer arithmetic in SQL and in JavaScript. Bytes, not characters: SQLite's substr() and unicode()
+// count code points and JavaScript's charCodeAt() counts UTF-16 units, so over characters an id ending in an emoji (or any non-BMP letter) fell in different buckets on the two sides, and a stored id shorter
+// than four characters had no bucket (NULL). The text is padded with '0000' first, so every id has four bytes, and a real id (`film:`, `person:`) is longer than four bytes and unaffected. hex() of the blob gives
+// the bytes to SQL; TextEncoder gives the same bytes to JavaScript. A fresh id that is not well-formed UTF-16 (a lone surrogate, which the database stores as U+FFFD) is not bucketed at all: the run reads
+// the whole table (see d1EnrichmentCheckpoints). 4,096 buckets hold about 8 stored keys each, so the digest is small and a changed entity pulls in few rows (the two-character suffix of the first version put 240
+// numeric ids in one bucket).
+const d1EnrichmentBucketHex="hex(substr(CAST('0000'||id AS BLOB),-4))";
+const d1EnrichmentBucketByte=index=>`((instr('0123456789ABCDEF',substr(${d1EnrichmentBucketHex},${2*index-1},1))-1)*16+(instr('0123456789ABCDEF',substr(${d1EnrichmentBucketHex},${2*index},1))-1))`;
+const D1_ENRICHMENT_BUCKET_EXPR=`((${d1EnrichmentBucketByte(4)}*1664525+${d1EnrichmentBucketByte(3)}*22695477+${d1EnrichmentBucketByte(2)}*48271+${d1EnrichmentBucketByte(1)}*69069)%4096)`;
+const D1_ENRICHMENT_ILL_FORMED=/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const D1_ENRICHMENT_BUCKET_NAME=/^(?:film|person):\d{1,4}$/;
+let D1_ENRICHMENT_ENCODER=null;
 const d1EnrichmentBucketSlice=from=>Array.from({length:8},(_,j)=>`(instr('0123456789abcdef',substr(change_key,${-from+j},1))-1)*${16**(7-j)}`).join('+');
 const D1_ENRICHMENT_BUCKET_SQL=`SELECT kind||':'||${D1_ENRICHMENT_BUCKET_EXPR} AS b,COUNT(*) AS n,SUM(${d1EnrichmentBucketSlice(28)}) AS a,SUM(${d1EnrichmentBucketSlice(20)}) AS c FROM projection_state WHERE projection=? AND change_key<>'absent' GROUP BY b`;
 const d1EnrichmentBucketOf=(kind,id)=>{
- const at=id.length;
- return kind+':'+((id.charCodeAt(at-1)*1664525+id.charCodeAt(at-2)*22695477+id.charCodeAt(at-3)*48271+id.charCodeAt(at-4)*69069)%D1_ENRICHMENT_BUCKETS);
+ const bytes=(D1_ENRICHMENT_ENCODER||(D1_ENRICHMENT_ENCODER=new TextEncoder())).encode('0000'+id),at=bytes.length;
+ return kind+':'+((bytes[at-1]*1664525+bytes[at-2]*22695477+bytes[at-3]*48271+bytes[at-4]*69069)%D1_ENRICHMENT_BUCKETS);
 };
 // The two 32-bit slices of a key, as the SQL above computes them (a character outside the hex digits counts -1, as instr()-1 does). Null for a key too short to have them.
 function d1EnrichmentKeySums(key){
@@ -360,6 +369,8 @@ async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMi
   return {stored:new Map(rows.map(row=>[row.kind+'\n'+row.id,row.change_key])),inputs,total:rows.length,mode:'full'};
  };
  if(!keys||inputs.people.length+inputs.films.length<bucketMin)return full();
+ // An id that is not well-formed UTF-16 cannot be bucketed the way the database will see it: read the whole table, before any D1 query of the bucket path.
+ for(const list of [inputs.people,inputs.films])for(const entry of list)if(typeof entry.id!=='string'||D1_ENRICHMENT_ILL_FORMED.test(entry.id)){summary.checkpointBuckets={skipped:'unsafe_id'};return full();}
  const expected=new Map();
  for(const [kind,list] of [['person',inputs.people],['film',inputs.films]])for(const entry of list){
   const sums=d1EnrichmentKeySums(keys.get(entry));
@@ -374,6 +385,8 @@ async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMi
  const missing=Math.max(0,inputs.people.length+inputs.films.length-total);
  if(missing>expected.size*D1_ENRICHMENT_BUCKET_MAX_MISSING){summary.checkpointBuckets={expected:expected.size,missing,skipped:'backlog'};return full();}
  const digest=await timer.time('diff.checkpointDigest',()=>db.all(D1_ENRICHMENT_BUCKET_SQL,[D1_ENRICHMENT_PROJECTION]),{rows:value=>value.length});
+ // A digest row the Worker cannot place (no bucket, a malformed one) means the two sides disagree about the mapping: read the whole table, visibly, instead of trusting the sums.
+ if(digest.some(row=>typeof row.b!=='string'||!D1_ENRICHMENT_BUCKET_NAME.test(row.b))){summary.checkpointBuckets={expected:expected.size,skipped:'bucket_mismatch'};return full();}
  const actual=new Map(digest.map(row=>[row.b,[Number(row.n),Number(row.a),Number(row.c)]]));
  const differing=new Set();
  for(const [bucket,item] of expected){const found=actual.get(bucket);if(!found||found[0]!==item[0]||found[1]!==item[1]||found[2]!==item[2])differing.add(bucket);}
@@ -391,6 +404,8 @@ async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMi
  await timer.time('diff.checkpointRows',async()=>{
   for(let from=0;from<statements.length;from+=D1_ENRICHMENT_BUCKET_WAVE)for(const part of await Promise.all(statements.slice(from,from+D1_ENRICHMENT_BUCKET_WAVE).map(run=>run())))for(const row of part)rows.push(row);
  },{rows:()=>rows.length});
+ // Every row the database returned for a differing bucket must be in a differing bucket by the Worker's own mapping; a row that is not proves the mappings differ (nothing is silently missed: read the whole table).
+ if(rows.some(row=>typeof row.id!=='string'||!differing.has(d1EnrichmentBucketOf(row.kind,row.id)))){summary.checkpointBuckets={expected:expected.size,stored:actual.size,differing:differing.size,skipped:'bucket_mismatch'};return full();}
  const look=(kind,list)=>list.filter(entry=>differing.has(d1EnrichmentBucketOf(kind,entry.id)));
  return {stored:new Map(rows.map(row=>[row.kind+'\n'+row.id,row.change_key])),inputs:{...inputs,people:look('person',inputs.people),films:look('film',inputs.films)},total,mode:'buckets'};
 }

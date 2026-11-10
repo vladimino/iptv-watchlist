@@ -9,12 +9,14 @@ const literal=value=>{
  if(typeof value==='boolean')return value?'1':'0';
  return "'"+String(value).replace(/'/g,"''")+"'";
 };
-export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=null}={}){
+// `rewrite(sql)` (tests only) changes the text of every statement before it runs: the way a test makes the database compute something other than the Worker expects.
+export function d1Standin(file,{onBatch=null,maxBinds=null,latencyMs=0,onQuery=null,rewrite=null}={}){
  const calls={queries:0,batches:0,statements:0};
  const sqlite=(sql,json)=>{const result=spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr.trim()||'sqlite failed');return result.stdout;};
  const rows=text=>{const out=sqlite(text+';',true).trim();return out?JSON.parse(out):[];};
  const statement=(sql,params)=>{
   if(maxBinds!=null&&params.length>maxBinds)throw new Error('D1_ERROR: too many SQL variables at offset 0: SQLITE_ERROR');
+  if(rewrite)sql=rewrite(sql);
   let index=0;const text=sql.replace(/\?/g,()=>{if(index>=params.length)throw new Error('missing parameter');return literal(params[index++]);});
   if(index!==params.length)throw new Error('parameter count');
   // `latencyMs` models D1's round trip so a test can tell a sequential read from a concurrent one; `onQuery` sees each statement before it runs.
