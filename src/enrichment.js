@@ -1311,6 +1311,14 @@ async function predictionEventSnapshot(env,queue,batchSize=null,inputs=null){
 function predictionEventDelta(run,summary,snapshot){const current=snapshot?.coverage?.currentPredictionsTotal,start=run.coverageStartCurrentPredictions;return {added:summary.added,updated:summary.updated,failed:summary.failed,predictionGain:Number.isInteger(current)&&Number.isInteger(start)?current-start:null};}
 const INTEGRATION_STALE_MS=48*3600000;
 function integrationTime(value){const ms=Date.parse(value);return Number.isFinite(ms)?new Date(ms).toISOString():null;}
+// Owner-facing “программа обновлена”: the successful end of the published run (`completedAt` / complete `sync.json`
+// `updatedAt`), the same instant the `epg` event stores as `at`. Not scan `report.updatedAt`, not `startedAt`/`dueAt`,
+// not D1 `published_epg_generation.published_at` (that column still copies the scan clock at pointer switch). An
+// in-flight or failed later run keeps `lastEpgPublishedAt` from the last complete record. Missing or invalid → null.
+function epgUxPublishedAt(sync,report){
+ if(sync?.stage==='complete'&&!sync.error&&(!report?.runId||!sync.runId||sync.runId===report.runId))return integrationTime(sync.completedAt||sync.updatedAt);
+ return integrationTime(sync?.lastEpgPublishedAt);
+}
 function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return {id,role,state,code,lastSuccessAt:lastSuccessAt||null,lastFailureAt:lastFailureAt||null};}
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
@@ -1348,12 +1356,12 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
   return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
- const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgPrevious=integrationTime(report?.updatedAt),epgSuccess=sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):epgFailure&&epgPrevious&&Date.parse(epgPrevious)<Date.parse(epgFailure)?epgPrevious:null;
+ const epgFailure=sync?.error?integrationTime(sync.updatedAt):null,epgSuccess=epgUxPublishedAt(sync,report);
  const epg=(()=>{
   if(sync?.error){const code=/HTTP/i.test(sync.error)?'epg_http':/cover the current window/i.test(sync.error)?'epg_window':/parse|xml|unexpected/i.test(sync.error)?'epg_parse':'epg_failed';return integrationEntry('epg','source','failed',code,epgSuccess,epgFailure);}
-  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(sync.updatedAt),freshCode(sync.updatedAt),integrationTime(sync.updatedAt),null);
-  if(sync&&['metadata','epg'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
-  return integrationEntry('epg','source','unknown','no_data',null,null);
+  if(sync?.stage==='complete')return integrationEntry('epg','source',fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);
+  if(sync&&['metadata','epg','seal'].includes(sync.stage)){const elapsed=age(sync.updatedAt);return elapsed!=null&&elapsed<15*60000?integrationEntry('epg','source','running','running',epgSuccess,null):integrationEntry('epg','source','degraded','epg_failed',epgSuccess,integrationTime(sync.updatedAt));}
+  return integrationEntry('epg','source','unknown','no_data',epgSuccess,null);
  })();
  const reportRunId=report?.runId||null,resolverConfirmed=[];
  if(discoveryStatus?.stage==='complete'&&!discoveryStatus.error){const at=integrationTime(discoveryStatus.finishedAt||discoveryStatus.at);if(at)resolverConfirmed.push({at,current:resolverMatches(discoveryStatus.programmeRunId,reportRunId)});}
