@@ -76,4 +76,25 @@ context.tasteUnknown={id:'<script>',type:'taste_profile',at:'2026-11-02T20:15:00
 tasteHTML=vm.runInContext('eventHTML(tasteUnknown)',context);assert.match(tasteHTML,/Изменены предпочтения для хорроров/);assert.doesNotMatch(tasteHTML,/Влияние:|<img|onerror|script>|secret profile|declarationSha256/);
 context.unknownType={id:'mystery',type:'no_such_event',at:'2026-11-02T20:16:00.000Z',changedFields:['<script>alert(1)</script>']};
 const unknownTypeHTML=vm.runInContext('eventHTML(unknownType)',context);assert.match(unknownTypeHTML,/activity-event/);assert.doesNotMatch(unknownTypeHTML,/Модель вкуса|<script>|alert/);
-console.log('Activity UI: taste-profile publication event, unknown scope and unknown type passed');
+// AIR-410: the Discovery tick card. Fixed sentences chosen by kind and status; every number is a non-negative integer or 0; nothing stored reaches the page as markup.
+{
+ const base={id:'discovery-a',type:'discovery',kind:'run',at:'2026-11-10T13:05:00.000Z',startedAt:'2026-11-10T12:00:00.000Z',status:'finished',reason:'backlog_empty',chunks:3,checked:30,added:6,reused:3,screenedOut:6,touched:0,tmdbCalls:15,remaining:0,queueEmpty:true,error:null};
+ const card=event=>{context.discoveryEvent=event;return vm.runInContext('eventHTML(discoveryEvent)',context);};
+ let html=card(base);
+ assert.match(html,/Найдено новых фильмов: 6/);assert.match(html,/<dt>Разобрано наблюдений<\/dt><dd>30<\/dd>/);assert.match(html,/<dt>Осталось в очереди<\/dt><dd>пуста<\/dd>/);
+ assert.match(html,/Повторно использовано: 3 · отсеяно: 6 · запросов к TMDB: 15/);assert.match(html,/data-event-id="discovery-a"/);
+ html=card({...base,added:0});assert.match(html,/Новых фильмов не найдено/);assert.match(html,/<dt>Новых фильмов<\/dt><dd>0<\/dd>/,'a zero is shown, not hidden');
+ html=card({...base,added:0,checked:0,chunks:1});assert.match(html,/Очередь Discovery пуста/);
+ html=card({...base,added:0,checked:0,chunks:1,remaining:4,queueEmpty:false});assert.match(html,/Новых изменений нет/);assert.doesNotMatch(html,/Очередь Discovery пуста/,'0 checked with 4 left is not an empty queue');assert.match(html,/<dd>4<\/dd>/);
+ html=card({...base,added:0,checked:0,remaining:null,queueEmpty:false});assert.match(html,/<dt>Осталось в очереди<\/dt><dd>неизвестен<\/dd>/,'an unknown remainder is not a zero');
+ html=card({...base,kind:'empty',chunks:0,checked:0,added:0,reused:0,screenedOut:0,tmdbCalls:0});assert.match(html,/Очередь Discovery пуста/);assert.match(html,/Новых изменений нет\./);assert.match(html,/<dt>Новых фильмов<\/dt><dd>0<\/dd>/);
+ html=card({...base,status:'superseded',reason:'stale_generation',remaining:12,queueEmpty:false});assert.match(html,/Прогон Discovery прерван: вышла новая программа/);assert.doesNotMatch(html,/успешно/);
+ html=card({...base,status:'failed',reason:'recovery_exhausted',remaining:12,queueEmpty:false,error:'d1_unavailable'});assert.match(html,/Прогон Discovery остановлен после повторных ошибок/);assert.doesNotMatch(html,/d1_unavailable/,'an error code is not printed');
+ html=card({...base,status:'stopped',reason:'executor_not_workflow',queueEmpty:false});assert.match(html,/Прогон Discovery остановлен/);
+ html=card({id:'x',type:'discovery',at:'2026-11-10T13:05:00.000Z'});assert.match(html,/activity-event/);assert.match(html,/Новых изменений нет/,'a bare event still renders without a crash');
+ const hostile=card({...base,id:'discovery-<b>',added:'<img src=x onerror=alert(1)>',checked:'<script>alert(1)</script>',reused:{toString(){return '<i>';}},screenedOut:-5,tmdbCalls:1.5,remaining:'<u>',status:'<svg onload=1>',kind:'<s>',error:'<script>'});
+ assert.doesNotMatch(hostile,/<img|<script|<svg|<i>|<u>|<s>|onerror|onload/,'hostile fields never become markup');
+ assert.match(hostile,/data-event-id="discovery-&lt;b&gt;"/,'the id attribute is escaped');
+ for(const legacy of [{id:'e',type:'epg',at:'2026-11-10T13:05:00.000Z',films:1,archive:0,future:1,broadcasts:2}])assert.doesNotMatch(card(legacy),/Discovery/,'other types do not render the Discovery card');
+}
+console.log('Activity UI: taste-profile publication event, unknown scope, unknown type and the Discovery tick card passed');
