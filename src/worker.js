@@ -329,6 +329,21 @@ function catalogFilmState(records,tmdbId){
  if(verified.length&&verified.every(record=>record.state==='superseded'))return {state:'retired'};
  return {state:'conflict'};
 }
+// AIR-409: a canonical Film admitted by a verified rated archive (letterboxd/admissions/verified-films.json) that Discovery never admitted.
+// Read only, and only when Discovery says "absent". The entry must verify exactly as film-admission.js requires (key tmdb_<n>, tmdb equal to the key,
+// short code, sha256 digest, verification time, no watchlist field); anything else is not a Film here. Nothing is scanned: one key of one object.
+const CATALOG_ADMISSION_KEY='letterboxd/admissions/verified-films.json';
+const CATALOG_ADMISSION_SHORT=/^[A-Za-z0-9_-]{1,40}$/,CATALOG_ADMISSION_HEX=/^[0-9a-f]{64}$/;
+function catalogAdmittedFilm(document,tmdbId){
+ if(!document||typeof document!=='object'||Array.isArray(document)||document.schemaVersion!==1||!document.films||typeof document.films!=='object'||Array.isArray(document.films)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+ const key='tmdb_'+tmdbId;
+ if(!Object.prototype.hasOwnProperty.call(document.films,key))return null;
+ const item=document.films[key];
+ if(!item||typeof item!=='object'||Array.isArray(item)||Object.prototype.hasOwnProperty.call(item,'watchlist'))return null;
+ if(String(item.tmdb)!==tmdbId||typeof item.sourceCode!=='string'||!CATALOG_ADMISSION_SHORT.test(item.sourceCode)||typeof item.archiveSha256!=='string'||!CATALOG_ADMISSION_HEX.test(item.archiveSha256)||typeof item.verifiedAt!=='string'||!Number.isFinite(Date.parse(item.verifiedAt)))return null;
+ const person=value=>Array.isArray(value)?value.filter(entry=>entry&&typeof entry==='object'&&entry.id!=null&&(entry.name||entry.original)):[];
+ return {id:key,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:typeof item.title==='string'&&item.title?item.title:null,original:null,year:Number.isInteger(item.year)?item.year:null,runtime:Number.isInteger(item.runtime)?item.runtime:null,genres:Array.isArray(item.genres)?item.genres.filter(g=>typeof g==='string'):[],url:typeof item.url==='string'&&item.url.startsWith('https://')?item.url:null,directors:person(item.directors),actors:person(item.actors),shows:[]};
+}
 async function catalogFilmRoute(env,tmdbId){
  if(!CATALOG_FILM_TMDB.test(tmdbId))return json({status:'invalid',error:'A TMDB movie id is a positive integer'},400);
  const now=Date.now();
@@ -342,6 +357,11 @@ async function catalogFilmRoute(env,tmdbId){
    // A missing or malformed catalog object is a source that cannot be read, not proof that the film was never admitted.
    if(!shared||typeof shared!=='object'||Array.isArray(shared)){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
    found=catalogFilmState(Object.entries(shared||{}).filter(([,film])=>film&&String(film.tmdbId)===tmdbId).map(([filmId,film])=>({filmId,state:'current',canonicalIdentity:film.canonicalIdentity,tmdbId:String(film.tmdbId),film})),tmdbId);
+  }
+ if(found.state==='absent'){
+   // Not in Discovery: a really existing canonical Film may still be one the verified archive admitted. A missing object admits nobody.
+   const archive=await loadJSON(env,CATALOG_ADMISSION_KEY);
+   if(archive!=null){const film=catalogAdmittedFilm(archive,tmdbId);if(film)found={state:'found',film};}
   }
  }catch(error){
   const code=error?.code||'';

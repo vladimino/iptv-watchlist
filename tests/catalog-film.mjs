@@ -139,7 +139,7 @@ const base={
 
 // ---- 3. Discovery on D1: the states of the admission map to the answers ----
 {
- const answer=(handled,list)=>{vm.runInContext('globalThis.DiscoveryAuthority={readAuthority:async()=>({held:false,ready:false}),routeRead:async()=>({handled:false}),readFilmAdmission:async()=>__stub()}',ctx);ctx.__stub=async()=>({handled,records:list});};
+ const answer=(handled,list)=>{vm.runInContext('globalThis.DiscoveryAuthority={ownsKey:()=>false,readAuthority:async()=>({held:false,ready:false}),routeRead:async()=>({handled:false}),readFilmAdmission:async()=>__stub()}',ctx);ctx.__stub=async()=>({handled,records:list});};
  const rec=(filmId,state,tmdb=7,over={})=>({filmId,state,canonicalIdentity:'tmdb:'+tmdb,tmdbId:String(tmdb),film:catalogFilm(filmId,tmdb,over)});
  seed({});
  answer(true,[rec('tmdb_7','current')]);let r=await get('7');assert.equal(r.status,200);assert.equal(r.body.film.id,'tmdb_7');
@@ -207,6 +207,37 @@ const base={
   assert.ok(statementsSeen.length>0&&statementsSeen.every(text=>/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)),'only reads reached D1: '+statementsSeen.filter(text=>!/^\s*(SELECT|PRAGMA|WITH)\b/i.test(text)).join(' | '));
   assert.deepEqual(fetches,[],'no provider request');
  }
+}
+
+// ---- 3d. AIR-409: a canonical Film the verified archive admitted, absent from Discovery ----
+{
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ const ADM='letterboxd/admissions/verified-films.json',sha='a'.repeat(64);
+ const entry=(tmdb,extra={})=>({tmdb:String(tmdb),sourceCode:'abc'+tmdb,archiveSha256:sha,verifiedAt:'2026-11-09T10:00:00.000Z',title:'Archive '+tmdb,year:1999,runtime:101,genres:['Драма'],directors:[{id:'tmdb_director/5',name:'Режиссёр'}],actors:[],...extra});
+ const archive=films=>({schemaVersion:1,films});
+ seed(base);
+ records.set(ADM,archive({tmdb_300:entry(300),tmdb_7:entry(7,{title:'Archive wins nothing'}),tmdb_301:entry(301,{watchlist:true}),tmdb_302:entry(999),tmdb_303:entry(303,{sourceCode:'bad code!'}),tmdb_304:entry(304,{archiveSha256:'zz'}),tmdb_305:entry(305,{verifiedAt:'nope'})}));
+ let r=await get('300');
+ assert.equal(r.status,200);assert.equal(r.body.status,'found');
+ assert.deepEqual([r.body.film.id,r.body.film.tmdbId,r.body.film.canonicalIdentity,r.body.film.title,r.body.film.year,r.body.film.runtime],['tmdb_300','300','tmdb:300','Archive 300',1999,101]);
+ assert.deepEqual(r.body.film.shows,[],'no EPG, no shows');assert.equal(r.body.film.availableNow,false);assert.equal(r.body.film.prediction,null);
+ assert.deepEqual(r.body.film.directors,[{id:'tmdb_director/5',name:'Режиссёр'}]);
+ r=await get('7');assert.equal(r.body.film.title,'Film tmdb_7','a Film Discovery has is answered by Discovery, never overridden by the archive');
+ for(const id of ['301','302','303','304','305','306']){r=await get(id);assert.deepEqual([r.status,r.body.status],[404,'absent'],'not a verified admission: '+id);}
+ // A missing object admits nobody; an unreadable or malformed one is unavailable, never absent.
+ records.delete(ADM);r=await get('300');assert.deepEqual([r.status,r.body.status],[404,'absent']);
+ for(const bad of [[],{schemaVersion:2,films:{}},{schemaVersion:1,films:[]},{schemaVersion:1}]){records.set(ADM,bad);r=await get('300');assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','discovery_unavailable']);}
+ // Discovery conflict, retired and unavailable are not rescued by the archive.
+ records.set(ADM,archive({tmdb_13:entry(13),tmdb_11:entry(11)}));
+ r=await get('13');assert.equal(r.status,409);r=await get('11');assert.equal(r.status,409);
+ // Discovery authority on D1: absent falls through to the archive, a fence stays 503, retired stays 410.
+ const answer=(handled,list)=>{vm.runInContext('globalThis.DiscoveryAuthority={ownsKey:()=>false,readAuthority:async()=>({held:false,ready:false}),routeRead:async()=>({handled:false}),readFilmAdmission:async()=>__stub()}',ctx);ctx.__stub=async()=>({handled,records:list});};
+ records.set(ADM,archive({tmdb_300:entry(300)}));
+ answer(true,[]);r=await get('300');assert.deepEqual([r.status,r.body.film?.id],[200,'tmdb_300']);
+ answer(true,[{filmId:'tmdb_300',state:'superseded',canonicalIdentity:'tmdb:300',tmdbId:'300',film:catalogFilm('tmdb_300',300)}]);r=await get('300');assert.equal(r.status,410,'retired in Discovery stays retired');
+ ctx.__stub=async()=>{const error=new Error('f');error.code='discovery_fence';throw error;};r=await get('300');assert.deepEqual([r.status,r.body.reason],[503,'discovery_fence']);
+ vm.runInContext('globalThis.DiscoveryAuthority=undefined',ctx);
+ assert.deepEqual(puts,[],'read only');assert.deepEqual(fetches,[],'no outbound request');
 }
 
 // ---- 4. Method and routing guards ----
