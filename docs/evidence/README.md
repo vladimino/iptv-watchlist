@@ -51,6 +51,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-86 replay results | [scored-resolver/air-86-replay-results.json](scored-resolver/air-86-replay-results.json) |
 | AIR-99 detail cards | [scored-resolver/air-99-detail.json](scored-resolver/air-99-detail.json) |
 | Scheduled Task Drift registry-only activation (2026-11-07) | [orchestration/scheduled-task-drift-registry-only-2026-11-07.md](orchestration/scheduled-task-drift-registry-only-2026-11-07.md) |
+| Scheduled Task registry inventory, 14 disabled Tasks and their decision table (2026-11-10; no deletion approved) | [orchestration/scheduled-task-registry-inventory-2026-11-10.md](orchestration/scheduled-task-registry-inventory-2026-11-10.md) |
 | AIR-347 Ratings Task disabled after Cloudflare cutover | [orchestration/ratings-task-disabled-2026-11-06.md](orchestration/ratings-task-disabled-2026-11-06.md) |
 | AIR-347 Ratings executor offline evidence | [orchestration/ratings-executor-air-347-2026-11-05.md](orchestration/ratings-executor-air-347-2026-11-05.md) |
 | AIR-348 EPG executor offline evidence | [orchestration/epg-executor-air-348-2026-11-07.md](orchestration/epg-executor-air-348-2026-11-07.md) |
