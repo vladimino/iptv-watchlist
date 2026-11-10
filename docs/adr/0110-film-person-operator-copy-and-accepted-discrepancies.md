@@ -1,9 +1,9 @@
 # ADR 0110: A Film/Person baseline may be recorded from an operator copy of D1 with a capped set of accepted discrepancies
 
-**Status:** Proposed  
-**Original decision date:** 2026-11-10 (owner inputs; not yet an acceptance of this record)  
+**Status:** Accepted  
+**Original decision date:** 2026-11-10 (owner approval and independent code review)  
 **Recorded at:** 2026-11-10  
-**Approval source:** not yet accepted. The inputs are three Product Owner decisions of 2026-11-10 on [AIR-373](https://trello.com/c/ugu3sQmp): the two quoted in the Decision section, and the [owner decision recorded on PR #501](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358), which fixes the caps at the exact measured counts, approves the operator-copy architecture in principle and keeps this ADR `Proposed`. See "Conditions for acceptance" below  
+**Approval source:** the Product Owner decisions on [AIR-373](https://trello.com/c/ugu3sQmp) and [PR #501](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358) approving the operator-copy path and exact measured caps, with the missing-evidence guard independently verified in the [successful exact-HEAD re-review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602) on `62e640425d49778be907a1419484a1127d44ef3d`  
 **Related work:** [AIR-373](https://trello.com/c/ugu3sQmp), [ADR 0099](0099-canonical-film-person-d1-authority.md), [measured parity of 10 Nov 2026](../evidence/d1-migration/air-373-measured-parity-2026-11-10.md), [offline evidence](../evidence/d1-migration/air-373-connector-path-offline-2026-11-10.md)  
 **Supersedes:** None. ADR 0099 and the `strict` and `cutover_minimum` v1 recording paths are unchanged  
 **Superseded by:** None
@@ -16,7 +16,7 @@ On 10 Nov 2026 the owner approved a measuring run. The session's D1 API token wa
 
 ## Decision
 
-Proposed: one additional, separately named recording path, `cutover_accepted` version 1. Each owner input is a constant in [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js) that a ledger must carry deeply equal; no other text creates the permission.
+Accepted: one additional, separately named recording path, `cutover_accepted` version 1. Each owner input is a constant in [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js) that a ledger must carry deeply equal; no other text creates the permission.
 
 1. **"ignore the discrepancies and prepare the migration"** and **"exact measured numbers"** are `ACCEPTED_DISCREPANCIES` v1. Unexplained missing or extra rows are accepted up to a per-class cap that is exactly the count measured on 10 Nov 2026 (`caps` equals `measured` per class, 1,600 in total). There is no headroom: one row more in any class fails and needs a fresh owner approval and a new version of the constant. A value that differs is never accepted, in any class, explained or not. A class the constant does not list fails. The acceptance, the measured counts and the caps are inside the ledger and its digest and are shown in the gate result.
 2. **"no token is needed, use the same path as before the pause"** is `OPERATOR_COPY_PERMISSION` v1. A source of kind `operator-copy` may be `verified`. The verdict is derived from the evidence files of the run and is not an argument: production equal at three reads for every statement except the Discovery statements, the copy equal to production at the second read, the Discovery tables re-read in one request with the generation equal at its start and end, the production projector lease held by the run at all three reads and released afterwards, unchanged R2 ETags, a complete probe and a consistent read. The statement set is fixed by reviewed constants (every witness statement, every gate statement and one row count per table of the copy plan), never by the evidence: each must be present at all three reads and in the copy comparison, and an unknown statement is refused.
@@ -27,7 +27,7 @@ Every other rule of `cutover_minimum` v1 applies unchanged; the gate calls the v
 
 ## Conditions for acceptance
 
-This record stays `Proposed`, and **recording a baseline through `cutover_accepted` stays blocked while it is `Proposed`**. By the owner decision on PR #501 it may become `Accepted` only when both hold, with the owner decision and the reviewer evidence linked here:
+The owner-required conditions for accepting this ADR have both been met, as documented by the [owner decision](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358) and [successful independent re-review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602) on the updated exact HEAD:
 
 - the missing-evidence guard is fixed (the required statement set comes from the reviewed copy plan, not from the keys of the supplied evidence);
 - an independent, successful re-review of the updated exact HEAD is recorded.
@@ -37,7 +37,7 @@ The capped acceptance and the operator-attestation semantics are owner decisions
 ## Alternatives considered
 
 - **Wait for a working D1 token and run the reviewed HTTP path.** It keeps provenance by transport. The owner chose the connector path instead.
-- **Owner exceptions per key.** The existing shape `{class, key, reason, approvedBy}` would need 1,600 entries whose keys the measurement did not keep. Not chosen; a capped acceptance by class is proposed instead.
+- **Owner exceptions per key.** The existing shape `{class, key, reason, approvedBy}` would need 1,600 entries whose keys the measurement did not keep. Not chosen; a capped acceptance by class was selected instead.
 - **Repair before recording.** The projector does not write the three empty tables; their producers are later work. The owner chose to prepare the migration first.
 - **Relax `cutover_minimum` v1 in place.** Not chosen: v1 stays exactly as reviewed, and the stored reference must say which rule passed.
 - **Caps with headroom above the measurement.** The first revision of the delivering pull request proposed the measured count plus 10 percent. The owner rejected it: the caps are the exact measured counts.
@@ -63,4 +63,4 @@ Offline code only. Nothing is bundled into the Worker and no production state ch
 
 ## Follow-ups
 
-Acceptance of this record under the conditions above. [AIR-374](https://trello.com/c/y3oT4gAK) (the `d1` activation) and the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C).
+[AIR-374](https://trello.com/c/y3oT4gAK) (the `d1` activation) and the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C).
