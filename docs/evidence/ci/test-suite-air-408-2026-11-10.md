@@ -81,4 +81,16 @@ A race found on the way (a rare `sqlite session gave no answer` in `film-person-
 
 ## CI results of this change
 
-To be filled from the three green runs on the exact HEAD of the pull request.
+GitHub Actions, Node 20, `ubuntu-latest`, 282 files, jobs 6 (the default of the new runner). Baseline on the card: `Run tests` 323.3 s, summed file time 1196.8 s, jobs 4.
+
+| Code | Run | `Run tests` | `Test and build` | Summed file time | Slowest file | Against the 180 s limit |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| `233db96`: sqlite session, timer unref, jobs 6 | [42814183520](https://github.com/vladimino/iptv-watchlist/actions/runs/42814183520) | 181 s | 3 min 28 s | not recorded | not recorded | **miss** |
+| `fa4c7fb`: adds the foreign-key reset of the review | [42815096339](https://github.com/vladimino/iptv-watchlist/actions/runs/42815096339) | 194.8 s | not recorded | 1108.3 s | `generation-stage` 142.7 s | **miss** |
+| `782e9fb`: adds `synchronous=OFF` | [42815961199](https://github.com/vladimino/iptv-watchlist/actions/runs/42815961199) attempt 1 | 95 s | 1 min 57 s | not recorded | not recorded | within |
+| `782e9fb` | attempt 2 | 159.8 s | 2 min 55 s | 901.7 s | `generation-stage` 151.7 s, `epg-r2-known-length` 54.6 s, `discovery-decisions-read` 46.2 s, `discovery-chunk-budget` 38.1 s, `projector-view-parity` 25.9 s | within |
+| `782e9fb` | attempt 3 | 133 s | 2 min 35 s | not recorded | not recorded | within |
+
+- On the final code the three runs are 95 s, 133 s and 159.8 s: maximum 159.8 s, median 133 s. Against the card's baseline this is 51% to 71% less. The two earlier misses are kept: they are the runs without the fsync change.
+- **The variance is large on one commit (95 to 160 s).** Attempt 2 had a summed file time of 901.7 s, more than twice the local figure, and `generation-stage` took 151.7 s of its 159.8 s wall time, so on a slow or contended runner that one file is the floor of the whole run. Locally `generation-stage` is about 43 s: 27 s for its first section (staged against legacy write of 1.25x production, row for row), 13 s for the second (withheld at 1.25x) and about 3 s for the other eleven. Splitting it into files by section would roughly halve its floor; it was not done because three runs are within the limit, and it is the next lever if a later run misses.
+- The pull request adds only this report after the code of `782e9fb`; the three runs on the final head of the pull request are recorded in its discussion, not here, to keep the report from being edited again after each run.
