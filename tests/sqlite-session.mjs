@@ -8,6 +8,7 @@
 // Semantics are kept by construction, not by hope:
 //  - The same real SQLite engine and the same `-bail` rule: a failing script makes the CLI exit, the call reports its status and stderr exactly as before, and
 //    the next call opens a fresh connection (an unfinished transaction is rolled back by the exit, as it was).
+//  - Foreign-key enforcement is per connection and a new process starts with it off, so every call on the shared connection starts with `PRAGMA foreign_keys=OFF` and the script's own `PRAGMA foreign_keys=ON` applies to that call only.
 //  - A script that could leave state behind in a shared connection (any PRAGMA other than foreign_keys=ON, ATTACH/DETACH, TEMP objects, VACUUM, dot-commands,
 //    `BEGIN` without a `COMMIT`/`END`/`ROLLBACK`, an in-memory or unnamed database) runs in a one-shot process, as before.
 //  - A script whose last statement has no `;` (the end of stdin ended it before) is closed with one before the marker, so the marker is never read as part of it.
@@ -58,7 +59,8 @@ if(!isMainThread&&workerData?.sqliteSession){
   else{sessions.delete(key);sessions.set(key,session);}
   session.chunks=[];session.tail='';session.err='';
   session.waiting=answer;
-  try{session.child.stdin.write(input+'\n;\n.print '+MARK+'\n');}catch(error){const wait=session.waiting;session.waiting=null;if(wait)wait({status:1,stdout:'',stderr:String(error.message||error),signal:null});}
+  try{// Every call starts as a fresh connection did: foreign keys off (SQLite's default) unless this script turns them on.
+  session.child.stdin.write('PRAGMA foreign_keys=OFF;\n'+input+'\n;\n.print '+MARK+'\n');}catch(error){const wait=session.waiting;session.waiting=null;if(wait)wait({status:1,stdout:'',stderr:String(error.message||error),signal:null});}
  });
 }
 
@@ -83,6 +85,9 @@ export function needsOneShot(args,input){
  const body=text.replace(/PRAGMA\s+foreign_keys\s*=\s*ON\s*;/gi,'');
  if(/\bPRAGMA\b/i.test(body)||/\b(ATTACH|DETACH|TEMP|TEMPORARY|VACUUM)\b/i.test(body))return true;
  if(/\bBEGIN\b/i.test(body)&&!/\b(COMMIT|END|ROLLBACK)\b/i.test(body))return true;
+ // `last_insert_rowid()`, `changes()` and `total_changes()` read per-connection counters that a fresh process starts at zero.
+ if(/\b(last_insert_rowid|total_changes|changes)\s*\(/i.test(body))return true;
+ if(/\bSAVEPOINT\b/i.test(body)&&!/\b(RELEASE|ROLLBACK)\b/i.test(body))return true;
  return false;
 }
 const fileKeyOf=file=>{try{const stat=statSync(file);return stat.dev+':'+stat.ino;}catch{return 'none';}};

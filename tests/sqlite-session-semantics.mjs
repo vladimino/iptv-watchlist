@@ -70,6 +70,35 @@ const same=(file,input,json=false)=>{
  const fk=session(file,'PRAGMA foreign_keys=ON;\nINSERT INTO c VALUES (99);');assert.notEqual(fk.status,0);assert.match(fk.stderr,/FOREIGN KEY constraint failed/);
 }
 
+// 3b. Foreign-key enforcement is per connection: a call that turns it on must not leave it on for the next call, as a process per call never did.
+{
+ const make=name=>{const file=db(name);session(file,'PRAGMA foreign_keys=ON;\nCREATE TABLE parent(id INTEGER PRIMARY KEY);CREATE TABLE child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id));INSERT INTO parent VALUES (1);');return file;};
+ const orphan='INSERT INTO child VALUES (100, 99);';
+ // Each case is checked against an independent fresh-process baseline on its own database copy: the same sequence of calls, the same status for each.
+ const sequences=[
+  ['PRAGMA ON then no PRAGMA','PRAGMA foreign_keys=ON;\nINSERT INTO child VALUES (1, 1);',orphan,'accepted: the second call did not ask for foreign keys'],
+  ['no PRAGMA then PRAGMA ON',orphan,'PRAGMA foreign_keys=ON;\nINSERT INTO child VALUES (101, 99);','rejected: the second call asked for them'],
+  ['PRAGMA ON twice','PRAGMA foreign_keys=ON;\n'+orphan.replace('100','102'),'PRAGMA foreign_keys=ON;\n'+orphan.replace('100','103'),'both rejected'],
+  ['PRAGMA ON, no PRAGMA, PRAGMA ON','PRAGMA foreign_keys=ON;\nSELECT 1;',orphan.replace('100','104'),'accepted']
+ ];
+ for(const [label,first,second] of sequences){
+  const viaSession=make('fk-s-'+label.replace(/\W+/g,'-')),viaProcess=make('fk-p-'+label.replace(/\W+/g,'-'));
+  const a=[session(viaSession,first).status,session(viaSession,second).status],b=[once(viaProcess,first).status,once(viaProcess,second).status];
+  assert.deepEqual(a,b,label+': the same status for each call as a fresh process gives');
+  assert.equal(session(viaSession,'SELECT count(*) AS n FROM child;',true).stdout.trim(),once(viaProcess,'SELECT count(*) AS n FROM child;',true).stdout.trim(),label+': the same rows');
+ }
+ // The shape the review named, spelled out: an orphan child is accepted without the PRAGMA even right after a call that enabled it.
+ const file=make('fk-named');session(file,'PRAGMA foreign_keys=ON;\nSELECT 1;');
+ assert.equal(session(file,orphan).status,0,'an orphan insert after a PRAGMA-ON call is accepted when the call does not enable foreign keys');
+ assert.notEqual(session(file,'PRAGMA foreign_keys=ON;\nINSERT INTO child VALUES (200, 99);').status,0,'and rejected when it does');
+ // A savepoint that is not released would stay open in a shared connection: it runs in a process of its own.
+ assert.equal(needsOneShot(['-bail',file],'SAVEPOINT a;INSERT INTO parent VALUES (7);'),true);
+ assert.equal(needsOneShot(['-bail',file],'SAVEPOINT a;INSERT INTO parent VALUES (8);RELEASE a;'),false);
+ // The per-connection counters of a fresh process start at zero, so a script that reads them runs in one.
+ for(const script of ['SELECT last_insert_rowid();','SELECT changes();','SELECT total_changes();'])assert.equal(needsOneShot(['-bail',file],script),true,script);
+ assert.equal(session(file,'INSERT INTO parent VALUES (50);').status,0);assert.equal(session(file,'SELECT last_insert_rowid() AS id;',true).stdout.trim(),'[{"id":0}]','a later call does not see the rowid of an earlier one');
+}
+
 // 4. A database file that is deleted or replaced is a new database for the next call, not the old one kept open.
 {
  const file=db('replaced');
