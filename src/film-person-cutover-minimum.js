@@ -1,7 +1,9 @@
 // AIR-373 (ADR 0099, Accepted; owner decision of 10 Nov 2026): the SEPARATE, VERSIONED `cutover_minimum` baseline gate. OFFLINE and INACTIVE like the rest of
-// the baseline tooling: nothing in the Worker imports this module, it reads no R2 or D1, and it records nothing. The strict `baselineGate` of
-// film-person-baseline.js is untouched: it still fails on an unavailable ownerLink class and it is still the only gate `recordBaselineVerified` consults. A pass of
-// THIS gate is evidence for an owner decision, never a permission: a baseline can only be recorded by a separate, owner-approved production step.
+// the baseline tooling: nothing in the Worker imports this module, it reads no R2 or D1, and it records nothing itself. The strict `baselineGate` of
+// film-person-baseline.js is untouched: it still fails on an unavailable ownerLink class and it is still the only gate the DEFAULT path of
+// `recordBaselineVerified` consults. This gate is consulted by that recorder only on its explicit, versioned path (`path: RECORDING_PATHS.cutover_minimum`,
+// reference `cutover_minimum/v1:<cutoverDigest>`); there is no fallback between the two. A pass of THIS gate is evidence for an owner decision, never a
+// permission: a baseline can only be recorded by a separate, owner-approved production step.
 // What it checks (returns {pass, accepted, notProved, reasons}):
 // - the 15 classes other than ownerLink are checked fully (present, compared, zero unexplained differences); an unavailable, unexplained or inconsistent cut fails;
 // - ownerLink: ONLY the values identity_link / identity_state are excluded. The existence and identity of each owner_review_entry by (kind, source_key), their

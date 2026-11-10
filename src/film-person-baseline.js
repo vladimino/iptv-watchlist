@@ -531,20 +531,47 @@ export async function markBaselineLoading(env,{reference,expectedGeneration,at})
   ["UPDATE film_person_baseline SET state='loading', reference=?, updated_at=? WHERE id=1",[reference,at]]],expectedGeneration);
  return {state:'loading',reference};
 }
-// Records the baseline as verified (empty|loading -> verified, reference = the ledger digest) in ONE batch, only when the gate passes and the marker is r2 at the
-// expected generation. The moves go through the triggers of migration 0013 (empty -> loading -> verified). It never moves the marker: r2 -> prepared is a separate owner step.
-export async function recordBaselineVerified(env,{ledger,expectedGeneration,at}){
+// Records the baseline as verified (empty|loading -> verified) in ONE batch, only when the gate of the REQUESTED path passes and the marker is r2 at the expected
+// generation. The moves go through the triggers of migration 0013 (empty -> loading -> verified). It never moves the marker: r2 -> prepared is a separate owner step.
+// Two recording paths, chosen by the caller and never by the ledger (AIR-373, coordinator decision of 10 Nov 2026):
+//  - strict (the default, `path` omitted or RECORDING_PATHS.strict): exactly the original behaviour. Only `baselineGate` is consulted and the reference is the bare
+//    ledger digest. A cutover_minimum ledger is refused here (its ownerLink class is unavailable), whatever sections it carries.
+//  - cutover_minimum version 1 (`path` deeply equal to RECORDING_PATHS.cutover_minimum): only `cutoverMinimumGate` is consulted. Its single waiver is the pinned
+//    OWNER_LINK_WAIVER; no other waiver, class or approver can pass it. The ledger must also have been measured at the generation it is recorded at.
+// There is NO fallback between the paths: a ledger that fails the requested gate is refused even when the other gate would pass it, and an unknown path, version or
+// shape is `baseline_path_invalid` before any gate or read. Both gates refuse a ledger whose source is not verified (`source_unverified`), so such a ledger is never
+// recorded on either path.
+// The reference names the recorder as far as the schema allows without a migration (film_person_baseline has state and reference only): the strict path stores the
+// 64-hex ledger digest, the cutover path stores `cutover_minimum/v1:<cutoverDigest>`, and the cutoverDigest itself covers the gate name, its version, the ledger
+// digest and the whole cutoverMinimum section (waiver, accepted, notProved, source evidence). The two forms cannot be confused.
+export const RECORDING_PATHS=Object.freeze({strict:Object.freeze({gate:'strict',version:1}),cutover_minimum:Object.freeze({gate:'cutover_minimum',version:1})});
+const pathIs=(path,known)=>!!path&&typeof path==='object'&&!Array.isArray(path)&&stable(path)===stable(known);
+export const recordingReference=(path,digest)=>path.gate+'/v'+path.version+':'+digest;
+async function recordingOf(ledger,path,expectedGeneration){
+ if(path===undefined||pathIs(path,RECORDING_PATHS.strict))return {gate:await baselineGate(ledger),reference:ledger?.digest};
+ if(!pathIs(path,RECORDING_PATHS.cutover_minimum))throw failed('baseline_path_invalid');
+ // Loaded here, not at the top: that module imports this one, and only this explicit path may reach it.
+ const {cutoverMinimumGate}=await import('./film-person-cutover-minimum.js');
+ const gate=await cutoverMinimumGate(ledger);
+ const reasons=[...gate.reasons];
+ if(gate.gate!==path.gate||gate.version!==path.version)reasons.push('gate_identity');
+ // The measurement is bound to the marker generation it is recorded at: a ledger of another generation (or of a marker that was not r2) is not this baseline.
+ const marker=ledger?.cutoverMinimum?.source?.d1?.after?.marker;
+ if(!(marker&&marker.mode==='r2'&&marker.generation===expectedGeneration))reasons.push('ledger_generation_mismatch');
+ return {gate:{pass:gate.pass===true&&reasons.length===0,reasons},reference:recordingReference(path,ledger?.cutoverDigest)};
+}
+export async function recordBaselineVerified(env,{ledger,expectedGeneration,at,path}){
  if(typeof at!=='string'||!Number.isInteger(expectedGeneration))throw failed('baseline_invalid');
- const gate=await baselineGate(ledger);
+ const {gate,reference}=await recordingOf(ledger,path,expectedGeneration);
  if(!gate.pass){const error=failed('baseline_gate_failed');error.reasons=gate.reasons;throw error;}
  await markerR2(env,expectedGeneration);
  const db=database(env);
  const row=await one(db,'SELECT state, reference FROM film_person_baseline WHERE id=1');
- if(row?.state==='verified'&&row.reference===ledger.digest)return {state:'verified',reference:ledger.digest,already:true};
+ if(row?.state==='verified'&&row.reference===reference)return {state:'verified',reference,already:true};
  if(row?.state==='verified')throw failed('baseline_state_changed');
  await runBatch(env,[MARKER_R2(expectedGeneration),
   [fenced.assertSql("EXISTS (SELECT 1 FROM film_person_baseline WHERE id=1 AND state IN ('empty','loading'))"),[]],
-  ["UPDATE film_person_baseline SET state='loading', reference=?, updated_at=? WHERE id=1",[ledger.digest,at]],
-  ["UPDATE film_person_baseline SET state='verified', reference=?, updated_at=? WHERE id=1",[ledger.digest,at]]],expectedGeneration);
- return {state:'verified',reference:ledger.digest,already:false};
+  ["UPDATE film_person_baseline SET state='loading', reference=?, updated_at=? WHERE id=1",[reference,at]],
+  ["UPDATE film_person_baseline SET state='verified', reference=?, updated_at=? WHERE id=1",[reference,at]]],expectedGeneration);
+ return {state:'verified',reference,already:false};
 }
