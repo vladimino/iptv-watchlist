@@ -1,6 +1,6 @@
 # Read paths and repair owners
 
-This page shows what a GET, a HEAD or an MCP read tool may touch, which reads **still write today** and which writer owns each repair. It follows [ADR 0107](../adr/0107-get-head-read-side-effect-boundary.md) (Accepted) and [ADR 0108](../adr/0108-epg-mirror-reconciliation-writer.md) (Proposed). Solid arrows are current behavior verified by `tests/get-write-audit.mjs`; the dashed arrows are the remaining **target** for prediction-run settlement, the event outbox and the ratings-seed overlay. Nothing here authorizes a production operation.
+This page shows what a GET, a HEAD or an MCP read tool may touch, which reads **still write today** and which writer owns each repair. It follows [ADR 0107](../adr/0107-get-head-read-side-effect-boundary.md) (Accepted) and [ADR 0108](../adr/0108-epg-mirror-reconciliation-writer.md) (Accepted). Solid arrows are current behavior verified by `tests/get-write-audit.mjs`; the dashed arrows are the remaining **target** for prediction-run settlement, the event outbox and the ratings-seed overlay. Nothing here authorizes a production operation.
 
 ```mermaid
 flowchart LR
