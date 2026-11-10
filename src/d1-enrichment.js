@@ -964,8 +964,10 @@ async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,
     if(result.leaseLost||result.windowLost||result.authorityMoved||result.budgetStop||!budgetLeft()){filmAt--;if(consumed)perEntityFilms++;continue;}
     const pending=syncById.get(entry.id)||null;
     await fenced(async()=>{
-     await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true});
-     for(const redirect of entry.film.redirects||[])await repository.projectLink({survivor:entry.film,redirect});
+     // AIR-405: the redirects go with the Film write (the Films they retire hold trusted ids the survivor carries) and with every link (a link may retire one of several).
+     const redirects=entry.film.redirects||[],retiring=redirects.map(item=>item.from);
+     await repository.projectFilm({film:entry.film,watchlist:entry.watchlist,credits:entry.credits,metadata:entry.metadata??undefined,preserveCanonical:entry.preserveCanonical===true,redirects});
+     for(const redirect of redirects)await repository.projectLink({survivor:entry.film,redirect,releasing:retiring});
      if(pending)await writeSync(pending);
      await state('film',entry.id,entry.key);
     });

@@ -23,7 +23,23 @@ export function createCanonicalRepository(db){
 // membership and the credits R2 supplies. It never writes the fingerprint or prediction dimensions, and it keeps the credits
 // only D1 holds: TMDB credits added to a watchlist Film (AIR-286) stay, renumbered after the R2 credits of their role, unless the
 // R2 roster already lists the same person in that role.
-async function projectFilm(db,input){await writeFilm(db,await planFilm(db,{...input,owner:'enrichment'}));}
+// AIR-405: a Film that carries redirects is written together with the links that retire the Films it replaces, in the caller's one transaction. The trusted external ids
+// are unique over all Films, and the Film this write retires still holds the ids the survivor now carries: planFilm may accept an owner only if the write really
+// retires it, and the owner's ids must be released before the survivor's are inserted. So every redirect is planned first, the way projectLink plans it (it must target
+// this Film, must not repeat a stored redirect to another target, and the retired Film must have no generation or EPG history: any of these refuses the whole write), and
+// only the owners of redirects that have not been stored yet are named as releasing. An owner this write does not retire still refuses the Film with identity_collision.
+// projectLink repeats the release, writes the Film's link facts and retires the Film.
+async function projectFilm(db,input){
+ const released=[];
+ for(const redirect of Array.isArray(input?.redirects)?input.redirects:[]){
+  if(!redirect||redirect.to!==input.film?.id)throw new Error('Redirect target must be the survivor');
+  const retirement=await planRetirement(db,redirect);
+  if(retirement.release)released.push(retirement.from);
+ }
+ const plan=await planFilm(db,{...input,owner:'enrichment',releasing:released});
+ for(const from of released)await db.run('DELETE FROM film_external_id WHERE film_id=?',[from]);
+ await writeFilm(db,plan);
+}
 async function projectPerson(db,input){await writePerson(db,await planPerson(db,input));}
 async function projectLink(db,input){const {plan,retirement}=await planLink(db,{...input,owner:'enrichment'});await writeLink(db,plan,retirement);}
 // A Film no R2 source lists any more keeps its row, credits and history: they stay true of the Film. Only the membership goes.
@@ -70,7 +86,7 @@ async function planLink(db,input){
  const survivorListed=await db.get('SELECT 1 AS ok FROM watchlist_film WHERE film_id=?',[survivor.id]);
  const retiredListed=redirect?await db.get('SELECT 1 AS ok FROM watchlist_film WHERE film_id=?',[redirect.from]):null;
  const watchlist=input.watchlist===true?true:input.watchlist===false?false:(survivorListed||retiredListed?true:null);
- const plan=await planFilm(db,{...input,film:survivor,watchlist,releasing:redirect?.from??null});
+ const plan=await planFilm(db,{...input,film:survivor,watchlist,releasing:[redirect?.from,...releasingOf(input.releasing)].filter(Boolean)});
  const retirement=redirect?await planRetirement(db,redirect):null;
  if(retirement&&!retirement.release)plan.keepHistory=true;
  return {plan,retirement};
@@ -81,6 +97,9 @@ async function writeLink(db,plan,retirement){
  await writeFilm(db,plan);
  if(retirement?.release){await adoptRetired(db,retirement);await retireFilm(db,retirement);}
 }
+
+// The Films a write retires, named by the caller: a Film id or a list of them. Empty when none.
+function releasingOf(value){return value==null?[]:Array.isArray(value)?value:[value];}
 
 async function planFilm(db,input){
  const film=input?.film;
@@ -93,10 +112,11 @@ async function planFilm(db,input){
  if(input.preserveCanonical===true&&await db.get('SELECT id FROM film WHERE id=?',[id]))return {film:{id},metadata:undefined,credits:undefined,watchlist,owner,kept:[],preserveCanonical:true,updatedAt:updatedAtOf(film)};
  const stored=await dimensionRow(db,'film_dimension','film_id',id,'localization');
  const guarded=guardReviewed(film,stored,'title');
+ const releasing=new Set(releasingOf(input.releasing));
  for(const item of guarded.externalIds||[]){
   if(!item?.trusted||item.conflicting)continue;
   const ownerRow=await db.get('SELECT film_id FROM film_external_id WHERE scheme=? AND value=? AND trusted=1 AND conflicting=0',[item.scheme,String(item.value)]);
-  if(ownerRow&&ownerRow.film_id!==id&&ownerRow.film_id!==input.releasing)throw new Error('identity_collision');
+  if(ownerRow&&ownerRow.film_id!==id&&!releasing.has(ownerRow.film_id))throw new Error('identity_collision');
  }
  const kept=owner==='enrichment'&&input.credits!==undefined&&watchlist===true?await db.all("SELECT person_id,role,ordinal FROM film_person_credit WHERE film_id=? AND person_id LIKE 'person:tmdb!_%' ESCAPE '!' ORDER BY role,ordinal",[id]):[];
  return {film:guarded,metadata:input.metadata===undefined?undefined:input.metadata,credits:input.credits,watchlist,owner,kept,updatedAt:updatedAtOf(guarded)};
