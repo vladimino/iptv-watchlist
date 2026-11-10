@@ -104,7 +104,8 @@ const FILE_SITES={
  'src/owner-review-d1.js':{r2:2,wrapper:0,dynamic:0},
  'src/prediction-d1.js':{r2:5,wrapper:0,dynamic:0},
  'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
- 'src/worker.js':{r2:14,wrapper:47,dynamic:18},
+ // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
+ 'src/worker.js':{r2:15,wrapper:47,dynamic:19},
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -176,6 +177,7 @@ const classes={
  'writeLedgerSegment@src/worker.js':'under the publication lease',
  'putKnownLength@src/worker.js':'under the publication lease',
  'writeEvent@src/worker.js':'EPG event log (not a projector input)',
+ 'writeDiscoveryEvent@src/worker.js':'Discovery tick entry of the events log (AIR-410): create-only under events/items, after the tick settled; not a projector input',
  'writeWorkflowState@src/discovery-workflow.js':'Workflow record: D1-routed, refused inside a held window by windowHeldGuard',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
