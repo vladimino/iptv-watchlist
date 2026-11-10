@@ -10,6 +10,9 @@ export const PREDICTION_HISTORY_LIMIT=80;
 export const PREDICTION_QUEUE_CHARS=900000;
 export const PREDICTION_INDEX_CHUNK=80;
 export const PREDICTION_INDEX_LIMIT=5000;
+// The overlay reads the D1 prediction rows in keyset pages. Its cost is the number of rows, not the number of view-index keys.
+export const PREDICTION_OVERLAY_PAGE=300;
+export const PREDICTION_OVERLAY_ROWS=20000;
 export const PREDICTION_BIND_LIMIT=100;
 export const PREDICTION_PRUNE_CHUNK=80;
 export const PREDICTION_STATEMENT_BYTES=100*1024;
@@ -568,30 +571,38 @@ export async function openProfile(env){
  return {mode:'r2',version:authority.version,generation:authority.generation,object,value:object?await object.json():null};
 }
 
+// Rows of one prediction table that belong to a film in the index, read in keyset pages (film_id is the primary key). A table
+// beyond PREDICTION_OVERLAY_ROWS rows is refused and nothing is returned. Rows of films outside the index are read and dropped.
+async function overlayRows(db,sql,wanted){
+ const rows=[];let after='',total=0;
+ for(;;){
+  const page=await many(db,sql,[after,PREDICTION_OVERLAY_PAGE]);
+  total+=page.length;
+  if(total>PREDICTION_OVERLAY_ROWS)throw failed('prediction_domain_budget',undefined,'overlay_rows');
+  for(const row of page)if(wanted.has(row.filmId))rows.push(row);
+  if(page.length<PREDICTION_OVERLAY_PAGE)return rows;
+  after=page[page.length-1].filmId;
+ }
+}
 export async function overlayIndex(env,index,moodFacet){
  const direct=!!env&&typeof env.prepare==='function'&&env.BUCKET==null;
  const db=direct?env:(env?.DB??null);
  const authority=await readPredictionAuthority(db,direct?undefined:env);
  if(authority.mode!=='d1')return index;
  const next={...(index||{})};
- const ids=Object.keys(next);
- if(ids.length>PREDICTION_INDEX_LIMIT)throw failed('prediction_domain_budget',undefined,'index_limit');
+ const ids=Object.keys(next),wanted=new Set(ids);
  const byFilm=new Map();
- for(let start=0;start<ids.length;start+=PREDICTION_INDEX_CHUNK){
-  const chunk=ids.slice(start,start+PREDICTION_INDEX_CHUNK);
-  const marks=chunk.map(()=>'?').join(',');
-  const [fingerprints,pointers]=await Promise.all([
-   many(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id IN ('+marks+')',chunk),
-   many(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id IN ('+marks+')',chunk),
-  ]);
-  for(const row of fingerprints){
-   let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
-   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
-  }
-  for(const row of pointers){
-   let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
-   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
-  }
+ const [fingerprints,pointers]=await Promise.all([
+  overlayRows(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id>? ORDER BY film_id LIMIT ?',wanted),
+  overlayRows(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id>? ORDER BY film_id LIMIT ?',wanted),
+ ]);
+ for(const row of fingerprints){
+  let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
+  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
+ }
+ for(const row of pointers){
+  let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
+  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
  }
  for(const filmId of ids){
   const item={...(next[filmId]||{})};
