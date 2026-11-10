@@ -93,7 +93,9 @@ const FILE_SITES={
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
  'src/discovery-workflow.js':{r2:1,wrapper:0,dynamic:0},
  'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
- 'src/enrichment.js':{r2:11,wrapper:42,dynamic:28},
+ // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
+ // events): not a projector input and not on a Discovery, admin-recovery or publication path.
+ 'src/enrichment.js':{r2:11,wrapper:44,dynamic:30},
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},

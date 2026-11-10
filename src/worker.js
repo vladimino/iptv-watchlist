@@ -1117,6 +1117,8 @@ const SEAL_REQUEST_BUDGET_MS=32000;
 const SEAL_PUBLICATION_BUDGET_MS=20000;
 // AIR-420: a flush hands sealWrite more than one batch can hold, so every batch is as full as its statement cap allows.
 const SEAL_FLUSH_ITEMS=400;
+// AIR-422: the catalog step hands upsertAdmissions this many films at a time; it stops at the step deadline between batches.
+const SEAL_CATALOG_FLUSH=2000;
 // AIR-362: a seal step that finds the lease held answers `wait` with the holder's real expiry plus this margin, never more
 // than one lease TTL from now. A cancelled step keeps its lease until it expires; the caller waits for that, once.
 // ADR 0103 (AIR-383). A projector window is not a failure of the EPG publication. The three publication paths that take the Discovery
@@ -1247,20 +1249,22 @@ async function sealCatalogStep(env,run,lease,deadline){
  const current=await loadJSON(env,'epg/discovered-films.json')||{};
  const changed=Object.keys(next).filter(id=>JSON.stringify(next[id])!==JSON.stringify(current[id])).sort();
  const stale=Object.keys(current).filter(id=>!Object.hasOwn(next,id));
- let written=0;
- // At least one batch per step, so a step with its time already spent still moves.
- for(let at=0;at<changed.length;at+=19){
-  const slice=changed.slice(at,at+19);
-  const result=await DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(slice.map(id=>[id,next[id]])),{lease});
-  written+=result.written.length;
+ // AIR-422: the films go to upsertAdmissions in flushes; it packs each batch to its caps and carries the generation from one batch to the
+ // next, so a batch is one D1 round trip. At least one batch per step, so a step with its time already spent still moves.
+ let written=0,batches=0,reads=0,writeMs=0,carried=null;
+ for(let at=0;at<changed.length;){
+  const slice=changed.slice(at,at+SEAL_CATALOG_FLUSH),started=Date.now();
+  const result=await DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(slice.map(id=>[id,next[id]])),{lease,carried,deadline});
+  writeMs+=Date.now()-started;written+=result.written.length;batches+=result.batches||0;reads+=result.reads||0;carried=result.carried||null;
   if(result.refused.length)throw new Error('admission_identity_conflict');
+  at+=slice.length-(result.remaining||0);
   if(Date.now()>=deadline)break;
  }
  // Done only when a step finds nothing to write: the merge depends on what D1 holds, so the step that writes the last
  // films is followed by one that confirms the difference is empty.
  const left=changed.length-written;
  if(!changed.length&&stale.length)await DiscoveryAuthority.supersedeAdmissions(env,stale,{lease});
- return {done:!changed.length,remaining:left,stale:stale.length,written};
+ return {done:!changed.length,remaining:left,stale:stale.length,written,items:written,batches,reads,writeMs};
 }
 // AIR-353: the publication is three bounded steps. On 6 November 2026 one combined step took 83.7 s of wall time
 // (2.4 s entry, 31.4 s pointer, mirrors, copy and discovery intent, 44.0 s commit tail of which the prediction queue
@@ -1386,7 +1390,7 @@ async function sealStep(env,run,entryAt=Date.now()){
    return sealResponse(run,{},{seal:{cursor:result.state.cursorItems,itemTotal:result.state.itemTotal,ledgerPhase:result.state.phase}});
   }
   if(run.seal.phase==='catalog'){
-   const result=await tracedPhase(run.runId,'seal_catalog',()=>sealCatalogStep(env,run,lease,deadline),value=>({remaining:value.remaining,stale:value.stale,written:value.written}));
+   const result=await tracedPhase(run.runId,'seal_catalog',()=>sealCatalogStep(env,run,lease,deadline),value=>({remaining:value.remaining,stale:value.stale,written:value.written,items:value.items,batches:value.batches,reads:value.reads,writeMs:value.writeMs}));
    if(result.done)run.seal.phase='publish';
    run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
    return sealResponse(run,{},{seal:{catalogRemaining:result.remaining}});
@@ -1583,7 +1587,7 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/epg/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await EpgOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(url.pathname==='/api/letterboxd/ratings/executor'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await RatingsOrchestration.handle(env,body);return json(reply.body,reply.status);}
   if(['/api/letterboxd/ratings/start','/api/letterboxd/ratings/step','/api/letterboxd/ratings/migrate'].includes(url.pathname)&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}const reply=await LetterboxdRatings.handle(env,url.pathname.slice('/api/letterboxd/ratings/'.length),body);return json(reply.body,reply.status);}
-  if(url.pathname==='/api/events'&&request.method==='GET'){await recoverStopEvents(env);const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
+  if(url.pathname==='/api/events'&&request.method==='GET'){const cursor=url.searchParams.get('cursor');if(cursor&&cursor.length>4000)return json({error:'Invalid cursor'},400);return json(await eventPage(env,cursor));}
   if(url.pathname==='/api/events/bootstrap'&&request.method==='POST'){await bootstrapEvents(env);return json({ok:true});}
   if(url.pathname==='/api/started'&&request.method==='GET')return json({ids:await startedFilms(env)});
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
