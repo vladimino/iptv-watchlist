@@ -66,6 +66,32 @@ const INPUT={
 const gateRowsOk=file=>{const r=sqliteSync(['-json',file],{input:"SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('film_person_authority','film_person_baseline','film_person_cas','discovery_authority','published_epg_authority','owner_review_authority','projector_window','film','projection_run');"});for(const t of JSON.parse(r.stdout||'[]'))sqlite(file,'DROP TRIGGER '+t.name+';');};
 const run=async(over={})=>{const bucket=over.bucket||await fakeBucket(INPUT);const file=over.file||database();gateRowsOk(file);const db=d1Standin(file,over.standin||{});const result=await C.captureProjectorInputs({client:bucket.client(),db,now:NOW,...over.options});return {bucket,file,db,result};};
 
+// AIR-418: the derived-payload binding is pure (no database, no bucket), so it runs first: the mutation check (film-person-capture-mutation.mjs) runs this whole
+// file once per mutant, and a mutant of verifyDerived is now killed in a fraction of a second instead of after every section above it. Nothing was removed;
+// the end-to-end refusal of a tampered derived set stays in section 12.
+{
+ const man=(derived,routes,after={published:{generation:3,programmeRunId:'run-1'},owner:{generation:2}})=>({runId:'run-1',routes,derived,d1:{after}});
+ const sha256=v=>createHash('sha256').update(JSON.stringify(v,(_k,val)=>val&&typeof val==='object'&&!Array.isArray(val)?Object.fromEntries(Object.keys(val).sort().map(k=>[k,val[k]])):val)).digest('hex');
+ const catalog={b:1,a:{y:2,x:1}},resolution={r:1},owner={o:1},pub={generation:3,programmeRunId:'run-1',programme:{films:[1]},watchlist:{films:[2]}};
+ const derived={publishedEpg:{generation:3,programmeRunId:'run-1',sha256:sha256({programme:pub.programme,watchlist:pub.watchlist})},discoveryCatalog:{sha256:sha256(catalog)},discoveryResolution:{sha256:sha256(resolution)},ownerReviews:{generation:2,sha256:sha256(owner)}};
+ const routes={publishedEpg:true,discovery:true,ownerReview:true};
+ const good={publishedEpg:pub,discoveryCatalog:catalog,discoveryResolution:resolution,ownerReviews:owner};
+ assert.deepEqual(C.verifyDerived(man(derived,routes),good),[]);
+ // canonical, order-independent serialization: the same object with its keys in another order verifies
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,discoveryCatalog:{a:{x:1,y:2},b:1}}),[]);
+ for(const id of ['publishedEpg','discoveryCatalog','discoveryResolution','ownerReviews']){
+  const mutated={...good,[id]:id==='publishedEpg'?{...pub,watchlist:{films:[3]}}:{...good[id],extra:1}};
+  assert.deepEqual(C.verifyDerived(man(derived,routes),mutated),['derived_digest:'+id],'a well-formed but mutated '+id+' is refused');
+  const missing={...good};delete missing[id];
+  assert.deepEqual(C.verifyDerived(man(derived,routes),missing),['derived_missing:'+id],id+' missing');
+ }
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,publishedEpg:{...pub,generation:4}}),['derived_identity:publishedEpg'],'a payload from another generation is refused');
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,publishedEpg:{...pub,programmeRunId:'run-2'}}),['derived_identity:publishedEpg']);
+ assert.deepEqual(C.verifyDerived(man(derived,routes,{published:{generation:3,programmeRunId:'run-1'},owner:{generation:9}}),good),['derived_identity:ownerReviews'],'owner payload bound to the recorded owner generation');
+ assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,surprise:{}}),['derived_extra:surprise']);
+ assert.deepEqual(C.verifyDerived(man({},{publishedEpg:false,discovery:false,ownerReview:false}),{discoveryCatalog:{}}),['derived_extra:discoveryCatalog']);
+ assert.ok(C.verifyDerived(man({...derived},{...routes,discovery:false}),good).some(item=>item.startsWith('derived_route_mismatch')),'a payload recorded for a route the manifest says is closed');
+}
 // 1. the allowlist is one constant derived from the projector's loader: every R2 key the loader names is in it, and nothing else is
 {
  const loader=fs.readFileSync('src/d1-enrichment.js','utf8');
@@ -465,27 +491,7 @@ const enc=values=>JSON.stringify(values);
  assert.deepEqual(C.identityMoved({...base.cap.manifest.d1.after,lease:{held:true}},base.cap.manifest.d1.after),[],'leases are not identity');
 
  // ---- derived payload binding ----
- const man=(derived,routes,after={published:{generation:3,programmeRunId:'run-1'},owner:{generation:2}})=>({runId:'run-1',routes,derived,d1:{after}});
- const sha256=v=>createHash('sha256').update(JSON.stringify(v,(_k,val)=>val&&typeof val==='object'&&!Array.isArray(val)?Object.fromEntries(Object.keys(val).sort().map(k=>[k,val[k]])):val)).digest('hex');
- const catalog={b:1,a:{y:2,x:1}},resolution={r:1},owner={o:1},pub={generation:3,programmeRunId:'run-1',programme:{films:[1]},watchlist:{films:[2]}};
- const derived={publishedEpg:{generation:3,programmeRunId:'run-1',sha256:sha256({programme:pub.programme,watchlist:pub.watchlist})},discoveryCatalog:{sha256:sha256(catalog)},discoveryResolution:{sha256:sha256(resolution)},ownerReviews:{generation:2,sha256:sha256(owner)}};
- const routes={publishedEpg:true,discovery:true,ownerReview:true};
- const good={publishedEpg:pub,discoveryCatalog:catalog,discoveryResolution:resolution,ownerReviews:owner};
- assert.deepEqual(C.verifyDerived(man(derived,routes),good),[]);
- // canonical, order-independent serialization: the same object with its keys in another order verifies
- assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,discoveryCatalog:{a:{x:1,y:2},b:1}}),[]);
- for(const id of ['publishedEpg','discoveryCatalog','discoveryResolution','ownerReviews']){
-  const mutated={...good,[id]:id==='publishedEpg'?{...pub,watchlist:{films:[3]}}:{...good[id],extra:1}};
-  assert.deepEqual(C.verifyDerived(man(derived,routes),mutated),['derived_digest:'+id],'a well-formed but mutated '+id+' is refused');
-  const missing={...good};delete missing[id];
-  assert.deepEqual(C.verifyDerived(man(derived,routes),missing),['derived_missing:'+id],id+' missing');
- }
- assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,publishedEpg:{...pub,generation:4}}),['derived_identity:publishedEpg'],'a payload from another generation is refused');
- assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,publishedEpg:{...pub,programmeRunId:'run-2'}}),['derived_identity:publishedEpg']);
- assert.deepEqual(C.verifyDerived(man(derived,routes,{published:{generation:3,programmeRunId:'run-1'},owner:{generation:9}}),good),['derived_identity:ownerReviews'],'owner payload bound to the recorded owner generation');
- assert.deepEqual(C.verifyDerived(man(derived,routes),{...good,surprise:{}}),['derived_extra:surprise']);
- assert.deepEqual(C.verifyDerived(man({},{publishedEpg:false,discovery:false,ownerReview:false}),{discoveryCatalog:{}}),['derived_extra:discoveryCatalog']);
- assert.ok(C.verifyDerived(man({...derived},{...routes,discovery:false}),good).some(item=>item.startsWith('derived_route_mismatch')),'a payload recorded for a route the manifest says is closed');
+ // (the pure verifyDerived cases run first in this file, see the top; here: the end-to-end refusal)
  // end to end: runParity refuses a tampered derived set before any D1 read
  const routed=await fresh(f=>sql(f,"UPDATE discovery_authority SET mode='d1',cutover='open',programme_run_id='run-1'"));
  assert.equal((await routed.go()).ok,true);

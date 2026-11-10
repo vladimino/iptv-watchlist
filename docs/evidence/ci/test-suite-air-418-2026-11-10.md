@@ -30,20 +30,27 @@ Each of the four slowest files was run alone, with nothing else on the machine:
 
 - `tests/sqlite-session.mjs`: a `-json` call runs in JSON mode unless the same statement shape (the start of the script with literals removed) returned large values before in this process; then it runs as `.mode quote` with headers and `quoteToJson` turns the output into the JSON text the CLI prints. The choice changes the time of a call only. `tests/sqlite-session-semantics.mjs` checks the conversion **byte for byte** against the CLI's own `-json` output for integers, reals, large integers, the infinities, NULL, the empty string, quotes, backslashes, commas, line breaks, tabs, non-ASCII, text that looks like a number, like NULL or like a blob, a duplicate column name and no row, and runs the adaptive path end to end against a process per call.
 - `tests/generation-stage.mjs` is three files with shared fixtures in `tests/generation-stage-lib.mjs`: `generation-stage.mjs` (published 1.25x), `generation-stage-withheld.mjs` (withheld 1.25x), `generation-stage-faults.mjs` (the fault matrix). Every assertion is kept: 141 `assert` lines before, 139 in the three files plus the two in the shared helpers. `dump()` compares the rows as the lines sqlite printed, sorted; two databases are equal row for row exactly when those are equal.
+- `tests/film-person-capture.mjs`: the pure `verifyDerived` cases (no database, no bucket) run first. The mutation file runs this whole file once per mutant, so a mutant of `verifyDerived` is killed in a fraction of a second instead of after every section above it. The 37 mutants run one after another took 67.1 s before and 44.6 s after; all 37 are still killed, and the file has the same 193 `assert` calls.
 - `scripts/run-tests.mjs`: the scheduling hint lists the new files. No runner contract changed.
-- Not changed: `film-person-capture-mutation` (all 37 mutants are still killed), `epg-r2-known-length`, the job count (6), every threshold.
+- Not changed: `film-person-capture-mutation.mjs` itself, `epg-r2-known-length`, the job count (6; 5 and 4 were measured locally on the changed suite at 115.8 s and 125.4 s against 106.6 s), every threshold.
 
 ## Result (local)
 
 | Where | Files | Wall | Summed file time | Slowest |
 | --- | ---: | ---: | ---: | --- |
-| Local, this change, jobs 6 | 295 | 106.6 s | 577.3 s | `film-person-capture-mutation` 71.8 s, `generation-stage` 43.7 s, `epg-r2-known-length` 26.8 s, `generation-stage-withheld` 23.5 s |
+| Local, adapter and split only, jobs 6 | 295 | 106.6 s | 577.3 s | `film-person-capture-mutation` 71.8 s, `generation-stage` 43.7 s, `epg-r2-known-length` 26.8 s, `generation-stage-withheld` 23.5 s |
+| Local, this change complete, jobs 6 | 295 | 103.8 s | 561.7 s | `film-person-capture-mutation` 55.7 s, `generation-stage` 39.6 s, `discovery-decisions-read` 27.5 s, `epg-r2-known-length` 26.2 s |
 
 Files alone: `prediction-queue-budget` 82.0 s to 5.8 s; the three `generation-stage` files 25.0 s, 12.1 s and 2.9 s (44.7 s as one file).
 
 ## Result (GitHub Actions)
 
-The runs on the pull request are recorded in the pull request and on the card: the acceptance is three complete runs on one final HEAD, each `Run tests` step at most 180 s.
+| Run | HEAD | Files | `Run tests` | Wall reported by the runner | Summed file time |
+| --- | --- | ---: | ---: | ---: | ---: |
+| [42856218757](https://github.com/vladimino/iptv-watchlist/actions/runs/42856218757), attempt 1 | `0d6eba8` (adapter and split only) | 297 | 150 s | 149.2 s | 851.9 s |
+| 42856218757, attempt 2 | `0d6eba8` | 297 | 145 s | not read | not read |
+
+Slowest in attempt 1: `generation-stage` 74.7 s, `film-person-capture-mutation` 71.1 s, `epg-r2-known-length` 48.7 s, `discovery-decisions-read` 42.3 s, `generation-stage-withheld` 39.6 s. The three runs on the final HEAD (with the `film-person-capture` order) are recorded in the pull request and on the card: the acceptance is three complete runs on one final HEAD, each `Run tests` step at most 180 s. The runner's speed varies between runs of the same code (the baseline day saw 119 s and 249 s on adjacent commits), so a single run is never the result.
 
 ## For new heavy tests
 
