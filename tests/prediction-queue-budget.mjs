@@ -50,6 +50,7 @@ const start=async(initial)=>{
  return {db,bucket,env:{DB:db,BUCKET:bucket}};
 };
 const read=async env=>(await routeRead(env,KEY)).value;
+const unwrap=text=>JSON.parse(text.replace(/^dict1:/,''));
 const same=(a,b)=>assert.equal(JSON.stringify(a),JSON.stringify(b));
 
 // 1. The 8 Nov generation (3109 outstanding) fits plain: the stored text is byte-identical to the plain document, so an older Worker reads it.
@@ -80,6 +81,8 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
  const text=stored(db);
  console.log('new generation plain',nextText.length,'encoded',text.length,'chunks',chunks(db),'write ms',ms.toFixed(0),'ratio',(text.length/nextText.length).toFixed(2));
  assert.ok(text.length<=PREDICTION_QUEUE_CHARS);
+ assert.ok(text.startsWith('dict1:'),'the encoded text is not valid JSON, so a build without this support cannot parse it');
+ assert.throws(()=>JSON.parse(text));
  assert.match(text,/"\$queueEncoding":"dict1"/);
  assert.ok(chunks(db)>=Math.ceil(text.length/40000));
  for(const row of db.sql('SELECT chunk_text FROM prediction_queue'))assert.ok(new TextEncoder().encode(row.chunk_text).length+160<=PREDICTION_STATEMENT_BYTES);
@@ -113,8 +116,8 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
  await writeQueue(env,await openQueue(env),odd);
  const text=stored(db);
  assert.match(text,/dict1/);
- assert.deepEqual(JSON.parse(text).pending,[1,2]);
- assert.ok(!JSON.parse(text).$queueEncoded.includes('pending'));
+ assert.deepEqual(unwrap(text).pending,[1,2]);
+ assert.ok(!unwrap(text).$queueEncoded.includes('pending'));
  same(await read(env),odd);
 }
 
@@ -173,8 +176,13 @@ assert.ok(nextText.length>PREDICTION_QUEUE_CHARS,'the new generation must exceed
   duplicateIds:doc=>{doc.$queueIds[1]=doc.$queueIds[0];},
   unknownField:doc=>{doc.$queueEncoded.push('retries');},
  };
+ // The prefix and the marker go together.
+ store(good.slice('dict1:'.length));
+ same(await read(env),next); // an encoded queue written without the prefix by the first build that had dict1 is still read
+ store('dict1:'+JSON.stringify(old));
+ await assert.rejects(read(env),error=>error.code==='prediction_domain_unavailable','prefix without marker');
  for(const [name,mutate] of Object.entries(cases)){
-  const doc=JSON.parse(good);mutate(doc);store(JSON.stringify(doc));
+  const doc=unwrap(good);mutate(doc);store('dict1:'+JSON.stringify(doc));
   await assert.rejects(read(env),error=>error.code==='prediction_domain_unavailable',name);
  }
 }

@@ -234,8 +234,10 @@ function queuePieces(text){
 // byte-identical to before and an older Worker reads it. Only a document that would exceed the cap is stored in the `dict1` encoding:
 // each film id is written once in `ids`, the lists hold integer references, and the repeated per-film `priority` and `work` values are
 // written once each in `table`. loadQueue expands it back to the exact plain document, so no reader sees a different shape.
-// An older Worker cannot read `dict1` and fails closed (prediction_domain_unavailable) until the next rebuild writes a plain document.
+// The encoded text starts with `dict1:` so it is not valid JSON: a Worker without this support fails closed in JSON.parse
+// (prediction_domain_unavailable) instead of reading the references as film ids. A compatible build must rewrite the queue as plain.
 const QUEUE_ENCODING='dict1';
+const QUEUE_PREFIX=QUEUE_ENCODING+':';
 const QUEUE_LISTS=['pending','hotPending','coldPending'];
 const QUEUE_MAPS=['priority','work'];
 const isPlainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
@@ -259,10 +261,10 @@ function encodeQueueDocument(plain){
   out[name]={k:keys,v:values};encoded.push(name);
  }
  out.$queueEncoding=QUEUE_ENCODING;out.$queueEncoded=encoded;out.$queueIds=ids;out.$queueTable=table;
- const text=JSON.stringify(out);
+ const body=JSON.stringify(out);
  // The encoding is accepted only when it expands to the identical document.
- if(JSON.stringify(decodeQueueDocument(JSON.parse(text)))!==JSON.stringify(doc))throw failed('prediction_domain_unavailable');
- return text;
+ if(JSON.stringify(decodeQueueDocument(JSON.parse(body)))!==JSON.stringify(doc))throw failed('prediction_domain_unavailable');
+ return QUEUE_PREFIX+body;
 }
 function decodeQueueDocument(doc){
  if(!isPlainObject(doc)||!Object.hasOwn(doc,'$queueEncoding'))return doc;
@@ -301,7 +303,11 @@ function queueStatements(text,generation){
 async function loadQueue(db){
  const rows=await many(db,'SELECT chunk_text AS chunk FROM prediction_queue ORDER BY seq');
  if(!rows.length)return null;
- let doc;try{doc=JSON.parse(rows.map(row=>row.chunk).join(''));}catch{throw failed('prediction_domain_unavailable');}
+ const text=rows.map(row=>row.chunk).join('');
+ let doc;try{doc=JSON.parse(text.startsWith(QUEUE_PREFIX)?text.slice(QUEUE_PREFIX.length):text);}catch{throw failed('prediction_domain_unavailable');}
+ // New writes always carry the prefix. An encoded document without it was written by the first build that had `dict1` and is read as before.
+ // A prefix without the marker is damage.
+ if(text.startsWith(QUEUE_PREFIX)&&!(isPlainObject(doc)&&Object.hasOwn(doc,'$queueEncoding')))throw failed('prediction_domain_unavailable');
  return decodeQueueDocument(doc);
 }
 async function loadProfile(env){
