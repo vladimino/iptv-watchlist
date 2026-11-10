@@ -702,7 +702,7 @@ async function flushEpgEvent(env,run){
  catch(e){console.error(JSON.stringify({event:'epg_event_pending',runId:String(run.runId||'').slice(0,64)}));}
 }
 async function finishSyncPersist(env,run,report){await persistWatchlist(env,run,report);await persistScan(env,run,report);await persistEvents(env,run,report);}
-async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -1356,7 +1356,7 @@ async function sealQueueStep(env,run,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;
  const out=await sealUnits(env,run,deadline,[
-  {name:'refresh',phase:'queue',work:async()=>{try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=String(e.message).slice(0,160);}return 'ok';}},
+  {name:'refresh',phase:'queue',work:async()=>{try{await refreshPredictionQueue(env,report,'programme_updated');}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);}return 'ok';}},
  ]);
  if(!out.done)return await sealCheckpoint(env,run,out);
  await prepareEpgCompletion(env,run,report);
