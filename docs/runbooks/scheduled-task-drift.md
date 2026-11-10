@@ -12,6 +12,8 @@ The independent Cloudflare-native monitor watches EPG, Discovery, Ratings and Pr
 
 The retired Daily EPG Task and the retired Ratings Task are disabled on purpose and are **not** checked by the registry-only drift automation: finding them disabled is the expected state, and the Worker refuses their write paths (`external_writer_fenced`). The Cloudflare EPG, Discovery and Ratings Workflows are observed by the Worker monitor.
 
+The 14 disabled Tasks are listed with a decision for each (all retirement candidates, none approved for deletion) in the [registry inventory](../evidence/orchestration/scheduled-task-registry-inventory-2026-11-10.md).
+
 The proposed prompt for the single-Task scope is [drift-hourly-only](../reference/scheduled-task-prompts/drift-hourly-only.md). The live prompt changes only by the owner-approved in-place update of the same Task, followed by a registry readback; this runbook and that file never change the live registry.
 
 ## Safety and operations

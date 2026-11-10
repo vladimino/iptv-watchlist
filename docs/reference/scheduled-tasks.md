@@ -45,9 +45,11 @@ The bullets below are the Stage A text the hourly Task carried while Discovery w
 
 ### Fingerprint evidence instruction in the live hourly task (AIR-335, 2026-11-03)
 
+**Historical snapshot of 3 November 2026.** This section records the hourly prompt as it was edited under AIR-335, when it still carried Stage A. Since the owner-approved [AIR-324](https://trello.com/c/kNtaEbm8) edit the live hourly prompt is Stage B only (11,372 characters); the Stage B evidence rules below remain in it, while every mention of Stage A in this section describes that date and not today's prompt.
+
 **Live state, not merely a proposal.** Under the owner's explicit AIR-335 GO in the chat on 3 November 2026, the external `Почасовые прогнозы «В эфире»` Scheduled Task prompt was updated at about 10:27 Europe/Madrid. A separate registry readback around 10:28 confirmed: task enabled, hourly at :20 Europe/Madrid, updated prompt 19,454 characters, and no new evidence-free authority prefix. The entire Stage A discovery section remained byte-identical; Stage B alone gained the following rules. [Dated activation evidence](../evidence/prediction/air-335-hourly-prompt-activation-2026-11-03.md) distinguishes registry acceptance from the still-pending first production fingerprint. This document is a maintained contract, not the executable task registry.
 
-**Active authority guidance.** Mutable prediction state, including queue, profile and fingerprint pointers, prediction current/history, runner files and leases, is D1-authoritative after AIR-317. Immutable fingerprint and prediction bodies remain in R2 bucket `iptv`. Stage A remains unchanged: no `epg_sync_start`, and no `epg_sync_step` unless `epg_status.stage` is `complete`.
+**Active authority guidance.** Mutable prediction state, including queue, profile and fingerprint pointers, prediction current/history, runner files and leases, is D1-authoritative after AIR-317. Immutable fingerprint and prediction bodies remain in R2 bucket `iptv`. On 3 November 2026 Stage A remained unchanged (no `epg_sync_start`, and no `epg_sync_step` unless `epg_status.stage` was `complete`); AIR-324 later removed Stage A from the live prompt and forbids `epg_sync_step` for any reason.
 
 **Active Stage B evidence rules.** Use the map only when the server requests `fingerprint_and_prediction`. On `prediction_only`, reuse the existing Worker fingerprint without writing or inventing its `evidence`:
 
