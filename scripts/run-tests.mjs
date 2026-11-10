@@ -9,6 +9,7 @@ import path from 'node:path';
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
+//   npm test -- --shard 1/2           this part of the suite only (also TEST_SHARD); CI runs the two shards as two jobs (AIR-418)
 //
 // A failing, timed-out or signalled file is never lost: it is named with its exit code or signal and its full stdout and stderr, the runner
 // stops starting new files, lets the running ones finish and exits non-zero. Files in SERIAL_ONLY run alone, after the parallel phase.
@@ -32,11 +33,12 @@ const SERIAL_ONLY=new Set([
 // long ones do not end up alone at the tail. A name that no longer exists, or a new slow file that is missing here, changes the wall time and
 // nothing else: every file still runs exactly once.
 const START_FIRST=[
- 'generation-stage.mjs',
  'film-person-capture-mutation.mjs',
+ 'generation-stage.mjs',
+ 'epg-r2-known-length.mjs',
+ 'generation-stage-withheld.mjs',
  'projector-bulk.mjs',
  'discovery-chunk-budget.mjs',
- 'epg-r2-known-length.mjs',
  'discovery-decisions-read.mjs',
  'discovery-production.mjs',
  'film-person-baseline.mjs',
@@ -89,11 +91,22 @@ export function capture(){
  };
 }
 
-export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY}={}){
+// `shard` is {index, count} (index from 1) or null for the whole suite. The split is taken from the planned order, every count-th file from the index-th on, so
+// the files of START_FIRST (the slow ones) alternate between the shards and every file is in exactly one shard, whatever the count.
+export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null}={}){
  const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
  const parallel=all.filter(file=>!serialOnly.has(file));
  const early=START_FIRST.filter(file=>parallel.includes(file));
- return {parallel:[...early,...parallel.filter(file=>!early.includes(file))],serial:all.filter(file=>serialOnly.has(file)),total:all.length};
+ const mine=list=>shard?list.filter((_,position)=>position%shard.count===shard.index-1):list;
+ const plan={parallel:mine([...early,...parallel.filter(file=>!early.includes(file))]),serial:mine(all.filter(file=>serialOnly.has(file)))};
+ return {...plan,total:plan.parallel.length+plan.serial.length,suite:all.length};
+}
+// "2/3" is shard 2 of 3. Anything else is refused: a typo must not silently run the whole suite, or nothing.
+export function parseShard(value){
+ if(value===undefined||value===null||value==='')return null;
+ const match=/^([1-9]\d*)\/([1-9]\d*)$/.exec(String(value));
+ if(!match||Number(match[1])>Number(match[2]))return undefined;
+ return {index:Number(match[1]),count:Number(match[2])};
 }
 
 async function main(){
@@ -105,7 +118,10 @@ async function main(){
  // jobs 4 = 149 s, 6 = 119 s, 8 = 115 s (docs/evidence/ci/test-suite-air-408-2026-11-10.md); 6 is the default cap, `--jobs` overrides it.
  const jobs=requestedSerial?1:positive(option(args,'jobs','TEST_JOBS',undefined),'--jobs',Math.max(1,Math.min(6,Math.ceil(availableParallelism()*1.5))));
  const timeoutMs=positive(option(args,'timeout-ms','TEST_TIMEOUT_MS',undefined),'--timeout-ms',300000);
- const plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY});
+ const shard=parseShard(option(args,'shard','TEST_SHARD',undefined));
+ if(shard===undefined){console.error(`--shard must be "index/count" with 1 <= index <= count, got "${option(args,'shard','TEST_SHARD',undefined)}"`);process.exit(2);}
+ const plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard});
+ const part=shard?` (shard ${shard.index}/${shard.count} of ${plan.suite} files)`:'';
  // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.
  if(jobs===1){plan.parallel=[...plan.parallel,...plan.serial].sort();plan.serial=[];}
  const running=new Set(),results=[],failures=[];
@@ -183,7 +199,7 @@ async function main(){
  process.on('SIGINT',()=>onSignal('SIGINT'));
  process.on('SIGTERM',()=>onSignal('SIGTERM'));
 
- console.log(`Running ${plan.total} self-contained test files (${jobs===1?'serial':`up to ${jobs} at a time`}${plan.serial.length?`, ${plan.serial.length} serial-only`:''}, ${seconds(timeoutMs)} per file).`);
+ console.log(`Running ${plan.total} self-contained test files${part} (${jobs===1?'serial':`up to ${jobs} at a time`}${plan.serial.length?`, ${plan.serial.length} serial-only`:''}, ${seconds(timeoutMs)} per file).`);
  const notStarted=[...await pool(plan.parallel,jobs)];
  if(!stopping)notStarted.push(...await pool(plan.serial,1));else notStarted.push(...plan.serial);
  const wall=Date.now()-started;
@@ -191,9 +207,9 @@ async function main(){
  const slowest=[...results].sort((a,b)=>b.ms-a.ms).slice(0,10);
  const busy=results.reduce((sum,record)=>sum+record.ms,0);
  process.stdout.write(`\nSlowest files: ${slowest.map(record=>`${record.file} ${seconds(record.ms)}`).join(', ')}\n`);
- process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run, jobs ${jobs}.\n`);
+ process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, jobs ${jobs}.\n`);
  if(process.env.GITHUB_STEP_SUMMARY){
-  const lines=[`### Test runner`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
+  const lines=[`### Test runner${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
   try{appendFileSync(process.env.GITHUB_STEP_SUMMARY,lines.join('\n')+'\n');}catch{}
  }
  // Exit through exitCode, not process.exit(): when stdout or stderr is a pipe (as in CI) process.exit() can cut the report still being written.
@@ -203,7 +219,7 @@ async function main(){
   process.exitCode=1;
   return;
  }
- console.log(`Passed ${results.length} self-contained test files.`);
+ console.log(`Passed ${results.length} self-contained test files${part}.`);
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===path.resolve(new URL(import.meta.url).pathname))await main();
