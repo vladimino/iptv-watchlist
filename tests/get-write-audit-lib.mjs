@@ -171,9 +171,11 @@ export function Probe(bundle){
   restore,
   // `request` is a Request or [path, init]. Returns {status, ...effects}.
   async run(scenario,request,{mcp=null}={}){
-   const file=path.join(root,'p'+(probeCount++)+'.sqlite');
-   fs.copyFileSync(scenario.dbFile,file);
-   const before=hashOf(file);
+   // AIR-418: a probe that wrote nothing to D1 left its copy exactly as the template (no write statement seen and the file hash unchanged), so the next probe of
+   // the same scenario uses that copy, and its sqlite process, again. Any D1 write, classified or not, retires the copy: the next probe starts from a new one.
+   let live=scenario.live;
+   if(!live){const fresh=path.join(root,'p'+(probeCount++)+'.sqlite');fs.copyFileSync(scenario.dbFile,fresh);live=scenario.live={file:fresh,hash:hashOf(fresh)};}
+   const file=live.file,before=live.hash;
    const effects={r2:[],d1:[],statements:[],fetches:[],background:0,dispatches:0,workflows:0,status:0};
    const bucket=new AuditBucket(scenario.snapshot);
    const db=d1Standin(file,{onQuery:async text=>{const shape=d1Shape(text);if(shape){effects.d1.push(shape);effects.statements.push(normalizeSql(text));}},onBatch:async statements=>{for(const item of statements){const shape=d1Shape(item.text);if(shape){effects.d1.push(shape);effects.statements.push(normalizeSql(item.text));}}}});
@@ -198,8 +200,9 @@ export function Probe(bundle){
    }catch(error){effects.status=599;effects.error=String(error?.message||error).slice(0,120);}
    finally{current=null;console.error=logged;}
    effects.r2=bucket.writes;
-   effects.d1Changed=effects.d1.length===0&&hashOf(file)!==before;
-   for(const suffix of ['','-journal','-wal','-shm'])try{fs.rmSync(file+suffix,{force:true});}catch{}
+   const after=hashOf(file);
+   effects.d1Changed=effects.d1.length===0&&after!==before;
+   if(effects.d1.length||after!==before){scenario.live=null;for(const suffix of ['','-journal','-wal','-shm'])try{fs.rmSync(file+suffix,{force:true});}catch{}}
    return effects;
   },
  };

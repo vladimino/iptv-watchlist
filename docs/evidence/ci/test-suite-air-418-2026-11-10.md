@@ -30,16 +30,20 @@ Each of the four slowest files was run alone, with nothing else on the machine:
 
 - `tests/sqlite-session.mjs`: a `-json` call runs in JSON mode unless the same statement shape (the start of the script with literals removed) returned large values before in this process; then it runs as `.mode quote` with headers and `quoteToJson` turns the output into the JSON text the CLI prints. The choice changes the time of a call only. `tests/sqlite-session-semantics.mjs` checks the conversion **byte for byte** against the CLI's own `-json` output for integers, reals, large integers, the infinities, NULL, the empty string, quotes, backslashes, commas, line breaks, tabs, non-ASCII, text that looks like a number, like NULL or like a blob, a duplicate column name and no row, and runs the adaptive path end to end against a process per call.
 - `tests/generation-stage.mjs` is three files with shared fixtures in `tests/generation-stage-lib.mjs`: `generation-stage.mjs` (published 1.25x), `generation-stage-withheld.mjs` (withheld 1.25x), `generation-stage-faults.mjs` (the fault matrix). Every assertion is kept: 141 `assert` lines before, 139 in the three files plus the two in the shared helpers. `dump()` compares the rows as the lines sqlite printed, sorted; two databases are equal row for row exactly when those are equal.
-- `tests/film-person-capture.mjs`: the pure `verifyDerived` cases (no database, no bucket) run first. The mutation file runs this whole file once per mutant, so a mutant of `verifyDerived` is killed in a fraction of a second instead of after every section above it. The 37 mutants run one after another took 67.1 s before and 44.6 s after; all 37 are still killed, and the file has the same 193 `assert` calls.
+- `tests/film-person-capture.mjs` and `tests/film-person-capture-mutation.mjs`: the mutation file ran the whole capture test once per mutant (37 runs, 67.1 s one after another). Two changes, no assertion removed (193 `assert` calls before and after, plus two that check the section selection):
+  - the pure `verifyDerived` cases (no database, no bucket) run first, so their mutants are killed in a fraction of a second (67.1 s to 44.6 s);
+  - the capture test's 21 independent blocks are numbered sections; with `CAPTURE_SECTIONS` unset every one runs, as before. Each mutant names the section that kills it and is run against that section first. **A mutant that passes its section is run against the whole file before it is called a survivor**, so a wrong or stale section number costs time and never hides a survivor (checked by giving one mutant a wrong section: it was still killed, by the whole file, and the output said so). The section of each mutant was found by running every mutant against every section. All 37 mutants are killed; the file takes 8.9 s alone.
+- `tests/get-write-audit-lib.mjs`: a probe that wrote nothing to D1 (no write statement and an unchanged file hash) leaves its database copy as the template, so the next probe of the scenario reuses the copy and its `sqlite3` process; any D1 write retires the copy. The audit takes 4.6 s alone instead of 6.7 s, with the same findings.
 - `scripts/run-tests.mjs`: the scheduling hint lists the new files. No runner contract changed.
-- Not changed: `film-person-capture-mutation.mjs` itself, `epg-r2-known-length`, the job count (6; 5 and 4 were measured locally on the changed suite at 115.8 s and 125.4 s against 106.6 s), every threshold.
+- Not changed: `epg-r2-known-length`, the job count (6; 5 and 4 were measured locally on the changed suite at 115.8 s and 125.4 s against 106.6 s), every threshold.
 
 ## Result (local)
 
 | Where | Files | Wall | Summed file time | Slowest |
 | --- | ---: | ---: | ---: | --- |
 | Local, adapter and split only, jobs 6 | 295 | 106.6 s | 577.3 s | `film-person-capture-mutation` 71.8 s, `generation-stage` 43.7 s, `epg-r2-known-length` 26.8 s, `generation-stage-withheld` 23.5 s |
-| Local, this change complete, jobs 6 | 295 | 103.8 s | 561.7 s | `film-person-capture-mutation` 55.7 s, `generation-stage` 39.6 s, `discovery-decisions-read` 27.5 s, `epg-r2-known-length` 26.2 s |
+| Local, plus the `verifyDerived` order, jobs 6 | 295 | 103.8 s | 561.7 s | `film-person-capture-mutation` 55.7 s, `generation-stage` 39.6 s, `discovery-decisions-read` 27.5 s, `epg-r2-known-length` 26.2 s |
+| Local, this change complete, jobs 6 | 295 | 95.4 s | 505.0 s | `generation-stage` 38.6 s, `film-person-capture-mutation` 34.7 s, `epg-r2-known-length` 25.3 s, `discovery-decisions-read` 20.4 s |
 
 Files alone: `prediction-queue-budget` 82.0 s to 5.8 s; the three `generation-stage` files 25.0 s, 12.1 s and 2.9 s (44.7 s as one file).
 
@@ -49,8 +53,12 @@ Files alone: `prediction-queue-budget` 82.0 s to 5.8 s; the three `generation-st
 | --- | --- | ---: | ---: | ---: | ---: |
 | [42856218757](https://github.com/vladimino/iptv-watchlist/actions/runs/42856218757), attempt 1 | `0d6eba8` (adapter and split only) | 297 | 150 s | 149.2 s | 851.9 s |
 | 42856218757, attempt 2 | `0d6eba8` | 297 | 145 s | not read | not read |
+| [42858739038](https://github.com/vladimino/iptv-watchlist/actions/runs/42858739038), attempt 1 | `dd4b793` (plus the `verifyDerived` order) | 297 | 207 s | 206.8 s | 1163.0 s |
+| 42858739038, attempt 2 | `dd4b793` | 297 | 126 s | 125.3 s | 706.2 s |
 
-Slowest in attempt 1: `generation-stage` 74.7 s, `film-person-capture-mutation` 71.1 s, `epg-r2-known-length` 48.7 s, `discovery-decisions-read` 42.3 s, `generation-stage-withheld` 39.6 s. The three runs on the final HEAD (with the `film-person-capture` order) are recorded in the pull request and on the card: the acceptance is three complete runs on one final HEAD, each `Run tests` step at most 180 s. The runner's speed varies between runs of the same code (the baseline day saw 119 s and 249 s on adjacent commits), so a single run is never the result.
+The 207 s run is the same code as the 126 s run: every file in it was about 1.65 times slower (summed 1163 s against 706 s; `generation-stage` 106.5 s against 60.6 s, `epg-r2-known-length` 82.2 s against 50.7 s). The runner's speed varies between runs of the same code (the baseline day saw 119 s and 249 s on adjacent commits), so a single run is never the result, and the remaining work was cut further after it (the section-targeted mutants and the audit copies). The three runs on the final HEAD are recorded in the pull request and on the card: the acceptance is three complete runs on one final HEAD, each `Run tests` step at most 180 s.
+
+What remains is real work, not harness overhead: the 1.25x generations (about 40 s of sqlite and SQL text alone), Miniflare in `epg-r2-known-length`, and files whose time is simulated latency or production code (`discovery-decisions-read` hashes every decision with WebCrypto; `discovery-chunk-budget` and `run-tests-runner` wait on timers). A slow runner can still take a run over the limit; the next lever, if it is needed, is the row-for-row comparison of the 1.25x tables inside sqlite instead of through the pipe.
 
 ## For new heavy tests
 
@@ -58,3 +66,4 @@ Slowest in attempt 1: `generation-stage` 74.7 s, `film-person-capture-mutation` 
 - A test that reads a large stored document needs nothing special: the adapter learns the statement shape. A test that starts `sqlite3 -json` itself on large values pays seconds per megabyte.
 - Independent sections that each build a large fixture belong in separate files, so the runner can run them side by side; list a file that takes more than about ten seconds in `START_FIRST`.
 - Compare large row sets as text, not as parsed objects.
+- A check that runs another test file many times (a mutation check) should run the part that decides, with the whole file as the fallback, as `film-person-capture-mutation.mjs` does.
