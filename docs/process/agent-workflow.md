@@ -109,6 +109,10 @@ Distinguish a **transitional switch** from a **permanent owner-only safety gate*
 
 Before creating any cleanup card, search live Trello for an existing removal/disposition card using the flag's literal identifier and relevant migration terms; avoid duplicate tickets and duplicate prerequisite checklists. If the required rollback or migration remains incomplete, do not prematurely remove the flag. Review the register after each rollout and verify the cleanup card's existence and prerequisites.
 
+## Read routes must not write
+
+A new or changed GET, HEAD, page or MCP read tool must pass `tests/get-write-audit.mjs` ([read side effects](../reference/api/read-side-effects.md), [ADR 0107](../adr/0107-get-head-read-side-effect-boundary.md)): register a new prefix route or MCP tool in `tests/get-write-baseline.mjs`, with no effect. A reviewer rejects an entry added to the baseline for new work; a PR that fixes a baseline writer deletes the entry in the same PR and moves the write to its owner writer. The audit runs the production bundle against an instrumented R2 and D1; it never calls production, and a production read of a route the baseline lists is still L2/L3.
+
 ## Documentation acceptance
 
 Before implementation, record the documentation impact in the Trello card and implementation handoff using the [documentation governance matrix](documentation-governance.md). At independent review, compare the actual diff with that matrix; require the matching source, contract, evidence, ADR and diagram changes in the same delivery. A claimed `Documentation impact: none` needs a reason that survives review. Missing required documentation is a blocking finding even when tests are green. Do not defer it to a future cleanup card.

@@ -10,6 +10,9 @@ export const PREDICTION_HISTORY_LIMIT=80;
 export const PREDICTION_QUEUE_CHARS=900000;
 export const PREDICTION_INDEX_CHUNK=80;
 export const PREDICTION_INDEX_LIMIT=5000;
+// The overlay reads the D1 prediction rows in keyset pages. Its cost is the number of rows, not the number of view-index keys.
+export const PREDICTION_OVERLAY_PAGE=300;
+export const PREDICTION_OVERLAY_ROWS=20000;
 export const PREDICTION_BIND_LIMIT=100;
 export const PREDICTION_PRUNE_CHUNK=80;
 export const PREDICTION_STATEMENT_BYTES=100*1024;
@@ -24,7 +27,13 @@ const TABLES=['prediction_domain_authority','prediction_domain_cas','prediction_
 const PRUNE_COLUMN={prediction_fingerprint:'film_id',prediction_pointer:'film_id',prediction_lineage:'film_id',prediction_run:'run_id'};
 const encoder=new TextEncoder();
 
-function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
+// AIR-417. `guard` names which budget refused (queue_chars, index_limit, statement_bytes, bind_limit, history_limit, mirror_list).
+// The code stays prediction_domain_budget; the guard rides on the error and in one structured log line without ids or bodies.
+function failed(code,cause,guard){
+ const error=new Error(code);error.code=code;if(cause)error.cause=cause;
+ if(guard){error.guard=guard;try{console.warn(JSON.stringify({event:'prediction_domain_budget',guard}));}catch{/* logging never changes the outcome */}}
+ return error;
+}
 function binding(db){return typeof db?.prepare==='function';}
 function literalBytes(value){
  if(value==null)return 4;
@@ -34,9 +43,9 @@ function literalBytes(value){
 }
 function assertStatements(statements){
  for(const [sql,params=[]] of statements){
-  if(params.length>PREDICTION_BIND_LIMIT)throw failed('prediction_domain_budget');
+  if(params.length>PREDICTION_BIND_LIMIT)throw failed('prediction_domain_budget',undefined,'bind_limit');
   const size=encoder.encode(sql).length+params.reduce((sum,value)=>sum+literalBytes(value),0);
-  if(size>PREDICTION_STATEMENT_BYTES)throw failed('prediction_domain_budget');
+  if(size>PREDICTION_STATEMENT_BYTES)throw failed('prediction_domain_budget',undefined,'statement_bytes');
  }
 }
 function rethrowFence(error){
@@ -217,21 +226,92 @@ function queuePieces(text){
  while(start<text.length){
   let end=Math.min(text.length,start+PREDICTION_QUEUE_CHUNK);
   while(end>start&&literalBytes(text.slice(start,end))+160>PREDICTION_STATEMENT_BYTES)end=start+Math.max(1,Math.floor((end-start)/2));
-  if(literalBytes(text.slice(start,end))+160>PREDICTION_STATEMENT_BYTES)throw failed('prediction_domain_budget');
+  if(literalBytes(text.slice(start,end))+160>PREDICTION_STATEMENT_BYTES)throw failed('prediction_domain_budget',undefined,'statement_bytes');
   pieces.push(text.slice(start,end));
   start=end;
  }
  return pieces;
 }
+
+// AIR-417. The stored queue text is the plain JSON document while it fits PREDICTION_QUEUE_CHARS, so every document that ever fit is
+// byte-identical to before and an older Worker reads it. Only a document that would exceed the cap is stored in the `dict1` encoding:
+// each film id is written once in `ids`, the lists hold integer references, and the repeated per-film `priority` and `work` values are
+// written once each in `table`. loadQueue expands it back to the exact plain document, so no reader sees a different shape.
+// The encoded text starts with `dict1:` so it is not valid JSON: a Worker without this support fails closed in JSON.parse
+// (prediction_domain_unavailable) instead of reading the references as film ids. A compatible build must rewrite the queue as plain.
+const QUEUE_ENCODING='dict1';
+const QUEUE_PREFIX=QUEUE_ENCODING+':';
+const QUEUE_LISTS=['pending','hotPending','coldPending'];
+const QUEUE_MAPS=['priority','work'];
+const isPlainObject=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+function encodeQueueDocument(plain){
+ const doc=JSON.parse(plain);
+ if(!isPlainObject(doc)||Object.hasOwn(doc,'$queueEncoding'))throw failed('prediction_domain_budget',undefined,'queue_chars');
+ const ids=[],index=new Map(),table=[],tableIndex=new Map(),encoded=[];
+ const ref=id=>{let at=index.get(id);if(at===undefined){at=ids.length;ids.push(id);index.set(id,at);}return at;};
+ const out={...doc};
+ for(const name of QUEUE_LISTS){
+  if(Array.isArray(doc[name])&&doc[name].every(id=>typeof id==='string')){out[name]=doc[name].map(ref);encoded.push(name);}
+ }
+ for(const name of QUEUE_MAPS){
+  if(!isPlainObject(doc[name]))continue;
+  const keys=[],values=[];
+  for(const [id,value] of Object.entries(doc[name])){
+   const text=JSON.stringify(value);let at=tableIndex.get(text);
+   if(at===undefined){at=table.length;table.push(value);tableIndex.set(text,at);}
+   keys.push(ref(id));values.push(at);
+  }
+  out[name]={k:keys,v:values};encoded.push(name);
+ }
+ out.$queueEncoding=QUEUE_ENCODING;out.$queueEncoded=encoded;out.$queueIds=ids;out.$queueTable=table;
+ const body=JSON.stringify(out);
+ // The encoding is accepted only when it expands to the identical document.
+ if(JSON.stringify(decodeQueueDocument(JSON.parse(body)))!==JSON.stringify(doc))throw failed('prediction_domain_unavailable');
+ return QUEUE_PREFIX+body;
+}
+function decodeQueueDocument(doc){
+ if(!isPlainObject(doc)||!Object.hasOwn(doc,'$queueEncoding'))return doc;
+ const bad=()=>failed('prediction_domain_unavailable');
+ const {$queueEncoding:encoding,$queueEncoded:encoded,$queueIds:ids,$queueTable:table,...rest}=doc;
+ if(encoding!==QUEUE_ENCODING||!Array.isArray(encoded)||!Array.isArray(ids)||!Array.isArray(table))throw bad();
+ if(new Set(ids).size!==ids.length||!ids.every(id=>typeof id==='string'))throw bad();
+ const id=at=>{if(!Number.isInteger(at)||at<0||at>=ids.length)throw bad();return ids[at];};
+ for(const name of encoded){
+  if(QUEUE_LISTS.includes(name)){
+   if(!Array.isArray(rest[name]))throw bad();
+   rest[name]=rest[name].map(id);
+  }else if(QUEUE_MAPS.includes(name)){
+   const packed=rest[name];
+   if(!isPlainObject(packed)||!Array.isArray(packed.k)||!Array.isArray(packed.v)||packed.k.length!==packed.v.length)throw bad();
+   const map={};
+   packed.k.forEach((key,at)=>{const value=packed.v[at];if(!Number.isInteger(value)||value<0||value>=table.length)throw bad();map[id(key)]=table[value];});
+   rest[name]=map;
+  }else throw bad();
+ }
+ return rest;
+}
+// The text that is stored for a queue: plain when it fits, else the encoding; refused when even that exceeds the cap.
+function storedQueueText(queue){
+ const plain=JSON.stringify(queue);
+ if(plain.length<=PREDICTION_QUEUE_CHARS)return plain;
+ const text=encodeQueueDocument(plain);
+ if(text.length>PREDICTION_QUEUE_CHARS)throw failed('prediction_domain_budget',undefined,'queue_chars');
+ return text;
+}
 function queueStatements(text,generation){
- if(text.length>PREDICTION_QUEUE_CHARS)throw failed('prediction_domain_budget');
+ if(text.length>PREDICTION_QUEUE_CHARS)throw failed('prediction_domain_budget',undefined,'queue_chars');
  const pieces=queuePieces(text);
  return [['DELETE FROM prediction_queue',[]],...pieces.map((chunk,seq)=>['INSERT INTO prediction_queue (seq, chunk_text, generation) VALUES (?,?,?)',[seq,chunk,generation]])];
 }
 async function loadQueue(db){
  const rows=await many(db,'SELECT chunk_text AS chunk FROM prediction_queue ORDER BY seq');
  if(!rows.length)return null;
- try{return JSON.parse(rows.map(row=>row.chunk).join(''));}catch{throw failed('prediction_domain_unavailable');}
+ const text=rows.map(row=>row.chunk).join('');
+ let doc;try{doc=JSON.parse(text.startsWith(QUEUE_PREFIX)?text.slice(QUEUE_PREFIX.length):text);}catch{throw failed('prediction_domain_unavailable');}
+ // New writes always carry the prefix. An encoded document without it was written by the first build that had `dict1` and is read as before.
+ // A prefix without the marker is damage.
+ if(text.startsWith(QUEUE_PREFIX)&&!(isPlainObject(doc)&&Object.hasOwn(doc,'$queueEncoding')))throw failed('prediction_domain_unavailable');
+ return decodeQueueDocument(doc);
 }
 async function loadProfile(env){
  const row=await one(env.DB,'SELECT version, profile_hash AS profileHash, created_at AS createdAt, r2_key AS r2Key, content_sha256 AS contentSha256, lineage_json AS lineage FROM prediction_profile WHERE active=1');
@@ -323,7 +403,7 @@ function pointerColumns(record){
 }
 async function savePredictions(env,filmId,bundle,authority){
  const history=Array.isArray(bundle?.history)?bundle.history:[];
- if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget');
+ if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget',undefined,'history_limit');
  const records=[...(bundle?.current?[bundle.current]:[]),...history];
  for(const record of records){
   if(typeof record?.r2Key!=='string'||typeof record?.contentSha256!=='string')throw failed('prediction_domain_unlinked');
@@ -368,8 +448,7 @@ async function saveProfile(env,value,authority){
  await mirror(env.BUCKET,PROFILE_KEY,value);
 }
 async function saveQueueDocument(env,queue,authority){
- const text=JSON.stringify(queue);
- if(text.length>PREDICTION_QUEUE_CHARS)throw failed('prediction_domain_budget');
+ const text=storedQueueText(queue);
  const next=authority.generation+1,queueNext=authority.queueGeneration+1;
  await fenced(env.DB,[
   ['UPDATE prediction_domain_authority SET generation=?, queue_generation=? WHERE id=1 AND mode=\'d1\' AND generation=? AND queue_generation=?',[next,queueNext,authority.generation,authority.queueGeneration]],
@@ -492,30 +571,38 @@ export async function openProfile(env){
  return {mode:'r2',version:authority.version,generation:authority.generation,object,value:object?await object.json():null};
 }
 
+// Rows of one prediction table that belong to a film in the index, read in keyset pages (film_id is the primary key). A table
+// beyond PREDICTION_OVERLAY_ROWS rows is refused and nothing is returned. Rows of films outside the index are read and dropped.
+async function overlayRows(db,sql,wanted){
+ const rows=[];let after='',total=0;
+ for(;;){
+  const page=await many(db,sql,[after,PREDICTION_OVERLAY_PAGE]);
+  total+=page.length;
+  if(total>PREDICTION_OVERLAY_ROWS)throw failed('prediction_domain_budget',undefined,'overlay_rows');
+  for(const row of page)if(wanted.has(row.filmId))rows.push(row);
+  if(page.length<PREDICTION_OVERLAY_PAGE)return rows;
+  after=page[page.length-1].filmId;
+ }
+}
 export async function overlayIndex(env,index,moodFacet){
  const direct=!!env&&typeof env.prepare==='function'&&env.BUCKET==null;
  const db=direct?env:(env?.DB??null);
  const authority=await readPredictionAuthority(db,direct?undefined:env);
  if(authority.mode!=='d1')return index;
  const next={...(index||{})};
- const ids=Object.keys(next);
- if(ids.length>PREDICTION_INDEX_LIMIT)throw failed('prediction_domain_budget');
+ const ids=Object.keys(next),wanted=new Set(ids);
  const byFilm=new Map();
- for(let start=0;start<ids.length;start+=PREDICTION_INDEX_CHUNK){
-  const chunk=ids.slice(start,start+PREDICTION_INDEX_CHUNK);
-  const marks=chunk.map(()=>'?').join(',');
-  const [fingerprints,pointers]=await Promise.all([
-   many(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id IN ('+marks+')',chunk),
-   many(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id IN ('+marks+')',chunk),
-  ]);
-  for(const row of fingerprints){
-   let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
-   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
-  }
-  for(const row of pointers){
-   let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
-   byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
-  }
+ const [fingerprints,pointers]=await Promise.all([
+  overlayRows(db,'SELECT film_id AS filmId, features_json AS features FROM prediction_fingerprint WHERE film_id>? ORDER BY film_id LIMIT ?',wanted),
+  overlayRows(db,'SELECT film_id AS filmId, display_json AS display FROM prediction_pointer WHERE film_id>? ORDER BY film_id LIMIT ?',wanted),
+ ]);
+ for(const row of fingerprints){
+  let features;try{features=JSON.parse(row.features);}catch{throw failed('prediction_domain_unavailable');}
+  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),features});
+ }
+ for(const row of pointers){
+  let display;try{display=JSON.parse(row.display);}catch{throw failed('prediction_domain_unavailable');}
+  byFilm.set(row.filmId,{...(byFilm.get(row.filmId)||{}),display});
  }
  for(const filmId of ids){
   const item={...(next[filmId]||{})};
@@ -566,7 +653,7 @@ async function pruneStale(db,fence,table,ids,onCommit){
 }
 async function predictionStatements(bucket,item){
  const history=Array.isArray(item.bundle?.history)?item.bundle.history:[];
- if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget');
+ if(history.length>PREDICTION_HISTORY_LIMIT)throw failed('prediction_domain_budget',undefined,'history_limit');
  const records=[...(item.bundle?.current?[item.bundle.current]:[]),...history];
  for(const record of records){
   if(typeof record?.contentSha256!=='string'||typeof record?.r2Key!=='string')throw failed('prediction_domain_unlinked');
@@ -695,7 +782,7 @@ export async function importPredictionDomain(db,bucket,snapshot,options={}){
     const features=featuresOf(unit.item.record);
     body=[['INSERT INTO prediction_fingerprint (film_id,fingerprint_hash,schema_version,prompt_version,generated_at,invalidated_at,r2_key,content_sha256,features_json) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET fingerprint_hash=excluded.fingerprint_hash,schema_version=excluded.schema_version,prompt_version=excluded.prompt_version,generated_at=excluded.generated_at,invalidated_at=excluded.invalidated_at,r2_key=excluded.r2_key,content_sha256=excluded.content_sha256,features_json=excluded.features_json',[unit.item.filmId,unit.item.record.fingerprintHash,features.fingerprintSchemaVersion??0,features.fingerprintPromptVersion,features.generatedAt,features.invalidatedAt,key,await sha256(stored),JSON.stringify(features)]]];
    }else if(unit.kind==='prediction')body=await predictionStatements(bucket,unit.item);
-   else if(unit.kind==='queue')body=queueStatements(JSON.stringify(unit.value),fence.queueGeneration);
+   else if(unit.kind==='queue')body=queueStatements(storedQueueText(unit.value),fence.queueGeneration);
    else if(unit.kind==='run')body=[['INSERT INTO prediction_run (run_id,latest,updated_at,document_json) VALUES (?,0,?,?) ON CONFLICT(run_id) DO UPDATE SET updated_at=excluded.updated_at, document_json=excluded.document_json',[unit.run.runId,unit.run.updatedAt||unit.run.createdAt,JSON.stringify(unit.run)]]];
    else if(unit.kind==='latest')body=[['UPDATE prediction_run SET latest=CASE WHEN run_id=? THEN 1 ELSE 0 END',[unit.runId]]];
    else if(unit.kind==='clear-profile')body=[['UPDATE prediction_profile SET active=0 WHERE active=1',[]]];
@@ -796,7 +883,7 @@ async function listedKeys(bucket,prefix){
  do{
   const page=await bucket.list({prefix,limit:100,...(cursor?{cursor}:{})});
   for(const object of page?.objects||[])keys.push(object.key);
-  if(keys.length>MIRROR_LIST_LIMIT)throw failed('prediction_domain_budget');
+  if(keys.length>MIRROR_LIST_LIMIT)throw failed('prediction_domain_budget',undefined,'mirror_list');
   if(page?.truncated&&!(page.cursor||page.nextCursor))throw failed('prediction_domain_parity');
   cursor=page?.truncated?page.cursor||page.nextCursor:null;
  }while(cursor);
