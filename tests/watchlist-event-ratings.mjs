@@ -39,7 +39,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  assert.equal(event.id,'run-1-watchlist');assert.equal(event.at,EVENT_AT,'the event time is untouched');
  assert.deepEqual(eventKeys(bucket),[KEY],'one event under the original key');
  assert.equal(net.fetches.length,0,'no Diary, no Letterboxd page, no network at all');
- assert.deepEqual(plain(run.removalPublication),{probed:4,rated:2});
+ assert.deepEqual(plain(run.removalPublication),{probed:4,rated:2,ms:0});
  assert.equal(ratingOf(run.events[0],'rated'),4.5,'the run record keeps the enriched event for a rescan');
 }
 
@@ -64,7 +64,15 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  const late=stored(bucket);
  assert.equal(ratingOf(late,'later'),3.5,'the late rating reached the event');assert.equal(ratingOf(late,'rated'),4,'the first rating is kept');
  assert.equal(late.at,EVENT_AT);assert.equal(late.id,'run-1-watchlist');assert.deepEqual(eventKeys(bucket),[KEY],'no second event, no moved key');
- assert.equal(bucket.value(QUEUE).films.rated.refs.every(ref=>ref.resolved===true)||bucket.value(QUEUE).films.rated.state==='pending'||true,true);
+ // The queue after the settlement: both films are rated from the stored fact (no request), and both references to this event are resolved with no
+ // issue. The film whose rating was already on the event at the first display is settled without a rewrite of its rating.
+ for(const id of ['rated','later']){
+  const entry=bucket.value(QUEUE).films[id];
+  assert.equal(entry.state,'rated',id+' is rated in the queue');assert.equal(entry.lastResult,'fact',id+' was resolved from the stored fact');
+  assert.deepEqual(entry.refs.map(ref=>[ref.eventKey,ref.resolved,ref.issue??null]),[[KEY,true,null]],id+': its one reference to this event is resolved');
+ }
+ assert.equal(bucket.value(QUEUE).films.rated.rating,4);assert.equal(bucket.value(QUEUE).films.later.rating,3.5);
+ assert.equal(net.fetches.filter(url=>url.includes('letterboxd.com')).length,0,'the settlement requested nothing either');
  // 4. A replay of the commit writes the same event: nothing is duplicated, no rating is lost.
  const replay={runId:'run-1',stage:'epg',events:[structuredClone(event)],watchlist:[],pending:[]};
  await ctx.persistEvents(env,replay,report);
@@ -92,7 +100,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  await ctx.persistEvents(env,run,report);
  bucket.hooks.beforeGet=null;
  assert.equal(ratingOf(stored(bucket),'rated'),undefined,'the event is written unrated, honestly');
- assert.deepEqual(plain(run.removalPublication),{probed:1,rated:0,failed:true});
+ assert.deepEqual(plain(run.removalPublication),{probed:1,rated:0,ms:0,failed:true});
  assert.deepEqual(eventKeys(bucket),[KEY]);
  // The rating still arrives later through the existing settlement, on the same key.
  migrated(bucket,{films:{rated:{url:'https://letterboxd.com/film/rated/',state:'pending',attempts:0,enqueuedAt:at(T0),nextAttemptAt:at(T0),lastAttemptAt:null,lastResult:null,claim:null,refs:[{eventKey:KEY,sourceRunId:'run-1',at:EVENT_AT,resolved:false}]}}});
@@ -111,7 +119,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  bucket.hooks.beforeGet=null;
  const event=stored(bucket);
  assert.equal(event.removed.filter(film=>film.rating!=null).length,25);assert.equal(event.removed.filter(film=>film.rating==null).length,5);
- assert.deepEqual(plain(run.removalPublication),{probed:25,rated:25});
+ assert.deepEqual(plain(run.removalPublication),{probed:25,rated:25,ms:0});
  assert.equal(reads.filter(key=>key.startsWith('letterboxd/facts/records/')||/facts\/.*record/.test(key)).length<=30,true,'one record read per probed film, not a scan');
 }
 

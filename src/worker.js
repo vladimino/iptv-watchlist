@@ -677,10 +677,11 @@ async function persistEvents(env,run,report){
  for(let index=0;index<run.events.length;index++){
   const event=run.events[index];
   if(event?.type==='epg')continue;
-  const probe=await storedRemovalRatings(env,event);
+  const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
   await writeEvent(env,probe.event);
   if(probe.event!==event)run.events[index]=probe.event;
-  if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,...(probe.failed?{failed:true}:{})};
+  // `ms` is the wall time of the stored-fact reads alone, so the cost inside the publication can be read from sync.json after a natural run.
+  if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
  }
 }
 // One `epg` event per run, written only after the run is durably `complete`. `prepareEpgCompletion` fixes `run.completedAt` and
