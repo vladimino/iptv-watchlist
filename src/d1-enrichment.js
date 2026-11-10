@@ -822,6 +822,9 @@ async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,
   result.errorCount++;
   if(result.errors.length<20)result.errors.push({kind,id,error:message.slice(0,160)});
  };
+ // AIR-405: a Film skipped on purpose, not a failure: the Film it would retire holds prediction-domain facts (owner decision 10 Nov 2026). Nothing was written for it (its transaction was never sent), it has no
+ // checkpoint, so the next run plans it again, and it is not an error: the run is not `partial` because of it. Bounded like `errors`.
+ const retain=(id,error)=>{result.retainedCount=(result.retainedCount||0)+1;(result.retainedFilms||(result.retainedFilms=[])).length<20&&result.retainedFilms.push({id,reason:'duplicate_film_retained',held:error.facts||[]});};
  const writePeople=async items=>{await fenced(async()=>{for(const entry of items){await repository.projectPerson({person:entry.person});await state('person',entry.id,entry.key);}});result.writtenPeople+=items.length;};
  // AIR-388 (fairness): the work of one run is three lanes that share ONE budget, not one queue in a fixed order. A strict order
  // "all changed Persons, then all changed Films" lets a Person backlog that is refilled faster than it drains (new credits arrive with
@@ -992,7 +995,8 @@ async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,
     }
    }
   }catch(error){
-   if(task?.kind==='film'||task?.kind==='sync'||task?.kind==='absent')failed(task.kind==='sync'?'film_sync':task.kind==='absent'?task.item.kind||'film':'film',task.item.id,error);
+   if(task?.kind==='film'&&error?.code==='duplicate_film_retained')retain(task.item.id,error);
+   else if(task?.kind==='film'||task?.kind==='sync'||task?.kind==='absent')failed(task.kind==='sync'?'film_sync':task.kind==='absent'?task.item.kind||'film':'film',task.item.id,error);
    else if(task?.kind==='people')for(const entry of task.items)failed('person',entry.id,error);
    else failed('film',null,error);
   }finally{

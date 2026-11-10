@@ -34,7 +34,14 @@ async function projectFilm(db,input){
  for(const redirect of Array.isArray(input?.redirects)?input.redirects:[]){
   if(!redirect||redirect.to!==input.film?.id)throw new Error('Redirect target must be the survivor');
   const retirement=await planRetirement(db,redirect);
-  if(retirement.release)released.push(retirement.from);
+  if(retirement.release){
+   // AIR-405 (owner decision 10 Nov 2026): the Film this write would retire holds D1-authoritative prediction-domain facts that retiring does not move, and the rows that reference it would refuse
+   // the delete. Nothing is moved or deleted: the Film is kept as it is, no redirect is made and the survivor is not written. The caller tells this apart from a failure by `code`; any other
+   // foreign key or identity error is not this case and is not touched.
+   const facts=await retainedPredictionFacts(db,retirement.from);
+   if(facts.length){const error=new Error('duplicate_film_retained');error.code='duplicate_film_retained';error.facts=facts;throw error;}
+   released.push(retirement.from);
+  }
  }
  const plan=await planFilm(db,{...input,owner:'enrichment',releasing:released});
  for(const from of released)await db.run('DELETE FROM film_external_id WHERE film_id=?',[from]);
@@ -96,6 +103,14 @@ async function writeLink(db,plan,retirement){
  if(retirement?.release)await db.run('DELETE FROM film_external_id WHERE film_id=?',[retirement.from]);
  await writeFilm(db,plan);
  if(retirement?.release){await adoptRetired(db,retirement);await retireFilm(db,retirement);}
+}
+
+// The tables of schema v1 that hold the prediction-domain facts of a Film, which the prediction authority owns in D1: the candidate decisions and their history, the fingerprint, the current prediction and its history.
+// One query names those that hold a row of the Film (at most one row of each is read).
+const PREDICTION_FACT_TABLES=['candidate_decision','candidate_decision_history','fingerprint_payload','prediction_current','prediction_history'];
+async function retainedPredictionFacts(db,filmId){
+ const rows=await db.all(PREDICTION_FACT_TABLES.map(table=>"SELECT '"+table+"' AS held FROM (SELECT 1 FROM "+table+' WHERE film_id=? LIMIT 1)').join(' UNION ALL '),PREDICTION_FACT_TABLES.map(()=>filmId));
+ return rows.map(row=>row.held);
 }
 
 // The Films a write retires, named by the caller: a Film id or a list of them. Empty when none.
