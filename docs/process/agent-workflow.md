@@ -74,6 +74,16 @@ An isolated problematic record may be deferred only when explicit acceptance/inv
 
 ## Delivery pipeline for already approved work
 
+### Test-suite performance quality gate
+
+**A pull request is not merge-ready when the complete `npm test` step (`Run tests`) takes more than 180 seconds in GitHub Actions on the proposed final HEAD.** This is a mandatory review and delivery gate for changes that affect test runtime, including additions of new tests; a green test result alone does not override the limit.
+
+- Measure the actual `Run tests` step duration on the GitHub-hosted runner, excluding queue time, dependency installation, build and deployment. Local timings are diagnostic only. Do not reduce test coverage, assertions, fixtures or production-scale parity checks merely to meet the budget.
+- If a run exceeds 180 seconds, the Executor must investigate and optimize the affected tests, fixtures, harness or scheduling, preserving isolation and correctness, and rerun CI on the updated HEAD. The Independent Reviewer and Delivery Controller must not approve or merge the PR until the gate passes. Record the slow files, before/after timings and the remedy in the PR.
+- For a suspected anomalous or contended runner, collect comparable reruns of the **same HEAD** and document the variance; do not silently discard a slow run. A persistent regression above the budget is a merge blocker, not a reason to accept a slower suite. Any exception requires an explicit Product Owner decision recorded in the PR; agents cannot waive the gate themselves.
+- The limit is a **documented review gate**, not a claim that GitHub currently enforces it automatically. A future automated check may implement the same threshold without changing the policy.
+
+
 1. **Select ready work:** inspect live approved Trello scope and native prerequisites, current main and related PRs. Choose unblocked tasks by approved priority, capacity and change conflicts. Do not infer owner approval from remembered AIR identifiers.
 2. **Portable handoff:** self-contained task requirements, acceptance, tests, docs, safety and PR evidence live in Trello/GitHub. A new agent can resume without copying chat history.
 3. **Implement and review:** branch/PR, tests, code/docs, independent review of actual HEAD, feedback, fixes, resolved blocking threads and green CI on final HEAD. No self-approval.
