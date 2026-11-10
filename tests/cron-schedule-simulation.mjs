@@ -69,7 +69,7 @@ const context=vm.createContext({console,Date,Math,JSON,Promise,Intl,URL,crypto:w
 vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
 const state={};
 context.loadJSON=async()=>null;
-context.PublishedEpg={readAuthority:async()=>({ready:true})};
+context.PublishedEpg={readAuthority:async()=>({ready:true}),repairMirrors:async()=>({mirrored:true,aligned:true,wrote:false})};
 context.postSync=async()=>({status:200,json:async()=>({})});
 vm.runInContext(fs.readFileSync('src/epg-orchestration.js','utf8'),context);
 const epg=vm.runInContext('EpgOrchestration',context);

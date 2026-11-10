@@ -3,10 +3,10 @@
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 const records=new Map(),etags=new Map();let revision=0;
 const faults={get:new Map(),put:new Map()};
-const logs=[];
+const logs=[];const reads=new Map();
 // A fault fires once, after `skip` earlier matching calls: the failure being modelled is one failed call, and the stop that follows must be able to read and write.
 const fail=(map,key)=>{for(const [match,fault] of map)if(key.startsWith(match)||key.includes(match)){const spec=typeof fault==='function'?{error:fault,skip:0}:fault;if(spec.skip>0){spec.skip--;continue;}map.delete(match);throw spec.error();}};
-const env={BUCKET:{async get(key){fail(faults.get,key);return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;fail(faults.put,key);records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)}},list:async()=>({objects:[],truncated:false})}};
+const env={BUCKET:{async get(key){reads.set(key,(reads.get(key)||0)+1);fail(faults.get,key);return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;fail(faults.put,key);records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)}},list:async()=>({objects:[],truncated:false})}};
 const capture={log:()=>{},info:()=>{},error:(...a)=>logs.push(a.join(' ')),warn:(...a)=>logs.push(a.join(' '))};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const file of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
@@ -56,7 +56,9 @@ for(const {stage,arm,code,guard} of stages){
 // 2. A start that works logs no failure, and runs through to its first next with no data loss.
 resetLease();faults.get.clear();faults.put.clear();logs.length=0;
 const queueBefore=records.get('enrichment/prediction-queue.json');
+reads.clear();
 const ok=await api('start',START);
+const startReads=new Map(reads);
 assert.equal(ok.status,200);assert.equal(ok.data.status,'running');
 assert.equal(lines().length,0,'a good start writes no failure line');
 const first=await api('next',{runId:ok.data.runId,batchSize:5});
@@ -73,5 +75,22 @@ assert.equal(unsafe.status,502);
 const line=lines().at(-1);
 assert.equal(line.code,'unknown');assert.equal(line.guard,null);
 assert.ok(!JSON.stringify(logs).includes('DROP TABLE'));
+
+// 4. One start reads each large input once: the catalog, the view index and the programme of the rebuild are reused for the batch
+//    selection and for the start event, instead of being read three times (the production start died with exceededMemory after its run was saved).
+assert.equal(startReads.get('epg/discovered-films.json'),1,'catalog reads '+startReads.get('epg/discovered-films.json'));
+assert.equal(startReads.get('enrichment/view-index.json')||0,1,'view index reads '+startReads.get('enrichment/view-index.json'));
+assert.ok((startReads.get('programme.json')||0)<=1,'programme reads '+startReads.get('programme.json'));
+// The start event carries the same snapshot a fresh read computes.
+const startRecord=[...records.values()].find(value=>(value?.event?.id||value?.id)==='prediction-start-'+ok.data.runId),startEvent=startRecord?.event||startRecord;
+assert.ok(startEvent,'the start event was written');
+ctx.snapshotQueue=records.get('enrichment/prediction-queue.json');
+const fresh=JSON.parse(JSON.stringify(await vm.runInContext('predictionEventSnapshot(env,snapshotQueue,'+startEvent.currentBatchSize+')',ctx)));
+assert.deepEqual(JSON.parse(JSON.stringify(startEvent.snapshot)),fresh,'reused inputs give the snapshot of a fresh read');
+// The answer of a start is small and plain JSON: a run id, counters and the runner contract, never the queue, the index or film metadata.
+const answer=JSON.stringify(ok.data);
+assert.ok(answer.length<8000,'start answer is '+answer.length+' characters');
+assert.match(ok.data.runId,/^[A-Za-z0-9_-]{1,100}$/);
+for(const key of ['pending','priority','work','films','index','catalog'])assert.ok(!Object.hasOwn(ok.data,key),'start answer carries '+key);
 
 console.log('prediction start diagnostics tests passed');
