@@ -134,4 +134,34 @@ for(const key of ['pending','priority','work','films','index','catalog'])assert.
  const nextAfter=await api('next',{runId:after.data.runId,batchSize:3});assert.equal(nextAfter.status,200);assert.ok(nextAfter.data.items.length>0);
 }
 
+// 6. A catalog hold during next is the same wait, not a 502 that stops the run (production request 0c093130…, code discovery_fence, stage was unknown).
+{
+ resetLease();logs.length=0;faults.get.clear();faults.put.clear();
+ const running=await api('start',START);assert.equal(running.status,200);assert.equal(running.data.status,'running');
+ const first=await api('next',{runId:running.data.runId,batchSize:1});assert.equal(first.status,200);assert.ok(first.data.items.length>0);
+ const resultsWas=JSON.stringify(records.get('enrichment/runs/'+running.data.runId+'.json').results);
+ const eventKeys=()=>[...records.keys()].filter(key=>key.startsWith('events/')||key.includes('stop-events/')).sort();
+ const beforeEvents=eventKeys();
+ for(const cause of ['discovery_fence','discovery_incomplete']){
+  logs.length=0;
+  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
+  const held=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
+  assert.equal(held.status,503,cause);
+  assert.equal(held.data.code,'prediction_catalog_held',cause);
+  assert.equal(held.data.cause,cause);
+  assert.equal(held.data.runId,running.data.runId);
+  assert.ok(!held.data.error,'not a storage_error');
+  assert.ok(!held.data.mustComplete);
+  assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').status,'running',cause);
+  assert.equal(JSON.stringify(records.get('enrichment/runs/'+running.data.runId+'.json').results),resultsWas,cause+': committed results stay');
+  assert.deepEqual(eventKeys(),beforeEvents,cause+': no stop Event');
+  const found=lines();assert.equal(found.length,1,cause);assert.equal(found[0].boundary,'next');assert.equal(found[0].stage,'queue_refresh');assert.equal(found[0].code,cause);
+ }
+ const concurrent=await api('start',{...START,trigger:'scheduled'});
+ assert.equal(concurrent.data.status,'already_running');
+ faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
+ const other=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
+ assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+}
+
 console.log('prediction start diagnostics tests passed');
