@@ -655,7 +655,34 @@ async function persistScan(env,run,report){
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
 // AIR-390: the journal written with the watchlist and the scan is every event except the `epg` one. The `epg` event is written
 // by flushEpgEvent once the run is complete, so its `at` is the completion time that sync.json also carries.
-async function persistEvents(env,run,report){for(const event of run.events)if(event?.type!=='epg')await writeEvent(env,event);}
+// AIR-379. Before a watchlist event that reports removals is written, the confirmed ratings that the fact store ALREADY holds are put on its
+// removed films, so a film rated before the publication is shown with its rating at the first display. It reads stored facts only (the same
+// `LetterboxdFacts.confirmedFilmRating` the removal queue uses, ADR 0077): no Diary, no Letterboxd request, no wait, no lookup, and the EPG
+// publication never depends on it. At most REMOVAL_PUBLICATION_PROBES films are probed (one record read each, after one read of the link
+// index and the films-list floor); a film not probed or without a confirmed rating stays unrated, and a failed read leaves the event exactly as
+// it was. A null or absent rating is never read as "watched". A later rating still arrives through `settleRemovalRefs` on the same key.
+const REMOVAL_PUBLICATION_PROBES=25;
+async function storedRemovalRatings(env,event){
+ if(event?.type!=='watchlist'||!Array.isArray(event.removed)||typeof LetterboxdFacts==='undefined')return {event,probed:0,rated:0};
+ const ids=[...new Set(event.removed.filter(film=>film&&!removalRating(film)).map(film=>String(film.id??'')).filter(Boolean))].slice(0,REMOVAL_PUBLICATION_PROBES);
+ if(!ids.length)return {event,probed:0,rated:0};
+ try{
+  const cache={links:(await loadJSON(env,LetterboxdFacts.FACTS_KEYS.links))||{},filmsList:await loadJSON(env,LetterboxdFacts.FACTS_KEYS.filmsList)};
+  const found={};
+  for(const id of ids){const rating=await LetterboxdFacts.confirmedFilmRating(env,id,cache);if(rating!=null)found[id]=rating;}
+  return {event:withRemovalRatings(event,found,null)||event,probed:ids.length,rated:Object.keys(found).length};
+ }catch{return {event,probed:ids.length,rated:0,failed:true};}
+}
+async function persistEvents(env,run,report){
+ for(let index=0;index<run.events.length;index++){
+  const event=run.events[index];
+  if(event?.type==='epg')continue;
+  const probe=await storedRemovalRatings(env,event);
+  await writeEvent(env,probe.event);
+  if(probe.event!==event)run.events[index]=probe.event;
+  if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,...(probe.failed?{failed:true}:{})};
+ }
+}
 // One `epg` event per run, written only after the run is durably `complete`. `prepareEpgCompletion` fixes `run.completedAt` and
 // parks the finished event in `run.epgEventPending`; the caller saves the complete run record (with `updatedAt = completedAt`) and
 // only then `flushEpgEvent` puts the event and clears the mark. A failed save of the complete record therefore exposes no event, and a
