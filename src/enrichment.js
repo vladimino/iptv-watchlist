@@ -1538,16 +1538,10 @@ async function catalogHeldCause(env){
  const gate=await DiscoveryAuthority.readAuthority(env);
  return gate.held?'discovery_fence':gate.ready&&gate.transfer==='loading'?'discovery_incomplete':null;
 }
-function withCatalogHeld(boundary,requestId,runId,work){
- return async()=>{
-  try{return await work();}
-  catch(error){
-   if(!CATALOG_HELD_CODES.includes(error?.code))throw error;
-   if(!error.stage)error.stage='queue_refresh';
-   logPredictionFailure(boundary,error,requestId,runId);
-   return catalogHeldResponse(error.code,runId?{runId}:{});
-  }
- };
+function catalogHeldQueueError(error){return CATALOG_HELD_CODES.includes(error?.code)&&error.stage==='queue_refresh'?error:null;}
+function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
+ logPredictionFailure(boundary,error,requestId,runId);
+ return catalogHeldResponse(error.code,{runId,leaseTtlMs:RUNNER_LEASE_TTL,...extra});
 }
 async function diagnosedStart(env,body,requestId){
  const runId=crypto.randomUUID(),at=new Date().toISOString(),shell={runId,createdAt:at,diagnosticStartedAt:at,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
@@ -1595,7 +1589,7 @@ async function runContractChanged(run){
  return run.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||(run.fingerprintPromptVersion??1)!==FINGERPRINT_PROMPT_VERSION||run.predictionPromptVersion!==PREDICTION_PROMPT_VERSION||(run.fingerprintRegistryDigest??registry)!==registry;
 }
 const contractChangedResponse=()=>json({error:'Contract changed; start a new run',code:'contract_changed'},409);
-async function enrichmentNext(env,body){
+async function enrichmentNext(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);run.firstNextAt||=new Date().toISOString();await savePredictionRun(env,run);const requestSize=body.batchSize??run.batchSize??MAX_PREDICTION_BATCH;if(!Number.isInteger(requestSize)||requestSize<1||requestSize>20)return json({error:'Invalid batchSize'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({runId:run.runId,items:[],mustComplete:true,stopReason:run.systemicStopReason});
@@ -1613,7 +1607,8 @@ async function enrichmentNext(env,body){
  for(let i=0;i<run.selectedIds.length;i++){const id=run.selectedIds[i],s=states[i],p=s.predictions?.current;if(run.failures[id]&&fresh(id,s)){delete run.failures[id];run.results[id]=p.generatedAt!==run.baseline[id]?(run.baseline[id]?'recalculated':'created'):'already_current';runRepair=true;}}
  if(repairs.length)await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},current=>{for(const item of repairs)current[item.id]={...(current[item.id]||{}),prediction:item.prediction,fingerprintHash:item.fingerprintHash,fingerprint:item.fingerprint,impactFeatures:item.impactFeatures};return current;});if(runRepair)await savePredictionRun(env,run);
  if(run.mode==='queued'){
-  const report=await loadJSON(env,'programme.json'),queue=await atStage('queue_refresh',()=>refreshPredictionQueue(env,report,'next_priority')),catalog=await loadJSON(env,'epg/discovered-films.json'),films=new Map(allEnrichmentFilms(report,catalog).map(f=>[String(f.id),f])),completed=run.selectedIds.filter((id,i)=>fresh(id,states[i])||run.results?.[id]);
+  const report=await loadJSON(env,'programme.json');let queue;try{queue=await atStage('queue_refresh',()=>refreshPredictionQueue(env,report,'next_priority'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('next',held,requestId,run.runId);throw error;}
+  const catalog=await loadJSON(env,'epg/discovered-films.json'),films=new Map(allEnrichmentFilms(report,catalog).map(f=>[String(f.id),f])),completed=run.selectedIds.filter((id,i)=>fresh(id,states[i])||run.results?.[id]);
   let slots=Math.max(0,run.batchSize-completed.filter(id=>(run.batchIds||run.selectedIds).includes(id)).length),newBatch=false;
   if(!slots){const plan=adaptivePredictionBatch(queue,body.capacity||run.capacity);run.adaptivePlan=plan;run.batchSize=plan.batchSize;slots=plan.batchSize;run.batchIds=[];newBatch=true;}
   const ready=queueBatchIds(queue,queueReadyIds(queue).filter(id=>!run.failures[id]),slots);run.batchIds=[...new Set([...(run.batchIds||completed),...ready])];const selected=[...new Set([...(newBatch?[]:completed),...ready])];if(newBatch&&ready.length)run.batchCount++;
@@ -1628,7 +1623,7 @@ async function enrichmentNext(env,body){
  for(let i=0;i<run.selectedIds.length;i++){const id=run.selectedIds[i],s=states[i];if(fresh(id,s)||run.failures[id])continue;pendingCount++;if(items.length>=requestSize)continue;const film=source[id];if(!film)continue;const requiredWork=freshness.fingerprintUsable(s.fingerprint,source[id]?.genres)?'prediction_only':'fingerprint_and_prediction',item={filmId:id,requiredWork};if(requiredWork==='prediction_only')item.fingerprint=s.fingerprint;else item.metadata=film;items.push(item);}
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
-async function enrichmentSubmit(env,body){
+async function enrichmentSubmit(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({...runSummary(run),mustComplete:true,stopReason:run.systemicStopReason});
@@ -1668,10 +1663,10 @@ async function enrichmentSubmit(env,body){
    if(record&&(record.attempts!==failure.attempts||record.retryAt!==failure.retryAt)){failure.attempts=record.attempts;failure.retryAt=record.retryAt;const answer=results.findLast(r=>r.filmId===id);if(answer?.retryAt!==undefined)answer.retryAt=record.retryAt;await savePredictionRun(env,run);}}
   if(run.systemicStopReason)break;
  }
- let queue=null;if(run.mode==='queued')queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_progress'));await runnerProgress(env,run,queue);
+ let queue=null;if(run.mode==='queued'){try{queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_progress'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('submit',held,requestId,run.runId,{results,committed:results.some(r=>['created','recalculated','already_current'].includes(r.status)),identicalSubmit:'idempotent'});throw error;}}await runnerProgress(env,run,queue);
  return json({...runSummary(run),results,mustComplete:!!run.systemicStopReason,stopReason:run.systemicStopReason||null,remaining:queue?.pending.length??null,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields()});
 }
-async function enrichmentComplete(env,body){
+async function enrichmentComplete(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);
  if(run.status==='complete'||run.status==='partial'){if(run.event)await writeEvent(env,run.event);else await writeEvent(env,{id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts});await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...(run.event||{})});}
  const fault=readCallerFault(body);if(fault.rejected)return json({error:'Invalid fault'},400);
@@ -1682,7 +1677,7 @@ async function enrichmentComplete(env,body){
  if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
  if(!body.reason&&await runContractChanged(run))return contractChangedResponse();
- if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){const queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check'));if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
+ if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){let queue;try{queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'completion_check'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
  const states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id)));let created=0,recalculated=0,pending=0;
  const freshness=await predictionFreshness(env,profile),source=freshness.needsGenres?await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{}:{};
  for(let i=0;i<states.length;i++){const s=states[i],p=s.predictions?.current,id=run.selectedIds[i];if(p?.generatedAt&&p.generatedAt!==run.baseline[id]&&p.tasteProfileHash===run.tasteProfileHash&&p.predictionPromptVersion===run.predictionPromptVersion){run.baseline[id]?recalculated++:created++;if(!['created','recalculated'].includes(run.results?.[id]))run.results[id]=run.baseline[id]?'recalculated':'created';}else if(!run.failures[id]&&!freshness.state(p,s.fingerprint,source[id]?.genres))pending++;}
@@ -1691,7 +1686,7 @@ async function enrichmentComplete(env,body){
  if(run.mode==='queued'){
   // Retries, the batch summary and the counter go into the rebuild's own conditional write; the counter moves once per run.
   const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason,perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
-  const queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend}));if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
+  let queue;try{queue=await atStage('queue_refresh',async()=>refreshPredictionQueue(env,await loadJSON(env,'programme.json'),'batch_complete',{amend}));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
   if(queue&&!run.reason&&!pending)run.stopReason=queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty';
@@ -1989,9 +1984,9 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
  if(path==='/api/enrichment/footer/status'&&request.method==='GET')return json(await footerStatus(env));
- if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,withCatalogHeld('next',requestId,body?.runId,()=>enrichmentNext(env,body))),'next',requestId);
- if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,withCatalogHeld('submit',requestId,body?.runId,()=>enrichmentSubmit(env,body))),'submit',requestId);
- if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,withCatalogHeld('complete',requestId,body?.runId,()=>enrichmentComplete(env,body))),'complete',requestId);
+ if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body,requestId)),'next',requestId);
+ if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body,requestId)),'submit',requestId);
+ if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body,requestId)),'complete',requestId);
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
