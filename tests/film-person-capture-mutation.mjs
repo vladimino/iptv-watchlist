@@ -54,12 +54,12 @@ const run=(file)=>new Promise(resolve=>{
 const survivors=[],files=[];
 try{
  const queue=MUTANTS.map(([name,from,to],index)=>{const file=path.resolve('scripts/.film-person-capture.mutant'+index+'.mjs');fs.writeFileSync(file,original.replace(from,()=>to));files.push(file);return {name,file};});
- const width=4;
- for(let at=0;at<queue.length;at+=width){
-  const batch=queue.slice(at,at+width);
-  const codes=await Promise.all(batch.map(item=>run(item.file)));
-  batch.forEach((item,index)=>{if(codes[index]===0)survivors.push(item.name);});
- }
+ // A small worker pool (not batches that wait for their slowest member): at most `width` capture tests run at once, each takes the next mutant when it ends.
+ const width=4;let next=0;
+ await Promise.all(Array.from({length:width},async()=>{
+  while(next<queue.length){const item=queue[next++];if(await run(item.file)===0)survivors.push(item.name);}
+ }));
+ survivors.sort();
 }finally{for(const file of files)fs.rmSync(file,{force:true});}
 assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
 console.log('film-person-capture-mutation: ok ('+MUTANTS.length+' mutants killed)');
