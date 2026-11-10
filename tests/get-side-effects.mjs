@@ -6,7 +6,7 @@ import {scoped} from '../scripts/bundle-scope.mjs';
 
 // GET routes that may write to R2 in this R2-only harness. D1 published-EPG GETs are covered by tests/get-write-audit.mjs.
 // Each remaining writer is documented in docs/reference/api/read-side-effects.md; extend both together.
-const WRITING_GET_ROUTES=['/api/enrichment/runs','/api/enrichment/status','/api/events'];
+const WRITING_GET_ROUTES=['/api/events'];
 
 const sources=['src/worker.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/letterboxd-ratings.js'].map(file=>fs.readFileSync(file,'utf8')).join('\n');
 const routes=new Set([...sources.matchAll(/(?:url\.pathname|path)==='(\/api\/[^']+)'&&request\.method==='GET'/g)].map(m=>m[1]));

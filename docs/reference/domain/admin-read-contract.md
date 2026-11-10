@@ -82,13 +82,13 @@ One admin response must name its pin, and that pin must cover every object the p
 
 ## GET side effects and safe reads
 
-The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted; [ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). Programme, watchlist, catalog availability and Admin reads of the published generation are query-only; they do not repair R2 compatibility mirrors. The remaining writers named by `tests/get-side-effects.mjs` are:
+The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted; [ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). Programme, watchlist, catalog availability and Admin reads of the published generation are query-only; they do not repair R2 compatibility mirrors. The remaining writer named by `tests/get-side-effects.mjs` is:
 
 | Route | Why it can write | Admin use |
 | --- | --- | --- |
 | `GET /api/events` | Recovers an undelivered stop event, then may list `events/items/` | Do not call |
-| `GET /api/enrichment/status` | Same stop-event recovery | Do not call. MCP `enrichment_status` calls this route |
-| `GET /api/enrichment/runs` | Writes diagnostic history | Do not call |
+
+`GET /api/enrichment/status` and `GET /api/enrichment/runs` no longer write ([AIR-415](https://trello.com/c/NHyIKM6z)). MCP `enrichment_status` is the same body as status.
 
 These GETs do not write, and they still are not an admin query:
 
@@ -305,7 +305,7 @@ Where the implementation fixes a point this section left open: the pin is one op
 
 | Risk | What would go wrong | Check before enablement |
 | --- | --- | --- |
-| Writing GET | An admin poll repairs events or seeds a rating | The route is not one of the four writing GETs. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
+| Writing GET | An admin poll repairs events or seeds a rating | The route is not `GET /api/events`. A test fails if the handler calls `recoverStopEvents` or `enrichmentView` |
 | Bucket scan | Opening `/admin` lists the bucket or `enrichment/films/` | The handler reads only `epg/published-generation.json`, `epg/generations/<runId>/programme.json`, `titles.json`, `people.json` and `admin/owner-reviews.json`. Assert no `list` and no fallback to root `programme.json` |
 | Resolver interference | A search reads the lease, continuation, or resolution ledger and is mistaken for AIR-69 activity | Those keys are absent from the handler. AIR-69 is closed or explicitly still excluded |
 | `skew` treated as a failed read | A dictionary clock hides a valid page, or a page claims the clocks match | `skew: true` still returns `items`. A newer titles clock expects 200 and `titles_newer`. A missing clock expects `timestamp_missing` |

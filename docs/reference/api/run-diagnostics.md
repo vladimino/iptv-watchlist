@@ -8,7 +8,7 @@ Each `start`, `next`, `submit`, `heartbeat`, and `complete` appends at most eigh
 
 `entered` is the attempt. `produced` means the Worker formed a response. `failed` means the handler threw; the client then sees HTTP 502 and `storage_error`. `lastAttemptedStep` is the latest step. `lastCompletedStep` is the latest `produced` step. `firstNextAt` can be set while `lastCompletedStep` is still `start`: the next attempt began, and no next response was formed.
 
-The server cannot attest that the caller received a response. Stored `delivery` stays `unconfirmed`. `GET /api/enrichment/status` adds `diagnostics.steps[].callerAcknowledged` only when a later `complete` fault echoes that step's `requestId` in `receivedRequestId`. `GET /api/enrichment/runs` returns the same projection. Neither route is new, and neither starts a run.
+The server cannot attest that the caller received a response. Stored `delivery` stays `unconfirmed`. `GET /api/enrichment/status` adds `diagnostics.steps[].callerAcknowledged` only when a later `complete` fault echoes that step's `requestId` in `receivedRequestId`. `GET /api/enrichment/runs` returns the same projection. An expired lease is projected on both reads and written only by the next `prediction_start`. Neither route starts a run, persists a diagnostic or delivers a stop event.
 
 The correlation id is `X-Request-Id` when it matches `^[A-Za-z0-9_-]{1,80}$`; otherwise the Worker generates one. The same value is returned as JSON `requestId` and the `X-Request-Id` response header so MCP `structuredContent` can see it. Old clients ignore the extra fields.
 
