@@ -1,6 +1,6 @@
 # GET and HEAD read side-effect audit (AIR-412)
 
-Dated, bounded, offline. Captured 2026-11-10 UTC on `main` at `2e07e3d` plus the AIR-412 pull request. No production request, no Cloudflare call, no TMDB call, no migration and no flag change was made. Decision: [ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md) (Proposed). Inventory and baseline: [read side effects](../../reference/api/read-side-effects.md). Card: [AIR-412](https://trello.com/c/TuRMtgFF), umbrella [AIR-411](https://trello.com/c/6abdVoGq).
+Dated, bounded, offline. Captured 2026-11-10 UTC on `main` at `2e07e3d` plus the AIR-412 pull request. No production request, no Cloudflare call, no TMDB call, no migration and no flag change was made. Decision: [ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md) (Accepted on 2026-11-10; see AIR-412 owner acceptance). Inventory and baseline: [read side effects](../../reference/api/read-side-effects.md). Card: [AIR-412](https://trello.com/c/TuRMtgFF), umbrella [AIR-411](https://trello.com/c/6abdVoGq).
 
 ## Method
 
