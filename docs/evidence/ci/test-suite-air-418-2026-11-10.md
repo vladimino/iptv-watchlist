@@ -55,7 +55,6 @@ Files alone: `prediction-queue-budget` 82.0 s to 5.8 s; the three `generation-st
 | 42856218757, attempt 2 | `0d6eba8` | 297 | 145 s | not read | not read |
 | [42858739038](https://github.com/vladimino/iptv-watchlist/actions/runs/42858739038), attempt 1 | `dd4b793` (plus the `verifyDerived` order) | 297 | 207 s | 206.8 s | 1163.0 s |
 | 42858739038, attempt 2 | `dd4b793` | 297 | 126 s | 125.3 s | 706.2 s |
-
 | [42863138066](https://github.com/vladimino/iptv-watchlist/actions/runs/42863138066), attempt 1 | `6c8ac04` (this change complete) | 297 | 166 s | 166.0 s | 920.6 s |
 | 42863138066, attempt 2 | `6c8ac04` | 297 | 201 s | 200.4 s | 1123.1 s |
 | 42863138066, attempt 3 | `6c8ac04` | 297 | 156 s | 156.3 s | 860.4 s |
