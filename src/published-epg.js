@@ -198,7 +198,7 @@ export async function currentGeneration(env){
  const authority=await readAuthority(env);
  if(!authority.ready)return null;
  const programmeRunId=authority.programmeRunId;
- return {authority:'d1',programmeRunId,phase:programmeRunId?'published':null,generation:authority.generation,fence:'d1:'+authority.generation+':'+(programmeRunId||''),mirrorProgrammeRunId:authority.mirrorProgrammeRunId,mirrorEtag:authority.mirrorEtag,watchlistGeneration:authority.watchlistGeneration};
+ return {authority:'d1',programmeRunId,phase:programmeRunId?'published':null,generation:authority.generation,fence:'d1:'+authority.generation+':'+(programmeRunId||''),mirrorProgrammeRunId:authority.mirrorProgrammeRunId,mirrorEtag:authority.mirrorEtag,mirrorWatchlistEtag:authority.mirrorWatchlistEtag,watchlistGeneration:authority.watchlistGeneration,mirrors:{aligned:!!programmeRunId&&authority.mirrorProgrammeRunId===programmeRunId&&!!authority.mirrorEtag&&!!authority.mirrorWatchlistEtag}};
 }
 
 export async function readDocument(env,programmeRunId,kind){
@@ -504,14 +504,14 @@ export async function writeMirrors(env,input){
 }
 export async function repairMirrors(env){
  const authority=await readAuthority(env);
- if(authority.cutover==='held')return {mirrored:false};
+ if(authority.cutover==='held')return {mirrored:false,aligned:false,wrote:false,reason:'held'};
  const current=await currentGeneration(env);
- if(!current?.programmeRunId)return current?{mirrored:false,authority:current}:{mirrored:false};
+ if(!current?.programmeRunId)return current?{mirrored:false,aligned:false,wrote:false,authority:current}:{mirrored:false,aligned:false,wrote:false};
  const bucket=env?.BUCKET;
- if(!bucket||typeof bucket.get!=='function')return {mirrored:false,authority:current};
+ if(!bucket||typeof bucket.get!=='function')return {mirrored:false,aligned:false,wrote:false,authority:current};
  const programme=await readDocument(env,current.programmeRunId,'programme');
  const watchlist=await readDocument(env,current.programmeRunId,'watchlist');
- if(!programme||!watchlist)return {mirrored:false,authority:current};
+ if(!programme||!watchlist)return {mirrored:false,aligned:false,wrote:false,authority:current};
  const run=current.programmeRunId;
  const pointer=await mirrorObject(bucket,POINTER_KEY,{programmeRunId:run,phase:'published'});
  const programmeMirror=await mirrorObject(bucket,PROGRAMME_KEY,programme);
@@ -519,9 +519,9 @@ export async function repairMirrors(env){
  const programmeCopy=await mirrorObject(bucket,generationObjectKey(run,'programme.json'),programme);
  const watchlistCopy=await mirrorObject(bucket,generationObjectKey(run,'watchlist.json'),watchlist);
  const aligned=pointer.match&&pointer.etag===current.mirrorEtag&&programmeMirror.match&&watchlistMirror.match&&watchlistMirror.etag===current.mirrorWatchlistEtag&&programmeCopy.match&&watchlistCopy.match;
- if(aligned)return {mirrored:true,authority:current};
+ if(aligned)return {mirrored:true,aligned:true,wrote:false,authority:current};
  const mirrored=await writeMirrors(env,{programmeRunId:run,programme,watchlist,phase:'published'});
- return {mirrored,authority:await readAuthority(env)};
+ return {mirrored,aligned:false,wrote:!!mirrored,authority:await readAuthority(env)};
 }
 
 export async function authoritativeSnapshot(env){

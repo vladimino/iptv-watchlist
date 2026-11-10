@@ -25,6 +25,8 @@ flowchart TD
     class data warning
 ```
 
+The tests of the `Test and build` box run as two shards in two jobs, `Test and build` (shard 1 of 2, also the build and the artifact) and `Test shard 2 of 2`; the deploy job needs both ([AIR-418](https://trello.com/c/5HEzNlvh)). The diagram shows them as one step: the gate before the artifact is unchanged.
+
 PR checks do **not** publish to Cloudflare. A successful `main` run builds and uploads a verified artifact; the deploy job consumes that artifact, checks freshness, performs credentials/settings preflight and deploys only on `main`. The freshness check limits stale publishes but is not atomic with publication.
 
 A successful deploy proves **code publication**, not EPG completion, prediction execution, scheduled-task state, OAuth configuration changes or any R2/D1 migration. Rollback of the Worker version cannot undo persisted R2 writes, restore external ChatGPT Tasks or alter Cloudflare Access policies. Production recovery remains governed by the [rollback runbook](../runbooks/recovery/cloudflare-worker-rollback.md) and separate owner approval.

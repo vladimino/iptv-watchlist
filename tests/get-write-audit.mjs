@@ -26,7 +26,7 @@ const readRoutes=[...exact].sort().map(withQuery).concat(Object.values(PREFIX_RO
 assert.equal(new Set(readRoutes).size,readRoutes.length,'a read route is listed twice');
 
 // ---- the matrix ----
-const observed={},statuses={};
+const observed={},statuses={},viewProbe={};
 const key=(method,route,scenario)=>method+' '+route.replace(/\?.*$/,'')+(route.includes('?')?' ?'+route.split('?')[1]:'')+' @ '+scenario;
 const names=Object.keys(SCENARIOS);
 const failures=[];
@@ -36,12 +36,14 @@ const baselineFor=(table,method,route,scenario)=>{
  const entry=table.find(item=>item.routes.includes(method+' '+route));
  return entry?{entry,effects:entry.effects[scenario]||[],sql:entry.sql?.[scenario]||[]}:{entry:null,effects:[],sql:[]};
 };
+const scenarios={};
 for(const name of names){
- const scenario=await buildScenario(name);
+ const scenario=scenarios[name]=await buildScenario(name);
  for(const route of readRoutes)for(const method of ['GET','HEAD']){
   const result=await probe.run(scenario,[route,{method}]);
   const found=effectsOf(result);
   observed[key(method,route,name)]=found;statuses[key(method,route,name)]=result.status;
+  if(method==='GET'&&route==='/api/enrichment/view')viewProbe[name]=result;
   const {entry,effects,sql}=baselineFor(BASELINE,method,route,name),statements=[...new Set(result.statements)];
   if(entry&&effects.length&&same(found,effects)&&same(statements,sql))consumed.add(entry.id+'@'+name);
   if(!same(found,effects))failures.push(key(method,route,name)+'\n   observed: '+JSON.stringify(found)+'\n   baseline: '+JSON.stringify(effects));
@@ -85,6 +87,35 @@ for(const name of names){
  }
  for(const registered of [...Object.keys(MCP_READ_TOOLS),...MCP_WRITE_TOOLS])if(!tools.some(tool=>tool.name===registered))failures.push('the registry names the MCP tool '+registered+', which tools/list no longer returns');
 }
+// GET /api/enrichment/view overlays the compiled seed in memory: missing and partial indexes, a concurrent pair of reads, and both R2
+// and D1 pending work must not persist the seed, dispatch work, or change the DTO between two equal probes.
+{
+ const dto=body=>{const data=JSON.parse(body);return {actualRating:data.films?.w1?.actualRating??null,watched:Object.hasOwn(data.films?.w1||{},'watched')?data.films.w1.watched:null,ids:Object.keys(data.films||{}).sort()};};
+ const noPersist=result=>{
+  assert.equal(result.dispatches,0);
+  assert.equal(result.background,0);
+  assert.equal(result.workflows,0);
+  assert.ok(!effectsOf(result).some(item=>item.includes('view-index')),'view index write: '+effectsOf(result).join(', '));
+ };
+ const missing=scenarios['r2-pending'];
+ const [first,second]=await Promise.all([probe.run(missing,['/api/enrichment/view',{method:'GET'}]),probe.run(missing,['/api/enrichment/view',{method:'GET'}])]);
+ assert.equal(first.status,200);assert.equal(second.status,200);
+ noPersist(first);noPersist(second);
+ assert.deepEqual(effectsOf(first),[]);assert.deepEqual(effectsOf(second),[]);
+ assert.deepEqual(dto(first.body),{actualRating:4,watched:null,ids:['w1']});
+ assert.deepEqual(dto(first.body),dto(second.body));
+ assert.equal(JSON.parse(missing.snapshot.get('enrichment/view-index.json').text).w1,undefined);
+ const partialSnapshot=new Map(missing.snapshot);
+ partialSnapshot.set('enrichment/view-index.json',{text:JSON.stringify({kept:{actualRating:null,watched:true},w1:{fingerprintHash:'x'}}),customMetadata:{}});
+ const partial=await probe.run({...missing,snapshot:partialSnapshot},['/api/enrichment/view',{method:'GET'}]);
+ assert.equal(partial.status,200);noPersist(partial);assert.deepEqual(effectsOf(partial),[]);
+ const partialFilms=JSON.parse(partial.body).films;
+ assert.equal(partialFilms.kept.actualRating,null);assert.equal(partialFilms.kept.watched,true);assert.equal(partialFilms.w1.actualRating,4);
+ const d1View=viewProbe['d1-pending'];
+ assert.equal(d1View.status,200);noPersist(d1View);
+ assert.equal(JSON.parse(d1View.body).films.w1.actualRating,4);
+}
+
 probe.restore();
 
 // A baseline entry that no probe ever matched with a non-empty effect list was fixed (or never real): it has to go, so the fix turns the route into a prohibition.

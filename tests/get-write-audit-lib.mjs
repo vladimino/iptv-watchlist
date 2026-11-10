@@ -26,8 +26,8 @@ export const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-get-audit-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 
 // ---- the production bundle, built into a directory of this test's own ----
-// `seeded` is the same bundle with a non-empty personal-ratings seed: the repository ships an empty seed ("replace it only in a private build"), and a private
-// build is exactly what makes the view read's seed merge a writer. A scenario with `seeded: true` runs against it.
+// `seeded` is the same bundle with a non-empty personal-ratings seed: the repository ships an empty seed ("replace it only in a private build"). A scenario with
+// `seeded: true` runs against it so a GET that used to persist that seed still has a seed to overlay.
 export async function loadBundle(){
  // `build.mjs` writes `dist` relative to its working directory: run it in a directory whose entries are links to the repository's, so the bundle is built from
  // the real sources into a `dist` of this test's own and no other test sees it change.
@@ -171,9 +171,11 @@ export function Probe(bundle){
   restore,
   // `request` is a Request or [path, init]. Returns {status, ...effects}.
   async run(scenario,request,{mcp=null}={}){
-   const file=path.join(root,'p'+(probeCount++)+'.sqlite');
-   fs.copyFileSync(scenario.dbFile,file);
-   const before=hashOf(file);
+   // AIR-418: a probe that wrote nothing to D1 left its copy exactly as the template (no write statement seen and the file hash unchanged), so the next probe of
+   // the same scenario uses that copy, and its sqlite process, again. Any D1 write, classified or not, retires the copy: the next probe starts from a new one.
+   let live=scenario.live;
+   if(!live){const fresh=path.join(root,'p'+(probeCount++)+'.sqlite');fs.copyFileSync(scenario.dbFile,fresh);live=scenario.live={file:fresh,hash:hashOf(fresh)};}
+   const file=live.file,before=live.hash;
    const effects={r2:[],d1:[],statements:[],fetches:[],background:0,dispatches:0,workflows:0,status:0};
    const bucket=new AuditBucket(scenario.snapshot);
    const db=d1Standin(file,{onQuery:async text=>{const shape=d1Shape(text);if(shape){effects.d1.push(shape);effects.statements.push(normalizeSql(text));}},onBatch:async statements=>{for(const item of statements){const shape=d1Shape(item.text);if(shape){effects.d1.push(shape);effects.statements.push(normalizeSql(item.text));}}}});
@@ -198,8 +200,9 @@ export function Probe(bundle){
    }catch(error){effects.status=599;effects.error=String(error?.message||error).slice(0,120);}
    finally{current=null;console.error=logged;}
    effects.r2=bucket.writes;
-   effects.d1Changed=effects.d1.length===0&&hashOf(file)!==before;
-   for(const suffix of ['','-journal','-wal','-shm'])try{fs.rmSync(file+suffix,{force:true});}catch{}
+   const after=hashOf(file);
+   effects.d1Changed=effects.d1.length===0&&after!==before;
+   if(effects.d1.length||after!==before){scenario.live=null;for(const suffix of ['','-journal','-wal','-shm'])try{fs.rmSync(file+suffix,{force:true});}catch{}}
    return effects;
   },
  };

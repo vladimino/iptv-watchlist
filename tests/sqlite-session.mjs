@@ -14,11 +14,80 @@
 //  - A script whose last statement has no `;` (the end of stdin ended it before) is closed with one before the marker, so the marker is never read as part of it.
 //  - A database file that was deleted or replaced gets a new connection (checked by device and inode before every call).
 //  - Calls on one database are strictly sequential (the caller is blocked), so there is no interleaving to reason about.
+//  - AIR-418: the CLI's own JSON writer costs seconds per megabyte of text (it emits a large value character by character: 1.7 MB took 5.9 s, against 0.006 s
+//    in quote mode), and quote mode costs a write per value (90 000 small rows: 0.7 s against 0.1 s in JSON mode). So a `-json` call runs in JSON mode unless the
+//    same statement shape returned large values before; then it runs as `.mode quote` with headers and the output is turned into the same JSON text here. Quote
+//    mode keeps what JSON mode keeps: column names, NULL, numbers as the CLI prints them (copied verbatim) and text. The choice changes the time of a call only.
 import {spawn,spawnSync} from 'node:child_process';
 import {statSync} from 'node:fs';
 import {Worker,isMainThread,workerData,MessageChannel,receiveMessageOnPort} from 'node:worker_threads';
 
 const MARK='__SQLITE_SESSION_DONE__';
+// `-json` for a statement shape that returns large values: the CLI is asked for quote mode with headers.
+const cliArgs=args=>args.flatMap(argument=>argument==='-json'?['-quote','-header']:[argument]);
+// Statement shapes (the start of the script, literals removed) whose answers were large values. Learned from the answers of this process; see the note above.
+const largeShapes=new Set();
+const LARGE_ANSWER=50000,LARGE_PER_LINE=20000,SMALL_PER_LINE=2000;
+const shapeOf=input=>input.slice(0,400).replace(/'(?:[^']|'')*'?/g,'?').replace(/\d+/g,'?').slice(0,200);
+const lineCount=text=>{let count=1;for(let at=text.indexOf('\n');at>=0;at=text.indexOf('\n',at+1))count++;return count;};
+// Remembers what this answer says about its shape and returns the result with stdout as JSON text.
+function settleJson(shape,quoted,result){
+ if(result.status!==0||typeof result.stdout!=='string')return result;
+ const perLine=result.stdout.length/lineCount(result.stdout);
+ if(!quoted){if(result.stdout.length>LARGE_ANSWER&&perLine>LARGE_PER_LINE)largeShapes.add(shape);return result;}
+ if(perLine<SMALL_PER_LINE)largeShapes.delete(shape);
+ result.stdout=quoteToJson(result.stdout);
+ return result;
+}
+// The output of `-quote -header` for ONE result set, as the text `-json` prints for it: `[{"name":value,...},\n{...}]\n`, or nothing for no row.
+// A text value is quoted with '' for a quote and may span lines; NULL, numbers and X'..' blobs are bare. Numbers are copied as printed (JSON mode prints the
+// same digits); the infinities are written as JSON mode writes them. A blob becomes its hex text (JSON mode prints unusable bytes for a blob; no test reads one).
+export function quoteToJson(text){
+ if(!text)return '';
+ const length=text.length,NEEDS_ESCAPE=/["\\\u0000-\u001f\u2028\u2029]/;
+ let position=0,names=null,column=0;const out=[];let row='';
+ // one value starting at `position`: returns its JSON token and leaves `position` after it
+ const value=()=>{
+  const first=text.charCodeAt(position);
+  if(first===39){
+   let from=position+1,end=text.indexOf("'",from);
+   if(end<0)throw new Error('sqlite quote output: unterminated text');
+   let content;
+   if(text.charCodeAt(end+1)!==39){content=text.slice(from,end);position=end+1;}
+   else{
+    content='';
+    for(;;){
+     if(text.charCodeAt(end+1)===39){content+=text.slice(from,end+1);from=end+2;end=text.indexOf("'",from);if(end<0)throw new Error('sqlite quote output: unterminated text');continue;}
+     content+=text.slice(from,end);position=end+1;break;
+    }
+   }
+   return NEEDS_ESCAPE.test(content)?JSON.stringify(content):'"'+content+'"';
+  }
+  if(first===88&&text.charCodeAt(position+1)===39){
+   const end=text.indexOf("'",position+2);if(end<0)throw new Error('sqlite quote output: unterminated blob');
+   const hex=text.slice(position+2,end);position=end+1;return '"'+hex+'"';
+  }
+  let end=position;
+  for(;end<length;end++){const code=text.charCodeAt(end);if(code===44||code===10)break;}
+  const bare=text.slice(position,end);position=end;
+  return bare==='NULL'?'null':bare==='Inf'?'9.0e+999':bare==='-Inf'?'-9.0e+999':bare;
+ };
+ while(position<length){
+  const fields=[];
+  for(;;){
+   fields.push(value());
+   const next=text.charCodeAt(position);
+   if(next===44){position++;continue;}
+   if(position<length&&next!==10)throw new Error('sqlite quote output: unexpected character after a value');
+   position++;break;
+  }
+  if(!names){names=fields.map(name=>name+':');continue;}
+  row='{';
+  for(column=0;column<fields.length;column++)row+=(column?',':'')+names[column]+fields[column];
+  out.push(row+'}');
+ }
+ return out.length?'['+out.join(',\n')+']\n':'';
+}
 const MAX_SESSIONS=12;
 
 if(!isMainThread&&workerData?.sqliteSession){
@@ -51,7 +120,7 @@ if(!isMainThread&&workerData?.sqliteSession){
   wait({status:0,stdout,stderr,signal:null});
  };
  port.on('message',message=>{
-  const {args,key,fileKey,input}=message;
+  const {args,key,fileKey,input,prefix}=message;
   // Keep the number of idle sqlite3 processes small: the oldest session goes first.
   while(sessions.size>=MAX_SESSIONS&&!sessions.has(key))close(sessions.keys().next().value);
   let session=sessions.get(key);
@@ -61,7 +130,7 @@ if(!isMainThread&&workerData?.sqliteSession){
   session.chunks=[];session.tail='';session.err='';
   session.waiting=answer;
   try{// Every call starts as a fresh connection did: foreign keys off (SQLite's default) unless this script turns them on.
-  session.child.stdin.write('PRAGMA foreign_keys=OFF;\n'+input+'\n;\n.print '+MARK+'\n');}catch(error){const wait=session.waiting;session.waiting=null;if(wait)wait({status:1,stdout:'',stderr:String(error.message||error),signal:null});}
+  session.child.stdin.write((prefix||'')+'PRAGMA foreign_keys=OFF;\n'+input+'\n;\n.print '+MARK+'\n');}catch(error){const wait=session.waiting;session.waiting=null;if(wait)wait({status:1,stdout:'',stderr:String(error.message||error),signal:null});}
  });
 }
 
@@ -95,22 +164,24 @@ const fileKeyOf=file=>{try{const stat=statSync(file);return stat.dev+':'+stat.in
 
 // Same shape as `spawnSync('sqlite3', args, {input, encoding: 'utf8'})`: `{status, stdout, stderr, signal}`.
 export function sqliteSync(args,{input='',timeoutMs=300000,...options}={}){
+ const json=args.includes('-json'),shape=json?shapeOf(String(input)):null,quoted=json&&largeShapes.has(shape);
  if(needsOneShot(args,input)){
   // A one-shot call in the usual form (`[-json] -bail file`) also skips the fsync per statement; any other argument list is run as given.
   const usual=args.filter(argument=>argument!=='-json'&&argument!=='-bail').length===1&&!args.some(argument=>argument.startsWith(':'));
-  return spawnSync('sqlite3',usual?['-cmd','PRAGMA synchronous=OFF',...args]:args,{input,encoding:'utf8',maxBuffer:1<<30,...options});
+  const real=quoted?cliArgs(args):args,result=spawnSync('sqlite3',usual?['-cmd','PRAGMA synchronous=OFF',...real]:real,{input,encoding:'utf8',maxBuffer:1<<30,...options});
+  return json?settleJson(shape,quoted,result):result;
  }
  const file=args.find(argument=>argument!=='-json'&&argument!=='-bail');
  ensure();
  const key=file+'|'+(args.includes('-json')?'json':'text');
  Atomics.store(flag,0,0);
- port.postMessage({args:[...args.filter(argument=>argument==='-json'),'-bail',file],key,fileKey:fileKeyOf(file),input:String(input)});
+ port.postMessage({args:[...args.filter(argument=>argument==='-json'),'-bail',file],prefix:json?(quoted?'.mode quote\n.headers on\n':'.mode json\n'):'',key,fileKey:fileKeyOf(file),input:String(input)});
  if(Atomics.wait(flag,0,0,timeoutMs)==='timed-out')throw new Error('sqlite session timed out after '+timeoutMs+' ms');
  // The wake-up flag can be seen a moment before the message itself is readable on the port; wait for the message, never for the flag again.
  let received=receiveMessageOnPort(port);
  for(let attempt=0;!received&&attempt<5000;attempt++){Atomics.wait(pause,0,0,2);received=receiveMessageOnPort(port);}
  if(!received)throw new Error('sqlite session gave no answer');
- return received.message;
+ return json?settleJson(shape,quoted,received.message):received.message;
 }
 
 // `runner` for scripts/offline-import.mjs `openSqlite(file, {runner})`: the same persistent process, with the shape of the spawnSync call it replaces.
