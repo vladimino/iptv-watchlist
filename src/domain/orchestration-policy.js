@@ -11,6 +11,9 @@ export const COOLDOWNS_MS = Object.freeze([60000, 300000, 900000, 3600000]);
 export const BUDGET_CAPS = Object.freeze({consecutive: 5, total: 12});
 export const JITTER = Object.freeze({low: 0.8, high: 1.2});
 export const RATINGS_STALL_MS = 2 * 3600000;
+// AIR-420: the daily EPG publication is expected within this long after its due time (the run of 9 November 2026 took 15 minutes
+// from the cron tick, most of it the wait for the source; a healthy seal is a few steps).
+export const EPG_LATE_MS = 15 * 60000;
 
 export const TRANSIENT_CODES = Object.freeze(['network_error', 'timeout', 'rate_limited', 'upstream_blocked', 'upstream_5xx', 'exceeded_memory', 'exceeded_cpu', 'worker_1102', 'wakeup_lost', 'instance_terminated', 'instance_errored', 'create_uncertain', 'owner_unknown', 'd1_unavailable', 'step_failed']);
 export const PERMANENT_CODES = Object.freeze(['credentials_missing', 'credentials_rejected', 'contract_unsupported', 'config_invalid']);
@@ -112,7 +115,10 @@ export function applyProgress(budget) {
 
 // The derived health (decision 7.2). `waiting` and `cooldown` do not alert; `stalled`, `quarantined` and
 // `failed_permanent` do. Inputs are facts the caller has read: no clock of its own.
-export function deriveHealth({now, dueAt, done, quarantine, permanent, cooldownUntil, nextWakeAt, lastDurableProgressAt, stallMs = RATINGS_STALL_MS}) {
+// AIR-420. `lateMs` is the domain's publication target after its due time. A domain that passes it reads `late` once that
+// long has passed with the work not done and no cooldown or planned wake that explains it, whether or not its checkpoints
+// still advance: an hour of slow but moving work is not healthy. A domain that does not pass it never reads `late`.
+export function deriveHealth({now, dueAt, done, quarantine, permanent, cooldownUntil, nextWakeAt, lastDurableProgressAt, stallMs = RATINGS_STALL_MS, lateMs = null}) {
   if (quarantine) return 'quarantined';
   if (permanent) return 'failed_permanent';
   if (done || !(Number.isFinite(dueAt) && now >= dueAt)) return done ? 'healthy' : 'idle';
@@ -120,5 +126,6 @@ export function deriveHealth({now, dueAt, done, quarantine, permanent, cooldownU
   if (Date.parse(nextWakeAt || '') > now) return 'waiting';
   const progress = Date.parse(lastDurableProgressAt || '');
   const since = Number.isFinite(progress) && progress >= dueAt ? progress : dueAt;
-  return now - since > stallMs ? 'stalled' : 'healthy';
+  if (now - since > stallMs) return 'stalled';
+  return Number.isFinite(lateMs) && lateMs > 0 && now - dueAt > lateMs ? 'late' : 'healthy';
 }

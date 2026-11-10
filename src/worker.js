@@ -1114,7 +1114,8 @@ const SEAL_REQUEST_BUDGET_MS=32000;
 // The publication's units are large (the pointer, the mirrors, the queue refresh run for seconds each), so its phases use a
 // shorter budget: the worst case of a step is this budget plus the longest unit that started before it.
 const SEAL_PUBLICATION_BUDGET_MS=20000;
-const SEAL_FLUSH_ITEMS=60;
+// AIR-420: a flush hands sealWrite more than one batch can hold, so every batch is as full as its statement cap allows.
+const SEAL_FLUSH_ITEMS=400;
 // AIR-362: a seal step that finds the lease held answers `wait` with the holder's real expiry plus this margin, never more
 // than one lease TTL from now. A cancelled step keeps its lease until it expires; the caller waits for that, once.
 // ADR 0103 (AIR-383). A projector window is not a failure of the EPG publication. The three publication paths that take the Discovery
@@ -1208,11 +1209,14 @@ async function readSealedItems(env,job,offset,visit){
 }
 async function sealLedgerStep(env,run,lease,deadline){
  const job=run.seal;
+ // Sanitized step counters for the phase log: how many batches, how long they waited for D1, how many observations and archive rounds.
+ const stats={batches:0,writeMs:0,items:0,archives:0,archiveMs:0};
  await DiscoveryAuthority.sealBegin(env,{programmeRunId:run.runId,jobId:job.jobId,sourceKey:job.sourceKey,sourceEtag:job.etag,itemTotal:job.itemTotal,startBytes:job.prefixBytes,lease});
  let state=await DiscoveryAuthority.sealState(env);
  if(state.phase==='items'&&state.cursorItems<state.itemTotal){
-  let batch=[],cursor=state.cursorItems;
-  const flush=async()=>{while(batch.length){const result=await DiscoveryAuthority.sealWrite(env,{jobId:job.jobId,expectedCursor:cursor,items:batch,lease});cursor=result.cursorItems;batch=batch.slice(result.written);if(Date.now()>=deadline&&batch.length)return false;}return true;};
+  let batch=[],cursor=state.cursorItems,carried=null;
+  // AIR-420: after the first batch of a step the next ones carry the fence values instead of reading them again (one D1 round trip a batch).
+  const flush=async()=>{while(batch.length){const at=Date.now();const result=await DiscoveryAuthority.sealWrite(env,{jobId:job.jobId,expectedCursor:cursor,items:batch,lease,carried});stats.batches++;stats.writeMs+=Date.now()-at;stats.items+=result.written;carried=result.carried||null;cursor=result.cursorItems;batch=batch.slice(result.written);if(Date.now()>=deadline&&batch.length)return false;}return true;};
   await readSealedItems(env,job,state.cursorBytes,async(item,bytes)=>{
    batch.push({item,bytes});
    if(batch.length>=SEAL_FLUSH_ITEMS){if(!await flush())return false;if(Date.now()>=deadline)return false;}
@@ -1223,12 +1227,14 @@ async function sealLedgerStep(env,run,lease,deadline){
   if(batch.length)await flush();
   state=await DiscoveryAuthority.sealState(env);
  }
- if(state.phase==='items'&&state.cursorItems<state.itemTotal)return {done:false,state};
+ if(state.phase==='items'&&state.cursorItems<state.itemTotal)return {done:false,state,stats};
  // At least one archive batch per step, so a step with its time already spent still moves.
  for(;;){
+  const at=Date.now();
   const result=await DiscoveryAuthority.sealArchive(env,{jobId:job.jobId,lease,limit:500});
-  if(result.committed)return {done:true,state:await DiscoveryAuthority.sealState(env)};
-  if(Date.now()>=deadline)return {done:false,state:await DiscoveryAuthority.sealState(env)};
+  stats.archives++;stats.archiveMs+=Date.now()-at;
+  if(result.committed)return {done:true,state:await DiscoveryAuthority.sealState(env),stats};
+  if(Date.now()>=deadline)return {done:false,state:await DiscoveryAuthority.sealState(env),stats,retiring:result.retiring};
  }
 }
 // The catalog is brought up to date by the difference to what D1 holds, a bounded part per step: a step writes what
@@ -1371,7 +1377,9 @@ async function sealStep(env,run,entryAt=Date.now()){
  if(!lease)return sealBusyResponse(run,taken);
  try{
   if(run.seal.phase==='ledger'){
-   const result=await tracedPhase(run.runId,'seal_ledger',()=>sealLedgerStep(env,run,lease,deadline),value=>({cursor:value.state.cursorItems,total:value.state.itemTotal,phase:value.state.phase,done:value.done}));
+   const result=await tracedPhase(run.runId,'seal_ledger',()=>sealLedgerStep(env,run,lease,deadline),value=>({cursor:value.state.cursorItems,total:value.state.itemTotal,phase:value.state.phase,done:value.done,...(value.stats||{})}));
+   // AIR-420: the cursor the step reached is kept on the run, so the read model and the executor's progress count see the seal move.
+   run.seal.cursor=result.state.cursorItems;run.seal.ledgerPhase=result.state.phase;
    if(result.done){run.seal.phase='catalog';}
    run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
    return sealResponse(run,{},{seal:{cursor:result.state.cursorItems,itemTotal:result.state.itemTotal,ledgerPhase:result.state.phase}});

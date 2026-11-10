@@ -288,7 +288,10 @@ const EpgOrchestration=(()=>{
  }
  // The checkpoint of a sync run, as one comparable number: the stage, the metadata cursor and the seal phase only move forward.
  const checkpointKey=run=>run?[run.runId,run.stage,run.cursor??0,run.remaining??0,run.seal?.phase??''].join('|'):null;
- const progressCount=run=>run?(STAGE_RANK[run.stage]??0)*1000000+(run.stage==='metadata'?(run.cursor??0):0)+(run.stage==='seal'?(SEAL_RANK[run.seal?.phase]??0)*1000:0):0;
+ // AIR-420: inside the `ledger` phase the seal's own cursor counts too (as a share of the item total, below the next phase's
+ // rank), so a seal that writes observations is durable progress and one that does not is not.
+ const ledgerShare=seal=>{const total=Number(seal?.itemTotal),cursor=Number(seal?.cursor);return seal?.phase==='ledger'&&total>0&&cursor>0?Math.min(998,Math.floor(cursor/total*998)):0;};
+ const progressCount=run=>run?(STAGE_RANK[run.stage]??0)*1000000+(run.stage==='metadata'?(run.cursor??0):0)+(run.stage==='seal'?(SEAL_RANK[run.seal?.phase]??0)*1000+ledgerShare(run.seal):0):0;
  const advanced=(run,previous)=>!!run&&!!previous&&previous.runId===run.runId&&progressCount(run)>(previous.count??0);
  async function body(response){try{return await response.json();}catch{return {};}}
 
@@ -517,10 +520,16 @@ const EpgOrchestration=(()=>{
   }
   const sameKey=c.runKey===dayKey;
   const lastProgress=sameKey?c.lastDurableProgressAt:(run?.updatedAt||null);
-  const health=control.malformed?'quarantined':policy().deriveHealth({now,dueAt,done:doneToday,quarantine:c.quarantine,permanent:c.failure?.class==='permanent'&&sameKey,cooldownUntil:sameKey?c.cooldownUntil:null,nextWakeAt:sameKey?c.nextWakeAt:null,lastDurableProgressAt:lastProgress});
+  const health=control.malformed?'quarantined':policy().deriveHealth({now,dueAt,done:doneToday,quarantine:c.quarantine,permanent:c.failure?.class==='permanent'&&sameKey,cooldownUntil:sameKey?c.cooldownUntil:null,nextWakeAt:sameKey?c.nextWakeAt:null,lastDurableProgressAt:lastProgress,lateMs:m.mode==='cloudflare'?policy().EPG_LATE_MS:null});
+  // AIR-420. The seal's real progress and the publication latency, from the run document and the control record only (no id of a
+  // Film or an observation): the ledger cursor is what the last finished step wrote, so a long `seal/ledger` reads as a number that moves.
+  const num=value=>Number.isFinite(Number(value))&&value!==null&&value!==undefined?Number(value):null;
+  const seal=run?.stage==='seal'&&run.seal?{phase:run.seal.phase??null,ledgerPhase:run.seal.ledgerPhase??null,cursorItems:num(run.seal.cursor),itemTotal:num(run.seal.itemTotal),stagedAt:run.seal.stagedAt??null,updatedAt:run.updatedAt??null}:null;
+  const doneAt=sameKey&&c.doneAt?Date.parse(c.doneAt):NaN;
+  const publication=Number.isFinite(dueAt)?{dueAt:iso(dueAt),publishedAt:Number.isFinite(doneAt)?iso(doneAt):null,latencyMs:Number.isFinite(doneAt)?Math.max(0,doneAt-dueAt):null,overdueMs:!doneToday&&now>=dueAt?now-dueAt:null,targetMs:policy().EPG_LATE_MS}:null;
   return {mode:m.mode,available:true,epoch:m.epoch,...(m.mode==='switching'?{target:m.target,drain:m.drain||null}:{}),runKey:c.runKey,published:c.publishedRunId??null,phase:c.phase,
    owner:{kind:'workflow',instanceId:c.instanceId,liveness},lastDurableProgressAt:c.lastDurableProgressAt,dueAt:iso(dueAt),nextWakeAt:c.nextWakeAt||(now>=dueAt?null:iso(dueAt)),
-   syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null}:null,
+   syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null}:null,seal,publication,
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
    cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,health,sideEffects:'none'};
  }

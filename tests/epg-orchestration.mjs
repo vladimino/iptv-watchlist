@@ -762,4 +762,57 @@ for(const stage of ['epg','seal']){
   eq(start(await epg.ensure(env,{now:due+11*MIN})),{started:false,reason:'complete'});
  }
 }
+
+// AIR-420. A seal that writes observations is durable progress, the read model shows how far it is, and a publication that is
+// more than the target late without a cooldown or a planned wake reads `late`, not `healthy`.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const health=input=>Policy.deriveHealth({now:due+20*MIN,dueAt:due,done:false,quarantine:null,permanent:false,cooldownUntil:null,nextWakeAt:null,lastDurableProgressAt:at(due+19*MIN),lateMs:Policy.EPG_LATE_MS,...input});
+ assert.equal(health({}),'late','progress that still moves does not hide a late publication');
+ assert.equal(health({now:due+14*MIN}),'healthy','inside the target');
+ assert.equal(health({lateMs:null}),'healthy','a domain without a target never reads late (Ratings)');
+ assert.equal(health({done:true}),'healthy');
+ assert.equal(health({cooldownUntil:at(due+25*MIN)}),'cooldown','a counted retry explains the delay');
+ assert.equal(health({nextWakeAt:at(due+25*MIN)}),'waiting','a planned wake explains the delay');
+ assert.equal(health({quarantine:{scope:'run'}}),'quarantined');
+ assert.equal(health({now:due+3*H,lastDurableProgressAt:at(due+5*MIN)}),'stalled','no progress for the stall threshold is still stalled');
+ const {epg}=cloudflare();
+ const count=seal=>epg.progressCount({runId:'r',stage:'seal',seal});
+ assert.ok(count({phase:'ledger',itemTotal:47059,cursor:4796})>count({phase:'ledger',itemTotal:47059,cursor:4256}),'a ledger cursor that moved is progress');
+ assert.equal(count({phase:'ledger',itemTotal:47059,cursor:4796}),count({phase:'ledger',itemTotal:47059,cursor:4796}),'the same cursor is not');
+ assert.equal(count({phase:'ledger'}),count({phase:'ledger',itemTotal:0,cursor:0}),'a run without a cursor counts as before');
+ assert.ok(count({phase:'catalog'})>count({phase:'ledger',itemTotal:10,cursor:10}),'a full ledger stays below the next phase');
+ assert.ok(count({phase:'ledger',itemTotal:47059,cursor:1})>=count({phase:'ledger'}));
+}
+{
+ const h=cloudflare();const {epg,env,state}=h;
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ await epg.ensure(env,{now:due});
+ state.sync={runId:'run-1',stage:'seal',remaining:0,startedAt:at(due+MIN),updatedAt:at(due+9*MIN),seal:{jobId:'job-1',phase:'ledger',sourceKey:'epg/generations/run-1/discovery-latest.json',itemTotal:47059,cursor:4796,ledgerPhase:'items',stagedAt:at(due+8*MIN)}};
+ let model=plain(await epg.readModel(env,due+10*MIN));
+ assert.equal(model.health,'healthy');
+ eq(model.seal,{phase:'ledger',ledgerPhase:'items',cursorItems:4796,itemTotal:47059,stagedAt:at(due+8*MIN),updatedAt:at(due+9*MIN)});
+ eq(model.publication,{dueAt:at(due),publishedAt:null,latencyMs:null,overdueMs:10*MIN,targetMs:15*MIN});
+ assert.ok(!JSON.stringify(model.seal).includes('job-1')&&!JSON.stringify(model.seal).includes('discovery-latest'),'no job id or storage key in the read model');
+ model=plain(await epg.readModel(env,due+16*MIN));
+ assert.equal(model.health,'late','sixteen minutes after due with no publication is not healthy');
+ assert.equal(model.publication.overdueMs,16*MIN);assert.equal(model.sideEffects,'none');
+ // A run from before this change has no cursor on it: the fields are null, never a guess.
+ state.sync={runId:'run-1',stage:'seal',remaining:0,startedAt:at(due+MIN),updatedAt:at(due+9*MIN),seal:{phase:'catalog'}};
+ eq(plain(await epg.readModel(env,due+10*MIN)).seal,{phase:'catalog',ledgerPhase:null,cursorItems:null,itemTotal:null,stagedAt:null,updatedAt:at(due+9*MIN)});
+ // Outside a seal there is no seal object; once the day is done the latency is the fact and the health is healthy again.
+ state.sync={runId:'run-1',stage:'metadata',remaining:5,cursor:3,startedAt:at(due+MIN),updatedAt:at(due+2*MIN)};
+ assert.equal(plain(await epg.readModel(env,due+3*MIN)).seal,null);
+}
+{
+ const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+ const {epg,env}=h;
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const r=runner(h,{startAt:due});
+ await epg.ensure(env,{now:due});
+ await epg.run(env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ const model=plain(await epg.readModel(env,r.clock()+2*H));
+ assert.equal(model.health,'healthy');assert.equal(model.seal,null);
+ assert.ok(model.publication.publishedAt&&model.publication.latencyMs>=0&&model.publication.overdueMs===null,'a published day reports its latency');
+}
 console.log('epg-orchestration: ok');
