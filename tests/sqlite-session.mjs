@@ -27,7 +27,8 @@ if(!isMainThread&&workerData?.sqliteSession){
  const answer=message=>{port.postMessage(message);Atomics.store(flag,0,1);Atomics.notify(flag,0);};
  const close=key=>{const session=sessions.get(key);if(!session)return;sessions.delete(key);try{session.child.stdin.end();}catch{}try{session.child.kill('SIGKILL');}catch{}};
  const open=(key,args,fileKey)=>{
-  const child=spawn('sqlite3',args,{stdio:['pipe','pipe','pipe']});
+  // Durability of a test database is not part of any test: no fsync per statement (a connection setting, not stored in the file).
+  const child=spawn('sqlite3',['-cmd','PRAGMA synchronous=OFF',...args],{stdio:['pipe','pipe','pipe']});
   const session={child,fileKey,chunks:[],tail:'',err:'',waiting:null,dead:false};
   child.stdout.setEncoding('utf8');child.stderr.setEncoding('utf8');
   child.stdout.on('data',chunk=>{session.chunks.push(chunk);session.tail=(session.tail+chunk).slice(-(MARK.length+1));settle(session);});
@@ -94,7 +95,11 @@ const fileKeyOf=file=>{try{const stat=statSync(file);return stat.dev+':'+stat.in
 
 // Same shape as `spawnSync('sqlite3', args, {input, encoding: 'utf8'})`: `{status, stdout, stderr, signal}`.
 export function sqliteSync(args,{input='',timeoutMs=300000,...options}={}){
- if(needsOneShot(args,input))return spawnSync('sqlite3',args,{input,encoding:'utf8',maxBuffer:1<<30,...options});
+ if(needsOneShot(args,input)){
+  // A one-shot call in the usual form (`[-json] -bail file`) also skips the fsync per statement; any other argument list is run as given.
+  const usual=args.filter(argument=>argument!=='-json'&&argument!=='-bail').length===1&&!args.some(argument=>argument.startsWith(':'));
+  return spawnSync('sqlite3',usual?['-cmd','PRAGMA synchronous=OFF',...args]:args,{input,encoding:'utf8',maxBuffer:1<<30,...options});
+ }
  const file=args.find(argument=>argument!=='-json'&&argument!=='-bail');
  ensure();
  const key=file+'|'+(args.includes('-json')?'json':'text');
