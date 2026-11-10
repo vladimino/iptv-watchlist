@@ -33,6 +33,7 @@ const SERIAL_ONLY=new Set([
 // nothing else: every file still runs exactly once.
 const START_FIRST=[
  'generation-stage.mjs',
+ 'film-person-capture-mutation.mjs',
  'projector-bulk.mjs',
  'discovery-chunk-budget.mjs',
  'epg-r2-known-length.mjs',

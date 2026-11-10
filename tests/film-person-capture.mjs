@@ -8,6 +8,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 import {baselineGate} from '../src/film-person-baseline.js';
 import {createReadOnlyClient,readCredentials} from '../scripts/r2-snapshot-export.mjs';
 const C=await import(process.env.CAPTURE_MODULE||'../scripts/film-person-capture.mjs');
@@ -16,8 +17,14 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-capture-'));
 process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 let n=0;
-const sqlite=(file,text)=>{const r=spawnSync('sqlite3',['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});if(r.status!==0)throw new Error(r.stderr);};
-function database(){const file=path.join(root,'c-'+(n++)+'.sqlite');sqlite(file,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));return file;}
+// The same persistent sqlite session the D1 stand-in uses (AIR-408): a one-shot process per fixture statement was most of this file's time.
+const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text});if(r.status!==0)throw new Error(r.stderr);};
+// The migrated schema is built ONCE (every migration through the sqlite3 CLI) and each test database is a file copy of it: the same bytes, a fraction of the time.
+let template=null;
+function database(){
+ if(!template){template=path.join(root,'template.sqlite');sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));}
+ const file=path.join(root,'c-'+(n++)+'.sqlite');fs.copyFileSync(template,file);return file;
+}
 const AT='2026-11-10T12:00:00.000Z',NOW=()=>AT;
 const stub=all=>({prepare:()=>{const s={bind:()=>s,all};return s;}});
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -56,7 +63,7 @@ const INPUT={
  'epg/discovery-resolution.json':{},
 };
 // The fixture changes authority rows directly, so the guard triggers of the tables it touches are dropped first (a test-only stand-in for a writer's own path).
-const gateRowsOk=file=>{const r=spawnSync('sqlite3',['-json',file],{input:"SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('film_person_authority','film_person_baseline','film_person_cas','discovery_authority','published_epg_authority','owner_review_authority','projector_window','film','projection_run');",encoding:'utf8'});for(const t of JSON.parse(r.stdout||'[]'))sqlite(file,'DROP TRIGGER '+t.name+';');};
+const gateRowsOk=file=>{const r=sqliteSync(['-json',file],{input:"SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('film_person_authority','film_person_baseline','film_person_cas','discovery_authority','published_epg_authority','owner_review_authority','projector_window','film','projection_run');"});for(const t of JSON.parse(r.stdout||'[]'))sqlite(file,'DROP TRIGGER '+t.name+';');};
 const run=async(over={})=>{const bucket=over.bucket||await fakeBucket(INPUT);const file=over.file||database();gateRowsOk(file);const db=d1Standin(file,over.standin||{});const result=await C.captureProjectorInputs({client:bucket.client(),db,now:NOW,...over.options});return {bucket,file,db,result};};
 
 // 1. the allowlist is one constant derived from the projector's loader: every R2 key the loader names is in it, and nothing else is

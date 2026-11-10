@@ -82,7 +82,7 @@ One admin response must name its pin, and that pin must cover every object the p
 
 ## GET side effects and safe reads
 
-`tests/get-side-effects.mjs` allows exactly four GET routes to write R2:
+The authoritative inventory is [GET and HEAD read side effects](../api/read-side-effects.md), checked by `tests/get-write-audit.mjs` against R2 and D1 in eight scenarios ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), Accepted). It supersedes the R2-only list that `tests/get-side-effects.mjs` kept: in D1 authority the published-generation pin also writes, so **`GET /api/programme`, `GET /api/watchlist`, `GET /api/catalog/available` and every `GET /api/admin/*` read can write** (the fenced D1 marker, and the R2 compatibility mirrors when they are missing or old) until [AIR-414](https://trello.com/c/GJefgNm8) lands. The four R2 writers named by `tests/get-side-effects.mjs` are:
 
 | Route | Why it can write | Admin use |
 | --- | --- | --- |
@@ -91,7 +91,7 @@ One admin response must name its pin, and that pin must cover every object the p
 | `GET /api/enrichment/status` | Same stop-event recovery | Do not call. MCP `enrichment_status` calls this route |
 | `GET /api/enrichment/runs` | Writes diagnostic history | Do not call |
 
-These GETs do not write, and they still are not an admin query:
+These GETs do not write **in R2 authority**, and they still are not an admin query (see the note above for the D1 pin):
 
 - `GET /api/catalog/available` loads the pinned programme, the catalog, the watchlist, the view index, the profile and the metadata cache, and derives the available catalog-only films in memory ([contract](../api/catalog.md)); it is a bounded read of fixed keys, not a search.
 - `GET /api/programme` and `GET /api/watchlist` load a few known keys and localize in memory. Safe to read, too coarse for quality queues, and they return the public catalogue shape rather than `filmView`.
