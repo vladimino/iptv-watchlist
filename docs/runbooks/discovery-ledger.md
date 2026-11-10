@@ -34,6 +34,7 @@ Verified side-effect-free observations and SELECT-only preflight are standing-au
 - `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`):
   - **`full`**: no `archive` field.
   - **bounded or frozen:** `archive` = `{ledgerMode, activeItems, uniqueArchivedItems, manifestId, segments, items, bytes}`, and `ledgerTotal` = `activeItems + uniqueArchivedItems` (unique keys of active ∪ archive).
+  - **Under D1 discovery authority** the block also says where each figure comes from ([reference](../reference/api/enrichment.md)). `ledgerMode` is the mode recorded in the published generation's own R2 document, not the feature flag; `ledgerMode: "unknown"` with `ledgerModeReason` and `null` archive figures means the status could not prove them (for example the seal record names another generation, or the document changed), not that the ledger is bounded or the archive is empty. `archive.d1` counts rows D1 itself holds; a zero there says nothing about the R2 archive. To decide a move to `bounded`, read `ledgerMode` with `ledgerModeSource: "generation_document"` only.
 - `GET /api/enrichment/status`: `ledgerTotal` has the same meaning, and `recognizedFilms` counts verified decisions among the **active** candidates only.
 - A consistent offline read for audits:
   1. Take the published active ledger `epg/generations/<runId>/discovery-latest.json`.

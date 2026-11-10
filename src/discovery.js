@@ -100,8 +100,57 @@ function ledgerCounts(source,decisions,now=Date.now()){return ledgerCountsFrom(s
 function ledgerCountsFrom(source,counts){
  const archive=source?.archive;
  if(!source?.ledgerMode)return counts;
+ if(archive?.source==='d1')return d1LedgerCounts(source,counts);
  const unique=Number.isInteger(archive?.uniqueArchivedItems)?archive.uniqueArchivedItems:0;
  return {...counts,ledgerTotal:counts.ledgerTotal+unique,archive:{ledgerMode:source.ledgerMode,activeItems:counts.ledgerTotal,uniqueArchivedItems:unique,manifestId:archive?.manifestId??null,segments:archive?.segments??0,items:archive?.items??0,bytes:archive?.bytes??0}};
+}
+// AIR-427. Under D1 authority the active ledger is D1 rows, and neither the mode of the published generation nor the size of the R2
+// archive is in D1. They are reported only as far as they are proven from that generation's own document (`ledger`, see
+// provenGenerationLedger): `ledgerMode` is its recorded mode or `unknown`; the archive figures are its recorded figures or null. A null
+// is "not known", never zero. `d1` is what D1 itself holds and is named as such. `ledgerTotal` stays the active count plus the archive
+// keys that are proven; `ledgerTotalScope` says which of the two it is.
+function d1LedgerCounts(source,counts){
+ const proven=source.ledger||{ledgerMode:'unknown',reason:'not_read'},known=proven.ledgerMode!=='unknown',recorded=known?proven.archive:null;
+ const unique=recorded&&Number.isInteger(recorded.uniqueArchivedItems)?recorded.uniqueArchivedItems:known&&!recorded?0:null;
+ const block={ledgerMode:proven.ledgerMode,ledgerModeSource:known?'generation_document':'unavailable',...(known?{}:{ledgerModeReason:proven.reason||'unknown'}),activeItems:counts.ledgerTotal,activeSource:'d1',uniqueArchivedItems:unique,manifestId:recorded?.manifestId??null,segments:recorded?recorded.segments:known?0:null,items:recorded?recorded.items:known?0:null,bytes:recorded?recorded.bytes:known?0:null,archiveSource:!known?'unavailable':recorded?'r2_generation_document':'none',d1:source.archive.d1};
+ return {...counts,ledgerTotal:counts.ledgerTotal+(unique??0),ledgerTotalScope:unique===null?'active_only':'active_and_archive',archive:block};
+}
+// The ledger mode and archive header of one published generation, proven from its own R2 document. The document is
+// `{meta,"items":[...],"ledgerMode":"…","archive":{…}}` (a `full` ledger ends at `]}`), and the completed seal of that generation
+// recorded the byte offset just past the last item, so the header is one short range read there; `uniqueArchivedItems` closes the
+// document and is one short read of its end. Reads only, bounded, never a scan. Anything that does not line up exactly (no seal
+// record, another generation, an unfinished seal, a changed or missing document, unexpected bytes, a read error) is `unknown` with a
+// reason: the feature flag is never used as evidence, because it says what the next commit will do, not what this generation is.
+const LEDGER_HEADER_BYTES=512,LEDGER_TAIL_BYTES=96;
+const LEDGER_HEADER_PATTERN=/^\],"ledgerMode":"(bounded|frozen)","archive":(null\}$|\{"version":"v1","manifestId":"([A-Za-z0-9_-]{1,100})","segments":(\d{1,9}),"items":(\d{1,12}),"bytes":(\d{1,15}),"alsoArchived":\[)/;
+async function provenGenerationLedger(env,programmeRunId){
+ const unknown=reason=>({ledgerMode:'unknown',reason});
+ try{
+  if(typeof programmeRunId!=='string'||!programmeRunId)return unknown('no_published_generation');
+  if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.sealSource!=='function')return unknown('seal_record_unavailable');
+  const seal=await DiscoveryAuthority.sealSource(env);
+  if(!seal||!seal.sourceKey)return unknown('seal_record_unavailable');
+  if(seal.programmeRunId!==programmeRunId||seal.sourceKey!=='epg/generations/'+programmeRunId+'/discovery-latest.json')return unknown('seal_of_another_generation');
+  if(seal.phase!=='done'||seal.cursorItems!==seal.itemTotal||!Number.isSafeInteger(seal.cursorBytes)||seal.cursorBytes<1)return unknown('seal_not_complete');
+  const head=await env.BUCKET.get(seal.sourceKey,{range:{offset:seal.cursorBytes-1,length:LEDGER_HEADER_BYTES}});
+  if(!head)return unknown('generation_document_missing');
+  if(!seal.sourceEtag||head.etag!==seal.sourceEtag)return unknown('generation_document_changed');
+  const text=(await head.text()).slice(0,LEDGER_HEADER_BYTES);
+  if(text===']}')return {ledgerMode:'full',archive:null};
+  const match=LEDGER_HEADER_PATTERN.exec(text);
+  if(!match)return unknown('generation_document_unreadable');
+  if(match[2].startsWith('null'))return {ledgerMode:match[1],archive:null};
+  const size=Number(head.size);
+  if(!Number.isSafeInteger(size)||size<=seal.cursorBytes)return unknown('generation_document_unreadable');
+  const tailAt=Math.max(seal.cursorBytes,size-LEDGER_TAIL_BYTES);
+  const tail=await env.BUCKET.get(seal.sourceKey,{range:{offset:tailAt,length:size-tailAt}});
+  if(!tail||tail.etag!==seal.sourceEtag)return unknown('generation_document_changed');
+  const closing=/"uniqueArchivedItems":(\d{1,12})\}\}$/.exec((await tail.text()).slice(-LEDGER_TAIL_BYTES));
+  if(!closing)return unknown('generation_document_unreadable');
+  const items=Number(match[5]),unique=Number(closing[1]);
+  if(unique>items)return unknown('generation_document_unreadable');
+  return {ledgerMode:match[1],archive:{manifestId:match[3],segments:Number(match[4]),items,bytes:Number(match[6]),uniqueArchivedItems:unique}};
+ }catch{return unknown('read_failed');}
 }
 // AIR-344: the status readers' view of the pinned ledger, read once. An R2 ledger is streamed item by item and no item is
 // kept: each one is counted as it is read (the same rules as ledgerCounts) and the per-status tallies are taken from the
@@ -120,6 +169,7 @@ async function ledgerStatusAggregates(pinned,decisions,now=Date.now()){
   const walked=await DiscoveryAuthority.streamActiveLedger(pinned,(item,decision)=>add(item,decision));
   if(walked.handled){
    const source={programmeRunId:walked.programmeRunId,itemCount:walked.itemCount,ledgerMode:walked.ledgerMode,archive:walked.archive};
+   if(source.ledgerMode&&source.archive?.source==='d1')source.ledger=await provenGenerationLedger(pinned,source.programmeRunId);
    return {source,counts:ledgerCountsFrom(source,counts),statuses,confirmed,recognized};
   }
  }
@@ -135,6 +185,7 @@ async function ledgerStatusAggregates(pinned,decisions,now=Date.now()){
   for(const item of loaded?.items||[])add(item,map[item.key]);
  }
  const source=loaded?{...loaded,items:undefined}:null;
+ if(source?.ledgerMode&&source.archive?.source==='d1')source.ledger=await provenGenerationLedger(pinned,source.programmeRunId);
  return {source,counts:ledgerCountsFrom(source,counts),statuses,confirmed,recognized};
 }
 // The public status still reports the retired variant-search counters. They stay zero: the Worker does not plan those searches.

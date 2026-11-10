@@ -265,6 +265,19 @@ Measurements: [AIR-344 evidence](../../evidence/discovery/air-344-status-memory-
 - **Decisions.** `epg/discovery-resolution.json` is never touched by archiving.
 - **Ledger fields.** The active ledger object then carries `ledgerMode` and `archive` (`version`, `manifestId`, `segments`, `items`, `bytes`, `alsoArchived`, `uniqueArchivedItems`).
 - **Pipeline status.** It adds `archive` = `{ledgerMode, activeItems, uniqueArchivedItems, manifestId, segments, items, bytes}` and reports `ledgerTotal` as the unique keys of active ∪ archive. Per-activity counters, `rejectedNonfilm` and `recognizedFilms` cover the active ledger. Status never reads segments.
+- **Pipeline status under D1 discovery authority.** The active ledger is D1 rows; D1 stores neither the mode of a generation nor the R2 archive, and the `DISCOVERY_LEDGER_MODE` flag says what the next commit will do, not what the published generation is. The status therefore proves both from the published generation's own R2 document (`epg/generations/<run>/discovery-latest.json`, whose items are followed by `ledgerMode` and `archive`): the completed seal of that generation recorded the byte offset just past the last item, so the status makes one read of at most 512 bytes there and, when an archive is named, one read of the last 96 bytes for `uniqueArchivedItems`. No segment, manifest or item is read and nothing is written. The block is then `archive` = `{ledgerMode, ledgerModeSource, ledgerModeReason?, activeItems, activeSource, uniqueArchivedItems, manifestId, segments, items, bytes, archiveSource, d1}`:
+
+  | Field | Proven | Not proven |
+  | --- | --- | --- |
+  | `ledgerMode` | `full`, `frozen` or `bounded`, as that document records it | `unknown` |
+  | `ledgerModeSource` | `generation_document` | `unavailable`, with `ledgerModeReason` |
+  | `uniqueArchivedItems`, `segments`, `items`, `bytes` | the document's figures; `0` when it names no archive | `null` (not known, never `0`) |
+  | `manifestId` | the archive manifest the document names, or `null` when it names none | `null` |
+  | `archiveSource` | `r2_generation_document`, or `none` when the document names no archive | `unavailable` |
+  | `activeItems`, `activeSource` | the D1 active rows, `d1` | the same |
+  | `d1` | `{archiveOnlyRows, unreferencedRows, segmentRows}`: rows D1 itself holds. They are not the archive and are never added to a total | the same |
+
+  `ledgerTotal` (and `candidates`) is `activeItems + uniqueArchivedItems` when the archive is proven, with `ledgerTotalScope: "active_and_archive"`, and `activeItems` alone with `ledgerTotalScope: "active_only"` when it is not. `ledgerModeReason` is one of `no_published_generation`, `seal_record_unavailable`, `seal_of_another_generation`, `seal_not_complete`, `generation_document_missing`, `generation_document_changed`, `generation_document_unreadable`, `read_failed`. A loading transfer still answers `502 discovery_incomplete`. Under R2 authority the block is the one above, unchanged. `GET /api/enrichment/footer/status` and `GET /api/enrichment/status` use the same total.
 - **Disabled routes.** `POST /api/enrichment/discovery/scan` and `/reconcile` answer `409` whenever the mode is not `full` or an archive exists.
 - **Operations.** See the [runbook](../../runbooks/discovery-ledger.md).
 

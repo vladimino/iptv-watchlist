@@ -505,7 +505,27 @@ async function ledgerArchive(env){
  const archive=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'archive\' AND observation_key NOT IN (SELECT observation_key FROM discovery_observation WHERE residence=\'active\')');
  const unreferenced=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE residence=\'unreferenced\'');
  const segments=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_segment WHERE residence=\'archive\'');
- return {uniqueArchivedItems:Number(archive?.n||0),unreferencedItems:Number(unreferenced?.n||0),segments:Number(segments?.n||0)};
+ // These are D1 rows only. The immutable archive lives in R2 segments and may never have been imported, so a zero here is not an
+ // empty archive: the counts are named for what they are and never stand for the archive as a whole.
+ return {source:'d1',d1:{archiveOnlyRows:Number(archive?.n||0),unreferencedRows:Number(unreferenced?.n||0),segmentRows:Number(segments?.n||0)}};
+}
+// D1 does not store the ledger mode of a generation. The rows of the active ledger are the same whether the generation was written
+// `full`, `frozen` or `bounded`, so every D1 read of the ledger answers `unknown`; a reader that needs the mode proves it from the
+// generation document (see `sealSource`).
+const LEDGER_MODE_UNPROVEN='unknown';
+// The completed seal of a generation: which R2 document was sealed, its etag, and the byte offset just past its last item. One read,
+// no authority gate (the caller already holds a consistent read of the ledger); null when the table or the row is not there.
+export async function sealSource(env){
+ const db=database(env);
+ if(!db)return null;
+ let row;
+ try{row=await one(db,'SELECT programme_run_id, source_key, source_etag, item_total, cursor_items, cursor_bytes, phase FROM discovery_seal WHERE id=1');}
+ catch(error){
+  if(/no such table/i.test(String(error?.message||error)))return null;
+  throw failed('discovery_unavailable',error);
+ }
+ if(!row)return null;
+ return {programmeRunId:row.programme_run_id??null,sourceKey:row.source_key??null,sourceEtag:row.source_etag??null,itemTotal:Number(row.item_total||0),cursorItems:Number(row.cursor_items||0),cursorBytes:Number(row.cursor_bytes||0),phase:row.phase};
 }
 function decisionFromRow(row){
  if(!row?.payload_json)return null;
@@ -568,18 +588,18 @@ export async function streamActiveLedger(env,visit){
  }
  const closedGate=await readAuthority(env);
  if(!closedGate.ready||closedGate.generation!==opened.generation||closedGate.programmeRunId!==opened.programmeRunId||closedGate.transfer==='loading')throw failed('discovery_fence');
- return {handled:true,programmeRunId:opened.programmeRunId,itemCount,ledgerMode:opened.programmeRunId?'bounded':null,archive};
+ return {handled:true,programmeRunId:opened.programmeRunId,itemCount,ledgerMode:opened.programmeRunId?LEDGER_MODE_UNPROVEN:null,archive};
 }
 async function readLedger(env,gate){
  const counted=await one(database(env),'SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\'');
  const itemCount=Number(counted?.n||0);
- if(itemCount>READ_CAP)return {programmeRunId:gate.programmeRunId,paged:true,itemCount,items:null,ledgerMode:gate.programmeRunId?'bounded':null,archive:await ledgerArchive(env)};
+ if(itemCount>READ_CAP)return {programmeRunId:gate.programmeRunId,paged:true,itemCount,items:null,ledgerMode:gate.programmeRunId?LEDGER_MODE_UNPROVEN:null,archive:await ledgerArchive(env)};
  const rows=await many(database(env),'SELECT observation_key, payload_json, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' ORDER BY observation_key');
  const showRows=await many(database(env),'SELECT observation_key, ordinal, channel_id, channel, start_ms, end_ms FROM discovery_observation_show WHERE source_key=\'active\' ORDER BY observation_key, ordinal');
  const shows=new Map();
  for(const show of showRows){const list=shows.get(show.observation_key)||[];list.push({channelId:show.channel_id,channel:show.channel,start:show.start_ms,end:show.end_ms});shows.set(show.observation_key,list);}
  const items=rows.map(row=>observationFromRow(row,shows.get(row.observation_key)||[]));
- return {programmeRunId:gate.programmeRunId,items,ledgerMode:gate.programmeRunId?'bounded':null,archive:await ledgerArchive(env)};
+ return {programmeRunId:gate.programmeRunId,items,ledgerMode:gate.programmeRunId?LEDGER_MODE_UNPROVEN:null,archive:await ledgerArchive(env)};
 }
 function observationFromRow(row,shows){
  let payload;try{payload=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
