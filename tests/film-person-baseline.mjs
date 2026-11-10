@@ -702,14 +702,14 @@ const e2eLedger=async file=>{
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-person-baseline'))importers.push(full);}};
  walk('src');
- // the separate cutover_minimum gate (AIR-373) is the only other file that names it; nothing else imports that gate either
- assert.deepEqual(importers.filter(file=>!file.endsWith('film-person-baseline.js')&&!file.endsWith('film-person-cutover-minimum.js')),[],'no source file imports film-person-baseline');
+ // the two separate gates (AIR-373: cutover_minimum, and cutover_accepted of ADR 0110) are the only other files that name it; nothing else imports those gates either
+ assert.deepEqual(importers.filter(file=>!file.endsWith('film-person-baseline.js')&&!file.endsWith('film-person-cutover-minimum.js')&&!file.endsWith('film-person-cutover-accepted.js')),[],'no source file imports film-person-baseline');
  const gateImporters=[];
  const walkGate=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walkGate(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-person-cutover-minimum'))gateImporters.push(full);}};
  walkGate('src');
  // The recorder names the gate in exactly one place: the dynamic import inside its explicit, versioned cutover_minimum recording path (AIR-373). It has no
  // static import of the gate, and no other source file names it, so the Worker bundle (which does not reach film-person-baseline.js at all) cannot contain it.
- assert.deepEqual(gateImporters.filter(file=>!file.endsWith('film-person-cutover-minimum.js')).map(file=>file.split(path.sep).join('/')),['src/film-person-baseline.js'],'only the recorder names the cutover_minimum gate');
+ assert.deepEqual(gateImporters.filter(file=>!file.endsWith('film-person-cutover-minimum.js')).map(file=>file.split(path.sep).join('/')).sort(),['src/film-person-baseline.js','src/film-person-cutover-accepted.js'],'only the recorder and the cutover_accepted gate (which reuses the v1 checks) name the cutover_minimum gate');
  const recorderText=fs.readFileSync('src/film-person-baseline.js','utf8').replace(/\/\/.*$/gm,'');
  assert.equal((recorderText.match(/film-person-cutover-minimum/g)||[]).length,1,'the recorder names the gate once');
  assert.ok(recorderText.includes("await import('./film-person-cutover-minimum.js')")&&!/^import[^;]*film-person-cutover-minimum/m.test(recorderText),'and only through the dynamic import of the explicit path');
