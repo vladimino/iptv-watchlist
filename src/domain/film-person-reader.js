@@ -325,6 +325,37 @@ function personFacts(person,store,now){
  const roleId=person.id,dictionary=store.personOverrides?.[roleId]||store.personNameIndex?.[roleId]||null,cache=store.people?.[roleId]||null;
  return {roleId,original:person.original||cache?.original||null,dictionary,cacheName:cache?.name||null,now};
 }
+// AIR-402: the catalog merge asks, for each catalog record, for the first Film of the map (in map order) that carries a trusted, non-conflicting
+// TMDB id equal to the record's, and for the first Film whose stored id is the record's. Scanning a copy of the map for each record made the
+// merge quadratic. This index answers both from the same map in the same order: every Film gets a sequence number when its key enters the map
+// (a key set again keeps its place, a key deleted and set again goes to the end, as in a Map), a bucket holds the keys that share a value, and the
+// first match is the key with the lowest sequence number. It lives for one merge and never outlives the map it mirrors.
+function orderedFilmIndex(films){
+ let counter=0;
+ const sequence=new Map(),byTmdb=new Map(),byStored=new Map();
+ const add=(index,value,key,seq)=>{let group=index.get(value);if(!group){group=new Map();index.set(value,group);}group.set(key,seq);};
+ const drop=(index,value,key)=>{const group=index.get(value);if(!group)return;group.delete(key);if(!group.size)index.delete(value);};
+ const tmdbValues=film=>{const values=[];for(const item of film.externalIds||[])if(item.scheme==='tmdb'&&item.trusted&&!item.conflicting&&item.value===item.value)values.push(item.value);return values;};
+ const place=(key,film,seq)=>{for(const value of tmdbValues(film))add(byTmdb,value,key,seq);add(byStored,storedFilmId(film),key,seq);};
+ const remove=(key,film)=>{for(const value of tmdbValues(film))drop(byTmdb,value,key);drop(byStored,storedFilmId(film),key);};
+ const first=(index,value)=>{
+  const group=index.get(value);
+  if(!group)return null;
+  let found,lowest=Infinity;
+  for(const [key,seq] of group)if(seq<lowest){found=key;lowest=seq;}
+  return films.get(found)||null;
+ };
+ for(const [key,film] of films){const seq=counter++;sequence.set(key,seq);place(key,film,seq);}
+ return {
+  set(key,film){
+   if(films.has(key)){remove(key,films.get(key));films.set(key,film);place(key,film,sequence.get(key));return;}
+   films.set(key,film);const seq=counter++;sequence.set(key,seq);place(key,film,seq);
+  },
+  delete(key){if(!films.has(key))return;remove(key,films.get(key));sequence.delete(key);films.delete(key);},
+  firstWithTmdb:value=>first(byTmdb,value),
+  firstStored:value=>first(byStored,value)
+ };
+}
 // options.entitiesOnly returns the Films and People alone, without the sidecars and the legacy parity: the D1 enrichment projector
 // (AIR-275 phase 2, ADR 0056) needs nothing else, and building the rest roughly doubles the memory of one view.
 function readLifecycle(store,now,options={}){
@@ -338,18 +369,19 @@ function readLifecycle(store,now,options={}){
  // AIR-297 (ADR 0057): the owner-approved TMDB retirements, only when the object exists. Absent, the view is what it was.
  const retirements=store.tmdbRetirements==null?null:applyTmdbRetirements([...films.values()],store.tmdbRetirements,film=>tmdbRetirementRecords(context,film));
  if(retirements)for(const film of retirements.films)films.set(storedFilmId(film),film);
+ const merged=orderedFilmIndex(films);
  for(const record of listOf(store.discoveredFilms)){
   const facts=filmFacts(record,context,resolution,now),incoming=projectFilm({...facts,letterboxdId:null,localId:null});
   if(!incoming)continue;
-  const same=facts.tmdbId?[...films.values()].find(film=>(film.externalIds||[]).some(item=>item.scheme==='tmdb'&&item.trusted&&!item.conflicting&&item.value===facts.tmdbId)):null;
+  const same=facts.tmdbId?merged.firstWithTmdb(facts.tmdbId):null;
   // A thin rated-archive stub uses the same stored id as a discovered film. Keep the discovered metadata and credits.
-  const archive=archiveItemFor(store,String(record.id),facts.tmdbId),prior=same||(films.has(String(record.id))?[...films.values()].find(film=>storedFilmId(film)===String(record.id)):null);
-  if(occupantIsArchiveStub(store,prior,archive)&&sourceRichness(record)>sourceRichness(archive)){films.delete(storedFilmId(prior));films.set(storedFilmId(incoming),incoming);continue;}
+  const archive=archiveItemFor(store,String(record.id),facts.tmdbId),prior=same||(films.has(String(record.id))?merged.firstStored(String(record.id)):null);
+  if(occupantIsArchiveStub(store,prior,archive)&&sourceRichness(record)>sourceRichness(archive)){merged.delete(storedFilmId(prior));merged.set(storedFilmId(incoming),incoming);continue;}
   if(films.has(String(record.id)))continue;
-  if(!same){films.set(storedFilmId(incoming),incoming);continue;}
+  if(!same){merged.set(storedFilmId(incoming),incoming);continue;}
   const linked=linkFilms(same,incoming,now);
-  if(!linked.ok){films.set(storedFilmId(incoming),incoming);continue;}
-  films.delete(storedFilmId(same));films.set(storedFilmId(linked.survivor),linked.survivor);
+  if(!linked.ok){merged.set(storedFilmId(incoming),incoming);continue;}
+  merged.delete(storedFilmId(same));merged.set(storedFilmId(linked.survivor),linked.survivor);
  }
  const settled=retirements?settleTmdbRetirements([...films.values()],retirements):null;
  for(const film of settled?.restore||[])films.set(storedFilmId(film),film);

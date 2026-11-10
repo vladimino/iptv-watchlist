@@ -12,7 +12,7 @@
 // 2 is quadratic). `--profile` adds a V8 sampling profile of the whole build and lists the functions with the most self time.
 // What it does NOT measure: Cloudflare Worker CPU (a different machine and runtime), the clock semantics of Date.now() inside a Worker, R2 JSON parsing, the D1
 // metadata-cache transform, any I/O, or production data. A time here says what this code costs on this machine; it does not say what the Worker spent.
-//   node --expose-gc scripts/projector-view-cpu-bench.mjs [--entities 52000] [--sizes 6500,13000,26000,52000,104000] [--repeats 7] [--warmup 2] [--profile 1] [--keys-breakdown 1] [--only 1] [--vm 1]
+//   node --expose-gc scripts/projector-view-cpu-bench.mjs [--impl baseline|indexed] [--entities 52000] [--sizes 6500,13000,26000,52000,104000] [--repeats 7] [--warmup 2] [--profile 1] [--keys-breakdown 1] [--only 1] [--vm 1]
 import fs from 'node:fs';
 import os from 'node:os';
 import inspector from 'node:inspector';
@@ -71,12 +71,14 @@ export function fixture(entities,{seed=7}={}){
 // through the sandboxed test context, to show how large that harness effect is. Neither is the Worker, but only the first resembles its global access.
 function directModules(){
  vm.runInThisContext(fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'));
- vm.runInThisContext(scoped('src/domain/film-person-reader.js','LifecycleReader',['readLifecycle']));
- vm.runInThisContext(scoped('src/enrichment-projection.js','EnrichmentProjection'));
+ // AIR-402: `--impl baseline` runs the frozen copies of the reader and the projection from before the linear indexes (tests/fixtures/air-402-baseline/, d73ac48), `--impl indexed` (the default) the current sources
+ vm.runInThisContext(scoped(BASELINE?'tests/fixtures/air-402-baseline/film-person-reader.baseline.js':'src/domain/film-person-reader.js','LifecycleReader',['readLifecycle']));
+ vm.runInThisContext(scoped(BASELINE?'tests/fixtures/air-402-baseline/enrichment-projection.baseline.js':'src/enrichment-projection.js','EnrichmentProjection'));
  vm.runInThisContext(scoped('src/owner-review-d1.js','OwnerReview'));
  return vm.runInThisContext('({LifecycleReader,EnrichmentProjection,OwnerReview})');
 }
 const SANDBOXED=arg('vm','0')==='1';
+const BASELINE=arg('impl','indexed')==='baseline';
 const projector=SANDBOXED?projectorContext({log:()=>{}}):directModules();
 const DICTIONARIES={films:JSON.parse(fs.readFileSync('data/film-titles.json','utf8')),people:JSON.parse(fs.readFileSync('data/person-names.json','utf8'))};
 const clone=value=>JSON.parse(JSON.stringify(value));
@@ -213,7 +215,7 @@ async function main(){
  const headline=toNumber(arg('entities',52000),52000);
  if(!sizes.includes(headline))sizes.push(headline);
  sizes.sort((a,b)=>a-b);
- const environment={loading:SANDBOXED?'vm.createContext (sandboxed test helper)':'vm.runInThisContext (ordinary global scope)',node:process.version,v8:process.versions.v8,platform:process.platform+' '+process.arch,cpu:os.cpus()[0]?.model,cores:os.cpus().length,gcExposed:!!global.gc};
+ const environment={implementation:BASELINE?'baseline (frozen d73ac48 copies)':'indexed (current src)',loading:SANDBOXED?'vm.createContext (sandboxed test helper)':'vm.runInThisContext (ordinary global scope)',node:process.version,v8:process.versions.v8,platform:process.platform+' '+process.arch,cpu:os.cpus()[0]?.model,cores:os.cpus().length,gcExposed:!!global.gc};
  const results=[];
  for(const size of sizes){results.push(await runSize(size,{repeats,warmup}));process.stderr.write('size '+size+' done\n');}
  const scaling={};
