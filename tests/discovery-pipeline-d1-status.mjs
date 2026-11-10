@@ -91,18 +91,22 @@ const paged=await Authority.routeRead(env,'epg/discovery-latest.json');
 assert.equal(paged.value.paged,true);
 assert.equal(paged.value.itemCount,36999);
 assert.equal(paged.value.items,null);
-assert.equal(paged.value.archive.uniqueArchivedItems,2);
+assert.deepEqual(paged.value.archive,{source:'d1',d1:{archiveOnlyRows:2,unreferencedRows:0,segmentRows:0}});
+assert.equal(paged.value.ledgerMode,'unknown','D1 does not store the mode of a generation');
 
-const expected=vm.runInContext('ledgerCounts({programmeRunId:args.run,ledgerMode:"bounded",archive:args.archive,items:args.items},args.decisions,args.now)',Object.assign(live,{args:{run:RUN,archive:paged.value.archive,items,decisions,now}}));
+const expected=vm.runInContext('ledgerCounts({programmeRunId:args.run,ledgerMode:"unknown",archive:args.archive,items:args.items},args.decisions,args.now)',Object.assign(live,{args:{run:RUN,archive:paged.value.archive,items,decisions,now}}));
 const statuses={},confirmed=new Set();
 for(const item of items){const decision=decisions[item.key];if(decision){statuses[decision.status]=(statuses[decision.status]||0)+1;if(decision.status==='verified')confirmed.add(String(decision.tmdbId));}}
 
 const origin='https://iptv.vladimino.workers.dev';
 const pipeline=await (await live.worker.fetch(new Request(origin+'/api/enrichment/pipeline/status'),env,{waitUntil(){}})).json();
 assert.equal(pipeline.ledgerTotal,expected.ledgerTotal);
-assert.equal(pipeline.candidates,36999+2);
-assert.equal(pipeline.archive.activeItems,36999);
-assert.equal(pipeline.archive.uniqueArchivedItems,2);
+// AIR-427: no completed seal names this generation, so nothing proves its mode or its R2 archive. The two D1 archive rows are
+// reported as D1 rows and are not added to the total as if they were the archive.
+assert.equal(pipeline.candidates,36999);
+assert.equal(pipeline.ledgerTotal,36999);
+assert.equal(pipeline.ledgerTotalScope,'active_only');
+assert.deepEqual(pipeline.archive,{ledgerMode:'unknown',ledgerModeSource:'unavailable',ledgerModeReason:'seal_record_unavailable',activeItems:36999,activeSource:'d1',uniqueArchivedItems:null,manifestId:null,segments:null,items:null,bytes:null,archiveSource:'unavailable',d1:{archiveOnlyRows:2,unreferencedRows:0,segmentRows:0}});
 assert.equal(pipeline.currentUnresolved,expected.currentUnresolved);
 assert.equal(pipeline.readyNow,expected.readyNow);
 assert.equal(pipeline.rejectedNonfilm,expected.rejectedNonfilm);
