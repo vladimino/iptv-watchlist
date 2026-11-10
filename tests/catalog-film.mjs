@@ -286,6 +286,10 @@ const base={
  records.delete(RET);
  r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:b',trusted:1,conflicting:0}]}));assert.equal(r.status,409,'two Films trust one TMDB id');
  r=await ask(fake({external:[{film_id:'film:a',trusted:0,conflicting:1}]}));assert.equal(r.status,409,'a conflicting external id');
+ r=await ask(fake({external:[{film_id:'film:a',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'only an untrusted, non-conflicting claim holds the identity');
+ r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:b',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'a trusted owner beside an untrusted claim of another Film');
+ r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:a',trusted:0,conflicting:0}]}));assert.equal(r.status,409,'any claim that is not the owner\'s own trusted row, even on the same Film');
+ r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0},{film_id:'film:x',trusted:0,conflicting:0},{film_id:'film:y',trusted:0,conflicting:0},{film_id:'film:z',trusted:0,conflicting:0},{film_id:'film:v',trusted:0,conflicting:0},{film_id:'film:w',trusted:0,conflicting:1}]}));assert.equal(r.status,409,'six claims: none is masked by a row limit');
  r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0}],redirects:['film:a']}));assert.equal(r.status,410,'the Film was merged into another');
  r=await ask(fake({external:[{film_id:'film:a',trusted:1,conflicting:0}]}));assert.equal(r.status,200,'one trusted, unredirected Film agrees with the receipt');
  r=await ask(fake({broken:/film_external_id/}));assert.deepEqual([r.status,r.body.reason],[503,'discovery_unavailable'],'a failed canonical guard is unavailable, never found');

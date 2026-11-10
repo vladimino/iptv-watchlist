@@ -362,10 +362,13 @@ async function catalogArchiveFallback(env,tmdbId){
  if(gate.state!=='legacy'){
   // D1 is a projection here and need not hold the Film yet; it can only contradict the receipt.
   let rows;
-  try{rows=await FilmPersonAuthority.many(FilmPersonAuthority.database(env),"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=? LIMIT 5",[tmdbId]);}
+  try{rows=await FilmPersonAuthority.many(FilmPersonAuthority.database(env),"SELECT film_id,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[tmdbId]);}
   catch{const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
-  const trusted=[...new Set(rows.filter(row=>Number(row.trusted)===1&&Number(row.conflicting)===0).map(row=>row.film_id))];
-  if(rows.some(row=>Number(row.conflicting)===1)||trusted.length>1)return {state:'conflict'};
+  // The rule of the admission writer (resolveAdmissionFilm): ALL claims of this typed id are read, and any claim that is not the one owner's own
+  // trusted, non-conflicting row (an untrusted or conflicting claim, on this or another Film, even beside a trusted owner) holds the identity.
+  const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0,owner=rows.find(isOwn)?.film_id??null;
+  if(rows.some(row=>!(isOwn(row)&&row.film_id===owner)))return {state:'conflict'};
+  const trusted=owner===null?[]:[owner];
   if(trusted.length===1){
    let redirected;
    try{redirected=await FilmPersonAuthority.one(FilmPersonAuthority.database(env),'SELECT 1 AS hit FROM film_redirect WHERE from_id=? LIMIT 1',[trusted[0]]);}
