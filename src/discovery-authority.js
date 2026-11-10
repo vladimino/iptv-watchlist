@@ -1029,51 +1029,124 @@ export async function writeDecisionDelta(env,changes,context={}){
 // Admissions the chunk made or touched, in batches. Each batch is behind the lease and generation fence; a film whose
 // identity (media kind and TMDB id) already belongs to another film id is refused, never merged. A refusal leaves the
 // rows that landed before it in place and names the film ids that did not.
+//
+// AIR-422. A batch is one D1 round trip. Its films go out as multi-row upserts (as many rows as the bind cap allows), each
+// followed by a fence that requires every row of it to have been written, so a row whose identity belongs to another film id
+// fails the whole batch exactly as the single-row fence did. The batch is bounded by the statement cap, by the bytes of one
+// upsert and by the bytes of the batch; a film larger than either goes alone. The authority is read once: every batch moves
+// the generation by exactly one, so the next batch starts from the generation the previous one reached (`carried`), and the
+// fence itself re-checks, atomically with the write, everything the read checked (mode d1, cutover open, the generation, the
+// live lease of this run and a transfer that is not loading). Any refusal drops the carried generation and reads the
+// authority again. A batch that cannot be applied whole is first checked for having landed (a lost response), then halved.
+const ADMISSION_ROW_BINDS=8;
+export const ADMISSION_ROWS_PER_UPSERT=Math.floor(BIND_CAP/ADMISSION_ROW_BINDS);
+export const ADMISSION_UPSERT_BYTES=200000;
+export const ADMISSION_BATCH_BYTES=400000;
+const ADMISSION_INSERT='INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES ';
+const ADMISSION_ROW='(?,?,?,?,?,?,?,\'current\',?)';
+const ADMISSION_CONFLICT=' ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=excluded.payload_json WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind';
+const ADMISSION_COUNT_FENCE='UPDATE discovery_cas SET ok=(changes()=?) WHERE id=1';
+const ADMISSION_FENCE_SQL=' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1) AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state<>\'loading\')';
+const ADMISSION_ENCODER=new TextEncoder();
+const carriedGate=value=>value&&Number.isInteger(value.generation)&&(typeof value.programmeRunId==='string'||value.programmeRunId===null)?{generation:value.generation,programmeRunId:value.programmeRunId}:null;
+// The films of `entries` from `from` that fit one batch: [{rows:[[filmId,film,json]],size}], and the index after the last one taken.
+function admissionGroups(entries,from){
+ const groups=[];let group=null,bytes=0,at=from;
+ const upsertsPerBatch=Math.max(1,Math.floor((STATEMENT_CAP-2)/2));
+ for(;at<entries.length;at++){
+  const [filmId,film,json,size]=entries[at];
+  const joins=!!group&&group.rows.length<ADMISSION_ROWS_PER_UPSERT&&group.size+size<=ADMISSION_UPSERT_BYTES;
+  if(at>from&&(bytes+size>ADMISSION_BATCH_BYTES||(!joins&&groups.length+1>upsertsPerBatch)))break;
+  if(joins){group.rows.push([filmId,film,json]);group.size+=size;}
+  else{group={rows:[[filmId,film,json]],size};groups.push(group);}
+  bytes+=size;
+ }
+ return {groups,next:at};
+}
 export async function upsertAdmissions(env,films,context={}){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
- const entries=Object.entries(films&&typeof films==='object'?films:{});
- if(entries.length>READ_CAP)throw failed('discovery_bounded');
- for(const [filmId,film] of entries)validateCatalog({[filmId]:film});
+ const raw=Object.entries(films&&typeof films==='object'?films:{});
+ if(raw.length>READ_CAP)throw failed('discovery_bounded');
+ for(const [filmId,film] of raw)validateCatalog({[filmId]:film});
+ const entries=raw.map(([filmId,film])=>{const json=JSON.stringify(film);return [filmId,film,json,ADMISSION_ENCODER.encode(json).byteLength];});
  const db=database(env);
  const written=[],refused=[];
- // Two statements per film (the upsert and its fence) after the opening fence pair.
- const per=Math.max(1,Math.floor((STATEMENT_CAP-2)/2));
- const apply=async batch=>{
-  const gate=await readAuthority(env);
+ let carried=carriedGate(context.carried),batches=0,reads=0;
+ const open=async()=>{
+  if(carried)return carried;
+  const gate=await readAuthority(env);reads++;
   assertOpen(gate);
-  const statements=[
-   fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
-   [FENCE_SQL,[]],
-  ];
-  for(const [filmId,film] of batch){
-   statements.push(['INSERT INTO discovery_admission (film_id, tmdb_id, media_kind, canonical_identity, observation_key, programme_run_id, generation, state, payload_json) VALUES (?,?,?,?,?,?,?,\'current\',?) ON CONFLICT(film_id) DO UPDATE SET tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, canonical_identity=excluded.canonical_identity, observation_key=excluded.observation_key, programme_run_id=excluded.programme_run_id, generation=excluded.generation, state=\'current\', payload_json=excluded.payload_json WHERE discovery_admission.tmdb_id=excluded.tmdb_id AND discovery_admission.media_kind=excluded.media_kind',[filmId,String(film.tmdbId),mediaKind(film),film.canonicalIdentity,film.observationKey??null,gate.programmeRunId,gate.generation+1,JSON.stringify(film)]]);
-   statements.push([FENCE_SQL,[]]);
+  return {generation:gate.generation,programmeRunId:gate.programmeRunId};
+ };
+ const apply=async groups=>{
+  const gate=await open();
+  carried=null;
+  const statements=[fence({generation:gate.generation},lease,ADMISSION_FENCE_SQL),[FENCE_SQL,[]]];
+  for(const group of groups){
+   statements.push([ADMISSION_INSERT+group.rows.map(()=>ADMISSION_ROW).join(',')+ADMISSION_CONFLICT,group.rows.flatMap(([filmId,film,json])=>[filmId,String(film.tmdbId),mediaKind(film),film.canonicalIdentity,film.observationKey??null,gate.programmeRunId,gate.generation+1,json])]);
+   statements.push([ADMISSION_COUNT_FENCE,[group.rows.length]]);
   }
+  batches++;
   await commit(db,statements);
+  // The fence of this batch moved the generation by exactly one; the next batch may start from that.
+  carried={generation:gate.generation+1,programmeRunId:gate.programmeRunId};
+ };
+ const rowsOf=groups=>groups.flatMap(group=>group.rows);
+ // Whether every film of a refused batch is already stored as sent: the write landed and its response was lost.
+ const landed=async rows=>{
+  for(let at=0;at<rows.length;at+=BIND_CAP){
+   const slice=rows.slice(at,at+BIND_CAP);
+   const stored=new Map((await many(db,'SELECT film_id, payload_json FROM discovery_admission WHERE state=\'current\' AND film_id IN ('+slice.map(()=>'?').join(',')+')',slice.map(row=>row[0]))).map(row=>[row.film_id,row.payload_json]));
+   if(!slice.every(row=>stored.get(row[0])===row[2]))return false;
+  }
+  return true;
  };
  // One film alone: a write that landed and lost its response is written; an identity owned by another film id is refused.
- const applyOne=async entry=>{
-  try{await apply([entry]);written.push(entry[0]);return;}
+ const applyOne=async row=>{
+  try{await apply([{rows:[row],size:0}]);written.push(row[0]);return;}
   catch(error){
    if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
-   const stored=await one(db,'SELECT payload_json FROM discovery_admission WHERE film_id=? AND state=\'current\'',[entry[0]]);
-   if(stored?.payload_json===JSON.stringify(entry[1])){written.push(entry[0]);return;}
-   const owner=await one(db,'SELECT film_id FROM discovery_admission WHERE media_kind=? AND tmdb_id=?',[mediaKind(entry[1]),String(entry[1].tmdbId)]);
-   if(owner&&owner.film_id!==entry[0]){refused.push({filmId:entry[0],reason:'identity_conflict'});return;}
+   const stored=await one(db,'SELECT payload_json FROM discovery_admission WHERE film_id=? AND state=\'current\'',[row[0]]);
+   if(stored?.payload_json===row[2]){written.push(row[0]);return;}
+   const owner=await one(db,'SELECT film_id FROM discovery_admission WHERE media_kind=? AND tmdb_id=?',[mediaKind(row[1]),String(row[1].tmdbId)]);
+   if(owner&&owner.film_id!==row[0]){refused.push({filmId:row[0],reason:'identity_conflict'});return;}
    throw error;
   }
  };
- for(let index=0;index<entries.length;index+=per){
-  const batch=entries.slice(index,index+per);
-  try{await apply(batch);for(const [filmId] of batch)written.push(filmId);}
+ // A refused batch: landed whole, or halved until the film that cannot be written stands alone, so one refused identity
+ // does not hide the rest and a real fence loss surfaces after a logarithmic number of attempts.
+ const settle=async rows=>{
+  if(rows.length===1)return applyOne(rows[0]);
+  const half=Math.ceil(rows.length/2);
+  for(const part of [rows.slice(0,half),rows.slice(half)]){
+   if(part.length===1){await applyOne(part[0]);continue;}
+   const groups=admissionGroups(part.map(row=>[row[0],row[1],row[2],ADMISSION_ENCODER.encode(row[2]).byteLength]),0);
+   if(groups.next!==part.length){await settle(part.slice(0,groups.next));await settle(part.slice(groups.next));continue;}
+   try{await apply(groups.groups);for(const row of part)written.push(row[0]);}
+   catch(error){
+    if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
+    if(part.length>1&&await landed(part)){for(const row of part)written.push(row[0]);continue;}
+    await settle(part);
+   }
+  }
+ };
+ const deadline=Number.isFinite(context.deadline)?context.deadline:null;
+ let index=0;
+ while(index<entries.length){
+  const {groups,next}=admissionGroups(entries,index);
+  const rows=rowsOf(groups);
+  try{await apply(groups);for(const row of rows)written.push(row[0]);}
   catch(error){
    if(error.code!=='discovery_conflict'&&error.code!=='discovery_fence')throw error.code?error:failed('discovery_unavailable',error);
-   // A batch that cannot be applied whole is retried one film at a time, so one refused identity does not hide the rest.
-   for(const entry of batch)await applyOne(entry);
+   if(rows.length>1&&await landed(rows)){for(const row of rows)written.push(row[0]);}
+   else await settle(rows);
   }
+  index=next;
+  // At least one batch per call, so a caller whose time is already spent still moves.
+  if(deadline!==null&&Date.now()>=deadline)break;
  }
- return {written,refused};
+ return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
 async function readCatalog(env){
  const rows=await many(database(env),'SELECT film_id, payload_json, canonical_identity, tmdb_id, media_kind FROM discovery_admission WHERE state=\'current\' ORDER BY film_id');
