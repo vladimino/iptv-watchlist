@@ -182,13 +182,13 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 ## Connector path (offline code, nothing executed)
 
-**Authority.** Owner decisions of 10 Nov 2026 for [AIR-373](https://trello.com/c/ugu3sQmp), recorded as inputs in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md), which is **Proposed**:
+**Authority.** Owner decisions of 10 Nov 2026 for [AIR-373](https://trello.com/c/ugu3sQmp), recorded in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md), now **Accepted** following the successful [independent review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602):
 
 1. *"ignore the discrepancies and prepare the migration"*: unexplained differences of the measured kind do not block recording the baseline and `r2` to `prepared`.
 2. *"no token is needed, use the same path as before the pause"*: the path of [the measurement of 10 Nov 2026](../evidence/d1-migration/air-373-measured-parity-2026-11-10.md) is the path to use. The operator copies D1 through the Cloudflare API connector and the run is local.
 3. *"exact measured numbers"* ([owner decision on PR #501](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358)): the caps are exactly the counts measured on 10 Nov 2026, with no headroom.
 
-**Recording a baseline through `cutover_accepted` stays blocked until ADR 0110 is `Accepted`.** By the owner decision on PR #501 that needs the fixed missing-evidence guard and a recorded, independent, successful re-review of the exact HEAD, linked from the ADR together with the owner decision. A review approval authorizes no discrepancy tolerance of its own. The block is procedural: the code does not read the ADR status, so no baseline-record GO is to be asked for or given while the ADR is `Proposed`.
+**ADR 0110 has passed its owner-controlled acceptance gate.** The [owner decision](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358) and [independent re-review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602) confirm exact measured caps and the complete missing-evidence guard. This removes only the procedural ADR-status block. **It is not a production operation GO**: the measuring run, baseline recording and marker transition each remain separate owner-controlled actions. The code does not read ADR status.
 
 **Nothing in this section was executed against production, and the section authorizes nothing.** The measuring run with the production lease, the baseline record and `r2` to `prepared` are three separate owner GOs.
 
@@ -257,7 +257,7 @@ Before step 1: an owner GO for the measuring run that names the production proje
 
 Then, each with its own owner GO and its own dated evidence:
 
-11. **Baseline record** (blocked while ADR 0110 is `Proposed`). `sql` with the sealed ledger, the marker generation and a time writes `sql-baseline-record.json`: the exact batch `recordBaselineVerified` would send (obtained by running it against a recording binding over the copy), its two fence assertions, the three read-back `SELECT`s and the rows they must return. The operator sends the `sql` text as **one** request and then the read-back. `sql` emits nothing for a ledger that fails the gate.
+11. **Baseline record** (requires separate owner GO after a valid, current measurement and passing gate). `sql` with the sealed ledger, the marker generation and a time writes `sql-baseline-record.json`: the exact batch `recordBaselineVerified` would send (obtained by running it against a recording binding over the copy), its two fence assertions, the three read-back `SELECT`s and the rows they must return. The operator sends the `sql` text as **one** request and then the read-back. `sql` emits nothing for a ledger that fails the gate.
 12. **`r2` to `prepared`.** `sql-r2-to-prepared.json`, the batch of `transitionAuthority`, sent the same way after step 11 is read back. The trigger of migration `0013` refuses it without a verified baseline.
 
 **STOP conditions, no blind retry.** Any refusal of `load`, `verify`, `run` or `seal`; `verified:false`; a failing gate; a lease row that names another holder; a write whose outcome is unclear. After an unclear write, read the three read-back statements first; never send a batch twice. A stopped run is a new run with a new copy file, except the resync request, which may be sent again. `run` refuses with `capture:discovery_lease_live` when the resync caught the Discovery Workflow in the middle of a chunk: send the resync again after that lease has expired, then `run`. `run` itself changes nothing but the lease row of the copy, so it may be repeated on the same copy.
