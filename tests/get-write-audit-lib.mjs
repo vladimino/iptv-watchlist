@@ -26,8 +26,8 @@ export const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-get-audit-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 
 // ---- the production bundle, built into a directory of this test's own ----
-// `seeded` is the same bundle with a non-empty personal-ratings seed: the repository ships an empty seed ("replace it only in a private build"), and a private
-// build is exactly what makes the view read's seed merge a writer. A scenario with `seeded: true` runs against it.
+// `seeded` is the same bundle with a non-empty personal-ratings seed: the repository ships an empty seed ("replace it only in a private build"). A scenario with
+// `seeded: true` runs against it so a GET that used to persist that seed still has a seed to overlay.
 export async function loadBundle(){
  // `build.mjs` writes `dist` relative to its working directory: run it in a directory whose entries are links to the repository's, so the bundle is built from
  // the real sources into a `dist` of this test's own and no other test sees it change.

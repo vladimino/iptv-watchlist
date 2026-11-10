@@ -45,14 +45,13 @@ Exact ordered effects per scenario are in `tests/get-write-baseline.mjs`; nothin
 
 | Baseline entry | Reads | Effects | Removed by |
 | --- | --- | --- | --- |
-| `enrichment-view-seed` | `GET /api/enrichment/view` | `put enrichment/view-index.json` when a private build carries a ratings seed the index lacks | [AIR-413](https://trello.com/c/orvuzDW5) |
 | `enrichment-runs-recovery` | `GET /api/enrichment/runs` | A run whose lease expired: `put` of the run record and of its diagnostic row; D1 prediction domain: `UPDATE prediction_domain_authority`, `UPDATE prediction_domain_cas`, `INSERT INTO prediction_domain_intent`, `DELETE FROM prediction_domain_intent`, `UPDATE prediction_domain_cas` | [AIR-415](https://trello.com/c/NHyIKM6z) |
 | `enrichment-status-recovery` | `GET /api/enrichment/status` | Stop-event recovery (run record, diagnostic row, `events/items/<ts>-stop-<run>.json`, the delivered flag), expired-lease settlement, the D1 prediction fence statements twice | AIR-415, [AIR-416](https://trello.com/c/f7FX4Elk) |
 | `events-recovery` | `GET /api/events` | Stop-event recovery before the page is read: the four R2 objects above and, in D1, the prediction fence statements | AIR-416 |
 | `tmdb-status-probe` | `GET /api/integrations/tmdb/status` | One outbound `GET https://api.themoviedb.org/3/movie/11` with the Worker secret; no storage write | none (registered outbound read) |
 | `mcp-enrichment-status` | MCP `enrichment_status` | The same as `GET /api/enrichment/status`; annotated `readOnlyHint: false` for this reason | AIR-415, AIR-416 |
 
-The published-generation pin is query-only: GET never repairs R2 compatibility mirrors ([ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). The remaining D1 statements of the prediction fence are `UPDATE prediction_domain_authority SET generation=? WHERE id=? AND mode=? AND writes=? AND generation=?`, `UPDATE prediction_domain_cas SET ok=changes() WHERE id=?`, `INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)` and `DELETE FROM prediction_domain_intent WHERE key=? AND token=?`.
+The compiled ratings seed on `GET /api/enrichment/view` and catalog reads is now a pure in-memory overlay; an explicit stored `actualRating: null` wins over the seed. The published-generation pin is query-only: GET never repairs R2 compatibility mirrors ([ADR 0108](../../adr/0108-epg-mirror-reconciliation-writer.md)). The remaining D1 statements of the prediction fence are `UPDATE prediction_domain_authority SET generation=? WHERE id=? AND mode=? AND writes=? AND generation=?`, `UPDATE prediction_domain_cas SET ok=changes() WHERE id=?`, `INSERT INTO prediction_domain_intent (key, token, generation, body_sha256) VALUES (?,?,?,?)` and `DELETE FROM prediction_domain_intent WHERE key=? AND token=?`.
 
 ## Changing a read route or a writer
 

@@ -45,9 +45,6 @@ const STOP_PUTS=['put:enrichment/runs/run-stopped.json','put:enrichment/run-diag
 const EXPIRED_PUTS=['put:enrichment/runs/run-expired.json','put:enrichment/run-diagnostics/<ts>-run-expired.json'];
 
 export const BASELINE=[
- {id:'enrichment-view-seed',owner:'AIR-413',kind:'r2-write',
-  summary:'ensureInitialRatings merges the personal-ratings seed into enrichment/view-index.json from a read when a private build carries a seed and the index lacks a seeded rating.',
-  routes:['GET /api/enrichment/view'],effects:{'r2-pending':['put:enrichment/view-index.json'],'d1-pending':['put:enrichment/view-index.json']},sql:{}},
  {id:'enrichment-runs-recovery',owner:'AIR-415',kind:'r2-d1-write',
   summary:'diagnosticHistory settles a run whose diagnostic row says running but whose lease expired: it rewrites the run record and the diagnostic row (R2); in D1 prediction-domain mode every saveJSON of a prediction object is a fenced D1 intent.',
   routes:['GET /api/enrichment/runs'],effects:{'r2-pending':EXPIRED_PUTS,'d1-pending':[...EXPIRED_PUTS,...PREDICTION_D1]},sql:{'d1-pending':PREDICTION_SQL}},
