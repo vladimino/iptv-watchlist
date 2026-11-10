@@ -95,5 +95,6 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-418 full test suite under 180 s again: slow `sqlite3 -json` on large values, `generation-stage` in three files | [ci/test-suite-air-418-2026-11-10.md](ci/test-suite-air-418-2026-11-10.md) |
 | AIR-412 GET and HEAD read side-effect audit: R2 and D1 instrumentation, route inventory, baseline of the reads that write | [api/air-412-get-head-audit-2026-11-10.md](api/air-412-get-head-audit-2026-11-10.md) |
 | AIR-414 EPG compatibility mirrors: GET no longer repairs; hourly `ensure` reconciles (offline tests only) | [api/air-414-epg-mirror-reconciliation-2026-11-10.md](api/air-414-epg-mirror-reconciliation-2026-11-10.md) |
+| AIR-419 watchlist card: confirmed Diary rating missing next to a forecast (offline RCA and fix) | [letterboxd/air-419-watchlist-card-rating-2026-11-10.md](letterboxd/air-419-watchlist-card-rating-2026-11-10.md) |
 
 See [current reference](../reference/README.md), [architectural decisions](../adr/README.md) and [operator runbooks](../runbooks/README.md). No production operations were performed for this registry.
