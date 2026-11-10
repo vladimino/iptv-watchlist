@@ -641,6 +641,82 @@ export async function walkObservationPages(env,options={}){
  return {programmeRunId:opened.programmeRunId,pages:starts.length,items,complete};
 }
 
+const ACTIONABLE_FROM=`FROM discovery_observation o
+LEFT JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active'
+ AND o.seen_in_latest=1
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
+ AND (
+  d.observation_key IS NULL
+  OR (
+   IFNULL(d.status,'')<>'verified'
+   AND IFNULL(d.status,'')<>'excluded_nonfilm'
+   AND (d.evidence_key IS NULL OR o.evidence_key IS NULL OR d.evidence_key<>o.evidence_key
+    OR ((d.terminal_reason IS NULL OR d.terminal_reason='') AND (d.retry_at IS NULL OR d.retry_at<=?)))
+  )
+ )`;
+export const SELECT_PAGE=80;
+export const SELECT_QUERIES=6;
+
+// A paged chunk's candidate set: current-window observations that are not a standing verified
+// decision, as a keyset, never the whole ledger. `remaining` is that SQL set's size. `touches`
+// are a bounded page of current verified rows so the cheap pass can still copy airings without
+// walking every verified observation. The same generation fence as the full walk.
+export async function selectActionableObservations(env,options={}){
+ const opened=await readAuthority(env);
+ if(opened.held)throw failed('discovery_fence');
+ if(!opened.ready)throw failed('discovery_not_authoritative');
+ if(opened.transfer==='loading')throw failed('discovery_incomplete');
+ const now=Number.isFinite(options.now)?options.now:Date.now();
+ const from=now-72*3600000,to=now+24*3600000,nowIso=new Date(now).toISOString();
+ const pageSize=Math.min(LEDGER_PAGE,Math.max(1,Number.isInteger(options.pageSize)&&options.pageSize>0?options.pageSize:SELECT_PAGE));
+ const maxQueries=Math.max(1,Math.min(8,Number.isInteger(options.maxQueries)&&options.maxQueries>0?options.maxQueries:SELECT_QUERIES));
+ const startAfter=typeof options.after==='string'?options.after:'';
+ const db=database(env);
+ const windowParams=[from,to,nowIso];
+ if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'count'});
+ const counted=await one(db,'SELECT COUNT(*) AS n '+ACTIONABLE_FROM,windowParams);
+ const remaining=Number(counted?.n||0);
+ const items=[];
+ let cursor=startAfter,wrapped=false,queries=0,complete=false;
+ while(items.length<pageSize&&queries<maxQueries){
+  if(options.shouldStop&&options.shouldStop())break;
+  if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor});
+  const take=pageSize-items.length;
+  const rows=await many(db,'SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+ACTIONABLE_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?',[...windowParams,cursor,take]);
+  queries++;
+  if(!rows.length){
+   if(!cursor||wrapped){complete=true;break;}
+   cursor='';wrapped=true;continue;
+  }
+  const shows=await loadPageShows(env,cursor,rows[rows.length-1].observation_key,pageKeySet(rows));
+  for(const row of rows){
+   cursor=row.observation_key;
+   items.push({candidate:observationFromRow(row,shows.get(row.observation_key)||[]),decision:row.decision_json?decisionFromRow({payload_json:row.decision_json}):null});
+  }
+  if(rows.length<take){
+   if(wrapped||!startAfter){complete=true;break;}
+   cursor='';wrapped=true;
+  }
+ }
+ if(options.beforeQuery)await options.beforeQuery({query:queries,after:cursor,phase:'touches'});
+ const touchLimit=Math.max(0,Number.isInteger(options.touchLimit)?options.touchLimit:0);
+ const touchRows=touchLimit?await many(db,`SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json
+FROM discovery_observation o
+JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND d.status='verified'
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
+ ORDER BY o.observation_key LIMIT ?`,[from,to,touchLimit]):[];
+ const touches=[];
+ if(touchRows.length){
+  const shows=await loadPageShows(env,'',touchRows[touchRows.length-1].observation_key,pageKeySet(touchRows));
+  for(const row of touchRows)touches.push({candidate:observationFromRow(row,shows.get(row.observation_key)||[]),decision:decisionFromRow({payload_json:row.decision_json})});
+ }
+ const closed=await readAuthority(env);
+ if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,wrapped,queries,remaining,complete};
+}
+
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity
 // and cursor; every batch of observation rows moves the cursor in the SAME D1 batch (compare-and-set on `cursor_items`),
 // so a request that dies leaves the rows and the cursor agreeing. The batch itself is idempotent (an upsert and a

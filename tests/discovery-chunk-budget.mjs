@@ -146,13 +146,13 @@ if(process.env.CHUNK_BUDGET_ONLY_WALK){console.log('walk report done');process.e
  assert.equal(result.stage,'complete');
  assert.equal(result.checked,HOT.length);
  assert.equal(result.remaining,0);
- // hot, then has a year (its value does not rank), then the latest airing, then the key; `h-e` has no year.
+ // Within the selected page, hot then year then latest airing then key; `h-e` has no year.
  const order=[...new Set(searched.map(title=>title.replace('Film ','')))];
  assert.deepEqual(order,['h-b','h-c','h-d','h-a','h-e']);
- assert.ok(result.timings.renewals>=1,'a lease with less than the margin left is renewed on the first batch');
+ assert.ok(result.timings.renewals>=1,'a lease with less than the margin left is renewed on the first selection query');
  assert.ok(result.timings.firstRenewMs>=0&&result.timings.firstRenewMs<result.timings.totalMs+1);
- assert.equal(result.timings.pages,Math.ceil(WIDE/Authority.LEDGER_PAGE));
- assert.equal(result.timings.concurrency,4);
+ assert.ok(result.timings.pages>=1&&result.timings.pages<=Authority.SELECT_QUERIES);
+ assert.equal(result.timings.concurrency,1);
  assert.ok(Number(leaseRow(file).expires_at)>Number(before),'the renewal moved the lease expiry forward');
  const summary=JSON.parse(statusPayload(file));
  assert.equal(summary.timings.pages,result.timings.pages);
@@ -272,22 +272,24 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  await Authority.releaseLease(env,lease.lease);
 }
 
-// 8. A ledger walk on a slow D1 that would cross the client limit stops at its budget: no candidate, no TMDB request,
-// no exact count, a back-off, and the status and checkpoint still written.
+// 8. A slow D1 that made the old full-ledger walk miss its budget still selects candidates: the chunk
+// does not issue the page-start ROW_NUMBER query, and it starts TMDB work.
 {
  const clock={offset:0};
  const base=await fixture();
- // Each ledger query costs two virtual seconds, so 41 pages of two queries cannot finish inside the budget.
- const env={...base.env,DB:d1Standin(base.file,{onQuery(text){if(/FROM discovery_observation/.test(text))clock.offset+=2000;}})};
+ let numbered=0;
+ const env={...base.env,DB:d1Standin(base.file,{onQuery(text){
+  if(/ROW_NUMBER/.test(text))numbered++;
+  if(/FROM discovery_observation/.test(text))clock.offset+=2000;
+ }})};
  const {context,searched}=chunkContext({clock});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  let checkpoints=0;
  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
- assert.equal(result.error,'wall_budget');
- assert.ok(Date.parse(result.retryAt)>Date.now());
- assert.equal(result.remaining,null,'a partial walk gives no exact remaining');
- assert.equal(result.checked,0);
- assert.equal(searched.length,0);
+ assert.equal(numbered,0,'the paged chunk no longer walks page starts');
+ assert.ok(result.checked>0,'keyset selection still takes a candidate');
+ assert.ok(searched.length>0);
+ assert.equal(result.error,null);
  assert.equal(checkpoints,1,'the checkpoint is still written');
  assert.ok(statusPayload(base.file));
  assert.ok(result.timings.walkMs>=0);
@@ -561,5 +563,39 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.deepEqual({...timings},{walkMs:13,pages:41,renewals:1,firstRenewMs:3,sinceStartMs:108000,failedAt:'final'});
  assert.equal(context.diagnosticTimings(null),null);
  assert.equal(context.diagnosticTimings({failedAt:'elsewhere'}),null);
+}
+
+// 17. Query-side selection: wrap past the last key, refuse a held marker, and advance selectAfter so the next chunk
+// does not repeat a decided observation.
+{
+ const {env}=await fixture();
+ const wrapped=await Authority.selectActionableObservations(env,{after:'zzz'});
+ assert.equal(wrapped.wrapped,true);
+ assert.ok(wrapped.items.some(row=>row.candidate.key==='h-a'),'the wrap returns the first current key');
+}
+{
+ const {file,env}=await fixture();
+ sql(file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
+ await assert.rejects(()=>Authority.selectActionableObservations(env,{}),error=>error.code==='discovery_fence');
+}
+{
+ const {file,env}=await fixture({mix:2});
+ const respond=url=>{
+  if(url.pathname.includes('/movie/')){const id=Number(url.pathname.split('/').pop());return movieFor(id,'Film mix'+String(id-1000).padStart(2,'0'));}
+  return {results:[]};
+ };
+ const first=chunkContext({clock:{offset:0},respond});
+ let lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const one=await first.context.resolveDiscoveryChunk(env,{films:[]},1,lease.lease);
+ assert.equal(one.checked,1);
+ const firstKey=sql(file,'SELECT observation_key AS k FROM discovery_decision')[0].k;
+ await Authority.releaseLease(env,lease.lease);
+ const second=chunkContext({clock:{offset:0},respond});
+ lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const two=await second.context.resolveDiscoveryChunk(env,{films:[]},1,lease.lease);
+ assert.equal(two.checked,1);
+ const secondKey=sql(file,`SELECT observation_key AS k FROM discovery_decision WHERE observation_key<>'${firstKey}'`);
+ assert.equal(secondKey.length,1,'the second chunk writes a different key');
+ await Authority.releaseLease(env,lease.lease);
 }
 console.log('discovery chunk budget ok');
