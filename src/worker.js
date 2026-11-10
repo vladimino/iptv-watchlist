@@ -18,7 +18,6 @@ const loadJSON=async(env,key,options=null)=>{
    if(key==='programme.json'||key==='watchlist.json'){
     if(!run)return null;
     const generation=env.epgPin?.authority==='d1'?env.epgPin.generation:live.generation;
-    await PublishedEpg.repairMirrors(env).catch(()=>{});
     const document=await PublishedEpg.readDocumentAt(env,run,key==='watchlist.json'?'watchlist':'programme',generation);
     if(key==='programme.json'&&!document){const error=new Error('published_epg_unavailable');error.code='published_epg_unavailable';throw error;}
     return document;
@@ -54,20 +53,10 @@ async function publishedOwnerReviews(env){
  return OwnerReview.loadForRead(env);
 }
 async function epgPublication(env){
- if(typeof PublishedEpg!=='undefined'){
-  const live=await PublishedEpg.currentGeneration(env);
-  if(live){
-   if(live.programmeRunId)await PublishedEpg.repairMirrors(env).catch(()=>{});
-   const again=await PublishedEpg.currentGeneration(env);
-   const current=again||live;
-   return {authority:'d1',programmeRunId:current.programmeRunId,phase:current.phase,etag:current.fence,fence:current.fence,generation:current.generation};
-  }
- }
- const pointer=await env.BUCKET.get(EPG_GENERATION_KEY),generation=pointer?await pointer.json():null;
- return {authority:'r2',programmeRunId:generation?.programmeRunId??null,phase:generation?.phase??null,etag:pointer?.etag??null,fence:pointer?.etag??null};
+ return epgPublicationReadOnly(env);
 }
-// The publication as `epgPublication` reports it (authority, run, phase, fence, generation), read with SELECTs only. `epgPublication` repairs the
-// R2 compatibility mirrors of a D1 generation (an R2 write) before it answers; a route that promises to be a pure read uses this one instead.
+// The publication as `epgPublication` reports it (authority, run, phase, fence, generation), SELECTs only. Compatibility mirrors
+// are reconciled by the EPG writer (`EpgOrchestration.ensure` on the hourly tick and the publication/revert tails), never here.
 // The generation fence is kept: the caller reads its documents at this exact generation (`readDocumentAt` re-checks it before and after).
 async function epgPublicationReadOnly(env){
  if(typeof PublishedEpg!=='undefined'){
@@ -1277,7 +1266,7 @@ function sealAdvance(run,phase){delete run.seal.units;delete run.seal.attempts;r
 // the one atomic unit. Before it the previous generation stays published and its fence is checked (a changed fence
 // refuses the step); a repeat after it finds the generation published and skips it, so the pointer moves exactly once
 // whatever is cancelled. A failed mirror write or copy is retried and then reported as degraded; the mirrors are also
-// repaired by the readers (`PublishedEpg.repairMirrors`), and the watchlist fallback below is written when they failed.
+// repaired by the EPG writer's hourly `ensure` (`PublishedEpg.repairMirrors`), and the watchlist fallback below is written when they failed.
 async function sealPublishStep(env,run,lease,deadline=Infinity){
  const payload=await sealPayload(env,run);
  const report=payload.report;

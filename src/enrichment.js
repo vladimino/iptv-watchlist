@@ -1429,7 +1429,7 @@ function footerGuard(env,degraded){
  };
 }
 // The published programme and watchlist of a D1 generation, read with SELECTs only and fenced at the pinned generation. `loadJSON` reads the same documents
-// but first runs `PublishedEpg.repairMirrors`, an R2 write; a status read must not write, and two parallel reads must not run two repairs.
+// without writing; R2 compatibility mirrors are reconciled by the EPG writer, not by a status GET.
 async function footerPublishedDocument(pinned,key){
  if(pinned.epgPin?.authority==='d1'&&typeof PublishedEpg!=='undefined'){
   const run=pinned.epgPin.programmeRunId;
