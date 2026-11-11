@@ -15,7 +15,8 @@ const secret=/Bearer|token|prompt|stack|MODEL-OUTPUT-CANARY|tmdb_88/i;
 
 boot(['tmdb_8801','tmdb_8802']);
 let start=await api('start',{scope:'watchlist_all',mode:'queued'});assert.equal(start.status,200);assert.equal(start.data.status,'running');assert.equal(start.data.delivery,'unconfirmed');assert.equal(start.requestId,start.data.requestId);
-failKey='enrichment/prediction-queue.json';
+// AIR-431: next no longer writes the queue (it advances the stored one), so the storage failure is injected into the run record write it does make.
+failKey='enrichment/latest-run.json';
 let next=await api('next',{runId:start.data.runId});
 assert.equal(next.status,502);assert.equal(next.data.error,'storage_error');assert.equal(next.data.delivery,'unconfirmed');assert.equal(next.requestId,next.data.requestId);
 let run=records.get('enrichment/runs/'+start.data.runId+'.json');assert.ok(run.firstNextAt);

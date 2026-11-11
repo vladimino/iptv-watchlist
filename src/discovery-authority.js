@@ -84,6 +84,28 @@ export async function readFilmAdmission(env,tmdbId){
  }
  return {handled:true,records};
 }
+// AIR-431. Current admitted films by film id, for the prediction runner. One authority check, then indexed lookups in chunks of
+// ADMISSION_IDS_PER_QUERY ids; each statement is atomic, so no generation recheck is needed or wanted: a runner step that needs
+// 20 films must not fail because an unrelated Discovery chunk moved the generation between two statements. It fails closed like
+// `routeRead` for a held cutover or a catalog/decision load in progress; `{handled:false}` means "not D1 authority" (R2 serves).
+export const ADMISSION_IDS_PER_QUERY=80;
+export async function readAdmissionsById(env,ids){
+ const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
+ const opened=await readAuthority(env);
+ if(opened.held)throw failed('discovery_fence');
+ if(!opened.ready)return {handled:false};
+ if(opened.transfer==='loading'&&!await loadingIsLedgerSeal(env))throw failed('discovery_incomplete');
+ const films=new Map();
+ for(let at=0;at<wanted.length;at+=ADMISSION_IDS_PER_QUERY){
+  const slice=wanted.slice(at,at+ADMISSION_IDS_PER_QUERY);
+  const rows=await many(database(env),"SELECT film_id, payload_json FROM discovery_admission WHERE state='current' AND film_id IN ("+slice.map(()=>'?').join(',')+')',slice);
+  for(const row of rows){
+   let film;try{film=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}
+   films.set(String(row.film_id),film);
+  }
+ }
+ return {handled:true,films};
+}
 export function ownsKey(key){
  return key==='epg/discovery-latest.json'||key==='epg/discovered-films.json'||key==='epg/discovery-resolution.json'||key==='epg/discovery-status.json'||key==='epg/discovery-score-preview.json'||key==='epg/resolver-continuation.json'||key==='epg/resolver-lease.json'||key==='epg/discovery-workflow.json'||GENERATION_KEY.test(key);
 }

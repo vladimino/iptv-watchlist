@@ -195,6 +195,8 @@ assert.deepEqual(stable(await reconcile(R2,SELECTIVE)),stable(queue),'a repeated
  assert.deepEqual(read('enrichment/films/A/predictions.json').current,oldPredictionA,'the kept prediction keeps its schema-1 provenance');
  // Preemption: a new hot film without a prediction enters the batch before the waiting migration film.
  programme([...films,film('G',['Драма'])]);
+ // AIR-431: next advances the stored queue; the new film reaches it through the named refresh (reconcile, as the EPG tail and the resolver checkpoint do).
+ assert.equal((await R2.api('enrichment/queue/reconcile','POST',{},SELECTIVE)).status,200);
  r=await next(R2,runId,SELECTIVE);assert.equal(r.status,200);
  assert.deepEqual(plain(r.data.items.map(item=>item.filmId)),['G'],'the one free slot goes to the new hot film; E waits');
  assert.equal((await next(R1,runId,SELECTIVE)).status,409,'the run is bound to the release that started it');

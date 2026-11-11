@@ -99,7 +99,8 @@ for(const key of ['pending','priority','work','films','index','catalog'])assert.
  const eventKeys=()=>[...records.keys()].filter(key=>key.startsWith('events/')||key.includes('stop-events/')).sort();
  for(const cause of ['discovery_fence','discovery_incomplete']){
   resetLease();logs.length=0;const before=eventKeys(),queueWas=JSON.stringify(records.get('enrichment/prediction-queue.json'));
-  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
+  // A held cutover keeps refusing (AIR-431: a single fence is absorbed by the bounded catalog retry), so the fault re-arms itself until cleared.
+  const arm=()=>faults.get.set('epg/discovered-films.json',()=>{arm();return Object.assign(new Error(cause),{code:cause});});arm();
   const held=await api('start',START);faults.get.clear();
   assert.equal(held.status,503,cause);
   assert.equal(held.data.status,'blocked');assert.equal(held.data.reason,'catalog_held');assert.equal(held.data.code,'prediction_catalog_held');assert.equal(held.data.cause,cause);
@@ -152,7 +153,8 @@ function assertCatalogHeld(result,boundary,cause,runId){
  const found=lines();assert.equal(found.length,1,cause);assert.equal(found[0].boundary,boundary);assert.equal(found[0].stage,'queue_refresh');assert.equal(found[0].code,cause);
 }
 
-// 6. A catalog hold during next is the same wait, not a 502 that stops the run (production request 0c093130…, code discovery_fence, stage was unknown).
+// 6. AIR-431: a catalog hold or failure during next no longer touches a run whose batch is already selected: the persisted queue is the work list and
+//    next reads no catalog (production request 0c093130…, code discovery_fence, was a 503 wait for every step while Discovery chunks ran).
 {
  resetLease();logs.length=0;faults.get.clear();faults.put.clear();
  const running=await api('start',START);assert.equal(running.status,200);assert.equal(running.data.status,'running');
@@ -163,7 +165,7 @@ function assertCatalogHeld(result,boundary,cause,runId){
   logs.length=0;
   faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
   const held=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
-  assertCatalogHeld(held,'next',cause,running.data.runId);
+  assert.equal(held.status,200,cause);assert.ok(held.data.items.length>0,cause);assert.equal(lines().length,0,cause+': no failed boundary');
   assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').status,'running',cause);
   assert.equal(JSON.stringify(records.get('enrichment/runs/'+running.data.runId+'.json').results),resultsWas,cause+': committed results stay');
   assert.deepEqual(eventKeys(),beforeEvents,cause+': no stop Event');
@@ -172,10 +174,10 @@ function assertCatalogHeld(result,boundary,cause,runId){
  assert.equal(concurrent.data.status,'already_running');
  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
  const other=await api('next',{runId:running.data.runId,batchSize:1});faults.get.clear();
- assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+ assert.equal(other.status,200,'an unrelated catalog failure does not reach next');
 }
 
-// 7. Submit: catalog hold after the film is written is 503 with results; identical retry is already_current; a fence off queue_refresh stays 502.
+// 7. Submit (AIR-431): the film is written and settled out of the persisted queue without any catalog read, so a catalog hold or failure changes nothing; an identical retry is already_current.
 {
  resetLease();logs.length=0;faults.get.clear();faults.put.clear();
  const running=await api('start',START);assert.equal(running.status,200);
@@ -186,9 +188,7 @@ function assertCatalogHeld(result,boundary,cause,runId){
   logs.length=0;
   faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
   const held=await api('submit',payload);faults.get.clear();
-  assertCatalogHeld(held,'submit',cause,running.data.runId);
-  assert.equal(held.data.identicalSubmit,'idempotent',cause);
-  assert.equal(held.data.committed,true,cause);
+  assert.equal(held.status,200,cause);assert.equal(lines().length,0,cause+': no failed boundary');
   assert.ok(['created','already_current'].includes(held.data.results[0].status),cause);
   assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').status,'running',cause);
   assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').results[filmId],'created',cause);
@@ -209,10 +209,10 @@ function assertCatalogHeld(result,boundary,cause,runId){
  logs.length=0;
  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
  const other=await api('submit',{runId:running.data.runId,items:[{filmId:nextFilm.filmId,fingerprint,prediction}]});faults.get.clear();
- assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+ assert.equal(other.status,200,'an unrelated catalog failure does not reach submit');
 }
 
-// 8. Complete: catalog hold on completion_check or batch_complete does not finish the run; after the hold, complete once.
+// 8. Complete (AIR-431): a catalog hold no longer defers the completion of a run whose queue is drained.
 {
  resetLease();logs.length=0;faults.get.clear();faults.put.clear();
  const catalog={tmdb_complete_1:film('tmdb_complete_1',now)};
@@ -224,20 +224,15 @@ function assertCatalogHeld(result,boundary,cause,runId){
  const drained=await api('next',{runId:running.data.runId,batchSize:1});assert.equal(drained.data.mustComplete,true);
  const beforeEvents=eventKeys();
  const metricsWas=records.get('enrichment/prediction-queue.json').metrics.hotProcessedTotal;
- for(const cause of ['discovery_fence','discovery_incomplete']){
-  logs.length=0;
-  faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error(cause),{code:cause}));
-  const held=await api('complete',{runId:running.data.runId});faults.get.clear();
-  assertCatalogHeld(held,'complete',cause,running.data.runId);
-  const stored=records.get('enrichment/runs/'+running.data.runId+'.json');
-  assert.equal(stored.status,'running',cause);
-  assert.equal(stored.results[filmId],'created',cause);
-  assert.deepEqual(eventKeys(),beforeEvents,cause+': no completion Event');
-  assert.equal(records.get('enrichment/prediction-queue.json').metrics.hotProcessedTotal,metricsWas,cause+': counters unchanged');
- }
- faults.get.set('epg/discovered-films.json',()=>Object.assign(new Error('x'),{code:'discovery_unavailable'}));
- const other=await api('complete',{runId:running.data.runId});faults.get.clear();
- assert.equal(other.status,502);assert.equal(other.data.error,'storage_error');
+ // AIR-431: the persisted queue is empty, so completion reads no catalog. A held catalog neither blocks nor misreports the run: it finishes, and its
+ // event says the coverage is unknown (null) instead of computing it from a catalog that could not be read.
+ logs.length=0;
+ const armHeld=()=>faults.get.set('epg/discovered-films.json',()=>{armHeld();return Object.assign(new Error('held'),{code:'discovery_fence'});});armHeld();
+ const finished=await api('complete',{runId:running.data.runId});faults.get.clear();
+ assert.equal(finished.status,200,JSON.stringify(finished.data));assert.ok(['complete','partial'].includes(finished.data.status));assert.equal(lines().length,0,'no failed boundary');
+ assert.equal(finished.data.snapshot.coverage,null,'coverage is unknown, not computed from a missing catalog');assert.equal(finished.data.delta.predictionGain,null);
+ assert.equal(records.get('enrichment/runs/'+running.data.runId+'.json').status,finished.data.status);
+ assert.notEqual(records.get('enrichment/prediction-queue.json').metrics.hotProcessedTotal,undefined);
  resetLease();logs.length=0;faults.get.clear();
  const catalog2={tmdb_complete_2:film('tmdb_complete_2',now)};
  records.set('programme.json',{runId:'complete-held-ok',films:[]});records.set('sync.json',{runId:'complete-held-ok',stage:'complete'});records.set('epg/discovered-films.json',catalog2);

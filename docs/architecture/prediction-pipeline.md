@@ -39,6 +39,7 @@ sequenceDiagram
             else Valid output, schema v7 marker is d1
                 MCP->>R2: Write and verify the immutable body
                 MCP->>D1: Commit the pointer and the queue
+                Note over MCP,D1: The written film leaves the stored queue, no catalog read
             else Isolated invalid output
                 MCP->>Queue: Record per-film failure and retryAt (conditional write)
             end
@@ -48,7 +49,7 @@ sequenceDiagram
             end
         end
         Client->>MCP: prediction_complete when required
-        MCP->>Queue: Record completion in the rebuild's conditional write, release lease
+        MCP->>Queue: Record completion in a conditional write of the stored queue, release lease
     end
 ```
 
@@ -66,7 +67,7 @@ The prediction runner is one of several writers of the queue object `enrichment/
 
 ```mermaid
 flowchart TD
-    runner["Prediction runner:<br/>start, next, submit, complete"]
+    runner["Prediction runner:<br/>start rebuilds;<br/>next, submit, complete<br/>advance the stored queue"]
     epg["EPG commit tail<br/>and EPG scan"]
     profile["Taste profile<br/>publication"]
     resolver["Discovery resolver<br/>checkpoint"]
@@ -76,7 +77,7 @@ flowchart TD
     inputs["Read profile, view index,<br/>catalogue; published programme<br/>if the queue's generation differs"]
     build["Rebuild membership;<br/>carry retries, last batch<br/>and counters from the queue read"]
     amend["Apply the run's<br/>bookkeeping, if any"]
-    change["Apply the change to<br/>the queue read;<br/>retry records only grow"]
+    change["Apply the change to<br/>the queue read; retry records<br/>only grow; written films<br/>leave the queue"]
     fence["Renew the caller's lease,<br/>if it holds one"]
     put{"Commit the queue:<br/>D1 generation when the schema v7 marker is d1,<br/>otherwise the object etag"}
     done["Queue written"]
@@ -103,6 +104,6 @@ flowchart TD
     conflict -.->|runner failure| marked
 ```
 
-A conflict means another writer committed after this one read the queue. While the marker is not `d1`, that commit is the object etag. On schema version 7 or newer while this domain is installed and the marker is still `r2`, the writer records an intent with the generation claim and deletes it only after the put returns. A put that throws keeps the intent. A queue or lease head captured before these tables existed does not put after the marker is `d1`; the caller opens the head again. A load or activation that still sees the intent does not copy the snapshot. When the schema v7 marker is `d1`, the condition is the D1 generation, and the object is the mirror. The writer starts again from the stored queue, so no retry record, batch summary or counter is lost. A writer holding an older programme or profile cannot overwrite a newer queue. A put that throws has an unknown outcome and is not repeated. A runner failure is saved on the run record before the queue write, so a write that fails every attempt leaves it marked, not lost. The run's stop writes it again. If that fails too, the next start writes it before acquiring the runner lease, or starts nothing. Each caller's handling of `prediction_queue_conflict` is in the [runner reference](../reference/api/prediction-runner.md#queue-writes). Leases still serialize runs; they are not what keeps the queue consistent.
+The runner's `next`, `submit` and `complete` take the left branch only when the stored queue fails the advance gate (another programme, profile, contract or registry); otherwise they read the stored queue and record one change, so a Discovery chunk that moves the Discovery generation cannot fail them ([ADR 0113](../adr/0113-prediction-runner-advances-persisted-queue.md)). A conflict means another writer committed after this one read the queue. While the marker is not `d1`, that commit is the object etag. On schema version 7 or newer while this domain is installed and the marker is still `r2`, the writer records an intent with the generation claim and deletes it only after the put returns. A put that throws keeps the intent. A queue or lease head captured before these tables existed does not put after the marker is `d1`; the caller opens the head again. A load or activation that still sees the intent does not copy the snapshot. When the schema v7 marker is `d1`, the condition is the D1 generation, and the object is the mirror. The writer starts again from the stored queue, so no retry record, batch summary or counter is lost. A writer holding an older programme or profile cannot overwrite a newer queue. A put that throws has an unknown outcome and is not repeated. A runner failure is saved on the run record before the queue write, so a write that fails every attempt leaves it marked, not lost. The run's stop writes it again. If that fails too, the next start writes it before acquiring the runner lease, or starts nothing. Each caller's handling of `prediction_queue_conflict` is in the [runner reference](../reference/api/prediction-runner.md#queue-writes). Leases still serialize runs; they are not what keeps the queue consistent.
 
 The [queue ADR](../adr/0015-queued-prediction-recovery.md) specifies hot priority, lease and retry limits. [Actual ratings](../reference/api/enrichment.md) remain independent evidence, not an answer passed into model prompts. The confirmed `watched` and `actualRating` values the catalogue exclusion reads follow the ratings marker ([ADR 0084](../adr/0084-d1-authoritative-ratings.md), Proposed). While migration `0010` is absent, or that marker is not `d1` with cutover `open`, they still come from the R2 view index. After that activation they come from `ratings_view`, and the R2 personal fields on the index do not compete. Prediction and fingerprint fields on the index stay. These diagrams do not change. No prediction run was started to draw this diagram.
