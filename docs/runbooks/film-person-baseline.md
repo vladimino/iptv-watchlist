@@ -196,7 +196,7 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 - [`scripts/film-person-connector-run.mjs`](../../scripts/film-person-connector-run.mjs): the connector path as a reviewed tool, with a small CLI (`plan`, `load`, `verify`, `run`, `seal`, `sql`). **Inactive:** not bundled, no Worker or `src/` import. It never calls the connector (only the human-facing operator session can) and its only network is the read-only R2 client it is given (`R2_SNAPSHOT_*`). The D1 side is the local copy: one read-only `SELECT` at a time, plus the three projector-lease statements applied to the copy. Private files (the copy, the measurement, the ledger) must be outside the repository; the CLI refuses a path inside it.
 - [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js): the `cutover_accepted` version 1 gate and the two pinned permissions. **Inactive:** only the recorder names it, through a dynamic import inside its own path.
-- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 39 connector mutants, every one killed; a mutant that does not parse or load fails the check).
+- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 45 connector mutants, every one killed; a mutant that does not parse or load fails the check).
 
 ### The `cutover_accepted` gate
 
@@ -245,7 +245,7 @@ Before step 1: an owner GO for the measuring run that names the production proje
 | 1. Lease | `fn-leaseAcquire.js`. **STOP** unless the returned row names this run's lease id: another holder is live | |
 | 2. T0 | `fn-check.js` with `LABEL="T0"`: 20 witness, 10 gate and 39 count statements in one request | |
 | 3. DDL | `fn-ddl.js` | `load` the result into a new copy file |
-| 4. Copy | `fn-copy.js`, repeated with the `CURSOR` each `load` prints, until it is `null`. Pages by `rowid`; the page size halves when a page is large; one result stays under about 8 MB | `load` each result, in order |
+| 4. Copy | `fn-copy.js`, repeated with the `CURSOR` each `load` prints, until it is `null`. Pages by `rowid`; the page size is **per table** (`PAGE_ROWS`, 2,000, at the start of every table; it halves inside a table whose pages are large, and the cursor `{i,after,limit}` carries that table's own size to resume it); one result stays under about 8 MB, and a call stops after the current page once about 40 s of wall time have passed (`WALL_CLOCK_MS`; the connector's `execute` tool times out after 60 s), returning the chunks so far with a cursor that is not `null` | `load` each result, in order |
 | 5. T1 | `fn-check.js` with `LABEL="T1"` | `verify` the copy against T1. **STOP** if any statement outside the Discovery ones differs |
 | 6. Resync | `fn-resync.js` with `SINCE` set to the Discovery generation of T0 | `load` the result. **STOP** if it is not `equal`; if `discovery_generation_moved`, send the request again |
 | 7. Run | | `run` with `R2_SNAPSHOT_*` loaded: the merged `captureProjectorInputs` and `runParity`, unmodified, then the class entries for the ledger. Writes `measurement.private.json` |
@@ -253,12 +253,29 @@ Before step 1: an owner GO for the measuring run that names the production proje
 | 9. Release | `fn-leaseRelease.js`. The returned row must show no holder | |
 | 10. Seal | | `seal` with the T0, T1, T2, resync and release files. Writes `ledger.private.json` (every key of every difference) and `report.json` (counts and digests only) |
 
+**Saving a small result: the `pad` wrapper.** The connector returns a result below its inline threshold in the reply and does not save it to a file (the threshold itself was not measured). The operator may wrap any function of the plan so that the result is large enough to be saved:
+
+```
+const f = <the function text of fn-*.js, unchanged>;
+const r = await f();
+return {...r, pad: 'x'.repeat(200000)};
+```
+
+The function text inside is the generated text, character for character; only the wrapper around it is the operator's. `pad` is the one top-level field the tool ignores: `load`, `verify` and `seal` drop it when they read a result (`parseResult`), and a padded result loads, verifies and seals identically to a plain one (`tests/film-person-connector.mjs`). The generated functions never add padding themselves, and no other extra field is tolerated by name.
+
 `fn-leaseRenew.js` extends the lease while the copy runs; the lease lasts 45 minutes from its last renewal and the hourly projector skips its tick while it is held. If the session is lost the lease expires on its own.
 
 Then, each with its own owner GO and its own dated evidence:
 
 11. **Baseline record** (requires separate owner GO after a valid, current measurement and passing gate). `sql` with the sealed ledger, the marker generation and a time writes `sql-baseline-record.json`: the exact batch `recordBaselineVerified` would send (obtained by running it against a recording binding over the copy), its two fence assertions, the three read-back `SELECT`s and the rows they must return. The operator sends the `sql` text as **one** request and then the read-back. `sql` emits nothing for a ledger that fails the gate.
 12. **`r2` to `prepared`.** `sql-r2-to-prepared.json`, the batch of `transitionAuthority`, sent the same way after step 11 is read back. The trigger of migration `0013` refuses it without a verified baseline.
+
+**Operational facts observed on 11 Nov 2026** (a real operator run through the Cloudflare API connector; observations, not guarantees):
+
+- Each `fn-copy.js` call returns up to the result budget (about 8 MB). The 39-table copy took about 25 calls, and `published_epg_document` alone (about 60 KB a row) about 5 of them. Before the AIR-373 fix of 11 Nov 2026 the page size travelled in the cursor across tables, so after that table every later table was read in pages of 31 or 62 rows, the calls timed out at 60 s (3 times in that run) and the operator edited `CURSOR.limit` by hand; the page size is now per table and the call has the wall-clock guard above. The effect of the fix on a real run is not observed.
+- **A quiet window is necessary.** The run needs the R2 ETags unchanged and the D1 witnesses equal at T0, T1 and T2. The Discovery Workflow and the hourly Predictions Task (which rewrites `enrichment/view-index.json` and the prediction state for about 25 minutes of each hour) both write. Before step 1 check that Discovery is `complete` with a standing generation, that no prediction run is running (the latest `prediction_run` status, and the `prediction_lease` runner expiry), and that nothing else holds the projector lease. A run that straddles a write fails at T2 or at the ETag check and is a new run.
+- **The projector lease can only be written through the `d1_database_query` tool of the Developer Platform connector.** The Cloudflare API connector's `execute` has no D1 write permission (error 7500), so `fn-leaseAcquire.js`, `fn-leaseRenew.js` and `fn-leaseRelease.js` cannot be run there; the same three statements go through `d1_database_query`. The generated reads (`fn-check.js`, `fn-ddl.js`, `fn-copy.js`, `fn-resync.js`) run through `execute`.
+- Not proved: that these timings hold on another day, that 40 s leaves enough margin for every page the connector may return, that the `execute` result-size limit equals the 8 MB budget, or that the lease statements behave through `d1_database_query` exactly as the HTTP API of the plan assumes. The Developer Platform connector is deprecated.
 
 **STOP conditions, no blind retry.** Any refusal of `load`, `verify`, `run` or `seal`; `verified:false`; a failing gate; a lease row that names another holder; a write whose outcome is unclear. After an unclear write, read the three read-back statements first; never send a batch twice. A stopped run is a new run with a new copy file, except the resync request, which may be sent again. `run` refuses with `capture:discovery_lease_live` when the resync caught the Discovery Workflow in the middle of a chunk: send the resync again after that lease has expired, then `run`. `run` itself changes nothing but the lease row of the copy, so it may be repeated on the same copy.
 

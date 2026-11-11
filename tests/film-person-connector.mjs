@@ -219,6 +219,141 @@ const dataFiles=[];
  assert.deepEqual(rows(copyFile,'SELECT COUNT(*) AS n, SUM(revision) AS a FROM canonical_revision'),rows(production,'SELECT COUNT(*) AS n, SUM(revision) AS a FROM canonical_revision'));
 }
 
+// ---------- 3b. AIR-373, 11 Nov 2026: a per-table page size, a wall-clock guard on the copy, and a tolerated `pad` field ----------
+// A second, separate "production" (the schema plus one table of very large rows, published_epg_document, followed by tables of small rows) behind its own fake
+// connector that counts its requests. Nothing here touches the main fixture or its copy.
+const padded=file=>{const value=JSON.parse(fs.readFileSync(file,'utf8'));value.pad='x'.repeat(200000);const out=path.join(root,'padded-'+(fileNumber++)+'.json');fs.writeFileSync(out,JSON.stringify(value));return out;};
+{
+ const fixture=path.join(root,'fixture.sqlite');
+ fs.copyFileSync(template,fixture);
+ for(const trigger of rows(fixture,"SELECT name FROM sqlite_master WHERE type='trigger'"))sql(fixture,'DROP TRIGGER '+trigger.name+';');
+ sql(fixture,`INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-1','published','${DAY}','${'0'.repeat(64)}','${DAY}');
+WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<11) INSERT INTO published_epg_document SELECT 'run-1','programme',i,'"'||hex(zeroblob(45000))||'"' FROM n;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2100) INSERT INTO canonical_revision (kind,id,revision,updated_at) SELECT 'film','film:r'||i,i,'${DAY}' FROM n;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2100) INSERT INTO film (id,contract_version,original_title,updated_at) SELECT 'film:f'||i,1,'F'||i,'${DAY}' FROM n;`);
+ const count=table=>rows(fixture,'SELECT COUNT(*) AS n FROM '+table)[0].n;
+ assert.deepEqual([count('published_epg_document'),count('canonical_revision'),count('film')],[12,2100,2100]);
+ // the fake connector: it records every request and moves an injectable clock by `tick` ms per request
+ const queries=[];let clock=1_800_000_000_000,tick=0;
+ const over={request:async({method,path:url,body})=>{
+  assert.equal(method,'POST');assert.match(url,/\/query$/);
+  queries.push({sql:body.sql,params:body.params??null});clock+=tick;
+  const statements=body.params?[renderSql(body.sql,body.params)]:body.sql.split(';\n');
+  return {success:true,result:statements.map(text=>({success:true,results:rows(fixture,text),meta:{rows_written:0}}))};
+ }};
+ // `Date` is a parameter of the function text, so the text is the production text; only the clock it reads is the test's
+ class TestDate extends Date{static now(){return clock;}}
+ const call=async(text,edit=value=>value)=>{
+  const result=await new Function('cloudflare','accountId','Date','return ('+edit(text)+')')(over,ACCOUNT,TestDate)();
+  const file=path.join(root,'fx-'+(fileNumber++)+'.json');fs.writeFileSync(file,JSON.stringify(result));return {file,result};
+ };
+ const budget=value=>text=>text.replace('BUDGET='+K.RESULT_BUDGET,'BUDGET='+value);
+ const withCursor=cursor=>text=>text.replace('const CURSOR=null','const CURSOR='+JSON.stringify(cursor));
+ const newCopy=async name=>{const file=path.join(root,name);const copy=K.sqliteDriver(file,{runner});K.loadResult(copy,(await call(plan.functions.ddl)).file,plan);return {file,copy};};
+ // the whole copy, call by call; returns each call's result file, its cursor and the range of requests it made
+ const copyAll=async({text,target=null})=>{
+  const calls=[];let cursor=null;
+  for(;;){
+   const from=queries.length;
+   const out=await call(plan.functions.copy,value=>cursor?withCursor(cursor)(text(value)):text(value));
+   calls.push({file:out.file,result:out.result,from,to:queries.length,cursor:out.result.cursor});
+   if(target)K.loadResult(target,out.file,plan);
+   cursor=out.result.cursor;
+   if(!cursor)break;
+   assert.ok(calls.length<40,'the copy ends');
+  }
+  return calls;
+ };
+ const tableOf=query=>/FROM (\w+) WHERE rowid > \? ORDER BY rowid LIMIT \?/.exec(query.sql)?.[1];
+ const HUGE='published_epg_document';
+ const sums=(file,table)=>rows(file,'SELECT COUNT(*) AS n, SUM(rowid) AS s FROM '+table);
+ // ---- A. the page size is per table ----
+ await call(plan.functions.leaseAcquire);// the copy carries the lease row, as in the real run
+ const a=await newCopy('fixture-a.sqlite');
+ queries.length=0;tick=0;
+ const callsA=await copyAll({text:budget(1_000_000),target:a.copy});
+ {
+  assert.ok(callsA.length>=3&&callsA.length<10,'the large table needs several calls: '+callsA.length);
+  const copyQueries=queries.filter(query=>tableOf(query));
+  const perTable=new Map();
+  for(const query of copyQueries)perTable.set(tableOf(query),(perTable.get(tableOf(query))||0)+1);
+  assert.deepEqual([...perTable.keys()],K.COPY_TABLES,'every table is paged, in plan order');
+  for(const table of K.COPY_TABLES.filter(name=>name!==HUGE)){
+   // rows / PAGE_ROWS pages, plus at most two for pages a full call had to give back to the next call
+   assert.ok(perTable.get(table)<=Math.ceil(count(table)/K.PAGE_ROWS)+2,table+': '+perTable.get(table)+' queries for '+count(table)+' rows');
+  }
+  assert.ok(perTable.get('canonical_revision')<=4&&perTable.get('film')<=4,'the tables after the large one are not paged in tiny pages');
+  // the large table did shrink its own page, and the next table started again at the full size
+  const huge=copyQueries.filter(query=>tableOf(query)===HUGE),limits=huge.map(query=>query.params[1]);
+  assert.equal(limits[0],K.PAGE_ROWS);assert.ok(Math.min(...limits)<=4,'the large table halved its page: '+limits.join());
+  const after=copyQueries.slice(copyQueries.indexOf(huge[huge.length-1])+1)[0];
+  assert.deepEqual([tableOf(after),after.params[1]],[K.COPY_TABLES[K.COPY_TABLES.indexOf(HUGE)+1],K.PAGE_ROWS],'the next table starts with the full page size');
+  // the cursor: a fresh table (after 0) always carries the full size; inside the large table it carries that table's own, reduced size
+  for(const item of callsA)if(item.cursor&&item.cursor.after===0)assert.equal(item.cursor.limit,K.PAGE_ROWS,'fresh table, full page: '+JSON.stringify(item.cursor));
+  const middle=callsA.find(item=>item.cursor&&item.cursor.i===K.COPY_TABLES.indexOf(HUGE)&&item.cursor.after>0);
+  assert.ok(middle&&middle.cursor.limit<K.PAGE_ROWS,'a cursor inside the large table keeps its reduced size: '+JSON.stringify(middle?.cursor));
+  // RESUME: the next call, started from that cursor, reads the large table with exactly that size and from exactly that rowid
+  const next=callsA[callsA.indexOf(middle)+1];
+  assert.deepEqual(queries[next.from].params,[middle.cursor.after,middle.cursor.limit],'the call resumes with the cursor\'s own page size');
+  assert.deepEqual(Object.keys(middle.cursor),['i','after','limit'],'the cursor keeps its shape {i,after,limit}');
+  // a cursor of the same shape is honoured; a missing or bad limit means the full size
+  for(const [cursor,expected] of [[{i:0,after:0},K.PAGE_ROWS],[{i:0,after:0,limit:0},K.PAGE_ROWS],[{i:0,after:0,limit:7},7]]){
+   const from=queries.length;await call(plan.functions.copy,value=>withCursor(cursor)(budget(60000)(value)));
+   assert.equal(queries[from].params[1],expected,JSON.stringify(cursor));
+  }
+  // the copy is whole
+  const state=K.copyState(a.copy);
+  assert.ok(Object.values(state.tables).every(item=>item.done)&&Object.keys(state.tables).length===K.COPY_TABLES.length);
+  for(const table of [HUGE,'canonical_revision','film'])assert.deepEqual(sums(a.file,table),sums(fixture,table),table);
+  assert.deepEqual(rows(a.file,'SELECT SUM(length(payload_json)) AS s FROM '+HUGE),rows(fixture,'SELECT SUM(length(payload_json)) AS s FROM '+HUGE));
+ }
+ // ---- B. the wall-clock guard ----
+ assert.equal(K.TOOL_TIMEOUT_MS,60_000);assert.ok(K.WALL_CLOCK_MS>=30_000&&K.WALL_CLOCK_MS<=45_000);
+ assert.ok(plan.functions.copy.includes('WALL_MS='+K.WALL_CLOCK_MS)&&plan.functions.copy.includes('PAGE_ROWS='+K.PAGE_ROWS));
+ {
+  // a fast connector: the whole copy fits one call; a slow one (7 s a request) is cut after the page that crosses 40 s
+  queries.length=0;tick=0;
+  const fast=await copyAll({text:value=>value});
+  assert.equal(fast.length,1,'at full speed one call copies everything');
+  assert.deepEqual([fast[0].result.cursor,fast[0].result.done],[null,true]);
+  tick=7000;
+  const b=await newCopy('fixture-b.sqlite');
+  queries.length=0;
+  const slow=await copyAll({text:value=>value,target:b.copy});
+  assert.ok(slow.length>=2,'a slow connector needs several calls: '+slow.length);
+  for(const item of slow){
+   const requests=item.to-item.from;
+   assert.ok(requests*tick<=K.WALL_CLOCK_MS+2*tick,'a call stops after the page that crosses the limit: '+requests+' requests');
+   assert.equal(item.result.kind,'data');
+  }
+  for(const item of slow.slice(0,-1))assert.ok(item.result.cursor&&item.result.done===false&&item.result.chunks.length>0,'a partial result is a valid data result with a cursor');
+  assert.deepEqual([slow[slow.length-1].result.cursor,slow[slow.length-1].result.done],[null,true]);
+  const state=K.copyState(b.copy);
+  assert.ok(Object.values(state.tables).every(item=>item.done)&&Object.keys(state.tables).length===K.COPY_TABLES.length,'every partial result loaded');
+  for(const table of [HUGE,'canonical_revision','film'])assert.deepEqual(sums(b.file,table),sums(fixture,table),table);
+  tick=0;
+ }
+ // ---- C. an unknown top-level `pad` field is ignored ----
+ {
+  const plain=await call(plan.functions.leaseRenew),wrapped=padded(plain.file);
+  const text=fs.readFileSync(wrapped,'utf8');
+  assert.ok(text.length>200000);
+  assert.deepEqual(K.parseResult(text),K.parseResult(fs.readFileSync(plain.file,'utf8')),'parse: the padded result is the plain result');
+  assert.ok(!('pad' in K.parseResult(text)));
+  assert.deepEqual(K.parseResult(JSON.stringify([{type:'text',text}])),K.parseResult(fs.readFileSync(plain.file,'utf8')),'also inside the MCP text wrapper');
+  // load: the same data files, padded, give the same copy
+  const c=await newCopy('fixture-c.sqlite');
+  for(const item of callsA)K.loadResult(c.copy,padded(item.file),plan);
+  assert.deepEqual(K.copyState(c.copy).tables,K.copyState(a.copy).tables,'load: padded data files give the same copy');
+  for(const table of [HUGE,'canonical_revision','film'])assert.deepEqual(sums(c.file,table),sums(a.file,table),table);
+  // verify: the same production read, padded or not, gives the same comparison
+  const check1=await call(plan.functions.check,value=>value.replace('const LABEL="T0"','const LABEL="T1"'));
+  const one=await K.verifyCopy(a.copy,check1.file,plan),two=await K.verifyCopy(a.copy,padded(check1.file),plan);
+  assert.equal(one.equal,true,JSON.stringify(one.statements.filter(item=>!item.equal)));assert.deepEqual(two,one,'verify: a padded check compares identically');
+  assert.deepEqual(K.parseCheck(K.parseResult(fs.readFileSync(padded(check1.file),'utf8')),plan),K.parseCheck(check1.result,plan));
+ }
+}
+
 // ---------- 4. verify ----------
 const t1=await check('T1');
 {
@@ -331,6 +466,13 @@ const sealed=await K.sealLedger({driver,plan,measurement:measured.measurement,fi
  assert.equal(direct.ok,true,direct.reasons.join());
  for(const [name,entry] of Object.entries(direct.ledger.classes))if(!entry.unavailable)assert.deepEqual([sealed.ledger.classes[name].expected,sealed.ledger.classes[name].actual,sealed.ledger.classes[name].unexplained],[entry.expected,entry.actual,entry.unexplained],name);
  assert.equal(direct.verified,false,'and that direct synthetic run is still not verified');
+}
+// a padded T0, T2 and release (the operator's wrapper, AIR-373 of 11 Nov 2026) seal to the very same report; `pad` is ignored by seal as by load and verify
+{
+ const again=await K.sealLedger({driver,plan,measurement:measured.measurement,files:{...files,t0:padded(t0.file),t2:padded(t2.file),release:padded(released.file)}});
+ assert.equal(again.ok,true,again.reasons?.join());
+ assert.deepEqual(again.report,sealed.report,'seal: padded evidence gives the identical report');
+ assert.deepEqual(again.ledger.digest,sealed.ledger.digest);
 }
 
 // ---------- 8. verified:false for each missing or inconsistent piece of evidence ----------
