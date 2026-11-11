@@ -23,6 +23,7 @@ import {filmFactsPresent,writeFilmFacts} from './canonical-film-writers.js';
 import {PERSON_STATE_CALLS,PERSON_STATE_RECONCILE} from './canonical-person-state.js';
 import {P6_DIFFERENTIAL_EXCEPTIONS} from './canonical-film-writers.js';
 import {DIFFERENTIAL_COVERAGE,EXTRA_EXCEPTIONS} from './canonical-differential-registry.js';
+import {OPERATION_KINDS,RECEIPT_MIN_VERSION,listAttention,operationRegistry,readUnreceipted,receiptsStatus,verifyBaseline} from './canonical-receipts.js';
 
 export const SHADOW_ITEM_CAP=200;
 export const SHADOW_LIST_CAP=200;
@@ -43,13 +44,16 @@ export const GAPS=Object.freeze([
 // AIR-374 P6: the registries handoffReadiness computes from. They are DATA (frozen objects), never read from comments or documentation, and every flip is a code change
 // a reviewer sees: the PR that wires a producer, moves a reader or introduces the receipts protocol changes its own entry, and a test refuses an entry that the code
 // contradicts (a producer marked wired while the Worker bundle does not carry this module).
-// P3: the natural producer call sites. `wired` is true only when the Worker bundle really carries the adapter and calls it from that site (dormant at `prepared`).
+// P3: the natural producer call sites. A producer counts as WIRED only when the receipts registry (PRODUCER_OPERATIONS, built by operationRegistry of src/canonical-receipts.js, which refuses
+// anything that is not atomic) holds an atomic operation for EVERY operation kind the producer needs (`requires`). There is no flag to flip: the P3 PR that wires a producer registers its operations
+// (a spec with readback, replay and atomic:true), and the Worker bundle must then carry this module (a test checks both). Today the registry is empty, so none is wired.
 export const PRODUCER_WIRING=Object.freeze([
- Object.freeze({name:'epg_commit',site:'epgSync commit (worker.js)',wired:false}),
- Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',wired:false}),
- Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',wired:false}),
- Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',wired:false}),
+ Object.freeze({name:'epg_commit',site:'epgSync commit (worker.js)',requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])}),
+ Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
+ Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
+ Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
 ]);
+export const PRODUCER_OPERATIONS=operationRegistry([]);
 // P4: every consumer that must stop reading the frozen canonical R2 mirrors (titles.json, people.json, metadata.json) and answer from D1, fail closed. P4 slice 1 (the
 // marker-gated /api/d1/* gate and the archive fallback) is moved; the PR of the next slice updates this list. Not derived from the readers' files.
 export const READER_REGISTRY=Object.freeze([
@@ -63,9 +67,9 @@ export const READER_REGISTRY=Object.freeze([
  Object.freeze({name:'admin_health',moved:false}),
  Object.freeze({name:'owner_review_d1_gate',moved:false}),
 ]);
-// ADR 0117 owner decision 5: durable cross-domain receipts inside the existing D1. Registered only when the protocol module exists, the table is named here and the
-// migration that creates it is in the chain; until then `registered` is false.
-export const RECEIPTS_PROTOCOL=Object.freeze({registered:false,table:'canonical_write_receipt',minSchema:19});
+// ADR 0117 owner decision 5 / ADR 0119: durable cross-domain receipts inside the existing D1. The protocol is "registered" only when PRODUCER_OPERATIONS holds at least one atomic operation
+// (derived, never a flag); the schema and the baseline are read from the database.
+export const RECEIPTS_PROTOCOL=Object.freeze({table:'canonical_write_receipt',minSchema:RECEIPT_MIN_VERSION});
 // ADR 0117 owner decision 2: the three classes loaded while `prepared` (counts accepted by the owner on 11 Nov 2026).
 export const EMPTY_CLASSES=Object.freeze([
  Object.freeze({name:'ratedAdmission',table:'film_rated_admission',expected:708}),
@@ -348,12 +352,13 @@ export async function shadowCompare(env,items){
 // - projector_lease_live, projector_window_not_idle:<state> (an absent window table is no window);
 // - gap:<former gap> unless every writer of it is registered in CALLS and RECONCILE AND the differential registry marks it covered;
 // - exception_not_accepted:<id> for each named projector-vs-canonical difference the owner has not accepted;
-// - receipts_schema_missing (schema below 19 or no receipt table) and receipts_protocol_unregistered;
-// - producer_not_wired:<name> and reader_not_moved:<name> from PRODUCER_WIRING and READER_REGISTRY;
+// - receipts_schema_missing, receipts_baseline_missing (marker open or held, no sealed baseline), receipts_baseline_unverified, unreceipted_changes, receipts_attention_open, receipts_unreadable,
+//   and receipts_protocol_unregistered (PRODUCER_OPERATIONS holds no atomic operation);
+// - producer_not_wired:<name> (a producer needs an atomic registered operation for every kind it requires) and reader_not_moved:<name> from READER_REGISTRY;
 // - empty_class_not_loaded:<name>:<found>/<expected> and empty_class_unreadable:<name>.
 // `evidence` replaces a registry only in tests (a synthetic fully satisfied fixture); production callers pass none.
 export async function handoffReadiness(env,{now=new Date().toISOString(),evidence={}}={}){
- const wiring=evidence.wiring||PRODUCER_WIRING,readers=evidence.readers||READER_REGISTRY,receipts=evidence.receipts||RECEIPTS_PROTOCOL,classes=evidence.classes||EMPTY_CLASSES;
+ const wiring=evidence.wiring||PRODUCER_WIRING,readers=evidence.readers||READER_REGISTRY,operations=evidence.operations||PRODUCER_OPERATIONS,classes=evidence.classes||EMPTY_CLASSES;
  const coverage=evidence.coverage||DIFFERENTIAL_COVERAGE,exceptions=evidence.exceptions||[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS],calls=evidence.calls||{CALLS,RECONCILE};
  const blockers=[];
  let gate=null;
@@ -387,9 +392,21 @@ export async function handoffReadiness(env,{now=new Date().toISOString(),evidenc
  }
  for(const gap of open)blockers.push('gap:'+gap);
  for(const item of exceptions)if(item.status!=='accepted')blockers.push('exception_not_accepted:'+item.id);
- if(!(version>=receipts.minSchema&&tables.has(receipts.table)))blockers.push('receipts_schema_missing');
- if(receipts.registered!==true)blockers.push('receipts_protocol_unregistered');
- for(const item of wiring)if(item.wired!==true)blockers.push('producer_not_wired:'+item.name);
+ // Receipts (ADR 0119), read-only. Schema below 19 or a missing receipt/baseline table: receipts_schema_missing. The activation baseline is recorded by the activation operation AFTER
+ // `open` (recordBaseline refuses before), so it is required here only once the marker is open or held; at `prepared` it is expected to be absent and is not a blocker.
+ const status=db?await receiptsStatus(env):'no_schema';
+ if(status==='no_schema')blockers.push('receipts_schema_missing');
+ else if(status==='no_baseline'){if(gate&&['open','held'].includes(gate.state))blockers.push('receipts_baseline_missing');}
+ else{
+  try{
+   if(!(await verifyBaseline(env)).ok)blockers.push('receipts_baseline_unverified');
+   if((await readUnreceipted(env)).unreceipted.length)blockers.push('unreceipted_changes');
+   if((await listAttention(env)).length)blockers.push('receipts_attention_open');
+  }catch{blockers.push('receipts_unreadable');}
+ }
+ const atomic=kind=>{for(const spec of operations.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};
+ if(![...operations.values()].some(spec=>spec.atomic===true))blockers.push('receipts_protocol_unregistered');
+ for(const item of wiring)if(!item.requires.every(kind=>OPERATION_KINDS.includes(kind)&&atomic(kind)))blockers.push('producer_not_wired:'+item.name);
  for(const item of readers)if(item.moved!==true)blockers.push('reader_not_moved:'+item.name);
  for(const item of classes){
   if(!db||!tables.has(item.table)){blockers.push('empty_class_unreadable:'+item.name);continue;}

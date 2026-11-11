@@ -10,28 +10,33 @@ import {d1Standin} from './d1-standin.mjs';
 import {copyOf,envOf,fresh,opened,root,sqlite} from './canonical-differential-helper.mjs';
 import {P6_DIFFERENTIAL_EXCEPTIONS} from '../src/canonical-film-writers.js';
 import {EXTRA_EXCEPTIONS,DIFFERENTIAL_COVERAGE} from '../src/canonical-differential-registry.js';
+import {OPERATION_KINDS,operationRegistry,recordBaseline} from '../src/canonical-receipts.js';
+import {mutateFilm} from '../src/canonical-mutations.js';
 
 const ONLY=(process.env.READINESS_ONLY||'').split(',').filter(Boolean);
 const on=key=>!ONLY.length||ONLY.some(item=>key.startsWith(item));
 const NOW='2026-11-11T12:00:00.000Z',NOW_MS=Date.parse(NOW);
 const source=process.env.PRODUCERS_SOURCE?path.resolve(process.env.PRODUCERS_SOURCE):'src/canonical-producers.js';
 const mod=await import(pathToFileURL(source).href);
-const {handoffReadiness,CALLS,RECONCILE,GAPS,PRODUCER_WIRING,READER_REGISTRY,RECEIPTS_PROTOCOL,EMPTY_CLASSES}=mod;
+const {handoffReadiness,CALLS,RECONCILE,GAPS,PRODUCER_WIRING,PRODUCER_OPERATIONS,READER_REGISTRY,RECEIPTS_PROTOCOL,EMPTY_CLASSES}=mod;
 const ALL_EXCEPTIONS=[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS];
 
-// A synthetic fully satisfied fixture: schema 19 with a receipt table, the three classes loaded at SMALL counts (2, 1, 1), a free lease, an idle window, marker prepared with a
+// Production today is schema 18 (migration 0019 exists in the repository but is NOT applied there): the test chain includes 0019, so the production state is built by lowering the contract.
+const production=file=>{sqlite(file,'DROP TRIGGER IF EXISTS schema_contract_no_downgrade;UPDATE schema_contract SET version=18 WHERE id=1');return file;};
+// A synthetic fully satisfied fixture: schema 19 (the real receipt tables), the three classes loaded at SMALL counts (2, 1, 1), a free lease, an idle window, marker prepared with a
 // verified baseline. The evidence replaces the registries only here: every producer wired, every reader moved, receipts registered, every named difference accepted.
 const SMALL=[{name:'ratedAdmission',table:'film_rated_admission',expected:2},{name:'retention',table:'film_retention',expected:1},{name:'retirement',table:'tmdb_retirement_decision',expected:1}];
 function satisfied(){
  const file=fresh();
- sqlite(file,"DROP TRIGGER schema_contract_no_downgrade;UPDATE schema_contract SET version=19 WHERE id=1;CREATE TABLE canonical_write_receipt (id INTEGER PRIMARY KEY);");
  sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:1',1,'"+NOW+"'),('film:tmdb:2',1,'"+NOW+"');"
   +"INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:1','1','a','"+'a'.repeat(64)+"','k','tmdb_1','"+NOW+"','r','"+NOW+"'),('film:tmdb:2','2','b','"+'a'.repeat(64)+"','k','tmdb_2','"+NOW+"','r','"+NOW+"');"
   +"INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:tmdb:1','watchlist_fact',1,'{}','r','"+NOW+"','"+NOW+"');"
   +"INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,payload_json,recorded_at) VALUES ('d1','film:tmdb:1','retire','abc','1','5','{}','{\"by\":\"owner\",\"at\":\"x\",\"source\":\"y\"}','owner_request','{}','"+NOW+"');");
  return file;
 }
-const good=()=>({wiring:PRODUCER_WIRING.map(item=>({...item,wired:true})),readers:READER_REGISTRY.map(item=>({...item,moved:true})),receipts:{...RECEIPTS_PROTOCOL,registered:true},classes:SMALL,exceptions:ALL_EXCEPTIONS.map(item=>({...item,status:'accepted'}))});
+const specOf=operation=>({operation,readback(){return null;},replay(){return {revision:1};},atomic:true});
+const registryOf=kinds=>operationRegistry(kinds.map(specOf));
+const good=()=>({readers:READER_REGISTRY.map(item=>({...item,moved:true})),operations:registryOf(OPERATION_KINDS),classes:SMALL,exceptions:ALL_EXCEPTIONS.map(item=>({...item,status:'accepted'}))});
 const run=async(file,evidence)=>handoffReadiness(envOf(file),{now:NOW,evidence});
 const only=async(label,file,evidence,...expected)=>{const out=await run(file,evidence);assert.deepEqual(out.blockers,expected,label+': exactly this blocker, no other: '+out.blockers);assert.equal(out.ready,false,label);return out;};
 
@@ -45,7 +50,7 @@ if(on('1')){
 
 // 2. Today's repository (the real registries, a prepared and verified marker, empty classes) is NOT ready; the exact remaining blockers.
 if(on('2')){
- const out=await handoffReadiness(envOf(fresh()),{now:NOW});
+ const out=await handoffReadiness(envOf(production(fresh())),{now:NOW});
  assert.equal(out.ready,false);
  const expected=[
   ...ALL_EXCEPTIONS.filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
@@ -58,7 +63,7 @@ if(on('2')){
  assert.deepEqual(out.blockers.filter(item=>/^(gap|marker|baseline|schema|projector)/.test(item)),[],'the marker, baseline, schema, lease and window are not what blocks');
  assert.deepEqual(EMPTY_CLASSES.map(item=>item.expected),[708,401,4],'the accepted class counts');
  assert.deepEqual(PRODUCER_WIRING.map(item=>item.name),['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
- assert.equal(RECEIPTS_PROTOCOL.registered,false);assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
+ assert.equal(PRODUCER_OPERATIONS.size,0,'no producer operation is registered');assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
  fs.writeFileSync(path.join(root,'today.json'),JSON.stringify(out.blockers));
 }
 
@@ -67,7 +72,7 @@ if(on('2')){
  const base=satisfied();
  // marker, baseline, schema, lease, window
  if(on('3a')){
- await only('marker open',opened(base),good(),'marker_not_prepared:open');
+ await only('marker open',opened(base),good(),'marker_not_prepared:open','receipts_baseline_missing');
  {const f=copyOf(base,'x');sqlite(f,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','l1','2099-01-01T00:00:00.000Z','2026-11-11T09:00:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='l1',lease_until='2099-01-01T00:00:00.000Z'");await only('live lease',f,good(),'projector_lease_live');}
  for(const state of ['requested','held']){const f=copyOf(base,'x');sqlite(f,"UPDATE projector_window SET state='"+state+"',owner='o',requested_at="+(NOW_MS-1000)+",expires_at="+(NOW_MS+60000)+" WHERE id=1");await only('window '+state,f,good(),'projector_window_not_idle:'+state);}
  {const f=copyOf(base,'x');sqlite(f,"UPDATE projector_window SET state='held',owner='o',requested_at="+(NOW_MS-200000)+",expires_at="+(NOW_MS-1000)+" WHERE id=1");assert.deepEqual((await run(f,good())).blockers,[],'an expired window is idle');}
@@ -76,12 +81,29 @@ if(on('2')){
  // receipts
  if(on('3b')){
  {const f=copyOf(base,'x');sqlite(f,'DROP TABLE canonical_write_receipt');await only('receipt table absent',f,good(),'receipts_schema_missing');}
- {const f=copyOf(base,'x');sqlite(f,'DROP TRIGGER IF EXISTS schema_contract_no_downgrade;UPDATE schema_contract SET version=18 WHERE id=1');await only('schema below 19',f,good(),'receipts_schema_missing');}
- await only('receipts protocol unregistered',base,{...good(),receipts:{...RECEIPTS_PROTOCOL,registered:false}},'receipts_protocol_unregistered');
+ {const f=copyOf(base,'x');sqlite(f,'DROP TABLE canonical_receipt_baseline_seal');await only('baseline seal table absent',f,good(),'receipts_schema_missing');}
+ await only('schema below 19',production(copyOf(base,'x')),good(),'receipts_schema_missing');
+ // the protocol and the producers come from the receipts registry: an empty registry, or one missing a kind, or a non-atomic operation
+ await only('no operation registered',base,{...good(),operations:registryOf([])},'receipts_protocol_unregistered',...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name));
+ for(const kind of OPERATION_KINDS){
+  const affected=PRODUCER_WIRING.filter(item=>item.requires.includes(kind)).map(item=>'producer_not_wired:'+item.name);
+  assert.deepEqual((await run(base,{...good(),operations:registryOf(OPERATION_KINDS.filter(k=>k!==kind))})).blockers,affected,'kind '+kind+' unregistered blocks exactly the producers that need it');
+ }
+ const plain=new Map([...registryOf(OPERATION_KINDS)].map(([key,spec])=>[key,{...spec,atomic:false}]));
+ assert.deepEqual((await run(base,{...good(),operations:plain})).blockers,['receipts_protocol_unregistered',...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name)],'a non-atomic operation neither registers the protocol nor wires a producer');
+ const NEEDS={film_mutation:['epg_commit','discovery_admission'],person_mutation:['epg_commit'],person_state:['epg_commit'],film_membership:['epg_commit'],localization_source:['metadata_sync'],film_admission:['rated_admission_retention'],film_retention:['rated_admission_retention']};
+ for(const [kind,names] of Object.entries(NEEDS))assert.deepEqual((await run(base,{...good(),operations:registryOf(OPERATION_KINDS.filter(k=>k!==kind))})).blockers,names.map(name=>'producer_not_wired:'+name),kind+' is needed by exactly '+names);
+ // the activation baseline is recorded after the flip: at open it is required, sealed it verifies, and what follows is read
+ const opened1=opened(base);
+ await mutateFilm(envOf(opened1),{id:'film:tmdb:76',expectedRevision:0,at:NOW,film:{contractVersion:1}});
+ await recordBaseline(envOf(opened1));
+ await only('open with a sealed baseline',opened1,good(),'marker_not_prepared:open');
+ {const f=copyOf(opened1,'x');await mutateFilm(envOf(f),{id:'film:tmdb:77',expectedRevision:0,at:NOW,film:{contractVersion:1}});await only('post-boundary change without a receipt',f,good(),'marker_not_prepared:open','unreceipted_changes');}
+ {const f=copyOf(opened1,'x');sqlite(f,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('r1','film_mutation','epg','film','film:tmdb:1','"+'a'.repeat(64)+"',0,2,'pending',1,'"+NOW+"','"+NOW+"','"+NOW+"');UPDATE canonical_write_receipt SET state='abandoned',error_class='stale_revision_needs_repair',next_attempt_at=NULL,settled_at='"+NOW+"' WHERE request_id='r1'");await only('abandoned receipt needs a person',f,good(),'marker_not_prepared:open','receipts_attention_open');}
+ {const f=copyOf(opened1,'x');sqlite(f,"DROP TRIGGER canonical_receipt_baseline_no_update;UPDATE canonical_receipt_baseline SET revision=revision+1");assert.deepEqual((await run(f,good())).blockers.filter(item=>item.startsWith('receipts_')&&item!=='receipts_protocol_unregistered'),['receipts_baseline_unverified'],'a tampered baseline does not verify');}
  }
  // producers and readers, one at a time
  if(on('3c')){
- for(const item of PRODUCER_WIRING)await only('unwired '+item.name,base,{...good(),wiring:good().wiring.map(w=>w.name===item.name?{...w,wired:false}:w)},'producer_not_wired:'+item.name);
  for(const item of READER_REGISTRY)await only('unmoved '+item.name,base,{...good(),readers:good().readers.map(r=>r.name===item.name?{...r,moved:false}:r)},'reader_not_moved:'+item.name);
  }
  // the three classes: one row fewer or more, and an unreadable table
@@ -137,7 +159,7 @@ if(on('4')){
 if(on('5')){
  const text=fs.readFileSync(source,'utf8');
  const stripped=text.replace(/^\s*\/\/.*$/gm,'');
- const boasting=text.replace(/^(export const (PRODUCER_WIRING|READER_REGISTRY|RECEIPTS_PROTOCOL|EMPTY_CLASSES|GAPS))/gm,'// wired: true moved: true registered: true covered: true cleared\n$1');
+ const boasting=text.replace(/^(export const (PRODUCER_WIRING|PRODUCER_OPERATIONS|READER_REGISTRY|RECEIPTS_PROTOCOL|EMPTY_CLASSES|GAPS))/gm,'// wired: true atomic: true registered: true moved: true covered: true cleared\n$1');
  assert.notEqual(stripped,text);assert.notEqual(boasting,text);
  const today=JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8'));
  const load=async(body,name)=>{
@@ -148,11 +170,15 @@ if(on('5')){
  };
  for(const [label,body] of [['comments removed',stripped],['boasting comments',boasting]]){
   const copy=await load(body,label.replace(/\W/g,'')+'.mjs');
-  assert.deepEqual((await copy.handoffReadiness(envOf(fresh()),{now:NOW})).blockers,today,label+': the blockers are unchanged');
+  assert.deepEqual((await copy.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers,today,label+': the blockers are unchanged');
  }
- const flipped=await load(text.replace("name:'epg_commit',site:'epgSync commit (worker.js)',wired:false","name:'epg_commit',site:'epgSync commit (worker.js)',wired:true"),'flip.mjs');
- const after=(await flipped.handoffReadiness(envOf(fresh()),{now:NOW})).blockers;
- assert.deepEqual(today.filter(item=>!after.includes(item)),['producer_not_wired:epg_commit'],'editing the data flips exactly its blocker');
+ // a flag-looking edit in the data (a `wired` field) changes nothing: wiring is derived from the receipts registry only
+ const flagged=await load(text.replace("site:'epgSync commit (worker.js)',","site:'epgSync commit (worker.js)',wired:true,"),'flag.mjs');
+ assert.deepEqual((await flagged.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers,today,'a wired flag has no effect');
+ // only registering a real atomic operation changes it: film_mutation clears discovery_admission and the protocol
+ const flipped=await load(text.replace("export const PRODUCER_OPERATIONS=operationRegistry([]);","export const PRODUCER_OPERATIONS=operationRegistry([{operation:'film_mutation',readback(){return null;},replay(){return {revision:1};},atomic:true}]);"),'flip.mjs');
+ const after=(await flipped.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers;
+ assert.deepEqual(today.filter(item=>!after.includes(item)),['receipts_protocol_unregistered','producer_not_wired:discovery_admission'],'registering an operation flips exactly its blockers');
 }
 
 // 6. The registries agree with the repository: a producer marked wired needs the Worker bundle to carry the adapters; receipts registered need the migration; nothing is
@@ -160,12 +186,12 @@ if(on('5')){
 if(on('6')){
  const bundle=fs.readFileSync('build.mjs','utf8')+(fs.existsSync('scripts/bundle-scope.mjs')?fs.readFileSync('scripts/bundle-scope.mjs','utf8'):'');
  const bundled=/canonical-producers/.test(bundle);
- if(PRODUCER_WIRING.some(item=>item.wired))assert.ok(bundled,'a producer is marked wired but the Worker bundle does not carry the producers module');
- else assert.ok(!bundled,'no producer is wired: the producers module is not bundled');
+ if(PRODUCER_OPERATIONS.size>0)assert.ok(bundled,'an operation is registered but the Worker bundle does not carry the producers module');
+ else assert.ok(!bundled,'no operation is registered: the producers module is not bundled');
  const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name));
  const introduced=migrations.some(name=>fs.readFileSync('migrations/'+name,'utf8').includes(RECEIPTS_PROTOCOL.table));
- if(RECEIPTS_PROTOCOL.registered)assert.ok(introduced,'receipts are registered but no migration introduces '+RECEIPTS_PROTOCOL.table);
- assert.equal(introduced,false,'migration 0019 is introduced by the receipts PR, not by this one');
+ assert.ok(introduced,'migration 0019 exists in the repository (it is NOT applied in production, schema 18)');
+ for(const item of PRODUCER_WIRING)for(const kind of item.requires)assert.ok(OPERATION_KINDS.includes(kind),kind+' is a receipts operation kind');
  assert.ok(!/canonical-differential-registry/.test(bundle));
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-differential-registry'))importers.push(full.replace(/\\/g,'/'));}};
@@ -173,7 +199,6 @@ if(on('6')){
  assert.deepEqual(importers,['src/canonical-producers.js'],'only the producers module imports the differential registry');
  assert.equal(fs.readFileSync('src/canonical-differential-registry.js','utf8').split('\n').filter(line=>/^import /.test(line)).length,0,'the registry is data and imports nothing');
  for(const item of READER_REGISTRY)assert.equal(typeof item.moved,'boolean');
- for(const item of PRODUCER_WIRING)assert.equal(typeof item.wired,'boolean');
  assert.ok(Object.isFrozen(PRODUCER_WIRING)&&Object.isFrozen(READER_REGISTRY)&&Object.isFrozen(RECEIPTS_PROTOCOL)&&Object.isFrozen(EMPTY_CLASSES)&&Object.isFrozen(DIFFERENTIAL_COVERAGE));
 }
 

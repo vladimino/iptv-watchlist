@@ -357,7 +357,7 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  assert.ok(!GAPS.some(item=>/projector revision/.test(item)),'AIR-374 P1 / ADR 0117 (owner decision 1): the projector revision bump is not a readiness blocker; the unconditional marker fence replaces it');
  assert.equal(GAPS.length,7,'the other producer gaps are unchanged');
  assert.ok(!ready.blockers.some(item=>item.startsWith('gap:')||item.startsWith('marker_')||item.startsWith('baseline_')||item.startsWith('schema_')),'a prepared marker, a verified baseline and the schema leave only the computed handoff blockers: '+ready.blockers);
- for(const expected of ['receipts_schema_missing','receipts_protocol_unregistered','producer_not_wired:epg_commit','reader_not_moved:admin_read','empty_class_not_loaded:ratedAdmission:0/708'])assert.ok(ready.blockers.includes(expected),'today this blocker remains: '+expected);
+ for(const expected of ['receipts_protocol_unregistered','producer_not_wired:epg_commit','reader_not_moved:admin_read','empty_class_not_loaded:ratedAdmission:0/708'])assert.ok(ready.blockers.includes(expected),'today this blocker remains: '+expected);
  assert.equal(env.DB.calls.batches,batches);assert.equal(tables(file),before);
  const r2=await handoffReadiness(state(database('r2')),{now:AT});
  assert.ok(r2.blockers.includes('marker_not_prepared:r2'));

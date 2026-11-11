@@ -31,10 +31,6 @@ const PRODUCER_MUTANTS=[
  ['a gap with no entry counts as cleared',"const registered=!!entry&&","const registered=!entry||"],
  ['cleared and open gaps are swapped',"(registered?cleared:open).push(gap);","(registered?open:cleared).push(gap);"],
  ['a named difference that is not accepted does not block',"if(item.status!=='accepted')blockers.push('exception_not_accepted:'","if(false)blockers.push('exception_not_accepted:'"],
- ['the receipt table is not required',"version>=receipts.minSchema&&tables.has(receipts.table)","version>=receipts.minSchema"],
- ['the receipt schema version is not required',"version>=receipts.minSchema&&tables.has(receipts.table)","tables.has(receipts.table)"],
- ['an unregistered receipts protocol does not block',"if(receipts.registered!==true)blockers.push","if(false)blockers.push"],
- ['an unwired producer does not block',"if(item.wired!==true)blockers.push","if(false)blockers.push"],
  ['an unmoved reader does not block',"if(item.moved!==true)blockers.push","if(false)blockers.push"],
  ['too many rows in a class do not block',"if(found!==item.expected)blockers.push","if(found<item.expected)blockers.push"],
  ['too few rows in a class do not block',"if(found!==item.expected)blockers.push","if(found>item.expected)blockers.push"],
@@ -45,19 +41,31 @@ const PRODUCER_MUTANTS=[
  ['the marker state is not checked',"if(gate.state!=='prepared')blockers.push","if(false)blockers.push"],
  ['the baseline is not checked',"if(gate.baseline!=='verified')blockers.push","if(false)blockers.push"],
  ['ready ignores the blockers',"return {ready:blockers.length===0,","return {ready:true,"],
- ['an epg producer is registered as wired',"name:'epg_commit',site:'epgSync commit (worker.js)',wired:false","name:'epg_commit',site:'epgSync commit (worker.js)',wired:true"],
+ ['a missing receipt schema does not block',"if(status==='no_schema')blockers.push('receipts_schema_missing');","if(false)blockers.push('receipts_schema_missing');"],
+ ['a missing baseline after the flip does not block',"{if(gate&&['open','held'].includes(gate.state))blockers.push('receipts_baseline_missing');}","{}"],
+ ['a missing baseline blocks before the flip',"if(gate&&['open','held'].includes(gate.state))blockers.push('receipts_baseline_missing')","if(true)blockers.push('receipts_baseline_missing')"],
+ ['an unverified baseline does not block',"if(!(await verifyBaseline(env)).ok)blockers.push","if(false)blockers.push"],
+ ['unreceipted changes do not block',"if((await readUnreceipted(env)).unreceipted.length)blockers.push","if(false)blockers.push"],
+ ['an open attention receipt does not block',"if((await listAttention(env)).length)blockers.push","if(false)blockers.push"],
+ ['an unregistered receipts protocol does not block',"if(![...operations.values()].some(spec=>spec.atomic===true))blockers.push","if(false)blockers.push"],
+ ['a non-atomic operation registers the protocol',"some(spec=>spec.atomic===true))blockers.push('receipts_protocol_unregistered')","some(spec=>true))blockers.push('receipts_protocol_unregistered')"],
+ ['a non-atomic operation wires a producer',"spec.operation===kind&&spec.atomic===true","spec.operation===kind"],
+ ['an unwired producer does not block',"for(const item of wiring)if(!item.requires.every(","for(const item of wiring)if(false&&!item.requires.every("],
+ ['a producer is wired by one of its kinds',"item.requires.every(kind=>OPERATION_KINDS","item.requires.some(kind=>OPERATION_KINDS"],
+ ['a producer no longer needs the person kind',"requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])","requires:Object.freeze(['film_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])"],
  ['a reader is registered as moved',"name:'admin_read',moved:false","name:'admin_read',moved:true"],
- ['the receipt schema floor is lowered',"table:'canonical_write_receipt',minSchema:19","table:'canonical_write_receipt',minSchema:18"],
  ['the accepted class count is changed',"table:'film_rated_admission',expected:708","table:'film_rated_admission',expected:707"],
 ];
 // Each readiness mutant is first run against only the section of tests/canonical-handoff-readiness.mjs that should kill it (READINESS_ONLY). A mutant the hinted section does
 // not kill is run again against the WHOLE file, so a stale hint can never hide a survivor; the hint only saves time.
 const HINTS={
  'a gap is cleared without its writers being registered':'3e','a gap is cleared though the registry does not mark it covered':'3e','a gap is cleared with no scenario':'3e','a gap with no entry counts as cleared':'3e','cleared and open gaps are swapped':'1',
- 'a named difference that is not accepted does not block':'3f','the receipt table is not required':'3b','the receipt schema version is not required':'3b','an unregistered receipts protocol does not block':'3b','the receipt schema floor is lowered':'3b',
- 'an unwired producer does not block':'3c','an unmoved reader does not block':'3c','too many rows in a class do not block':'3d','too few rows in a class do not block':'3d','an unreadable class table does not block':'3d',
+ 'a named difference that is not accepted does not block':'3f','a missing receipt schema does not block':'3b','a missing baseline after the flip does not block':'3a','a missing baseline blocks before the flip':'1','an unverified baseline does not block':'3b',
+ 'unreceipted changes do not block':'3b','an open attention receipt does not block':'3b','an unregistered receipts protocol does not block':'3b','a non-atomic operation registers the protocol':'3b','a non-atomic operation wires a producer':'3b','an unwired producer does not block':'3b',
+ 'a producer is wired by one of its kinds':'3b','a producer no longer needs the person kind':'3b',
+ 'too many rows in a class do not block':'3d','too few rows in a class do not block':'3d','an unreadable class table does not block':'3d',
  'a live projector lease does not block':'3a','a requested projector window does not block':'3a','an expired projector window blocks':'3a','the marker state is not checked':'3a','the baseline is not checked':'3a','ready ignores the blockers':'3a',
- 'an epg producer is registered as wired':'2','a reader is registered as moved':'2','the accepted class count is changed':'2',
+ 'a reader is registered as moved':'2','the accepted class count is changed':'2',
 };
 for(const [name,from] of REGISTRY_MUTANTS)assert.equal(registry.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+REGISTRY);
 for(const [name,from] of PRODUCER_MUTANTS)assert.ok(producers.split(from).length>=2,'the mutation text of "'+name+'" must occur in '+PRODUCERS);
