@@ -22,7 +22,8 @@ export const SECTION_COUNT=21;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-capture-'));
 process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+// The capture gate expects the schema production holds (SCHEMA_EXPECTED, 18); migration 0019 is in the repository but NOT applied (ADR 0119), so this fixture stops at 18.
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=18).sort();
 let n=0;
 // The same persistent sqlite session the D1 stand-in uses (AIR-408): a one-shot process per fixture statement was most of this file's time.
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text});if(r.status!==0)throw new Error(r.stderr);};
