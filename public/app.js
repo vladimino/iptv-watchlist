@@ -2358,7 +2358,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
   // ADR 0118: the REPORT of an hour could not be completed. No counters and no queue facts are drawn (none were read), and Discovery is named only when the
   // reconcile of that firing confirmed a state that needs attention; every sentence is fixed text chosen by `status`.
   const state=event.status==='failed'?'Discovery остановлен после повторных ошибок':event.status==='waiting'?'Discovery ждёт повтора':event.status==='blocked'?'Discovery не запустился: временный отказ':null;
-  body=`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Накопленные данные войдут в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
+  body=`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
  }
  else if(event.type==='discovery'){
   const n=v=>Number.isInteger(v)&&v>=0?v:0,known=Number.isInteger(event.remaining)&&event.remaining>=0,empty=event.queueEmpty===true,added=n(event.added),checked=n(event.checked);

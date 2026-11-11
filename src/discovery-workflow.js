@@ -154,28 +154,49 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
  const hourMs=Math.floor(options.now/3600000)*3600000,hourKey=discoveryHourStamp(hourMs),at=new Date(hourMs).toISOString();
  const generationOf=record=>outcome?.programmeRunId||record?.programmeRunId||null;
 
- let incompleteReason='state_unreadable',record=null;
- try{
-  for(let attempt=0;attempt<DISCOVERY_REPORT_CLOSE_ATTEMPTS;attempt++){
-   const state=await readWorkflowState(env);record=state.record;
-   if(!record){incompleteReason='no_record';break;}
-   const report=normalizeDiscoveryReport(record.report);
-   // The compact UTC keys sort chronologically: this hour or an older one is already closed (or superseded by a later close). A delayed or replayed
-   // firing of it must not close the open accumulator, which holds chunks of a later period, under an id that already exists.
-   if(typeof report.lastClosedHour==='string'&&hourKey<=report.lastClosedHour){await deliverDiscoveryOutbox(env);return {closed:false,reason:hourKey===report.lastClosedHour?'already_closed':'stale_hour',hourKey};}
-   const pending=(Array.isArray(record.outbox)?record.outbox.length:0);
-   if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
-   const queue=await discoveryReportQueue(env,report,generationOf(record));
-   const {status,reason}=discoveryReportState(outcome,record,queue.empty);
-   const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue});
-   const {tick,...rest}=record;
-   const next={...rest,report:{...newDiscoveryReport(at,report.seen),lastClosedHour:hourKey},outbox:[...(Array.isArray(record.outbox)?record.outbox:[]),event]};
-   const written=await writeWorkflowStateSoft(env,next,state.etag);
-   if(written.saved){const delivery=await deliverDiscoveryOutbox(env);return {closed:true,hourKey,status,delivered:delivery.delivered};}
-   if(written.windowBusy){incompleteReason='projector_window';break;}
-   incompleteReason='write_conflict';
+ let incompleteReason='state_unreadable',record=null,held=null;
+ // A refused write inside the exclusive projector window is waited out, bounded, like the reconcile does (AIR-428): the window has a deadline and the close is
+ // closed again from a fresh read once it has passed. The projector runs at the top of every hour, so its window covers the seconds in which this close runs.
+ for(let windowTry=0;windowTry<DISCOVERY_REPORT_WINDOW_TRIES;windowTry++){
+  incompleteReason='state_unreadable';held=null;
+  try{
+   for(let attempt=0;attempt<DISCOVERY_REPORT_CLOSE_ATTEMPTS;attempt++){
+    const state=await readWorkflowState(env);record=state.record;
+    if(!record){incompleteReason='no_record';break;}
+    const report=normalizeDiscoveryReport(record.report);
+    // The compact UTC keys sort chronologically: this hour or an older one is already closed (or superseded by a later close). A delayed or replayed
+    // firing of it must not close the open accumulator, which holds chunks of a later period, under an id that already exists.
+    if(typeof report.lastClosedHour==='string'&&hourKey<=report.lastClosedHour){await deliverDiscoveryOutbox(env);return {closed:false,reason:hourKey===report.lastClosedHour?'already_closed':'stale_hour',hourKey};}
+    const pending=(Array.isArray(record.outbox)?record.outbox.length:0);
+    if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
+    const queue=await discoveryReportQueue(env,report,generationOf(record));
+    const {status,reason}=discoveryReportState(outcome,record,queue.empty);
+    const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue});
+    const {tick,...rest}=record;
+    const next={...rest,report:{...newDiscoveryReport(at,report.seen),lastClosedHour:hourKey},outbox:[...(Array.isArray(record.outbox)?record.outbox:[]),event]};
+    const written=await writeWorkflowStateSoft(env,next,state.etag);
+    if(written.saved){const delivery=await deliverDiscoveryOutbox(env);return {closed:true,hourKey,status,delivered:delivery.delivered};}
+    if(written.windowBusy){incompleteReason='projector_window';held={window:written.window,record,report,queue,state:{status,reason}};break;}
+    incompleteReason='write_conflict';
+   }
+  }catch{incompleteReason='state_unreadable';}
+  if(incompleteReason!=='projector_window'||windowTry>=DISCOVERY_REPORT_WINDOW_TRIES-1)break;
+  try{await waitReconcileWindow({window:held?.window},options,Date.now());}catch{}
+ }
+ // The window did not pass inside this firing, but the close is still provable: the queue is empty (numeric zeros and a `complete` continuation of this generation),
+ // and the accumulator that was just read holds no chunk and no counter, so there is nothing to attribute, lose or count twice, and no writer can add anything while
+ // the window is held. The report of that hour is then published straight to the journal, as the normal empty report, without the record write the window refuses.
+ // Two guards keep it a proof: the reconcile of this firing confirmed the executor stopped on an empty queue (status `empty`, never running, blocked or failed), and the record that
+ // holds the zero accumulator belongs to the very generation the outcome, the status file and the continuation were proven for (no inference across a rollover).
+ // It is `provisional`: the accumulator and `lastClosedHour` are untouched, and a report of the same hour that closes later replaces it (see `writeDiscoveryEvent`).
+ if(incompleteReason==='projector_window'&&held&&held.state.status==='empty'&&held.queue.empty===true&&held.queue.incomplete===false&&typeof held.record?.programmeRunId==='string'&&held.record.programmeRunId===generationOf(held.record)&&discoveryReportIsZero(held.report)){
+  const provisional={...discoveryHourEvent({at,hourKey,generation:generationOf(held.record),status:held.state.status,reason:held.state.reason,report:held.report,queue:held.queue}),provisional:true};
+  const written=await putDiscoveryEvent(env,provisional);
+  if(written==='written'||written==='exists'){
+   try{console.warn(JSON.stringify({event:'discovery_hour_close_provisional',hourKey:String(hourKey).slice(0,12),reason:'projector_window'}));}catch{}
+   return {closed:false,reason:'projector_window',hourKey,provisional:true,status:provisional.status};
   }
- }catch{incompleteReason='state_unreadable';}
+ }
  // Not persisted: the hour still gets one truthful line, a compact notice that its REPORT could not be completed (ADR 0118). It carries no counters and no
  // queue facts, so it can neither show unknowns nor imply that Discovery failed (only a Discovery state confirmed by the reconcile is named). The accumulator is
  // untouched, so the next successful report carries the deltas once. The notice does not travel through the record whose write failed: it is put create-only
@@ -187,6 +208,8 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
  logDiscoveryReportClose({hourKey,reason:incompleteReason,generation,delivery});
  return {closed:false,reason:incompleteReason,hourKey,notice:delivery};
 }
+const DISCOVERY_REPORT_WINDOW_TRIES=3;
+function discoveryReportIsZero(report){return report.chunks===0&&DISCOVERY_REPORT_COUNTERS.every(name=>report[name]===0);}
 const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','outbox_full','projector_window','write_conflict']);
 const DISCOVERY_REPORT_FAULT_KEY='events/discovery-report-faults.json';
 // The ledger never evicts: it holds one compact tuple per undelivered hour, up to a year of hours (about 40 bytes each, well under 1 MB). Past that bound the NEWEST
