@@ -544,11 +544,12 @@ export async function markBaselineLoading(env,{reference,expectedGeneration,at})
 // The reference names the recorder as far as the schema allows without a migration (film_person_baseline has state and reference only): the strict path stores the
 // 64-hex ledger digest, the cutover path stores `cutover_minimum/v1:<cutoverDigest>`, and the cutoverDigest itself covers the gate name, its version, the ledger
 // digest and the whole cutoverMinimum section (waiver, accepted, notProved, source evidence). The two forms cannot be confused.
-export const RECORDING_PATHS=Object.freeze({strict:Object.freeze({gate:'strict',version:1}),cutover_minimum:Object.freeze({gate:'cutover_minimum',version:1})});
+export const RECORDING_PATHS=Object.freeze({strict:Object.freeze({gate:'strict',version:1}),cutover_minimum:Object.freeze({gate:'cutover_minimum',version:1}),cutover_accepted:Object.freeze({gate:'cutover_accepted',version:1})});
 const pathIs=(path,known)=>!!path&&typeof path==='object'&&!Array.isArray(path)&&stable(path)===stable(known);
 export const recordingReference=(path,digest)=>path.gate+'/v'+path.version+':'+digest;
 async function recordingOf(ledger,path,expectedGeneration){
  if(path===undefined||pathIs(path,RECORDING_PATHS.strict))return {gate:await baselineGate(ledger),reference:ledger?.digest};
+ if(pathIs(path,RECORDING_PATHS.cutover_accepted))return recordingAccepted(ledger,path,expectedGeneration);
  if(!pathIs(path,RECORDING_PATHS.cutover_minimum))throw failed('baseline_path_invalid');
  // Loaded here, not at the top: that module imports this one, and only this explicit path may reach it.
  const {cutoverMinimumGate}=await import('./film-person-cutover-minimum.js');
@@ -559,6 +560,18 @@ async function recordingOf(ledger,path,expectedGeneration){
  const marker=ledger?.cutoverMinimum?.source?.d1?.after?.marker;
  if(!(marker&&marker.mode==='r2'&&marker.generation===expectedGeneration))reasons.push('ledger_generation_mismatch');
  return {gate:{pass:gate.pass===true&&reasons.length===0,reasons},reference:recordingReference(path,ledger?.cutoverDigest)};
+}
+// The third path (AIR-373, ADR 0110, owner decisions of 10 Nov 2026): `cutover_accepted` version 1. Only `cutoverAcceptedGate` is consulted (the v1 rules with the
+// pinned ACCEPTED_DISCREPANCIES caps instead of zero unexplained differences, and the pinned OPERATOR_COPY_PERMISSION for an operator-copy source). The reference
+// is `cutover_accepted/v1:<acceptedDigest>`. It is reached only by its own path object and falls back to nothing.
+async function recordingAccepted(ledger,path,expectedGeneration){
+ const {cutoverAcceptedGate}=await import('./film-person-cutover-accepted.js');
+ const verdict=await cutoverAcceptedGate(ledger);
+ const why=[...verdict.reasons];
+ if(verdict.gate!==path.gate||verdict.version!==path.version)why.push('gate_identity');
+ const measured=ledger?.cutoverMinimum?.source?.d1?.after?.marker;
+ if(!(measured&&measured.mode==='r2'&&measured.generation===expectedGeneration))why.push('ledger_generation_mismatch');
+ return {gate:{pass:verdict.pass===true&&why.length===0,reasons:why},reference:recordingReference(path,ledger?.acceptedDigest)};
 }
 export async function recordBaselineVerified(env,{ledger,expectedGeneration,at,path}){
  if(typeof at!=='string'||!Number.isInteger(expectedGeneration))throw failed('baseline_invalid');

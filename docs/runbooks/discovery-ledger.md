@@ -34,6 +34,7 @@ Verified side-effect-free observations and SELECT-only preflight are standing-au
 - `GET /api/enrichment/pipeline/status` (or MCP `epg_pipeline_status`):
   - **`full`**: no `archive` field.
   - **bounded or frozen:** `archive` = `{ledgerMode, activeItems, uniqueArchivedItems, manifestId, segments, items, bytes}`, and `ledgerTotal` = `activeItems + uniqueArchivedItems` (unique keys of active ∪ archive).
+  - **Under D1 discovery authority** the block also says where each figure comes from ([reference](../reference/api/enrichment.md)). `ledgerMode` is the mode recorded in the published generation's own R2 document, not the feature flag; `ledgerMode: "unknown"` with `ledgerModeReason` and `null` archive figures means the status could not prove them (for example the seal record names another generation, or the document changed), not that the ledger is bounded or the archive is empty. `archive.d1` counts rows D1 itself holds; a zero there says nothing about the R2 archive. To decide a move to `bounded`, read `ledgerMode` with `ledgerModeSource: "generation_document"` only.
 - `GET /api/enrichment/status`: `ledgerTotal` has the same meaning, and `recognizedFilms` counts verified decisions among the **active** candidates only.
 - A consistent offline read for audits:
   1. Take the published active ledger `epg/generations/<runId>/discovery-latest.json`.
@@ -222,6 +223,8 @@ A D1 chunk has three clocks that must all fit: the MCP client's timeout (about 6
 - The 30 October reading is in the [evidence](../evidence/epg-diary-oom-profile-2026-10-30.md).
 
 ## Wall time of the staged publication (AIR-353)
+
+A recoverable Workflow stop (`step_cap` and the other `DISCOVERY_WORKFLOW_RECOVERABLE` reasons) is supposed to open `series+1` after `recovery.dueAt`. The hourly cron is the fallback. On 10 November 2026 the cron ran at 21:00, 22:00 and 23:00 Europe/Madrid with the projector window granted on the same tick, instance `_0` already `complete`, and no `_1`; the reconcile outcome was not logged ([AIR-428 evidence](../evidence/orchestration/air-428-discovery-step-cap-recovery-2026-11-10.md)). After that change a scheduled `projector_window` is retried in the same tick after the window expiry, and every attempt logs `discovery_workflow_reconcile`. Read those lines (reason, attempt, series) plus the Workflows instance list; do not treat a green cron as recovery. Do not manually create or retry a Workflow instance without a separate owner operation.
 
 The hourly cron in the window between the committed ledger seal and the publish step (the authority names the new run, the pointer still the old one) does two things, both fail-closed: `reconcileDiscoveryWorkflow` answers `generation_handoff` and creates and writes nothing, and the D1 enrichment projector answers `deferred`/`generation_pending` and reads no catalog (a missing R2 copy of the old generation is not an input failure there). `input_missing: epg/generations/<run>/discovered-films.json` in a cron summary is the projector's own text; the reconcile never reads that object. After the publish both continue on their own. See [the RCA](../evidence/discovery/air-363-generation-handoff-input-missing-2026-11-07.md).
 

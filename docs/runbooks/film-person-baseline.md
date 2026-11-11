@@ -180,3 +180,97 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 3. **Recording the baseline.** Only with a separate owner GO that names the path: `recordBaselineVerified` with the passing ledger, the generation the ledger was measured at and, for this gate, `path: RECORDING_PATHS.cutover_minimum`. A ledger digest names one measurement; a later write makes it stale, so the recording follows the measurement with the writers quiet.
 4. **`r2` to `prepared`.** Only with another separate owner GO, by `transitionAuthority` against the verified baseline. Recording the baseline does not authorize it.
 
+## Connector path (offline code, nothing executed)
+
+**Authority.** Owner decisions of 10 Nov 2026 for [AIR-373](https://trello.com/c/ugu3sQmp), recorded in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md), now **Accepted** following the successful [independent review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602):
+
+1. *"ignore the discrepancies and prepare the migration"*: unexplained differences of the measured kind do not block recording the baseline and `r2` to `prepared`.
+2. *"no token is needed, use the same path as before the pause"*: the path of [the measurement of 10 Nov 2026](../evidence/d1-migration/air-373-measured-parity-2026-11-10.md) is the path to use. The operator copies D1 through the Cloudflare API connector and the run is local.
+3. *"exact measured numbers"* ([owner decision on PR #501](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358)): the caps are exactly the counts measured on 10 Nov 2026, with no headroom.
+
+**ADR 0110 has passed its owner-controlled acceptance gate.** The [owner decision](https://github.com/vladimino/iptv-watchlist/pull/501#issuecomment-6780196358) and [independent re-review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602) confirm exact measured caps and the complete missing-evidence guard. This removes only the procedural ADR-status block. **It is not a production operation GO**: the measuring run, baseline recording and marker transition each remain separate owner-controlled actions. The code does not read ADR status.
+
+**Nothing in this section was executed against production, and the section authorizes nothing.** The measuring run with the production lease, the baseline record and `r2` to `prepared` are three separate owner GOs.
+
+### What is built
+
+- [`scripts/film-person-connector-run.mjs`](../../scripts/film-person-connector-run.mjs): the connector path as a reviewed tool, with a small CLI (`plan`, `load`, `verify`, `run`, `seal`, `sql`). **Inactive:** not bundled, no Worker or `src/` import. It never calls the connector (only the human-facing operator session can) and its only network is the read-only R2 client it is given (`R2_SNAPSHOT_*`). The D1 side is the local copy: one read-only `SELECT` at a time, plus the three projector-lease statements applied to the copy. Private files (the copy, the measurement, the ledger) must be outside the repository; the CLI refuses a path inside it.
+- [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js): the `cutover_accepted` version 1 gate and the two pinned permissions. **Inactive:** only the recorder names it, through a dynamic import inside its own path.
+- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 39 connector mutants, every one killed; a mutant that does not parse or load fails the check).
+
+### The `cutover_accepted` gate
+
+It is `cutover_minimum` version 1 with two differences. The gate calls the v1 gate and drops only its zero-unexplained reasons; the waiver of the owner-link values, the D1 identity, the witness, the fence, the lease and the probe rules apply unchanged. The strict gate and v1 are not modified and still refuse such a ledger.
+
+**Accepted discrepancies (`ACCEPTED_DISCREPANCIES` v1, decisions 1 and 3).** Unexplained missing or extra rows are accepted up to a cap per class, and the cap is exactly the count measured on 10 Nov 2026 (`caps` equals `measured` in the constant). There is no headroom: one unexplained row more in any class fails, and passing it needs a fresh owner approval and a new version of the constant.
+
+| Class | Cap = measured | Class | Cap = measured |
+| --- | ---: | --- | ---: |
+| film | 8 | personLocalization | 3 |
+| person | 6 | watchlist | 4 |
+| filmExternalId | 16 | redirect | 4 |
+| personExternalId | 3 | retirement | 4 |
+| filmAlias | 145 | ratedAdmission | 708 |
+| personAlias | 147 | retention | 401 |
+| credit | 132 | projectionKey | 11 |
+| filmLocalization | 8 | **total** | **1,600** |
+
+A value that **differs** is never accepted: `differs` must be 0 in every class, explained or not. A class above its cap (`over_cap:<class>`), a differing value (`differs:<class>`), a class the constant does not list (`class_not_listed:<class>`) or a candidate acceptance that is not deeply equal to the constant (`acceptance_not_permitted`) fails. The acceptance, the per-class counts and the caps are in the ledger under `acceptedDigest`, and the gate result shows them (`accepted`, `notProved`, `discrepancies`).
+
+**The operator-copy source (`OPERATOR_COPY_PERMISSION` v1, decision 2).** For a source of kind `operator-copy`, `source.verified` is not an argument. `buildCutoverAcceptedLedger` derives it from the facts of the evidence files, and the gate derives it again from the facts the ledger carries. It is `true` only when all of this holds:
+
+- the statement set is complete: all 20 witness statements, all 10 gate statements and one row count for each of the 39 tables of the copy plan are present at T0, T1, T2 and in the copy comparison at T1. The set is `requiredStatementIds()`, derived from the same `COPY_TABLES` constant the plan copies from, not from the keys of the evidence. A missing one is `check_missing:<id>` or `copy_missing:<id>`; a statement outside the set is refused (`check_unknown:<id>`), not ignored;
+- production gave the same rows at T0, T1 and T2 for every witness, gate and table-count statement, except the Discovery statements (`gate:discovery`, `gate:discoveryLease` and the counts of the five Discovery tables);
+- the local copy gave the same rows as production at T1 for every one of those statements;
+- the resync request read the Discovery generation first and last with the same value, that generation is the one the run saw, and every Discovery table of the copy equals production on its aggregate;
+- the production projector lease was held by this run's lease id and live at T0, T1 and T2 (the lease row of each read), with the same `started_at`, and a later read shows it released;
+- the manifest digest and the R2 ETags after the cut are the ones the run observed and are unchanged; the probe is complete; the read is consistent.
+
+Missing or inconsistent evidence gives `verified:false` with its reasons, and both this gate and the recorder refuse the ledger. **This is operator attestation, not cryptographic proof.** The evidence files are plain JSON the operator saved from the connector, and the synthetic test builds such files with a fake connector. The checks stop an incomplete, mixed or moved run from being recorded; they do not authenticate one.
+
+**Recording.** `recordBaselineVerified` takes `path: RECORDING_PATHS.cutover_accepted` (`{gate: 'cutover_accepted', version: 1}`) and stores `cutover_accepted/v1:<acceptedDigest>`. There is no fallback: the strict and v1 paths refuse this ledger and this path refuses a ledger without the section.
+
+### The tables that are copied
+
+`COPY_TABLES` (39 tables) is every table a statement of the run names: the witness and gate statements, the D1 readers of the capture with all three routes in D1, the stage A cut with its AIR-286 check, the owner-review facts and the diagnostics of `runParity`. A view counts as its tables. The test runs that code against the stand-in with a tracing driver and asserts that the traced set equals the list; the five prediction fact tables are read only for a changed Film with a retained duplicate, so the test adds that one reviewed statement by its text.
+
+`load` creates **every** table of the production DDL (tables, indexes and views, no triggers), because the readers check that the published EPG and Discovery tables exist. A table whose copy is not complete is never read as empty: the binding of the copy refuses any `SELECT` that names it (`connector_table_not_copied`), and the run stops.
+
+### Operator procedure
+
+Before step 1: an owner GO for the measuring run that names the production projector lease, the current authority markers and flags read live, and `node scripts/film-person-connector-run.mjs plan --out <private dir>`. `plan` writes `plan.json` and one `fn-*.js` per connector function. Every statement in them is generated from the reviewed code: the witness SQL from `readWitness`, the gate SQL from `GATE_STATEMENTS`, the lease SQL from `readStableCut`. Each function goes to the connector's `execute` tool as it is, and each result is saved to a file as returned. The results carry the plan digest; a file of another plan is refused.
+
+| Step | Operator (connector) | Local |
+| --- | --- | --- |
+| 1. Lease | `fn-leaseAcquire.js`. **STOP** unless the returned row names this run's lease id: another holder is live | |
+| 2. T0 | `fn-check.js` with `LABEL="T0"`: 20 witness, 10 gate and 39 count statements in one request | |
+| 3. DDL | `fn-ddl.js` | `load` the result into a new copy file |
+| 4. Copy | `fn-copy.js`, repeated with the `CURSOR` each `load` prints, until it is `null`. Pages by `rowid`; the page size halves when a page is large; one result stays under about 8 MB | `load` each result, in order |
+| 5. T1 | `fn-check.js` with `LABEL="T1"` | `verify` the copy against T1. **STOP** if any statement outside the Discovery ones differs |
+| 6. Resync | `fn-resync.js` with `SINCE` set to the Discovery generation of T0 | `load` the result. **STOP** if it is not `equal`; if `discovery_generation_moved`, send the request again |
+| 7. Run | | `run` with `R2_SNAPSHOT_*` loaded: the merged `captureProjectorInputs` and `runParity`, unmodified, then the class entries for the ledger. Writes `measurement.private.json` |
+| 8. T2 | `fn-check.js` with `LABEL="T2"` | |
+| 9. Release | `fn-leaseRelease.js`. The returned row must show no holder | |
+| 10. Seal | | `seal` with the T0, T1, T2, resync and release files. Writes `ledger.private.json` (every key of every difference) and `report.json` (counts and digests only) |
+
+`fn-leaseRenew.js` extends the lease while the copy runs; the lease lasts 45 minutes from its last renewal and the hourly projector skips its tick while it is held. If the session is lost the lease expires on its own.
+
+Then, each with its own owner GO and its own dated evidence:
+
+11. **Baseline record** (requires separate owner GO after a valid, current measurement and passing gate). `sql` with the sealed ledger, the marker generation and a time writes `sql-baseline-record.json`: the exact batch `recordBaselineVerified` would send (obtained by running it against a recording binding over the copy), its two fence assertions, the three read-back `SELECT`s and the rows they must return. The operator sends the `sql` text as **one** request and then the read-back. `sql` emits nothing for a ledger that fails the gate.
+12. **`r2` to `prepared`.** `sql-r2-to-prepared.json`, the batch of `transitionAuthority`, sent the same way after step 11 is read back. The trigger of migration `0013` refuses it without a verified baseline.
+
+**STOP conditions, no blind retry.** Any refusal of `load`, `verify`, `run` or `seal`; `verified:false`; a failing gate; a lease row that names another holder; a write whose outcome is unclear. After an unclear write, read the three read-back statements first; never send a batch twice. A stopped run is a new run with a new copy file, except the resync request, which may be sent again. `run` refuses with `capture:discovery_lease_live` when the resync caught the Discovery Workflow in the middle of a chunk: send the resync again after that lease has expired, then `run`. `run` itself changes nothing but the lease row of the copy, so it may be repeated on the same copy.
+
+### What it proves and what it does not
+
+It proves that, by the operator's evidence, production did not change on any witnessed aggregate between three reads while this run held the projector lease, that the copy answered every check as production did, and that the reviewed parity code found no differing value and no more unexplained rows in any class than were measured on 10 Nov 2026.
+
+Not proved, and listed in every gate result:
+
+- R2 and D1 are not one snapshot, and the D1 side is a copy taken minutes before the R2 reads. A writer that keeps every witness aggregate is not seen. Tables outside the witness are compared by row count and largest `rowid` only.
+- The Discovery tables are compared by aggregates (row count, sums of generation and payload length, largest generation); a change that keeps them is not seen.
+- The owner-link values are not compared.
+- The accepted differences are not repaired. **`prepared` keeps the projector as the only writer and R2 as the authority**, so the empty `ratedAdmission`, `retention` and `retirement` tables change no behaviour at `prepared`. They are open gaps for the later `d1` activation ([AIR-374](https://trello.com/c/y3oT4gAK), the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C)), which nothing here authorizes.
+- The tool has never run against the real connector. The shape of an `execute` result and the atomicity of a multi-statement request sent through the connector are assumed from the D1 HTTP API (the write unit of `scripts/d1-backfill.mjs`), not observed.
+

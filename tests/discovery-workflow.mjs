@@ -1017,4 +1017,94 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  }finally{Date.now=realNow;delete env.DISCOVERY_EXECUTOR;context.advanceDiscovery=realAdvance;clearWorkflowAdmission();}
 }
 
+// 17. AIR-428: a halted step_cap with due elapsed opens one successor; a scheduled projector-window
+// refusal waits for the expiry in the same tick; refusals are logged; D1/CAS/quarantine/empty/mismatch stay fail-closed.
+{
+ const logs=[];
+ context.console.log=line=>{try{const row=JSON.parse(line);if(row?.event==='discovery_workflow_reconcile')logs.push(row);}catch{}};
+ const past=new Date(Date.now()-60000).toISOString();
+ const halt=()=>{
+  seed({reason:'backoff',remaining:12});
+  armWorkflowAdmission();
+  Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
+  set('epg/resolver-continuation.json',{stage:'paused',reason:'backoff',at:iso,hopId:null,remainingChunks:12,nextCatchUpAt:past,retryAt:past,programmeRunId:GENERATION});
+  set('epg/discovery-status.json',{programmeRunId:GENERATION,remaining:12,finishedAt:past});
+  set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'step_cap',updatedAt:past,waitingUntil:past,chunksThisInstance:19,lastProgress:null,recovery:{attempts:1,reason:'step_cap',at:past,dueAt:past,quarantined:false}});
+  creates.length=0;logs.length=0;
+  binding.create=async request=>{creates.push(request);return {id:request.id};};
+  binding.get=async()=>({status:'complete'});
+ };
+ try{
+  halt();
+  let result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.started,true);assert.equal(result.series,1);assert.notEqual(result.instanceId,INSTANCE);
+  assert.equal(creates.length,1);assert.equal(logs[0]?.reason,'started');assert.equal(logs[0]?.attempt,1);
+  const again=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.notEqual(again.reason,'started');assert.equal(creates.length,1);
+
+  let windowUntil=0;
+  const holdWindow=()=>{context.DiscoveryAuthority.writeWorkflow=async()=>{if(windowUntil>Date.now())throw Object.assign(new Error('discovery_window'),{code:'discovery_window',window:{expiresAt:windowUntil,state:'held'}});return {handled:false,saved:false};};};
+  halt();
+  windowUntil=Date.now()+60000;holdWindow();
+  const waits=[];
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'),{scheduled:true,now:Date.now(),wait:async(outcome,now)=>{waits.push({reason:outcome.reason,windowUntil:outcome.windowUntil,now});windowUntil=0;}});
+  assert.equal(result.started,true);assert.equal(result.series,1);assert.equal(creates.length,1);
+  assert.equal(waits.length,1);assert.equal(waits[0].reason,'projector_window');
+  assert.equal(logs.length,2);assert.equal(logs[0].reason,'projector_window');assert.equal(logs[1].reason,'started');assert.equal(logs[1].scheduled,true);
+
+  halt();
+  windowUntil=Date.now()+60000;holdWindow();
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.started,false);assert.equal(result.reason,'projector_window');assert.equal(creates.length,0);assert.equal(logs.length,1);
+
+  halt();
+  windowUntil=Date.now()+60000;holdWindow();
+  const stubborn=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'),{scheduled:true,now:Date.now(),wait:async()=>{}});
+  assert.equal(stubborn.reason,'projector_window');assert.equal(creates.length,0);assert.equal(logs.length,3);
+
+  halt();
+  const scheduledTime=Date.now()-400000,holdMs=60000;
+  windowUntil=Date.now()+holdMs;holdWindow();
+  const delayed=[];
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'),{scheduled:true,now:scheduledTime,wait:async(outcome,now)=>{delayed.push({now,windowUntil:outcome.windowUntil,waitMs:outcome.windowUntil-now});windowUntil=0;}});
+  assert.equal(result.started,true);assert.equal(creates.length,1);
+  assert.equal(delayed.length,1);
+  assert.ok(delayed[0].now-scheduledTime>350000,'wait clock is Date.now, not the stale scheduledTime');
+  assert.ok(delayed[0].waitMs>10000&&delayed[0].waitMs<120000,'remaining window from wall clock, not the 330s cap from scheduledTime: '+delayed[0].waitMs);
+
+  halt();
+  context.DiscoveryAuthority.readAuthority=async()=>{throw Object.assign(new Error('d1'),{code:'d1_unavailable'});};
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.reason,'d1_unavailable');assert.equal(creates.length,0);assert.equal(logs[0].reason,'d1_unavailable');
+
+  halt();
+  const write=context.DiscoveryAuthority.writeWorkflow;
+  context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.reason,'write_conflict');assert.equal(creates.length,0);
+  context.DiscoveryAuthority.writeWorkflow=write;
+
+  halt();
+  set('epg/discovery-workflow.json',{...records.get('epg/discovery-workflow.json'),reason:'recovery_exhausted',recovery:{attempts:5,reason:'recovery_exhausted',at:past,dueAt:null,quarantined:true}});
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.reason,'recovery_exhausted');assert.equal(creates.length,0);
+
+  halt();
+  set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.reason,'stopped');assert.equal(creates.length,0);
+
+  halt();
+  armPublishedEpg(GENERATION);
+  context.DiscoveryAuthority.readAuthority=async()=>({...readyDiscoveryGate(OTHER),publishedProgrammeRunId:OTHER});
+  result=await call('reconcileDiscoveryWorkflow')(workflowEnv('workflow'));
+  assert.equal(result.reason,'generation_handoff');assert.equal(creates.length,0);
+ }finally{
+  context.console.log=()=>{};
+  delete env.DISCOVERY_EXECUTOR;
+  clearWorkflowAdmission();
+  context.advanceDiscovery=realAdvance;
+ }
+}
+
 console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
