@@ -245,12 +245,35 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  const detailsD=plain(ratings(bucket).find(event=>event.runId===dayD.runId).details);eq(detailsD.updated.map(f=>[f.id,f.from,f.rating]),[['toy',3.5,4]],'day D: the real change is one update line');assert.equal(detailsD.rated,undefined);
 }
 
-// 1i. A run recorded before this change (its stored contribution lists `resolved` and a `rated` film that the same run reported as added) builds the event without the repeats.
+// 1i. A run recorded before this change: its page contribution has no `news` marker, so its `rated` (Diary reconciliation) and `resolved` (settled references) are not passed on as
+// news; a marked page and the removal contribution (lookups only) keep `rated` unless the run reported the film as added or updated. Hidden bookkeeping never makes the event incomplete.
 {
  const {R}=setup();
- const run={diary:{pageChanges:{1:{state:'applied',added:[{id:'a',rating:4}],updated:[],rated:[{id:'a',rating:4},{id:'b',rating:3}],resolved:[{id:'a',rating:4},{id:'b',rating:3}],more:{resolved:2}}}},removal:{changes:{added:[],updated:[],rated:[],resolved:[{id:'c',rating:2}],more:{}}}};
- const out=plain(R.detailsOf(run));
- {eq(out.details.added.map(f=>f.id),['a']);eq(out.details.rated.map(f=>f.id),['b'],'a film is not listed as rated when the run reported it as added');assert.equal(out.details.resolved,undefined);assert.equal(out.details.more?.resolved,undefined);}
+ const page=(extra)=>({state:'applied',added:[{id:'a',rating:4}],updated:[],rated:[{id:'a',rating:4},{id:'b',rating:3}],resolved:[{id:'a',rating:4},{id:'b',rating:3}],more:{},...extra});
+ const legacy=plain(R.detailsOf({diary:{pageChanges:{1:page()}},removal:{changes:{added:[],updated:[],rated:[{id:'c',rating:2}],resolved:[{id:'c',rating:2}],more:{}}}}));
+ eq(legacy.details.added.map(f=>f.id),['a']);eq(legacy.details.rated.map(f=>f.id),['c'],'a legacy page rated list is dropped; a lookup contribution of the removal record stays');assert.equal(legacy.details.resolved,undefined);
+ const marked=plain(R.detailsOf({diary:{pageChanges:{1:page({news:2})}},removal:{}}));
+ eq(marked.details.rated.map(f=>f.id),['b'],'a marked page keeps rated, minus the film reported as added');assert.equal(marked.details.resolved,undefined);
+ // A hidden `resolved` remainder alone is not news and not an incomplete event; beside an added film it does not make that event incomplete either.
+ eq(R.detailsOf({diary:{pageChanges:{1:{state:'applied',added:[],updated:[],rated:[],resolved:[],more:{resolved:3},news:2}}},removal:{}}),{},'only hidden bookkeeping: no details at all');
+ const withAdded=plain(R.detailsOf({diary:{pageChanges:{1:{state:'applied',added:[{id:'a',rating:4}],updated:[],rated:[],resolved:[],more:{resolved:3},news:2}}},removal:{}}));
+ assert.equal(withAdded.details.incomplete,undefined,'not incomplete because of a hidden group');eq(withAdded.details.added.map(f=>f.id),['a']);
+ // A visible overflow and a page marked incomplete still say so.
+ assert.equal(plain(R.detailsOf({diary:{pageChanges:{1:{state:'applied',added:[{id:'a',rating:4}],updated:[],rated:[],resolved:[],more:{added:2},news:2}}},removal:{}})).details.incomplete,true);
+ assert.equal(plain(R.detailsOf({diary:{pageChanges:{1:{state:'applied',added:[{id:'a',rating:4}],updated:[],rated:[],resolved:[],more:{},incomplete:true,news:2}}},removal:{}})).details.incomplete,true);
+}
+
+// 1j. AIR-443: planning a Diary page no longer reads the removal queue, so a failing queue read in that window cannot turn valid new facts into an incomplete event.
+{
+ const {clock,net,bucket,env,R}=setup();
+ migrated(bucket);bucket.set('metadata.json',{lidA:{id:'lidA',title:'Фильм А',year:2001,tmdbId:'111'}});
+ net.diary.set(1,diaryPage([diaryRow('lidA',8,'2026-11-08','v1')]));
+ let planning=false,planned=false,blocked=0;
+ bucket.hooks.beforeGet=async key=>{if(!planned&&key==='enrichment/view-index.json')planning=true;if(planning&&key===QUEUE){blocked++;throw new Error('queue read failed');}};
+ bucket.hooks.beforePut=async (key,value)=>{if(key===RUN&&value?.diary?.pageChanges?.['1']){planning=false;planned=true;}};
+ const {reply}=await runOnce(R,env,clock);assert.equal(reply.state,'finished',JSON.stringify(reply));
+ assert.equal(blocked,0,'no removal-queue read happens while the page is planned');
+ const details=plain(ratings(bucket)[0].details);assert.equal(details.incomplete,undefined);eq(details.added.map(f=>f.id),['lidA'],'the new fact is announced complete');
 }
 
 // 1d. A repeated merge of the same contribution is ignored, never added again.
