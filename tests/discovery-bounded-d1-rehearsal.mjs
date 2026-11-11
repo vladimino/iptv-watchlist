@@ -199,25 +199,28 @@ if(!process.env.BOUNDED_PERF){
  assert.ok(history.find(row=>row.day===5).departed>history.find(row=>row.day===6).departed,'the first bounded commit after a frozen period archives the accumulated absent rows');
  console.log(JSON.stringify({bounded_d1_rehearsal:history.map(({day,effective,active,total,departed,reentered,d1})=>({day,effective,active,total,departed,reentered,d1Archive:d1.archive||0}))}));
 
- // 2. What the D1 status reads against what R2 holds. D1 counts archive rows whose key is not active; a key that departed twice
- //    has two rows. The R2 archive is the history a re-entry reads. This is the reporting gap of AIR-427, recorded, not fixed here.
+ // 2. What the D1 reader says against what R2 holds (AIR-427). D1 stores neither the mode of a generation nor the R2 archive: the reader
+ //    answers `unknown` for the mode and names its archive figures as D1 rows. D1 counts a row per departure, so a key that departed
+ //    twice has two rows; the R2 archive keeps one record per key.
  {
   const union=r2Union(state),env=envOf(state);
   const ledger=await call('loadJSON')(env,'epg/discovery-latest.json');
   const r2Unique=union.doc.archive.uniqueArchivedItems;
   const d1Rows=Number(sql(state.file,"SELECT COUNT(*) AS n FROM discovery_observation WHERE residence='archive'")[0].n);
   const d1DistinctKeysNotActive=Number(sql(state.file,"SELECT COUNT(DISTINCT observation_key) AS n FROM discovery_observation WHERE residence='archive' AND observation_key NOT IN (SELECT observation_key FROM discovery_observation WHERE residence='active')")[0].n);
-  assert.equal(ledger.ledgerMode,'bounded');
-  assert.equal(d1DistinctKeysNotActive,r2Unique,'every key that is only archived in R2 has at least one D1 archive row here (all departures of this world went through D1)');
-  assert.ok(ledger.archive.uniqueArchivedItems>=r2Unique,'the D1 status counts rows, so it is never below the R2 figure');
+  assert.equal(ledger.ledgerMode,'unknown','the D1 reader does not claim a mode it cannot prove');
+  assert.equal(ledger.archive.source,'d1');
+  assert.equal(ledger.archive.d1.archiveOnlyRows,d1Rows-Number(sql(state.file,"SELECT COUNT(*) AS n FROM discovery_observation WHERE residence='archive' AND observation_key IN (SELECT observation_key FROM discovery_observation WHERE residence='active')")[0].n));
+  assert.equal(d1DistinctKeysNotActive,r2Unique,'in this world every departure went through D1, so the keys archived only in R2 each have a D1 row');
   assert.ok(d1Rows>d1DistinctKeysNotActive,'keys that departed more than once have more than one D1 archive row');
-  console.log(JSON.stringify({status_counters:{r2UniqueArchived:r2Unique,d1StatusUniqueArchived:ledger.archive.uniqueArchivedItems,d1ArchiveRows:d1Rows,d1DistinctArchivedNotActive:d1DistinctKeysNotActive}}));
+  console.log(JSON.stringify({status_counters:{r2UniqueArchived:r2Unique,d1ArchiveOnlyRows:ledger.archive.d1.archiveOnlyRows,d1ArchiveRows:d1Rows,d1DistinctArchivedNotActive:d1DistinctKeysNotActive}}));
  }
 
- // 3. BLOCKER reproduction (AIR-426 finding A). With 20,000 or fewer active rows the D1 ledger read is not paged, and the chunk
- //    then saves the whole decision map. A decision of a departed key makes that save fail closed (`discovery_fence`). In a
- //    frozen ledger nothing departs, so this cannot happen today; in a bounded ledger it happens on the first chunk after a
- //    departure whenever the scan has 20,000 keys or fewer. This block asserts the present behaviour so that a fix must change it.
+ // 3. AIR-426 finding A, and its fix. With READ_CAP rows (20,000) or fewer the D1 ledger is read whole. The chunk used to take the
+ //    whole-ledger path for that, which saves the whole decision map; a whole-map save fails closed once a decided key has departed
+ //    from the active ledger (and above READ_CAP decisions). A frozen ledger never gets there (it is far above READ_CAP and nothing
+ //    departs); a bounded ledger has the size of one scan (20,568 on 10 November, 19,821 and 20,506 earlier) and 4,995 of the 32,530
+ //    stored decisions already have no active observation. The D1 chunk is now the paged one whatever the size.
  {
   const env=envOf(state,'bounded');
   const ledger=await call('loadJSON')(env,'epg/discovery-latest.json');
@@ -226,17 +229,27 @@ if(!process.env.BOUNDED_PERF){
   const activeKey=ledger.items[0].key;
   const evidence=sql(state.file,"SELECT evidence_key AS e FROM discovery_observation WHERE source_key='active' AND observation_key='"+activeKey.replace(/'/g,"''")+"'")[0].e;
   await call('saveJSON')(env,'epg/discovery-resolution.json',{[activeKey]:{status:'no_confident_match',checkedAt:'2026-11-10T00:00:00.000Z',evidenceKey:evidence,attempts:1}});
-  assert.equal(Object.keys(await call('loadJSON')(env,'epg/discovery-resolution.json')).filter(key=>key!=='__canonicalizedAt').length,1);
   // The key departs: a scan without it.
   const day=11,without=scan(day).filter(item=>keyOf(item)!==activeKey);
-  const withIt=scan(day).some(item=>keyOf(item)===activeKey);
-  assert.ok(withIt,'the key is in the next scan unless removed');
+  assert.ok(scan(day).some(item=>keyOf(item)===activeKey),'the key is in the next scan unless removed');
   await commit(state,day,'bounded',{latest:without});
   assertParity(state,'day 11 (bounded, one decided key departs)');
   const after=envOf(state,'bounded'),lease2=await takeLease(after,state.file);after.discoveryLease=lease2;
   const decisions=await call('loadJSON')(after,'epg/discovery-resolution.json');
   assert.ok(decisions[activeKey],'the decision of a departed key is kept');
   await assert.rejects(()=>call('saveJSON')(after,'epg/discovery-resolution.json',decisions),error=>error?.code==='discovery_fence'||/discovery_fence/.test(String(error?.message)),'saving the whole decision map fails closed once a decided key has departed');
+  // The chunk of that small ledger goes to the paged path, with the descriptor the reader gives above READ_CAP, and never to the
+  // whole-ledger path.
+  const real=context.resolvePagedDiscoveryChunk,seen=[];
+  context.resolvePagedDiscoveryChunk=async(env_,report,limit,lease_,checkpoint,source)=>{seen.push(source);return {stage:'complete',checked:0,remaining:0};};
+  try{
+   const result=await call('resolveDiscoveryChunk')(after,{films:[]},1,lease2);
+   assert.equal(result.stage,'complete');
+  }finally{context.resolvePagedDiscoveryChunk=real;}
+  assert.equal(seen.length,1,'the small D1 ledger is resolved by the paged chunk');
+  assert.equal(seen[0].paged,true);assert.equal(seen[0].items,null);
+  assert.equal(seen[0].itemCount,Number(sql(state.file,"SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active'")[0].n));
+  assert.equal(seen[0].programmeRunId,state.published.programmeRunId);
   // The key returns: the decision is still there and is joined again.
   await commit(state,12,'bounded',{latest:[...scan(12).filter(item=>keyOf(item)!==activeKey),scan(day).find(item=>keyOf(item)===activeKey)]});
   assertParity(state,'day 12 (bounded, the decided key returns)');
