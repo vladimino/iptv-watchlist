@@ -25,13 +25,17 @@ const REGISTRY_MUTANTS=[
  ['a coverage entry has no writer',"cover('film_sync_state clocks',['writeFilmFacts']","cover('film_sync_state clocks',[]"],
 ];
 const PRODUCER_MUTANTS=[
+ ['an unmoved freeze reader does not block',"if(item.class==='freeze'){if(item.moved!==true)blockers.push","if(item.class==='freeze'){if(false)blockers.push"],
+ ['an exception reader marked moved does not block',"else if(item.class==='exception'){if(item.moved===true)blockers.push","else if(item.class==='exception'){if(false)blockers.push"],
+ ['an exception reader blocks while unmoved',"if(item.moved===true)blockers.push('reader_exception_marked_moved:'","if(item.moved!==true)blockers.push('reader_exception_marked_moved:'"],
+ ['an unknown reader class does not block',"else blockers.push('reader_class_invalid:'+item.name);","else{}"],
+ ['a reader registry is duplicated in the producers',"readers=evidence.readers||CANONICAL_READER_REGISTRY","readers=evidence.readers||[{name:'x',class:'freeze',moved:true}]"],
  ['a gap is cleared without its writers being registered',"entry.writers.every(name=>typeof calls.CALLS[name]==='function'&&!!calls.RECONCILE[name])","true"],
  ['a gap is cleared though the registry does not mark it covered',"entry.covered===true&&","true&&"],
  ['a gap is cleared with no scenario',"&&entry.scenarios?.length>0&&entry.tables?.length>0;","&&true;"],
  ['a gap with no entry counts as cleared',"const registered=!!entry&&","const registered=!entry||"],
  ['cleared and open gaps are swapped',"(registered?cleared:open).push(gap);","(registered?open:cleared).push(gap);"],
  ['a named difference that is not accepted does not block',"if(item.status!=='accepted')blockers.push('exception_not_accepted:'","if(false)blockers.push('exception_not_accepted:'"],
- ['an unmoved reader does not block',"if(item.moved!==true)blockers.push","if(false)blockers.push"],
  ['too many rows in a class do not block',"if(found!==item.expected)blockers.push","if(found<item.expected)blockers.push"],
  ['too few rows in a class do not block',"if(found!==item.expected)blockers.push","if(found>item.expected)blockers.push"],
  ['an unreadable class table does not block',"{blockers.push('empty_class_unreadable:'+item.name);continue;}","{continue;}"],
@@ -53,7 +57,6 @@ const PRODUCER_MUTANTS=[
  ['an unwired producer does not block',"for(const item of wiring)if(!item.requires.every(","for(const item of wiring)if(false&&!item.requires.every("],
  ['a producer is wired by one of its kinds',"item.requires.every(kind=>OPERATION_KINDS","item.requires.some(kind=>OPERATION_KINDS"],
  ['a producer no longer needs the person kind',"requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])","requires:Object.freeze(['film_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])"],
- ['a reader is registered as moved',"name:'admin_read',moved:false","name:'admin_read',moved:true"],
  ['the accepted class count is changed',"table:'film_rated_admission',expected:708","table:'film_rated_admission',expected:707"],
 ];
 // Each readiness mutant is first run against only the section of tests/canonical-handoff-readiness.mjs that should kill it (READINESS_ONLY). A mutant the hinted section does
@@ -65,7 +68,7 @@ const HINTS={
  'a producer is wired by one of its kinds':'3b','a producer no longer needs the person kind':'3b',
  'too many rows in a class do not block':'3d','too few rows in a class do not block':'3d','an unreadable class table does not block':'3d',
  'a live projector lease does not block':'3a','a requested projector window does not block':'3a','an expired projector window blocks':'3a','the marker state is not checked':'3a','the baseline is not checked':'3a','ready ignores the blockers':'3a',
- 'a reader is registered as moved':'2','the accepted class count is changed':'2',
+ 'an unmoved freeze reader does not block':'3c','an exception reader marked moved does not block':'3c','an exception reader blocks while unmoved':'3c','an unknown reader class does not block':'3c','a reader registry is duplicated in the producers':'2','the accepted class count is changed':'2',
 };
 for(const [name,from] of REGISTRY_MUTANTS)assert.equal(registry.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+REGISTRY);
 for(const [name,from] of PRODUCER_MUTANTS)assert.ok(producers.split(from).length>=2,'the mutation text of "'+name+'" must occur in '+PRODUCERS);
@@ -89,7 +92,7 @@ try{
  assert.equal(await run('tests/canonical-differential.mjs',{}),0,'the unmutated harness passes');
  assert.equal(await run('tests/canonical-handoff-readiness.mjs',{}),0,'the unmutated readiness test passes');
  const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();{const first=await run(item.test,{...item.env,...(item.hint||{})});if(first===0&&(!item.hint||await run(item.test,item.env)===0))survivors.push(item.name);}}}));
+ await Promise.all(Array.from({length:Math.min(4,Math.max(2,os.cpus().length))},async()=>{while(queue.length){const item=queue.shift();{const first=await run(item.test,{...item.env,...(item.hint||{})});if(first===0&&(!item.hint||await run(item.test,item.env)===0))survivors.push(item.name);}}}));
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
  console.log('canonical-differential-mutation: ok ('+total+' mutants killed)');
 }finally{fs.rmSync(dir,{recursive:true,force:true});fs.rmSync(helperRoot,{recursive:true,force:true});}

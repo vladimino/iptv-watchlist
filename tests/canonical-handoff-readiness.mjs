@@ -12,13 +12,14 @@ import {P6_DIFFERENTIAL_EXCEPTIONS} from '../src/canonical-film-writers.js';
 import {EXTRA_EXCEPTIONS,DIFFERENTIAL_COVERAGE} from '../src/canonical-differential-registry.js';
 import {OPERATION_KINDS,operationRegistry,recordBaseline} from '../src/canonical-receipts.js';
 import {mutateFilm} from '../src/canonical-mutations.js';
+import {CANONICAL_READER_REGISTRY} from '../src/canonical-catalog-reader.js';
 
 const ONLY=(process.env.READINESS_ONLY||'').split(',').filter(Boolean);
 const on=key=>!ONLY.length||ONLY.some(item=>key.startsWith(item));
 const NOW='2026-11-11T12:00:00.000Z',NOW_MS=Date.parse(NOW);
 const source=process.env.PRODUCERS_SOURCE?path.resolve(process.env.PRODUCERS_SOURCE):'src/canonical-producers.js';
 const mod=await import(pathToFileURL(source).href);
-const {handoffReadiness,CALLS,RECONCILE,GAPS,PRODUCER_WIRING,PRODUCER_OPERATIONS,READER_REGISTRY,RECEIPTS_PROTOCOL,EMPTY_CLASSES}=mod;
+const {handoffReadiness,CALLS,RECONCILE,GAPS,PRODUCER_WIRING,PRODUCER_OPERATIONS,RECEIPTS_PROTOCOL,EMPTY_CLASSES}=mod;
 const ALL_EXCEPTIONS=[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS];
 
 // Production today is schema 18 (migration 0019 exists in the repository but is NOT applied there): the test chain includes 0019, so the production state is built by lowering the contract.
@@ -36,7 +37,7 @@ function satisfied(){
 }
 const specOf=operation=>({operation,readback(){return null;},replay(){return {revision:1};},atomic:true});
 const registryOf=kinds=>operationRegistry(kinds.map(specOf));
-const good=()=>({readers:READER_REGISTRY.map(item=>({...item,moved:true})),operations:registryOf(OPERATION_KINDS),classes:SMALL,exceptions:ALL_EXCEPTIONS.map(item=>({...item,status:'accepted'}))});
+const good=()=>({readers:CANONICAL_READER_REGISTRY.map(item=>item.class==='freeze'?{...item,moved:true}:item),operations:registryOf(OPERATION_KINDS),classes:SMALL,exceptions:ALL_EXCEPTIONS.map(item=>({...item,status:'accepted'}))});
 const run=async(file,evidence)=>handoffReadiness(envOf(file),{now:NOW,evidence});
 const only=async(label,file,evidence,...expected)=>{const out=await run(file,evidence);assert.deepEqual(out.blockers,expected,label+': exactly this blocker, no other: '+out.blockers);assert.equal(out.ready,false,label);return out;};
 
@@ -56,7 +57,7 @@ if(on('2')){
   ...ALL_EXCEPTIONS.filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
   'receipts_schema_missing','receipts_protocol_unregistered',
   ...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name),
-  ...['worker_programme_read','worker_watchlist_read','worker_catalog_read','admin_read','admin_limbo','admin_health','owner_review_d1_gate'].map(name=>'reader_not_moved:'+name),
+  ...CANONICAL_READER_REGISTRY.filter(item=>item.class==='freeze'&&!item.moved).map(item=>'reader_not_moved:'+item.name),
   ...EMPTY_CLASSES.map(item=>'empty_class_not_loaded:'+item.name+':0/'+item.expected),
  ];
  assert.deepEqual(out.blockers,expected,'the computed blockers of this repository');
@@ -104,7 +105,12 @@ if(on('2')){
  }
  // producers and readers, one at a time
  if(on('3c')){
- for(const item of READER_REGISTRY)await only('unmoved '+item.name,base,{...good(),readers:good().readers.map(r=>r.name===item.name?{...r,moved:false}:r)},'reader_not_moved:'+item.name);
+ for(const item of CANONICAL_READER_REGISTRY.filter(entry=>entry.class==='freeze'))await only('unmoved '+item.name,base,{...good(),readers:good().readers.map(r=>r.name===item.name?{...r,moved:false}:r)},'reader_not_moved:'+item.name);
+ {const exception=CANONICAL_READER_REGISTRY.find(entry=>entry.class==='exception');
+  assert.ok(exception&&exception.moved===false,'an exception entry is never moved');
+  assert.deepEqual((await run(base,good())).blockers,[],'exception entries never block');
+  await only('exception marked moved',base,{...good(),readers:good().readers.map(r=>r.name===exception.name?{...r,moved:true}:r)},'reader_exception_marked_moved:'+exception.name);
+  await only('unknown reader class',base,{...good(),readers:[...good().readers,{name:'x',file:'x',class:'other',moved:true}]},'reader_class_invalid:x');}
  }
  // the three classes: one row fewer or more, and an unreadable table
  if(on('3d')){
@@ -162,9 +168,9 @@ if(on('5')){
  const boasting=text.replace(/^(export const (PRODUCER_WIRING|PRODUCER_OPERATIONS|READER_REGISTRY|RECEIPTS_PROTOCOL|EMPTY_CLASSES|GAPS))/gm,'// wired: true atomic: true registered: true moved: true covered: true cleared\n$1');
  assert.notEqual(stripped,text);assert.notEqual(boasting,text);
  const today=JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8'));
- const load=async(body,name)=>{
+ const load=async(body,name,overrides={})=>{
   const dir=path.dirname(path.resolve(source));
-  const rewritten=body.replace(/from '\.\/([^']+)'/g,(_,file)=>"from '"+pathToFileURL(path.join(dir,file)).href+"'");
+  const rewritten=body.replace(/from '\.\/([^']+)'/g,(_,file)=>"from '"+(overrides[file]||pathToFileURL(path.join(dir,file)).href)+"'");
   const file=path.join(root,name);fs.writeFileSync(file,rewritten);
   return import(pathToFileURL(file).href);
  };
@@ -172,6 +178,17 @@ if(on('5')){
   const copy=await load(body,label.replace(/\W/g,'')+'.mjs');
   assert.deepEqual((await copy.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers,today,label+': the blockers are unchanged');
  }
+ // the readers are DERIVED from the canonical registry module: a synthetic copy of it flips exactly the reader blockers, and nothing is duplicated here
+ {const synthetic=(items)=>{const file=path.join(root,'registry'+items.length+'.mjs');fs.writeFileSync(file,'export const CANONICAL_READER_REGISTRY='+JSON.stringify(items)+';');return pathToFileURL(file).href;};
+  const frozen=CANONICAL_READER_REGISTRY.filter(item=>item.class==='freeze');
+  const allMoved=await load(text,'readersmoved.mjs',{'canonical-catalog-reader.js':synthetic(CANONICAL_READER_REGISTRY.map(item=>item.class==='freeze'?{...item,moved:true}:item))});
+  const afterMoved=(await allMoved.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers;
+  assert.deepEqual(today.filter(item=>!afterMoved.includes(item)),frozen.filter(item=>!item.moved).map(item=>'reader_not_moved:'+item.name),'every reader blocker follows the registry data');
+  const one=await load(text,'readersone.mjs',{'canonical-catalog-reader.js':synthetic([{name:'only',file:'x',class:'freeze',moved:false},{name:'kept',file:'x',class:'exception',moved:false}])});
+  assert.deepEqual((await one.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers.filter(item=>item.startsWith('reader_')),['reader_not_moved:only']);
+  const code=text.replace(/^\s*\/\/.*$/gm,'');
+  assert.ok(!/READER_REGISTRY\s*=|moved\s*:\s*(true|false)/.test(code.replace(/CANONICAL_READER_REGISTRY/g,'')),'no reader entry is duplicated in the producers module');
+  assert.ok(/import \{CANONICAL_READER_REGISTRY\} from '\.\/canonical-catalog-reader\.js'/.test(code));}
  // a flag-looking edit in the data (a `wired` field) changes nothing: wiring is derived from the receipts registry only
  const flagged=await load(text.replace("site:'epgSync commit (worker.js)',","site:'epgSync commit (worker.js)',wired:true,"),'flag.mjs');
  assert.deepEqual((await flagged.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers,today,'a wired flag has no effect');
@@ -198,8 +215,8 @@ if(on('6')){
  walk('src');
  assert.deepEqual(importers,['src/canonical-producers.js'],'only the producers module imports the differential registry');
  assert.equal(fs.readFileSync('src/canonical-differential-registry.js','utf8').split('\n').filter(line=>/^import /.test(line)).length,0,'the registry is data and imports nothing');
- for(const item of READER_REGISTRY)assert.equal(typeof item.moved,'boolean');
- assert.ok(Object.isFrozen(PRODUCER_WIRING)&&Object.isFrozen(READER_REGISTRY)&&Object.isFrozen(RECEIPTS_PROTOCOL)&&Object.isFrozen(EMPTY_CLASSES)&&Object.isFrozen(DIFFERENTIAL_COVERAGE));
+ for(const item of CANONICAL_READER_REGISTRY)assert.ok(['freeze','exception'].includes(item.class)&&typeof item.moved==='boolean');
+ assert.ok(Object.isFrozen(PRODUCER_WIRING)&&Object.isFrozen(RECEIPTS_PROTOCOL)&&Object.isFrozen(EMPTY_CLASSES)&&Object.isFrozen(DIFFERENTIAL_COVERAGE));
 }
 
 console.log('canonical-handoff-readiness: computed readiness is not ready today ('+(fs.existsSync(path.join(root,'today.json'))?JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8')).length:'n/a')+' blockers: receipts, producer wiring, readers, loaded classes, unaccepted named differences), ready in a fully satisfied synthetic fixture, every blocker flips independently, read-only, registries are data and agree with the repository');

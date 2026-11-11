@@ -23,6 +23,7 @@ import {filmFactsPresent,writeFilmFacts} from './canonical-film-writers.js';
 import {PERSON_STATE_CALLS,PERSON_STATE_RECONCILE} from './canonical-person-state.js';
 import {P6_DIFFERENTIAL_EXCEPTIONS} from './canonical-film-writers.js';
 import {DIFFERENTIAL_COVERAGE,EXTRA_EXCEPTIONS} from './canonical-differential-registry.js';
+import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
 import {OPERATION_KINDS,RECEIPT_MIN_VERSION,listAttention,operationRegistry,readUnreceipted,receiptsStatus,verifyBaseline} from './canonical-receipts.js';
 
 export const SHADOW_ITEM_CAP=200;
@@ -54,19 +55,8 @@ export const PRODUCER_WIRING=Object.freeze([
  Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
 ]);
 export const PRODUCER_OPERATIONS=operationRegistry([]);
-// P4: every consumer that must stop reading the frozen canonical R2 mirrors (titles.json, people.json, metadata.json) and answer from D1, fail closed. P4 slice 1 (the
-// marker-gated /api/d1/* gate and the archive fallback) is moved; the PR of the next slice updates this list. Not derived from the readers' files.
-export const READER_REGISTRY=Object.freeze([
- Object.freeze({name:'catalog_d1_gate',moved:true}),
- Object.freeze({name:'catalog_archive_fallback',moved:true}),
- Object.freeze({name:'worker_programme_read',moved:false}),
- Object.freeze({name:'worker_watchlist_read',moved:false}),
- Object.freeze({name:'worker_catalog_read',moved:false}),
- Object.freeze({name:'admin_read',moved:false}),
- Object.freeze({name:'admin_limbo',moved:false}),
- Object.freeze({name:'admin_health',moved:false}),
- Object.freeze({name:'owner_review_d1_gate',moved:false}),
-]);
+// P4: the readers are NOT listed here. handoffReadiness derives them from CANONICAL_READER_REGISTRY of src/canonical-catalog-reader.js (the one registry, owner decision 4): every entry of
+// class 'freeze' with moved:false is `reader_not_moved:<name>`; an entry of class 'exception' never blocks and must not be marked moved.
 // ADR 0117 owner decision 5 / ADR 0119: durable cross-domain receipts inside the existing D1. The protocol is "registered" only when PRODUCER_OPERATIONS holds at least one atomic operation
 // (derived, never a flag); the schema and the baseline are read from the database.
 export const RECEIPTS_PROTOCOL=Object.freeze({table:'canonical_write_receipt',minSchema:RECEIPT_MIN_VERSION});
@@ -354,11 +344,11 @@ export async function shadowCompare(env,items){
 // - exception_not_accepted:<id> for each named projector-vs-canonical difference the owner has not accepted;
 // - receipts_schema_missing, receipts_baseline_missing (marker open or held, no sealed baseline), receipts_baseline_unverified, unreceipted_changes, receipts_attention_open, receipts_unreadable,
 //   and receipts_protocol_unregistered (PRODUCER_OPERATIONS holds no atomic operation);
-// - producer_not_wired:<name> (a producer needs an atomic registered operation for every kind it requires) and reader_not_moved:<name> from READER_REGISTRY;
+// - producer_not_wired:<name> (a producer needs an atomic registered operation for every kind it requires) and reader_not_moved:<name> (class 'freeze', moved:false), reader_exception_marked_moved:<name>, reader_class_invalid:<name> from CANONICAL_READER_REGISTRY;
 // - empty_class_not_loaded:<name>:<found>/<expected> and empty_class_unreadable:<name>.
 // `evidence` replaces a registry only in tests (a synthetic fully satisfied fixture); production callers pass none.
 export async function handoffReadiness(env,{now=new Date().toISOString(),evidence={}}={}){
- const wiring=evidence.wiring||PRODUCER_WIRING,readers=evidence.readers||READER_REGISTRY,operations=evidence.operations||PRODUCER_OPERATIONS,classes=evidence.classes||EMPTY_CLASSES;
+ const wiring=evidence.wiring||PRODUCER_WIRING,readers=evidence.readers||CANONICAL_READER_REGISTRY,operations=evidence.operations||PRODUCER_OPERATIONS,classes=evidence.classes||EMPTY_CLASSES;
  const coverage=evidence.coverage||DIFFERENTIAL_COVERAGE,exceptions=evidence.exceptions||[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS],calls=evidence.calls||{CALLS,RECONCILE};
  const blockers=[];
  let gate=null;
@@ -407,7 +397,11 @@ export async function handoffReadiness(env,{now=new Date().toISOString(),evidenc
  const atomic=kind=>{for(const spec of operations.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};
  if(![...operations.values()].some(spec=>spec.atomic===true))blockers.push('receipts_protocol_unregistered');
  for(const item of wiring)if(!item.requires.every(kind=>OPERATION_KINDS.includes(kind)&&atomic(kind)))blockers.push('producer_not_wired:'+item.name);
- for(const item of readers)if(item.moved!==true)blockers.push('reader_not_moved:'+item.name);
+ for(const item of readers){
+  if(item.class==='freeze'){if(item.moved!==true)blockers.push('reader_not_moved:'+item.name);}
+  else if(item.class==='exception'){if(item.moved===true)blockers.push('reader_exception_marked_moved:'+item.name);}
+  else blockers.push('reader_class_invalid:'+item.name);
+ }
  for(const item of classes){
   if(!db||!tables.has(item.table)){blockers.push('empty_class_unreadable:'+item.name);continue;}
   try{
