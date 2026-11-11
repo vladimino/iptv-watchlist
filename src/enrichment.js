@@ -1112,6 +1112,117 @@ async function atStage(name,work){try{return await work();}catch(error){if(error
 function logPredictionFailure(boundary,error,requestId,runId){
  try{console.warn(JSON.stringify({event:'prediction_boundary_failed',boundary:safeLogToken(boundary),stage:safeLogToken(error?.stage)||'unknown',code:safeLogToken(error?.code)||'unknown',guard:safeLogToken(error?.guard),kind:safeLogToken(String(error?.name||'').toLowerCase()),requestId:typeof requestId==='string'&&SAFE_LOG_ID.test(requestId)?requestId:null,runId:typeof runId==='string'&&SAFE_LOG_ID.test(runId)?runId:null}));}catch{/* logging never changes the outcome */}
 }
+// AIR-438. Where the time of a `next` or `submit` goes: one sanitized log line `prediction_step_timing` per step. The Worker's environment is
+// replaced, for the length of the step, by one whose R2 bucket and D1 database time every call they receive and then forward it unchanged: no
+// call is added, reordered, retried or awaited differently, so the control flow, the CAS and lease protocols and the answer are the ones of before.
+// A call is classed by what it touches (an R2 key shape or a D1 table name from a closed vocabulary), never by an id, and the line holds
+// counts, sizes, milliseconds and a few whitelisted counters, never a film id, a key, a statement, a body or a model output. Calls that run in
+// parallel are not summed as if sequential: `busyMs` is the union of their intervals, `overlapMs` what the sum exceeds it by, and
+// `unattributedMs` the rest of the wall time (compute, scheduling, the awaits between calls). A failure of any of this is swallowed.
+const STEP_TIMER=Symbol('predictionStepTimer');
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures'];
+const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
+const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
+function stepKeyClass(key){
+ const k=typeof key==='string'?key:'';
+ if(k===profileKey)return 'profile';if(k===RUNNER_LEASE_KEY||k===PREDICTION_MUTATION_LEASE)return 'lease';
+ if(k.startsWith(ENRICHMENT_KEY+'runs/'))return 'run';if(k===ENRICHMENT_KEY+'latest-run.json')return 'run_latest';
+ if(k.startsWith(ENRICHMENT_KEY+'sources/'))return 'source';if(k===ENRICHMENT_KEY+'view-index.json')return 'view_index';
+ if(k.startsWith(ENRICHMENT_KEY+'films/'))return /\/(?:fingerprint|predictions)\.json$/.test(k)?'film_state':'film_other';
+ if(k===predictionQueueKey)return 'queue';if(k.startsWith(ENRICHMENT_KEY+'diagnostics/')||k.includes('/diagnostic'))return 'diagnostics';
+ if(k==='programme.json'||k.endsWith('/programme.json'))return 'programme';
+ return 'other';
+}
+function stepSqlClass(sql){const m=typeof sql==='string'?STEP_TABLE.exec(sql):null;return m?m[1].toLowerCase():'other';}
+function stepSizeClass(bytes){return !(bytes>=0)?'unknown':bytes<1024?'lt1k':bytes<65536?'lt64k':bytes<1048576?'lt1m':'ge1m';}
+function createStepTimer(now=Date.now){
+ const started=now(),ops=[],classes=new Map(),notes={},total={r2:{n:0,ms:0,bytesIn:0,bytesOut:0},d1:{n:0,ms:0,statements:0,batches:0,rowsRead:0,rowsWritten:0}};
+ let truncated=false;
+ const union=list=>{let sum=0,end=-Infinity;for(const [a,b] of list.slice().sort((x,y)=>x[0]-y[0])){if(b<=a)continue;if(a>end){sum+=b-a;end=b;}else if(b>end){sum+=b-end;end=b;}}return sum;};
+ const record=(kind,cls,op,from,to,extra={})=>{try{
+  const ms=Math.max(0,to-from),bucket=total[kind];bucket.n++;bucket.ms+=ms;
+  if(kind==='r2'){bucket.bytesIn+=extra.bytesIn||0;bucket.bytesOut+=extra.bytesOut||0;}else{bucket.statements+=extra.statements||0;bucket.batches+=extra.batch?1:0;bucket.rowsRead+=extra.rowsRead||0;bucket.rowsWritten+=extra.rowsWritten||0;}
+  const label=kind+':'+cls;let entry=classes.get(label);
+  if(!entry){if(classes.size>=STEP_CLASS_CAP){truncated=true;return;}entry={n:0,ms:0,bytes:0,maxMs:0,ops:{}};classes.set(label,entry);}
+  entry.n++;entry.ms+=ms;entry.maxMs=Math.max(entry.maxMs,ms);entry.bytes+=(extra.bytesIn||0)+(extra.bytesOut||0);entry.ops[op]=(entry.ops[op]||0)+1;
+  if(ops.length<STEP_OPS_CAP)ops.push([from,to,kind]);else truncated=true;
+ }catch{truncated=true;}};
+ const note=fields=>{try{for(const name of STEP_NOTES){const value=fields?.[name];if(Number.isSafeInteger(value)&&value>=0)notes[name]=value;}}catch{/* a note never changes the step */}};
+ const summary=(step,fields)=>{
+  const wallMs=Math.max(0,now()-started),busyMs=union(ops.map(([a,b])=>[a,b])),r2Busy=union(ops.filter(o=>o[2]==='r2').map(([a,b])=>[a,b])),d1Busy=union(ops.filter(o=>o[2]==='d1').map(([a,b])=>[a,b])),summed=total.r2.ms+total.d1.ms;
+  const byClass={};for(const [label,entry] of classes)byClass[label]={n:entry.n,ms:entry.ms,maxMs:entry.maxMs,bytes:entry.bytes,ops:entry.ops};
+  return {event:'prediction_step_timing',step,...fields,wallMs,busyMs,overlapMs:Math.max(0,summed-busyMs),unattributedMs:Math.max(0,wallMs-busyMs),r2:{...total.r2,busyMs:r2Busy},d1:{...total.d1,busyMs:d1Busy},classes:byClass,notes,...(truncated?{truncated:true}:{})};
+ };
+ return {record,note,summary,now};
+}
+// An R2 object whose body readers are timed (the body is read after `get` has answered, and that is I/O too). Everything else is the real object.
+function timedR2Object(object,timer,cls){
+ if(!object||typeof object!=='object')return object;
+ return new Proxy(object,{get(target,prop){
+  const value=Reflect.get(target,prop,target);
+  if(typeof value!=='function')return value;
+  if(prop==='json'||prop==='text'||prop==='arrayBuffer'||prop==='blob'||prop==='bytes')return async(...args)=>{const from=timer.now();try{return await value.apply(target,args);}finally{timer.record('r2',cls,'body',from,timer.now(),{bytesOut:target.size>=0?target.size:0});}};
+  return value.bind(target);
+ }});
+}
+function timedBucket(bucket,timer){
+ const timedCall=(name,method,classOf,extraOf)=>async(...args)=>{
+  const from=timer.now();let result;
+  try{result=await method.apply(bucket,args);return name==='get'?timedR2Object(result,timer,classOf(args)):result;}
+  finally{let extra={};try{extra=extraOf?extraOf(args,result):{};}catch{extra={};}timer.record('r2',classOf(args),name,from,timer.now(),extra);}
+ };
+ const keyOf=args=>stepKeyClass(args[0]);
+ const sizeOf=value=>typeof value==='string'||(value&&typeof value.byteLength==='number')?(typeof value==='string'?value.length:value.byteLength):0;
+ const wrapped={
+  get:timedCall('get',bucket.get,keyOf),
+  put:timedCall('put',bucket.put,keyOf,args=>({bytesIn:sizeOf(args[1])})),
+  head:timedCall('head',bucket.head,keyOf),
+  delete:timedCall('delete',bucket.delete,keyOf),
+  list:timedCall('list',bucket.list,()=>'list')
+ };
+ return new Proxy(bucket,{get(target,prop){if(Object.hasOwn(wrapped,prop)&&typeof target[prop]==='function')return wrapped[prop];const value=Reflect.get(target,prop,target);return typeof value==='function'?value.bind(target):value;}});
+}
+function timedDatabase(db,timer){
+ const real=new WeakMap();
+ const unwrap=statement=>real.get(statement)||statement;
+ const meta=result=>{const m=result&&result.meta;return {rowsRead:Number(m?.rows_read)||0,rowsWritten:Number(m?.rows_written)||0};};
+ const statementOf=(statement,sql)=>{
+  const proxy=new Proxy(statement,{get(target,prop){
+   const value=Reflect.get(target,prop,target);
+   if(typeof value!=='function')return value;
+   if(prop==='bind')return(...args)=>statementOf(value.apply(target,args),sql);
+   if(prop==='first'||prop==='all'||prop==='run'||prop==='raw')return async(...args)=>{const from=timer.now();let result;try{result=await value.apply(target,args);return result;}finally{let extra={};try{extra={statements:1,...meta(result)};}catch{extra={statements:1};}timer.record('d1',stepSqlClass(sql),prop,from,timer.now(),extra);}};
+   return value.bind(target);
+  }});
+  real.set(proxy,statement);return proxy;
+ };
+ return new Proxy(db,{get(target,prop){
+  const value=Reflect.get(target,prop,target);
+  if(typeof value!=='function')return value;
+  if(prop==='prepare')return sql=>statementOf(value.call(target,sql),sql);
+  if(prop==='batch')return async(statements,...rest)=>{const from=timer.now();let results;const list=Array.isArray(statements)?statements.map(unwrap):statements;try{results=await value.call(target,list,...rest);return results;}finally{let extra={};try{extra={batch:true,statements:Array.isArray(list)?list.length:0};for(const item of Array.isArray(results)?results:[]){const m=meta(item);extra.rowsRead=(extra.rowsRead||0)+m.rowsRead;extra.rowsWritten=(extra.rowsWritten||0)+m.rowsWritten;}}catch{/* sizes are best effort */}timer.record('d1','batch','batch',from,timer.now(),extra);}};
+  if(prop==='exec')return async(sql,...rest)=>{const from=timer.now();try{return await value.call(target,sql,...rest);}finally{timer.record('d1',stepSqlClass(sql),'exec',from,timer.now(),{statements:1});}};
+  if(prop==='withSession')return(...args)=>timedDatabase(value.apply(target,args),timer);
+  return value.bind(target);
+ }});
+}
+function stepTimedEnv(env,timer){
+ // An own copy, not a prototype link: callers spread the environment (`{...env,epgPin}`), and a spread must keep every binding and the timer.
+ const timed={...env,[STEP_TIMER]:timer};
+ if(env.BUCKET&&typeof env.BUCKET==='object')timed.BUCKET=timedBucket(env.BUCKET,timer);
+ const database=typeof PredictionD1==='undefined'||typeof PredictionD1.timedBinding!=='function'?null:PredictionD1.timedBinding(env,binding=>timedDatabase(binding,timer));
+ if(database)timed.DB=database;
+ return timed;
+}
+const noteStep=(env,fields)=>{try{const timer=env?.[STEP_TIMER];if(timer)timer.note(fields());}catch{/* a note never changes the step */}};
+async function timedPredictionStep(env,step,body,requestId,work){
+ let timer=null,timed=env;
+ try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
+ let status=null;
+ try{const response=await work(timed);status=response&&typeof response.status==='number'?response.status:null;return response;}
+ catch(error){status=0;throw error;}
+ finally{try{if(timer){const id=typeof requestId==='string'&&SAFE_LOG_ID.test(requestId)?requestId:null,run=typeof body?.runId==='string'&&SAFE_LOG_ID.test(body.runId)?body.runId:null;console.log(JSON.stringify(timer.summary(step,{requestId:id,runId:run,status})));}}catch{/* logging never changes the outcome */}}
+}
 async function observedPrediction(env,body,work,stage,requestId){
  const correlation=safeRequestId(requestId)||crypto.randomUUID();
  const started=Date.now(),attemptedAt=new Date(started).toISOString(),traceId=body?.diagnosticRunId||body?.runId||null;
@@ -1800,6 +1911,7 @@ async function enrichmentNext(env,body,requestId){
  }
  const items=[];let pendingCount=0;
  for(let i=0;i<run.selectedIds.length;i++){const id=run.selectedIds[i],s=states[i];if(fresh(id,s)||run.failures[id])continue;pendingCount++;if(items.length>=requestSize)continue;const film=source[id];if(!film)continue;const requiredWork=freshness.fingerprintUsable(s.fingerprint,source[id]?.genres)?'prediction_only':'fingerprint_and_prediction',item={filmId:id,requiredWork};if(requiredWork==='prediction_only')item.fingerprint=s.fingerprint;else item.metadata=film;items.push(item);}
+ noteStep(env,()=>({items:items.length,selected:run.selectedIds.length,pending:pendingCount,batchSize:run.batchSize,predictionOnly:items.filter(i=>i.requiredWork==='prediction_only').length,fingerprintAndPrediction:items.filter(i=>i.requiredWork==='fingerprint_and_prediction').length}));
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
 async function enrichmentSubmit(env,body,requestId){
@@ -1843,6 +1955,7 @@ async function enrichmentSubmit(env,body,requestId){
   if(run.systemicStopReason)break;
  }
  let queue=null;if(run.mode==='queued'){const settled=results.filter(r=>SETTLED_STATUSES.includes(r.status)).map(r=>r.filmId);try{queue=await atStage('queue_refresh',async()=>{const report=await loadJSON(env,'programme.json'),stored=await currentPredictionQueue(env,report,profile,'batch_progress');if(!stored||!settled.length)return stored;return await mutatePredictionQueue(env,guardedSettle(await advanceContext(env,report,profile),settled,'batch_progress'),'batch_progress')||stored;});}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('submit',held,requestId,run.runId,{results,committed:results.some(r=>['created','recalculated','already_current'].includes(r.status)),identicalSubmit:'idempotent'});throw error;}}await runnerProgress(env,run,queue);
+ noteStep(env,()=>({bodyItems:body.items.length,predictionOnly:body.items.filter(i=>i&&!i.fingerprint&&!i.failure).length,fingerprintAndPrediction:body.items.filter(i=>i&&i.fingerprint).length,created:results.filter(r=>r.status==='created').length,recalculated:results.filter(r=>r.status==='recalculated').length,alreadyCurrent:results.filter(r=>r.status==='already_current').length,failures:results.filter(r=>r.status==='retryable_failure'||r.error).length}));
  return json({...runSummary(run),results,mustComplete:!!run.systemicStopReason,stopReason:run.systemicStopReason||null,remaining:queue?.pending.length??null,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields()});
 }
 async function enrichmentComplete(env,body,requestId){
@@ -2170,8 +2283,8 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
  if(path==='/api/enrichment/footer/status'&&request.method==='GET')return json(await footerStatus(env));
- if(path==='/api/enrichment/next'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentNext(env,body,requestId)),'next',requestId);
- if(path==='/api/enrichment/submit'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentSubmit(env,body,requestId)),'submit',requestId);
+ if(path==='/api/enrichment/next'&&request.method==='POST')return timedPredictionStep(env,'next',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>enrichmentNext(timed,body,requestId)),'next',requestId));
+ if(path==='/api/enrichment/submit'&&request.method==='POST')return timedPredictionStep(env,'submit',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>enrichmentSubmit(timed,body,requestId)),'submit',requestId));
  if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body,requestId)),'complete',requestId);
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
