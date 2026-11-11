@@ -350,6 +350,9 @@ function catalogAdmittedFilm(document,tmdbId){
 }
 async function catalogArchiveFallback(env,tmdbId){
  const gate=await FilmPersonAuthority.readAuthority(env);
+ // AIR-374 P4 (owner decision 4): at `open` the R2 receipt and the R2 retirements object are frozen compatibility copies and are never read; the verified admission,
+ // the identity claims and the retirement ledger come from D1. held and an unreadable marker fail closed (503) and never reach R2.
+ if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);
  if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
  const retirements=await loadJSON(env,'identity/tmdb-retirements.json');
  if(retirements!=null){
@@ -397,7 +400,7 @@ async function catalogFilmRoute(env,tmdbId){
  if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
-  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
   return json({status:'error',error:'The catalog lookup failed'},500);
  }
  if(found.state==='absent')return json({status:'absent'},404);

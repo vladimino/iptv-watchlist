@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
-import {scopePersonIdentity} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedReplacing,scopePersonIdentity} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const source=fs.readFileSync('src/catalog-d1.js','utf8');
@@ -42,8 +42,10 @@ INSERT INTO actual_rating VALUES('film:tmdb:1',4.0,'letterboxd','${T}');
 INSERT INTO import_receipt VALUES('k','s','film','film:tmdb:1','${T}');
 `);
 
-const ctx=vm.createContext({Response,URL,JSON,Promise,Number,String,Math});
+const ctx=vm.createContext({Response,URL,JSON,Promise,Number,String,Math,Map,Set,Error});
 // The status view also reports the enrichment projector (ADR 0056); its read-only status function comes from its own module.
+vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);
+vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);
 vm.runInContext("const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8'}});\n"+fs.readFileSync('src/d1-enrichment.js','utf8')+'\n'+scopePersonIdentity(['src/domain/canonical-person.js','src/domain/person-identity-projection.js'])+'\n'+source+'\nglobalThis.route=catalogD1Route;',ctx);
 const get=async(p,env={DB},method='GET')=>{const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p,{method}),env,new URL('https://iptv.test/api/d1/'+p));return {status:res.status,body:await res.json()};};
 
