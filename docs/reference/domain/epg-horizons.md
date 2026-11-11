@@ -36,7 +36,7 @@ Older snapshots without `window.hotTo` or `coverage` read as before (a 96-hour w
 
 ## What the reader sees
 
-The reader window stays the rolling `[now - 72h, now + 24h)`, clipped to the saved window: `effectiveWindow` keeps the saved `window` as `retained` (storage and coverage metadata) and uses `{from: window.from, to: min(window.to, now + 24h)}` as the display envelope. A retained show beyond 24 hours ahead is **hidden** from the period sections, the «Дальше» group and the period counters, and appears when the clock reaches 24 hours before it, with or without a fresh EPG sync (a skipped sync therefore keeps revealing the saved week as time passes). Legacy snapshots, whose window already ends at `cutoff + 24h`, read unchanged.
+The reader window stays the rolling `[now - 72h, now + 24h)`, clipped to the saved window: `effectiveWindow` keeps the saved `window` as `retained` (storage and coverage metadata) and uses `{from: window.from, to: min(window.to, now + 24h)}` as the display envelope. A retained show beyond 24 hours ahead is **hidden** from the period sections, the «Дальше» group and the period counters, and appears when the clock reaches 24 hours before it, with or without a fresh EPG sync (a skipped sync therefore keeps revealing the saved week as time passes). The period selector «Все показы / Архив / Скоро» classifies **films**, not shows, with the [availability lifecycle](film-availability.md) over those visible shows: «Архив» is a film with a ready recording, «Скоро» a film with none that is on air or starts inside the next 24 hours ([programme filters](programme-filters.md)). Legacy snapshots, whose window already ends at `cutoff + 24h`, read unchanged.
 
 ## Reader states
 
