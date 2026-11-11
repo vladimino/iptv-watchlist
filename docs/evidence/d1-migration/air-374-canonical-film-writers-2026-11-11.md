@@ -1,0 +1,9 @@
+# AIR-374 P2a: canonical Film writers, offline evidence
+
+Captured 11 Nov 2026 (UTC). Offline only: sqlite3 D1 stand-in, no Worker, R2, D1, TMDB or connector access, no marker or flag change. Counts only.
+
+- `tests/canonical-film-writers.mjs`: 11 scenarios, about 0.8 s alone. Covers: refusal at `r2`, `prepared`, `held` and legacy with no batch and no row; acceptance at `open`; replay (also by an older caller) opens no batch; revision conflict; generation fence lost between read and batch (whole rollback); unknown outcome applied-then-lost (`content_present`, replay no-op) and lost-before-send (`not_applied`, replay applies); worst-case plan within the 60-statement cap and the cap refusal of the fenced commit; reviewed and owner values survive automatic writes; blanks never overwrite; identity precedence and `canonical_identity` rules; effective localization in the same batch as the source write; identity ids, aliases and credits untouched by metadata writes; identical rows with the projector for identical inputs (set and clear); dormancy (route, importer allowlist, not bundled, no R2).
+- `tests/canonical-film-writers-mutation.mjs`: 24 mutants of `src/canonical-film-writers.js`, all killed, about 4 s wall on a quiet host.
+- Existing assertions kept valid: `tests/localization-sources.mjs` now allowlists the new module explicitly; `tests/canonical-producers.mjs` and `tests/canonical-read-model.mjs` pass unchanged.
+- Owner follow-up of 11 Nov 2026 (PR #529): title order for `original_title`, `titleSource` in identity provenance, partial sync null keeps the stored clock; tests cover every adjacent rank pair, equal rank, owner over all, unknown/blank sources, preserved provenance keys, null vs missing vs explicit clear of clocks; the mutation file now has 24 mutants. Named exceptions: `P6_DIFFERENTIAL_EXCEPTIONS`.
+- Not verified: equivalence on production data (P6), receipt durability (no table), behaviour at the real D1 binding.

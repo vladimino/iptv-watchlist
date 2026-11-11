@@ -283,8 +283,8 @@ const code=expected=>error=>error.code===expected;
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('localization-sources'))importers.push(full);}};
  walk('src');
- // The only importer is the equally inactive canonical read model (AIR-372), which tests/canonical-read-model.mjs proves is itself imported by nothing.
- assert.deepEqual(importers.filter(file=>!file.endsWith('localization-sources.js')&&!file.endsWith('canonical-read-model.js')&&!file.endsWith('canonical-producers.js')),[],'no Worker source file imports localization-sources');
+ // The only importer is the equally inactive canonical read model (AIR-372), which tests/canonical-read-model.mjs proves is itself imported by nothing. The film writers (AIR-374 P2a) are imported by the producers module only, which tests/canonical-film-writers.mjs proves.
+ assert.deepEqual(importers.filter(file=>!file.endsWith('localization-sources.js')&&!file.endsWith('canonical-read-model.js')&&!file.endsWith('canonical-producers.js')&&!file.endsWith('canonical-film-writers.js')),[],'no Worker source file imports localization-sources');
  for(const file of ['scripts/build.mjs','scripts/build-worker.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('localization-sources'),file+' does not bundle or name it');
  assert.ok(fs.readFileSync('migrations/README.md','utf8').includes(NEW),'migrations/README.md lists 0014');
  assert.ok(!/localization_source/.test(fs.readFileSync('src/canonical-repository.js','utf8')),'the projector path does not write the source tables');

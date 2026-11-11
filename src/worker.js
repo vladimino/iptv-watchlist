@@ -350,7 +350,17 @@ function catalogAdmittedFilm(document,tmdbId){
 }
 async function catalogArchiveFallback(env,tmdbId){
  const gate=await FilmPersonAuthority.readAuthority(env);
+ // AIR-374 P4 (owner decision 4): at `open` the R2 receipt and the R2 retirements object are frozen compatibility copies and are never read; the verified admission,
+ // the identity claims and the retirement ledger come from D1. held and an unreadable marker fail closed (503) and never reach R2.
+ if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);
  if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
+ const result=await catalogArchiveFallbackR2(env,tmdbId,gate);
+ // The marker is read again after the R2 and D1 reads: an answer read under one state and generation is never returned after the marker moved (r2 to prepared, prepared to open, held).
+ const again=await FilmPersonAuthority.readAuthority(env);
+ if(again.state!==gate.state||again.generation!==gate.generation){const error=new Error('film_person_generation_moved');error.code='film_person_generation_moved';throw error;}
+ return result;
+}
+async function catalogArchiveFallbackR2(env,tmdbId,gate){
  const retirements=await loadJSON(env,'identity/tmdb-retirements.json');
  if(retirements!=null){
   const set=tmdbRetirementSet(retirements);
@@ -397,7 +407,7 @@ async function catalogFilmRoute(env,tmdbId){
  if(found.state==='absent')found=await catalogArchiveFallback(env,tmdbId);
  }catch(error){
   const code=error?.code||'';
-  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
+  if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','film_person_held','film_person_unavailable','film_person_not_open_read','film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative'].includes(code))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
   return json({status:'error',error:'The catalog lookup failed'},500);
  }
  if(found.state==='absent')return json({status:'absent'},404);
@@ -605,8 +615,8 @@ async function writeEvent(env,event){
 // AIR-361: a `ratings` event is immutable and its id is the runId: a second put of the same run finds the key and keeps the first.
 async function writeRatingsEvent(env,event){const saved=await env.BUCKET.put(removalEventKey(event),JSON.stringify(event),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});return saved!==null?'written':'exists';}
 // AIR-410: a `discovery` event is immutable and its id is the tick id: a second put of the same tick finds the key and keeps the first.
-// One Discovery event per generation and hour (ADR 0118): the put is create-only, so a repeat keeps the first. The only replacement allowed is a REPORT (`kind` `hour`)
-// over the `report_failed` notice of the same hour, by a compare-and-swap on the notice's etag: a report always wins over its hour's notice, a notice never replaces
+// One Discovery event per generation and hour (ADR 0118): the put is create-only, so a repeat keeps the first. The only replacements allowed are of a REPORT (`kind` `hour`)
+// over the `report_failed` notice, or over the `provisional` empty report published without the record write (a window held), of the same hour, by a compare-and-swap on the notice's etag: a report always wins over its hour's notice, a notice never replaces
 // anything, so the Events Log cannot hold two events for one hourly firing and the deltas of a report are never dropped because a notice got there first.
 async function writeDiscoveryEvent(env,event){
  const key=removalEventKey(event),httpMetadata={contentType:'application/json'};
@@ -616,7 +626,7 @@ async function writeDiscoveryEvent(env,event){
  const current=await env.BUCKET.get(key);
  if(!current)return 'failed';
  let stored=null;try{stored=await current.json();}catch{stored=null;}
- if(stored?.kind!=='report_failed')return 'exists';
+ if(stored?.kind!=='report_failed'&&!(stored?.provisional===true&&event.provisional!==true))return 'exists';
  const replaced=await env.BUCKET.put(key,JSON.stringify(event),{httpMetadata,onlyIf:{etagMatches:current.etag}});
  return replaced!==null?'written':'failed';
 }

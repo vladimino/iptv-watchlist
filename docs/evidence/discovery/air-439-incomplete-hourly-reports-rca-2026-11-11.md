@@ -41,3 +41,10 @@ Which of the five reasons each of the four stored events carries. The reason is 
 ## Verification
 
 Offline only: `tests/discovery-events.mjs` (a held projector window, an unreadable record, a lost compare-and-swap, no record, an outbox at its limit, a notice per hour with a stable identity, a replay and a duplicate, a prolonged failure, the journal refusing the notice and the ledger drained by later firings, a lossless ledger drained oldest first and bounded per firing, one event per hour, an unread queue beside real deltas, a failed hour between two reports, no second count of a delta) and `tests/activity-ui.mjs` (the card for `queueUnreadable`, hostile fields, the legacy `incomplete` card). The safe read-only operational status and a few natural hourly events after deploy remain the owner's acceptance.
+
+## Addendum: acceptance fail at 15:00 UTC, 11 Nov 2026
+
+- Event `events/items/8205590799999-discovery-hour-6d9e3c36bba2-20261111T15.json` (provided by the owner): `kind=report_failed`, `reason=projector_window`, `status=null`.
+- Worker logs (read-only, 09:00 to 15:00 UTC): the D1 enrichment projector ran at about :00:42 each hour, window granted (wait 0.7 to 3.1 s) and held for 36 to 148 s. No window was logged before 09:00 UTC, which matches the first failure at 09:00 and a normal report at 08:00. At 15:00:45 the reconcile answered `stopped`; at 15:00:49 the log shows `discovery_hour_close_failed reason=projector_window notice=delivered`.
+- Operational status at 16:07 Madrid (later than the tick): complete, remaining 0, cheapRemaining 0, executor stopped/complete, window idle.
+- Conclusion: a short real window conflict on every hourly tick, not a wrong write policy; the close did not wait. Fixed in the amendment to ADR 0118 (bounded wait, proven-empty provisional event). The remaining limit: the exact wait length is bounded by the window deadline, so HH:05 is not guaranteed.

@@ -40,7 +40,7 @@ assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет п�
  // ADR 0118: the notice of an hour whose REPORT could not be completed: fixed sentences, no numbers, Discovery named only when a state was confirmed.
  const notice={id:'discovery-hour-a30f67e93a11-20261111T10-report-failed',type:'discovery',kind:'report_failed',at:'2026-11-11T10:00:00.000Z',generation:'a30f67e9',reason:'write_conflict',status:null};
  let failed=card(notice);
- assert.match(failed,/Отчёт за час не удалось сформировать/);assert.match(failed,/Накопленные данные войдут в следующий успешный отчёт/);
+ assert.match(failed,/Отчёт за час не удалось сформировать/);assert.match(failed,/Если за этот период что-то было найдено, оно войдёт в следующий успешный отчёт/);
  assert.doesNotMatch(failed,/<dl>|<dd>|неизвестно|Отчёт за час неполный|<dd>0<\/dd>|write_conflict/,'no numbers, no unknowns, no zeros, no reason code');
  assert.doesNotMatch(failed,/Discovery (остановлен|ждёт|не запустился)/,'reporting failed, not Discovery: nothing about Discovery is implied');
  assert.match(card({...notice,status:'failed'}),/Discovery остановлен после повторных ошибок/);assert.match(card({...notice,status:'waiting'}),/Discovery ждёт повтора/);assert.match(card({...notice,status:'blocked'}),/Discovery не запустился: временный отказ/);

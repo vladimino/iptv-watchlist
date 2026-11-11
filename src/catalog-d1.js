@@ -1,7 +1,7 @@
 // Read-only relational views over the D1 catalog. Persons are entities here: one row per Letterboxd role
 // slug, with their names, external ids and filmography, plus review queues for people stored twice.
 // The person identity route loads one person's neighborhood and calls the pure projection. Nothing here writes,
-// and nothing reads R2; R2 stays authoritative for every existing page.
+// and nothing reads R2. Before `open` R2 stays authoritative for every existing page and `authoritative` is false (AIR-374 P4 gates it by the marker).
 const D1_LIMIT_DEFAULT=50,D1_LIMIT_MAX=100;
 const d1Limit=value=>{const n=Number(value);return Number.isInteger(n)&&n>=1?Math.min(n,D1_LIMIT_MAX):D1_LIMIT_DEFAULT;};
 const d1Rows=async(db,sql,params=[])=>(await db.prepare(sql).bind(...params).all()).results||[];
@@ -18,9 +18,9 @@ const PERSON_NAMES_CTE=`names as (select person_id id,value name from person_ali
 const PERSON_NAME_SQL=`(select value from person_alias a where a.person_id=p.id and a.kind='name' order by value limit 1)`;
 const PERSON_LOCAL_SQL=`(select value from person_dimension d where d.person_id=p.id and d.dimension='localization' and d.status in ('reviewed','provisional'))`;
 const FILM_TITLE_SQL=`coalesce((select value from film_dimension d where d.film_id=f.id and d.dimension='localization' and d.status in ('reviewed','provisional')),f.original_title)`;
-async function d1Status(db,env){
+async function d1Status(db,env,authoritative=false){
  const counts=await d1First(db,`select (select count(*) from film) films,(select count(*) from person) persons,(select count(*) from film_person_credit) credits,(select count(*) from candidate) candidates,(select count(*) from prediction_current) predictions,(select count(*) from actual_rating) ratings,(select max(imported_at) from import_receipt) lastImport,(select version from schema_contract where id=1) schemaVersion`);
- return {source:'d1',authoritative:false,...counts,projector:await d1EnrichmentStatus(db,env)};
+ return {source:'d1',authoritative,...counts,projector:await d1EnrichmentStatus(db,env)};
 }
 async function d1Persons(db,{q='',role='',source='',cursor='',limit}){
  const where=['p.id>?'],params=[String(cursor||'')];
@@ -173,7 +173,7 @@ async function d1IdentityFilms(db,ids){
  for(const row of external){if(!byFilm.has(row.filmId))byFilm.set(row.filmId,[]);byFilm.get(row.filmId).push({scheme:row.scheme,value:String(row.value),trusted:row.trusted===1,conflicting:row.conflicting===1});}
  return films.map(row=>({id:row.id,surface:row.inWatchlist===1?'watchlist':'catalog',canonicalIdentity:row.canonicalIdentity??null,identity:row.identityStatus?{status:row.identityStatus}:null,externalIds:byFilm.get(row.id)||[]}));
 }
-function d1IdentityBody(recordId,projection,limitations,bounded){
+function d1IdentityBody(recordId,projection,limitations,bounded,authoritative=false){
  const selector={recordId};
  const resolved=PersonIdentity.resolvePersonReference(projection,selector);
  const reference={state:resolved.status,crossSource:resolved.crossSource,humanId:resolved.humanId,formerIds:resolved.formerIds,memberIds:resolved.memberIds,links:resolved.links,reviews:resolved.reviews,externalIds:resolved.externalIds,reversal:resolved.reversal};
@@ -182,7 +182,7 @@ function d1IdentityBody(recordId,projection,limitations,bounded){
   const surfaces=PersonIdentity.personSurfaces(projection,selector,role);
   films[role]={state:surfaces.status,crossSource:surfaces.crossSource,humanId:surfaces.humanId,watchlist:surfaces.watchlist,catalog:surfaces.catalog};
  }
- return {source:'d1',authoritative:false,recordId,reference,films,limitations,bounded};
+ return {source:'d1',authoritative,recordId,reference,films,limitations,bounded};
 }
 const IDENTITY_FILM_SQL=`select film_id id from film_person_credit where role in ('actor','director') and person_id in (/*ids*/) group by film_id order by film_id`;
 const IDENTITY_WITNESS_SQL=`select person_id id from film_person_credit where role in ('actor','director') and film_id in (/*ids*/) group by person_id order by person_id`;
@@ -202,7 +202,7 @@ async function d1SameKeyProjection(db,personIds){
 // Namesakes are loaded with no extra films. Owner decisions and role links are not stored in D1.
 // The film, witness and namesake probes each stop at cap+1 rows. Past a cap the answer is the same-key records
 // only, so a partial witness or namesake list cannot add a film.
-async function d1PersonIdentity(db,id){
+async function d1PersonIdentity(db,id,authoritative=false){
  if(!await d1First(db,`select id from person where id=?`,[id]))return null;
  const seed=new Set(await d1HumanIds(db,[id]));
  seed.add(id);
@@ -225,32 +225,53 @@ async function d1PersonIdentity(db,id){
   const projection=PersonIdentity.projectPersonIdentity({persons,credits,films,decisions:[]});
   const members=PersonIdentity.resolvePersonReference(projection,{recordId:id}).memberIds;
   const missing=members.filter(personId=>!core.has(personId));
-  if(!missing.length)return d1IdentityBody(id,projection,limitations,false);
+  if(!missing.length)return d1IdentityBody(id,projection,limitations,false,authoritative);
   const grown=await d1HumanIds(db,missing);
   if(core.size+grown.length>IDENTITY_PERSON_CAP)break;
   for(const personId of grown)core.add(personId);
  }
  if(namesakeCut)limitations.push('namesakes_truncated');
  limitations.push('neighborhood_bounded');
- return d1IdentityBody(id,await d1SameKeyProjection(db,[...seed].sort()),limitations,true);
+ return d1IdentityBody(id,await d1SameKeyProjection(db,[...seed].sort()),limitations,true,authoritative);
 }
-async function catalogD1Dispatch(request,env,url){
+async function catalogD1Dispatch(request,env,url,authoritative=false){
  if(request.method!=='GET')return json({error:'Method not allowed'},405);
  if(!env.DB)return json({error:'D1 is not bound to this Worker'},503);
  const path=url.pathname.slice('/api/d1/'.length),params=url.searchParams;
- if(path==='status')return json(await d1Status(env.DB,env));
+ if(path==='status')return json(await d1Status(env.DB,env,authoritative));
  if(path==='persons')return json(await d1Persons(env.DB,{q:params.get('q'),role:params.get('role'),source:params.get('source'),cursor:params.get('cursor'),limit:params.get('limit')}));
  if(path==='persons/review')return json(await d1PersonReview(env.DB,{limit:params.get('limit')}));
  let match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})\/identity$/);
- if(match){let key;try{key=decodeURIComponent(match[1]);}catch{return json({error:'Person not found'},404);}const body=await d1PersonIdentity(env.DB,'person:'+key);return body?json(body):json({error:'Person not found'},404);}
+ if(match){let key;try{key=decodeURIComponent(match[1]);}catch{return json({error:'Person not found'},404);}const body=await d1PersonIdentity(env.DB,'person:'+key,authoritative);return body?json(body):json({error:'Person not found'},404);}
  match=path.match(/^persons\/((?:tmdb_)?(?:actor|director)\/[^/]{1,200})$/);
  if(match){const person=await d1Person(env.DB,'person:'+decodeURIComponent(match[1]));return person?json(person):json({error:'Person not found'},404);}
  match=path.match(/^films\/([^/]{1,200})$/);
  if(match){const film=await d1Film(env.DB,'film:'+decodeURIComponent(match[1]));return film?json(film):json({error:'Film not found'},404);}
  return json({error:'Not found'},404);
 }
+// AIR-374 P4: the marker gate of the /api/d1/* views (and of the owner-review overlay, which is reachable only through this route). legacy, r2 and prepared answer exactly as
+// before (`authoritative:false`); held, an unreadable or malformed marker answer 503 and read nothing; open reads the same D1 rows and says `authoritative:true`.
+// A non-GET request is not gated (405 as before). The gate is one set of SELECTs of the marker tables; nothing is written.
 async function catalogD1Route(request,env,url){
- const response=await catalogD1Dispatch(request,env,url);
- if(typeof OwnerReview==='undefined'||typeof OwnerReview.overlayCatalogResponse!=='function')return response;
- return OwnerReview.overlayCatalogResponse(env,response);
+ let authoritative=false,first=null;
+ const refuse=error=>{
+  const code=error?.code||'';
+  if(code==='film_person_held'||code==='film_person_unavailable'||code==='film_person_generation_moved')return json({error:'storage_unavailable',reason:code},503);
+  throw error;
+ };
+ if(request.method==='GET'){
+  try{first=await CanonicalCatalogReader.catalogReaderGate(env);authoritative=first.mode==='d1';}
+  catch(error){return refuse(error);}
+ }
+ let response=await catalogD1Dispatch(request,env,url,authoritative);
+ if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.overlayCatalogResponse==='function')response=await OwnerReview.overlayCatalogResponse(env,response);
+ if(first){
+  // The marker is read again after every D1 and overlay read, immediately before the answer: a view read at `open` is returned only if the marker is still open at the same
+  // generation; a move to held, an unreadable marker or a new generation refuses (a response already read is never returned as authoritative).
+  try{
+   const again=await CanonicalCatalogReader.catalogReaderGate(env);
+   if(again.state!==first.state||again.generation!==first.generation)throw Object.assign(new Error('film_person_generation_moved'),{code:'film_person_generation_moved'});
+  }catch(error){return refuse(error);}
+ }
+ return response;
 }

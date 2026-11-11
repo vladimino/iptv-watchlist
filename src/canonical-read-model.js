@@ -10,6 +10,7 @@
 // - Person grouping stays derived (ADR 0058/0059/0062): a Person is the role-specific record person:<role>/<key>; nothing here merges people.
 import {database,failed,many,readAuthority,readSource} from './film-person-authority.js';
 import {loadLocalizationInputs,resolveLocalization} from './localization-sources.js';
+import {catalogReaderGate} from './canonical-catalog-reader.js';
 
 export const CANONICAL_READ_MAX_IDS=200;
 export const CANONICAL_REDIRECT_DEPTH=8;
@@ -20,11 +21,8 @@ export const CANONICAL_READ_CHUNK=80;
 const FILM=/^film:.+/,PERSON=/^person:[a-z_]+\/.+/;
 
 // legacy, r2 and prepared keep the existing runtime; open reads D1; held and every unreadable state throw (film_person_held / film_person_unavailable).
-export async function canonicalReaderMode(env){
- const gate=await readAuthority(env);
- const source=readSource(gate);
- return {mode:source==='d1'?'d1':'existing',generation:gate.generation,state:gate.state};
-}
+// AIR-374 P4: the gate itself lives in canonical-catalog-reader.js (the one module the Worker bundles) so the Worker routes and this model share one implementation.
+export const canonicalReaderMode=catalogReaderGate;
 
 async function gateD1(env){
  const gate=await readAuthority(env);
