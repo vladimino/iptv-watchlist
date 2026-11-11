@@ -11,10 +11,10 @@ Each `next` and `submit` writes one log line `prediction_step_timing` ([contract
 - the same scripted run with the instrument, without it, and with a logger that throws gives the same answers, the same stored records and the same R2 calls;
 - the calls counted in the lines are exactly the calls the steps made;
 - calls in parallel are a union (`busyMs`), not a sum, the overlap is reported, and the rest of the wall time is `unattributedMs`;
-- the line holds no film id, key, SQL text, body or model output, and its class vocabulary is closed;
-- the overhead is 0.0057 ms per timed `get` plus body read in an in-memory harness (about 5 microseconds; the same harness without the instrument is 0.0016 ms).
+- the line holds no film id, key, SQL text, body or model output, and its R2 class vocabulary is closed while a D1 class is a table name read from static SQL text, bounded to 60 characters and 40 classes;
+- the overhead of the bucket wrapper is about 5 to 10 microseconds per timed `get` plus body read in an in-memory harness (0.0057 to 0.0069 ms against 0.0016 to 0.0017 ms without it, across runs); the D1 wrapper and the object proxy were not benchmarked.
 
-What it cannot see: CPU time (not available inside the Worker without a call), the bytes of a streamed body, the time a D1 statement spends inside D1 (only its round trip), and anything the caller does between calls.
+What it cannot see: CPU time (not available inside the Worker without a call; and because the Workers clock may advance only across I/O, synchronous compute may read as close to zero, so `unattributedMs` is awaits and scheduling and may understate compute until the first production lines show otherwise), the bytes of a streamed body, the time a D1 statement spends inside D1 (only its round trip), and anything the caller does between calls.
 
 ## 2. The exact chain that fixes the batch sizes
 
@@ -22,7 +22,7 @@ There are three different batch sizes, and today they are 12, 1 and 1.
 
 | Size | Where it is decided | Value in production |
 | --- | --- | --- |
-| **Selection batch S**: films a run selects and keeps | `MAX_PREDICTION_BATCH = 20` (`src/enrichment.js`); `adaptivePredictionBatch` gives 4 or fewer, 8, 12 or 20 by backlog (under 5, 15, 100, else) and then `min(size, usageCap)` where `usageCap` is **12 when `capacity.remainingPercent` is unknown**, 4, 8 or 20 by usage; `start` takes `min(plan, body.batchSize)` and ignores `batchSize: 4` from a scheduled trigger; `start` refuses `batchSize` above 20 | **12**: every run since the task started reports `adaptivePlan.reason = backlog_usage_unknown_conservative_cap_12`, `usageKnown: false` |
+| **Selection batch S**: films a run selects and keeps | `MAX_PREDICTION_BATCH = 20` (`src/enrichment.js`); `adaptivePredictionBatch` gives the backlog itself up to 4, 8 up to 15, 12 under 100, else 20, then `min(size, usageCap)` where `usageCap` is **12 when `capacity.remainingPercent` is unknown**, 4, 8 or 20 by usage, and **at most 5 while no hot film is outstanding** (a cold-only backlog); `start` takes `min(plan, body.batchSize)` and ignores `batchSize: 4` from a scheduled trigger; `start` refuses `batchSize` above 20 | **12 while hot films are outstanding** (5 for a cold-only backlog): the runs read on 11 November report `adaptivePlan.reason = backlog_usage_unknown_conservative_cap_12`, `usageKnown: false`; that reason string stays the same when the cold-only cap lowers the size to 5 |
 | **Next request r**: items one `next` hands to the model | HTTP `next` accepts `batchSize` 1 to 20; the MCP tool `prediction_next` always sends `batchSize: 1` (`src/mcp.js`) | **1** |
 | **Submit batch s**: items one `submit` takes | HTTP `submit` accepts 1 to 10 items; the MCP tool `prediction_submit` accepts exactly one (`src/mcp.js`) | **1** |
 | Model generation batch g | `enrichment_runner` publishes `modelBatching: {enabled: false, readyFingerprintsPerCall: 1}`; the runner contract and the hourly prompt require `prediction_validate` on each film's exact objects before its submit | **1** |
@@ -54,7 +54,7 @@ So one film costs one `next`, one `prediction_validate`, one `submit`, whatever 
 | 3,000 | 2,478,375 | 3,304,273 | 55 / 41 |
 | 9,257 (the production queue size) | 7,642,296 | 10,189,501 | 55 / 41 |
 
-About 830 bytes per film. At the production size a step moves megabytes of queue document through the Worker before it does any work for the film. In production the document is stored in D1 (and `dict1`-encoded above 900,000 characters), so the real bytes differ; the shape (three to four whole-document moves per step) is what the code does.
+About 830 bytes per film **on this fixture** (130 films on an R2 stand-in, extrapolated linearly; 9,257 films gives 7.6 and 10.2 MB). That is an extrapolation, not a production measurement. Production stores the queue under a budget of 900,000 characters (`PREDICTION_QUEUE_CHARS`, `dict1`-encoded above it), so the document read from D1 is at most about 0.9 MB on the wire per move; the in-memory document the Worker parses and writes back is larger. What the code does is move the whole document three to four times per step; what that costs in Cloudflare milliseconds is not known until production telemetry exists.
 - **Items that share a step share its fixed cost** (3,000-film queue, S=12, next r=10, submit of s items):
 
 | s | `submit` calls | `submit` bytes | Calls per film (`next` + `submit`) | Bytes per film |
@@ -80,7 +80,7 @@ Between the caller's `next` answer and its `submit` request lie 28–34 s of mod
 
 ## 5. Throughput model (assumptions named, not measured)
 
-`scripts/prediction-batch-profile.mjs` holds the model (`SCENARIOS`, `filmsPerActiveHour`); `tests/prediction-batch-profile.mjs` checks it against the two observed regimes before it is used (today's configuration: about 29 films/h in the slow regime against 28 observed, 54 in the fast regime against 49).
+`scripts/prediction-batch-profile.mjs` holds the model (`SCENARIOS`, `filmsPerActiveHour`); The model is **calibrated** on the two observed regimes (its `Wn0`, `Ws0` and the 24 s model time come from them), so its agreement with them (about 29 films/h in the slow regime against 28 observed, 54 in the fast regime against 49) is a consistency check, not a validation; `tests/prediction-batch-profile.mjs` keeps it within 15 % of them. Every other row is a scenario analysis with invented multipliers (`m`, the `nScale` rule, the fixed share `f`), not a predictor, and `g` is set equal to `r` (the number of items one `next` hands out).
 
 Per film: `T = m*G + o*(1/g + 1 + 1/s) + Wn(S)/g + Ws(s)/s`, with model time `G = 24 s` per film, `m` its multiplier for a batched call (0.8 best, 1.0 likely, 1.1 worst: a shared prompt may shorten it, longer outputs lengthen it), tool-call overhead `o` of 4 s (6 s worst), `Wn` the `next` wall scaled by the selection batch (best: the film reads run fully in parallel and cost nothing; worst: proportional to the 31 + 2S calls), and `Ws` the `submit` wall with the fixed share measured in section 3. Regimes: best uses the fast walls (16 and 19 s), likely and worst the slow ones (45 and 43 s).
 
@@ -99,7 +99,7 @@ Per film: `T = m*G + o*(1/g + 1 + 1/s) + Wn(S)/g + Ws(s)/s`, with model time `G 
 
 Calls per film fall from 96 to 29 and bytes per film by a factor of 4 between s=1 and s=10 on the stored-queue fixture. Tokens: the answer of every `next` carries the whole taste profile (about 12.5 KB of text, from `enrichment_profile`; the token count was not measured) plus the metadata of its items, so batching r films per `next` pays the profile once per r films instead of once per film. Cost per film for a model call that generates several films is not estimated: no model data exists.
 
-**What the matrix shows.** Raising the selection batch alone does nothing for throughput and, beyond what `next` reads in parallel, lowers it: the measured per-film storage reads grow with S. The lever is sharing a `next` and a `submit` among several films, and even at the largest request the HTTP contract allows (r=20, s=10) the model gives 57 to 112 films per active hour, not 100 or more with confidence. A figure above 100 per hour needs the best-case assumptions on every line. This is not an SLA.
+**What the matrix shows.** Raising the selection batch alone does nothing for throughput and, beyond what `next` reads in parallel, lowers it: the measured per-film storage reads grow with S. The lever is sharing a `next` and a `submit` among several films, and even at the largest sizes the model tries (g=10 and s=10 on S=20; the HTTP contract allows r up to 20 and s up to 10) it gives 57 to 112 films per active hour, not 100 or more with confidence. A figure above 100 per hour needs the best-case assumptions on every line. This is not an SLA.
 
 ## 6. Risks of batching, by dimension
 
@@ -115,7 +115,7 @@ Calls per film fall from 96 to 29 and bytes per film by a factor of 4 between s=
 
 1. **Keep `selectionBatchSize` at the plan's value (12 while usage is unknown, at most 20) and do not raise it.** It does not raise throughput and each film in it adds two storage reads to every `next`.
 2. **Introduce `modelGenerationBatchSize` and `submitBatchSize` as two separate parameters, starting at 1 and 1.** The measured fixed cost per step makes sharing the lever; the unknown is model quality, so the first change is a *controlled quality experiment* with g=2 and s=2 against a paired baseline, validate per film unchanged, not a switch. Cap `submitBatchSize` at 5 so a crash loses at most five films of checkpoint.
-3. **Separately from batching, the stored queue (and the view index) should not move whole through every step.** At the production queue size the profile's step moves megabytes before it works on one film. This is the largest fixed cost the offline profile found, and it is independent of any batch size. A card that reads the queue once per step and avoids the per-item view-index rewrite is the change with the largest expected effect per film and the smallest effect on the model's behaviour; it needs the production telemetry below to confirm that the D1 path behaves as the stand-in does.
+3. **Separately from batching, the stored queue (and the view index) are candidates for not moving whole through every step.** On the fixture this is the largest fixed cost the offline profile found, and it is independent of any batch size; whether it is the largest in production (where the stored queue is at most about 0.9 MB encoded) is a hypothesis for the telemetry below to confirm or reject. A card that reads the queue once per step and avoids the per-item view-index rewrite would have the smallest effect on the model's behaviour; its expected effect per film is not established.
 4. **Next atomic card (offline, owner approval for any contract change):** after two natural runs have produced `prediction_step_timing` lines, decide between (a) reducing whole-document movement per step, (b) exposing `submitBatchSize` up to 5 in `prediction_submit` and `batchSize` in `prediction_next`. The contract change in (b) alters the runner contract and the hourly prompt and needs the owner's decision and likely an ADR.
 
 ## 8. Telemetry gate (not passed)

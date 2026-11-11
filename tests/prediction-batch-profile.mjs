@@ -27,8 +27,8 @@ const one=await measure({S:12,r:10,s:1,catalogSize:130}),ten=await measure({S:12
 const callsPerFilm=m=>(m.next.calls+m.submit.calls)/m.s,bytesPerFilm=m=>(m.next.r2Bytes+m.submit.r2Bytes)/m.s;
 assert.ok(callsPerFilm(ten)<callsPerFilm(one)/2,'calls per film '+callsPerFilm(one)+' -> '+callsPerFilm(ten));
 assert.ok(bytesPerFilm(ten)<bytesPerFilm(one)/2,'bytes per film '+bytesPerFilm(one)+' -> '+bytesPerFilm(ten));
-// The throughput model reproduces the two regimes observed on 11 November 2026 for today's configuration (about 28 films/h in the slow regime
-// of run 3bfcac84, about 49 in the fast one of run 6ad5062e) before it is used for any other configuration.
+// The throughput model is calibrated on the two regimes observed on 11 November 2026 (about 28 films/h in the slow regime of run 3bfcac84, about
+// 49 in the fast one of run 6ad5062e); this keeps it consistent with them. It is a calibration check, not a validation of any other row.
 const today=CONFIGS[0];
 assert.ok(Math.abs(filmsPerActiveHour(today,'likely').filmsPerHour-28.4)/28.4<.15,'slow regime '+filmsPerActiveHour(today,'likely').filmsPerHour);
 assert.ok(Math.abs(filmsPerActiveHour(today,'best').filmsPerHour-48.6)/48.6<.15,'fast regime '+filmsPerActiveHour(today,'best').filmsPerHour);

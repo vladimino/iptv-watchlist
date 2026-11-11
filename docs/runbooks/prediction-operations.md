@@ -93,11 +93,11 @@ Repeated conflicts across many hours are a finding for the owner. Look in the lo
 `next` and `submit` log one `prediction_step_timing` line each ([fields](../reference/api/prediction-runner.md#step-timing-line-air-438)). It is a safe read: nothing starts, retries or writes. To see where a run's time went:
 
 1. Query Workers Observability for the Worker `iptv` with the needle `prediction_step_timing` and the time range of the run (the recipe used for the `epg_phase` events works the same: `POST /accounts/{id}/workers/observability/telemetry/query`, view `events`, filter `$metadata.service = iptv`, a `needle`). The line is the event's `source`.
-2. Compare `wallMs` with `busyMs`: a large `unattributedMs` is compute and awaits, a large `busyMs` is storage. `overlapMs` says how much of the storage time ran in parallel.
+2. Compare `wallMs` with `busyMs`: a large `unattributedMs` is awaits and scheduling (the Workers clock may advance only across I/O, so synchronous compute can read as near zero), a large `busyMs` is storage. `overlapMs` says how much of the storage time ran in parallel.
 3. Read `classes` for the stage that holds the time: `r2:queue` and `d1:*` for the stored queue and the prediction tables, `r2:view_index`, `r2:film_state`, `r2:lease`, `r2:run`.
 4. Group by `step`, by the deploy (`$workers.scriptVersion.id`) and by `notes.selected` or `notes.bodyItems` before taking p50 and p95; a mix of deploys or batch sizes hides the cause.
 
-A missing line for a step means the Worker that served it predates the instrument or the step failed before answering. Telemetry is not a stored record: the retention is the platform's (seven days of queryable events). No production write or run is needed to read it, and none is authorized by this page.
+A missing line for a step means the Worker that served it predates the instrument or the step failed before answering. Telemetry is not a stored record: its retention is the platform's (the Observability tool reported a seven-day queryable range on 11 November 2026; confirm it before relying on older runs). The query shape above is the one used for the `epg_phase` events on that date; the first read of a `prediction_step_timing` line is the check that `source` carries the fields described here. No production write or run is needed to read it, and none is authorized by this page.
 
 ## One film without a current prediction
 
