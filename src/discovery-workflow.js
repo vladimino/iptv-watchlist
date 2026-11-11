@@ -19,111 +19,160 @@ const DISCOVERY_WORKFLOW_FRESH_MS=15*60*1000;
 const DISCOVERY_WORKFLOW_TERMINAL=new Set(['complete','backlog_empty','stale_generation','executor_not_workflow','recovery_exhausted']);
 const DISCOVERY_WORKFLOW_RECOVERABLE=new Set(['no_progress','write_uncertain','step_cap','rollover_uncertain','no_continuation','step_failure']);
 function discoveryWorkflowChunkLimit(){return DISCOVERY_WORKFLOW_CHUNK_LIMIT;}
-// AIR-410. One `discovery` Events Log entry per logical tick. A tick is one orchestration run: the chain of Workflow instances of one
-// generation from the start of its first instance to the terminal stop of the last one (a rollover and the recovery after a failed step stay inside
-// the tick), or one scheduled hourly firing that finds the queue confirmed empty and starts no chain. The counters are sums of the per-chunk
-// summaries that the owner checkpoint persisted (each summary describes one chunk, none is cumulative); an unsaved checkpoint loses its
-// chunk's numbers, so they are a lower bound. The tick lives in the executor record, is carried by every successor and is settled in the same
-// compare-and-swap as the terminal stop. The event is immutable, written create-only under its tick id, and delivered after the settlement by
-// whoever sees a settled tick that is not marked delivered: no Discovery step or TMDB request is repeated for a lost event write.
-const DISCOVERY_TICK_COUNTERS=['checked','added','reused','screenedOut','touched','tmdbCalls'];
+// AIR-410 (ADR 0111). Every scheduled hourly firing of the cron writes ONE `discovery` Events Log entry for the period since the previous report,
+// whatever the Workflow is doing: a chain that runs for hours across rollovers, a wait for a successor, a block, an exhausted recovery, an idle
+// pipeline or a confirmed empty queue. The chain and its terminal stop are a separate matter and write no event of their own.
+// The counters are DELTAS of the period, never lifetime totals. The executor record carries one open accumulator, `report`. Each saved chunk
+// checkpoint adds that chunk's summary to it inside the owner's compare-and-swap (the model is attribution by COMMIT TIME: a chunk belongs to the
+// period in which its checkpoint was saved, whatever series or generation it ran in) and records the chunk key in `seen`, so a retried or replayed
+// checkpoint adds nothing a second time. The cron closes the period in ONE compare-and-swap of the same record: it moves the report event into the
+// `outbox` and starts a new accumulator, so a chunk is counted in exactly one report. The event is immutable, keyed by generation and UTC hour,
+// written create-only after that, and delivered from the outbox by whoever looks next, so a lost put is never a lost report and never repeats a
+// Discovery step or a TMDB request. An absent reading is never a zero: an unknown part is `null` and the report says it is incomplete.
+const DISCOVERY_REPORT_COUNTERS=['checked','added','reused','screenedOut','touched','tmdbCalls'];
+const DISCOVERY_REPORT_SEEN_LIMIT=16;
+const DISCOVERY_REPORT_OUTBOX_LIMIT=64;
+const DISCOVERY_REPORT_CLOSE_ATTEMPTS=3;
+const DISCOVERY_REPORT_BLOCKED=new Set(['authority_held','authority_loading','authority_not_ready','generation_unpublished','generation_handoff','d1_unavailable','projector_window','write_conflict','intent_uncertain','intent_unconfirmed','stale_generation','workflow_unavailable','invalid','events_outbox_full']);
+// The legacy status map of the per-chain events written before the hourly model; read only to deliver a legacy entry that was still pending.
 const DISCOVERY_TICK_STATUS={complete:'finished',backlog_empty:'finished',stale_generation:'superseded',recovery_exhausted:'failed',executor_not_workflow:'stopped'};
-function discoveryTickStamp(ms){return new Date(ms).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z');}
-function newDiscoveryTick(programmeRunId,now){
- const compact=String(programmeRunId||'').replace(/[^0-9A-Za-z]/g,'').slice(0,32)||'none';
- return {id:compact+'-'+discoveryTickStamp(now),startedAt:new Date(now).toISOString(),programmeRunId:programmeRunId||null,chunks:0,checked:0,added:0,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:null,cheapRemaining:null,error:null,settled:null,delivered:false};
+function discoveryHourStamp(ms){return new Date(ms).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z').slice(0,11);}
+function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
+// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
+// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
+function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&cheapRemaining===0&&!error;}
+function newDiscoveryReport(since,seen=[]){
+ const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,seen,lastClosedHour:null};
+ for(const name of DISCOVERY_REPORT_COUNTERS)report[name]=0;
+ return report;
 }
-// Pure. `summary` is one saved chunk's summary; a field that is missing or not a finite non-negative number adds nothing.
-function addChunkToDiscoveryTick(tick,summary){
- const next={...tick,chunks:(tick?.chunks||0)+1};
- for(const name of DISCOVERY_TICK_COUNTERS){const value=summary?.[name];next[name]=(tick?.[name]||0)+(Number.isFinite(value)&&value>0?value:0);}
+function normalizeDiscoveryReport(value){
+ const base=newDiscoveryReport(typeof value?.since==='string'&&Number.isFinite(Date.parse(value.since))?value.since:null,Array.isArray(value?.seen)?value.seen.filter(key=>typeof key==='string').slice(-DISCOVERY_REPORT_SEEN_LIMIT):[]);
+ if(!value||typeof value!=='object')return base;
+ base.chunks=Number.isInteger(value.chunks)&&value.chunks>0?value.chunks:0;
+ for(const name of DISCOVERY_REPORT_COUNTERS)base[name]=Number.isFinite(value[name])&&value[name]>0?value[name]:0;
+ base.remaining=discoveryCount(value.remaining);base.cheapRemaining=discoveryCount(value.cheapRemaining);
+ base.error=typeof value.error==='string'&&value.error?value.error:null;
+ base.lastClosedHour=typeof value.lastClosedHour==='string'?value.lastClosedHour:null;
+ return base;
+}
+// Pure. `summary` is one saved chunk's summary and `chunkKey` names that chunk (the instance id and the chunk's ordinal in it, both stable
+// across a replay). A key already in `seen` is a repeat of the same checkpoint and adds nothing. A counter that is missing or not a finite
+// non-negative number adds nothing.
+function addChunkToDiscoveryReport(report,summary,chunkKey){
+ const base=normalizeDiscoveryReport(report);
+ if(chunkKey&&base.seen.includes(chunkKey))return base;
+ const next={...base,chunks:base.chunks+1,seen:chunkKey?[...base.seen,chunkKey].slice(-DISCOVERY_REPORT_SEEN_LIMIT):base.seen};
+ for(const name of DISCOVERY_REPORT_COUNTERS){const value=summary?.[name];next[name]=base[name]+(Number.isFinite(value)&&value>0?value:0);}
  if(summary&&typeof summary==='object'){
-  next.remaining=Number.isInteger(summary.remaining)&&summary.remaining>=0?summary.remaining:null;
-  next.cheapRemaining=Number.isInteger(summary.cheapRemaining)&&summary.cheapRemaining>=0?summary.cheapRemaining:null;
+  next.remaining=discoveryCount(summary.remaining);next.cheapRemaining=discoveryCount(summary.cheapRemaining);
   next.error=typeof summary.error==='string'&&summary.error?summary.error:null;
  }
  return next;
 }
-// The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
-// negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
-function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
-function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&cheapRemaining===0&&!error;}
-// The tick of a record with the settlement applied (kept as is when it is already settled), or null when there is no open tick to settle.
-function settledDiscoveryTick(record,reason,now){
- const tick=record?.tick;
- if(!tick||typeof tick!=='object')return null;
- if(tick.settled)return tick;
- if(!DISCOVERY_WORKFLOW_TERMINAL.has(reason))return null;
- return {...tick,settled:{at:new Date(now).toISOString(),reason},delivered:false};
+// The state at the firing, from what this firing's reconcile answered. `empty` is a confirmed empty queue.
+function discoveryReportState(outcome,record,empty){
+ const reason=typeof outcome?.reason==='string'?outcome.reason:null;
+ if(outcome?.started===true||reason==='in_progress')return {status:'running',reason:reason==='in_progress'||reason==='started'?null:reason};
+ if(reason==='recovery_exhausted')return {status:'failed',reason};
+ if(reason==='recovery_waiting')return {status:'waiting',reason};
+ if(reason==='stopped')return empty?{status:'empty',reason:'queue_empty'}:{status:'idle',reason:DISCOVERY_WORKFLOW_TERMINAL.has(record?.reason)?record.reason:null};
+ if(reason&&DISCOVERY_REPORT_BLOCKED.has(reason))return {status:'blocked',reason};
+ return {status:'blocked',reason:reason?'other':'unknown'};
 }
-function discoveryTickEvent(tick){
- const reason=tick.settled?.reason||null;
- const empty=discoveryQueueEmpty(tick.remaining,tick.cheapRemaining,tick.error);
- const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:empty,remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
- for(const name of DISCOVERY_TICK_COUNTERS)event[name]=tick[name]||0;
+// `incomplete` events carry no counters (every number is null): the reading they would come from was not available.
+function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue,incomplete}){
+ const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
+ const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:incomplete?null:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:incomplete?null:report.chunks,queueEmpty:!incomplete&&queue.empty===true,remaining:incomplete?null:queue.remaining,incomplete:incomplete===true||queue?.incomplete===true,error:incomplete?null:(report.chunks>0?report.error:queue.error)||null};
+ for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=incomplete?null:report[name];
+ if(queue?.reason&&!event.reason)event.reason=queue.reason;
  return event;
 }
-function discoveryEmptyTickEvent(programmeRunId,now){
- const hour=Math.floor(now/3600000)*3600000,compact=String(programmeRunId||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
- const event={id:'discovery-empty-'+compact+'-'+discoveryTickStamp(hour).slice(0,11),type:'discovery',kind:'empty',at:new Date(hour).toISOString(),startedAt:new Date(hour).toISOString(),status:'finished',reason:'queue_empty',chunks:0,queueEmpty:true,remaining:0,error:null};
- for(const name of DISCOVERY_TICK_COUNTERS)event[name]=0;
+// The legacy per-chain event of the model before the hourly reports. Used only to deliver an entry that was still pending at the change.
+function discoveryTickEvent(tick){
+ const reason=tick.settled?.reason||null;
+ const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:discoveryQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
+ for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=tick[name]||0;
  return event;
 }
 async function putDiscoveryEvent(env,event){
  if(typeof writeDiscoveryEvent!=='function')return 'unavailable';
  try{return await writeDiscoveryEvent(env,event);}catch{return 'failed';}
 }
-// Writes the event of a settled tick that is not delivered and then marks it. The marker is one expected-etag write of the whole record, so a
-// racing owner write wins and the next call finds the event ('exists') and marks it. Never throws and never touches Discovery.
-async function deliverDiscoveryTick(env){
+// What the period can say about the queue. The chunks of the period are the freshest committed reading; without one, the last saved status of
+// the published generation. An empty queue needs the continuation to say complete for that generation too. An unreadable source is `incomplete`.
+async function discoveryReportQueue(env,report,programmeRunId){
+ const unreadable={remaining:null,cheapRemaining:null,error:null,empty:false,incomplete:true,reason:'queue_unreadable'};
+ let remaining=null,cheapRemaining=null,error=null;
  try{
-  const state=await readWorkflowState(env),record=state.record,tick=record?.tick;
-  const outbox=Array.isArray(record?.outbox)?record.outbox.filter(entry=>entry&&typeof entry==='object'&&entry.settled):[];
-  const open=tick?.settled&&tick.delivered!==true?tick:null;
-  if(!open&&!outbox.length)return {delivered:false,reason:'nothing_to_deliver'};
-  // The outbox holds the settled ticks of replaced generations whose event write failed. Each is written create-only and leaves the outbox
-  // only after its put is confirmed; the rest stay for the next call. The open tick is delivered the same way.
-  const left=[];let delivered=0,event=null;
-  for(const entry of outbox){const written=await putDiscoveryEvent(env,discoveryTickEvent(entry));if(written==='written'||written==='exists')delivered++;else left.push(entry);}
-  let tickDone=false;
-  if(open){const written=await putDiscoveryEvent(env,discoveryTickEvent(open));tickDone=written==='written'||written==='exists';event=written;if(tickDone)delivered++;}
-  if(!delivered)return {delivered:false,reason:'event_failed'};
-  const next={...record,tick:tickDone?{...open,delivered:true}:record.tick};
-  if(Array.isArray(record.outbox))next.outbox=left;
+  if(report.chunks>0){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;}
+  else if(programmeRunId){
+   const last=await loadJSON(env,'epg/discovery-status.json');
+   if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
+  }
+ }catch{return unreadable;}
+ let complete=false;
+ try{const stored=programmeRunId?await readContinuation(env):null;complete=!!stored?.record&&stored.record.programmeRunId===programmeRunId&&stored.record.stage==='complete';}catch{return unreadable;}
+ return {remaining,cheapRemaining,error,empty:complete&&discoveryQueueEmpty(remaining,cheapRemaining,error),incomplete:false,reason:null};
+}
+// Delivers every pending report: the events of the outbox and a legacy per-chain tick that was settled and not yet delivered. An entry leaves
+// the record only after its create-only put is confirmed. The record is written back with its `updatedAt` untouched, so delivery never hides a
+// stalled instance. A legacy open tick (never settled) is dropped: its lifetime totals are not a report and must not double the hourly ones.
+async function deliverDiscoveryOutbox(env){
+ try{
+  const state=await readWorkflowState(env),record=state.record;
+  if(!record)return {delivered:0,reason:'no_record'};
+  const legacy=record.tick&&typeof record.tick==='object'?record.tick:null,outbox=Array.isArray(record.outbox)?record.outbox:[];
+  const items=[];
+  if(legacy?.settled&&legacy.delivered!==true)items.push({event:discoveryTickEvent(legacy),legacy:true});
+  for(const entry of outbox){const event=entry?.type==='discovery'?entry:entry?.settled?discoveryTickEvent(entry):null;if(event)items.push({event,legacy:false});}
+  if(!items.length&&!legacy&&!Array.isArray(record.outbox))return {delivered:0,reason:'nothing_to_deliver'};
+  const left=[];let delivered=0,legacyFailed=false;
+  for(const item of items){const written=await putDiscoveryEvent(env,item.event);if(written==='written'||written==='exists')delivered++;else if(item.legacy)legacyFailed=true;else left.push(item.event);}
+  if(!delivered&&!legacy&&left.length===outbox.length)return {delivered:0,reason:'event_failed'};
+  const {tick,...rest}=record;
+  const next={...rest,outbox:left,...(legacyFailed?{tick:legacy}:{})};
   const marked=await writeWorkflowStateSoft(env,next,state.etag);
-  return {delivered:true,event,count:delivered,marked:marked.saved===true};
- }catch{return {delivered:false,reason:'error'};}
+  return {delivered,pending:left.length+(legacyFailed?1:0),marked:marked.saved===true};
+ }catch{return {delivered:0,reason:'error'};}
 }
-// A new generation replaces the record, so the tick of the one it replaces (as superseded when it was still open) is written first. An entry
-// whose put is not confirmed is NOT dropped: it goes to the `outbox` of the new record, which every later write keeps, and the next scheduled
-// reconcile delivers it. The outbox never discards an entry. It holds at most DISCOVERY_TICK_OUTBOX_LIMIT entries (about 350 bytes each); when
-// the entries still undelivered would exceed that, the replacement FAILS CLOSED: `createWorkflowInstance` answers `events_outbox_full` and leaves
-// the record as it is, so no tick is lost. The hourly reconcile delivers the outbox before it looks at the generation, so the replacement goes
-// through at a later firing as soon as the event puts succeed again. A failed put alone never blocks the new generation.
-const DISCOVERY_TICK_OUTBOX_LIMIT=64;
-async function replacedDiscoveryOutbox(env,previous,programmeRunId,now){
- let pending;
+// Closes the period of this scheduled firing and delivers. Called only for a real scheduled firing (`options.scheduled`, `options.now` its
+// scheduled time); an unscheduled caller writes no report, and no report is invented for a firing that did not happen (a gap is for the Monitor).
+// Never throws and never starts a Discovery step. The report of the firing is keyed by the generation and the UTC hour, so a repeated or
+// concurrent firing of the same hour finds it closed. A close that cannot be persisted (a held projector window, lost compare-and-swaps, an
+// outbox at its limit) leaves the accumulator as it is: the deltas then appear in the next report, whose `from` says how far back it reaches.
+async function closeHourlyDiscoveryReport(env,outcome,options){
+ if(options?.scheduled!==true||!Number.isFinite(options.now))return {closed:false,reason:'not_scheduled'};
+ if(discoveryExecutorMode(env)!=='workflow')return {closed:false,reason:'not_workflow'};
+ const hourMs=Math.floor(options.now/3600000)*3600000,hourKey=discoveryHourStamp(hourMs),at=new Date(hourMs).toISOString();
+ const generationOf=record=>outcome?.programmeRunId||record?.programmeRunId||null;
+ const state_=discoveryReportState(outcome,null,false);
+ let incompleteReason='state_unreadable',record=null;
  try{
-  pending=(Array.isArray(previous?.outbox)?previous.outbox:[]).filter(entry=>entry&&typeof entry==='object'&&entry.settled);
-  const tick=previous?.tick;
-  // An open tick of the same generation is carried by the successor, never delivered here.
-  if(tick&&typeof tick==='object'&&tick.delivered!==true&&!(previous.programmeRunId===programmeRunId&&!tick.settled)&&!pending.some(entry=>entry.id===tick.id))pending.push(tick.settled?tick:{...tick,settled:{at:new Date(now).toISOString(),reason:'stale_generation'},delivered:false});
- }catch{return {outbox:null,full:true};}
- const left=[];
- for(const entry of pending){const written=await putDiscoveryEvent(env,discoveryTickEvent(entry));if(written!=='written'&&written!=='exists')left.push(entry);}
- return left.length>DISCOVERY_TICK_OUTBOX_LIMIT?{outbox:null,full:true}:{outbox:left,full:false};
-}
-// A scheduled firing that finds the queue confirmed empty. Not claimed unless the last saved status and the continuation both say so for the
-// published generation; an unknown, blocked, busy or unstarted pipeline writes nothing.
-async function emitEmptyDiscoveryTick(env,programmeRunId,now){
- try{
-  const stored=await readContinuation(env),last=await loadJSON(env,'epg/discovery-status.json');
-  const record=stored?.record;
-  if(!record||record.programmeRunId!==programmeRunId||record.stage!=='complete')return {emitted:false,reason:'not_confirmed'};
-  if(!last||last.programmeRunId!==programmeRunId||!discoveryQueueEmpty(discoveryCount(last.remaining),discoveryCount(last.cheapRemaining),last.error))return {emitted:false,reason:'not_confirmed'};
-  const written=await putDiscoveryEvent(env,discoveryEmptyTickEvent(programmeRunId,now));
-  return {emitted:written==='written'||written==='exists',event:written};
- }catch{return {emitted:false,reason:'error'};}
+  for(let attempt=0;attempt<DISCOVERY_REPORT_CLOSE_ATTEMPTS;attempt++){
+   const state=await readWorkflowState(env);record=state.record;
+   if(!record){incompleteReason='no_record';break;}
+   const report=normalizeDiscoveryReport(record.report);
+   if(report.lastClosedHour===hourKey){await deliverDiscoveryOutbox(env);return {closed:false,reason:'already_closed',hourKey};}
+   const pending=(Array.isArray(record.outbox)?record.outbox.length:0);
+   if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
+   const queue=await discoveryReportQueue(env,report,generationOf(record));
+   const {status,reason}=discoveryReportState(outcome,record,queue.empty);
+   const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue,incomplete:false});
+   const {tick,...rest}=record;
+   const next={...rest,report:{...newDiscoveryReport(at,report.seen),lastClosedHour:hourKey},outbox:[...(Array.isArray(record.outbox)?record.outbox:[]),event]};
+   const written=await writeWorkflowStateSoft(env,next,state.etag);
+   if(written.saved){const delivery=await deliverDiscoveryOutbox(env);return {closed:true,hourKey,status,delivered:delivery.delivered};}
+   if(written.windowBusy){incompleteReason='projector_window';break;}
+   incompleteReason='write_conflict';
+  }
+ }catch{incompleteReason='state_unreadable';}
+ // Not persisted: an event without numbers says so, the accumulator keeps its deltas for the next report and nothing is double counted.
+ const generation=generationOf(record);
+ const event=discoveryHourEvent({at,hourKey,generation,status:state_.status,reason:state_.reason||incompleteReason,report:null,queue:null,incomplete:true});
+ event.reason=incompleteReason==='no_record'?(state_.reason||'no_record'):incompleteReason;
+ const written=await putDiscoveryEvent(env,event);
+ return {closed:false,reason:incompleteReason,hourKey,event:written};
 }
 // Counts the statements prepared through env.DB. Statements and batches are passed through untouched, because a
 // native D1 batch only accepts native prepared statements.
@@ -246,9 +295,7 @@ function workflowRecoveryGate(record,now){
 }
 async function workflowOwnerGate(env,ownId,series){
  const record=(await readWorkflowState(env)).record;
- // AIR-410: the open tick is read here, inside the step, so a replay after a sleep gets the same value. A record from before this change has
- // none; its chain gets one at its first checkpoint, started at the time of this step.
- if(record?.instanceId===ownId&&record.series===series)return {owned:true,tick:record.tick&&typeof record.tick==='object'?record.tick:newDiscoveryTick(record.programmeRunId,Date.now())};
+ if(record?.instanceId===ownId&&record.series===series)return {owned:true};
  return {owned:false,reason:'not_owner'};
 }
 function workflowReadoutFacts(stored,liveness,now){
@@ -301,7 +348,7 @@ async function workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,us
 async function settleWorkflowIfOwner(env,ownId,patch){
  let state=await readWorkflowState(env);
  if(state.record?.instanceId&&state.record.instanceId!==ownId)return {saved:false,reason:'other_instance',record:state.record};
- const next={schemaVersion:1,...(state.record||{}),...patch,instanceId:ownId,updatedAt:new Date().toISOString()};
+ const next={schemaVersion:1,...(state.record||{}),...(typeof patch==='function'?patch(state.record||{}):patch),instanceId:ownId,updatedAt:new Date().toISOString()};
  // ADR 0103: a held projector window refuses this state write inside its own statement. That is a soft, typed refusal with an
  // expiry, not a step failure: nothing is written, no stall or recovery budget is charged, and the caller carries on to its sleep.
  try{if(await writeWorkflowState(env,next,state.etag))return {saved:true,reason:null,record:next};}
@@ -354,15 +401,10 @@ async function workflowInstanceStatus(binding,id){
 async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,recovery,previous){
  const binding=env.DISCOVERY_WORKFLOW;
  const same=previous?.instanceId===instanceId;
- // AIR-410: the open tick of this generation continues (rollover, recovery successor, a retried start); otherwise the replaced tick is
- // delivered and this chain starts its own.
- const startedAtMs=Date.now();
- const carried=previous?.programmeRunId===programmeRunId&&previous.tick&&typeof previous.tick==='object'&&!previous.tick.settled?previous.tick:null;
- const replaced=carried?{outbox:Array.isArray(previous?.outbox)?previous.outbox:[],full:false}:await replacedDiscoveryOutbox(env,previous,programmeRunId,startedAtMs);
- // AIR-410: saturated outbox. Nothing is written and nothing is dropped; the reconcile delivers the outbox and a later firing replaces the record.
- if(replaced.full)return {started:false,reason:'events_outbox_full',programmeRunId,instanceId,series};
- const outbox=replaced.outbox;
- const next={schemaVersion:1,...(same?previous:{}),tick:carried||newDiscoveryTick(programmeRunId,startedAtMs),outbox,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
+ // AIR-410: the period accumulator and the outbox of undelivered reports belong to the executor, not to a generation or an instance: they are
+ // carried over whatever replaces the record, so no delta and no pending report is lost on a generation change or a successor.
+ const carry={...(previous?.report?{report:previous.report}:{}),...(Array.isArray(previous?.outbox)?{outbox:previous.outbox}:{})};
+ const next={schemaVersion:1,...(same?previous:{}),...carry,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
  const first=await writeWorkflowStateSoft(env,next,etag);
  if(first.windowBusy)return {started:false,reason:'projector_window',windowUntil:first.window.expiresAt??null,programmeRunId,instanceId,series};
  let wrote=first.saved;
@@ -380,8 +422,7 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
    return {started:true,attached:true,reason:'attached',programmeRunId,instanceId,series};
   }
   const failure=workflowFailure(recovery,'start_uncertain',Date.now());
-  const exhausted=failure.quarantined?settledDiscoveryTick(next,'recovery_exhausted',Date.now()):null;
-  await settleWorkflowIfOwner(env,instanceId,{phase:failure.quarantined?'stopped':'uncertain',reason:failure.quarantined?'recovery_exhausted':'start_uncertain',programmeRunId,series,recovery:failure,waitingUntil:failure.dueAt,...(exhausted?{tick:exhausted}:{})});
+  await settleWorkflowIfOwner(env,instanceId,{phase:failure.quarantined?'stopped':'uncertain',reason:failure.quarantined?'recovery_exhausted':'start_uncertain',programmeRunId,series,recovery:failure,waitingUntil:failure.dueAt});
   return {started:false,uncertain:!failure.quarantined,reason:failure.quarantined?'recovery_exhausted':'start_uncertain',programmeRunId,instanceId,series,dueAt:failure.dueAt};
  }
 }
@@ -454,8 +495,7 @@ async function ensureDiscoveryWorkflow(env){
    if(gate.action==='waiting')return {started:false,reason:'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:gate.dueAt};
    if(gate.action==='arm'){
     const failure=workflowFailure(current.recovery,current.reason||'stopped',Date.now());
-    const exhausted=failure.quarantined?settledDiscoveryTick(current,'recovery_exhausted',Date.now()):null;
-    const next={...current,reason:failure.quarantined?'recovery_exhausted':current.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt,...(exhausted?{tick:exhausted}:{})};
+    const next={...current,reason:failure.quarantined?'recovery_exhausted':current.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
     {const w=await writeWorkflowStateSoft(env,next,state.etag);if(w.windowBusy)return {started:false,reason:'projector_window',windowUntil:w.window.expiresAt??null,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(!w.saved)return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};}
     return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
    }
@@ -466,20 +506,13 @@ async function ensureDiscoveryWorkflow(env){
   return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null);
  }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:{})};}
 }
-// AIR-410: `options.scheduled` is set only by the hourly cron firing, with `options.now` its scheduled time. Only such a firing may report an
-// empty queue; every other caller (a test, an admin path) reconciles exactly as before and writes no event of its own.
 async function reconcileDiscoveryWorkflowAttempt(env,options={}){
  try{
- if(discoveryExecutorMode(env)==='workflow')await deliverDiscoveryTick(env);
  const admitted=await discoveryWorkflowAdmission(env);
  if(!admitted.ok)return {started:false,reason:admitted.reason};
  const programmeRunId=admitted.programmeRunId;
  const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
- if(!intent.ok){
-  // A stopped queue (no chunk left to run) is where a scheduled firing may confirm an empty queue.
-  if(options?.scheduled===true&&intent.reason==='stopped'&&Number.isFinite(options.now))await emitEmptyDiscoveryTick(env,programmeRunId,options.now);
-  return {started:false,reason:intent.reason,programmeRunId};
- }
+ if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
  const binding=env.DISCOVERY_WORKFLOW;
  const state=await readWorkflowState(env),current=state.record;
  const same=current?.programmeRunId===programmeRunId&&current.instanceId;
@@ -488,8 +521,7 @@ async function reconcileDiscoveryWorkflowAttempt(env,options={}){
   const status=await workflowInstanceStatus(binding,current.instanceId);
   if(status==='complete'||status==='errored'||status==='terminated'){
    const failure=workflowFailure(current.recovery,'instance_'+status,Date.now());
-   const exhausted=failure.quarantined?settledDiscoveryTick(current,'recovery_exhausted',Date.now()):null;
-   const next={...current,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':failure.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt,...(exhausted?{tick:exhausted}:{})};
+   const next={...current,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':failure.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
    {const w=await writeWorkflowStateSoft(env,next,state.etag);if(w.windowBusy)return {started:false,reason:'projector_window',windowUntil:w.window.expiresAt??null,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(!w.saved)return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};}
    return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
   }
@@ -501,10 +533,7 @@ async function reconcileDiscoveryWorkflowAttempt(env,options={}){
   }
   return {started:false,reason:'in_progress',programmeRunId,instanceId:current.instanceId,series:current.series??0};
  }
- const ensured=await ensureDiscoveryWorkflow(env);
- // A firing that starts no chain and finds the published generation's queue confirmed empty is a tick of its own.
- if(options?.scheduled===true&&ensured?.started===false&&ensured.reason==='stopped'&&Number.isFinite(options.now))await emitEmptyDiscoveryTick(env,programmeRunId,options.now);
- return ensured;
+ return ensureDiscoveryWorkflow(env);
  }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:{})};}
 }
 // AIR-428: a scheduled firing retries a projector-window refusal in the same tick, after the window's one expiry.
@@ -517,9 +546,12 @@ async function reconcileDiscoveryWorkflow(env,options={}){
   attempt++;
   outcome=await reconcileDiscoveryWorkflowAttempt(env,options);
   logDiscoveryReconcile(outcome,{scheduled,attempt});
-  if(!scheduled||outcome?.reason!=='projector_window'||attempt>=RECONCILE_WINDOW_ATTEMPTS)return outcome;
+  if(!scheduled||outcome?.reason!=='projector_window'||attempt>=RECONCILE_WINDOW_ATTEMPTS)break;
   await waitReconcileWindow(outcome,options,Date.now());
  }while(attempt<RECONCILE_WINDOW_ATTEMPTS);
+ // AIR-410: a real scheduled firing reports its period whatever the outcome was, a refusal and an idle pipeline included. Best effort: the report
+ // never changes what this reconcile answers and never throws.
+ if(scheduled)await closeHourlyDiscoveryReport(env,outcome,options);
  return outcome;
 }
 async function rolloverDiscoveryWorkflow(env,pinned,ownSeries){
@@ -537,12 +569,8 @@ async function stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks){
   recovery=workflowFailure(state.record.recovery,reason,Date.now());
   if(recovery.quarantined)finalReason='recovery_exhausted';
  }
- // AIR-410: a terminal reason (or an exhausted recovery) settles the tick in the same write as the stop; any other stop is recoverable and
- // the successor continues the same tick. A repeat of this step finds the tick already settled and keeps its first settlement.
- const tick=owned?settledDiscoveryTick(state.record,finalReason,Date.now()):null;
- const settled=await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery,...(tick?{tick}:{})});
- const delivery=settled?.saved===true&&tick&&tick.delivered!==true?await deliverDiscoveryTick(env):null;
- return {stopped:true,reason:finalReason,chunks,instanceId:ownId,settled:settled?.saved===true,...(delivery?{tickDelivered:delivery.delivered===true}:{}),settleReason:settled?.reason||null,...(settled?.reason==='projector_window'?{windowUntil:settled.window?.expiresAt??null}:{})};
+ const settled=await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery});
+ return {stopped:true,reason:finalReason,chunks,instanceId:ownId,settled:settled?.saved===true,settleReason:settled?.reason||null,...(settled?.reason==='projector_window'?{windowUntil:settled.window?.expiresAt??null}:{})};
 }
 // AIR-364 (ADR 0098). Arms the recovery of a recognised step failure and proves what was persisted. The write is one expected-etag CAS
 // of the whole record; a lost CAS re-reads and recomputes from the fresh record (at most three times), so the attempt counter moves
@@ -555,8 +583,7 @@ async function armStepFailureRecovery(env,ownId,series,pinned,chunks){
   if(record?.instanceId!==ownId||record.series!==series)return {armed:false,reason:'not_owner'};
   if(record.phase==='stopped'&&record.recovery?.armedFor===ownId)return {armed:true,quarantined:record.recovery.quarantined===true,dueAt:record.recovery.dueAt||null,attempts:record.recovery.attempts||0};
   const failure={...workflowFailure(record.recovery,'step_failure',Date.now()),armedFor:ownId};
-  const exhausted=failure.quarantined?settledDiscoveryTick(record,'recovery_exhausted',Date.now()):null;
-  const next={schemaVersion:1,...record,programmeRunId:pinned,series,instanceId:ownId,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':'step_failure',chunksThisInstance:chunks,waitingUntil:failure.dueAt,recovery:failure,updatedAt:new Date().toISOString(),...(exhausted?{tick:exhausted}:{})};
+  const next={schemaVersion:1,...record,programmeRunId:pinned,series,instanceId:ownId,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':'step_failure',chunksThisInstance:chunks,waitingUntil:failure.dueAt,recovery:failure,updatedAt:new Date().toISOString()};
   const w=await writeWorkflowStateSoft(env,next,state.etag);
   if(w.windowBusy)return {armed:false,reason:'projector_window',windowUntil:w.window.expiresAt??null};
   if(w.saved)return {armed:true,quarantined:failure.quarantined===true,dueAt:failure.dueAt,attempts:failure.attempts};
@@ -699,7 +726,10 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     stalls=0;uncertainWrites=0;chunks++;
     // A window that opened between the chunk and this checkpoint refuses it: the chunk did happen (the count above stays), the record
     // is re-saved after the window's expiry, and a refusal is never a stall.
-    const progressPatch={phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,tick:addChunkToDiscoveryTick(gate.tick,outcome.summary)};
+    // AIR-410: the chunk's key is its instance and its ordinal in that instance, stable across a replay. The patch is a function of the record read
+    // inside the compare-and-swap, so a cron closing the period in between cannot be overwritten, and a retried checkpoint adds nothing twice.
+    const chunkKey=ownId+':'+chunks;
+    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey)});
     const checkpoint=await persist('progress',()=>settleWorkflowIfOwner(env,ownId,progressPatch),settleKind);
     if(checkpoint.kind==='lost')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
     if(checkpoint.kind==='deferred')return deferredExit('checkpoint_unsaved',checkpoint.cause);

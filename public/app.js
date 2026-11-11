@@ -2159,9 +2159,29 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
  else if(event.type==='enrichment'&&['started','resumed'].includes(event.stage)){body=`<p>${event.stage==='resumed'?'Прогнозы продолжены':'Прогнозы запущены'}</p><p class="event-note">В окне просмотра ждут прогноза: ${event.hotRemaining??'нет данных'} · вне окна: ${event.coldRemaining??'нет данных'}.</p>${event.currentBatchSize?`<p class="event-note">Текущий пакет: ${event.currentBatchSize}.</p>`:''}`;}
  else if(event.type==='enrichment'&&event.queueSchemaVersion>=3){const added=event.added??event.created??0,updated=event.updated??event.recalculated??0,reason={quota:'Достигнут лимит использования. Сохранённый прогресс продолжится в следующем запуске.',time_budget:'Закончилось время прохода. Прогресс сохранён.',parse_error:'Не удалось разобрать часть ответов. Эти фильмы остаются в очереди.',storage_error:'Часть результатов не удалось сохранить. Следующий запуск повторит попытку.',model_error:'Часть прогнозов не рассчитана. Следующий запуск продолжит очередь.',lease_expired:'Предыдущий запуск оборвался. Сохранённые прогнозы переиспользуются.',profile_changed:'Модель вкуса изменилась между запусками.',format_error_storm:'Несколько фильмов подряд получили ответы неверного формата. Проход остановлен, результаты сохранены.'}[event.reason];body=`<p>${event.stage==='running'?'Прогнозы считаются · промежуточный итог':event.stage==='blocked'?'Прогнозы ждут следующего запуска':event.stage==='partial'?(event.queueSchemaVersion>=5?'Прогнозы приостановлены':'Прогнозы сохранены, проход прерван'):'Прогнозы обновлены'}</p><p class="event-note">Добавлено: ${added}${updated?` · пересчитано: ${updated}`:''}${event.failed?` · не удалось: ${event.failed}`:''}.</p><p class="event-note">В окне просмотра ждут прогноза: ${event.hotRemaining??(event.queueSchemaVersion>=5?'нет данных':0)}${event.queueSchemaVersion>=4?` · вне окна: ${event.coldRemaining??(event.queueSchemaVersion>=5?'нет данных':0)}`:''}.</p>${event.queueSchemaVersion>=5&&event.reason?`<p class="event-note">Причина: ${escapeHTML(event.reason)}</p>`:''}${event.stopReason==='eligible_queue_empty'&&event.failed?`<p class="event-note">Фильмы с ошибками сохранены для повторной попытки.</p>`:''}${reason?`<p class="event-note">${reason}</p>`:''}`;}
  else if(event.type==='enrichment'){const added=event.added??event.created??0,updated=event.updated??event.recalculated??0,changed=added+updated,remaining=Number.isInteger(event.remaining)?event.remaining:null,previous=Number.isInteger(olderEnrichment?.remaining)&&(!event.queueSchemaVersion||event.queueSchemaVersion===olderEnrichment.queueSchemaVersion)?olderEnrichment.remaining:null,arrived=previous===null||remaining===null?null:remaining-previous+changed;body=`<p>${event.stage==='partial'||event.failed||event.pending?'Пакет прогнозов прерван':changed?'Прогнозы рассчитаны':'Очередь проверена'}</p><p class="event-note">За проход: ${added} новых${updated?` · ${updated} пересчитано`:''}${event.failed?` · ${event.failed} не удалось`:''}.</p>${remaining!==null?`<p class="event-note">После прохода ждут прогноза: ${remaining}${Number.isInteger(event.hotRemaining)?` (в окне просмотра: ${event.hotRemaining})`:""}.</p>`:''}${arrived>0?`<p class="event-note">Очередь: ${previous} + ${arrived} поступило − ${changed} готово = ${remaining}. Новые задачи появляются при проверке EPG.</p>`:''}${event.reason?`<p class="event-note">Причина: ${escapeHTML(event.reason)}</p>`:''}`;}
- // AIR-410: one compact card per Discovery tick. Every number is passed through n() (a non-negative integer or 0) and every sentence is fixed
- // text chosen by kind and status, so nothing from the stored event reaches the page as markup. No film, id or error text is shown.
- if(event.type==='discovery'){
+ // AIR-410 (ADR 0111): one compact card per hourly Discovery report (`kind:'hour'`) and the older per-chain card (any other kind). Every number is
+ // read through a strict integer check and every sentence is fixed text chosen by kind and status, so nothing from the stored event reaches the
+ // page as markup. A part the report could not read is `null` and is shown as «неизвестно», never as 0. No film, id or error text is shown.
+ if(event.type==='discovery'&&event.kind==='hour'){
+  const int=v=>Number.isInteger(v)&&v>=0,num=v=>int(v)?String(v):'неизвестно',incomplete=event.incomplete===true||!int(event.checked)||!int(event.added);
+  const stamp=value=>{const t=Date.parse(value);return Number.isFinite(t)?new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(t)):null;};
+  const empty=event.queueEmpty===true&&!incomplete,queue=empty?'пуста':int(event.remaining)?String(event.remaining):'неизвестно';
+  const status=event.status,added=incomplete?null:event.added,checked=incomplete?null:event.checked;
+  const title=incomplete?'Отчёт за час неполный'
+   :status==='failed'?'Discovery остановлен после повторных ошибок'
+   :status==='waiting'?'Discovery ждёт повтора'
+   :status==='blocked'?'Discovery не запустился: временный отказ'
+   :status==='empty'||empty?'Очередь Discovery пуста'
+   :status==='idle'?'Discovery не работает: запуска не требовалось'
+   :added>0?`Найдено новых фильмов: ${added}`
+   :checked>0?'Новых фильмов не найдено'
+   :'Discovery работает, новых результатов за час нет';
+  const from=incomplete?null:stamp(event.from);
+  body=`<p>${title}</p><dl><div><dt>Новых фильмов</dt><dd>${num(added)}</dd></div><div><dt>Разобрано наблюдений</dt><dd>${num(checked)}</dd></div><div><dt>Осталось в очереди</dt><dd>${queue}</dd></div></dl>`
+   +(incomplete?'<p class="event-note">Данные за этот период не удалось прочитать. Найденное войдёт в следующий отчёт.</p>'
+    :`<p class="event-note">Повторно использовано: ${num(event.reused)} · отсеяно: ${num(event.screenedOut)} · запросов к TMDB: ${num(event.tmdbCalls)}.</p>${from?`<p class="event-note">Период: с ${from}.</p>`:''}`);
+ }
+ else if(event.type==='discovery'){
   const n=v=>Number.isInteger(v)&&v>=0?v:0,known=Number.isInteger(event.remaining)&&event.remaining>=0,empty=event.queueEmpty===true,added=n(event.added),checked=n(event.checked);
   const title=event.kind==='empty'?'Очередь Discovery пуста'
    :event.status==='superseded'?'Прогон Discovery прерван: вышла новая программа'

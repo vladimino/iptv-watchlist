@@ -179,7 +179,6 @@ const classes={
  'writeLedgerSegment@src/worker.js':'under the publication lease',
  'putKnownLength@src/worker.js':'under the publication lease',
  'writeEvent@src/worker.js':'EPG event log (not a projector input)',
- 'writeDiscoveryEvent@src/worker.js':'Discovery tick entry of the events log (AIR-410): create-only under events/items, after the tick settled; not a projector input',
  'writeWorkflowState@src/discovery-workflow.js':'Workflow record: D1-routed, refused inside a held window by windowHeldGuard',
 };
 const reached=new Set([...writers(chunk),...writers(publication)]);
