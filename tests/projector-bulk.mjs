@@ -242,7 +242,7 @@ async function writeWith(binding,plan,{bulk=null,...options}={}){
  let marker=null;try{const row=binding.sql('SELECT mode,cutover,generation FROM film_person_authority WHERE id=1')[0];if(row)marker={mode:row.mode,cutover:row.cutover,generation:Number(row.generation)};}catch{}
  const bulkOptions=bulk?projector.d1EnrichmentBulkOptions({D1_ENRICHMENT_BULK:'on'},bulk):null;
  if(bulkOptions&&marker)bulkOptions.expectedMarker=marker;
- const result=await projector.d1EnrichmentWrite(adapter,plan,{leaseId,started:Date.now(),queryBudget:1e9,wallMs:1e9,bulk:bulkOptions,...options});
+ const result=await projector.d1EnrichmentWrite(adapter,plan,{leaseId,started:Date.now(),queryBudget:1e9,wallMs:1e9,bulk:bulkOptions,authority:marker||{legacy:true},...options});
  binding.sql("UPDATE projection_run SET lease_id=NULL,lease_until=NULL WHERE projection='enrichment' AND lease_id='"+leaseId+"'");
  return {result,adapter,leaseId};
 }

@@ -4,15 +4,15 @@
 **Original decision date:** 2026-11-11  
 **Recorded at:** 2026-11-11  
 **Approval source:** Owner approval comment of 11 Nov 2026, 12:03 Madrid, on the [AIR-374 card](https://trello.com/c/ha7ais3w)  
-**Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0103](0103-projector-exclusive-window.md), [ADR 0110](0110-film-person-operator-copy-and-accepted-discrepancies.md), [runbook](../runbooks/film-person-open-handoff.md), the ADR titled "Projector marker and generation fence" (decision 1, written in a parallel PR)  
+**Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [ADR 0099](0099-canonical-film-person-d1-authority.md), [ADR 0103](0103-projector-exclusive-window.md), [ADR 0110](0110-film-person-operator-copy-and-accepted-discrepancies.md), [runbook](../runbooks/film-person-open-handoff.md), [ADR 0116](0116-projector-marker-and-generation-fence-on-every-batch.md) (decision 1)  
 **Supersedes:** None. It refines [ADR 0099](0099-canonical-film-person-d1-authority.md) section 6 (recovery paragraph) only within the approved change below; ADR 0099 carries a dated note.  
 **Superseded by:** None
 
-> Numbering note: this number was picked as the next free one at the branch point while the parallel decision-1 ADR was in flight. If the register clashes at review, the Controller renumbers; this number is referenced only in this file, the ADR index row, the dated note in ADR 0099 and the links in the runbook, evidence record and the two architecture/reference pages.
+> Numbering note: decision 1 is now merged as ADR 0116 and is linked by number.
 
 ## Context
 
-The production marker is `prepared`, `open`, generation 1, baseline `verified` ([AIR-373 evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md)). The projector is the only canonical writer; the fenced producers (`src/canonical-producers.js` and the fenced writers) are dormant. The owner answered the open questions of AIR-374 on 11 Nov 2026. This ADR records decisions 2 to 5; decision 1 (the projector checks marker and generation in every real batch, unconditionally, independent of `D1_ENRICHMENT_BULK` and any other flag; the missing historic `canonical_revision` bump does not block readiness, initial revision 0) is recorded in the parallel ADR titled "Projector marker and generation fence". Facts below are read from the repository at `origin/main` 07d3893.
+The production marker is `prepared`, `open`, generation 1, baseline `verified` ([AIR-373 evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md)). The projector is the only canonical writer; the fenced producers (`src/canonical-producers.js` and the fenced writers) are dormant. The owner answered the open questions of AIR-374 on 11 Nov 2026. This ADR records decisions 2 to 5; decision 1 (the projector checks marker and generation in every real batch, unconditionally, independent of `D1_ENRICHMENT_BULK` and any other flag; the missing historic `canonical_revision` bump does not block readiness, initial revision 0) is recorded in [ADR 0116](0116-projector-marker-and-generation-fence-on-every-batch.md). Facts below are read from the repository at `origin/main` 07d3893.
 
 ## Decision
 

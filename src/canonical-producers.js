@@ -5,14 +5,14 @@
 // held and every unreadable marker fail closed and never fall back to R2 (AIR-374 owns the real handoff and each production step).
 // - writerRoute: the one routing decision. Exactly one of the projector and the canonical adapters may write in any state.
 // - projectorFence: the SQL assertion a FUTURE projector batch carries so an in-flight projector batch loses once the marker moves
-//   (a generation mismatch or mode d1 fails its CHECK and rolls the batch back whole). It is the proof of "no overlap"; today's projector
-//   does not include it and is unchanged.
+//   (a generation mismatch or mode d1 fails its CHECK and rolls the batch back whole). It is the proof of "no overlap"; the real projector
+//   carries the same condition from src/film-person-authority.js (AIR-374 P1, ADR 0117), so this module stays dormant and unimported.
 // - plan* functions are pure: they turn the existing producers' data into fenced AIR-367..370 calls, or say why not.
 // - dispatch executes a plan only when the route is canonical; an unknown batch outcome is reported, never blindly retried, and is settled
 //   by readback (the entity revision) and a replay with the same request id.
 // - shadowCompare / handoffReadiness are read-only and bounded. handoffReadiness stays not ready while GAPS lists a producer write that no
 //   fenced mutation covers yet.
-import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced,mutateFilm,mutatePerson} from './canonical-mutations.js';
 import {compareLocalization,recordLocalizationSources} from './localization-sources.js';
 import {admitRatedFilm,retainFilm,verifiedAdmission} from './film-admission.js';
@@ -31,7 +31,8 @@ export const GAPS=Object.freeze([
  'person_dimension rows and Person localization state',
  'localization_conflict rows outside a merge',
  'canonical_identity and original_title overwrite (the fenced write only fills)',
- 'projector revision bumps (the projector does not move canonical_revision)',
+ // AIR-374 P1 / ADR 0117 (owner decision 1): "projector revision bumps" is no longer a readiness blocker. The projector does not write the historic
+ // canonical_revision in prepared (an entity's initial revision is 0); every projector batch instead asserts the marker and generation unconditionally.
 ]);
 const ROLES=new Set(['director','actor']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
@@ -48,12 +49,12 @@ export async function writerRoute(env){
 }
 
 // The statement a projector batch would add after its own fence. Null when there is no marker (legacy): nothing to prove. Otherwise it
-// holds only while the marker is r2 or prepared at the generation the projector read, so a batch that started before a move to open
-// (or any generation change) fails whole.
+// holds only while the marker is the r2 or prepared mode at cutover open and the generation the projector read, so a batch that started before a move to open
+// (or any generation change) fails whole. The condition is the one the real projector carries (src/film-person-authority.js, ADR 0117).
 export function projectorFence(gate){
  if(!gate||gate.state==='legacy')return null;
  if(gate.r2Allowed!==true)throw failed('film_person_not_projector');
- return [fenced.assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode IN ('r2','prepared') AND cutover='open' AND generation=?)"),[gate.generation]];
+ return [fenced.assertSql(PROJECTOR_MARKER_CONDITION),[gate.state,gate.generation]];
 }
 
 // EPG identity and the aliases, trusted ids and credits of the projector's Film entity. The credits are upserts only: no removal, no
