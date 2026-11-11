@@ -12,6 +12,29 @@ assert.match(html,/144 \+ 142 поступило − 4 готово = 282/,'even
 assert.doesNotMatch(html,/Прогнозы обновлены частично/);
 context.partial={...context.latest,stage:'partial',failed:1,reason:'quota'};
 assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет прогнозов прерван/);
+// AIR-410 v2: the hourly report card. Unknown parts are «неизвестно», never 0; every sentence is fixed text chosen by status.
+{
+ const hour={id:'discovery-hour-a30f67e93a11-20261111T10',type:'discovery',kind:'hour',at:'2026-11-11T10:00:00.000Z',from:'2026-11-11T09:00:00.000Z',generation:'a30f67e9',status:'running',reason:null,chunks:2,checked:20,added:3,reused:2,screenedOut:4,touched:0,tmdbCalls:10,queueEmpty:false,remaining:7,incomplete:false,error:null};
+ const card=event=>{context.discoveryEvent=event;return vm.runInContext('eventHTML(discoveryEvent)',context);};
+ let html=card(hour);
+ assert.match(html,/Найдено новых фильмов: 3/);assert.match(html,/<dt>Разобрано наблюдений<\/dt><dd>20<\/dd>/);assert.match(html,/<dt>Осталось в очереди<\/dt><dd>7<\/dd>/);
+ assert.match(html,/Повторно использовано: 2 · отсеяно: 4 · запросов к TMDB: 10/);assert.match(html,/Период: с /);assert.match(html,/data-event-id="discovery-hour-a30f67e93a11-20261111T10"/);
+ html=card({...hour,added:0});assert.match(html,/Новых фильмов не найдено/);assert.match(html,/<dt>Новых фильмов<\/dt><dd>0<\/dd>/,'a proven zero is shown');
+ html=card({...hour,added:0,checked:0,chunks:0});assert.match(html,/Discovery работает, новых результатов за час нет/);
+ html=card({...hour,added:0,checked:0,chunks:0,status:'empty',queueEmpty:true,remaining:0});assert.match(html,/Очередь Discovery пуста/);assert.match(html,/<dd>пуста<\/dd>/);
+ html=card({...hour,added:0,checked:0,status:'idle',remaining:4});assert.match(html,/запуска не требовалось/);assert.doesNotMatch(html,/Очередь Discovery пуста/);
+ html=card({...hour,status:'waiting',reason:'recovery_waiting'});assert.match(html,/Discovery ждёт повтора/);
+ html=card({...hour,status:'blocked',reason:'projector_window'});assert.match(html,/временный отказ/);assert.doesNotMatch(html,/projector_window/,'a reason code is not printed');
+ html=card({...hour,status:'failed',reason:'recovery_exhausted'});assert.match(html,/остановлен после повторных ошибок/);
+ html=card({...hour,added:0,checked:0,remaining:null,queueEmpty:false});assert.match(html,/<dt>Осталось в очереди<\/dt><dd>неизвестно<\/dd>/,'an unknown remainder is not a zero');
+ const unknown=card({...hour,incomplete:true,from:null,chunks:null,checked:null,added:null,reused:null,screenedOut:null,touched:null,tmdbCalls:null,remaining:null,reason:'outbox_full'});
+ assert.match(unknown,/Отчёт за час неполный/);assert.match(unknown,/<dt>Новых фильмов<\/dt><dd>неизвестно<\/dd>/);assert.match(unknown,/<dt>Разобрано наблюдений<\/dt><dd>неизвестно<\/dd>/);assert.doesNotMatch(unknown,/<dd>0<\/dd>/,'an unread period never shows 0');assert.doesNotMatch(unknown,/Новых фильмов не найдено|пуста/);
+ html=card({...hour,added:null,checked:5});assert.match(html,/Отчёт за час неполный/,'a null counter makes the report incomplete');
+ const hostile=card({...hour,id:'discovery-hour-<b>',added:'<img src=x onerror=alert(1)>',checked:'<script>alert(1)</script>',reused:{toString(){return '<i>';}},screenedOut:-5,tmdbCalls:1.5,remaining:'<u>',status:'<svg onload=1>',from:'<s>',error:'<script>'});
+ assert.doesNotMatch(hostile,/<img|<script|<svg|<i>|<u>|<s>|onerror|onload/,'hostile fields never become markup');assert.match(hostile,/data-event-id="discovery-hour-&lt;b&gt;"/);
+ html=card({...hour,from:'not a date'});assert.doesNotMatch(html,/Invalid|NaN/);
+ html=card({...hour,kind:'run',startedAt:'2026-11-10T12:00:00.000Z'});assert.match(html,/Найдено новых фильмов: 3/,'legacy per-chain events keep their card');
+}
 console.log('Activity UI: completed batch, growing queue and partial failure labels passed');
 context.hotEvent={id:'adaptive',type:'enrichment',at:'2026-10-11T17:00:00Z',queueSchemaVersion:3,batchSize:20,added:20,hotRemaining:200,coldRemaining:4000,stage:'complete'};
 const adaptiveHTML=vm.runInContext('eventHTML(hotEvent)',context);assert.match(adaptiveHTML,/Добавлено: 20/);assert.match(adaptiveHTML,/В окне просмотра ждут прогноза: 200/);assert.doesNotMatch(adaptiveHTML,/4000|hash|prompt/i);
