@@ -110,6 +110,19 @@ function leaseName(kind){return kind==='writer'?'writer':'runner';}
 function idleAuthority(version,bindingPresent,domain='absent'){
  return {mode:'r2',tables:false,domain,version,ready:false,binding:bindingPresent,generation:0,queueGeneration:0,profileGeneration:0,writes:null};
 }
+const AUTHORITY_TABLES_SQL="SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")";
+const AUTHORITY_ROW_SQL='SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1';
+// AIR-441. The schema contract, the table list and the authority marker in one batch of reads, the same three statements read in one snapshot. Returns null
+// whenever the batch cannot answer (a table of the domain is missing, the binding has no batch, the answer has another shape), and the caller then
+// asks them one at a time. It never reads anything the stepwise reader did not.
+async function readAuthorityTogether(db){
+ if(!binding(db)||typeof db.batch!=='function')return null;
+ try{
+  const results=await db.batch([db.prepare('SELECT version FROM schema_contract WHERE id=1').bind(),db.prepare(AUTHORITY_TABLES_SQL).bind(),db.prepare(AUTHORITY_ROW_SQL).bind()]);
+  if(!Array.isArray(results)||results.length!==3||results.some(item=>!item||!Array.isArray(item.results)))return null;
+  return {version:results[0].results[0]?.version??null,names:results[1].results.map(row=>row.name),row:results[2].results[0]??null};
+ }catch{return null;}
+}
 export async function readPredictionAuthority(db,env){
  // A local caller that omits the binding and does not set PREDICTION_DB_REQUIRED stays on the objects.
  // The deployed Worker sets that variable. A missing binding, or a bound database with no schema
@@ -121,8 +134,12 @@ export async function readPredictionAuthority(db,env){
   if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
   return idleAuthority(null,false);
  }
+ // One round trip answers the three questions below when the database has the whole domain; any refusal of that batch (a table missing, a binding that
+ // cannot batch) falls back to asking them one at a time, which is the reading, and the classification of its failures, that this function always had.
+ const together=await readAuthorityTogether(db);
  let version;
- try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
+ if(together)version=together.version;
+ else try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
   if(/no such table/i.test(String(error?.message||error))){
    if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
@@ -136,13 +153,15 @@ export async function readPredictionAuthority(db,env){
  }
  if(Number(version)<PREDICTION_CONTRACT)return idleAuthority(version,true);
  let names;
- try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
+ if(together)names=together.names;
+ else try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  const present=TABLES.filter(name=>names.includes(name)).length;
  if(present===0)return idleAuthority(Number(version),true);
  if(present!==TABLES.length)throw failed('prediction_domain_unavailable');
  let row;
- try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1');}
+ if(together)row=together.row;
+ else try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1');}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held'))throw failed('prediction_domain_unavailable');
  return {mode:row.mode,tables:true,domain:'ready',version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
