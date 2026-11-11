@@ -97,6 +97,8 @@ Repeated conflicts across many hours are a finding for the owner. Look in the lo
 3. Read `classes` for the stage that holds the time: `r2:queue` and `d1:*` for the stored queue and the prediction tables, `r2:view_index`, `r2:film_state`, `r2:lease`, `r2:run`.
 4. Group by `step`, by the deploy (`$workers.scriptVersion.id`) and by `notes.selected` or `notes.bodyItems` before taking p50 and p95; a mix of deploys or batch sizes hides the cause.
 
+Since AIR-442 a `next` or `submit` reads the run record, its diagnostics row, the queue and the runner lease once each and writes the view index once per film, so `r2:run`, `r2:lease`, `r2:view_index` and `r2:queue` counts drop against a Worker that predates it: compare only the same step (`next` with `next`, one-film `submit` with one-film `submit`) and the same deploy. The diagnostics row (`run-diagnostics`) is written from the same values as before; its `hotRemaining` and `coldRemaining` come from the queue counters the step last held, not from a separate queue read.
+
 A missing line for a step means the Worker that served it predates the instrument or the step failed before answering. Telemetry is not a stored record: its retention is the platform's (the Observability tool reported a seven-day queryable range on 11 November 2026; confirm it before relying on older runs). The query shape above is the one used for the `epg_phase` events on that date; the first read of a `prediction_step_timing` line is the check that `source` carries the fields described here. No production write or run is needed to read it, and none is authorized by this page.
 
 ## One film without a current prediction

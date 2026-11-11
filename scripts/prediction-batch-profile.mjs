@@ -76,6 +76,8 @@ export async function profile(){
  out.extrapolated=Object.fromEntries([20,50,100,500].map(S=>[S,{executed:S<=20,nextCalls:Math.round(out.fit.nextCallsBySelection.intercept+out.fit.nextCallsBySelection.slope*S),submitCalls:Math.round(out.fit.submitCallsBySelection.intercept+out.fit.submitCallsBySelection.slope*S),nextR2Bytes:Math.round(out.fit.nextBytesBySelection.intercept+out.fit.nextBytesBySelection.slope*S),submitR2Bytes:Math.round(out.fit.submitBytesBySelection.intercept+out.fit.submitBytesBySelection.slope*S)}]));
  return out;
 }
+// The throughput model behind the report's matrix. Its call counts (31 + 2S for `next`, 55 at S = 12) are those of the code of 11 November 2026 before AIR-442, which the production
+// observations calibrate it on; the code now makes 22 + 2S in the first `next` of a run (46 at S = 12; 43 in steady state) and 31 calls per one-film `submit` (before 41), so the model is not a prediction for the current Worker.
 // The throughput model behind the report's matrix. Every input is either a production observation of 11 November 2026 (the AIR-437 run table and
 // the step walls read from Workers Observability) or an assumption named in SCENARIOS; nothing here is measured at Cloudflare for a batch size
 // the API does not accept today, and the quality of a batched model call is not modelled at all, only its time.
