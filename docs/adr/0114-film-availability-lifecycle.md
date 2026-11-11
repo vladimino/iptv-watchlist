@@ -1,4 +1,4 @@
-# ADR 0113: Film availability is one computed lifecycle: available, soon, unavailable
+# ADR 0114: Film availability is one computed lifecycle: available, soon, unavailable
 
 **Status:** Proposed (the product rules were approved by the owner on 2026-11-11 on the cards below; acceptance of this ADR, and of the one reading choice marked in Decision 6, is pending)  
 **Original decision date:** 2026-11-11 (owner's product rules); technical contract recorded the same day  

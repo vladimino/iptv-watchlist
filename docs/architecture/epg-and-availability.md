@@ -27,7 +27,7 @@ flowchart TD
 
 ## Film availability lifecycle
 
-On the published shows a film is, at every instant, in one of three states ([ADR 0113](../adr/0113-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is computed from the shows, never stored. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the END of the show.
+On the published shows a film is, at every instant, in one of three states ([ADR 0114](../adr/0114-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is computed from the shows, never stored. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the END of the show.
 
 ```mermaid
 stateDiagram-v2
