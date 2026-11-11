@@ -244,6 +244,9 @@ html.film-screen .page-heading,html.film-screen .demo-note,html.film-screen .sea
 .finds-card .film-head{padding:17px 118px 15px 17px;gap:15px;min-height:0}
 .finds-poster{position:relative;flex:none}
 .finds-badge{position:absolute;top:-6px;left:-6px;z-index:1;padding:3px 7px;border-radius:5px;background:var(--lime);color:#17241b;font-size:10px;font-weight:800;letter-spacing:.08em;box-shadow:0 2px 6px #0006}
+.poster-frame{position:relative;flex:none}
+#film-poster{position:relative;width:max-content;max-width:100%}
+.soon-badge{position:absolute;top:-6px;right:-6px;z-index:1;display:grid;place-items:center;width:26px;height:26px;border-radius:50%;border:1px solid #6d8ba6;background:var(--blue);color:#14202b;box-shadow:0 2px 6px #0006}.soon-badge svg{display:block;flex:none}
 .finds-card .film-info h3{font-size:19px;margin:2px 0 4px;display:block}
 .finds-labels{padding:0 17px 10px}
 .finds-match{margin:0;padding:0 17px 8px;font-size:12px;color:#9fd3ad}

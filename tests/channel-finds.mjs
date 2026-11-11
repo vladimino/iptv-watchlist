@@ -1,3 +1,4 @@
+import {scoped} from '../scripts/bundle-scope.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -12,6 +13,7 @@ assert.doesNotMatch(app,/\$\('#empty'\)\.hidden=visible\.length>0\|\|!valid;/,'t
 const node=()=>({hidden:true,textContent:'',innerHTML:''});
 const nodes={'#finds':node(),'#finds-cards':node(),'#finds-caption':node(),'#finds-title':{...node(),textContent:'Находки'},'#watchlist-title':node(),'#empty':node()};
 const ui=vm.createContext({Date,Intl,Set,Map,console,document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ui);
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 // The programme window is the usual (now − 72h, now + 24h) envelope; the catalog answer is for the same generation.
 vm.runInContext(`viewClock=${now};report={runId:'G1',films:[],window:{from:${now-72*hour},to:${now+24*hour}},cutoff:${now}};`,ui);
@@ -39,7 +41,7 @@ assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),['tmdb_4','tmdb_1','t
 scope(['Один']);
 assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),['tmdb_1','tmdb_3'],'a film shown only on another channel is not a find on this one');
 assert.equal(run('findsAiring(input,now).kind',catalog[2]),'next');
-assert.match(run('findsAiring(input,now).text',catalog[2]),/ · Один$/,'the relevant show is on the selected channel');
+assert.match(run('findsAiring(input,now).text',catalog[2]),/ · Один · архив появится после /,'the relevant show is on the selected channel');
 assert.doesNotMatch(run('findsCard(input,now)',catalog[2]),/Два/,'the other channel never appears on the card');
 
 // Two channels combine with OR and never show one film twice.
@@ -53,9 +55,10 @@ scope(['Один','Два'],'archive');
 assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),['tmdb_1','tmdb_3'],'archive keeps started shows only');
 assert.match(run('findsAiring(input,now).text',catalog[2]),/^Архив · Два · до /,'in archive the catch-up show on the selected channel is the relevant one');
 scope(['Один','Два'],'future');
-assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),['tmdb_2','tmdb_3'],'future keeps upcoming shows only');
-assert.match(run('findsAiring(input,now).text',catalog[2]),/ · Один$/);
+assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),['tmdb_2'],'«Скоро» keeps films with no ready archive: a film with an archive on Два and a repeat on Один is available, not soon');
+assert.match(run('findsAiring(input,now).text',catalog[2]),/^Архив · Два · до /,'with both channels the film has a ready archive, so the line names it, not the repeat');
 scope(['Один'],'future');
+assert.match(run('findsAiring(input,now).text',catalog[2]),/ · Один · архив появится после /,'on Один alone it is only a show ahead');
 assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),['tmdb_3'],'channel and period together');
 scope(['Три'],'future');
 assert.deepEqual(ids(run('buildFinds(input,now)',catalog)),[],'an empty intersection is empty, not filled from another channel or period');

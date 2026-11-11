@@ -1,3 +1,4 @@
+import {scoped} from '../scripts/bundle-scope.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -11,6 +12,7 @@ const node=()=>({hidden:true,textContent:'',innerHTML:''});
 const nodes={'#finds':node(),'#finds-cards':node(),'#finds-caption':node(),'#finds-title':{...node(),textContent:'Находки'},'#finds-notice':node(),'#watchlist-title':node(),'#empty':node()};
 let fetches=0;
 const ui=vm.createContext({Date,Intl,Set,Map,URL,Promise,console,fetch:async()=>{fetches++;throw new Error('no network in this test');},document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ui);
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 vm.runInContext(`viewClock=${now};report={runId:'G1',films:[],window:{from:${now-72*hour},to:${now+24*hour}},cutoff:${now}};MAX_YEAR=2026;`,ui);
 ui.now=now;

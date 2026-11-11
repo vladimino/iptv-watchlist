@@ -306,6 +306,26 @@ assert.deepEqual(puts,[]);
  seed();records.get('epg/discovered-films.json').tmdb_15.runtime=null;records.get('epg/generations/'+G1+'/discovered-films.json').tmdb_15.runtime=null;
  setCatalogShows('tmdb_15',[{channelId:'c1',channel:'One',start:now+3*hour}]);r=await get();f=by('tmdb_15');
  assert.deepEqual([f.shows[0].status,f.availability.state,f.availability.appearsAt,f.availability.appearsAtKnown,f.availability.appearsAtEstimated],['future','soon',null,false,null]);
+ // AIR-435: the browser reads the same lifecycle through the same module, so for every catalog entry the client's film state, expected archive time and
+ // archive end, and every show status equal what the Worker returned (this is the Finds / server parity: no entry is «Архив» on one side and «Скоро» on the other).
+ {
+  const html=fs.readFileSync('public/index.html','utf8'),app=fs.readFileSync('public/app.js','utf8');
+  const nodes={};const ui=vm.createContext({Date,Intl,Set,Map,console,document:{querySelector:()=>nodes['x']||null,querySelectorAll:()=>[]}});
+  vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ui);vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
+  setCatalogShows('tmdb_7',[show(now-3*hour),show(now+2*hour,{channelId:'c2',channel:'Two'})]);
+  setCatalogShows('tmdb_15',[show(now+23*hour,{end:now+25*hour})]);
+  setCatalogShows('tmdb_18',[{channelId:'c1',channel:'One',start:now-30*min}]);          // on air by the film runtime
+  r=await get();
+  vm.runInContext(`viewClock=${Date.now()}`,ui);
+  assert.ok(r.body.films.length>=3);
+  for(const item of r.body.films){
+   ui.input=item;const client=vm.runInContext('filmAvail(input,viewClock)',ui);
+   assert.deepEqual([client.state,client.appearsAt,client.appearsAtKnown,client.appearsAtEstimated,client.archiveUntil,client.onAir],[item.availability.state,item.availability.appearsAt,item.availability.appearsAtKnown,item.availability.appearsAtEstimated,item.availability.archiveUntil,item.availability.onAir],'client and server agree on '+item.id);
+   assert.equal(item.availableNow,client.state==='available',item.id);
+   assert.deepEqual(item.shows.map(entry=>vm.runInContext(`FilmAvailability.showPhase({start:${entry.start},end:${entry.end}},viewClock,{runtimeMinutes:${item.runtime}}).phase`,ui)),item.shows.map(entry=>entry.status),'every show status agrees on '+item.id);
+  }
+  assert.equal(r.body.films.find(f=>f.id==='tmdb_18').availability.state,'soon');
+ }
  // availableNow always agrees with the film-level state, and every status is one of the five
  seed();r=await get();
  for(const item of r.body.films){assert.equal(item.availableNow,item.availability.state==='available',item.id);assert.equal(item.availableUntil!==null,item.availableNow,item.id);for(const s of item.shows)assert.ok(['future','on_air','archive','expired','unknown'].includes(s.status),item.id);}

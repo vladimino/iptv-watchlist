@@ -1,3 +1,4 @@
+import {scoped} from '../scripts/bundle-scope.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -29,6 +30,7 @@ assert.doesNotMatch(app,/finds-card[^`]*film-open/,'a find never opens the watch
 
 const nodes={'#finds':{hidden:true},'#finds-cards':{innerHTML:''},'#finds-caption':{textContent:''}};
 const ui=vm.createContext({Date,Intl,Set,Map,console,document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ui);
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 vm.runInContext(`viewClock=${now}`,ui);
 ui.now=now;
@@ -93,17 +95,18 @@ assert.equal(run('franchiseKey(input)',{original:'Mission: Impossible 2'}),'miss
 assert.notEqual(run('franchiseKey(input)',{original:'Apollo 13'}),run('franchiseKey(input)',{original:'Apollo'}),'a two-digit title number is not stripped as a sequel marker when it is the only number');
 
 // Airing line.
-assert.equal(run('findsAiring(input,now).text',film('tmdb_61',61,'Эфир',4.5,.9,'high',[show(-1,'Первый')])),'Сейчас в эфире · Первый');
+assert.match(run('findsAiring(input,now).text',film('tmdb_61',61,'Эфир',4.5,.9,'high',[show(-1,'Первый')])),/^Сейчас в эфире · Первый · архив появится после /);
 assert.equal(run('findsAiring(input,now).kind',film('tmdb_62',62,'Скоро',4.5,.9,'high',[show(5,'Второй')])),'next');
-assert.match(run('findsAiring(input,now).text',film('tmdb_62',62,'Скоро',4.5,.9,'high',[show(5,'Второй')])),/ · Второй$/);
+assert.match(run('findsAiring(input,now).text',film('tmdb_62',62,'Скоро',4.5,.9,'high',[show(5,'Второй')])),/ · Второй · архив появится после /);
 assert.match(run('findsAiring(input,now).text',film('tmdb_63',63,'Архив',4.5,.9,'high',[show(-30,'Третий')])),/^Архив · Третий · до /);
-assert.equal(run('findsAiring(input,now).kind',film('tmdb_64',64,'Приоритет эфира',4.5,.9,'high',[show(-30,'Третий'),show(-1,'Первый'),show(3,'Второй')])),'live','a live show wins over catch-up and future');
+assert.equal(run('findsAiring(input,now).kind',film('tmdb_64',64,'Приоритет эфира',4.5,.9,'high',[show(-30,'Третий'),show(-1,'Первый'),show(3,'Второй')])),'catchup','a ready archive wins over a live show and a future repeat (AIR-435: archive first)');
+assert.equal(run('findsAiring(input,now).kind',film('tmdb_64',64,'Приоритет эфира',4.5,.9,'high',[show(-1,'Первый'),show(3,'Второй')])),'live','with no archive a live show is named before a future one');
 
 // Card markup: NEW on the poster, the usual title, year, poster, prediction, at most two labels, the airing, a TMDB link instead of the watchlist film route.
 const rich=film('tmdb_71',71,'Богатый',4.7,.82,'high',[show(-1,'Первый')],{original:'Rich Film',poster:'https://img.example/p.jpg',mechanics:['heist','investigation'],moods:['tense','dark'],genres:['Триллер','Драма']});
 const card=run('findsCard(input,now)',rich);
 assert.match(card,/^<article class="finds-card" data-finds-film="tmdb_71">/);
-assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span><img class="poster" src="https:\/\/img.example\/p.jpg"/);
+assert.match(card,/<div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW<\/span>(?:<span class="soon-badge"[^>]*>[\s\S]*?<\/span>)?<img class="poster" src="https:\/\/img.example\/p.jpg"/);
 assert.match(card,/score-predicted[^>]*><span>ПРОГНОЗ<\/span><strong>4\.7<\/strong><small>82% на 4\.0\+<\/small>/);
 assert.match(card,/<h3><a class="film-open" href="\/film\/tmdb_71" data-film-id="tmdb_71">Богатый<\/a><a class="letterboxd-link"/,'AIR-387: the title opens the internal film page, then the icon');
 assert.doesNotMatch(card,/themoviedb\.org|finds-title-link|<button/,'AIR-387: the title never jumps to TMDB');
@@ -156,7 +159,7 @@ assert.match(card,/<p class="original">Rich Film<\/p>/);
 assert.match(card,/<span class="film-year">2020 · 100 мин<\/span>/);
 assert.match(card,/<div class="film-tags">Триллер · Драма<\/div>/);
 assert.match(card,/<div class="film-moods finds-labels"><span>Ограбление<\/span><span>Напряжённый<\/span><\/div>/,'one mechanic and one mood, two labels at most');
-assert.match(card,/<p class="finds-airing" data-airing="live">Сейчас в эфире · Первый<\/p>/);
+assert.match(card,/<p class="finds-airing" data-airing="live">Сейчас в эфире · Первый · архив появится после [^<]+<\/p>/);
 assert.doesNotMatch(card,/data-started-id|Последний шанс/,'no started or last-chance controls on a find');
 assert.equal((card.match(/data-film-id=/g)||[]).length,1,'the title link is the only film opener');
 const bare=run('findsCard(input,now)',{...film('tmdb_72',72,'Голый',4.0,.7,'medium',[show(-30)],{fingerprint:null,moods:[]}),url:null,poster:null,runtime:null,genres:[]});
