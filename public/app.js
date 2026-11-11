@@ -73,7 +73,9 @@ function blackZone(){const model=viewingWindow();return !!model?.envelope&&model
 // Old links and saved presets used `period=future` (the former «Следующие сутки») and `shortlist=today`/`now`: they are normalised, never rejected.
 function normalizePeriod(value){return value==='all'||value==='archive'?value:value==='soon'||value==='future'?'soon':null;}
 function normalizeShortlistMode(value){return value==='soon'||value==='today'?'soon':'available';}
-function inSelectedScope(film,period=state.period){if(periodShows(film,period).length>0)return true;if(periodShows(film,'all').length>0)return false;if(blackZone()&&!state.lastChanceOnly)return true;return !!state.includeUnscheduled;}
+// A film with no show in the window is listed only under «Все показы» and only when «включить без показа» is on; it is never an archive or a soon film. The black zone keeps
+// listing the watchlist under every tab (its counters stay 0, see `countedScope`).
+function inSelectedScope(film,period=state.period){if(periodShows(film,period).length>0)return true;if(periodShows(film,'all').length>0)return false;if(blackZone()&&!state.lastChanceOnly)return true;return (normalizePeriod(period)||'all')==='all'&&!!state.includeUnscheduled;}
 function countedScope(film,period){if(blackZone()&&period!=='all')return periodShows(film,period).length>0;return inSelectedScope(film,period);}
 function parseSearchScopes(value){
  if(value==null||!String(value).trim())return defaultSearchScopes();
@@ -621,8 +623,20 @@ function updateFacetOptions(){
 }
 function storedExecution(film){const value=filmEnrichmentItem(film).fingerprint?.execution;return value&&typeof value==='object'?value:null;}
 function matchesExecution(film){const stored=storedExecution(film);for(const dimension of EXECUTION_FILTERS){const selected=state.execution[dimension.id];if(!selected?.size)continue;if(!selected.has(stored?.[dimension.id]))return false;}return true;}
-function scopedChannels(film){return new Set(periodShows(film).map(show=>show.channel).filter(Boolean));}
-function matchesChannels(film){if(!state.channels?.size)return true;const names=scopedChannels(film);return [...state.channels].some(channel=>names.has(channel));}
+// The channels a film can be picked by in the current period: those whose OWN shows give the film that period's state (a channel that carries only a repeat of an
+// archive film belongs to «Скоро», not to «Архив»). Used for the channel options and their counts; it never constrains the counters.
+function scopedChannels(film){
+ const p=normalizePeriod(state.period)||'all',names=new Set(),now=viewingClock();
+ for(const show of findsWindowShows(film,now,null)){
+  const name=typeof show.channel==='string'?show.channel.trim():'';if(!name||names.has(name))continue;
+  const kind=filmLifecycle(film,now,new Set([name])).avail?.state;
+  if(kind==='available'&&p!=='soon'||kind==='soon'&&p!=='archive')names.add(name);
+ }
+ return names;
+}
+// The channel constraint does not depend on the selected period: a film passes when it has a show on a selected channel in the window (the lifecycle over those shows is not
+// «Недоступно»). The period then picks the archive or the soon part of that same set, so the three counters are fixed by the filters and never by the tab.
+function matchesChannels(film){if(!state.channels?.size)return true;return periodShows(film,'all').length>0;}
 function filmsMatching(except){
  const backup={genres:state.genres,mechanics:state.mechanics,moods:state.moods,channels:state.channels,execution:state.execution};
  if(except==='genres')state.genres=new Set();
@@ -722,11 +736,13 @@ function updateExecutionOptions(){
  if(typeof box.querySelectorAll==='function')box.querySelectorAll('input').forEach(input=>{input.checked=!!state.execution[input.dataset.execution]?.has(input.value);});
 }
 function eligible(film) { const parsed=searchTokens(state.query); const matched=searchRank(film,parsed.normalized,parsed.tokens)!==null; const prediction=enrichment.films[String(film.id)]?.prediction,facets=filmFacets(film); return matched && (state.viewing==='any'||ratingsLoaded&&((state.viewing==='rewatch')===hasActualRating(film))) && (state.minPrediction===null||Number.isFinite(prediction?.predictedRating)&&prediction.predictedRating>=state.minPrediction) && (state.minProbability===null||Number.isFinite(prediction?.probability4Plus)&&prediction.probability4Plus>=state.minProbability) && (!state.startedOnly||startedIds.has(String(film.id))) && (!state.lastChanceOnly||isLastChance(film)) && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && ((film.year >= state.from && film.year <= state.to)||(!film.year&&state.from===1900&&state.to===MAX_YEAR)) && (state.maxRuntime===null||(Number(film.runtime)>0&&Number(film.runtime)<=state.maxRuntime)) && (!state.genres.size || film.genres.some(g => state.genres.has(g))) && (!state.mechanics.size||[...state.mechanics].some(m=>facets.mechanics.has(m))) && (!state.moods.size||[...state.moods].some(m=>facets.moods.has(m))) && matchesChannels(film) && matchesExecution(film); }
-// The lifecycle of a film at the viewing clock over all its shows inside the product windows and the loaded programme (`findsWindowShows` and the envelope: none in the black zone). `archive` holds
-// the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the film state comes only from `filmAvail`.
-function filmLifecycle(film,now=viewingClock()){
+// The lifecycle of a film at the viewing clock over its shows inside the product windows and the loaded programme (`findsWindowShows` and the envelope: none in the black zone),
+// restricted to the SELECTED channels when there are any (as the Finds do): a recording on another channel is not an archive for a viewer who chose this channel, and a
+// repeat on the chosen channel is the only show there. `archive` holds the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the
+// film state comes only from `filmAvail`. `channels` overrides the selection (an empty or absent set means every channel).
+function filmLifecycle(film,now=viewingClock(),channels=state.channels){
  const lib=availabilityLib();if(!lib||!film)return {avail:null,archive:[],ahead:[]};
- const model=viewingWindow(now),shows=findsWindowShows(film,now,null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
+ const model=viewingWindow(now),shows=findsWindowShows(film,now,channels?.size?{channels}:null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
  for(const show of shows){const info=lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}),phase=info.phase;if(phase==='archive')archive.push(show);else if(phase==='on_air'||phase==='future')ahead.push({...show,effectiveEnd:info.end});}
  return {avail,archive,ahead};
 }
