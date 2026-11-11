@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const hour=3600000;
@@ -35,6 +36,7 @@ const live=vm.createContext({
  },
  fetch(url,options){fetches.push({url:String(url),method:options?.method||'GET'});throw new Error('film page render must not fetch');},
 });
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),live);
 vm.runInContext(source,live);
 const run=code=>vm.runInContext(code,live);
 run(`viewClock=${clock};CUTOFF=${clock};WINDOW_START=${clock-72*hour};WINDOW_END=${clock+24*hour};report={window:{from:${clock-72*hour},to:${clock+24*hour}},updatedAt:'2026-10-24T12:00:00Z',people:{directors:[{id:'d1',name:'Манн'}],actors:[{id:'a1',name:'Де Ниро'}]}};urlReady=true`);
@@ -111,14 +113,15 @@ assert.match(actions,/Просмотр начат/);
 assert.doesNotMatch(actions,/Начал просмотр/);
 assert.equal(actions.indexOf('letterboxd-link')<actions.indexOf('</a>'),true);
 assert.ok(actions.indexOf('data-started-id')>actions.indexOf('</a>'));
-assert.doesNotMatch(availability,/<details\b|<summary\b/);
-assert.match(availability,/Осталось показов <strong>3<\/strong>/);
-assert.match(availability,/Ближайший показ/);
+assert.doesNotMatch(availability,/Осталось показов|Ближайший показ|Сейчас в эфире|film-callouts|film-nearest/,'no counter and no nearest panel');
+assert.match(availability,/data-availability="available"/);
+assert.match(availability,/>Доступно<\/span>/);
+assert.match(availability,/Архив доступен до/);
 assert.doesNotMatch(availability,/Последний шанс/);
-assert.equal((availability.match(/data-channel=/g)||[]).length,4,'nearest summary plus every open showing');
+assert.equal((availability.match(/data-channel=/g)||[]).length,3,'every showing once, no repeated channel line');
+assert.match(availability,/<details class="more"><summary>Ещё 1 показ<\/summary>/,'the second repeat is folded');
 assert.doesNotMatch(availability,/Старый|Граница/);
-assert.match(availability,/Архив/);
-assert.match(availability,/Доступно до/);
+assert.ok(availability.indexOf('is-archive')<availability.indexOf('is-future'),'the archive group comes before the repeat');
 const list=availability.slice(availability.indexOf('film-show-list'));
 const rows=[...list.matchAll(/datetime="([^"]+)"/g)].map(match=>match[1]);
 assert.deepEqual(rows,[...rows].sort(),'the full list stays in start order');
@@ -132,7 +135,8 @@ assert.match(query('#film-screen-score').innerHTML,/Оценка Letterboxd не
 assert.doesNotMatch(query('#film-screen-score').innerHTML,/Совпадает со вкусом|Основной риск|film-why/);
 assert.match(query('#film-screen-synopsis').innerHTML,/Синопсис не сохранён/);
 assert.match(query('#film-screen-availability').innerHTML,/Последний шанс/);
-assert.match(query('#film-screen-availability').innerHTML,/Осталось показов <strong>1<\/strong>/);
+assert.doesNotMatch(query('#film-screen-availability').innerHTML,/Осталось показов/);
+assert.equal((query('#film-screen-availability').innerHTML.match(/data-channel=/g)||[]).length,1,'one show, one line');
 assert.match(query('#film-poster').innerHTML,/no-poster/);
 assert.equal(fetches.length,0);
 
@@ -146,8 +150,7 @@ assert.match(query('#film-screen-score').innerHTML,/Прогноз ещё не �
 assert.doesNotMatch(query('#film-screen-score').innerHTML,/Совпадает со вкусом|Основной риск|film-why/);
 assert.match(query('#film-screen-score').innerHTML,/Оценка Letterboxd не сохранена/);
 assert.match(query('#film-screen-availability').innerHTML,/Нет показов в текущем окне/);
-assert.match(query('#film-screen-availability').innerHTML,/Осталось показов <strong>0<\/strong>/);
-assert.match(query('#film-screen-availability').innerHTML,/Срок доступности не определён/);
+assert.match(query('#film-screen-availability').innerHTML,/>Недоступно<\/span>/);
 assert.equal(query('#film-screen-original').textContent,'');
 assert.equal(fetches.length,0);
 
@@ -176,13 +179,14 @@ const liveNow={id:'live-1',title:'Прямой эфир',original:'Live',year:20
 live.liveNow=liveNow;
 run(`films.push(liveNow);filmScreen='live-1';renderFilmShell()`);
 const onAir=query('#film-screen-availability').innerHTML;
-assert.match(onAir,/Сейчас в эфире/);
-assert.match(onAir,/Следующий показ/);
-assert.ok(onAir.indexOf('Сейчас в эфире')<onAir.indexOf('Следующий показ'));
-assert.match(onAir,/data-channel="Эфир"/);
+assert.doesNotMatch(onAir,/Сейчас в эфире|Следующий показ|Ближайший показ|film-callouts/,'no nearest panel');
+assert.match(onAir,/data-availability="soon"/,'a show on air with no archive is only soon');
+assert.match(onAir,/Архив появится после/,'the archive time is the end of the show');
+assert.match(onAir,/В эфире до /);
+assert.doesNotMatch(onAir,/Архив доступен до/,'a live show is not a ready archive');
+assert.equal((onAir.match(/data-channel="Эфир"/g)||[]).length,1);
 assert.match(onAir,/data-channel="Повтор"/);
-assert.match(onAir,/is-live/);
-assert.match(onAir,/is-next/);
+assert.match(onAir,/is-on-air/);
 const listed=onAir.slice(onAir.indexOf('film-show-list'));
 assert.ok(listed.indexOf('Эфир')>=0&&listed.indexOf('Повтор')>listed.indexOf('Эфир'));
 

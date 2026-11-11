@@ -805,7 +805,6 @@ function evidenceConfidenceHtml(value,fingerprintHash){
 function filmWhy(prediction){if(!prediction||!Number.isFinite(prediction.predictedRating))return '';const signals=(Array.isArray(prediction.matchSignals)?prediction.matchSignals:[]).filter(item=>typeof item==='string'&&item.trim()).slice(0,3).map(item=>item.trim());const risk=typeof prediction.mainRisk==='string'?prediction.mainRisk.trim():'';if(!signals.length&&!risk)return '';const signalText=signals.length<2?escapeHTML(signals[0]||''):signals.length===2?`${escapeHTML(signals[0])} и ${escapeHTML(signals[1])}`:`${signals.slice(0,-1).map(item=>escapeHTML(item)).join(', ')} и ${escapeHTML(signals.at(-1))}`;return `<div class="film-why">${signals.length?`<p><span>Совпадает со вкусом</span> ${signalText}</p>`:''}${risk?`<p><span>Основной риск</span> ${escapeHTML(risk)}</p>`:''}</div>`;}
 function setFilmHtml(id,html){const node=$('#'+id);if(node)node.innerHTML=html;}
 function availableShows(film,now=viewingClock()){const model=viewingWindow(now);return (film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show))).sort((a,b)=>a.start-b.start||String(a.channel||'').localeCompare(String(b.channel||''),'ru'));}
-function nearestAvailable(shows,now){const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now),upcoming=shows.find(show=>show.start>now);if(live&&upcoming)return {show:live,also:upcoming,label:'Сейчас в эфире',nextLabel:'Следующий показ'};if(live)return {show:live,label:'Сейчас в эфире'};if(upcoming)return {show:upcoming,label:'Ближайший показ'};return shows.length?{show:shows[shows.length-1],label:'Последний доступный показ'}:null;}
 // A catalog page carries its own current prediction and fingerprint (null when none is current); a watchlist film reads the view index.
 function filmItem(film){return film?.catalogRoute?{prediction:film.prediction||undefined,fingerprint:film.fingerprint||undefined,moodIds:film.fingerprint?.moodIds}:filmEnrichmentItem(film);}
 function filmScore(film){const item=filmItem(film),actual=item.actualRating,prediction=item.prediction;const rating=actual!==null&&actual!==undefined&&Number.isFinite(Number(actual))?`<article class="film-score-card"><span>Оценка Letterboxd</span><strong>${Number(actual).toFixed(1)}</strong></article>`:`<article class="film-score-card is-empty"><span>Оценка Letterboxd</span><p class="film-missing">Оценка Letterboxd не сохранена</p></article>`;const forecast=prediction&&Number.isFinite(prediction.predictedRating)?(()=>{const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'',confidence=confidenceText(prediction.confidence),assessed=evidenceConfidenceHtml(prediction.confidenceAssessment,prediction.fingerprintHash),model=confidence?(assessed?`уверенность модели ${escapeHTML(confidence)}`:`уверенность ${escapeHTML(confidence)}`):'';return `<article class="film-score-card"><span>Прогноз</span><strong>${Number(prediction.predictedRating).toFixed(1)}</strong><p>${chance?`<span>шанс 4.0+ ${chance}</span>`:''}${model?`<span>${model}</span>`:''}${prediction.stale?'<span>ожидает пересчёта</span>':''}</p>${assessed}</article>`;})():'<article class="film-score-card is-empty"><span>Прогноз</span><p class="film-missing">Прогноз ещё не готов</p></article>';return `<section class="film-score" aria-label="Оценка и прогноз"><div class="film-score-row">${forecast}${film.catalogRoute?'':rating}</div>${filmWhy(prediction)}</section>`;}
@@ -822,10 +821,50 @@ function showFacetValue(text){const value=String(text||'');return value?value.ch
 function savedForecast(film){const prediction=enrichment.films?.[String(film?.id)]?.prediction;if(!prediction||!Number.isFinite(prediction.predictedRating))return null;const chance=Number.isFinite(prediction.probability4Plus)?`${Math.round(prediction.probability4Plus*100)}%`:'';return `${Number(prediction.predictedRating).toFixed(1)}${chance?` · ${chance}`:''}`;}
 function filmCompare(film){if(!filmCompareId)return '<p class="film-missing">Выбери другой фильм из загруженной программы. Это сравнение сохранённых характеристик, не подбор похожих.</p>';if(String(filmCompareId)===String(film.id))return '<p class="film-missing">Это тот же фильм. Для сравнения нужен другой.</p>';const other=films.find(item=>String(item.id)===String(filmCompareId));if(!other)return '<p class="film-missing">Этого фильма нет в загруженной программе.</p>';const left=storedComparable(film),right=storedComparable(other);if(left.empty)return '<p class="film-missing">У этого фильма нет сохранённых характеристик для сравнения.</p>';if(right.empty)return `<p class="film-missing">У «${escapeHTML(other.title)}» нет сохранённых характеристик для сравнения.</p>`;const sharedMechanics=left.mechanics.filter(id=>right.mechanics.includes(id)),sharedMoods=left.moods.filter(id=>right.moods.includes(id));const rows=[];for(const dimension of EXECUTION_FILTERS){const a=left.execution.get(dimension.id),b=right.execution.get(dimension.id);if(!a&&!b)continue;const scale=EXECUTION_RANK[dimension.id];let markA='',markB='',kind='is-gap';if(a&&b){kind=a===b?'is-same':'is-diff';if(scale&&a!==b){const higher=scale.indexOf(a)>scale.indexOf(b);if(scale.includes(a)&&scale.includes(b)){markA=higher?'лучше':'хуже';markB=higher?'хуже':'лучше';}}}rows.push({label:dimension.label,a:a?showFacetValue(EXECUTION_VALUES[dimension.id][a]):'',b:b?showFacetValue(EXECUTION_VALUES[dimension.id][b]):'',markA,markB,kind});}const canMechanics=left.mechanics.length&&right.mechanics.length,canMoods=left.moods.length&&right.moods.length,forecastA=savedForecast(film),forecastB=savedForecast(other);if(!canMechanics&&!canMoods&&!rows.length&&!forecastA&&!forecastB)return '<p class="film-missing">Сравнить нельзя: у фильмов нет общих групп сохранённых характеристик. Неизвестные значения не считаются различием.</p>';const chips=(ids,label)=>ids.map(id=>`<span class="film-compare-chip">${escapeHTML(label(id))}</span>`).join('');const blocks=[];if(canMechanics)blocks.push(`<div class="film-compare-block"><h3>Общая механика</h3>${sharedMechanics.length?`<div class="film-chips">${chips(sharedMechanics,id=>MECHANIC_LABELS[id])}</div>`:'<p class="film-missing">Общих механик нет</p>'}</div>`);if(canMoods)blocks.push(`<div class="film-compare-block"><h3>Общее настроение</h3>${sharedMoods.length?`<div class="film-chips">${chips(sharedMoods,moodLabel)}</div>`:'<p class="film-missing">Общих настроений нет</p>'}</div>`);const rankClass=mark=>mark==='лучше'?' is-better':mark==='хуже'?' is-worse':'';const cell=(value,mark)=>`<td>${value?`${escapeHTML(value)}${mark?`<small class="film-compare-rank${rankClass(mark)}">${mark}</small>`:''}`:'нет данных'}</td>`;const forecastCell=value=>value?`<td><strong class="film-compare-score">${escapeHTML(value)}</strong></td>`:'<td class="is-missing">нет данных</td>';const forecast=forecastA||forecastB?`<tr class="film-compare-forecast"><th scope="row">Мой прогноз</th>${forecastCell(forecastA)}${forecastCell(forecastB)}</tr>`:'';const body=rows.map(row=>`<tr class="${row.kind}"><th scope="row">${escapeHTML(row.label)}</th>${cell(row.a,row.markA)}${cell(row.b,row.markB)}</tr>`).join('');const matrix=forecast||body?`<table class="film-compare-matrix"><thead><tr><th scope="col">Характеристика</th><th scope="col">${escapeHTML(filmCompareLabel(film))}</th><th scope="col"><button type="button" class="film-compare-open" data-compare-open="${escapeHTML(String(other.id))}">${escapeHTML(filmCompareLabel(other))}</button></th></tr></thead><tbody>${forecast}${body}</tbody></table>`:'';return `<div class="film-compare-body">${blocks.join('')}${matrix}</div>`;}
 
-function filmShowMark(show,nearest){if(!nearest)return '';if(show.start===nearest.show.start&&show.channel===nearest.show.channel)return nearest.label==='Сейчас в эфире'?' is-live':' is-nearest';if(nearest.also&&show.start===nearest.also.start&&show.channel===nearest.also.channel)return ' is-next';return '';}
-function filmShowRow(show,nearest){const time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(new Date(show.start));return `<div class="show-row${filmShowMark(show,nearest)}">${channelControl(show)}<time class="show-time" datetime="${new Date(show.start).toISOString()}">${madridStamp(show.start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
-function filmNowLine(kind,show){return `<p class="film-nearest"><span>${kind}</span> ${channelControl(show)}<time datetime="${new Date(show.start).toISOString()}">${escapeHTML(madridStamp(show.start))}</time></p>`;}
-function filmAvailability(film){const now=viewingClock(),shows=availableShows(film,now),until=availabilityTime(film,now),nearest=nearestAvailable(shows,now),untilText=until?madridStamp(until):'';const facts=`<div class="film-facts">${isLastChance(film,now)?lastChanceBadge(film):''}<p class="film-fact">Осталось показов <strong>${shows.length}</strong></p>${untilText?`<p class="film-fact">Доступно до <time datetime="${new Date(until).toISOString()}">${escapeHTML(untilText)}</time></p>`:'<p class="film-missing">Срок доступности не определён</p>'}</div>`;const calls=nearest?`<div class="film-callouts">${filmNowLine(nearest.label,nearest.show)}${nearest.also?filmNowLine(nearest.nextLabel,nearest.also):''}</div>`:'';const list=shows.length?`<div class="film-show-list">${shows.map(show=>filmShowRow(show,nearest)).join('')}</div>`:'<p class="film-missing">Нет показов в текущем окне программы</p>';return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2><div class="film-availability-summary">${facts}${calls}</div>${list}</section>`;}
+// AIR-436: the film page «Показы» block. State and per-show phases come only from the shared lifecycle (ADR 0114): `filmAvail` for the film and
+// `FilmAvailability.showPhase` for each show, both with the film runtime. The block lists the shows the programme window still holds (`availableShows`) and reads the
+// state of exactly those, so the pill never contradicts its own list. It claims no archive from `start <= now` alone, and the «до» of an archive is the 72 h counted from
+// the show START; an expected archive time is a schedule-based calculation, never a provider check.
+const FILM_SHOW_CAP=3;
+function filmShowInfo(film,show,now){const lib=availabilityLib();return lib?lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film?.runtime}):null;}
+function filmShowRow(show,info,{until=false}={}){
+ const phase=info?.phase||'',hm={hour:'2-digit',minute:'2-digit'};
+ let note='';
+ if(phase==='on_air')note=`<span class="show-phase">В эфире${info.end!==null?` до ${madridStamp(info.end,hm)}`:''}</span>`;
+ else if(phase==='unknown')note='<span class="show-phase">Окончание неизвестно</span>';
+ else if(phase==='archive'&&until)note=`<span class="show-phase">архив до ${madridStamp(show.start+72*3600000)}</span>`;
+ return `<div class="show-row${phase?` is-${phase.replace('_','-')}`:''}"${phase?` data-phase="${phase}"`:''}>${channelControl(show)}<time class="show-time" datetime="${new Date(show.start).toISOString()}">${madridStamp(show.start,{day:'numeric',month:'short'})}<b>${madridStamp(show.start,hm)}</b></time>${note}</div>`;
+}
+function filmShowGroup(title,kind,rows,cap=FILM_SHOW_CAP){
+ if(!rows.length)return '';
+ const rest=rows.slice(cap);
+ return `<section class="film-show-group is-${kind}" aria-label="${title}"><h3>${title}${rows.length>1?` <span>${rows.length}</span>`:''}</h3><div class="film-show-list">${rows.slice(0,cap).join('')}${rest.length?`<details class="more"><summary>Ещё ${rest.length} ${showWord(rest.length)}</summary>${rest.join('')}</details>`:''}</div></section>`;
+}
+function filmAvailabilityHead(avail,now,count){
+ if(!avail)return '';
+ const pill=`<span class="film-avail-pill is-${avail.state}">${escapeHTML(avail.label)}</span>`;
+ let note='',hint='';
+ if(avail.state==='available'){
+  const until=avail.archiveUntil,left=until-now;
+  note=`<p class="film-fact">Архив доступен до <time datetime="${new Date(until).toISOString()}">${escapeHTML(madridStamp(until))}</time></p>${left>0&&left<8*3600000?lastChanceMark(until):''}`;
+ }else if(avail.state==='soon'){
+  note=`<p class="film-fact">${escapeHTML(showFacetValue(soonTail(avail)))}</p>`;
+  hint='<p class="film-hint">Расчёт по расписанию: наличие записи у провайдера не проверяется.</p>';
+ }else note=`<p class="film-fact">${count?'Готового архива нет':'Нет показов в текущем окне программы'}</p>`;
+ return `<div class="film-avail-head" data-availability="${avail.state}">${pill}${note}</div>${hint}`;
+}
+function filmAvailability(film){
+ const now=viewingClock(),shows=availableShows(film,now),avail=filmAvail(film,now,shows),infos=shows.map(show=>filmShowInfo(film,show,now));
+ const by=phase=>shows.map((show,i)=>({show,info:infos[i]})).filter(item=>(item.info?.phase||'')===phase);
+ const archive=by('archive'),future=by('future'),live=[...by('on_air'),...by('unknown')];
+ const render=(items,until=false)=>items.map(item=>filmShowRow(item.show,item.info,{until}));
+ let body='';
+ if(shows.length===1&&avail)body=`<div class="film-show-list">${render(archive.concat(live,future),false).join('')}</div>`;
+ else if(!avail)body=shows.length?`<div class="film-show-list">${shows.map(show=>filmShowRow(show,null)).join('')}</div>`:'<p class="film-missing">Нет показов в текущем окне программы</p>';
+ else body=filmShowGroup('Архив','archive',render(archive,archive.length>1))+filmShowGroup('В эфире','live',render(live))+filmShowGroup(avail.state==='available'?'Повтор в эфире':'Дальше','future',render(future),avail.state==='available'?1:FILM_SHOW_CAP);
+ return `<section class="film-section film-availability" aria-label="Показы"><h2>Показы</h2>${filmAvailabilityHead(avail,now,shows.length)}${body}</section>`;
+}
+function refreshFilmAvailability(){const node=$('#film-screen-availability'),film=typeof currentFilm==='function'?currentFilm():null;if(node&&film)node.innerHTML=filmAvailability(film);}
 // Film timeline: predictions, rating observations and Diary viewings of one film, read on demand from the read-only
 // GET /api/enrichment/history (contract: docs/reference/api/film-history.md). The rest of the page renders without it,
 // and a failure stays inside this section. Shown in the API's order; nothing is merged, filled or invented here.
@@ -1023,10 +1062,13 @@ function presentationChips(film){
  return chips.slice(0,3);
 }
 function moodTags(film){const chips=presentationChips(film);return chips.length?`<div class="film-moods">${chips.map(chip=>`<span data-chip-bucket="${escapeHTML(chip.bucket)}"${chip.id?` data-chip-id="${escapeHTML(chip.id)}"`:''}>${escapeHTML(chip.label)}</span>`).join('')}</div>`:'';}
+function lastChanceMark(until){
+ const label=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(until));
+ return `<span class="last-chance-badge" title="До ${escapeHTML(label)}" aria-label="Последний шанс: до ${escapeHTML(label)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Последний шанс</span>`;
+}
 function lastChanceBadge(film){
  if(!isLastChance(film))return '';
- const until=new Date(availabilityTime(film)),label=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(until);
- return `<span class="last-chance-badge" title="До ${escapeHTML(label)}" aria-label="Последний шанс: до ${escapeHTML(label)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Последний шанс</span>`;
+ return lastChanceMark(availabilityTime(film));
 }
 function card(film){
  const item=filmEnrichmentItem(film),hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
@@ -1212,7 +1254,7 @@ function armSoonTick(){
  if(soonTimer){clearTimeout(soonTimer);soonTimer=null;}
  if(at===null||viewClock!=null||!report)return;
  const delay=Math.min(Math.max(at-Date.now()+1000,1000),3600000);
- soonTimer=setTimeout(()=>{soonTimer=null;render();refreshFilmPoster();},delay);soonTimer?.unref?.();
+ soonTimer=setTimeout(()=>{soonTimer=null;render();refreshFilmPoster();refreshFilmAvailability();},delay);soonTimer?.unref?.();
 }
 function findsScope(){return state.channels?.size||state.period!=='all'?{channels:state.channels?.size?new Set(state.channels):null,period:state.period}:null;}
 function findsOnChannel(show,channels){const name=typeof show?.channel==='string'?show.channel:'';return !!name&&(channels.has(name)||channels.has(name.trim()));}
