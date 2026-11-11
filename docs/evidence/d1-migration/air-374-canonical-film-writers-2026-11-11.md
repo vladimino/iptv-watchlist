@@ -1,0 +1,8 @@
+# AIR-374 P2a: canonical Film writers, offline evidence
+
+Captured 11 Nov 2026 (UTC). Offline only: sqlite3 D1 stand-in, no Worker, R2, D1, TMDB or connector access, no marker or flag change. Counts only.
+
+- `tests/canonical-film-writers.mjs`: 11 scenarios, about 0.8 s alone. Covers: refusal at `r2`, `prepared`, `held` and legacy with no batch and no row; acceptance at `open`; replay (also by an older caller) opens no batch; revision conflict; generation fence lost between read and batch (whole rollback); unknown outcome applied-then-lost (`content_present`, replay no-op) and lost-before-send (`not_applied`, replay applies); worst-case plan within the 60-statement cap and the cap refusal of the fenced commit; reviewed and owner values survive automatic writes; blanks never overwrite; identity precedence and `canonical_identity` rules; effective localization in the same batch as the source write; identity ids, aliases and credits untouched by metadata writes; identical rows with the projector for identical inputs (set and clear); dormancy (route, importer allowlist, not bundled, no R2).
+- `tests/canonical-film-writers-mutation.mjs`: 18 mutants of `src/canonical-film-writers.js`, all killed, about 3.5 s idle (70 s inside a loaded 6-job full run before trimming from 27 mutants).
+- Existing assertions kept valid: `tests/localization-sources.mjs` now allowlists the new module explicitly; `tests/canonical-producers.mjs` and `tests/canonical-read-model.mjs` pass unchanged.
+- Not verified: equivalence on production data (P6), receipt durability (no table), behaviour at the real D1 binding.

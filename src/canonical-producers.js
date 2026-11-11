@@ -17,6 +17,7 @@ import {fenced,mutateFilm,mutatePerson} from './canonical-mutations.js';
 import {compareLocalization,recordLocalizationSources} from './localization-sources.js';
 import {admitRatedFilm,retainFilm,verifiedAdmission} from './film-admission.js';
 import {recordRetirementDecision} from './tmdb-retirement-decisions.js';
+import {filmFactsPresent,writeFilmFacts} from './canonical-film-writers.js';
 
 export const SHADOW_ITEM_CAP=200;
 export const SHADOW_LIST_CAP=200;
@@ -88,6 +89,18 @@ export function planEpgIdentity(input){
  return {producer:'epg_identity',atomic:false,epgGeneration:input.epgGeneration??null,calls,skipped:[]};
 }
 
+// AIR-374 P2a / ADR 0118: the film-side facts the projector writes today (identity overwrite, metadata, sync clocks, membership, lifecycle rows, effective
+// localization) as ONE fenced call per Film. Dormant like every other planner: dispatch runs it only when the route is canonical. `revisions` is the map of
+// readRevisions; the call is idempotent by CONTENT under a stable requestId (no receipt table exists for it, see ADR 0118).
+// input: {id, at, requestId, revisions?:{id:n}, updatedAt?, film:{contractVersion?, canonicalIdentity?, originalTitle?, source?, authority?}, evidence?, dimensions?,
+//   localization?, metadata?, sync?, watchlist?, epgGeneration?}
+export function planFilmWrite(input){
+ if(!plain(input)||typeof input.id!=='string'||!input.id.startsWith('film:')||typeof input.at!=='string'||typeof input.requestId!=='string'||!input.requestId)return skipped('film_facts','invalid_input');
+ const revisions=plain(input.revisions)?input.revisions:{};
+ const {revisions:_revisions,epgGeneration,...rest}=input;
+ return {producer:'film_facts',epgGeneration:epgGeneration??null,calls:[{fn:'writeFilmFacts',input:{...rest,expectedRevision:Number.isInteger(revisions[input.id])&&revisions[input.id]>=0?revisions[input.id]:0,film:{...(plain(input.film)?input.film:{}),contractVersion:Number.isInteger(input.film?.contractVersion)?input.film.contractVersion:1}}}],skipped:[]};
+}
+
 // Automatic localization candidates only: a reviewed or owner value, an empty one or an inconsistent one never becomes a source write.
 // input: {kind, id, localization, resolved, revision, at, requestId}
 export function planLocalization(input){
@@ -135,7 +148,7 @@ export function planBatch(plans){
  return {ok:true,plans};
 }
 
-const CALLS={mutateFilm,mutatePerson,recordLocalizationSources,admitRatedFilm,retainFilm,recordRetirementDecision};
+const CALLS={writeFilmFacts,mutateFilm,mutatePerson,recordLocalizationSources,admitRatedFilm,retainFilm,recordRetirementDecision};
 
 // Executes a plan only when the route is canonical. In legacy, r2 and prepared nothing runs and no statement reaches the database; held and
 // unreadable markers throw. Each call is one fenced batch. A thrown unknown outcome (film_person_unavailable) is returned as `unknown` and is
@@ -160,8 +173,9 @@ export async function dispatch(env,plan){
 }
 
 // What each call kind can settle by itself. A request id makes a replay a no-op (the writer opens no batch for a request it already applied);
-// mutateFilm and mutatePerson carry NO request id: they are idempotent in content, not by request id.
+// mutateFilm, mutatePerson and writeFilmFacts carry NO per-request receipt: they are idempotent in content, not by request id (writeFilmFacts opens no batch when D1 already holds its rows).
 const RECONCILE={
+ writeFilmFacts:{kind:()=>'film',id:input=>input.id,byRequestId:false,content:(db,input)=>filmFactsPresent(db,input)},
  mutateFilm:{kind:()=>'film',id:input=>input.id,byRequestId:false},
  mutatePerson:{kind:()=>'person',id:input=>input.id,byRequestId:false},
  recordLocalizationSources:{kind:input=>input.kind,id:input=>input.id,byRequestId:true},
@@ -233,7 +247,7 @@ export async function readback(env,call){
  const base={id,kind,revision,expected,moved:revision>expected};
  if(spec.byRequestId)return {...base,outcome:'settle_by_request_id',applied:null,note:'replay the same call: an applied request id is a no-op'};
  if(revision<=expected)return {...base,outcome:'not_applied',applied:false};
- if(await contentPresent(db,call.fn,input))return {...base,outcome:'content_present',applied:null,note:'the wanted content exists; a competing writer may have written it'};
+ if(await (spec.content?spec.content(db,input):contentPresent(db,call.fn,input)))return {...base,outcome:'content_present',applied:null,note:'the wanted content exists; a competing writer may have written it'};
  return {...base,outcome:'reread_and_replan',applied:false};
 }
 
