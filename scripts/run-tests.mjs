@@ -29,30 +29,44 @@ const FIXTURE_DEPENDENT=new Set([
 const SERIAL_ONLY=new Set([
  'local-dev-smoke.mjs',
 ]);
-// Scheduling hint only: the slowest files (measured with the persistent sqlite session of AIR-408, docs/evidence/ci/test-suite-air-408-2026-11-10.md) start first so the
-// long ones do not end up alone at the tail. A name that no longer exists, or a new slow file that is missing here, changes the wall time and
-// nothing else: every file still runs exactly once.
-const START_FIRST=[
- 'film-person-capture-mutation.mjs',
- 'generation-stage.mjs',
- 'epg-r2-known-length.mjs',
- 'generation-stage-withheld.mjs',
- 'projector-bulk.mjs',
- 'discovery-chunk-budget.mjs',
- 'discovery-decisions-read.mjs',
- 'discovery-production.mjs',
- 'film-person-baseline.mjs',
- 'epg-orchestration.mjs',
- 'run-tests-runner.mjs',
- 'd1-enrichment.mjs',
- 'events-type-filter.mjs',
- // AIR-374: the three heaviest mutation checks (60 s to 120 s in a CI shard on 11 Nov 2026) start at the beginning of their shard instead of in the alphabetical tail, where such a file ends the
- // shard late. A fourth entry keeps the count even: positions 13 to 16 alternate shard 2, 1, 2, 1 and each of the three stays in the shard it already had, so only four small files changed shard.
- 'film-person-connector-mutation.mjs',
- 'film-person-cutover-record-mutation.mjs',
- 'film-person-prepared-loader-mutation.mjs',
- 'film-person-prepared-loader.mjs',
-];
+// AIR-374: approximate cost of the heaviest files in seconds of one slow GitHub Actions runner (the per-file times of the CI logs of 11 Nov 2026, docs/evidence/ci/test-suite-air-374-ci-balance-2026-11-11.md).
+// Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
+// the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
+// every file still runs exactly once, in exactly one shard.
+export const WEIGHTS={
+ 'generation-stage.mjs':118,
+ 'film-person-connector-mutation.mjs':115,
+ 'generation-stage-withheld.mjs':90,
+ 'film-person-prepared-loader-mutation.mjs':75,
+ 'discovery-chunk-budget.mjs':58,
+ 'discovery-decisions-read.mjs':58,
+ 'epg-r2-known-length.mjs':44,
+ 'discovery-seal-publish.mjs':39,
+ 'film-person-cutover-record-mutation.mjs':35,
+ 'canonical-receipts-mutation.mjs':33,
+ 'd1-enrichment-fairness.mjs':33,
+ 'canonical-differential-mutation.mjs':31,
+ 'd1-enrichment-bucket-unicode.mjs':31,
+ 'd1-enrichment-stored-pages.mjs':31,
+ 'canonical-film-writers-mutation.mjs':18,
+ 'film-person-capture-mutation.mjs':30,
+ 'discovery-bounded-drain.mjs':26,
+ 'projector-bulk.mjs':26,
+ 'projector-bulk-spike.mjs':24,
+ 'canonical-catalog-reader-mutation.mjs':22,
+ 'projector-view-parity.mjs':22,
+ 'run-tests-runner.mjs':21,
+ 'projector-marker-fence-mutation.mjs':20,
+ 'film-person-baseline.mjs':15,
+ 'discovery-production.mjs':15,
+ 'epg-orchestration.mjs':15,
+ 'd1-enrichment.mjs':15,
+ 'events-type-filter.mjs':12,
+ 'film-person-prepared-loader.mjs':10,
+ 'sqlite-session-semantics.mjs':8,
+ 'local-dev-smoke.mjs':6,
+};
+export const DEFAULT_WEIGHT=2.5;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
 export const HEAD_LIMIT=1024*1024;
@@ -97,14 +111,19 @@ export function capture(){
  };
 }
 
-// `shard` is {index, count} (index from 1) or null for the whole suite. The split is taken from the planned order, every count-th file from the index-th on, so
-// the files of START_FIRST (the slow ones) alternate between the shards and every file is in exactly one shard, whatever the count.
-export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null}={}){
+// `shard` is {index, count} (index from 1) or null for the whole suite. AIR-374: the files are ordered heaviest first (WEIGHTS, then name) and dealt one by one to the shard with the least weight so far
+// (ties to the lowest index), so the split is the same whichever shard asks and every file is in exactly one shard, whatever the count.
+export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights=WEIGHTS}={}){
  const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
- const parallel=all.filter(file=>!serialOnly.has(file));
- const early=START_FIRST.filter(file=>parallel.includes(file));
- const mine=list=>shard?list.filter((_,position)=>position%shard.count===shard.index-1):list;
- const plan={parallel:mine([...early,...parallel.filter(file=>!early.includes(file))]),serial:mine(all.filter(file=>serialOnly.has(file)))};
+ const weight=file=>weights[file]??DEFAULT_WEIGHT;
+ const ordered=[...all].sort((a,b)=>weight(b)-weight(a)||(a<b?-1:1));
+ const owner=new Map();
+ if(shard){
+  const load=Array(shard.count).fill(0);
+  for(const file of ordered){let best=0;for(let i=1;i<load.length;i++)if(load[i]<load[best])best=i;owner.set(file,best);load[best]+=weight(file);}
+ }
+ const mine=list=>shard?list.filter(file=>owner.get(file)===shard.index-1):list;
+ const plan={parallel:mine(ordered.filter(file=>!serialOnly.has(file))),serial:mine(ordered.filter(file=>serialOnly.has(file)).sort())};
  return {...plan,total:plan.parallel.length+plan.serial.length,suite:all.length};
 }
 // "2/3" is shard 2 of 3. Anything else is refused: a typo must not silently run the whole suite, or nothing.
