@@ -472,6 +472,7 @@ vm.runInContext(scoped('src/domain/admin-actions.js','AdminActions'),httpContext
 vm.runInContext(scoped('src/domain/discovery-identity-review.js','DiscoveryIdentity'),httpContext);
 vm.runInContext(scoped('src/domain/discovery-recovery.js','DiscoveryRecovery'),httpContext);
 vm.runInContext(fs.readFileSync('src/admin/discovery-recovery.js','utf8'),httpContext);
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),httpContext);
 vm.runInContext(fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),httpContext);
 const routeEnv={...httpEnv,BUCKET:guardedBucket};
 const origin='https://iptv.example';

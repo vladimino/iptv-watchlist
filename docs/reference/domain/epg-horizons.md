@@ -6,7 +6,7 @@ Contract introduced by [AIR-188](https://trello.com/c/XQQVS3KG). It separates tw
 |---|---|---|
 | Retention / display | `EPG_RETAIN_FUTURE_MS` = 168 hours ahead, and the unchanged 72-hour archive behind | Shows stored in the published programme generation and shown to the reader |
 | Hot processing | `EPG_HOT_FUTURE_MS` = 24 hours ahead | Discovery candidates, uncertain matches, raw candidate counts, catalog-only availability, resolver and prediction priority |
-| IPTV catch-up | 72 hours | Unchanged; `availableUntil` is still the last start plus 72 hours |
+| IPTV catch-up | 72 hours | Unchanged, counted from the show start; in the catalog API `availableUntil` is the end of the window of the latest ready show, or `null` when no recording is ready ([film availability](film-availability.md), ADR 0114) |
 
 ## What the scan keeps
 

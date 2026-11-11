@@ -1,6 +1,6 @@
 # Film availability lifecycle
 
-Contract of [ADR 0114](../../adr/0114-film-availability-lifecycle.md) (Proposed; the product rules were approved by the owner on [AIR-433](https://trello.com/c/D3mlCSiC)). One pure function, `filmAvailability(shows, now)` in `src/domain/film-availability.js`, says what a **film** offers at an instant. The same source runs in the Worker (bundle name `FilmAvailability`) and in the browser (`/film-availability.js`, loaded before `app.js`). It reads only the shows it is given: no storage, network, clock or time zone, and it changes nothing.
+Contract of [ADR 0114](../../adr/0114-film-availability-lifecycle.md) (Proposed; the product rules and the owner decisions of 2026-11-11 are recorded on [AIR-433](https://trello.com/c/D3mlCSiC) and on its pull request). One pure function, `filmAvailability(shows, now, {runtimeMinutes})` in `src/domain/film-availability.js`, says what a **film** offers at an instant. The same source runs in the Worker (bundle name `FilmAvailability`) and in the browser (`/film-availability.js`, loaded before `app.js`). It reads only the shows it is given: no storage, network, clock or time zone, and it changes nothing.
 
 IPTV is used to choose a film from the archive (catch-up), not to watch linear television.
 
@@ -13,48 +13,55 @@ IPTV is used to choose a film from the archive (catch-up), not to watch linear t
 | `unavailable` | «Недоступно» | Neither |
 
 - **Archive wins.** If a ready recording exists the state is `available`, whatever is on air or ahead. A repeat or a show on air is only additional information (`nextStart`, `onAir`). `available` and `soon` never hold together.
-- **A show on air is not an archive.** The film turns `available` at the **end** of the show. For `soon`, `appearsAt` is the earliest known **end** among the candidates (the show on air, and shows starting inside the next 24 hours), never a start. It is the **scheduled end from the programme guide**, not verified availability of a recording at the provider: no provider probe and no recording delay are assumed, and a client must not present it as a guarantee (a probe or a delay is a separate product decision).
+- **A show on air is not an archive.** The film turns `available` at the **effective end** of the show, with no further delay. For `soon`, `appearsAt` is the earliest effective **end** among the candidates (the show on air, and shows starting inside the next 24 hours), never a start. It is a **schedule-based calculation** (the EPG end, or start + film runtime), not verified availability of a recording at the provider: no provider probe, no buffer and no advertising heuristic are used, and a client must not present it as a guarantee.
 - **Elapsed time, not calendar days.** `+24 h` and `72 h` are millisecond arithmetic, so a 23-hour or 25-hour day (DST) and a call at 23:50 Madrid behave like any other instant. A show exactly 24 hours ahead is outside; one millisecond inside is `soon`.
-- **The catch-up is counted from the start of a show** (the existing `availableUntil` = last start + 72 h). At exactly `start + 72 h` the recording is gone.
+- **The catch-up is 72 elapsed hours counted from the START of a show** (owner decision, AIR-433). At exactly `start + 72 h` the recording is gone; the end of the window of the latest ready show is `archiveUntil`.
 - **Only the given shows count.** The 168-hour retention of stored shows is storage, not a product horizon: a show later than 24 hours ahead is not read as `soon`, and holding more shows than the product windows never changes the answer.
 
-## Unknown end
+## The effective end of a show
 
-An `end` that is missing, not a time, or not after the `start` is **unknown and never guessed**:
+The end that every rule above uses is the **effective end** (owner decision of 2026-11-11, AIR-433):
+
+1. the EPG `end` when it is a time after the `start`;
+2. otherwise `start + runtime × 60 000 ms` when the film has a finite positive `runtime` in minutes (`options.runtimeMinutes` of the helper; the catalog consumers pass `film.runtime`). The owner accepts the minor divergence between the film runtime and the broadcast duration; there is no buffer, no advertising heuristic and no provider probe;
+3. otherwise the end is **unknown and never invented**.
 
 | Show | Effect |
 | --- | --- |
-| started, no usable end | **ignored**: neither a ready recording nor a promised one; it cannot make a film `available` |
-| future (inside 24 h), no usable end | the film is `soon`; `appearsAt` is the earliest known end among the other candidates or `null`; `appearsAtKnown` is `false`, so no exact hour is promised |
-| future (inside 24 h), end known | `soon`, `appearsAt` = that end, `appearsAtKnown: true` |
+| started, effective end unknown | `unknown`: **ignored**, neither a ready recording nor a promised one; it cannot make a film `available` |
+| future (inside 24 h), effective end unknown | the film is `soon`; `appearsAt` is the earliest known end among the other candidates or `null`; `appearsAtKnown` is `false`, so no exact hour is promised |
+| future (inside 24 h), effective end known | `soon`, `appearsAt` = that end, `appearsAtKnown: true`; `appearsAtEstimated` is `true` when the earliest end was derived from the runtime and `false` when the EPG gave it |
 
-A show without a usable `start` is ignored. A `now` that is not a finite number gives `unavailable`.
+A show without a usable `start` is ignored. A `now` that is not a finite number gives `unavailable`. The end instant itself already belongs to the archive (`end > now` is on air, `end <= now` is ready).
 
 ## Result
 
 | Field | Meaning |
 | --- | --- |
 | `state`, `label` | `available` / `soon` / `unavailable` and its word |
-| `appearsAt` | `soon` only: the earliest known **scheduled** end among the candidates, milliseconds; `null` otherwise or when no end is known. Not a promise that the provider's recording is ready then |
-| `appearsAtKnown` | `soon` only: `true` when every candidate has a known end; `false` means do not promise an hour; `null` otherwise |
+| `appearsAt` | `soon` only: the earliest known **effective** end among the candidates (scheduled or estimated), milliseconds; `null` otherwise or when no end is known. Not a promise that the provider's recording is ready then |
+| `appearsAtKnown` | `soon` only: `true` when every candidate has an effective end; `false` means do not promise an hour; `null` otherwise |
+| `appearsAtEstimated` | `soon` with a known `appearsAt` only: `true` when that earliest end came from the film runtime, `false` when the EPG gave it; `null` otherwise |
 | `archiveUntil` | `available` only: the latest start of a ready show + 72 h, milliseconds |
 | `archiveShow` | `available` only: `{start, end}` of that show (helper only; not in the API field) |
 | `onAir` | A show is on air now. It does not make the film available |
 | `nextStart` | The first start later than `now` among the given shows (helper only; the API keeps its own `nextStart`) |
 
-`showPhase(show, now)` gives the phase of one show: `future`, `on_air`, `archive`, `expired` (ended and the window over), `unknown` (started without a usable end) or `invalid`.
+`showPhase(show, now, {runtimeMinutes})` gives the phase of one show: `future` (not started), `on_air` (started, before the effective end), `archive` (ended, still inside the start-based 72 hours), `expired` (ended, past the catch-up), `unknown` (started and no valid end can be determined) or `invalid` (no usable start). A show that has not started is `future` whether or not its end is known.
 
 ## Relation to the catalog fields
 
-`GET /api/catalog/available` and `GET /api/catalog/film/<id>` carry `films[].availability` / `film.availability` ([catalog API](../api/catalog.md)): `{state, label, appearsAt, appearsAtKnown, archiveUntil, onAir}`. Nothing else changed:
+`GET /api/catalog/available` and `GET /api/catalog/film/<id>` take **all** their availability fields from this helper ([catalog API](../api/catalog.md)), so they cannot contradict each other. The owner chose on 2026-11-11 to change the meaning of the existing fields now instead of keeping two contradictory semantics (a breaking change for consumers, explicitly authorized):
 
-| Legacy field | Still means | Differs from the lifecycle |
+| Field | Before | Now |
 | --- | --- | --- |
-| `shows[].status` | `future` (not started), `on_air` (started, not ended), `archive` (the rest) | `archive` is also given to a show **without an end**; that is not a ready recording. A film with a show `on_air` is `soon`, not available |
-| `availableNow` | Some returned show has started | A show on air counts; the lifecycle does not |
-| `nextStart` | The earliest returned show that has not started | Same as the helper's `nextStart` |
-| `availableUntil` | Latest start + 72 h | Same as `archiveUntil` when the film is `available` |
+| `availability` | (new in the first AIR-433 commit) | `{state, label, appearsAt, appearsAtKnown, appearsAtEstimated, archiveUntil, onAir}` |
+| `availableNow` | Some returned show has started | `availability.state === 'available'`: a ready recording exists. A show on air is **not** one |
+| `shows[].status` | `future`, `on_air`, or `archive` for everything else, including a show without an end | The five phases above: `future`, `on_air`, `archive`, `expired`, `unknown`. The spelling of `future`, `on_air` and `archive` is unchanged; `archive` now means ended and inside the start-based 72 hours |
+| `shows[].effectiveEnd` | (not present) | The effective end in milliseconds (the EPG `end`, else start + runtime), or `null`. `shows[].end` is still the EPG value or `null` |
+| `availableUntil` | Latest returned start + 72 h (a future repeat extended it) | `availability.archiveUntil` as an ISO time when the film is `available`, else `null` (nothing to watch now). A repeat never extends it |
+| `nextStart` | The earliest returned show that has not started | Unchanged |
 
-Consumers that decide "can this be watched now" use `availability`. `public/app.js` (shortlist, Finds, film page) and `predictionPriority` still compute their own values until AIR-434 to AIR-436 (children of [AIR-432](https://trello.com/c/r1uaF4c4)) move them; see the ADR.
+The list order of `GET /api/catalog/available` and the choice between two ids of one identity keep the previous key (latest returned start + 72 h), now internal and no longer a response field. Compatibility impact: a client that read `availableNow` as "has started", `availableUntil` as a non-null time, or `status: archive` for a show without an end must read `availability` and the new statuses; the in-repo clients (`public/app.js`) do not read these catalog fields. `predictionPriority`'s own `availableNow`/`availableUntil` (hot processing, `src/enrichment.js`), the stored watchlist `availableUntil` (`src/sources.js`, `src/domain/film-person.js`) and the browser's own availability functions are **not changed** by this card: hot-processing eligibility and the horizon stay as they are, and its internal priority signals are not user-visible archive readiness. The screens move to the helper in AIR-434 to AIR-436 (children of [AIR-432](https://trello.com/c/r1uaF4c4)).
 
-Tests: `tests/film-availability.mjs` (a table of transitions, 23:50 Madrid, both DST nights, boundaries, missing and invalid `end`, windows, and a seeded sweep of invariants) and the catalog tests.
+Tests: `tests/film-availability.mjs` (a table of transitions, 23:50 Madrid, both DST nights, exact end and 72-hour boundaries, the runtime fallback future → on air → archive → expired, unknown without end and runtime, windows, and a seeded sweep of invariants) and the catalog tests (`tests/catalog-available.mjs`, `tests/catalog-film.mjs`: both endpoints reuse the one helper, all five show statuses, `availableNow` consistency).

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {scoped} from '../scripts/bundle-scope.mjs';
-import {AVAILABILITY_ARCHIVE_MS as ARCHIVE,AVAILABILITY_SOON_MS as SOON,AVAILABILITY_LABELS,filmAvailability,normalizeShow,showPhase} from '../src/domain/film-availability.js';
+import {AVAILABILITY_ARCHIVE_MS as ARCHIVE,AVAILABILITY_SOON_MS as SOON,AVAILABILITY_LABELS,filmAvailability,normalizeShow,runtimeMs,showPhase} from '../src/domain/film-availability.js';
 
 const H=3600000,M=60000;
 // Madrid wall-clock to epoch milliseconds, from the UTC offset that applies on that date (CET +1 in winter, CEST +2 in summer).
@@ -141,11 +141,9 @@ for(const now of [NaN,Infinity,undefined,null])assert.equal(filmAvailability([sh
  assert.equal(p({start:NOW-ARCHIVE,end:NOW-ARCHIVE+H}),'expired');assert.equal(p({start:NOW-5*H}),'unknown','no end, started');
  assert.equal(p({start:NOW-H}),'unknown');assert.equal(p({end:NOW}),'invalid');
  assert.equal(showPhase({start:NOW+H},NOW).endKnown,false);assert.equal(showPhase({start:NOW+H,end:NOW+2*H},NOW).endKnown,true);
- // the legacy per-show status of the catalog DTO calls a show without an end an archive; the corrected phase does not
- const legacy=(item,now)=>Number(item.start)>now?'future':Number(item.end)>now?'on_air':'archive';
- assert.equal(legacy({start:NOW-5*H},NOW),'archive');assert.notEqual(p({start:NOW-5*H}),'archive');
- assert.equal(legacy({start:NOW-30*M,end:null},NOW),'archive','null end');assert.equal(p({start:NOW-30*M,end:null}),'unknown');
- assert.deepEqual(normalizeShow({start:'2026-11-10T13:00:00.000Z',end:'2026-11-10T14:00:00.000Z'}),{start:Date.parse('2026-11-10T13:00:00.000Z'),end:Date.parse('2026-11-10T14:00:00.000Z')});
+ // a started show without a usable end and without a runtime is `unknown`, never an archive (the owner replaced the old per-show status that said `archive`)
+ assert.notEqual(p({start:NOW-5*H}),'archive');assert.equal(p({start:NOW-30*M,end:null}),'unknown');
+ assert.deepEqual(normalizeShow({start:'2026-11-10T13:00:00.000Z',end:'2026-11-10T14:00:00.000Z'}),{start:Date.parse('2026-11-10T13:00:00.000Z'),end:Date.parse('2026-11-10T14:00:00.000Z'),endSource:'epg'});
  assert.equal(normalizeShow({start:true}),null);assert.equal(normalizeShow({start:''}),null);assert.equal(normalizeShow({start:NOW,end:NOW-1}).end,null);
 }
 
@@ -177,13 +175,46 @@ for(const now of [NaN,Infinity,undefined,null])assert.equal(filmAvailability([sh
   if(r.state==='available'){const more=filmAvailability([...shows,{start:now+2*H,end:now+3*H},{start:now-M}],now);assert.equal(more.state,'available');assert.equal(more.archiveUntil,r.archiveUntil);}
  }
 }
+// ---- AIR-433 owner decisions: the effective end is the EPG end, else start + film runtime (minutes), else unknown ----
+{
+ const RUN=100; // minutes
+ const ph=(item,now,runtimeMinutes=RUN)=>showPhase(item,now,{runtimeMinutes});
+ // a show with no end: future -> on_air -> archive (exactly at start + runtime) -> expired (72 h from the START)
+ const start=NOW+3*H,end=start+RUN*M;
+ assert.equal(ph({start},start-1).phase,'future');assert.equal(ph({start},start).phase,'on_air');assert.equal(ph({start},end-1).phase,'on_air');
+ assert.equal(ph({start},end).phase,'archive','ready at the effective end, with no delay');assert.equal(ph({start},start+ARCHIVE-1).phase,'archive');assert.equal(ph({start},start+ARCHIVE).phase,'expired','72 h elapsed from the START');
+ assert.deepEqual([ph({start},end).end,ph({start},end).endSource],[end,'runtime']);
+ // a valid EPG end wins over the runtime; an invalid one falls back to it
+ assert.deepEqual([ph({start,end:start+30*M},start+40*M).phase,ph({start,end:start+30*M},start+40*M).endSource],['archive','epg']);
+ for(const bad of [null,undefined,'',start,start-1,'later',true]) assert.equal(ph({start,end:bad},start+RUN*M-1).phase,'on_air','invalid end '+String(bad)+' falls back to the runtime');
+ // no usable runtime: unknown, never invented
+ for(const bad of [null,undefined,0,-5,'abc','',NaN,Infinity,true]) assert.equal(showPhase({start:NOW-H},NOW,{runtimeMinutes:bad}).phase,'unknown','runtime '+String(bad));
+ assert.equal(runtimeMs('100'),6000000);assert.equal(runtimeMs(100.5),100.5*M);assert.equal(runtimeMs(0),null);assert.equal(runtimeMs(Infinity),null);
+ // film level: a show with no end, with the runtime, goes soon (on air) -> available at the effective end -> unavailable 72 h after the start
+ const film=(shows,now,runtimeMinutes=RUN)=>filmAvailability(shows,now,{runtimeMinutes});
+ assert.deepEqual([film([{start}],start-H).state,film([{start}],start-H).appearsAt,film([{start}],start-H).appearsAtKnown,film([{start}],start-H).appearsAtEstimated],['soon',end,true,true]);
+ assert.deepEqual([film([{start}],start+M).state,film([{start}],start+M).onAir],['soon',true]);
+ assert.equal(film([{start}],end-1).state,'soon');assert.equal(film([{start}],end).state,'available');assert.equal(film([{start}],end).archiveUntil,start+ARCHIVE);
+ assert.equal(film([{start}],start+ARCHIVE-1).state,'available');assert.equal(film([{start}],start+ARCHIVE).state,'unavailable');
+ // archive wins over a future repeat; the repeat does not change the end of the window
+ const repeat=film([{start:NOW-5*H,end:NOW-4*H},{start:NOW+2*H}],NOW);
+ assert.equal(repeat.state,'available');assert.equal(repeat.archiveUntil,NOW-5*H+ARCHIVE);assert.equal(repeat.nextStart,NOW+2*H);
+ // estimated or scheduled: the flag follows the source of the earliest end
+ assert.equal(film([{start:NOW+H,end:NOW+2*H}],NOW).appearsAtEstimated,false);assert.equal(film([{start:NOW+H}],NOW).appearsAtEstimated,true);
+ assert.equal(film([{start:NOW+H,end:NOW+2*H},{start:NOW+3*H}],NOW).appearsAtEstimated,false,'the earliest end is scheduled');
+ assert.equal(film([],NOW).appearsAtEstimated,null);
+ // neither a valid end nor a runtime: explicit unknown, as before
+ assert.deepEqual([film([{start:NOW-30*M}],NOW,null).state,film([{start:NOW+3*H}],NOW,null).appearsAt,film([{start:NOW+3*H}],NOW,null).appearsAtKnown],['unavailable',null,false]);
+ // the runtime only matters when it is passed: the default call is the old behaviour
+ assert.equal(filmAvailability([{start:NOW-30*M}],NOW).state,'unavailable');
+}
 // ---- the browser and the Worker run the same source ----
 {
  // As a classic script (what the browser gets at /film-availability.js and what the Worker bundle embeds): one top-level binding, the same answers.
  const code=scoped('src/domain/film-availability.js','FilmAvailability');
  const context=vm.createContext({});vm.runInContext(code,context);
  const FilmAvailability=vm.runInContext('FilmAvailability',context);
- assert.deepEqual(Object.keys(FilmAvailability).sort(),['AVAILABILITY_ARCHIVE_MS','AVAILABILITY_LABELS','AVAILABILITY_SOON_MS','AVAILABILITY_STATES','filmAvailability','normalizeShow','showPhase']);
+ assert.deepEqual(Object.keys(FilmAvailability).sort(),['AVAILABILITY_ARCHIVE_MS','AVAILABILITY_LABELS','AVAILABILITY_SOON_MS','AVAILABILITY_STATES','filmAvailability','normalizeShow','runtimeMs','showPhase']);
  for(const [name,shows] of CASES){const here=JSON.parse(JSON.stringify(filmAvailability(shows,NOW))),there=JSON.parse(JSON.stringify(FilmAvailability.filmAvailability(shows,NOW)));assert.deepEqual(there,here,'classic script, '+name);}
  // wired once into the browser asset, once into the Worker, and loaded before app.js
  const build=fs.readFileSync('build.mjs','utf8');

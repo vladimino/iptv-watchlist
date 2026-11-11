@@ -1,6 +1,7 @@
 // The owner's «Смотрел» mark on a Finds card (ADR-0032): POST /api/catalog/watched writes only the owner's `watched` fact for one
 // verified film of the published catalog copy, named by its TMDB id; no title, year or Letterboxd id is read. Covers the ADR's
 // specification cases on the server and the card button, undo and immediate hiding in the client. Synthetic data only.
+import {scoped} from '../scripts/bundle-scope.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -21,6 +22,7 @@ const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abo
  fetch:async()=>{throw new Error('unexpected fetch');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),context);
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context),Facts=constant('LetterboxdFacts');
 const VIEW=constant('ENRICHMENT_KEY')+'view-index.json',ORIGIN='https://iptv.vladimino.workers.dev',G1='11111111-1111-4111-8111-111111111111',G2='22222222-2222-4222-8222-222222222222';

@@ -72,14 +72,15 @@ const seven=r.body.films[1];
 assert.deepEqual(Object.keys(seven).sort(),['actors','availability','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year']);
 assert.doesNotMatch(JSON.stringify(r.body),/SYNOPSIS-|ALIAS-|tasteProfileHash|moodLabels/,'minimal display DTO: no synopsis, aliases or raw prediction internals');
 assert.deepEqual(seven.shows.map(s=>[s.channelId,s.status]),[['c1','archive'],['c2','future']],'duplicate show collapsed, statuses derived from the clock');
-assert.equal(seven.availableNow,true);assert.equal(seven.nextStart,now+2*hour);assert.equal(seven.availableUntil,new Date(now+2*hour+72*hour).toISOString());
+// owner decisions of 2026-11-11: availableNow is `availability.state === 'available'` and availableUntil is the end of the 72 h window of the latest READY show
+assert.equal(seven.availableNow,true);assert.equal(seven.availability.state,'available');assert.equal(seven.nextStart,now+2*hour);assert.equal(seven.availableUntil,new Date(now-3*hour+72*hour).toISOString(),'the window of the ready show, not of the repeat');
 assert.deepEqual(seven.prediction,{predictedRating:4.5,probability4Plus:.74,confidence:'high',matchSignals:['Investigation'],mainRisk:'Slow start',moodIds:seven.prediction.moodIds});
 assert.ok(seven.prediction.moodIds.length>0,'mood ids come from the canonical mood facet');
 assert.deepEqual(seven.fingerprint,{plotMechanics:['investigation'],moodIds:seven.prediction.moodIds,execution:{payoff:'strong'}},'fingerprint facet omits unknown execution values');
 assert.deepEqual(seven.directors,[{id:'tmdb_director/1',name:'Director'}]);assert.deepEqual(seven.actors,[{id:'tmdb_actor/2',name:'Actor'}]);
 assert.equal(seven.canonicalIdentity,'tmdb:7');assert.equal(seven.tmdbId,'7');assert.equal(seven.poster,'https://image.tmdb.org/t/p/w342/tmdb_7.jpg');
 const eighteen=r.body.films[0];
-assert.deepEqual(eighteen.shows.map(s=>s.status),['on_air']);assert.equal(eighteen.availableNow,true);assert.equal(eighteen.nextStart,null);
+assert.deepEqual(eighteen.shows.map(s=>s.status),['on_air']);assert.equal(eighteen.availableNow,false,'a show on air is not a ready recording');assert.equal(eighteen.availability.state,'soon');assert.equal(eighteen.availableUntil,null);assert.equal(eighteen.nextStart,null);
 const fifteen=r.body.films[2];
 assert.deepEqual(fifteen.shows.map(s=>s.status),['future']);assert.equal(fifteen.availableNow,false);assert.equal(fifteen.nextStart,now+23*hour);
 assert.deepEqual(r.body.channels,[{channelId:'c1',channel:'One',films:3},{channelId:'c2',channel:'Two',films:1}]);
@@ -254,29 +255,51 @@ assert.deepEqual(puts,[]);
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 }
 
-// AIR-433 (ADR 0114): the film-level availability beside the legacy fields. An archive wins over a repeat, a film on air or only ahead is `soon` and is
-// ready at the END of the show, a show without an end is never a ready archive (the legacy per-show status still says `archive` for it), and the legacy
-// fields keep their values.
+// AIR-433 (ADR 0114, owner decisions of 2026-11-11): one lifecycle for the film `availability`, `availableNow`, `availableUntil` and every `shows[].status`.
+// An archive wins over a repeat, a film on air or only ahead is `soon` and is ready at the effective END of the show (the EPG end, else start + the film
+// runtime), `availableNow` is `availability.state === 'available'`, and a show without a determinable end is `unknown`, never an archive.
 {
  seed();
+ const min=60000,by=id=>r.body.films.find(f=>f.id===id);
  setCatalogShows('tmdb_7',[show(now-3*hour),show(now+2*hour,{channelId:'c2',channel:'Two'})]);          // ended archive and a repeat in two hours
  setCatalogShows('tmdb_15',[show(now+23*hour,{end:now+25*hour})]);                                       // future only
- setCatalogShows('tmdb_18',[show(now-30*60000,{end:now+90*60000})]);                                     // on air, ends in 90 minutes
+ setCatalogShows('tmdb_18',[show(now-30*min,{end:now+90*min})]);                                         // on air, ends in 90 minutes
  setCatalogShows('tmdb_14',[]);
  r=await get();
- const by=id=>r.body.films.find(f=>f.id===id);
- assert.deepEqual(by('tmdb_7').availability,{state:'available',label:'Доступно',appearsAt:null,appearsAtKnown:null,archiveUntil:now-3*hour+72*hour,onAir:false},'archive plus a repeat stays available');
- assert.equal(by('tmdb_7').nextStart,now+2*hour,'the repeat is only the next start');assert.equal(by('tmdb_7').availableNow,true);
- assert.deepEqual(by('tmdb_15').availability,{state:'soon',label:'Скоро',appearsAt:now+25*hour,appearsAtKnown:true,archiveUntil:null,onAir:false},'future only: ready at the end of the show, not its start');
- assert.equal(by('tmdb_15').availableNow,false);assert.equal(by('tmdb_15').nextStart,now+23*hour);
- assert.deepEqual(by('tmdb_18').availability,{state:'soon',label:'Скоро',appearsAt:now+90*60000,appearsAtKnown:true,archiveUntil:null,onAir:true},'on air is not an archive until it ends');
- assert.equal(by('tmdb_18').availableNow,true,'the legacy availableNow is unchanged and still says true for a show that has started');
- assert.deepEqual(by('tmdb_18').shows.map(item=>item.status),['on_air']);
- // a show without an end: the legacy status says archive, the film is not available
- setCatalogShows('tmdb_18',[{channelId:'c1',channel:'One',start:now-hour}]);
- r=await get();
- assert.deepEqual(by('tmdb_18').shows.map(item=>item.status),['archive'],'the legacy per-show status is unchanged');
- assert.equal(by('tmdb_18').availability.state,'unavailable','no end is never a ready archive');
+ assert.deepEqual(by('tmdb_7').availability,{state:'available',label:'Доступно',appearsAt:null,appearsAtKnown:null,appearsAtEstimated:null,archiveUntil:now-3*hour+72*hour,onAir:false},'archive plus a repeat stays available');
+ assert.equal(by('tmdb_7').nextStart,now+2*hour,'the repeat is only the next start');assert.equal(by('tmdb_7').availableNow,true);assert.equal(by('tmdb_7').availableUntil,new Date(now-3*hour+72*hour).toISOString());
+ assert.deepEqual(by('tmdb_7').shows.map(item=>item.status),['archive','future']);
+ assert.deepEqual(by('tmdb_15').availability,{state:'soon',label:'Скоро',appearsAt:now+25*hour,appearsAtKnown:true,appearsAtEstimated:false,archiveUntil:null,onAir:false},'future only: ready at the end of the show, not its start');
+ assert.equal(by('tmdb_15').availableNow,false);assert.equal(by('tmdb_15').availableUntil,null);assert.equal(by('tmdb_15').nextStart,now+23*hour);
+ assert.deepEqual(by('tmdb_18').availability,{state:'soon',label:'Скоро',appearsAt:now+90*min,appearsAtKnown:true,appearsAtEstimated:false,archiveUntil:null,onAir:true},'on air is not an archive until it ends');
+ assert.equal(by('tmdb_18').availableNow,false);assert.equal(by('tmdb_18').availableUntil,null);assert.deepEqual(by('tmdb_18').shows.map(item=>item.status),['on_air']);
+ // the EPG end is absent: the end is start + runtime (100 minutes in this fixture): future -> on_air -> archive at the exact end -> expired 72 h after the START
+ // The handler reads the real clock, so the shows are shifted instead of the clock and the boundaries get a margin of seconds; the exact millisecond
+ // boundaries (end - 1, end, start + 72 h - 1, start + 72 h) are in tests/film-availability.mjs.
+ const shifted=async delta=>{seed();setCatalogShows('tmdb_18',[{channelId:'c1',channel:'One',start:now-delta}]);r=await get();return by('tmdb_18');};
+ let f=await shifted(-hour);                                                   // starts in an hour
+ assert.deepEqual([f.shows[0].status,f.availability.state,f.availableNow,f.availableUntil],['future','soon',false,null]);
+ assert.deepEqual([f.shows[0].end,f.shows[0].effectiveEnd,f.availability.appearsAt,f.availability.appearsAtEstimated,f.availability.appearsAtKnown],[null,now+hour+100*min,now+hour+100*min,true,true]);
+ f=await shifted(10*min);assert.deepEqual([f.shows[0].status,f.availability.state,f.availability.onAir,f.availableNow],['on_air','soon',true,false]);
+ f=await shifted(100*min-5000);assert.deepEqual([f.shows[0].status,f.availability.state],['on_air','soon'],'seconds before the effective end');
+ f=await shifted(100*min+5000);assert.deepEqual([f.shows[0].status,f.availability.state,f.availableNow],['archive','available',true],'ready right after the effective end');
+ assert.equal(f.availableUntil,new Date(now-100*min-5000+72*hour).toISOString());assert.equal(f.availability.archiveUntil,now-100*min-5000+72*hour);
+ f=await shifted(72*hour-5000);assert.deepEqual([f.shows[0].status,f.availability.state],['archive','available'],'72 h not yet elapsed from the start');
+ // a film whose only show started 72 h or more ago is outside the catalog window altogether: the expired phase is covered by the helper table and the film page
+ // no EPG end and no usable runtime: the show is `unknown`, the film is not available and nothing is invented
+ for(const runtime of [null,0,-3,'abc']){
+  seed();records.get('epg/discovered-films.json').tmdb_18.runtime=runtime;records.get('epg/generations/'+G1+'/discovered-films.json').tmdb_18.runtime=runtime;
+  setCatalogShows('tmdb_18',[{channelId:'c1',channel:'One',start:now-hour}]);
+  r=await get();f=by('tmdb_18');
+  assert.deepEqual([f.shows[0].status,f.shows[0].effectiveEnd,f.availability.state,f.availableNow,f.availableUntil],['unknown',null,'unavailable',false,null],'runtime '+String(runtime));
+ }
+ // a future show without end and without runtime stays `future`: the film is soon, with no promised hour
+ seed();records.get('epg/discovered-films.json').tmdb_15.runtime=null;records.get('epg/generations/'+G1+'/discovered-films.json').tmdb_15.runtime=null;
+ setCatalogShows('tmdb_15',[{channelId:'c1',channel:'One',start:now+3*hour}]);r=await get();f=by('tmdb_15');
+ assert.deepEqual([f.shows[0].status,f.availability.state,f.availability.appearsAt,f.availability.appearsAtKnown,f.availability.appearsAtEstimated],['future','soon',null,false,null]);
+ // availableNow always agrees with the film-level state, and every status is one of the five
+ seed();r=await get();
+ for(const item of r.body.films){assert.equal(item.availableNow,item.availability.state==='available',item.id);assert.equal(item.availableUntil!==null,item.availableNow,item.id);for(const s of item.shows)assert.ok(['future','on_air','archive','expired','unknown'].includes(s.status),item.id);}
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 }
 

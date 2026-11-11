@@ -27,12 +27,12 @@ flowchart TD
 
 ## Film availability lifecycle
 
-On the published shows a film is, at every instant, in one of three states ([ADR 0114](../adr/0114-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is a **snapshot recomputed from the shows** at each instant and is never stored, so any of the three can be the first one seen; the diagram lists the transitions time or a new generation can cause. A repeat or a show on air never changes `available` while a ready recording exists. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the END of the show.
+On the published shows a film is, at every instant, in one of three states ([ADR 0114](../adr/0114-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is a **snapshot recomputed from the shows** at each instant and is never stored, so any of the three can be the first one seen; the diagram lists the transitions time or a new generation can cause. A repeat or a show on air never changes `available` while a ready recording exists. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the show's effective end (the EPG end, else start plus the film runtime; a schedule-based calculation, not a provider probe).
 
 ```mermaid
 stateDiagram-v2
     unavailable --> soon: a show starts within 24 h or is on air
-    soon --> available: the show ends (scheduled end)
+    soon --> available: the effective end of the show passes
     soon --> unavailable: the candidate shows are gone without an archive
     available --> unavailable: 72 h after the start of the last ready show
     available --> soon: the last archive expires while a repeat is on air or starts within 24 h
