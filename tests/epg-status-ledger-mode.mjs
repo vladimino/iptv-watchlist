@@ -114,6 +114,31 @@ const ARCHIVE={version:'v1',manifestId:'manifest-33525',segments:64,items:33525,
  assertPure(result,key,{ranges:2});
 }
 
+// 2b. AIR-429: a bounded generation that still holds backlog says so. Its active ledger is the scan plus that backlog, and the status
+//     does not call it the scan: `drain` carries what is left and the cap. Without backlog the field is absent, as before.
+{
+ const draining=await generation({ledger:{ledgerMode:'bounded',drain:{backlog:21673,cap:8000},archive:{...ARCHIVE,alsoArchived:[],items:44839,uniqueArchivedItems:44839}}});
+ const result=await draining.status();
+ assert.equal(result.body.archive.ledgerMode,'bounded');
+ assert.deepEqual(result.body.archive.drain,{backlog:21673,cap:8000});
+ assert.equal(result.body.archive.uniqueArchivedItems,44839);assert.equal(result.body.archive.ledgerModeSource,'generation_document');
+ assertPure(result,draining.key,{ranges:2});
+ // no archive at all but backlog (a first commit that archived nothing yet)
+ const bare=await generation({ledger:{ledgerMode:'bounded',drain:{backlog:5,cap:3},archive:null}});
+ const bareResult=await bare.status();
+ assert.equal(bareResult.body.archive.ledgerMode,'bounded');assert.deepEqual(bareResult.body.archive.drain,{backlog:5,cap:3});
+ assertPure(bareResult,bare.key,{ranges:1});
+ // a drained or ordinary bounded generation has no drain field
+ const done=await generation({ledger:{ledgerMode:'bounded',archive:{...ARCHIVE,alsoArchived:[],items:120,uniqueArchivedItems:120}}});
+ assert.equal('drain' in (await done.status()).body.archive,false);
+ // a drain that no commit can write (on a frozen ledger, or with nothing left) is not believed: unknown, not a guess
+ for(const ledger of [{ledgerMode:'frozen',drain:{backlog:3,cap:2},archive:null},{ledgerMode:'bounded',drain:{backlog:0,cap:2},archive:null}]){
+  const bad=await generation({ledger});
+  const body=(await bad.status()).body;
+  assert.equal(body.archive.ledgerMode,'unknown');assert.equal(body.archive.ledgerModeReason,'generation_document_unreadable');
+ }
+}
+
 // 3. A `full` ledger has no header at all (the document ends at `]}`), and `frozen` without an archive names none: both are proven, with
 //    an archive of zero that is a fact and is labelled `none`.
 for(const [ledger,mode] of [[{},'full'],[{ledgerMode:'frozen',archive:null},'frozen']]){

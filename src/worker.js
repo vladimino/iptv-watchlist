@@ -786,11 +786,11 @@ async function locateDiscoveryLedger(env){
 }
 async function readLedgerView(env){
  const located=await locateDiscoveryLedger(env);
- if(!located)return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
+ if(!located)return {kind:'missing',items:[],archive:null,prevKeys:new Set(),backlog:new Set(),duplicates:new Set()};
  const object=await env.BUCKET.get(located.key);
  if(!object){
   if(located.expectRun)throw new Error('Discovery ledger is missing for the published generation');
-  return {kind:'missing',items:[],archive:null,prevKeys:new Set(),duplicates:new Set()};
+  return {kind:'missing',items:[],archive:null,prevKeys:new Set(),backlog:new Set(),duplicates:new Set()};
  }
  const requireRun=wrapper=>{if(located.expectRun&&wrapper?.programmeRunId!==located.expectRun)throw new Error('Discovery ledger does not match the published generation');};
  if(!ledgerStreamable(object)){
@@ -798,12 +798,12 @@ async function readLedgerView(env){
   requireRun(value);
   if(!Array.isArray(value?.items))throw new Error('Discovery ledger JSON is incomplete');
   const items=value.items;
-  return {kind:'materialized',items,archive:value?.archive||null,prevKeys:new Set(items.map(item=>item?.key)),duplicates:new Set()};
+  return {kind:'materialized',items,archive:value?.archive||null,prevKeys:new Set(items.map(item=>item?.key)),backlog:new Set(items.filter(item=>item?.seenInLatestSnapshot!==true).map(item=>item?.key)),duplicates:new Set()};
  }
- const prevKeys=new Set(),duplicates=new Set(),seen=new Set();
- const wrapper=await forEachJsonArrayItems(ledgerChunks(object),'items',item=>{prevKeys.add(item?.key);const key=discoveryCandidateKey(item);if(seen.has(key))duplicates.add(key);else seen.add(key);});
+ const prevKeys=new Set(),backlog=new Set(),duplicates=new Set(),seen=new Set();
+ const wrapper=await forEachJsonArrayItems(ledgerChunks(object),'items',item=>{prevKeys.add(item?.key);if(item?.seenInLatestSnapshot!==true)backlog.add(item?.key);const key=discoveryCandidateKey(item);if(seen.has(key))duplicates.add(key);else seen.add(key);});
  requireRun(wrapper);
- return {kind:'stream',key:located.key,archive:wrapper.archive||null,prevKeys,duplicates};
+ return {kind:'stream',key:located.key,archive:wrapper.archive||null,prevKeys,backlog,duplicates};
 }
 // Prefix, comma and suffix are the bytes the generation document actually writes. The length is their size
 // plus the candidate bytes counted on the decision walk. workerd accepts a ReadableStream only when that
@@ -914,12 +914,15 @@ async function storePlannedDiscovery(env,runId,meta,planned,next,lease){
 }
 // Departures (bounded mode) stay objects only for the archive write that follows; frozen mode keeps none.
 // The scan list stays reachable until the generation put has pulled the document. Encoding happens then, one row at a time.
+// AIR-429: a departure waits for the archive write as its key and its JSON text, not as an object: the objects of a first bounded commit were most
+// of its peak. It is parsed again when the segment that holds it is written.
+function departureRecord(item){return {key:item.key,json:JSON.stringify(item)};}
 async function collectLedgerDecisions(env,view,holder,reentry,options,active){
  const merge=openDiscoveryMerge(holder?.discovery||[],reentry,options,view.duplicates);
  const object=await env.BUCKET.get(view.key);
  if(!object)throw new Error('Discovery ledger is missing for the published generation');
  const departures=[],activeKeys=new Set();
- const place=item=>{if(!item)return;if(active(item))activeKeys.add(item.key);else departures.push(item);};
+ const place=item=>{if(!item)return;if(active(item))activeKeys.add(item.key);else departures.push(departureRecord(item));};
  const encoder=new TextEncoder(),bytesOf=item=>encoder.encode(JSON.stringify(item)).byteLength;
  let itemBytes=0,itemCount=0,holeOpen=false;const parked=[],holes=new Map();
  const add=n=>{itemBytes+=n;itemCount++;};
@@ -1001,7 +1004,9 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  const reentry=[],found=new Set(),wanted=new Map();
  for(const key of latestKeys)if(!prevKeys.has(key)){const segment=ledgerArchiveSegment(key,start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS);if(!wanted.has(segment))wanted.set(segment,[]);wanted.get(segment).push(key);}
  if(start)for(const [segment,keys] of wanted){const items=await readLedgerSegment(env,start,segment);for(const key of keys)if(items[key]){reentry.push(items[key].payload);found.add(key);}}
- const keep=item=>effective!=='bounded'||latestKeys.has(item.key);
+ // AIR-429: a bounded active ledger is the scan plus the part of the backlog that this commit does not archive yet (see planLedgerDrain).
+ const drain=effective==='bounded'?planLedgerDrain(view.backlog,latestKeys,ledgerDrainCap()):null;
+ const keep=item=>effective!=='bounded'||latestKeys.has(item.key)||drain.held(item.key);
  let items=null,emit=null,departures,activeKeys,collected=null;
  if(view.kind==='stream'){
   latestList=null;
@@ -1011,7 +1016,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  }else{
   const merged=mergeDiscoveryCandidates([...(view.items||[]),...reentry],latestList,options);
   items=effective==='bounded'?merged.filter(keep):merged;
-  departures=effective==='bounded'?merged.filter(item=>!latestKeys.has(item.key)):[];
+  departures=effective==='bounded'?merged.filter(item=>!keep(item)).map(departureRecord):[];
   activeKeys=new Set(items.map(item=>item.key));
   if(sourceHolder)sourceHolder.discovery=null;
  }
@@ -1034,7 +1039,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   const segments=Array.from({length:count},(_,segment)=>start?.segments?.[segment]||{segment,object:null,sha256:null,items:0,bytes:0});
   for(const [segment,records] of [...bySegment].sort((a,b)=>a[0]-b[0])){
    const segmentItems=await readLedgerSegment(env,start,segment);
-   for(const payload of records)if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};
+   for(const record of records){const payload=JSON.parse(record.json);if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};}
    const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},fence);
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   }
@@ -1047,7 +1052,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   if(swapped===null)throw new Error('Discovery archive fence lost: archive pointer changed');
  }
  const alsoArchived=[...also].sort(),archive=manifest?{version:'v1',manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes,alsoArchived,uniqueArchivedItems:manifest.totals.items-alsoArchived.length}:null;
- const ledgerOut={ledgerMode:effective,archive};
+ const ledgerOut={ledgerMode:effective,...(drain&&drain.backlog>0?{drain:{backlog:drain.backlog,cap:drain.cap}}:{}),archive};
  if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut,itemBytes:collected.itemBytes,itemCount:collected.itemCount};
  return {items,ledger:ledgerOut};
 }
