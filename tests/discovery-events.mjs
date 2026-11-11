@@ -571,6 +571,73 @@ resetAll();seed({count:3});const own10e=elect();
  assert.deepEqual(hourEvents().map(event=>event.kind),['hour']);
 }
 
+// 10f. Settled and complete, zero backlog, the projector window held (the 15:00 UTC case of 11 Nov 2026): the close waits the window out, bounded; a window that outlasts
+// the firing still yields the NORMAL empty report (provisional, no record write); and nothing is guessed when anything pending or unproven stands in the way.
+{
+ const settle=(generation=GENERATION)=>{
+  resetAll();seed({stage:'complete',remaining:0,reason:null,count:3});
+  set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'complete',updatedAt:iso,waitingUntil:null,recovery:null});
+  set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:generation,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
+  set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:generation});
+ };
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ const windowBusy=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000,state:'held'};throw error;};
+ const stopped={started:false,reason:'stopped',programmeRunId:GENERATION};
+ const closeWith=(n,wait)=>call('closeHourlyDiscoveryReport')(env,stopped,{...cron(n),wait});
+ const hourAt=n=>discoveryEvents().filter(event=>event.at===new Date(BASE+n*HOUR).toISOString());
+ // (a) the window passes while the close waits: the normal report, closed for real (the record moved on), not provisional, no notice
+ settle();let waits=0;
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ const normal=await closeWith(0,async()=>{waits++;context.DiscoveryAuthority.writeWorkflow=realWrite;});
+ assert.equal(normal.closed,true);assert.equal(waits,1,'it waited the window out once');
+ assert.deepEqual(hourAt(0).map(event=>[event.kind,event.status,event.queueEmpty,event.checked,event.added,event.provisional]),[['hour','empty',true,0,0,undefined]],'the normal empty report with proven zeros');
+ assert.equal(workflowRecord().report.lastClosedHour,call('discoveryHourStamp')(BASE),'the hour is closed in the record');assert.equal(warnings.length,0);
+ // (b) the window outlasts every try: the same empty report, provisional, no notice, the record untouched
+ settle();waits=0;context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ const before=JSON.stringify(workflowRecord());
+ const prov=await closeWith(0,async()=>{waits++;});
+ assert.equal(prov.provisional,true);assert.equal(prov.closed,false);assert.equal(waits,2,'it waited between its three tries and no longer');
+ assert.deepEqual(hourAt(0).map(event=>[event.kind,event.status,event.queueEmpty,event.remaining,event.checked,event.added,event.chunks,event.provisional,event.incomplete]),[['hour','empty',true,0,0,0,0,true,false]],'the normal empty report: proven zeros, no notice');
+ assert.equal(notices().length,0);assert.equal(JSON.stringify(workflowRecord()),before,'no record write: the accumulator, outbox and lastClosedHour are untouched');
+ assert.equal(warnings.some(entry=>entry.event==='discovery_hour_close_provisional'&&entry.reason==='projector_window'),true);assert.equal(warnings.some(entry=>entry.event==='discovery_hour_close_failed'),false,'it is not a failure');
+ // a replay or a duplicate firing of the same hour finds the same event
+ await closeWith(0,async()=>{});assert.equal(hourAt(0).length,1);assert.equal(eventKeys().length,1);
+ // a report of the same hour that closes later replaces it and is never dropped (the deltas that arrived after the window are in it)
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await call('settleWorkflowIfOwner')(env,INSTANCE,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:6,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:0,cheapRemaining:0,error:null},INSTANCE+':late',GENERATION)})).catch(()=>{});
+ const late=await closeWith(0,async()=>{});
+ assert.equal(late.closed,true);assert.equal(hourAt(0).length,1,'one event for the hour');assert.equal(eventKeys().length,1);
+ assert.equal(hourAt(0)[0].provisional,undefined,'the report replaced the provisional one');
+ // (c) pending deltas stand in the way: nothing is zeroed or claimed; the notice is the truthful line and the deltas stay
+ settle();context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await call('settleWorkflowIfOwner')(env,INSTANCE,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:4,added:3,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:0,cheapRemaining:0,error:null},INSTANCE+':pending',GENERATION)})).catch(()=>{});
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ const pendingClose=await closeWith(0,async()=>{});
+ assert.equal(pendingClose.provisional,undefined);assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed']);assert.equal(workflowRecord().report.added,3,'the deltas wait for a real close');
+ // (d) a competing checkpoint lands while the close waits the window: the second read sees it and the real report carries it
+ settle();context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ const raced=await closeWith(0,async()=>{
+  context.DiscoveryAuthority.writeWorkflow=realWrite;
+  await call('settleWorkflowIfOwner')(env,INSTANCE,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:5,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:0,cheapRemaining:0,error:null},INSTANCE+':race',GENERATION)})).catch(()=>{});
+ });
+ assert.equal(raced.closed,true);assert.deepEqual(hourAt(0).map(event=>[event.kind,event.added,event.checked,event.provisional]),[['hour',1,5,undefined]],'the delta that landed is reported once, never swallowed by a zero');
+ // (e) the queue is not proven for this generation (another generation's status): no empty claim; the notice
+ settle(OTHER);context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ await closeWith(0,async()=>{});assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed'],'an empty queue of another generation is not this one\'s');
+ // a continuation that is not complete is not an empty queue either
+ settle();set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso,hopId:'h',remainingChunks:3,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ await closeWith(0,async()=>{});assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed']);
+ // (f) a real write failure (a lost compare-and-swap, an unreadable record, no record) is never read as an empty queue
+ settle();context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});
+ assert.equal((await closeWith(0,async()=>{})).reason,'write_conflict');assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed']);
+ settle();records.delete('epg/discovery-workflow.json');context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.equal((await closeWith(0,async()=>{})).reason,'no_record');assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed']);
+ // (g) the journal itself refuses the provisional report: it falls to the notice path (ledger), nothing is claimed
+ settle();context.DiscoveryAuthority.writeWorkflow=windowBusy;failEventPuts=true;
+ const refused=await closeWith(0,async()=>{});assert.equal(refused.provisional,undefined);assert.equal(refused.notice,'queued');
+ failEventPuts=false;context.DiscoveryAuthority.writeWorkflow=realWrite;
+}
+
 // 10b. The hour closes and the deltas are real, but the queue cannot be read: the report keeps its numbers and says only that the remainder is unread.
 resetAll();seed({count:3});const own10b=elect();
 {
