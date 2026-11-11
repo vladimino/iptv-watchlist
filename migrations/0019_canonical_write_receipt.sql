@@ -14,7 +14,7 @@
 -- Fence model, consistent with 0013: a receipt may be inserted or updated ONLY while the marker is d1/open (so at r2, prepared and held the
 -- table stays empty or frozen, and a producer cannot write it); reads are always allowed. An insert must carry the live marker generation.
 -- Rows are never deleted (trigger); pruning terminal rows is a later, separately approved decision (not decided: rows are kept indefinitely).
--- The activation baseline tables (canonical_receipt_watermark, canonical_receipt_baseline) scope what `unreceipted` means; both start EMPTY and are filled by a later, separately authorized step.
+-- The activation baseline tables (canonical_receipt_baseline, canonical_receipt_watermark, canonical_receipt_baseline_seal) scope what `unreceipted` means; both start EMPTY and are filled by a later, separately authorized step.
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
@@ -147,25 +147,16 @@ BEGIN
  SELECT RAISE(ABORT, 'canonical_receipt_delete');
 END;
 
--- The activation baseline (ADR 0119): a canonical_revision that predates receipts must not be called "unreceipted", and must not be retrospectively given a receipt. canonical_receipt_watermark
--- is one row, taken once, and PROVES the boundary: per kind, the count, the highest revision and the SHA-256 digest of the (id, revision) pairs it copied, plus the marker generation it was
--- taken under (the code verifies them read-only against the copied rows: `verifyBaseline`); canonical_receipt_baseline holds one row per canonical_revision entity as it stood then (kind, id, revision). A revision at or below its baseline entry is
--- `pre_receipt_baseline`; unreceipted applies only above it. Both tables are insert-only, and may be filled only while the marker is d1/open (the watermark under the live generation) and BEFORE the first
--- receipt exists (a receipt needs the watermark, and the watermark is one row, so it can only precede them); a receipt cannot be inserted until the watermark exists. Taking it is a later, separately authorized activation step (src/canonical-receipts.js `recordBaseline`).
-CREATE TABLE canonical_receipt_watermark (
- id INTEGER PRIMARY KEY CHECK (id = 1),
- marker_generation INTEGER NOT NULL CHECK (marker_generation >= 0),
- entries INTEGER NOT NULL CHECK (entries >= 0),
- film_count INTEGER NOT NULL CHECK (film_count >= 0),
- film_max_revision INTEGER NOT NULL CHECK (film_max_revision >= 0),
- film_digest TEXT NOT NULL CHECK (length(film_digest) = 64 AND film_digest NOT GLOB '*[^0-9a-f]*'),
- person_count INTEGER NOT NULL CHECK (person_count >= 0),
- person_max_revision INTEGER NOT NULL CHECK (person_max_revision >= 0),
- person_digest TEXT NOT NULL CHECK (length(person_digest) = 64 AND person_digest NOT GLOB '*[^0-9a-f]*'),
- taken_at TEXT NOT NULL CHECK (length(taken_at) BETWEEN 20 AND 32),
- CHECK (entries = film_count + person_count)
-) STRICT;
-
+-- The activation baseline (ADR 0119): a canonical_revision that predates receipts must not be called "unreceipted", and must not be retrospectively given a receipt. It is built in THREE insert-only steps
+-- that can never leave an unrepairable state, because nothing is ever derived from an earlier read:
+--   1. ONE batch copies canonical_revision into canonical_receipt_baseline (a single SELECT: one snapshot) and, in the same batch, inserts canonical_receipt_watermark whose per-kind count and highest revision
+--      are computed IN SQL from the rows just copied. A trigger refuses a watermark that disagrees with the copied rows. The batch is one transaction: on any failure NO row of either table exists, and the
+--      step can simply be retried. Baseline rows can only be inserted while no watermark exists (so only by that step), while the marker is d1/open and before the first receipt.
+--   2. canonical_receipt_baseline_seal holds, per kind, the SHA-256 digest of the (id, revision) pairs; the code computes it from the IMMUTABLE copied rows (not from any earlier read), so there is no read/copy
+--      split to race. The seal is the committed pointer, written last; if writing it fails it is retried from the same immutable rows. A receipt cannot be inserted until the seal exists.
+--   3. `verifyBaseline` recomputes counts, highest revisions and digests read-only and compares them with the watermark and the seal.
+-- A revision at or below its baseline entry is `pre_receipt_baseline`; unreceipted applies only above it. All three tables are insert-only and fillable only while the marker is d1/open. Taking the baseline is a
+-- later, separately authorized activation step (src/canonical-receipts.js `recordBaseline`). The step is bounded (5,000 entities, asserted inside the batch): at the planned boundary canonical_revision holds 0 rows.
 CREATE TABLE canonical_receipt_baseline (
  kind TEXT NOT NULL CHECK (kind IN ('film', 'person')),
  id TEXT NOT NULL CHECK ((kind = 'film' AND id GLOB 'film:?*') OR (kind = 'person' AND id GLOB 'person:?*')),
@@ -173,20 +164,54 @@ CREATE TABLE canonical_receipt_baseline (
  PRIMARY KEY (kind, id)
 ) STRICT;
 
-CREATE TRIGGER canonical_receipt_watermark_insert
-BEFORE INSERT ON canonical_receipt_watermark
-FOR EACH ROW
-WHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open' AND generation = NEW.marker_generation)
-BEGIN
- SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');
-END;
+CREATE TABLE canonical_receipt_watermark (
+ id INTEGER PRIMARY KEY CHECK (id = 1),
+ marker_generation INTEGER NOT NULL CHECK (marker_generation >= 0),
+ entries INTEGER NOT NULL CHECK (entries >= 0),
+ film_count INTEGER NOT NULL CHECK (film_count >= 0),
+ film_max_revision INTEGER NOT NULL CHECK (film_max_revision >= 0),
+ person_count INTEGER NOT NULL CHECK (person_count >= 0),
+ person_max_revision INTEGER NOT NULL CHECK (person_max_revision >= 0),
+ taken_at TEXT NOT NULL CHECK (length(taken_at) BETWEEN 20 AND 32),
+ CHECK (entries = film_count + person_count)
+) STRICT;
 
+CREATE TABLE canonical_receipt_baseline_seal (
+ id INTEGER PRIMARY KEY CHECK (id = 1),
+ film_digest TEXT NOT NULL CHECK (length(film_digest) = 64 AND film_digest NOT GLOB '*[^0-9a-f]*'),
+ person_digest TEXT NOT NULL CHECK (length(person_digest) = 64 AND person_digest NOT GLOB '*[^0-9a-f]*'),
+ sealed_at TEXT NOT NULL CHECK (length(sealed_at) BETWEEN 20 AND 32)
+) STRICT;
+
+-- Baseline rows: only before the watermark (that is, by the one copying batch) and while the marker is d1/open. (A receipt needs the seal, which needs the watermark, so none can exist before them.)
 CREATE TRIGGER canonical_receipt_baseline_insert
 BEFORE INSERT ON canonical_receipt_baseline
 FOR EACH ROW
 WHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')
+ OR EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');
+END;
+
+-- The watermark: under the live generation, and equal to what the copied rows say (per-kind counts and highest revisions; the entries total follows from its CHECK), so it can only describe the rows that are there.
+CREATE TRIGGER canonical_receipt_watermark_insert
+BEFORE INSERT ON canonical_receipt_watermark
+FOR EACH ROW
+WHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open' AND generation = NEW.marker_generation)
+ OR NEW.film_count <> (SELECT COUNT(*) FROM canonical_receipt_baseline WHERE kind = 'film')
+ OR NEW.person_count <> (SELECT COUNT(*) FROM canonical_receipt_baseline WHERE kind = 'person')
+ OR NEW.film_max_revision <> COALESCE((SELECT MAX(revision) FROM canonical_receipt_baseline WHERE kind = 'film'), 0)
+ OR NEW.person_max_revision <> COALESCE((SELECT MAX(revision) FROM canonical_receipt_baseline WHERE kind = 'person'), 0)
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');
+END;
+
+-- The seal: after the watermark, while the marker is d1/open.
+CREATE TRIGGER canonical_receipt_baseline_seal_insert
+BEFORE INSERT ON canonical_receipt_baseline_seal
+FOR EACH ROW
+WHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')
  OR NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)
- OR EXISTS (SELECT 1 FROM canonical_write_receipt)
 BEGIN
  SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');
 END;
@@ -215,10 +240,23 @@ BEGIN
  SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
 END;
 
+CREATE TRIGGER canonical_receipt_baseline_seal_no_update
+BEFORE UPDATE ON canonical_receipt_baseline_seal
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
+END;
+
+CREATE TRIGGER canonical_receipt_baseline_seal_no_delete
+BEFORE DELETE ON canonical_receipt_baseline_seal
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
+END;
+
+-- A receipt cannot be inserted before the baseline is sealed.
 CREATE TRIGGER canonical_write_receipt_insert_baseline
 BEFORE INSERT ON canonical_write_receipt
 FOR EACH ROW
-WHEN NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)
+WHEN NOT EXISTS (SELECT 1 FROM canonical_receipt_baseline_seal WHERE id = 1)
 BEGIN
  SELECT RAISE(ABORT, 'canonical_receipt_baseline_missing');
 END;

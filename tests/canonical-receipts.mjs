@@ -16,7 +16,7 @@ import {failed} from '../src/film-person-authority.js';
 
 const M=await import(process.env.CANON_RECEIPTS_SOURCE?pathToFileURL(path.resolve(process.env.CANON_RECEIPTS_SOURCE)).href:'../src/canonical-receipts.js');
 const {receiptedWrite:rawWrite,reconcilePlan,reconcileReceipts,unreceiptedChanges,readUnreceipted,readReceipt,listReceipts,digestOf,canonicalJson,requestIdOf,backoffMs,classify,errorClassOf,defineOperation:rawDefine,operationRegistry:rawRegistry,
- appliedStatements,receiptsAvailable,assertReceiptsAvailable,normalizeRequest,RETRY_POLICY,OPERATION_KINDS,RECEIPT_STATES,recordBaseline,judgeReadback,receiptsStatus,BASELINE_CAP,verifyBaseline,listAttention,exceptionOf,APPROVED_EXCEPTIONS}=M;
+ appliedStatements,receiptsAvailable,assertReceiptsAvailable,normalizeRequest,RETRY_POLICY,OPERATION_KINDS,RECEIPT_STATES,recordBaseline,judgeReadback,receiptsStatus,BASELINE_CAP,verifyBaseline,listAttention,exceptionOf,APPROVED_EXCEPTIONS,validEvidence}=M;
 // Atomic mode is REQUIRED by the module (owner decision, PR #530 comment 6802553275). Only the test seam below can approve the named legacy exception, so the separate-mark scenarios of sections 4 to 14 run through it;
 // production code has no approved exception (APPROVED_EXCEPTIONS is empty) and sections 13 and 16 use the raw functions.
 const EXCEPTION={id:'test-legacy-separate-mark',review:'test fixture',proof:'test fixture',ownerAcceptance:'test fixture'};
@@ -53,9 +53,10 @@ if(shared){
 }
 let n=0;
 const EMPTY=crypto.createHash('sha256').update('[]').digest('hex');
-// A watermark row for an EMPTY canonical_revision (every scenario database starts empty), with the proof of the empty set.
-const WM=generation=>"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,film_digest,person_count,person_max_revision,person_digest,taken_at) VALUES (1,"+generation+",0,0,0,'"+EMPTY+"',0,0,'"+EMPTY+"','2026-11-11T09:00:00.000Z')";
-const BASELINE=WM(2)+";INSERT INTO canonical_receipt_baseline (kind,id,revision) SELECT kind,id,revision FROM canonical_revision;";
+// A watermark and a seal for an EMPTY canonical_revision (every scenario database starts empty), with the digest of the empty set.
+const WM=generation=>"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,"+generation+",0,0,0,0,0,'2026-11-11T09:00:00.000Z')";
+const SEAL="INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','2026-11-11T09:00:00.000Z')";
+const BASELINE=WM(2)+";"+SEAL+";";
 // A database at `open` carries the activation baseline unless `baseline` is false (the baseline tests take it themselves).
 function database(stage='open',source=template,baseline=true){
  const file=path.join(root,'rc-'+(n++)+'.sqlite');
@@ -81,20 +82,23 @@ const revision=(file,id)=>Number(one(file,"SELECT revision FROM canonical_revisi
 const filmRow=(file,id=FILM)=>rows(file,"SELECT original_title,contract_version FROM film WHERE id='"+id+"'")[0]||null;
 
 // The test operation: one Film written by the real fenced mutateFilm; the planned digest and the readback digest go through the same digestOf over the same canonical form.
+// The operation-specific evidence: a writer that wants a lost mark settled by readback writes STRUCTURED evidence {requestId, target, appliedRevision, contentDigest} as an alias row inside its OWN batch; the readback
+// returns it and the MODULE validates it against the receipt (validEvidence). A write without it (another actor's) proves nothing.
 const filmContent=(title,contractVersion=1)=>({originalTitle:title,contractVersion});
 const plannedDigest=title=>digestOf(filmContent(title));
-// The operation-specific evidence: a writer that wants its lost mark settled by readback writes the request id as an alias row inside its OWN batch; the readback proves the request's own effect
-// from that row, at the revision after the one it planned against, even when the content was overwritten since. A write without that evidence (another actor's) proves nothing.
+const evidenceOf=async(requestId,id,appliedRevision,title)=>({requestId,target:{kind:'film',id},appliedRevision,contentDigest:await plannedDigest(title)});
 const readbackFilm=async(env,target,receipt)=>{
  const row=await env.DB.prepare('SELECT original_title,contract_version FROM film WHERE id=?').bind(target.id).first();
  if(!row)return null;
  const rev=await env.DB.prepare('SELECT revision FROM canonical_revision WHERE kind=? AND id=?').bind(target.kind,target.id).first();
- const proof=receipt?!!(await env.DB.prepare("SELECT 1 AS x FROM film_alias WHERE film_id=? AND kind='request' AND value=?").bind(target.id,receipt.requestId).first()):false;
- const out={digest:await digestOf(filmContent(row.original_title,row.contract_version)),revision:proof?receipt.plannedRevision+1:Number(rev?.revision??0)};
- if(proof)out.proof='request';
+ const out={digest:await digestOf(filmContent(row.original_title,row.contract_version)),revision:Number(rev?.revision??0)};
+ if(receipt){
+  const alias=await env.DB.prepare("SELECT value FROM film_alias WHERE film_id=? AND kind='request' AND value LIKE ?").bind(target.id,'%"requestId":"'+receipt.requestId+'"%').first();
+  if(alias)out.evidence=JSON.parse(alias.value);
+ }
  return out;
 };
-const writeFilm=(env,title,expectedRevision=0,id=FILM,requestId=null)=>mutateFilm(env,{id,expectedRevision,at:T,film:{contractVersion:1,originalTitle:title,...(requestId?{aliases:[{kind:'request',value:requestId}]}:{})}});
+const writeFilm=async(env,title,expectedRevision=0,id=FILM,requestId=null)=>mutateFilm(env,{id,expectedRevision,at:T,film:{contractVersion:1,originalTitle:title,...(requestId?{aliases:[{kind:'request',value:JSON.stringify(await evidenceOf(requestId,id,expectedRevision+1,title))}]}:{})}});
 async function request(source,title=SECRET_TITLE,over={}){
  return {requestId:await requestIdOf({origin:'epg',operation:'film_mutation',source}),operation:'film_mutation',origin:'epg',target:{kind:'film',id:FILM},expectedRevision:0,digest:await plannedDigest(title),...over};
 }
@@ -116,7 +120,7 @@ if(on(1)){
  const file=database('r2');
  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),19);
  assert.equal(count(file),0,'the table starts empty');
- assert.equal(Number(one(file,'SELECT COUNT(*) FROM canonical_receipt_watermark')),0);assert.equal(Number(one(file,'SELECT COUNT(*) FROM canonical_receipt_baseline')),0,'the baseline tables start empty');
+ for(const table of ['canonical_receipt_watermark','canonical_receipt_baseline','canonical_receipt_baseline_seal'])assert.equal(Number(one(file,'SELECT COUNT(*) FROM '+table)),0,table+' starts empty');
  for(const name of ['canonical_write_receipt'])assert.equal(Number(one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='"+name+"'")),1);
  // Applying 0019 to a database that is not a complete version 18 changes nothing.
  const partial=path.join(root,'partial.sqlite');
@@ -520,15 +524,20 @@ if(on(8)){
  for(const state of ['prepared','held','r2'])assert.deepEqual(plan([rc('m1')],{},iso(5000),{state,generation:2}).waiting.map(item=>item.reason),['marker_not_open']);
  // a due receipt is read back first; equal digest -> mark_applied (with the observed revision); different or absent -> replay; null (target empty) -> replay
  assert.deepEqual(plan([rc('u1',{state:'unknown'})]).actions,[{requestId:'u1',action:'readback'}]);
- assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'a'.repeat(64),revision:4,proof:'request'}}).actions,[{requestId:'u1',action:'mark_applied',revision:4}]);
+ const ev=(requestId,over={})=>({requestId,target:{kind:'film',id:FILM},appliedRevision:1,contentDigest:'a'.repeat(64),...over});
+ assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'a'.repeat(64),revision:4,evidence:ev('u1')}}).actions,[{requestId:'u1',action:'mark_applied',revision:1}],'the revision is the one the evidence says');
  // the planned content WITHOUT proof of this request is never applied: it is for review
  assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'a'.repeat(64),revision:4}}).actions,[{requestId:'u1',action:'needs_review',reason:'content_match_unproven'}]);
  // proof of the request wins even when the content was overwritten since
- assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'c'.repeat(64),revision:1,proof:'request'}}).actions,[{requestId:'u1',action:'mark_applied',revision:1}]);
- assert.equal(judgeReadback({digest:'a'.repeat(64),proof:'request'},{contentDigest:'z'}),'applied');assert.equal(judgeReadback({digest:'a'.repeat(64)},{contentDigest:'a'.repeat(64)}),'content_unproven');assert.equal(judgeReadback(null,{contentDigest:'a'}),'absent');
+ assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'c'.repeat(64),revision:3,evidence:ev('u1')}}).actions,[{requestId:'u1',action:'mark_applied',revision:1}]);
+ // evidence that does not validate against THIS receipt is for review, never applied, whatever the content is
+ for(const [name,evidence] of [['another request',ev('other')],['another target',ev('u1',{target:{kind:'film',id:'film:other'}})],['another target kind',ev('u1',{target:{kind:'person',id:FILM}})],['another revision',ev('u1',{appliedRevision:2})],['a string revision',ev('u1',{appliedRevision:'1'})],['another digest',ev('u1',{contentDigest:'b'.repeat(64)})],['an extra field',ev('u1',{extra:1})],['a missing field',{requestId:'u1',target:{kind:'film',id:FILM},appliedRevision:1}],['an extra target field',ev('u1',{target:{kind:'film',id:FILM,x:1}})],['an array',[]],['a string','proof'],['null',null],['a flag',true]])for(const digest of ['a'.repeat(64),'c'.repeat(64)])assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest,revision:1,evidence}}).actions,[{requestId:'u1',action:'needs_review',reason:'evidence_invalid'}],name+' ('+digest[0]+')');
+ assert.equal(validEvidence(ev('u1'),{requestId:'u1',target:{kind:'film',id:FILM},contentDigest:'a'.repeat(64),plannedRevision:0}),true);
+ assert.equal(validEvidence(ev('u1'),{requestId:'u1',target:{kind:'film',id:FILM},contentDigest:'a'.repeat(64),plannedRevision:1}),false,'evidence of another planned revision');
+ assert.equal(judgeReadback({digest:'z',evidence:ev('u1')},{requestId:'u1',target:{kind:'film',id:FILM},contentDigest:'a'.repeat(64),plannedRevision:0}),'applied');assert.equal(judgeReadback({digest:'a'.repeat(64),evidence:{proof:'request'}},{requestId:'u1',target:{kind:'film',id:FILM},contentDigest:'a'.repeat(64),plannedRevision:0}),'evidence_invalid','a bare flag is not evidence');assert.equal(judgeReadback({digest:'a'.repeat(64)},{contentDigest:'a'.repeat(64)}),'content_unproven');assert.equal(judgeReadback(null,{contentDigest:'a'}),'absent');
  assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'b'.repeat(64),revision:4}}).actions,[{requestId:'u1',action:'replay',attempt:2,replan:false}]);
  assert.deepEqual(plan([rc('u1',{state:'failed'})],{u1:null}).actions,[{requestId:'u1',action:'replay',attempt:2,replan:false}]);
- assert.equal(plan([rc('u1',{state:'pending'})],{u1:{digest:'a'.repeat(64),revision:2,proof:'request'}}).actions[0].action,'mark_applied','an in-flight attempt past its window is settled like an unknown one');
+ assert.equal(plan([rc('u1',{state:'pending'})],{u1:{digest:'a'.repeat(64),revision:2,evidence:ev('u1')}}).actions[0].action,'mark_applied','an in-flight attempt past its window is settled like an unknown one');
  // a moved generation asks for a re-plan
  assert.equal(plan([rc('g1',{markerGeneration:1})],{g1:null}).actions[0].replan,true);
  // the bound: attempts exhausted and age
@@ -536,7 +545,7 @@ if(on(8)){
  assert.deepEqual(plan([rc('x2',{attempts:4})],{x2:null}).actions[0].action,'replay');
  assert.deepEqual(reconcilePlan({receipts:[rc('x3')],observed:{x3:null},marker,now:iso(RETRY_POLICY.abandonAfterMs+1)}).actions,[{requestId:'x3',action:'abandon',reason:'expired'}]);
  // even an exhausted receipt is settled by proof (applied) or sent to review (content alone), not abandoned as absent
- assert.equal(plan([rc('x4',{attempts:5})],{x4:{digest:'a'.repeat(64),revision:1,proof:'request'}}).actions[0].action,'mark_applied');
+ assert.equal(plan([rc('x4',{attempts:5})],{x4:{digest:'a'.repeat(64),revision:1,evidence:ev('x4')}}).actions[0].action,'mark_applied');
  assert.equal(plan([rc('x4',{attempts:5})],{x4:{digest:'a'.repeat(64),revision:1}}).actions[0].action,'needs_review');
  // deterministic order by due time then id; pure (no input mutated)
  const input=[rc('b',{nextAttemptAt:iso(2000)}),rc('a',{nextAttemptAt:iso(2000)}),rc('c',{nextAttemptAt:iso(1000)})];
@@ -867,7 +876,7 @@ if(on(15)){
  const once=database('open',template,false),onceEnv=envOf(once);
  await recordBaseline(onceEnv,{now:clockAt(1)});
  await assert.rejects(()=>recordBaseline(onceEnv,{now:clockAt(2)}),code('receipt_baseline_exists'),'once');
- for(const statement of ["UPDATE canonical_receipt_baseline SET revision=revision+1","DELETE FROM canonical_receipt_baseline","UPDATE canonical_receipt_watermark SET entries=0","DELETE FROM canonical_receipt_watermark"])assert.match(message(sqlite(file,statement)),/canonical_receipt_baseline_immutable/,statement);
+ for(const statement of ["UPDATE canonical_receipt_baseline SET revision=revision+1","DELETE FROM canonical_receipt_baseline","UPDATE canonical_receipt_watermark SET entries=0","DELETE FROM canonical_receipt_watermark","UPDATE canonical_receipt_baseline_seal SET sealed_at=sealed_at","DELETE FROM canonical_receipt_baseline_seal"])assert.match(message(sqlite(file,statement)),/canonical_receipt_baseline_immutable/,statement);
  assert.match(message(sqlite(file,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:late',1)")),/canonical_receipt_baseline_refused/,'a baseline row after a receipt exists');
  // refused unless the marker is open, and bounded
  for(const stage of ['prepared','held']){
@@ -877,19 +886,32 @@ if(on(15)){
  }
  const f2=database('open',template,false);
  await writeFilm(envOf(f2),'x');await writeFilm(envOf(f2),'y',0,'film:tmdb:9');
- await assert.rejects(()=>recordBaseline(envOf(f2),{cap:1}),code('film_person_bounded'));
+ await assert.rejects(()=>recordBaseline(envOf(f2),{cap:1}),code('baseline_over_capacity'));
+ for(const table of ['canonical_receipt_baseline','canonical_receipt_watermark','canonical_receipt_baseline_seal'])assert.equal(Number(one(f2,'SELECT COUNT(*) FROM '+table)),0,'over capacity records nothing in '+table);
  assert.equal(await receiptsStatus(envOf(f2)),'no_baseline','a refused baseline leaves nothing behind');
  assert.equal(BASELINE_CAP,5000);
  // a baseline under a stale generation is refused in SQL
  const f3=database('open',template,false);
  assert.match(message(sqlite(f3,WM(1))),/canonical_receipt_baseline_refused/);
- // raw inserts: a baseline row needs the watermark; a held marker accepts neither
+ // raw inserts: baseline rows only before the watermark (by the copying batch); the watermark only equal to the rows it describes; the seal only after the watermark; a held marker accepts none of them
  const f4=database('open',template,false);
- assert.match(message(sqlite(f4,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:x',1)")),/canonical_receipt_baseline_refused/,'a baseline row without the watermark');
+ assert.match(message(sqlite(f4,SEAL)),/canonical_receipt_baseline_refused/,'a seal without the watermark');
+ assert.equal(sqlite(f4,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:x',1)").status,0,'a baseline row before the watermark (the copying batch writes them first)');
+ // the watermark must equal what the copied rows say, field by field (per kind: count and highest revision)
+ assert.equal(sqlite(f4,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('person','person:p',3)").status,0);
+ const WMX=(entries,fc,fmax,pc,pmax)=>"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,"+entries+","+fc+","+fmax+","+pc+","+pmax+",'2026-11-11T09:00:00.000Z')";
+ for(const [name,statement] of [['the film count',WMX(2,0,1,2,3)],['the film highest revision',WMX(2,1,9,1,3)],['the person count',WMX(2,2,1,0,3)],['the person highest revision',WMX(2,1,1,1,9)],['everything zero',WM(2)]])assert.match(message(sqlite(f4,statement)),/canonical_receipt_baseline_refused/,'a watermark with the wrong '+name);
+ // held marker, watermark present, no seal yet: the seal is refused
+ const f9=database('open',template,false);
+ assert.equal(sqlite(f9,WM(2)).status,0);
+ assert.equal(sqlite(f9,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+ assert.match(message(sqlite(f9,SEAL)),/canonical_receipt_baseline_refused/,'a seal while held');
  assert.equal(sqlite(f4,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+
+ assert.match(message(sqlite(f4,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:y',1)")),/canonical_receipt_baseline_refused/,'a baseline row while held');
  assert.match(message(sqlite(f4,WM(3))),/canonical_receipt_baseline_refused/,'a watermark while held');
  const held=database('held');
- assert.match(message(sqlite(held,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:x',1)")),/canonical_receipt_baseline_refused/,'a baseline row while held');
+ assert.match(message(sqlite(held,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:x',1)")),/canonical_receipt_baseline_refused/,'a baseline row after the watermark');
  // schema 18: no status
  assert.equal(await receiptsStatus(envOf(database('open',template18))),'no_schema');
  await assert.rejects(()=>recordBaseline(envOf(database('open',template18))),code('receipt_schema_missing'));
@@ -923,7 +945,7 @@ if(on(16)){
  const atomicWriter=(target,{extra=[],skip=false}={})=>async ctx=>{
   const st=fenced.head(ctx.gate,entities(0));
   st.push(['INSERT INTO film (id,contract_version,original_title,updated_at) VALUES (?,?,?,?)',[FILM,1,SECRET_TITLE,T]]);
-  st.push(['INSERT INTO film_alias (film_id,kind,value) VALUES (?,?,?)',[FILM,'request',ctx.requestId]]);
+  st.push(['INSERT INTO film_alias (film_id,kind,value) VALUES (?,?,?)',[FILM,'request',JSON.stringify(await evidenceOf(ctx.requestId,FILM,1,SECRET_TITLE))]]);
   st.push([fenced.BUMP,['film',FILM,T]]);
   st.push(...extra);
   if(!skip)st.push(...ctx.appliedStatements());
@@ -965,7 +987,7 @@ if(on(16)){
  const writerFor=requestId=>async ctx=>{
   const st=fenced.head(ctx.gate,[{kind:'film',id:FILM,expected:ctx.currentRevision}]);
   st.push(['INSERT INTO film (id,contract_version,original_title,updated_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET original_title=excluded.original_title',[FILM,1,SECRET_TITLE,T]]);
-  st.push(['INSERT INTO film_alias (film_id,kind,value) VALUES (?,?,?)',[FILM,'request',requestId]]);
+  st.push(['INSERT INTO film_alias (film_id,kind,value) VALUES (?,?,?)',[FILM,'request',JSON.stringify(await evidenceOf(requestId,FILM,ctx.currentRevision+1,SECRET_TITLE))]]);
   st.push([fenced.BUMP,['film',FILM,T]]);st.push(...ctx.appliedStatements());
   await fenced.commit(ea,ctx.gate,st,[{kind:'film',id:FILM,expected:ctx.currentRevision}]);
   return {revision:ctx.currentRevision+1};
@@ -993,9 +1015,9 @@ if(on(17)){
  // the proof stored is the count, highest revision and digest per kind, recomputable from the rows
  const rev=rows(file,'SELECT kind,id,revision FROM canonical_revision ORDER BY kind,id');
  const digestFor=async kind=>digestOf(rev.filter(r=>r.kind===kind).map(r=>[r.id,r.revision]));
- const mark=rows(file,'SELECT * FROM canonical_receipt_watermark')[0];
- assert.equal(mark.film_digest,await digestFor('film'));assert.equal(mark.person_digest,await digestFor('person'));
- assert.equal(taken.film.digest,mark.film_digest);assert.equal(mark.marker_generation,2);assert.equal(mark.film_count,2);assert.equal(mark.person_max_revision,1);assert.equal(mark.entries,3);
+ const mark=rows(file,'SELECT * FROM canonical_receipt_watermark')[0],seal=rows(file,'SELECT * FROM canonical_receipt_baseline_seal')[0];
+ assert.equal(seal.film_digest,await digestFor('film'));assert.equal(seal.person_digest,await digestFor('person'));
+ assert.equal(taken.film.digest,seal.film_digest);assert.equal(mark.marker_generation,2);assert.equal(mark.film_count,2);assert.equal(mark.person_max_revision,1);assert.equal(mark.entries,3);
  assert.deepEqual(await verifyBaseline(env),{ok:true,reasons:[]});
  assert.equal(count(file),0,'no receipt was fabricated for history');
  let found=await readUnreceipted(env);
@@ -1015,9 +1037,10 @@ if(on(17)){
   const f=database('open',template,false),e=envOf(f);
   await writeFilm(e,'A');await writeFilm(e,'B',0,'film:tmdb:2');await recordBaseline(e,{now:clockAt(1)});
   assert.deepEqual((await verifyBaseline(e)).ok,true);
-  assert.equal(sqlite(f,'DROP TRIGGER canonical_receipt_baseline_no_update;DROP TRIGGER canonical_receipt_baseline_no_delete;DROP TRIGGER canonical_receipt_watermark_no_update;'+statements).status,0);
+  assert.equal(sqlite(f,'DROP TRIGGER canonical_receipt_baseline_no_update;DROP TRIGGER canonical_receipt_baseline_no_delete;DROP TRIGGER canonical_receipt_watermark_no_update;DROP TRIGGER canonical_receipt_baseline_seal_no_update;DROP TRIGGER canonical_receipt_baseline_seal_no_delete;'+statements).status,0);
   const verified=await verifyBaseline(e);
   assert.equal(verified.ok,false);assert.ok(verified.reasons.some(item=>item.startsWith(reason)),reason+' in '+verified.reasons);
+  if(reason==='seal_missing'){await assert.rejects(()=>readUnreceipted(e),code('receipt_baseline_missing'));return;}
   const read=await readUnreceipted(e);
   assert.equal(read.safe,false);assert.equal(read.baseline.ok,false,'a tampered baseline is never clean');
  };
@@ -1025,7 +1048,8 @@ if(on(17)){
  await tamper("DELETE FROM canonical_receipt_baseline WHERE id='film:tmdb:2'",'count_mismatch:film');
  await tamper("DELETE FROM canonical_receipt_baseline WHERE id='film:tmdb:2'",'entries_mismatch');
  await tamper("UPDATE canonical_receipt_watermark SET film_max_revision=9",'max_mismatch:film');
- await tamper("UPDATE canonical_receipt_watermark SET film_digest='"+'f'.repeat(64)+"'",'digest_mismatch:film');
+ await tamper("UPDATE canonical_receipt_baseline_seal SET film_digest='"+'f'.repeat(64)+"'",'digest_mismatch:film');
+ await tamper("DELETE FROM canonical_receipt_baseline_seal",'seal_missing');
  await tamper("UPDATE canonical_receipt_watermark SET marker_generation=99",'generation_ahead');
  await tamper("DELETE FROM canonical_revision WHERE id='film:tmdb:2'",'revision_regressed');
  // the boundary generation: a marker that moved between reading and recording fails the whole batch, nothing is recorded; so does a revision written in between
@@ -1036,16 +1060,54 @@ if(on(17)){
  assert.equal(Number(one(f3,'SELECT COUNT(*) FROM canonical_receipt_watermark')),0);assert.equal(Number(one(f3,'SELECT COUNT(*) FROM canonical_receipt_baseline')),0);
  // ... and the retry records the NEW boundary generation
  assert.equal((await recordBaseline(envOf(f3),{now:clockAt(2)})).generation,4);assert.equal(Number(one(f3,'SELECT marker_generation FROM canonical_receipt_watermark')),4);
- const f4=database('open',template,false);
- await writeFilm(envOf(f4),'x');
- const racing=envOf(f4,{onBatch:async()=>{if(!racing.moved){racing.moved=true;await writeFilm(envOf(f4),'y',1);}}});
- await assert.rejects(()=>recordBaseline(racing,{now:clockAt(1)}),code('receipt_state_conflict'));
- assert.equal(Number(one(f4,'SELECT COUNT(*) FROM canonical_receipt_watermark')),0,'a revision written between the read and the batch fails the whole batch');
- assert.equal(count(f4),0);
- // the watermark's own shape: entries must equal the per-kind counts, digests are hex
+
+ // BLOCKER 1: an entity set with the SAME count, highest revision and revision sum but other ids, replaced between the read and the batch, is recorded coherently from the batch's own snapshot: the baseline
+ // describes exactly the rows that were copied, it verifies, and nothing unrepairable is left.
+ const f6=database('open',template,false),e6=envOf(f6);
+ await writeFilm(e6,'a',0,'film:tmdb:1');await writeFilm(e6,'b',0,'film:tmdb:2');await writeFilm(e6,'b2',1,'film:tmdb:2');
+ assert.equal(sqlite(f6,"SELECT 1").status,0);
+ const swapping=envOf(f6,{onBatch:async()=>{if(!swapping.moved){swapping.moved=true;assert.equal(sqlite(f6,"DELETE FROM canonical_revision;INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES ('film','film:tmdb:7',1,'"+T+"'),('film','film:tmdb:8',2,'"+T+"')").status,0);}}});
+ const swapped=await recordBaseline(swapping,{now:clockAt(1)});
+ assert.equal(swapped.entries,2);
+ assert.deepEqual(rows(f6,'SELECT id,revision FROM canonical_receipt_baseline ORDER BY id'),[{id:'film:tmdb:7',revision:1},{id:'film:tmdb:8',revision:2}],'the NEW set, from the same snapshot as the watermark');
+ assert.deepEqual(await verifyBaseline(e6),{ok:true,reasons:[]});
+ assert.equal(rows(f6,'SELECT film_count,film_max_revision FROM canonical_receipt_baseline_seal, canonical_receipt_watermark')[0].film_count,2);
+ assert.equal((await readUnreceipted(e6)).safe,true);
+ // the same race against a write that changes the COUNT beyond the cap leaves NOTHING recorded and is retryable
+ const f7=database('open',template,false),e7=envOf(f7);
+ await writeFilm(e7,'a',0,'film:tmdb:1');
+ const growing=envOf(f7,{onBatch:async()=>{if(!growing.moved){growing.moved=true;await writeFilm(envOf(f7),'b',0,'film:tmdb:2');}}});
+ await assert.rejects(()=>recordBaseline(growing,{cap:1,now:clockAt(1)}),code('receipt_state_conflict'));
+ for(const table of ['canonical_receipt_baseline','canonical_receipt_watermark','canonical_receipt_baseline_seal'])assert.equal(Number(one(f7,'SELECT COUNT(*) FROM '+table)),0,'nothing left in '+table);
+ assert.equal(count(f7),0);
+ await assert.rejects(()=>recordBaseline(envOf(f7),{cap:1}),code('baseline_over_capacity'),'now over capacity at the read');
+ assert.equal((await recordBaseline(envOf(f7),{now:clockAt(2)})).entries,2,'retried with the real cap');
+ assert.deepEqual(await verifyBaseline(envOf(f7)),{ok:true,reasons:[]});
+ // a failure between the copy batch and the seal is repaired by calling it again, from the same immutable rows
+ const f8=database('open',template,false),e8=envOf(f8);
+ await writeFilm(e8,'a',0,'film:tmdb:1');
+ const failing=envOf(f8,{onBatch:async list=>{if(!failing.failed&&list.some(item=>item.text.includes('canonical_receipt_baseline_seal'))){failing.failed=true;throw new Error('connection reset');}}});
+ await assert.rejects(()=>recordBaseline(failing,{now:clockAt(1)}),code('film_person_unavailable'));
+ assert.equal(Number(one(f8,'SELECT COUNT(*) FROM canonical_receipt_watermark')),1);assert.equal(Number(one(f8,'SELECT COUNT(*) FROM canonical_receipt_baseline_seal')),0);
+ assert.equal(await receiptsStatus(e8),'no_baseline','unsealed: no receipt can be written');
+ assert.ok((await verifyBaseline(e8)).reasons.includes('seal_missing'));
+ // the canonical set moves on between the failure and the retry: the seal still comes from the immutable copied rows
+ await writeFilm(e8,'c',0,'film:tmdb:5');
+ await assert.rejects(()=>readUnreceipted(e8),code('receipt_baseline_missing'));
+ const input8=await request('event-unsealed');
+ await assert.rejects(()=>receiptedWrite(e8,{...input8,now:clockAt(0)},hooksFor(e8)),code('receipt_baseline_missing'));
+ const resumed=await recordBaseline(e8,{now:clockAt(2)});
+ assert.equal(resumed.resumed,true);assert.equal(resumed.entries,1,'the copied rows, not the current set');assert.deepEqual(await verifyBaseline(e8),{ok:true,reasons:[]});assert.equal(await receiptsStatus(e8),'ready');
+ assert.deepEqual((await readUnreceipted(e8)).unreceipted.map(item=>item.id),['film:tmdb:5'],'the later change is above the baseline');
+ await assert.rejects(()=>recordBaseline(e8),code('receipt_baseline_exists'),'once sealed it is final');
+ // the sealed baseline carries exactly the rows that were copied
+ assert.equal(count(f8),0);
+ // the shape of the seal: both digests are hex
  const f5=database('open',template,false);
- assert.notEqual(sqlite(f5,WM(2).replace('VALUES (1,2,0,','VALUES (1,2,5,')).status,0,'entries that disagree with the counts');
- assert.notEqual(sqlite(f5,WM(2).replace(EMPTY,'zz'.repeat(32))).status,0,'a digest that is not hex');
+ assert.equal(sqlite(f5,WM(2)).status,0);
+ assert.notEqual(sqlite(f5,SEAL.replace(EMPTY,'zz'.repeat(32))).status,0,'a film seal digest that is not hex');
+ assert.notEqual(sqlite(f5,SEAL.replace("'"+EMPTY+"','"+EMPTY+"'","'"+EMPTY+"','"+'zz'.repeat(32)+"'")).status,0,'a person seal digest that is not hex');
+ assert.equal(sqlite(f5,SEAL).status,0);
  // no code path fabricates receipts: the baseline functions never write the receipt table
  assert.equal(count(file),0);assert.equal(count(f2),1,'only the genuine receipt');
 }
@@ -1082,6 +1144,43 @@ if(on(18)){
  assert.match(message(sqlite(file,"UPDATE canonical_write_receipt SET state='pending',attempts=attempts+1 WHERE state IN ('applied','abandoned')")),/canonical_receipt_transition/);
  assert.match(message(sqlite(file,"UPDATE canonical_write_receipt SET updated_at='"+iso(9)+"' WHERE state='applied'")),/canonical_receipt_transition/);
  assert.equal(JSON.stringify(receiptRows(file)),before,'every terminal row is untouched');
+}
+
+// 19. Adversarial evidence: a proof for another request, target, revision or digest, or a forged shape, never settles a receipt as applied; matching content never does either.
+if(on(19)){
+ const forge=async over=>{
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-forged');
+  // the request's writer really landed the planned content (so the digest matches), but the evidence row says something else
+  const base=await evidenceOf(input.requestId,FILM,1,SECRET_TITLE);
+  const evidence=typeof over==='function'?over(base):over;
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},{run:async()=>{await mutateFilm(env,{id:FILM,expectedRevision:0,at:T,film:{contractVersion:1,originalTitle:SECRET_TITLE,aliases:[{kind:'request',value:JSON.stringify({...evidence,requestId:evidence.requestId??'x'})}]}});throw new Error('lost');},readback:async(e,t,r)=>{const out=await readbackFilm(env,t,r);if(out&&evidence!==undefined&&!out.evidence){out.evidence=evidence;}return out;}}));
+  const registry=operationRegistry([FILM_OPERATION(env)]);
+  const op=defineOperation({operation:'film_mutation',readback:async(e,t,r)=>{const out=await readbackFilm(env,t,r);out.evidence=evidence;return out;},replay:async()=>{throw new Error('must not replay');}});
+  const pass=await reconcileReceipts(env,{operations:operationRegistry([op]),now:clockAt(60000)});
+  void registry;
+  const row=await readReceipt(env,input.requestId);
+  assert.deepEqual(pass.applied,[],'never applied');assert.notEqual(row.state,'applied');assert.equal(row.appliedRevision,null);
+  assert.deepEqual(pass.needsReview,[input.requestId]);assert.equal(row.errorClass,'evidence_invalid');
+ };
+ await forge(base=>({...base,requestId:'epg:film_mutation:'+'0'.repeat(64)}));
+ await forge(base=>({...base,target:{kind:'film',id:'film:tmdb:999'}}));
+ await forge(base=>({...base,target:{kind:'person',id:FILM}}));
+ await forge(base=>({...base,appliedRevision:2}));
+ await forge(base=>({...base,appliedRevision:'1'}));
+ await forge(base=>({...base,contentDigest:'b'.repeat(64)}));
+ await forge(base=>({...base,extra:true}));
+ await forge(base=>({requestId:base.requestId,target:base.target,appliedRevision:base.appliedRevision}));
+ await forge(()=>({proof:'request',requestId:'x'}));
+ // the genuine evidence applies; another actor's identical content with a DIFFERENT request's evidence does not
+ const file=database('open'),env=envOf(file);
+ const A=await request('event-real-a'),B=await request('event-real-b');
+ await assert.rejects(()=>receiptedWrite(env,{...A,now:clockAt(0)},{run:async()=>{await writeFilm(env,SECRET_TITLE,0,FILM,A.requestId);throw new Error('lost');},readback:readbackFilm}));
+ await assert.rejects(()=>receiptedWrite(env,{...B,now:clockAt(0)},{run:async()=>{throw new Error('timeout');},readback:readbackFilm}));
+ const pass=await reconcileReceipts(env,{operations:operationRegistry([FILM_OPERATION(env)]),now:clockAt(60000)});
+ assert.deepEqual(pass.applied,[A.requestId],'A: its own evidence');
+ assert.deepEqual(pass.needsReview,[B.requestId],'B: the same final content carries A\'s evidence, not B\'s');
+ assert.equal((await readReceipt(env,B.requestId)).state,'abandoned');
 }
 
 console.log('canonical-receipts: the durable canonical write receipt (schema 19) is writable only at open, records pending before the commit, settles unknown outcomes by readback both ways, bounds its retries, reports unreceipted changes, stores no payload, and stays dormant');

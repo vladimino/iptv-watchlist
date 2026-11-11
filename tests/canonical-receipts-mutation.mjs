@@ -80,7 +80,6 @@ const MUTANTS=[
  ['the pass reads receipts that are not due','js',"await listReceipts(env,{dueBefore:at,limit})","await listReceipts(env,{limit})",'10.1'],
  ['the receipt read is not capped','js',"const cap=Math.min(Math.max(Number(limit)||1,1),RECONCILE_LIMIT_MAX);","const cap=Number(limit)||1;",'10.2'],
  ['an unregistered operation is guessed','js',"if(!operation){missing.add(row.requestId);result.waiting.push({requestId:row.requestId,reason:'operation_unregistered'});continue;}","",'10.1'],
- ["a readback proof of the request is ignored",'js',"if(observed&&observed.proof==='request')return 'applied';","if(false)return 'applied';",'13'],
  ["an unproven content match is marked applied",'js',"if(action.action==='needs_review'){await transition(env,gate,row,{kind:'abandoned',errorClass:action.reason},now);","if(action.action==='needs_review'){await transition(env,gate,row,{kind:'applied',revision:0},now);",'13'],
  ["an atomic writer is marked applied by a second batch",'js',"if(atomic){\n  try{","if(false){\n  try{",'13'],
  ["a stale revision is retried without revalidation",'js',"if(currentRevision!==row.plannedRevision){\n  const verdict","if(false){\n  const verdict",'14'],
@@ -94,37 +93,57 @@ const MUTANTS=[
  ["the baseline count counts every revision",'js',"WHERE r.revision<=b.revision'","WHERE 1'",'15'],
  ["a receipt is written without the baseline check",'js',"readAuthority(env));\n if(status==='no_baseline')throw failed('receipt_baseline_missing');","readAuthority(env));",'15'],
  ["a missing baseline reads as ready",'js',"return Number(row?.baseline)===1?'ready':'no_baseline';","return 'ready';",'15'],
- ["a receipt is accepted before the baseline exists",'sql',"CREATE TRIGGER canonical_write_receipt_insert_baseline\nBEFORE INSERT ON canonical_write_receipt\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)","CREATE TRIGGER canonical_write_receipt_insert_baseline\nBEFORE INSERT ON canonical_write_receipt\nFOR EACH ROW\nWHEN 0",'15'],
- ["a watermark is accepted under a stale generation",'sql'," AND generation = NEW.marker_generation)\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');\nEND;\n\nCREATE TRIGGER canonical_receipt_baseline_insert",")\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');\nEND;\n\nCREATE TRIGGER canonical_receipt_baseline_insert",'15'],
- ["a baseline row is accepted without the watermark",'sql'," OR NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)\n OR EXISTS (SELECT 1 FROM canonical_write_receipt)\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');\nEND;"," OR EXISTS (SELECT 1 FROM canonical_write_receipt)\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');\nEND;",'15'],
- ["a baseline row is accepted after a receipt exists",'sql'," OR NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)\n OR EXISTS (SELECT 1 FROM canonical_write_receipt)\nBEGIN"," OR NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)\nBEGIN",'15'],
  ["a baseline row is accepted while held",'sql',"BEFORE INSERT ON canonical_receipt_baseline\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')\n OR","BEFORE INSERT ON canonical_receipt_baseline\nFOR EACH ROW\nWHEN 0\n OR",'15'],
  ["the watermark can be updated",'sql',"CREATE TRIGGER canonical_receipt_watermark_no_update\nBEFORE UPDATE ON canonical_receipt_watermark\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],
  ["the watermark can be deleted",'sql',"CREATE TRIGGER canonical_receipt_watermark_no_delete\nBEFORE DELETE ON canonical_receipt_watermark\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],
  ["a baseline row can be updated",'sql',"CREATE TRIGGER canonical_receipt_baseline_no_update\nBEFORE UPDATE ON canonical_receipt_baseline\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],
  ["a baseline row can be deleted",'sql',"CREATE TRIGGER canonical_receipt_baseline_no_delete\nBEFORE DELETE ON canonical_receipt_baseline\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],
- ["the baseline is recorded without the receipt table",'js',"await assertReceiptsAvailable(env);\n const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n const rows=","const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n const rows=",'15'],
- ["the baseline is recorded without the marker gate",'js',"const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n const rows=","const gate=await readAuthority(env);\n const db=database(env);\n const rows=",'15'],
- ["the baseline is not bounded",'js',"if(rows.length>cap)throw failed('film_person_bounded');","",'15'],
  ["an unapproved exception is accepted",'js',"||!approved.includes(exception.id)","",'16'],
  ["an incomplete exception is accepted",'js',".every(value=>typeof value==='string'&&value.length>=3)",".every(()=>true)",'16'],
  ["a non-atomic operation registers without an exception",'js',"if(!named||!approved.includes(exception.id))throw failed('receipt_atomic_required');","",'16'],
  ["a write is made without the atomic requirement",'js',"if(!atomic)exceptionOf({exception:hooks?.exception},hooks?.approvedExceptions||APPROVED_EXCEPTIONS);","",'16'],
  ["the registry accepts a spec that skipped defineOperation",'js',"if(spec.atomic!==true&&!spec.exception)throw failed('receipt_atomic_required');\n  if(spec.atomic!==true)exceptionOf(spec,approved);","",'16'],
  ["an exception is approved today",'js',"export const APPROVED_EXCEPTIONS=Object.freeze([]);","export const APPROVED_EXCEPTIONS=Object.freeze(['legacy']);",'16'],
- ["the baseline verifier ignores the digest",'js',"if(mark[kind+'_digest']!==proof[kind].digest)reasons.push('digest_mismatch:'+kind);","",'17'],
  ["the baseline verifier ignores the count",'js',"if(Number(mark[kind+'_count'])!==proof[kind].count)reasons.push('count_mismatch:'+kind);","",'17'],
  ["the baseline verifier ignores the highest revision",'js',"if(Number(mark[kind+'_max_revision'])!==proof[kind].max)reasons.push('max_mismatch:'+kind);","",'17'],
  ["the baseline verifier ignores the entries total",'js',"if(Number(mark.entries)!==rows.length)reasons.push('entries_mismatch');","",'17'],
  ["the baseline verifier ignores the boundary generation",'js',"if(live&&Number(mark.marker_generation)>live.generation)reasons.push('generation_ahead');","",'17'],
  ["the baseline verifier ignores a regressed revision",'js',"if(Number(regressed?.n??0)>0)reasons.push('revision_regressed');","",'17'],
  ["a tampered baseline reads clean",'js',"safe:changes.safe&&baseline.ok}","safe:changes.safe}",'17'],
- ["the baseline is recorded without asserting its snapshot",'js',"  [fenced.assertSql(same('film')+' AND '+same('person')),[proof.film.count,proof.film.max,proof.film.sum,proof.person.count,proof.person.max,proof.person.sum]],\n","",'17'],
- ["the baseline stores the wrong digest",'js',"rows.length,proof.film.count,proof.film.max,proof.film.digest,proof.person.count,proof.person.max,proof.person.digest,at]","rows.length,proof.film.count,proof.film.max,proof.person.digest,proof.person.count,proof.person.max,proof.film.digest,at]",'17'],
  ["abandoned receipts are not listed",'js',"WHERE state IN ('abandoned','unknown') ORDER BY updated_at","WHERE state IN ('unknown') ORDER BY updated_at",'18'],
  ["a content match without proof is not marked for review",'js',"const REVIEW_CLASSES=new Set(['content_match_unproven',","const REVIEW_CLASSES=new Set([",'18'],
- ["a watermark may disagree with its entries",'sql',"CHECK (entries = film_count + person_count)\n","CHECK (1)\n",'17'],
- ["a watermark digest may be any text",'sql',"film_digest TEXT NOT NULL CHECK (length(film_digest) = 64 AND film_digest NOT GLOB '*[^0-9a-f]*')","film_digest TEXT NOT NULL CHECK (length(film_digest) = 64)",'17'],
+ ["a readback with evidence is not judged",'js',"if(observed&&observed.evidence!==undefined)return validEvidence(observed.evidence,receipt)?'applied':'evidence_invalid';","if(false)return 'applied';",'8'],
+ ["evidence of any shape is accepted",'js',"if(Object.keys(evidence).sort().join(',')!=='appliedRevision,contentDigest,requestId,target')return false;","",'8'],
+ ["invalid evidence falls back to the content",'js',"if(verdict==='evidence_invalid'){plan.actions.push({requestId:receipt.requestId,action:'needs_review',reason:'evidence_invalid'});continue;}\n","",'8'],
+ ["the applied revision is taken from the readback",'js',"revision:seen.evidence.appliedRevision});continue;}","revision:Number(seen.revision)||0});continue;}",'8'],
+ ["the baseline is recorded without the receipt table",'js',"await assertReceiptsAvailable(env);\n const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n const at=","const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n const at=",'15'],
+ ["the baseline is recorded without the marker gate",'js',"const gate=assertWritable(await readAuthority(env));\n const db=database(env);\n const at=","const gate=await readAuthority(env);\n const db=database(env);\n const at=",'15'],
+ ["the baseline is not bounded at the read",'js',"if(count>cap)throw failed('baseline_over_capacity');","",'15'],
+ ["the baseline copy has no capacity assertion",'js',"   [fenced.assertSql('(SELECT COUNT(*) FROM canonical_revision)<=?'),[cap]],\n","",'17'],
+ ["the baseline verifier ignores the digest",'js',"if(seal&&seal[kind+'_digest']!==proof[kind].digest)reasons.push('digest_mismatch:'+kind);","",'17'],
+ ["the baseline verifier ignores a missing seal",'js',"if(!seal)reasons.push('seal_missing');","",'17'],
+ ["the baseline stores the wrong digest",'js',"[proof.film.digest,proof.person.digest,at]","[proof.person.digest,proof.film.digest,at]",'17'],
+ ["the baseline is sealed from a stale read",'js',"const rows=await many(db,'SELECT kind,id,revision FROM canonical_receipt_baseline ORDER BY kind,id LIMIT ?',[cap+1]);\n const proof=await proofOf(rows);\n await writeBatch","const rows=await many(db,'SELECT kind,id,revision FROM canonical_revision ORDER BY kind,id LIMIT ?',[cap+1]);\n const proof=await proofOf(rows);\n await writeBatch",'17'],
+ ["an existing watermark is not resumed",'js',"if(Number(state?.mark)===0){","if(true){",'17'],
+ ["a sealed baseline can be recorded again",'js',"if(Number(state?.seal)===1)throw failed('receipt_baseline_exists');","",'17'],
+ ["an unsealed baseline reads as ready",'js',"return Number(row?.baseline)===1?'ready':'no_baseline';","return 'ready';",'15'],
+ ["a receipt is accepted before the baseline is sealed",'sql',"CREATE TRIGGER canonical_write_receipt_insert_baseline\nBEFORE INSERT ON canonical_write_receipt\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM canonical_receipt_baseline_seal WHERE id = 1)","CREATE TRIGGER canonical_write_receipt_insert_baseline\nBEFORE INSERT ON canonical_write_receipt\nFOR EACH ROW\nWHEN 0",'15'],
+ ["a watermark is accepted under a stale generation",'sql',"AND generation = NEW.marker_generation)\n OR NEW.film_count",")\n OR NEW.film_count",'15'],
+ ["a watermark may disagree with the film highest revision",'sql',"OR NEW.film_max_revision <> COALESCE((SELECT MAX(revision) FROM canonical_receipt_baseline WHERE kind = 'film'), 0)\n","",'15'],
+ ["a watermark may disagree with the person highest revision",'sql',"OR NEW.person_max_revision <> COALESCE((SELECT MAX(revision) FROM canonical_receipt_baseline WHERE kind = 'person'), 0)\n","",'15'],
+ ["a baseline row is accepted after the watermark",'sql',"BEFORE INSERT ON canonical_receipt_baseline\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')\n OR EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)\nBEGIN","BEFORE INSERT ON canonical_receipt_baseline\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')\nBEGIN",'15'],
+ ["a seal is accepted without the watermark",'sql',"OR NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');\nEND;\n\nCREATE TRIGGER canonical_receipt_watermark_no_update","\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');\nEND;\n\nCREATE TRIGGER canonical_receipt_watermark_no_update",'15'],
+ ["a seal is accepted while held",'sql',"BEFORE INSERT ON canonical_receipt_baseline_seal\nFOR EACH ROW\nWHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')\n OR","BEFORE INSERT ON canonical_receipt_baseline_seal\nFOR EACH ROW\nWHEN 0\n OR",'15'],
+ ["a seal can be updated",'sql',"CREATE TRIGGER canonical_receipt_baseline_seal_no_update\nBEFORE UPDATE ON canonical_receipt_baseline_seal\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],
+ ["a seal can be deleted",'sql',"CREATE TRIGGER canonical_receipt_baseline_seal_no_delete\nBEFORE DELETE ON canonical_receipt_baseline_seal\nBEGIN\n SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');\nEND;\n","",'15'],
+ ["a seal digest may be any text",'sql',"person_digest TEXT NOT NULL CHECK (length(person_digest) = 64 AND person_digest NOT GLOB '*[^0-9a-f]*')","person_digest TEXT NOT NULL CHECK (length(person_digest) = 64)",'17'],
+ ["a watermark may disagree with the per-kind counts",'sql',"OR NEW.film_count <> (SELECT COUNT(*) FROM canonical_receipt_baseline WHERE kind = 'film')\n OR NEW.person_count <> (SELECT COUNT(*) FROM canonical_receipt_baseline WHERE kind = 'person')\n","\n",'15'],
+ ["evidence of another request is accepted",'js',"return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;","return target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;",'8'],
+ ["evidence of another target kind is accepted",'js',"return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;","return evidence.requestId===receipt.requestId&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;",'8'],
+ ["evidence of another target is accepted",'js',"return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;","return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;",'8'],
+ ["evidence of another content digest is accepted",'js',"return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;","return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&\n  evidence.appliedRevision===receipt.plannedRevision+1;",'8'],
+ ["evidence of another revision is accepted",'js',"return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest\n  &&evidence.appliedRevision===receipt.plannedRevision+1;","return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest;",'8'],
+ ["evidence with another target shape is accepted",'js',"if(!target||typeof target!=='object'||Object.keys(target).sort().join(',')!=='id,kind')return false;","",'8'],
  // unreceipted
  ['every change counts as receipted','js',"if(applied.has(key+'|'+Number(change.revision))){covered++;continue;}","if(true){covered++;continue;}",'9'],
  ['a non-terminal receipt is not called out','js',"reason:open.has(key)?'receipt_not_applied':'no_receipt'","reason:'no_receipt'",'9'],
@@ -150,7 +169,8 @@ try{
   fs.writeFileSync(mutant,file==='js'?absolute(sources.js.replace(from,()=>to)):sources.sql.replace(from,()=>to));
   return {name,env:{[file==='js'?'CANON_RECEIPTS_SOURCE':'CANON_RECEIPTS_MIGRATION']:mutant,CANON_RECEIPTS_ONLY:sections}};
  });
- assert.equal(await run({}),0,'the unmutated test passes');
+ // The control (the unmutated test, whole file) runs beside the mutants instead of before them: it is the longest single run, and a failing control is reported before any survivor.
+ const control=run({});
  const survivors=[];
  await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();if(await run(item.env)===0){
     // A hinted section that does not kill is retried against the whole file, so a stale hint can never hide a survivor.
@@ -158,5 +178,6 @@ try{
     if(await run(whole)===0)survivors.push(item.name);
    }}}));
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
+ assert.equal(await control,0,'the unmutated test passes');
  console.log('canonical-receipts-mutation: ok ('+MUTANTS.length+' mutants killed)');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

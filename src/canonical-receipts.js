@@ -3,9 +3,11 @@
 // introduced in code only; applying it to production D1 is a separate owner GO.
 //
 // The protocol (owner decision 5: a cross-domain operation into canonical Film/Person has a durable receipt, a stable request id, bounded safe retries and a separate reconciliation):
-//   0. BASELINE first (once, at activation). `recordBaseline` copies the current canonical_revision rows into canonical_receipt_baseline, in one fenced batch, before any receipt exists.
-//      A revision at or below its baseline entry predates receipts: it is `pre_receipt_baseline`, never claimed to have a receipt and never reported `unreceipted`. A receipt cannot be
-//      inserted before the baseline exists.
+//   0. BASELINE first (once, at the activation boundary), in two retryable insert-only steps with nothing derived from an earlier read: `recordBaseline` copies canonical_revision in ONE fenced batch (a single
+//      SELECT) whose watermark counts and highest revisions are computed in SQL from the copied rows (a failure leaves no row and is retried), then writes the SEAL (the per-kind digests, computed from the immutable
+//      copied rows) last; `verifyBaseline` recomputes everything read-only. A revision at or below its baseline entry predates receipts: it is `pre_receipt_baseline`, never given a fabricated receipt and never
+//      reported `unreceipted`. A revision ABOVE it with no applied receipt is `unreceipted` and makes `readUnreceipted` non-clean; a baseline that does not verify makes it non-clean too. A receipt cannot be
+//      inserted before the baseline is sealed.
 //   1. PENDING. The receipt row is inserted (state `pending`, attempt 1, the planned-content digest, the marker generation) in a batch carrying the same fence head as every canonical
 //      mutation. If that insert is refused, nothing was written to canonical.
 //   2. COMMIT. The writer runs its own fenced commit (src/canonical-mutations.js `fenced.commit`, unchanged).
@@ -18,10 +20,11 @@
 //      LEGACY, exception-gated only: a second batch marks `applied` after the writer returned. If the answer or the mark is lost the receipt stays `pending`, and only OPERATION-SPECIFIC EVIDENCE can settle it
 //      as applied (see 4): a content digest alone cannot, because another actor may independently reach identical final content and a later writer may overwrite it.
 //      A definite rollback marks `failed` (known NOT applied), a permanent refusal `abandoned`, any other outcome `unknown`; a `pending` receipt past its window is treated like `unknown`.
-//   4. RECONCILE by READBACK, never by assumption. A due non-terminal receipt is settled from what its operation's `readback` returns: {digest, revision, proof?}.
-//      - `proof: 'request'` means the operation proved THIS request's own effect (request-id evidence written inside the writer's own batch, for example) at `revision`: the receipt becomes
-//        `applied`, even if the content was overwritten since, and the writer does not run again.
-//      - A digest equal to the planned one WITHOUT that proof is `content_unproven`: the receipt is never marked applied; it is abandoned for review (`content_match_unproven`), because
+//   4. RECONCILE by READBACK, never by assumption. A due non-terminal receipt is settled from what its operation's `readback` returns: {digest, revision, evidence?}.
+//      - Valid EVIDENCE: the readback carries `evidence` {requestId, target:{kind,id}, appliedRevision, contentDigest}, written by the operation inside the writer's own batch, and THIS module validates it against
+//        the receipt (same request id, target and content digest; appliedRevision is the revision after the planned one). Valid: the receipt becomes `applied`, even if the content was overwritten since, and the
+//        writer does not run again. Any other shape or value (another request, target, revision or digest, a forged shape) is `evidence_invalid`: abandoned for review, never applied, whatever the content is.
+//      - A digest equal to the planned one WITHOUT evidence is `content_unproven`: the receipt is never marked applied; it is abandoned for review (`content_match_unproven`), because
 //        the identical content may be someone else's write. It is reported in `needsReview`.
 //      - Anything else did not land: the SAME request id is retried, at most `maxAttempts` times on a stored backoff, but only after the retry is re-validated (see 5).
 //   5. STALE REVISION. A retry reads the CURRENT canonical revision. If it equals the revision the receipt was planned against, the retry runs. If an unrelated writer advanced it, the
@@ -117,17 +120,28 @@ function sameRequest(row,request){
  return row.operation===request.operation&&row.origin===request.origin&&row.target.kind===request.target.kind&&row.target.id===request.target.id&&row.contentDigest===request.digest;
 }
 
-// What a readback proves about a receipt. `applied`: the operation proved this request's own effect. `content_unproven`: the planned content is there but nothing says it is THIS request's
-// (another actor may have reached it): never applied. `absent`: the planned effect is not there.
+// STRUCTURED request-specific evidence, validated by this module against the receipt: exactly {requestId, target:{kind,id}, appliedRevision, contentDigest}, where requestId, target and contentDigest equal the
+// receipt's and appliedRevision is the revision right after the one the receipt was planned against. The adapter produces it from evidence its own writer batch wrote (an operation-level marker carrying the request
+// id); a wrong request id, another target, another revision, another digest or any other shape is invalid, and final matching content is never sufficient.
+export function validEvidence(evidence,receipt){
+ if(!evidence||typeof evidence!=='object')return false;
+ if(Object.keys(evidence).sort().join(',')!=='appliedRevision,contentDigest,requestId,target')return false;
+ const target=evidence.target;
+ if(!target||typeof target!=='object'||Object.keys(target).sort().join(',')!=='id,kind')return false;
+ return evidence.requestId===receipt.requestId&&target.kind===receipt.target.kind&&target.id===receipt.target.id&&evidence.contentDigest===receipt.contentDigest
+  &&evidence.appliedRevision===receipt.plannedRevision+1;
+}
+// What a readback proves about a receipt. `applied`: its evidence validates against THIS receipt. `evidence_invalid`: evidence was supplied and does not validate (forged, another request, target, revision or
+// digest): for review, never applied whatever the content is. `content_unproven`: the planned content is there but there is no evidence (another actor may have reached it): never applied. `absent`: not there.
 export function judgeReadback(observed,receipt){
- if(observed&&observed.proof==='request')return 'applied';
+ if(observed&&observed.evidence!==undefined)return validEvidence(observed.evidence,receipt)?'applied':'evidence_invalid';
  if(observed&&observed.digest===receipt.contentDigest)return 'content_unproven';
  return 'absent';
 }
 
 // The pure reconciliation plan. receipts: stored receipts as `readReceipt` shows them; observed: {[requestId]: {digest,revision,proof?}|null} for the targets already read (a missing key means NOT
 // read yet, null means the target was read and holds nothing); marker: {state,generation} from readAuthority; now: ISO time. It reads nothing and writes nothing.
-// Actions: `readback` (read the target first), `mark_applied` (the readback proved this request's own effect), `needs_review` (the content is there but unproven), `replay` (retry with the SAME
+// Actions: `readback` (read the target first), `mark_applied` (the readback carried valid evidence of this request's own effect), `needs_review` (the content is there but unproven, or the evidence is invalid), `replay` (retry with the SAME
 // request id, after the stale-revision check of the pass; `replan` is true when the marker generation moved), `abandon` (bounded: attempts exhausted or too old). Everything else is `waiting`
 // with its reason, or `attention` (an abandoned receipt: a known failure that needs repair, never silently dropped).
 export function reconcilePlan({receipts,observed={},marker,now,policy=RETRY_POLICY}){
@@ -144,7 +158,8 @@ export function reconcilePlan({receipts,observed={},marker,now,policy=RETRY_POLI
   const seen=observed[receipt.requestId];
   if(seen===undefined){plan.actions.push({requestId:receipt.requestId,action:'readback'});continue;}
   const verdict=judgeReadback(seen,receipt);
-  if(verdict==='applied'){plan.actions.push({requestId:receipt.requestId,action:'mark_applied',revision:Number(seen.revision)||0});continue;}
+  if(verdict==='applied'){plan.actions.push({requestId:receipt.requestId,action:'mark_applied',revision:seen.evidence.appliedRevision});continue;}
+  if(verdict==='evidence_invalid'){plan.actions.push({requestId:receipt.requestId,action:'needs_review',reason:'evidence_invalid'});continue;}
   if(verdict==='content_unproven'){plan.actions.push({requestId:receipt.requestId,action:'needs_review',reason:'content_match_unproven'});continue;}
   if(receipt.attempts>=policy.maxAttempts){plan.actions.push({requestId:receipt.requestId,action:'abandon',reason:'attempts_exhausted'});continue;}
   if(at-timeOf(receipt.createdAt)>policy.abandonAfterMs){plan.actions.push({requestId:receipt.requestId,action:'abandon',reason:'expired'});continue;}
@@ -178,8 +193,8 @@ export function unreceiptedChanges({changes,receipts,baseline={}}){
 // ---- the registration point ----
 
 // What a P2a/P2b writer (or a P3 producer adapter) registers for one operation kind:
-//   readback(env,target,receipt) -> {digest,revision,proof?}|null  the content digest of what the target holds NOW (digestOf over the same canonical form as the planned digest) and, when the
-//                                    operation can prove this request's own effect (request-id evidence written inside the writer's own batch), proof:'request' with the revision it landed at;
+//   readback(env,target,receipt) -> {digest,revision,evidence?}|null  the content digest of what the target holds NOW (digestOf over the same canonical form as the planned digest) and, when the operation
+//                                    wrote request-id evidence inside the writer's own batch, `evidence` {requestId,target:{kind,id},appliedRevision,contentDigest} (validated by `validEvidence`, never trusted as a flag);
 //   replay(env,receipt,ctx)      -> {revision}                    runs the writer's fenced commit again with the same request id, planned against ctx.currentRevision;
 //   revalidate(env,receipt,ctx)  -> 'proceed'|'superseded'        optional: called only when the entity revision moved since planning; the writer re-checks its preconditions. Without it a moved
 //                                    revision abandons the receipt for repair;
@@ -216,7 +231,7 @@ export async function receiptsStatus(env){
  const db=database(env);
  if(!db)return 'no_schema';
  try{
-  const row=await one(db,"SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canonical_write_receipt') AS present,(SELECT COUNT(*) FROM canonical_receipt_watermark) AS baseline");
+  const row=await one(db,"SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canonical_write_receipt') AS present,(SELECT COUNT(*) FROM canonical_receipt_baseline_seal) AS baseline");
   if(!(Number(row?.version)>=RECEIPT_MIN_VERSION&&Number(row?.present)===1))return 'no_schema';
   return Number(row?.baseline)===1?'ready':'no_baseline';
  }catch{return 'no_schema';}
@@ -253,8 +268,10 @@ async function currentRevisionOf(env,target){
 export async function verifyBaseline(env){
  const db=database(env);
  const reasons=[];
- const mark=await one(db,'SELECT marker_generation,entries,film_count,film_max_revision,film_digest,person_count,person_max_revision,person_digest FROM canonical_receipt_watermark WHERE id=1');
+ const mark=await one(db,'SELECT marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision FROM canonical_receipt_watermark WHERE id=1');
  if(!mark)return {ok:false,reasons:['watermark_missing']};
+ const seal=await one(db,'SELECT film_digest,person_digest FROM canonical_receipt_baseline_seal WHERE id=1');
+ if(!seal)reasons.push('seal_missing');
  const rows=await many(db,'SELECT kind,id,revision FROM canonical_receipt_baseline ORDER BY kind,id LIMIT ?',[BASELINE_CAP+1]);
  if(rows.length>BASELINE_CAP)reasons.push('baseline_oversized');
  else{
@@ -263,7 +280,7 @@ export async function verifyBaseline(env){
   for(const kind of ['film','person']){
    if(Number(mark[kind+'_count'])!==proof[kind].count)reasons.push('count_mismatch:'+kind);
    if(Number(mark[kind+'_max_revision'])!==proof[kind].max)reasons.push('max_mismatch:'+kind);
-   if(mark[kind+'_digest']!==proof[kind].digest)reasons.push('digest_mismatch:'+kind);
+   if(seal&&seal[kind+'_digest']!==proof[kind].digest)reasons.push('digest_mismatch:'+kind);
   }
  }
  let live=null;
@@ -291,7 +308,7 @@ export async function readUnreceipted(env,{limit=100}={}){
 
 // Receipts that need a person: every `abandoned` receipt (never silently discarded), every `unknown` one, with the reason class. `needs_review` marks the classes that say a human must look
 // (content match without proof, an atomic writer that did not apply its receipt, a stale revision, a superseded one). Read-only and bounded; there is no cleanup of any kind.
-const REVIEW_CLASSES=new Set(['content_match_unproven','atomic_mark_missing','stale_revision_needs_repair','superseded_by_newer_revision']);
+const REVIEW_CLASSES=new Set(['content_match_unproven','evidence_invalid','atomic_mark_missing','stale_revision_needs_repair','superseded_by_newer_revision']);
 export async function listAttention(env,{limit=100}={}){
  await assertReceiptsAvailable(env);
  const cap=Math.min(Math.max(Number(limit)||1,1),500);
@@ -335,33 +352,41 @@ async function writeBatch(env,gate,statements){
 
 // The per-kind proof of a set of (kind, id, revision) rows: count, highest revision, and the SHA-256 of the ordered (id, revision) pairs (the same function records and verifies it).
 async function proofOf(rows){
- const out={film:{count:0,max:0,sum:0,digest:null},person:{count:0,max:0,sum:0,digest:null}};
+ const out={film:{count:0,max:0,digest:null},person:{count:0,max:0,digest:null}};
  for(const kind of ['film','person']){
   const list=rows.filter(row=>row.kind===kind).sort((x,y)=>x.id<y.id?-1:x.id>y.id?1:0).map(row=>[row.id,Number(row.revision)]);
-  out[kind]={count:list.length,max:list.reduce((m,[,r])=>Math.max(m,r),0),sum:list.reduce((t,[,r])=>t+r,0),digest:await digestOf(list)};
+  out[kind]={count:list.length,max:list.reduce((m,[,r])=>Math.max(m,r),0),digest:await digestOf(list)};
  }
  return out;
 }
-// The activation baseline: ONE fenced batch that records the watermark row (the boundary proof: marker generation, and per kind the count, highest revision and digest) and copies every canonical_revision
-// row. WHO RECORDS IT: the activation operation of the owner-authorized `open` flip, under the same lease and window, once. HOW IT IS PROVEN: the rows are read, their proof is computed here, and the batch
-// starts by asserting in SQL that canonical_revision still has exactly that count, highest revision and revision sum per kind (and the marker the generation read), so a revision written in between fails
-// the whole batch; `verifyBaseline` later recomputes the proof read-only. It is insert-only, refused once a baseline exists, while the marker is not `open`, and above BASELINE_CAP rows. It never creates a
+// The activation baseline, in two retryable steps, nothing derived from an earlier read (see the migration): (1) ONE fenced batch copies canonical_revision in a single SELECT and inserts the watermark whose counts and
+// highest revisions are computed in SQL FROM THE ROWS JUST COPIED (a trigger refuses a watermark that disagrees with them), after asserting in the batch that canonical_revision holds at most `cap` rows. The batch is one
+// transaction: a failure leaves NO row, and the step is retried. (2) the seal (the committed pointer, written last) stores the per-kind digests, computed from the IMMUTABLE copied rows. If only the seal is missing
+// (a failure between the steps), calling this again completes it from the same rows. WHO RECORDS IT: the activation operation of the owner-authorized `open` flip, under the same lease and window, once. Refused while the
+// marker is not `open`, once sealed (`receipt_baseline_exists`), and above `cap` rows (`baseline_over_capacity`; a paged baseline with a committed pointer is the documented follow-up, not built). It never creates a
 // receipt: the revisions it covers are `pre_receipt_baseline`, not retrospectively receipted.
 export async function recordBaseline(env,{now=()=>new Date().toISOString(),cap=BASELINE_CAP}={}){
  await assertReceiptsAvailable(env);
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
- const rows=await many(db,'SELECT kind,id,revision FROM canonical_revision ORDER BY kind,id LIMIT ?',[cap+1]);
- if(rows.length>cap)throw failed('film_person_bounded');
- const proof=await proofOf(rows);
  const at=typeof now==='function'?now():now;
- const same=kind=>"(SELECT COUNT(*) FROM canonical_revision WHERE kind='"+kind+"')=? AND COALESCE((SELECT MAX(revision) FROM canonical_revision WHERE kind='"+kind+"'),0)=? AND COALESCE((SELECT SUM(revision) FROM canonical_revision WHERE kind='"+kind+"'),0)=?";
- await writeBatch(env,gate,[
-  [fenced.assertSql(same('film')+' AND '+same('person')),[proof.film.count,proof.film.max,proof.film.sum,proof.person.count,proof.person.max,proof.person.sum]],
-  ['INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,film_digest,person_count,person_max_revision,person_digest,taken_at) VALUES (1,?,?,?,?,?,?,?,?,?)',[gate.generation,rows.length,proof.film.count,proof.film.max,proof.film.digest,proof.person.count,proof.person.max,proof.person.digest,at]],
-  ['INSERT INTO canonical_receipt_baseline (kind,id,revision) SELECT kind,id,revision FROM canonical_revision',[]],
- ]);
- return {entries:rows.length,generation:gate.generation,takenAt:at,film:{count:proof.film.count,max:proof.film.max,digest:proof.film.digest},person:{count:proof.person.count,max:proof.person.max,digest:proof.person.digest}};
+ const state=await one(db,'SELECT (SELECT COUNT(*) FROM canonical_receipt_watermark) AS mark,(SELECT COUNT(*) FROM canonical_receipt_baseline_seal) AS seal');
+ if(Number(state?.seal)===1)throw failed('receipt_baseline_exists');
+ let resumed=true;
+ if(Number(state?.mark)===0){
+  const count=Number((await one(db,'SELECT COUNT(*) AS n FROM canonical_revision'))?.n??0);
+  if(count>cap)throw failed('baseline_over_capacity');
+  await writeBatch(env,gate,[
+   [fenced.assertSql('(SELECT COUNT(*) FROM canonical_revision)<=?'),[cap]],
+   ['INSERT INTO canonical_receipt_baseline (kind,id,revision) SELECT kind,id,revision FROM canonical_revision',[]],
+   ["INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) SELECT 1,?,COUNT(*),COALESCE(SUM(kind='film'),0),COALESCE(MAX(CASE WHEN kind='film' THEN revision END),0),COALESCE(SUM(kind='person'),0),COALESCE(MAX(CASE WHEN kind='person' THEN revision END),0),? FROM canonical_receipt_baseline",[gate.generation,at]],
+  ]);
+  resumed=false;
+ }
+ const rows=await many(db,'SELECT kind,id,revision FROM canonical_receipt_baseline ORDER BY kind,id LIMIT ?',[cap+1]);
+ const proof=await proofOf(rows);
+ await writeBatch(env,gate,[['INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,?,?,?)',[proof.film.digest,proof.person.digest,at]]]);
+ return {entries:rows.length,generation:gate.generation,takenAt:at,resumed,film:{count:proof.film.count,max:proof.film.max,digest:proof.film.digest},person:{count:proof.person.count,max:proof.person.max,digest:proof.person.digest}};
 }
 
 async function transition(env,gate,row,change,now){
