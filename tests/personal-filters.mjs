@@ -1,13 +1,15 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const html=fs.readFileSync('public/index.html','utf8');
 for(const value of ['any','3.5','4','4.5'])assert.match(html,new RegExp(`data-min-prediction="${value}"`));
 for(const value of ['any','0.5','0.7','0.85'])assert.match(html,new RegExp(`data-min-probability="${value}"`));
 
 const ctx=vm.createContext({Date,Intl,Set,Map});
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const now=Date.now();
 const film=(id,title,shows=true)=>({id,title,original:title,aliases:[],year:2020,runtime:100,genres:['Драма'],directors:[],actors:[],shows:shows?[{start:now,offset:0}]:[]});
 ctx.sample=[

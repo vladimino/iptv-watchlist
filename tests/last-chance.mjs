@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const now=Date.now(),hour=3600000;
 const source=vm.createContext({Date,Number,Math});
@@ -18,7 +20,7 @@ source.watchlist={films:[{id:'one',title:'Первый'},{id:'two',title:'Вто
 assert.equal(vm.runInContext('programmeWithWatchlist(report,watchlist).films[1].availableUntil',source),null);
 
 const ui=vm.createContext({Date,Intl,Set,Map,console});
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ui);
 ui.now=now;
 ui.items=[
  {id:'two',title:'Б',availableUntil:new Date(now+2*hour).toISOString()},

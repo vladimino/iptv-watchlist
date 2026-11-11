@@ -85,4 +85,7 @@ assert.throws(()=>run("applyFilters({period:'today'})"),/Invalid period/);
 assert.deepEqual(run('applyFilters({period:"archive"}).films.map(f=>f.id)').slice().sort(),['archive','onair-repeat','repeat']);
 // The result summary and counters after a render agree with the sets.
 run("state.period='all';render()");assert.deepEqual(['all','archive','soon'].map(p=>String(nodes.get('#count-'+p).textContent)),['6','3','3']);
+// The empty shortlist names the period conflict instead of a generic empty state.
+run("ratingsLoaded=true;enrichment={films:{future:{prediction:{predictedRating:4.5,probability4Plus:.8}},archive:{prediction:{predictedRating:4.5,probability4Plus:.8}}}};state.period='archive';state.shortlistMode='soon';render()");assert.match(String(nodes.get('#shortlist-empty').textContent),/Период «Архив» оставил только фильмы с готовым архивом/);
+run("state.period='soon';state.shortlistMode='available';render()");assert.match(String(nodes.get('#shortlist-empty').textContent),/Период «Скоро» оставил только фильмы без готового архива/);
 console.log('Period filter: archive/soon/all film sets, counters, cards, clock transitions, 23:50 Madrid, DST, aliases and URL/preset round trip passed');
