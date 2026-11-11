@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const hour=3600000;
 const t0=Date.parse('2026-06-15T10:00:00Z');
 const ctx=vm.createContext({Date,Intl,URL,URLSearchParams,Set,Map,JSON,console,document:{querySelector(){return null;},querySelectorAll(){return [];},documentElement:{classList:{toggle(){}}}},window:{history:{state:null,pushState(){},replaceState(){}},location:{href:'https://iptv.example/'}}});
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 const film=(id,starts,extra={})=>{ctx[id]={id,title:id,original:id,year:2020,genres:['Драма'],runtime:100,directors:[],actors:[],shows:starts.map(start=>({start,end:start+2*hour,channel:'One'})),...extra};return id;};
 
@@ -62,8 +64,8 @@ assert.equal(run(`viewClock=${t0};availabilityTime(kept)`),t0-2*hour+72*hour,'a 
 assert.equal(run(`viewClock=${t0};availabilityTime(gone)`),null);
 assert.equal(run(`viewClock=${t0};isLastChance(kept)`),false);
 assert.equal(run(`viewClock=${t0+64*hour};isLastChance(kept)`),true,'the surviving showing, not a stale field, makes the last chance');
-assert.equal(run(`viewClock=${t0};films.filter(f=>periodShows(f,'future').length).map(f=>f.id).join()`),'soon');
-assert.equal(run(`viewClock=${t0+30*hour};films.filter(f=>periodShows(f,'future').length).length`),0,'yesterday future is not still future');
+assert.equal(run(`viewClock=${t0};films.filter(f=>periodShows(f,'soon').length).map(f=>f.id).join()`),'soon');
+assert.equal(run(`viewClock=${t0+30*hour};films.filter(f=>periodShows(f,'soon').length).length`),0,'yesterday future is not still future');
 assert.equal(run(`viewClock=${t0+30*hour};periodShows(soon,'archive').length`),1);
 assert.equal(run(`viewClock=${t0+80*hour};periodShows(kept,'all').length`),0);
 assert.equal(run(`viewClock=${t0};availabilityTime(soon)===${t0}+24*${hour}`),false,'retention is not clipped to the snapshot end');
@@ -73,9 +75,9 @@ assert.equal(run('blackZone()'),true);
 assert.equal(run('state.includeUnscheduled'),false);
 assert.equal(run(`films.filter(f=>inSelectedScope(f,'all')).length`),5);
 assert.equal(run(`films.filter(f=>inSelectedScope(f,'archive')).length`),5,'the open archive tab still lists the watchlist');
-assert.equal(run(`films.filter(f=>inSelectedScope(f,'future')).length`),5,'the open next-day tab still lists the watchlist');
+assert.equal(run(`films.filter(f=>inSelectedScope(f,'soon')).length`),5,'the open next-day tab still lists the watchlist');
 assert.equal(run(`films.filter(f=>countedScope(f,'archive')).length`),0);
-assert.equal(run(`films.filter(f=>countedScope(f,'future')).length`),0);
+assert.equal(run(`films.filter(f=>countedScope(f,'soon')).length`),0);
 run(`state.query='nomatch';`);
 assert.equal(run(`films.filter(f=>eligible(f)&&inSelectedScope(f)).length`),0,'search still applies in the black zone');
 run(`state.query='';state.lastChanceOnly=true;`);
@@ -111,20 +113,25 @@ run(`report={updatedAt:new Date(${t0}).toISOString(),window:{from:${t0}-72*${hou
 run('render();noteTimeView()');
 assert.match(nodes.get('#movies').innerHTML,/ДАЛЬШЕ/);
 assert.doesNotMatch(nodes.get('#movies').innerHTML,/АРХИВ/);
-assert.equal(String(nodes.get('#count-future').textContent),'1');
+assert.equal(String(nodes.get('#count-soon').textContent),'1');
 assert.equal(String(nodes.get('#count-archive').textContent),'0');
 run(`viewClock=${start};refreshTimeSensitiveView();`);
+assert.match(nodes.get('#movies').innerHTML,/ДАЛЬШЕ/,'a show on air is not an archive until it ends');
+assert.doesNotMatch(nodes.get('#movies').innerHTML,/АРХИВ/);
+assert.equal(String(nodes.get('#count-archive').textContent),'0');
+assert.equal(String(nodes.get('#count-soon').textContent),'1');
+run(`viewClock=${start}+2*${hour};refreshTimeSensitiveView();`);
 assert.match(nodes.get('#movies').innerHTML,/АРХИВ/);
 assert.doesNotMatch(nodes.get('#movies').innerHTML,/ДАЛЬШЕ/);
 assert.equal(String(nodes.get('#count-archive').textContent),'1');
-assert.equal(String(nodes.get('#count-future').textContent),'0');
+assert.equal(String(nodes.get('#count-soon').textContent),'0');
 assert.equal(run('state.period'),'all');
 run(`films.push({id:'bare',title:'Bare',original:'Bare',year:2020,genres:['Драма'],runtime:90,directors:[],actors:[],shows:[]});`);
-for(const period of ['all','archive','future'])for(const checked of [false,true]){
+for(const period of ['all','archive','soon'])for(const checked of [false,true]){
  run(`state.period='${period}';state.includeUnscheduled=${checked};state.lastChanceOnly=false;state.query='';viewClock=${t0+96*hour};`);
  assert.equal(run('visibleFilms().length'),2,`${period} with the box ${checked?'on':'off'} still lists the watchlist`);
  assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'archive')).length`),0);
- assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'future')).length`),0);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'soon')).length`),0);
  assert.equal(run('state.period'),period);
  assert.equal(run('state.includeUnscheduled'),checked);
  assert.equal(run("presetQuery().includes('view=watchlist')"),checked);
@@ -132,7 +139,7 @@ for(const period of ['all','archive','future'])for(const checked of [false,true]
  assert.equal(run('blackZone()'),false);
  const restored=period==='archive'?checked?1:0:checked?2:1;
  assert.equal(run('visibleFilms().length'),restored,`${period} restores the schedule and keeps the box ${checked?'on':'off'}`);
- assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'future')).length`),checked?2:1);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'soon')).length`),checked?2:1);
  assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'archive')).length`),checked?1:0);
  assert.equal(run('state.includeUnscheduled'),checked);
  assert.equal(run('state.period'),period);

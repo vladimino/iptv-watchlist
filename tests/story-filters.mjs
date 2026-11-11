@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const ctx=vm.createContext({Date,Intl,Set,Map,URL});
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const now=Date.now();
 const film=(id,title,genres,runtime,shows=true)=>({id,title,original:title,aliases:[],year:2020,runtime,genres,directors:[],actors:[],shows:shows?[{start:now,offset:0}]:[]});
 ctx.sample=[film('a','Побег Альфа',['Драма'],90),film('b','Побег Бета',['Драма'],120),film('c','Комедия',['Комедия'],80),film('d','Побег Гамма',['Драма'],80),film('e','Побег Дельта',['Драма'],95,false)];

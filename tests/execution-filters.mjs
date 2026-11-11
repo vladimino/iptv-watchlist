@@ -1,11 +1,13 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const parses={count:0};
 const countingJSON={parse(...args){parses.count++;return JSON.parse(...args);},stringify(...args){parses.count++;return JSON.stringify(...args);}};
 const ctx=vm.createContext({Date,Intl,Set,Map,URL,JSON:countingJSON});
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 const now=Date.now();
 const film=(id,title,genres,year,runtime,shows=true)=>({id,title,original:title,aliases:[],year,runtime,genres,directors:[],actors:[],shows:shows?[{start:now,offset:0}]:[]});
 ctx.sample=[

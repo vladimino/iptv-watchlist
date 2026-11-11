@@ -1,9 +1,10 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
-import {scoped} from '../scripts/bundle-scope.mjs';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
-const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
+const source=AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const hour=3600000;
 const clock=Date.parse('2026-10-24T12:00:00Z');
 const nodes=new Map();
@@ -36,7 +37,6 @@ const live=vm.createContext({
  },
  fetch(url,options){fetches.push({url:String(url),method:options?.method||'GET'});throw new Error('film page render must not fetch');},
 });
-vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),live);
 vm.runInContext(source,live);
 const run=code=>vm.runInContext(code,live);
 run(`viewClock=${clock};CUTOFF=${clock};WINDOW_START=${clock-72*hour};WINDOW_END=${clock+24*hour};report={window:{from:${clock-72*hour},to:${clock+24*hour}},updatedAt:'2026-10-24T12:00:00Z',people:{directors:[{id:'d1',name:'Манн'}],actors:[{id:'a1',name:'Де Ниро'}]}};urlReady=true`);

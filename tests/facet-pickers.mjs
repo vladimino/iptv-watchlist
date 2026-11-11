@@ -1,9 +1,11 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const ctx=vm.createContext({Date,Intl,Set,Map,URL});
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
 ctx.saved={films:{
  a:{fingerprint:{plotMechanics:['heist'],moodIds:['tense'],execution:{pace:'fast',decision_logic:'strong',plot_engine:'unknown'}}},
  b:{fingerprint:{plotMechanics:['rescue'],moodIds:['light'],execution:{pace:'slow',decision_logic:'mixed'}}},
@@ -42,8 +44,8 @@ assert.equal(option('pace','slow'),undefined);
 assert.equal(option('decision_logic','weak').count,1);
 assert.equal(option('decision_logic','mixed'),undefined);
 vm.runInContext('state.execution.decision_logic.clear()',ctx);
-vm.runInContext('state.channels=new Set(["Первый"]);state.period="future"',ctx);
-assert.deepEqual(ids(),['c'],'channel membership follows the selected availability scope');
+vm.runInContext('state.channels=new Set(["Первый"]);state.period="soon"',ctx);
+assert.deepEqual(ids(),['a','c'],'channel membership follows the selected availability scope: «Скоро» holds the show still on air (runtime fallback) and the one ahead');
 const linked=vm.runInContext('urlForState("https://iptv.example/").search',ctx);
 assert.match(linked,/channel=%D0%9F%D0%B5%D1%80%D0%B2%D1%8B%D0%B9/);
 assert.match(linked,/execution=pace%3Afast/);

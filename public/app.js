@@ -39,7 +39,7 @@ function moodIdsFromUrl(value){const key=normalizeMood(value).replace(/ё/g,"е"
 let mechanics=[],moods=[];
 function defaultSearchScopes(){return {titles:true,people:false,plot:false};}
 const SEARCH_SCOPE_IDS=['titles','people','plot'];
-const state = { shortlistMode:'now', period: 'all', sort: 'personal', sortExplicit:false, viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', searchScopes:defaultSearchScopes(), genres: new Set(), mechanics:new Set(), moods:new Set(), channels:new Set(), execution:emptyExecution(), from: 1900, to: MAX_YEAR, maxRuntime: null };
+const state = { shortlistMode:'available', period: 'all', sort: 'personal', sortExplicit:false, viewing: 'any', minPrediction: null, minProbability: null, startedOnly: false, lastChanceOnly: false, includeUnscheduled: false, directors: '', actors: '', query: '', searchScopes:defaultSearchScopes(), genres: new Set(), mechanics:new Set(), moods:new Set(), channels:new Set(), execution:emptyExecution(), from: 1900, to: MAX_YEAR, maxRuntime: null };
 const APP_QUERY_KEYS = ['shortlist','view','period','q','searchIn','sort','genre','mechanic','mood','channel','execution','from','to','runtime','viewing','started','lastChance','director','actor','prediction','chance'];
 let urlReady=false,urlRestoring=false,viewClock=null,programmeRefreshError=false;
 function nowMs(){return viewClock??Date.now();}
@@ -69,6 +69,10 @@ function onAir(model,show){const start=showStart(show),end=finiteTime(show?.end)
 function inArchive(model,show){const start=showStart(show);if(!model?.now||!inEnvelope(model,start)||start>model.now)return false;if(onAir(model,show))return true;return start>model.now-72*3600000&&start+72*3600000>model.now;}
 function inFuture(model,show){const start=showStart(show);return !!model?.now&&inEnvelope(model,start)&&start>model.now;}
 function blackZone(){const model=viewingWindow();return !!model?.envelope&&model.black;}
+// AIR-434: the period filter «Все показы / Архив / Скоро» and the shortlist «Доступно / Скоро» are film-level states of the one lifecycle (ADR 0114).
+// Old links and saved presets used `period=future` (the former «Следующие сутки») and `shortlist=today`/`now`: they are normalised, never rejected.
+function normalizePeriod(value){return value==='all'||value==='archive'?value:value==='soon'||value==='future'?'soon':null;}
+function normalizeShortlistMode(value){return value==='soon'||value==='today'?'soon':'available';}
 function inSelectedScope(film,period=state.period){if(periodShows(film,period).length>0)return true;if(periodShows(film,'all').length>0)return false;if(blackZone()&&!state.lastChanceOnly)return true;return !!state.includeUnscheduled;}
 function countedScope(film,period){if(blackZone()&&period!=='all')return periodShows(film,period).length>0;return inSelectedScope(film,period);}
 function parseSearchScopes(value){
@@ -109,10 +113,10 @@ function syncSearchControls(){
  });
 }
 function readUrlState(url){
- const p=url.searchParams,defaults={shortlistMode:'now',period:'all',sort:'personal',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',searchScopes:parseSearchScopes(p.get('searchIn')),genres:new Set(),mechanics:new Set(),moods:new Set(),channels:new Set(),execution:emptyExecution(),from:1900,to:MAX_YEAR,maxRuntime:null};
- if(p.get('shortlist')==='today')defaults.shortlistMode='today';
+ const p=url.searchParams,defaults={shortlistMode:'available',period:'all',sort:'personal',sortExplicit:false,viewing:'any',minPrediction:null,minProbability:null,startedOnly:false,lastChanceOnly:false,includeUnscheduled:false,directors:'',actors:'',query:'',searchScopes:parseSearchScopes(p.get('searchIn')),genres:new Set(),mechanics:new Set(),moods:new Set(),channels:new Set(),execution:emptyExecution(),from:1900,to:MAX_YEAR,maxRuntime:null};
+ defaults.shortlistMode=normalizeShortlistMode(p.get('shortlist'));
  if(p.get('view')==='watchlist')defaults.includeUnscheduled=true;
- if(['all','archive','future'].includes(p.get('period')))defaults.period=p.get('period');
+ defaults.period=normalizePeriod(p.get('period'))||'all';
  if(p.get('sort')==='relevance'&&normalizeSearch(p.get('q')||''))defaults.sort='relevance';
  // AIR-382: «Для меня» is the default. The retired `time` sort (an old link) and any unknown value fall back to it, or to relevance while a search is typed.
  else if(['title','personal','expiring'].includes(p.get('sort'))){defaults.sort=p.get('sort');defaults.sortExplicit=true;}
@@ -141,7 +145,7 @@ function readUrlState(url){
 function urlForState(current){
  const url=new URL(current);for(const key of APP_QUERY_KEYS)url.searchParams.delete(key);
  const add=(key,value)=>url.searchParams.append(key,String(value));
- if(state.shortlistMode==='today')add('shortlist','today');
+ if(state.shortlistMode==='soon')add('shortlist','soon');
  if(state.includeUnscheduled)add('view','watchlist');
  if(state.period!=='all')add('period',state.period);
  if(state.query)add('q',state.query);
@@ -583,7 +587,7 @@ function applySearchInput(value){
  if(!hasQuery&&hadQuery&&!state.sortExplicit&&state.sort==='relevance')state.sort='personal';
 }
 function availabilityTime(film,now=viewingClock()){const model=viewingWindow(now);const starts=(film?.shows||[]).map(show=>inArchive(model,show)||inFuture(model,show)?showStart(show):null).filter(start=>start!==null);return starts.length?Math.max(...starts)+72*3600000:null;}
-function isLastChance(film,now=viewingClock()){const until=availabilityTime(film,now);return until!==null&&until>now&&until-now<8*3600000;}
+function isLastChance(film,now=viewingClock()){const until=archiveDeadline(film,now);return until!==null&&until>now&&until-now<8*3600000;}
 function filmTmdbViewKey(film){const tmdb=String(film?.tmdbId??'');return /^[1-9]\d{0,11}$/.test(tmdb)?'tmdb_'+tmdb:null;}
 // Watchlist cards key films by Letterboxd lid; ratings_view also projects the verified tmdb_<n> of the same record. Titles are not compared.
 function filmEnrichmentItem(film){
@@ -718,7 +722,24 @@ function updateExecutionOptions(){
  if(typeof box.querySelectorAll==='function')box.querySelectorAll('input').forEach(input=>{input.checked=!!state.execution[input.dataset.execution]?.has(input.value);});
 }
 function eligible(film) { const parsed=searchTokens(state.query); const matched=searchRank(film,parsed.normalized,parsed.tokens)!==null; const prediction=enrichment.films[String(film.id)]?.prediction,facets=filmFacets(film); return matched && (state.viewing==='any'||ratingsLoaded&&((state.viewing==='rewatch')===hasActualRating(film))) && (state.minPrediction===null||Number.isFinite(prediction?.predictedRating)&&prediction.predictedRating>=state.minPrediction) && (state.minProbability===null||Number.isFinite(prediction?.probability4Plus)&&prediction.probability4Plus>=state.minProbability) && (!state.startedOnly||startedIds.has(String(film.id))) && (!state.lastChanceOnly||isLastChance(film)) && ['directors','actors'].every(key=>!state[key]||(film[key]||[]).some(p=>p.id===state[key])) && ((film.year >= state.from && film.year <= state.to)||(!film.year&&state.from===1900&&state.to===MAX_YEAR)) && (state.maxRuntime===null||(Number(film.runtime)>0&&Number(film.runtime)<=state.maxRuntime)) && (!state.genres.size || film.genres.some(g => state.genres.has(g))) && (!state.mechanics.size||[...state.mechanics].some(m=>facets.mechanics.has(m))) && (!state.moods.size||[...state.moods].some(m=>facets.moods.has(m))) && matchesChannels(film) && matchesExecution(film); }
-function periodShows(film,period=state.period) { return film.shows.filter(s => period==='archive'?isArchive(s):period==='future'?isFuture(s):isArchive(s)||isFuture(s)); }
+// The lifecycle of a film at the viewing clock over all its shows inside the product windows and the loaded programme (`findsWindowShows` and the envelope: none in the black zone). `archive` holds
+// the ready recordings, `ahead` the show on air and the shows that start inside the next 24 hours; the film state comes only from `filmAvail`.
+function filmLifecycle(film,now=viewingClock()){
+ const lib=availabilityLib();if(!lib||!film)return {avail:null,archive:[],ahead:[]};
+ const model=viewingWindow(now),shows=findsWindowShows(film,now,null).filter(show=>inEnvelope(model,show.start)),avail=filmAvail(film,now,shows),archive=[],ahead=[];
+ for(const show of shows){const info=lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}),phase=info.phase;if(phase==='archive')archive.push(show);else if(phase==='on_air'||phase==='future')ahead.push({...show,effectiveEnd:info.end});}
+ return {avail,archive,ahead};
+}
+// «Архив» is film-level `available`, «Скоро» is film-level `soon`, «Все показы» is their union: the sets never overlap. A film with a ready archive keeps
+// its repeat in the «Все показы» list, but a repeat never moves it into «Скоро».
+function periodShows(film,period=state.period){
+ const life=filmLifecycle(film),kind=life.avail?.state,p=normalizePeriod(period)||'all';
+ if(kind==='available')return p==='soon'?[]:p==='archive'?life.archive:[...life.archive,...life.ahead];
+ if(kind==='soon')return p==='archive'?[]:life.ahead;
+ return [];
+}
+// The deadline of a ready archive (start + 72 h of the latest ready show); null for a film that is only «Скоро» or has nothing: «последний шанс» is an archive notion.
+function archiveDeadline(film,now=viewingClock()){const avail=filmLifecycle(film,now).avail;return avail?.state==='available'?avail.archiveUntil:null;}
 function filmWord(n){return n%10===1&&n%100!==11?'фильм':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'фильма':'фильмов';}
 function showWord(n){return n%10===1&&n%100!==11?'показ':n%10>=2&&n%10<=4&&(n%100<12||n%100>14)?'показа':'показов';}
 function programmeWindow(snapshot){
@@ -753,7 +774,7 @@ function letterboxdLink(film,options){const target=letterboxdTarget(film,options
 function channelControl(show){const hint=show.basis==='title_duration'?`<span class="match-hint" title="${escapeHTML(matchHintText(show.matchReason))}" aria-label="${escapeHTML(matchHintText(show.matchReason))}"> ≈</span>`:'';const name=typeof show.channel==='string'?show.channel:'';if(!name.trim())return `<span class="channel">${hint}</span>`;return `<span class="channel"><button type="button" class="channel-filter" data-channel="${escapeHTML(name)}" title="Добавить канал «${escapeHTML(name)}» в фильтр" aria-label="Добавить канал «${escapeHTML(name)}» в фильтр">${escapeHTML(name)}</button>${hint}</span>`;}
 function row(show){const start=showStart(show),date=new Date(start),time=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(date);return `<div class="show-row">${channelControl(show)}<time class="show-time" datetime="${date.toISOString()}">${madridStamp(start,{day:'numeric',month:'short'})}<b>${time}</b></time></div>`;}
 function compareShows(type){return (a,b)=>{const rank=(state.channels.has(a.channel)?0:1)-(state.channels.has(b.channel)?0:1);if(rank)return rank;return type==='archive'?showStart(b)-showStart(a):showStart(a)-showStart(b);};}
-function group(film,type){const shows=film.shows.filter(type==='archive'?isArchive:isFuture).sort(compareShows(type));if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
+function group(film,type){const life=filmLifecycle(film),shows=[...(type==='archive'?life.archive:life.ahead)].sort(compareShows(type));if(!shows.length)return '';return `<section class="show-group ${type}"><div class="group-title"><span>${type==='archive'?'АРХИВ':'ДАЛЬШЕ'}</span><span class="show-count">${shows.length} ${showWord(shows.length)}</span></div>${row(shows[0])}${shows.length>1?`<details class="more"><summary>Ещё ${shows.length-1} ${showWord(shows.length-1)}</summary>${shows.slice(1).map(row).join('')}</details>`:''}</section>`;}
 function startedButton(film,labeled=false){
  const id=String(film.id),on=startedIds.has(id),busy=savingStarted.has(id);
  const caption=on?'Просмотр начат':'Начал просмотр';
@@ -1069,34 +1090,37 @@ function lastChanceMark(until){
 }
 function lastChanceBadge(film){
  if(!isLastChance(film))return '';
- return lastChanceMark(availabilityTime(film));
+ return lastChanceMark(archiveDeadline(film));
 }
 function card(film){
  const item=filmEnrichmentItem(film),hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
- return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${posterFrame(film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`,soonBadge(film))}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
+ return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${posterFrame(film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`,soonBadge(film))}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='soon'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':''}${startedButton(film)}</article>`;
 }
-function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
+function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=archiveDeadline(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
 
-function shortlistDay(time){return new Intl.DateTimeFormat('en-CA',{timeZone:'Europe/Madrid',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(time));}
-function shortlistAvailability(film,mode='now',now=viewingClock()){
- const model=viewingWindow(now);
- const selected=(film.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&(inArchive(model,show)||inFuture(model,show)));
- const current=selected.filter(show=>show.start<=now&&finiteTime(show.end)!==null&&show.end>now).sort((a,b)=>a.start-b.start);
- const catchup=selected.filter(show=>show.start<=now).sort((a,b)=>b.start-a.start);
- const future=selected.filter(show=>show.start>now&&shortlistDay(show.start)===shortlistDay(now)).sort((a,b)=>a.start-b.start);
- const show=current[0]||catchup[0]||(mode==='today'?future[0]:null),kind=current.length?'current':catchup.length?'catchup':mode==='today'&&future.length?'future':'unavailable';
- if(show)return {available:true,kind,show,archiveUntil:catchup.length?Math.max(...catchup.map(s=>s.start))+72*3600000:null,until:availabilityTime(film,now)};
- if(mode==='today'&&state.includeUnscheduled&&!periodShows(film,'all').length)return {available:false,kind:'unavailable',show:null,until:null};
- return null;
+// AIR-434 (ADR 0114): the shortlist is two disjoint sets of FILMS, «Доступно» (film-level `available`: a ready archive) and «Скоро» (film-level `soon`: no ready
+// archive, a show on air or starting inside the next 24 hours). A film is in exactly one or in none; no archive film ever fills «Скоро», however few candidates there are.
+// The state and the wording come from the shared module (`filmLifecycle`, `soonTail`); the shortlist has no poster, so it shows no badge.
+function shortlistAvailability(film,mode='available',now=viewingClock()){
+ const life=filmLifecycle(film,now),avail=life.avail;
+ if(!avail||avail.state!==mode)return null;
+ if(mode==='available'){
+  const ready=life.archive.filter(show=>show.start===avail.archiveShow?.start).sort(compareShows('archive'))[0]||[...life.archive].sort(compareShows('archive'))[0]||null;
+  return ready?{state:'available',kind:'archive',show:ready,avail,archiveUntil:avail.archiveUntil,until:avail.archiveUntil}:null;
+ }
+ // The shown show is the one whose effective end IS the film's `appearsAt` (the earliest end), so the channel and the hour in the text belong together; ties prefer a selected channel.
+ const known=avail.appearsAt!==null&&avail.appearsAtKnown?life.ahead.filter(show=>show.effectiveEnd===avail.appearsAt):[];
+ const next=[...(known.length?known:life.ahead)].sort(compareShows('future'))[0]||null;
+ return next?{state:'soon',kind:next.start<=now?'live':'next',show:next,avail,archiveUntil:null,until:null}:null;
 }
 function shortlistCompare(a,b){const x=personal(a),y=personal(b);return (y.rating??-Infinity)-(x.rating??-Infinity)||Number(y.actual)-Number(x.actual)||(!x.actual&&!y.actual?y.probability-x.probability:0)||a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
-function buildShortlist(input=visibleFilms(),mode=state.shortlistMode,now=nowMs()){
+function buildShortlist(input=visibleFilms(),mode=normalizeShortlistMode(state.shortlistMode),now=nowMs()){
  const candidates=input.filter(eligible).filter(f=>inSelectedScope(f)).map(f=>({film:f,availability:shortlistAvailability(f,mode,now)})).filter(x=>x.availability&&personal(x.film).rating!==null).sort((a,b)=>shortlistCompare(a.film,b.film));
  const seen=new Set(),unique=candidates.filter(x=>{const id=String(x.film.tmdbId||x.film.id);if(seen.has(id))return false;seen.add(id);return true;});if(!unique.length)return [];
  const best=personal(unique[0].film).rating,strong=Math.max(3.5,best-.5),runtimes=unique.map(x=>Number(x.film.runtime)).filter(n=>Number.isFinite(n)&&n>0).sort((a,b)=>a-b),shortLimit=runtimes.length?runtimes[Math.floor((runtimes.length-1)*.25)]:0;
  const roles=[
   {id:'best',accept:()=>true,reason:x=>personal(x.film).actual?'сильный пересмотр':'лучший прогноз'},
-  {id:'last_chance',accept:x=>x.availability.available&&x.availability.kind!=='future'&&x.availability.until>now&&x.availability.until-now<8*3600000&&personal(x.film).rating>=3.5,reason:()=> 'последний шанс'},
+  {id:'last_chance',accept:x=>x.availability.state==='available'&&x.availability.archiveUntil>now&&x.availability.archiveUntil-now<8*3600000&&personal(x.film).rating>=3.5,reason:()=> 'последний шанс'},
   {id:'started',accept:x=>startedIds.has(String(x.film.id)),reason:()=> 'продолжить'},
   {id:'short',accept:x=>Number(x.film.runtime)>0&&Number(x.film.runtime)<=shortLimit&&personal(x.film).rating>=strong,reason:()=> 'короткий вариант'},
   {id:'rewatch',accept:x=>personal(x.film).actual&&personal(x.film).rating>=3.5,reason:()=> 'сильный пересмотр'}
@@ -1105,8 +1129,15 @@ function buildShortlist(input=visibleFilms(),mode=state.shortlistMode,now=nowMs(
   const next=matches.find(x=>!picked.has(identity(x)));if(next&&output.length<5){const item={...next,score:personal(next.film),role:role.id,reasons:[role.reason(next)]};output.push(item);picked.set(identity(next),item);}}
  return output;
 }
-function shortlistAvailabilityText(item){const a=item.availability;if(!a.available)return 'Нет показов в текущем окне';const channel=a.show.channel||'Канал не указан',time=t=>new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',hour:'2-digit',minute:'2-digit'}).format(new Date(t));if(a.kind==='current')return `Сейчас · ${channel}`;if(a.kind==='future')return `Сегодня ${time(a.show.start)} · ${channel}`;return `Архив · ${channel} · до ${new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(new Date(a.archiveUntil??a.until))}`;}
-function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const list=valid?buildShortlist(visible):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card${item.availability.available?'':' is-unavailable'}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':!ratingsLoaded?'Загружаем оценки и прогнозы…':'Нет подходящих вариантов с оценкой или прогнозом. Измени фильтры или выбери «Сегодня». Границы фильтров сохранены.';$('#shortlist-caption').textContent=state.includeUnscheduled&&state.shortlistMode==='today'?'Из твоей выборки · варианты без показа отмечены отдельно':'Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===state.shortlistMode)));}
+function shortlistAvailabilityText(item){
+ const a=item.availability,channel=a.show.channel||'Канал не указан';
+ if(a.state==='available')return `Архив · ${channel} · до ${madridStamp(a.archiveUntil)}`;
+ return `${a.kind==='live'?'Сейчас в эфире':madridStamp(a.show.start)} · ${channel} · ${soonTail(a.avail)}`;
+}
+const SHORTLIST_EMPTY={available:'Нет подходящих вариантов с готовым архивом, оценкой или прогнозом. Измени фильтры или выбери «Скоро». Границы фильтров сохранены.',soon:'Сейчас нет подходящих вариантов «Скоро»: фильмов без готового архива, которые идут в эфире или начнутся в ближайшие 24 часа, с оценкой или прогнозом. Измени фильтры или выбери «Доступно». Границы фильтров сохранены.'};
+// A period that holds only the other group leaves this one empty by construction: say so instead of a generic empty state.
+const SHORTLIST_CONFLICT={'available:soon':'Период «Скоро» оставил только фильмы без готового архива. Выбери период «Все показы» или «Архив», чтобы увидеть «Доступно».','soon:archive':'Период «Архив» оставил только фильмы с готовым архивом. Выбери период «Все показы» или «Скоро», чтобы увидеть «Скоро».'};
+function renderShortlist(visible,valid=true){const node=$('#shortlist');if(!node)return;const mode=normalizeShortlistMode(state.shortlistMode),list=valid?buildShortlist(visible,mode):[];$('#shortlist-cards').innerHTML=list.map(item=>{const f=item.film;return `<article class="shortlist-card" data-shortlist-state="${item.availability.state}"><h3><button type="button" data-shortlist-film="${escapeHTML(f.id)}">${escapeHTML(f.title)}</button>${letterboxdLink(f)}</h3><p class="shortlist-meta">${escapeHTML(f.year||'Год не указан')} · ${Number(f.runtime)>0?Math.round(f.runtime)+' мин':'Длительность неизвестна'}</p><p class="shortlist-score">${item.score.actual?'Твоя оценка':'Прогноз'} <strong>${item.score.rating.toFixed(1)} ★</strong></p><p class="shortlist-availability">${escapeHTML(shortlistAvailabilityText(item))}</p><div class="shortlist-reasons">${item.reasons.map(reason=>`<span>${escapeHTML(reason)}</span>`).join('')}</div></article>`;}).join('');$('#shortlist-empty').hidden=list.length>0;$('#shortlist-empty').textContent=!valid?'Проверь значения фильтров.':!ratingsLoaded?'Загружаем оценки и прогнозы…':SHORTLIST_CONFLICT[mode+':'+normalizePeriod(state.period)]||SHORTLIST_EMPTY[mode];$('#shortlist-caption').textContent='Из твоей выборки · только актуальное окно показов';document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.shortlistMode===mode)));}
 
 // Finds: strong catalog films outside the watchlist, read from GET /api/catalog/available. The route decides eligibility; this block only re-checks it against the loaded watchlist and clock, ranks and presents.
 // With a channel filter the section becomes channel-scoped: only shows on a selected channel (OR across channels) inside the selected period of the
@@ -1260,7 +1291,7 @@ function armSoonTick(){
 }
 function findsScope(){return state.channels?.size||state.period!=='all'?{channels:state.channels?.size?new Set(state.channels):null,period:state.period}:null;}
 function findsOnChannel(show,channels){const name=typeof show?.channel==='string'?show.channel:'';return !!name&&(channels.has(name)||channels.has(name.trim()));}
-function findsInPeriod(model,show,period){return period==='archive'?inArchive(model,show):period==='future'?inFuture(model,show):inArchive(model,show)||inFuture(model,show);}
+function findsInPeriod(model,show,period){const p=normalizePeriod(period);return p==='archive'?inArchive(model,show):p==='soon'?inFuture(model,show):inArchive(model,show)||inFuture(model,show);}
 function findsShows(film,now,scope=findsScope()){
  const from=now-72*3600000,to=now+24*3600000;
  let shows=(film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&show.start>from&&show.start<to);
@@ -1277,7 +1308,7 @@ function findsWindowShows(film,now,scope=findsScope()){
 // The lifecycle of a find over the shows of the selected channels. `null` only when the shared module is absent (an isolated context).
 function findsAvail(film,now,scope=findsScope()){return filmAvail(film,now,findsWindowShows(film,now,scope));}
 // Archive-first period filter: «Архив» keeps films with a ready archive, «Скоро» (period `future`) keeps films with no ready archive that are on air or ahead.
-function findsPeriodAllows(state,period){return period==='archive'?state==='available':period==='future'?state==='soon':state==='available'||state==='soon';}
+function findsPeriodAllows(state,period){const p=normalizePeriod(period);return p==='archive'?state==='available':p==='soon'?state==='soon':state==='available'||state==='soon';}
 function findsUntil(film,now,scope=findsScope()){
  const avail=findsAvail(film,now,scope);
  if(avail)return avail.state==='available'?avail.archiveUntil:null;
@@ -1662,13 +1693,13 @@ function onFindsClick(event){
 // The cached catalog answer is usable only for the generation the loaded programme is on. A generation change with no catalog
 // answer for it yet (or a 409 while the new generation is still copying) hides the section instead of showing the old shows.
 function findsFresh(){const run=report?.runId??null;return !!findsSource.ready&&!!findsSource.programmeRunId&&!!run&&findsSource.programmeRunId===run;}
-const FINDS_PERIOD_LABELS={archive:'архив',future:'следующие сутки'};
+const FINDS_PERIOD_LABELS={archive:'архив',soon:'скоро'};
 function findsTitle(scope){return !scope?.channels?'Находки':scope.channels.size>1?'Находки на выбранных каналах':'Находки на выбранном канале';}
 function findsCaption(count,scope,contextual=false){
  if(!count)return '';
  const filters=contextual?' по выбранным фильтрам':'';
  if(!scope)return contextual?`${count} ${filmWord(count)} вне watchlist по выбранным фильтрам: сильный прогноз и реальный показ`:`${count} ${filmWord(count)} вне watchlist: сильный прогноз и реальный показ`;
- const period=FINDS_PERIOD_LABELS[scope.period];
+ const period=FINDS_PERIOD_LABELS[normalizePeriod(scope.period)];
  if(!scope.channels)return `${count} ${filmWord(count)} вне watchlist${filters}${period?` · ${period}`:''}`;
  const channels=[...scope.channels].sort((a,b)=>a.localeCompare(b,'ru')).join(', ');
  return `${count} ${filmWord(count)} вне watchlist${filters} с показом на ${scope.channels.size>1?'каналах':'канале'} ${channels}${period?` · ${period}`:''}`;
@@ -1737,7 +1768,7 @@ function render(){
   ['#year-from','#year-to'].forEach(s=>$(s).setAttribute('aria-invalid',String(!validYear)));
   $('#runtime-max').setAttribute('aria-invalid',String(!validRuntime));
   const filtered=valid?films.filter(eligible):[];
-  for(const p of ['all','archive','future'])$(`#count-${p}`).textContent=filtered.filter(f=>countedScope(f,p)).length;
+  for(const p of ['all','archive','soon'])$(`#count-${p}`).textContent=filtered.filter(f=>countedScope(f,p)).length;
   document.querySelectorAll('[data-period]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.period===state.period)));
   const visible=valid?visibleFilms():[];
   $('#movies').innerHTML=visible.map(card).join('');
@@ -1756,7 +1787,7 @@ function render(){
   noteTimeView(valid?visible:[]);
   return {period:state.period,query:state.query,genres:[...state.genres],mechanics:[...state.mechanics],moods:[...state.moods],years:[state.from,state.to],maxRuntime:state.maxRuntime,minPrediction:state.minPrediction,minProbability:state.minProbability,films:visible.map(f=>({id:f.id,title:f.title,year:f.year,shows:periodShows(f)}))};
 }
-function reset(){state.shortlistMode='now';state.viewing='any';state.minPrediction=null;state.minProbability=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.sort='personal';state.sortExplicit=false;state.query='';state.searchScopes=defaultSearchScopes();state.genres.clear();state.mechanics.clear();state.moods.clear();state.channels.clear();for(const selected of Object.values(state.execution))selected.clear();closeFacet();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';for(const selector of ['#genres input','#mechanics input','#moods input','#execution input'])document.querySelectorAll(selector).forEach(i=>i.checked=false);render();}
+function reset(){state.shortlistMode='available';state.viewing='any';state.minPrediction=null;state.minProbability=null;state.includeUnscheduled=false;$('#include-unscheduled').checked=false;state.startedOnly=false;$('#started-only').checked=false;state.lastChanceOnly=false;$('#last-chance-only').checked=false;for(const key of ['directors','actors']){state[key]='';$('#'+key+'-input').value='';$('#'+key+'-options').hidden=true;$('#'+key+'-input').setAttribute('aria-expanded','false');}state.period='all';state.sort='personal';state.sortExplicit=false;state.query='';state.searchScopes=defaultSearchScopes();state.genres.clear();state.mechanics.clear();state.moods.clear();state.channels.clear();for(const selected of Object.values(state.execution))selected.clear();closeFacet();state.from=1900;state.to=MAX_YEAR;state.maxRuntime=null;$('#year-from').value=1900;$('#year-to').value=MAX_YEAR;$('#runtime-max').value='';for(const selector of ['#genres input','#mechanics input','#moods input','#execution input'])document.querySelectorAll(selector).forEach(i=>i.checked=false);render();}
 function applyFilters(input){
  if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('Expected a filters object');
  if(input.includeUnscheduled!==undefined&&typeof input.includeUnscheduled!=='boolean')throw new Error('Invalid watchlist scope');
@@ -1765,7 +1796,7 @@ function applyFilters(input){
  if(input.minPrediction!==undefined&&![null,3.5,4,4.5].includes(input.minPrediction))throw new Error('Invalid prediction threshold');
  if(input.minProbability!==undefined&&![null,0.5,0.7,0.85].includes(input.minProbability))throw new Error('Invalid probability threshold');
  if(input.query!==undefined&&typeof input.query!=='string')throw new Error('Invalid search query');
- if(input.period!==undefined&&!['all','archive','future'].includes(input.period))throw new Error('Invalid period');
+ if(input.period!==undefined&&!normalizePeriod(input.period))throw new Error('Invalid period');
  if(input.genres!==undefined&&(!Array.isArray(input.genres)||input.genres.some(g=>!genres.includes(g))))throw new Error('Invalid genre');
  if(input.mechanics!==undefined&&(!Array.isArray(input.mechanics)||input.mechanics.some(m=>!mechanics.includes(m))))throw new Error('Invalid mechanic');
  if(input.moods!==undefined&&(!Array.isArray(input.moods)||input.moods.some(m=>!moods.includes(m))))throw new Error('Invalid mood');
@@ -1778,7 +1809,7 @@ function applyFilters(input){
  state.minPrediction=input.minPrediction===undefined?state.minPrediction:input.minPrediction;
  state.minProbability=input.minProbability===undefined?state.minProbability:input.minProbability;
  state.query=input.query??state.query;
- state.period=input.period??state.period;state.genres=new Set(input.genres??state.genres);state.mechanics=new Set(input.mechanics??state.mechanics);state.moods=new Set(input.moods??state.moods);
+ state.period=input.period===undefined?state.period:normalizePeriod(input.period);state.genres=new Set(input.genres??state.genres);state.mechanics=new Set(input.mechanics??state.mechanics);state.moods=new Set(input.moods??state.moods);
  state.from=from;state.to=to;state.maxRuntime=maxRuntime;
  $('#year-from').value=from;$('#year-to').value=to;$('#runtime-max').value=maxRuntime??'';
  document.querySelectorAll('#genres input').forEach(i=>i.checked=state.genres.has(i.value));
@@ -1811,8 +1842,8 @@ function refreshGenreOptions(){
 }
 let gridTimeKey='',shortTimeKey='',statusTimeKey='';
 function showBucket(show){return isFuture(show)?'f':isArchive(show)?'a':'x';}
-function gridTimeKeyOf(visible){const model=viewingWindow();const counts=['archive','future'].map(period=>films.filter(film=>eligible(film)&&countedScope(film,period)).length).join(',');return visible.map(film=>`${film.id}:${isLastChance(film)?1:0}:${(film.shows||[]).map(show=>`${showStart(show)}:${showBucket(show)}`).join(',')}`).join('|')+`|${model.black?1:0}|${counts}`;}
-function shortTimeKeyOf(visible){return ['now','today'].map(mode=>buildShortlist(visible,mode).map(item=>`${item.film.id}:${item.availability.kind}:${item.availability.show?.start??''}:${item.availability.show?.end??''}`).join(',')).join(';');}
+function gridTimeKeyOf(visible){const model=viewingWindow();const counts=['archive','soon'].map(period=>films.filter(film=>eligible(film)&&countedScope(film,period)).length).join(',');return visible.map(film=>`${film.id}:${filmLifecycle(film).avail?.state||'-'}:${isLastChance(film)?1:0}:${(film.shows||[]).map(show=>`${showStart(show)}:${showBucket(show)}`).join(',')}`).join('|')+`|${model.black?1:0}|${counts}`;}
+function shortTimeKeyOf(visible){return ['available','soon'].map(mode=>buildShortlist(visible,mode).map(item=>`${item.film.id}:${item.availability.state}:${item.availability.kind}:${item.availability.show?.start??''}:${item.availability.show?.end??''}:${item.availability.avail?.appearsAt??''}`).join(',')).join(';');}
 function noteTimeView(visible=visibleFilms()){gridTimeKey=gridTimeKeyOf(visible);shortTimeKey=shortTimeKeyOf(visible);statusTimeKey=JSON.stringify(programmeStatus());}
 function refreshTimeSensitiveView(){
  if(!report)return;
@@ -1851,7 +1882,7 @@ function showProgrammeUnavailable(error){
  const badge=$('#connection-badge');if(badge){badge.textContent='Ошибка обновления';badge.title='Программу не удалось загрузить. Это не статус сохранённого окна.';badge.classList?.remove('is-ok','is-warning','is-critical');badge.classList?.add('is-error');}
 }
 async function registerModelTool(){
- if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Text matched only against the search scopes currently selected on the page. Titles are the default.'},period:{type:'string',enum:['all','archive','future']},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
+ if(document.modelContext?.registerTool){try{await document.modelContext.registerTool({name:'filter_watchlist_programme',title:'Фильтровать кинопрограмму',description:'Apply title search, genre, plot mechanics, mood, year, runtime, prediction, probability, last-chance and broadcast period filters. Values within each multi-select use OR; filter groups combine with AND. Returns the visible films and broadcasts.',inputSchema:{type:'object',properties:{includeUnscheduled:{type:'boolean',description:'Include watchlist films with no broadcasts in the saved EPG window'},lastChanceOnly:{type:'boolean',description:'Only films with less than eight hours before their last known showing leaves the 72-hour archive window'},viewing:{type:'string',enum:['any','new','rewatch'],description:'Filter by absence or presence of a personal Letterboxd rating'},minPrediction:{type:['number','null'],enum:[null,3.5,4,4.5],description:'Minimum saved predicted rating; null removes the filter'},minProbability:{type:['number','null'],enum:[null,0.5,0.7,0.85],description:'Minimum saved probability of a 4.0+ rating; null removes the filter'},query:{type:'string',description:'Text matched only against the search scopes currently selected on the page. Titles are the default.'},period:{type:'string',enum:['all','archive','soon','future'],description:'all: archive and soon together; archive: films with a ready recording; soon: films with no ready recording that are on air or start in the next 24 hours; future is the old name of soon'},genres:{type:'array',items:{type:'string',enum:genres}},mechanics:{type:'array',items:{type:'string',enum:Object.keys(MECHANIC_LABELS)}},moods:{type:'array',items:{type:'string'},description:'Canonical mood IDs currently offered by the page'},from:{type:'integer',minimum:1900,maximum:MAX_YEAR},to:{type:'integer',minimum:1900,maximum:MAX_YEAR},maxRuntime:{type:['integer','null'],minimum:1,description:'Maximum film runtime in minutes; null removes the runtime filter'}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute:applyFilters});}catch(e){console.info('Browser tools unavailable',e.message);}}
 }
 let presets=[],presetsEtag='"none"',presetEditor=null,presetPrompt=null,presetStatus='',presetSaving=false;
 function presetQuery(){return urlForState('https://iptv.example/').searchParams.toString();}
@@ -1864,7 +1895,8 @@ function applyPresetQuery(query){
  syncUrl();
 }
 // A saved scenario is "current" only when its canonical app parameters equal the filters on screen. A manual change drops the mark.
-function presetKey(query){const keys=new Set(APP_QUERY_KEYS);return [...new URLSearchParams(String(query||''))].filter(([key])=>keys.has(key)).map(([key,value])=>key+'='+value).sort().join('&');}
+// The key is canonical: the old values of a preset saved before AIR-434 (`period=future`, `shortlist=today|now`) read as the same state as `period=soon` / `shortlist=soon`, and a default is absent.
+function presetKey(query){const keys=new Set(APP_QUERY_KEYS);return [...new URLSearchParams(String(query||''))].filter(([key])=>keys.has(key)).map(([key,value])=>key==='period'?[key,normalizePeriod(value)||'all']:key==='shortlist'?[key,normalizeShortlistMode(value)]:[key,value]).filter(([key,value])=>!(key==='period'&&value==='all')&&!(key==='shortlist'&&value==='available')).map(([key,value])=>key+'='+value).sort().join('&');}
 function presetIsCurrent(preset,key){return !!preset&&key!==null&&presetKey(preset.query)===key;}
 function currentPresetKey(){try{return presetKey(presetQuery());}catch{return null;}}
 function markCurrentPreset(){
@@ -1976,7 +2008,7 @@ function bindControls(){
  for(const type of ['pointerdown','focusin','contextmenu'])$('#finds')?.addEventListener(type,refreshFilmLink);
  $('#finds')?.addEventListener('click',onFindsClick);
  $('#film-screen')?.addEventListener('click',onMovieClick);
- document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.addEventListener('click',()=>{state.shortlistMode=button.dataset.shortlistMode;render();}));
+ document.querySelectorAll('[data-shortlist-mode]').forEach(button=>button.addEventListener('click',()=>{state.shortlistMode=normalizeShortlistMode(button.dataset.shortlistMode);render();}));
  $('#shortlist').addEventListener('click',event=>{const button=event.target.closest('[data-shortlist-film]');if(!button)return;const target=[...document.querySelectorAll('.movie-card')].find(card=>card.dataset.filmId===button.dataset.shortlistFilm);if(target){target.scrollIntoView({behavior:'smooth',block:'start'});target.setAttribute('tabindex','-1');target.focus({preventScroll:true});}});
  $('#sort').addEventListener('change',e=>{state.sort=e.target.value;state.sortExplicit=true;render();});
  $('#search').addEventListener('input',e=>{applySearchInput(e.target.value);render();});
@@ -2246,7 +2278,7 @@ function updateProgrammeStatus(){
  if(updated){const published=Date.parse(report.publishedAt);updated.textContent=Number.isFinite(published)?`Обновлено ${madridStamp(published)}`:'Обновлено — нет данных';}
  if(coverage){coverage.textContent=status.coverage;coverage.title=status.title;}
  if(badge){badge.classList?.remove('is-ok','is-warning','is-critical','is-error');if(programmeRefreshError){badge.textContent='Ошибка обновления';badge.title='Последний снимок сохранён. Ошибка обновления не заменяет состояние окна.';badge.classList?.add('is-error');}else{badge.textContent=status.badge;badge.title=status.title;badge.classList?.add(status.level==='ok'?'is-ok':status.level==='warning'?'is-warning':'is-critical');}}
- if(note){note.hidden=!blackZone();note.textContent=state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет. Фильтры не изменены.':'Окно программы закончилось. Показаны фильмы из watchlist без расписания. Архив и следующие сутки пусты, пока не придёт новый снимок.';}
+ if(note){note.hidden=!blackZone();note.textContent=state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет. Фильтры не изменены.':'Окно программы закончилось. Показаны фильмы из watchlist без расписания. Архив и «Скоро» пусты, пока не придёт новый снимок.';}
 }
 function updateSourceInfo(){updateProgrammeStatus();}
 // AIR-393: the films a Ratings run changed, as expandable groups like the watchlist event. Only groups that have films are drawn. A film is a local
