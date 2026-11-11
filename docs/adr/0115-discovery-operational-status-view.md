@@ -16,7 +16,7 @@
 
 1. **Two semantic levels on the same read-only paths.** `GET /api/enrichment/pipeline/status` (and its alias `discovery/status`, and MCP `epg_pipeline_status`) take an optional `view`. No `view` and `view=detailed` are the unchanged full status with its snapshot fence. `view=operational` is the new light status. An unknown `view` is `400` before any read. Existing clients are not changed.
 2. **The operational view reads only small authoritative records**: the authority row, transfer state, status, continuation, workflow, lease and projector window, in one D1 `batch` of at most 7 single-row SELECTs (`DiscoveryAuthority.readOperationalSnapshot`). One batch is one snapshot, so no generation compare is needed and a Discovery commit cannot refuse it. Outside D1 authority the same records are small R2 objects read independently. It never reads an observation, show, decision, admission or segment, never calls TMDB and never writes.
-3. **Honest, never invented.** The backlog is the last checkpoint's stored values with their `observedAt`, `source: "checkpoint"` and `known | stale | unknown`; no exact figure is computed. A record that cannot be read is named in `unavailable` and not replaced from another source; a held cutover is `authority.state: "held"`; an unavailable authority is a typed `200` with `authority.state: "unavailable"` and no records.
+3. **Honest, never invented.** The backlog is two stored facts, the continuation's chunk budget and the last chunk's ledger counts, each with the time of the record that stored it, its programme generation and `known | stale | foreign | unknown` (a fact of another programme than the published one is `foreign` and its values are withheld); the freshness of one is never taken from the other, and no exact figure is computed. The executor facts are derived from the Workflow record of the same snapshot; only the platform liveness of that instance is observed anew and is labeled as a separate, non-atomic observation. A record that cannot be read is named in `unavailable` and not replaced from another source; a held cutover is `authority.state: "held"`; an unavailable authority is a typed `200` with `authority.state: "unavailable"` and no records.
 4. **Writers and fences are untouched.** No writer, Cron, Scheduled Task, flag or schema changes; the generation fence of every Discovery write stays.
 
 **Not decided here.** No production run, retry, reset or data write is authorized. Delivered in code; not deployed or production-verified until a post-merge deploy and a read of the new view during natural Discovery activity.
@@ -31,7 +31,7 @@
 
 - An operator or monitor gets a bounded, always-readable status during commits; the cost does not follow the ledger.
 - Two views to keep consistent; the operational one carries fewer fields and its own `schemaVersion`.
-- The workflow readout is a separate read from the snapshot (a different module), so the executor part may be a few milliseconds newer than the records.
+- The platform liveness of the Workflow instance is the one observation outside the snapshot; it is labeled `livenessObserved` with `atomicWithSnapshot: false`.
 
 ## Recovery and migration boundary
 

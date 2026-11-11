@@ -14,7 +14,7 @@ A ledger of 3 and of 1500 observations is ingested through `ingestLedger`; the s
 
 | Read | 3 observations | 1500 observations |
 | --- | --- | --- |
-| Operational: statements | 16 (9 single reads of the authority gate and the executor record, plus one batch of 7 single-row SELECTs) | 16 |
+| Operational: statements | 11 (4 single reads of the authority gate plus one batch of 7 single-row SELECTs) | 11 |
 | Operational: statements against ledger, decisions, catalog, segments | 0 | 0 |
 | Operational: writes | 0 | 0 |
 | Detailed (quiet): statements | 74 | 81 |
@@ -22,6 +22,8 @@ A ledger of 3 and of 1500 observations is ingested through `ingestLedger`; the s
 | Operational under the storm, 8 concurrent reads | 200 each, identical `discovery` block | 200 each |
 
 The operational cost is the same for both ledger sizes; the detailed cost grows with the ledger.
+
+Review follow-up (same file): the executor facts are the Workflow record of the snapshot (the Workflow table is read once; a transition written while the platform liveness is observed does not reach the answer, and the liveness is labeled as a separate observation); the backlog keeps each fact's own time and generation (a 5-hour-old status next to a fresh continuation stays `stale` with its own time; counts of another programme are `foreign` with their values withheld; a status without a time is `unknown`). Mutants that re-read the Workflow, borrow the continuation's time or skip the foreign check fail.
 
 States covered in the same file: held cutover (`authority.state: held`, `unavailable: [records]`), loading transfer, unavailable D1 (typed answer, `source: none`), no checkpoint (`unknown`, nulls, no zero), checkpoint older than 3 hours (`stale`, own `observedAt`), empty backlog (`known`, 0, `nextAction: stop`), stopped Workflow at `step_cap` with a backlog, held and expired projector window, generation handoff (`generationConflict`), an unparseable record (named, not replaced), R2 mode with one object failing, invalid `view` (400 before any read), the alias path and the MCP argument. The GET/HEAD audit (60 read routes) covers both views as samples.
 

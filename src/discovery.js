@@ -1560,11 +1560,14 @@ async function presentContinuationDiscovery(env){
  const workflow=await noteDiscoveryWorkflow(env);
  return {discovery:delegatedContract(contract,workflow),executor:'workflow',delegated:true,workflow};
 }
-async function discoveryExecutorReadout(env,continuation){
+// `options.workflow` (the record, or null for none) is the Workflow state the caller already holds as part of a consistent snapshot; without it the state is
+// read here. Only the platform liveness of that record's instance is observed anew.
+async function discoveryExecutorReadout(env,continuation,options={}){
  const configured=discoveryExecutorMode(env);
  const now=Date.now();
  let stored=null;
- if(typeof readWorkflowState==='function'){try{stored=(await readWorkflowState(env)).record;}catch{stored={phase:'unknown'};}}
+ if(Object.hasOwn(options,'workflow'))stored=options.workflow;
+ else if(typeof readWorkflowState==='function'){try{stored=(await readWorkflowState(env)).record;}catch{stored={phase:'unknown'};}}
  let liveness=null;
  if(stored?.instanceId&&typeof workflowInstanceStatus==='function'&&typeof env?.DISCOVERY_WORKFLOW?.get==='function')liveness=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,stored.instanceId);
  const facts=typeof workflowReadoutFacts==='function'?workflowReadoutFacts(stored,liveness,now):{active:!!stored&&['starting','running','waiting','uncertain'].includes(stored?.phase),stalled:false,alive:false,dead:false,recoveryDue:stored?.recovery?.dueAt||null,recoveryWaiting:false,quarantined:false,updatedAt:stored?.updatedAt||null};
@@ -1619,8 +1622,8 @@ function catalogFilmById(catalog,id){
 // AIR-430. The operational status of Discovery: what an operator or a monitor needs while writers commit continuously. It reads only the small
 // authoritative records (one consistent D1 snapshot of the authority row, status, continuation, workflow, lease and projector window; the same
 // small R2 objects outside D1 authority), never the ledger, the decisions or the catalog, never TMDB, and it writes nothing. The backlog is only
-// what the last checkpoint stored, with its own time and source, `stale` once older than OPERATIONAL_STALE_MS and `unknown` without one; no exact
-// figure is computed. A record that cannot be read is named in `unavailable`; it is never filled from another source. The detailed view
+// what the last checkpoints stored, each fact with its own time, source and programme generation (`known`, `stale` once older than OPERATIONAL_STALE_MS,
+// `foreign` when it belongs to another programme, `unknown` without a time); no exact figure is computed. A record that cannot be read is named in `unavailable`; it is never filled from another source. The detailed view
 // (`discoveryPipelineStatus`) keeps its snapshot fence and may be refused with `discovery_fence` while Discovery commits.
 const OPERATIONAL_STALE_MS=3*3600000;
 const operationalNumber=value=>Number.isFinite(value)&&value>=0?value:null;
@@ -1650,11 +1653,26 @@ async function discoveryOperationalStatus(env){
  const health=healthSummary(continuationHealth(continuation,records.lease,last,now,published));
  const running=continuation?.stage==='running';
  const contract=discoveryContract(continuation,running?runningOverride(continuationHealth(continuation,records.lease,last,now,published)):{});
- const observed=[last?.finishedAt,last?.at,continuation?.at].map(value=>Date.parse(value||'')).filter(Number.isFinite).sort((a,b)=>b-a)[0];
- const known=Number.isFinite(observed)&&(Number.isInteger(continuation?.remainingChunks)||Number.isFinite(last?.remaining)||Number.isFinite(last?.cheapRemaining));
- const backlog=known?{state:now-observed>OPERATIONAL_STALE_MS?'stale':'known',source:'checkpoint',observedAt:new Date(observed).toISOString(),ageMs:Math.max(0,now-observed),remainingChunks:operationalNumber(continuation?.remainingChunks),remaining:operationalNumber(last?.remaining),cheapRemaining:operationalNumber(last?.cheapRemaining)}:{state:'unknown',source:'checkpoint',observedAt:null,ageMs:null,remainingChunks:null,remaining:null,cheapRemaining:null};
+ // The backlog is two stored facts, each with its own time and programme generation, never one figure with the newest of the two times: the
+ // chunk budget the continuation holds, and the ledger counts the last chunk stored. A fact of another programme than the published (or current) one is
+ // `foreign` and its values are withheld; one without a time is `unknown`; one older than OPERATIONAL_STALE_MS is `stale` and keeps its own time.
+ const current=published||authority.programmeRunId||continuation?.programmeRunId||null;
+ const fact=(record,at,values)=>{
+  const observed=Date.parse(at||''),run=record?.programmeRunId||null;
+  if(!record)return {state:'unknown',source:null,observedAt:null,ageMs:null,programmeRunId:null,...Object.fromEntries(Object.keys(values).map(key=>[key,null]))};
+  const base={source:null,observedAt:Number.isFinite(observed)?new Date(observed).toISOString():null,ageMs:Number.isFinite(observed)?Math.max(0,now-observed):null,programmeRunId:run};
+  const blank=Object.fromEntries(Object.keys(values).map(key=>[key,null]));
+  if(current&&run&&run!==current)return {state:'foreign',...base,...blank};
+  if(!Number.isFinite(observed)||!Object.values(values).some(value=>value!==null))return {state:'unknown',...base,...blank};
+  return {state:now-observed>OPERATIONAL_STALE_MS?'stale':'known',...base,...values};
+ };
+ const backlog={
+  chunks:{...fact(continuation,continuation?.at,{remainingChunks:operationalNumber(continuation?.remainingChunks)}),source:'continuation'},
+  ledger:{...fact(last,last?.finishedAt||null,{remaining:operationalNumber(last?.remaining),cheapRemaining:operationalNumber(last?.cheapRemaining)}),source:'status'},
+ };
  let executor={configured:discoveryExecutorMode(env)};
- if(executor.configured!=='external'){try{executor=await discoveryExecutorReadout(env,continuation);}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
+ // The executor facts come from the Workflow record of the same snapshot; only the platform liveness of that instance is observed now, and says so.
+ if(executor.configured!=='external'){try{executor=await discoveryExecutorReadout(env,continuation,{workflow:records.workflow});executor={...executor,workflowSource:'snapshot'};if(executor.liveness!=null)executor.livenessObserved={at:new Date(now).toISOString(),source:'workflow_binding',atomicWithSnapshot:false};}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
  const window=records.window&&records.window.expiresAt>now&&records.window.state!=='idle'?{state:records.window.state,expiresAt:new Date(records.window.expiresAt).toISOString()}:{state:'idle',expiresAt:null};
  return {view:'operational',schemaVersion:1,observedAt:new Date(now).toISOString(),source,authority:{state:authority.state,mode:authority.mode??null,cutover:authority.cutover??null,transfer:authority.transfer??null,generation:authority.generation??null,cause:authority.cause||null},
   programmeRunId:published||continuation?.programmeRunId||null,publishedProgrammeRunId:published,projectorWindow:window,

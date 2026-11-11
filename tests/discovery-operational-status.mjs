@@ -65,7 +65,7 @@ for(const ledger of [3,1500]){
  assert.equal(body.view,'operational');assert.equal(body.schemaVersion,1);assert.equal(body.source,'d1_snapshot');assert.equal(body.authority.state,'ready');
  assert.equal(body.programmeRunId,'run-1');assert.equal(body.publishedProgrammeRunId,'run-1');
  assert.equal(body.discovery.state,'running');assert.equal(body.discovery.remainingChunks,7);
- assert.equal(body.backlog.state,'known');assert.equal(body.backlog.source,'checkpoint');assert.equal(body.backlog.remaining,480);assert.equal(body.backlog.cheapRemaining,120);assert.ok(body.backlog.observedAt);
+ assert.equal(body.backlog.chunks.state,'known');assert.equal(body.backlog.chunks.source,'continuation');assert.equal(body.backlog.chunks.remainingChunks,7);assert.equal(body.backlog.ledger.state,'known');assert.equal(body.backlog.ledger.source,'status');assert.equal(body.backlog.ledger.remaining,480);assert.equal(body.backlog.ledger.cheapRemaining,120);assert.equal(body.backlog.ledger.observedAt,iso(at-61000),'the ledger counts carry the time of the chunk that stored them');assert.equal(body.backlog.chunks.observedAt,iso(at-60000),'the chunk budget carries the continuation time');assert.equal(body.executor.workflowSource,'snapshot');
  assert.equal(body.executor.phase,'running');assert.equal(body.executor.series,3);
  assert.equal(body.unavailable.length,0,JSON.stringify(body.unavailable));
  assert.ok(!w.seen.statements.some(text=>BIG_TABLES.test(text)),'no statement touches the ledger, decisions, catalog or segments: '+w.seen.statements.filter(text=>BIG_TABLES.test(text)).slice(0,2).join(' | '));
@@ -112,28 +112,28 @@ assert.ok(measures[1500].detailedQueries>measures[3].detailedQueries,'the detail
  // 3a. Held cutover: answered as held, records not served, nothing thrown.
  const held=world();await seed(held,{ledger:2});sql(held.file,"UPDATE discovery_authority SET cutover='held' WHERE id=1");
  let r=await worker(held).get(OPERATIONAL);
- assert.equal(r.status,200);assert.equal(r.data.authority.state,'held');assert.ok(r.data.unavailable.includes('records'));assert.equal(r.data.backlog.state,'unknown');
+ assert.equal(r.status,200);assert.equal(r.data.authority.state,'held');assert.ok(r.data.unavailable.includes('records'));assert.equal(r.data.backlog.chunks.state,'unknown');assert.equal(r.data.backlog.ledger.state,'unknown');
  // 3b. A loading transfer: records are still served, the state says loading.
  const loading=world();await seed(loading,{ledger:2});continuation(loading,{stage:'idle',reason:'idle',at:iso(at-1000),remainingChunks:0,programmeRunId:'run-1'});sql(loading.file,"UPDATE discovery_transfer SET state='loading', programme_run_id='run-1' WHERE id=1");
  r=await worker(loading).get(OPERATIONAL);assert.equal(r.status,200);assert.equal(r.data.authority.state,'loading');assert.equal(r.data.lastCheckpoint.stage,'idle');
  // 3c. Unavailable D1: a typed answer, no invented records, no write.
  const broken=world();const bad={...broken.db,prepare(){throw new Error('D1_ERROR: network connection lost');},batch(){throw new Error('D1_ERROR: network connection lost');}};
  r=await worker({...broken,db:bad}).get(OPERATIONAL);
- assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.authority.state,'unavailable');assert.ok(r.data.unavailable.includes('authority'));assert.equal(r.data.source,'none');assert.equal(r.data.backlog.state,'unknown');
+ assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.authority.state,'unavailable');assert.ok(r.data.unavailable.includes('authority'));assert.equal(r.data.source,'none');assert.equal(r.data.backlog.ledger.state,'unknown');
  // 3d. No checkpoint yet: unknown, never a zero. A checkpoint older than the stale limit is stale and keeps its own time.
  const empty=world();await seed(empty,{ledger:1});
- r=await worker(empty).get(OPERATIONAL);assert.equal(r.status,200);assert.equal(r.data.backlog.state,'unknown');assert.equal(r.data.backlog.remainingChunks,null);assert.equal(r.data.backlog.remaining,null);assert.equal(r.data.lastCheckpoint,null);
+ r=await worker(empty).get(OPERATIONAL);assert.equal(r.status,200);assert.equal(r.data.backlog.chunks.state,'unknown');assert.equal(r.data.backlog.chunks.remainingChunks,null);assert.equal(r.data.backlog.ledger.state,'unknown');assert.equal(r.data.backlog.ledger.remaining,null);assert.equal(r.data.lastCheckpoint,null);
  const stale=world();await seed(stale,{ledger:1});const old=at-5*3600000;
  continuation(stale,{stage:'running',reason:null,at:iso(old),hopId:'h',remainingChunks:4,programmeRunId:'run-1'});status(stale,{programmeRunId:'run-1',hopId:'h',stage:'chunk',remaining:90,finishedAt:iso(old+1000)});
- r=await worker(stale).get(OPERATIONAL);assert.equal(r.data.backlog.state,'stale');assert.equal(r.data.backlog.remaining,90);assert.equal(r.data.backlog.observedAt,iso(old+1000));assert.ok(r.data.backlog.ageMs>=4*3600000);
+ r=await worker(stale).get(OPERATIONAL);assert.equal(r.data.backlog.ledger.state,'stale');assert.equal(r.data.backlog.ledger.remaining,90);assert.equal(r.data.backlog.ledger.observedAt,iso(old+1000));assert.ok(r.data.backlog.ledger.ageMs>=4*3600000);assert.equal(r.data.backlog.chunks.state,'stale');
  // 3e. Empty backlog: the stored zero is reported as a zero from its checkpoint.
  const drained=world();await seed(drained,{ledger:1});continuation(drained,{stage:'complete',reason:'complete',at:iso(at-1000),remainingChunks:0,programmeRunId:'run-1'});status(drained,{programmeRunId:'run-1',stage:'complete',remaining:0,cheapRemaining:0,finishedAt:iso(at-2000)});
- r=await worker(drained).get(OPERATIONAL);assert.equal(r.data.backlog.state,'known');assert.equal(r.data.backlog.remaining,0);assert.equal(r.data.discovery.nextAction,'stop');
+ r=await worker(drained).get(OPERATIONAL);assert.equal(r.data.backlog.ledger.state,'known');assert.equal(r.data.backlog.ledger.remaining,0);assert.equal(r.data.backlog.chunks.remainingChunks,0);assert.equal(r.data.discovery.nextAction,'stop');
  // 3f. A stopped Workflow at its step cap with a backlog and a successor series: reported as the executor's own record.
  const capped=world();await seed(capped,{ledger:1});continuation(capped,{stage:'idle',reason:'chunk_budget',at:iso(at-5000),remainingChunks:9,nextCatchUpAt:iso(at+600000),programmeRunId:'run-1'});
  workflow(capped,{phase:'stopped',reason:'step_cap',instanceId:'wf-old',series:4,programmeRunId:'run-1',updatedAt:iso(at-4000),successor:{instanceId:'wf-new',series:5}});
  r=await worker(capped,{DISCOVERY_EXECUTOR:'workflow'}).get(OPERATIONAL);
- assert.equal(r.data.executor.phase,'stopped');assert.equal(r.data.executor.waitingReason,'step_cap');assert.equal(r.data.executor.series,4);assert.equal(r.data.discovery.remainingChunks,9);assert.equal(r.data.backlog.remainingChunks,9);
+ assert.equal(r.data.executor.phase,'stopped');assert.equal(r.data.executor.waitingReason,'step_cap');assert.equal(r.data.executor.series,4);assert.equal(r.data.discovery.remainingChunks,9);assert.equal(r.data.backlog.chunks.remainingChunks,9);
  // 3g. A projector window that is held is visible; an expired one is idle.
  const windowed=world();await seed(windowed,{ledger:1});sql(windowed.file,"INSERT INTO projector_window (id,state,owner,requested_at,expires_at) VALUES (1,'held','projector',"+(at-1000)+","+(at+120000)+") ON CONFLICT(id) DO UPDATE SET state='held', owner='projector', requested_at="+(at-1000)+", expires_at="+(at+120000));
  r=await worker(windowed).get(OPERATIONAL);assert.equal(r.data.projectorWindow.state,'held');assert.ok(r.data.projectorWindow.expiresAt);
@@ -147,6 +147,53 @@ assert.ok(measures[1500].detailedQueries>measures[3].detailedQueries,'the detail
  r=await worker(damaged).get(OPERATIONAL);assert.equal(r.status,200);assert.ok(r.data.unavailable.includes('status'));assert.equal(r.data.lastChunk,null);
 }
 
+// 3j. AIR-430 review: the backlog facts keep their own time and generation. A stale status next to a fresh continuation stays stale and is not refreshed
+//     by the continuation; counts of another programme are withheld as foreign, never shown as current.
+{
+ const at=Date.now(),old=at-5*3600000;
+ const mixed=world();await seed(mixed,{ledger:1});
+ continuation(mixed,{stage:'running',reason:null,at:iso(at-30000),hopId:'h',remainingChunks:6,programmeRunId:'run-1'});
+ status(mixed,{programmeRunId:'run-1',hopId:'h0',stage:'chunk',remaining:777,cheapRemaining:55,finishedAt:iso(old)});
+ sql(mixed.file,"UPDATE discovery_authority SET published_programme_run_id='run-1', programme_run_id='run-1' WHERE id=1");
+ let r=await worker(mixed).get(OPERATIONAL);
+ assert.equal(r.data.backlog.chunks.state,'known');assert.equal(r.data.backlog.chunks.remainingChunks,6);assert.equal(r.data.backlog.chunks.observedAt,iso(at-30000));
+ assert.equal(r.data.backlog.ledger.state,'stale','5-hour-old counts are not made fresh by a fresh continuation');assert.equal(r.data.backlog.ledger.observedAt,iso(old));assert.equal(r.data.backlog.ledger.remaining,777);assert.ok(r.data.backlog.ledger.ageMs>=4.9*3600000);
+ // A status without any time cannot be dated: unknown, values withheld.
+ status(mixed,{programmeRunId:'run-1',stage:'chunk',remaining:5});
+ r=await worker(mixed).get(OPERATIONAL);assert.equal(r.data.backlog.ledger.state,'unknown');assert.equal(r.data.backlog.ledger.remaining,null);
+ // Generation handoff with different counts per record: the published programme is run-new; the continuation (run-old, 2 chunks) and the status (run-old, 100) are foreign.
+ const handoff=world();await seed(handoff,{ledger:1});
+ continuation(handoff,{stage:'running',reason:null,at:iso(at-1000),hopId:'old',remainingChunks:2,programmeRunId:'run-old'});status(handoff,{programmeRunId:'run-old',stage:'chunk',remaining:100,finishedAt:iso(at-2000)});
+ sql(handoff.file,"UPDATE discovery_authority SET programme_run_id='run-new', published_programme_run_id='run-new' WHERE id=1");
+ r=await worker(handoff).get(OPERATIONAL);
+ for(const [name,field] of [['chunks','remainingChunks'],['ledger','remaining']]){assert.equal(r.data.backlog[name].state,'foreign',name);assert.equal(r.data.backlog[name][field],null,name+': foreign values are withheld');assert.equal(r.data.backlog[name].programmeRunId,'run-old',name+': the generation they belong to is named');}
+ // The same run for both, and the published one: both known.
+ status(handoff,{programmeRunId:'run-new',stage:'chunk',remaining:41,finishedAt:iso(at-3000)});continuation(handoff,{stage:'running',reason:null,at:iso(at-1500),hopId:'new',remainingChunks:8,programmeRunId:'run-new'});
+ r=await worker(handoff).get(OPERATIONAL);assert.equal(r.data.backlog.ledger.state,'known');assert.equal(r.data.backlog.ledger.remaining,41);assert.equal(r.data.backlog.chunks.remainingChunks,8);
+}
+
+// 3k. AIR-430 review: the executor facts come from the Workflow record of the same snapshot. A Workflow transition that lands after the batch (here: while the
+//     platform liveness of the instance is being observed) does not mix a newer instance or series into the earlier continuation and authority; the liveness
+//     is labeled as a separate observation.
+{
+ const at=Date.now();
+ const w=world();await seed(w,{ledger:1});
+ continuation(w,{stage:'running',reason:null,at:iso(at-5000),hopId:'h',remainingChunks:4,programmeRunId:'run-1'});
+ workflow(w,{phase:'running',instanceId:'wf-A',series:1,programmeRunId:'run-1',updatedAt:iso(at-2000),reason:null});
+ sql(w.file,"UPDATE discovery_authority SET published_programme_run_id='run-1', programme_run_id='run-1' WHERE id=1");
+ let lookups=0;
+ const binding={async get(id){lookups++;workflow(w,{phase:'running',instanceId:'wf-B',series:2,programmeRunId:'run-1',updatedAt:iso(Date.now()),reason:null});return {status:async()=>({status:'running'})};}};
+ const h=worker(w,{DISCOVERY_EXECUTOR:'workflow',DISCOVERY_WORKFLOW:binding});
+ w.seen.statements.length=0;
+ const r=await h.get(OPERATIONAL);
+ assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(lookups,1,'the platform is asked once, for the snapshot\'s instance');
+ assert.equal(r.data.executor.instanceId,'wf-A');assert.equal(r.data.executor.series,1,'the executor is the record of the snapshot, not the one written meanwhile');
+ assert.equal(r.data.executor.workflowSource,'snapshot');assert.equal(r.data.executor.liveness,'running');assert.equal(r.data.executor.livenessObserved.source,'workflow_binding');assert.equal(r.data.executor.livenessObserved.atomicWithSnapshot,false);
+ assert.equal(w.seen.statements.filter(text=>/FROM\s+discovery_workflow/i.test(text)).length,1,'the Workflow table is read once, in the snapshot batch');
+ // The next read sees the new record, again as one snapshot.
+ const next=await h.get(OPERATIONAL);assert.equal(next.data.executor.instanceId,'wf-B');assert.equal(next.data.executor.series,2);
+}
+
 // 4. Outside D1 authority the same view reads the small R2 objects, each on its own; one that fails is named.
 {
  const w=world({mode:'r2'});await seed(w,{ledger:1}).catch(()=>{});
@@ -155,7 +202,7 @@ assert.ok(measures[1500].detailedQueries>measures[3].detailedQueries,'the detail
  await h.bucket.put('epg/discovery-status.json',JSON.stringify({programmeRunId:'run-r2',stage:'chunk',remaining:33,finishedAt:iso(at-2000)}));
  await h.bucket.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:'run-r2'}));
  const r=await h.get(OPERATIONAL);
- assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.source,'r2_objects');assert.equal(r.data.authority.state,'r2');assert.equal(r.data.publishedProgrammeRunId,'run-r2');assert.equal(r.data.backlog.remaining,33);assert.equal(r.data.backlog.state,'known');
+ assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.source,'r2_objects');assert.equal(r.data.authority.state,'r2');assert.equal(r.data.publishedProgrammeRunId,'run-r2');assert.equal(r.data.backlog.ledger.remaining,33);assert.equal(r.data.backlog.ledger.state,'known');
  const originalGet=h.bucket.get.bind(h.bucket);h.bucket.get=async key=>{if(key==='epg/discovery-status.json')throw new Error('R2 down');return originalGet(key);};
  const partial=await h.get(OPERATIONAL);assert.equal(partial.status,200);assert.ok(partial.data.unavailable.includes('status'));assert.equal(partial.data.lastChunk,null);assert.equal(partial.data.discovery.remainingChunks,5,'the other records are still served');
 }
