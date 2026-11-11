@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {scoped} from '../scripts/bundle-scope.mjs';
 
 const records=new Map();let puts=[],fetches=[];
 const bucket={
@@ -15,6 +16,7 @@ const bucket={
 const env={BUCKET:bucket};
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{tmdb_17:3.5},
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context);
 const get=async()=>{const response=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/available'),env,{waitUntil(){}});return {status:response.status,body:await response.json()};};
@@ -67,7 +69,7 @@ assert.equal(Date.parse(r.body.window.to)-Date.parse(r.body.window.from),96*hour
 assert.deepEqual(r.body.films.map(f=>f.id),['tmdb_18','tmdb_7','tmdb_15'],'ordered by availableUntil, then id');
 assert.equal(r.body.total,3);
 const seven=r.body.films[1];
-assert.deepEqual(Object.keys(seven).sort(),['actors','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year']);
+assert.deepEqual(Object.keys(seven).sort(),['actors','availability','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year']);
 assert.doesNotMatch(JSON.stringify(r.body),/SYNOPSIS-|ALIAS-|tasteProfileHash|moodLabels/,'minimal display DTO: no synopsis, aliases or raw prediction internals');
 assert.deepEqual(seven.shows.map(s=>[s.channelId,s.status]),[['c1','archive'],['c2','future']],'duplicate show collapsed, statuses derived from the clock');
 assert.equal(seven.availableNow,true);assert.equal(seven.nextStart,now+2*hour);assert.equal(seven.availableUntil,new Date(now+2*hour+72*hour).toISOString());
@@ -160,7 +162,7 @@ r=await get();
 assert.equal(posterOf(r.body,'tmdb_7'),null,'disagreeing cached posters for one TMDB id are not used');
 assert.equal(posterOf(r.body,'tmdb_18'),null,'a non-https cached value is not a poster');
 assert.equal(posterOf(r.body,'tmdb_15'),'https://a.ltrbxd.com/resized/fifteen.jpg','agreeing cached posters for one TMDB id are reused');
-assert.deepEqual(Object.keys(r.body.films[1]).sort(),['actors','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year'],'the DTO shape is unchanged');
+assert.deepEqual(Object.keys(r.body.films[1]).sort(),['actors','availability','availableNow','availableUntil','canonicalIdentity','directors','fingerprint','genres','id','nextStart','original','poster','prediction','runtime','shows','title','tmdbId','url','year'],'the DTO shape is unchanged');
 assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 
 // A conflict is sticky: once two cached records for one TMDB id disagree, no later record and no insertion order restores a poster.
@@ -249,6 +251,32 @@ assert.deepEqual(puts,[]);
  assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'a TMDB-keyed record is not a Letterboxd identity');
  seed();records.set('metadata.json',{x:{id:'x',title:'Film tmdb_7',original:'Original tmdb_7',year:2020,url:lb('x')}});r=await get();
  assert.equal(Object.hasOwn(field(r.body,'tmdb_7'),'letterboxdUrl'),false,'a title or year match is not proof');
+ assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
+}
+
+// AIR-433 (ADR 0112): the film-level availability beside the legacy fields. An archive wins over a repeat, a film on air or only ahead is `soon` and is
+// ready at the END of the show, a show without an end is never a ready archive (the legacy per-show status still says `archive` for it), and the legacy
+// fields keep their values.
+{
+ seed();
+ setCatalogShows('tmdb_7',[show(now-3*hour),show(now+2*hour,{channelId:'c2',channel:'Two'})]);          // ended archive and a repeat in two hours
+ setCatalogShows('tmdb_15',[show(now+23*hour,{end:now+25*hour})]);                                       // future only
+ setCatalogShows('tmdb_18',[show(now-30*60000,{end:now+90*60000})]);                                     // on air, ends in 90 minutes
+ setCatalogShows('tmdb_14',[]);
+ r=await get();
+ const by=id=>r.body.films.find(f=>f.id===id);
+ assert.deepEqual(by('tmdb_7').availability,{state:'available',label:'Доступно',appearsAt:null,appearsAtKnown:null,archiveUntil:now-3*hour+72*hour,onAir:false},'archive plus a repeat stays available');
+ assert.equal(by('tmdb_7').nextStart,now+2*hour,'the repeat is only the next start');assert.equal(by('tmdb_7').availableNow,true);
+ assert.deepEqual(by('tmdb_15').availability,{state:'soon',label:'Скоро',appearsAt:now+25*hour,appearsAtKnown:true,archiveUntil:null,onAir:false},'future only: ready at the end of the show, not its start');
+ assert.equal(by('tmdb_15').availableNow,false);assert.equal(by('tmdb_15').nextStart,now+23*hour);
+ assert.deepEqual(by('tmdb_18').availability,{state:'soon',label:'Скоро',appearsAt:now+90*60000,appearsAtKnown:true,archiveUntil:null,onAir:true},'on air is not an archive until it ends');
+ assert.equal(by('tmdb_18').availableNow,true,'the legacy availableNow is unchanged and still says true for a show that has started');
+ assert.deepEqual(by('tmdb_18').shows.map(item=>item.status),['on_air']);
+ // a show without an end: the legacy status says archive, the film is not available
+ setCatalogShows('tmdb_18',[{channelId:'c1',channel:'One',start:now-hour}]);
+ r=await get();
+ assert.deepEqual(by('tmdb_18').shows.map(item=>item.status),['archive'],'the legacy per-show status is unchanged');
+ assert.equal(by('tmdb_18').availability.state,'unavailable','no end is never a ready archive');
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 }
 

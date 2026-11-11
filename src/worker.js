@@ -89,6 +89,9 @@ async function loadEpgSnapshot(env){
 // whose identity is unverified, or that are watched, rated or on the watchlist are not returned.
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
 function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
+// AIR-433 (ADR 0112): the film-level availability of the shows an entry carries, additive beside `availableNow`, `nextStart` and `availableUntil`.
+// `status` above is the legacy per-show field and is unchanged: it says `archive` for a show without an end, `availability` never does.
+const catalogAvailability=(shows,now)=>typeof FilmAvailability==='undefined'?{}:{availability:(({state,label,appearsAt,appearsAtKnown,archiveUntil,onAir})=>({state,label,appearsAt,appearsAtKnown,archiveUntil,onAir}))(FilmAvailability.filmAvailability(shows.map(show=>({start:show.start,end:show.end})),now))};
 function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}
 // Poster fallback from the stored Letterboxd metadata cache (`metadata.json`). Nothing is fetched or invented. A cached poster is
 // reused for the same stored id (cached TMDB id equal or absent) or for the same TMDB id, and only while every cached record for that
@@ -268,7 +271,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
    directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
    shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
-   availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
+   availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),...catalogAvailability(shows,now),
    prediction:{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds},
    fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
   posterSource.set(entry,artwork.source);
@@ -300,7 +303,7 @@ function catalogFilmPage({film,programmeRunId,index,profile,metadata,watchlist,p
  return {id,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
   directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
   shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
-  availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:latest===null?null:new Date(latest+CATALOG_ARCHIVE_MS).toISOString(),
+  availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:latest===null?null:new Date(latest+CATALOG_ARCHIVE_MS).toISOString(),...catalogAvailability(shows,now),
   prediction:prediction?{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds}:null,
   fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
 }

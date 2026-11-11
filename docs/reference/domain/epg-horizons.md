@@ -52,6 +52,10 @@ The programme status (`programmeStatus` in `public/app.js`) distinguishes:
 
 The known end is the feed's last show (from `retained`), never the display edge, so an older programme is not passed off as fresh and no show is invented.
 
+## Film availability on these horizons
+
+The product reads two of the horizons above: the 72-hour catch-up and a rolling next 24 hours (the hot edge). The 168-hour retention is storage and is never a product horizon. The film-level lifecycle on them (`available`, `soon`, `unavailable`; an archive outranks live and future; `soon` is ready at the end of the show) is the [film availability lifecycle](film-availability.md) ([ADR 0113](../../adr/0113-film-availability-lifecycle.md)). It changes none of the horizons above.
+
 ## Consumers that stay on 24 hours
 
 `src/discovery.js`, `src/enrichment.js` (`filmIsHot`) and the catalog reader (`CATALOG_FUTURE_MS`, see [catalog API](../api/catalog.md)) keep their explicit 24-hour future bound. Changing the XMLTV source URL is not required by this contract and remains a separate owner-gated production action.

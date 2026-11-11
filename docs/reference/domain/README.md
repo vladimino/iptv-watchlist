@@ -18,6 +18,7 @@ Maintained source-verified domain contracts, distinct from dated rollout evidenc
 - [Discovery observation recovery assessment](discovery-recovery.md) — pure judgement `src/domain/discovery-recovery.js` of one EPG observation: verdict, whether a retry of it would help, the next expected step and time, identity review instead of retry, and the gate of the one guarded action `discovery_reconsider`; mirrors the resolver's rules
 - [Discovery observation index](discovery-observation-index.md) — the bounded, sharded, generation-scoped projection of current unresolved observations that the resolver chunk writes and the owner reads use instead of the ledger: layout, scope, bounds, writer and reader states
 - [EPG non-film screening](nonfilm-screening.md) — `nonFilmEPGReason()` reason codes, identity precedence and reversible `excluded_nonfilm` decisions
+- [Film availability lifecycle](film-availability.md) — `available` / `soon` / `unavailable` per film: an archive outranks live and future, `soon` is ready at the END of the show, a missing end is never guessed ([ADR 0113](../../adr/0113-film-availability-lifecycle.md))
 - [EPG horizons](epg-horizons.md) — 7-day retention and display versus the 24-hour hot processing horizon, the report fields and the reader freshness states
 - [Events log](events.md) — the `events/items/` objects, including one `taste_profile` event per committed taste-profile version
 
