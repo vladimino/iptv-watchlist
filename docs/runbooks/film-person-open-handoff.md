@@ -1,6 +1,6 @@
 # Film/Person `open` handoff, `held` drill and forward fix (design only)
 
-**This runbook authorizes nothing. Nothing in it has been executed. Every step below is a DESIGN that needs its own explicit, operation-specific owner GO; no GO is implied by this page, by a merge, or by a green CI.** Decisions: [ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md) (and [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)). Card: [AIR-374](https://trello.com/c/ha7ais3w).
+**This runbook authorizes nothing. Nothing in it has been executed. It is a DESIGN of one concrete activation plan; the plan must be separately approved by the owner (L3 staged plan) before anything runs, and no approval is implied by this page, by a merge, or by a green CI.** Decisions: [ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md) (and [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md), [ADR 0103](../adr/0103-projector-exclusive-window.md)). Card: [AIR-374](https://trello.com/c/ha7ais3w).
 
 Counts and digests only in any evidence; no ids, titles, payloads or credentials.
 
@@ -24,18 +24,18 @@ Procedure: (a) put the copy at `prepared`, run the handoff batch to `open`; (b) 
 
 Acceptance criteria: generation rises by exactly one per move; every writer attempt at `held` is refused with no row changed; no reader names R2 at `held`; the D1-only change from (b) survives unchanged; after the forward fix the writer route is `canonical` and one fenced write succeeds; the migration trigger refuses `d1` to `r2`; a stale-generation batch fails whole.
 
-## Operator sequence at `open` (DESIGN, nothing executes)
+## Operator sequence at `open` (DESIGN: ONE owner-approved activation plan, nothing executes)
 
-Each numbered step is a separate owner GO and a holdpoint.
+Once the owner approves this single plan, its bounded preflight reads, the lease and exclusive window, the final empty-plan projector pass, the readback, the catch-up and the release are executed within it and need no separate approval each. The **holdpoints** are explicit owner GOs: (H1) the P5 live load of the three empty classes, (H2) the batch `prepared` to `open`, (H3) any live write probe, (H4) `held`, recovery or rollback and any repair.
 
-1. **GO-1 pre-flight reads** (read-only, fenced; emit counts).
-2. **GO-2 lease and exclusive window** ([ADR 0103](../adr/0103-projector-exclusive-window.md)); stop if not granted.
-3. **Final projector pass with an empty plan**; stop if any write is planned.
-4. **GO-3 the single batch:** assert lease held and unexpired, assert marker `prepared`/`open`/G, assert baseline `verified` with the expected reference, guarded `UPDATE` to `d1`/`open`/G+1, CAS fence. All or nothing.
+1. Bounded fenced preflight reads (counts only).
+2. Lease and exclusive window ([ADR 0103](../adr/0103-projector-exclusive-window.md)); stop if not granted. Producers are parked while it is held; cross-domain operations queue as durable receipts.
+3. Final projector pass with an empty plan; stop if any write is planned.
+4. **Holdpoint H2, the single batch:** assert lease held and unexpired, assert marker `prepared`/`open`/G, assert baseline `verified` with the expected reference, guarded `UPDATE` to `d1`/`open`/G+1, CAS fence. All or nothing.
 5. Readback: marker `d1`/`open`/G+1, writer route `canonical`, projector compare-only.
-6. One catch-up canonical reconcile; confirm no pending receipt.
+6. Bounded catch-up canonical reconcile (not atomic with the marker); settle pending and unknown receipts by readback and same-request-id replay.
 7. Release the window and the lease.
-8. **GO-4 mirror freeze verification** and consumer check (readers on D1).
+8. Mirror freeze and consumer verification (reads only).
 
 ## STOP conditions
 
@@ -43,7 +43,7 @@ Any failed or ambiguous assertion; batch outcome unknown (read the marker, do no
 
 ## After `open`
 
-Recovery is `open` to `held` (separate GO), then the forward fix `held` to `open` (separate GO), only with the drill passed. **Once D1-only writes exist, setting `r2` or a git revert is not a rollback.** The reverse reconciler is deferred.
+Recovery is `open` to `held`, then the forward fix `held` to `open`; both are holdpoint H4 and need an explicit owner GO, and only with the drill passed. **Once D1-only writes exist, setting `r2` or a git revert is not a rollback.** The reverse reconciler is deferred.
 
 ## Not covered
 

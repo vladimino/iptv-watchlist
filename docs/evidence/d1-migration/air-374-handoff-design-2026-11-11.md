@@ -11,6 +11,8 @@
 | `GAPS` / `handoffReadiness` | Never ready while `GAPS` is non-empty (P6 makes it computed) |
 | `projector_window` / projection lease (`src/d1-enrichment.js`) | Window fence exists in the projector write path (ADR 0103) |
 
+Model: one owner-approved L3 staged plan with holdpoints (P5 live load, `prepared` to `open`, live write probes, held/recovery/rollback); the fence proves no overlapping canonical ownership, not uninterrupted execution, and intent is kept by durable receipts and a bounded, non-atomic catch-up.
+
 Not verified: production state; table-by-table absence of marker triggers on migrations 0015/0016 (taken from the AIR-374 plan); `bulk.expectedMarker` guard conditions beyond the plan; text of the decision-1 ADR.
 
 Decisions: [ADR 0117](../../adr/0117-film-person-d1-handoff-owner-decisions.md). Runbook: [open handoff](../../runbooks/film-person-open-handoff.md).

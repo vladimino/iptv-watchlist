@@ -32,7 +32,7 @@ Verified references (code at 07d3893):
 
 The batch below is therefore new reviewed code, to be delivered offline first (follow-up).
 
-Sequence, every step behind an owner GO (see the runbook):
+Sequence, as ONE owner-approved concrete activation plan with explicit holdpoints (see the runbook and the L3 staged-plan rule of [authorization](../process/authorization-and-escalation.md)); bounded reads, lease, window, readback and release inside an approved plan need no separate approval, while the holdpoints below do:
 
 1. **Pre-flight (read-only).** Marker `prepared`/`open`/G; fence row ok; baseline `verified` with the recorded reference; schema version at least 16; `handoffReadiness` ready (computed readiness, P6; today it is never ready while `GAPS` is non-empty); no live projector lease; empty-class loader receipts and the frozen-mirror classification present; producers still dormant.
 2. **Lease and exclusive window ([ADR 0103](0103-projector-exclusive-window.md)).** Acquire the projector lease and the held `projector_window`, so Discovery and every lease-fenced writer yield.
@@ -41,7 +41,7 @@ Sequence, every step behind an owner GO (see the runbook):
 5. **Readback:** marker `d1`/`open`/G+1, route `canonical`, projector compare-only.
 6. **One catch-up canonical reconcile** of what producers could not write while `prepared` (receipts, decision 4), then release the window and the lease.
 
-**Why never two writers and never none.** A projector batch in flight carries the marker CHECK for G, so after step 4 it fails whole; adapters cannot pass their fence before the move; between steps 2 and 6 no other lease-fenced writer runs; the move is one atomic batch, so one fence can pass at any generation. The only no-writer interval is the batch itself and is closed by the catch-up reconcile and the receipts. Decision 1 (unconditional projector fence) is a **precondition**: today the projector asserts the marker only with `D1_ENRICHMENT_BULK=on` (`bulk.expectedMarker`, from the AIR-374 plan; not re-verified here).
+**Why no overlapping canonical ownership and no lost canonical intent.** The fence proves that no two writers can hold successful canonical authority at the same time; it does not prove uninterrupted execution. A projector batch in flight carries the marker CHECK for G, so after step 4 it fails whole; adapters cannot pass their fence before the move; the move is one atomic batch, so one fence can pass at any generation. The quiet window deliberately parks producers before and after that batch, so there are intervals with no executing writer. Intent is not lost because, while the window is held, cross-domain operations are queued or recorded as durable receipts (decision 4); after the release a bounded catch-up reconcile applies them, and a pending or unknown receipt is settled by readback and replay with the same request id, never assumed done or absent. The catch-up is **not** atomic with the marker move. Decision 1 (unconditional projector fence) is a **precondition**: today the projector asserts the marker only with `D1_ENRICHMENT_BULK=on` (`bulk.expectedMarker`, from the AIR-374 plan; not re-verified here).
 
 ## `open` to `held`
 
@@ -57,7 +57,7 @@ Recovery is fail-closed and forward only; readers and writers are unavailable wh
 
 ## Recovery and migration boundary
 
-This ADR and its runbook authorize nothing: no marker move, lease, window, held, loader run, flag, Task or cron. Each production step is a separate owner GO. A code revert reverts neither D1 nor the marker.
+This ADR and its runbook authorize nothing: no marker move, lease, window, held, loader run, flag, Task or cron. Each production operation needs an owner-approved plan; the holdpoints (P5 live load, `prepared` to `open`, live write probes, `held`/recovery/rollback) each need an explicit owner GO. A code revert reverts neither D1 nor the marker.
 
 ## Evidence
 
