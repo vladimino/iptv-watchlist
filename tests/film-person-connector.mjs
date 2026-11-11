@@ -226,7 +226,9 @@ const dataFiles=[];
 // A second, separate "production" (the schema plus one table of very large rows, published_epg_document, followed by tables of small rows) behind its own fake
 // connector that counts its requests. Nothing here touches the main fixture or its copy.
 const padded=file=>{const value=JSON.parse(fs.readFileSync(file,'utf8'));value.pad='x'.repeat(200000);const out=path.join(root,'padded-'+(fileNumber++)+'.json');fs.writeFileSync(out,JSON.stringify(value));return out;};
-{
+// AIR-374: CONNECTOR_SKIP_3B=1 skips this self-contained section (its own fixture, connector and copies: it reads and writes nothing the later sections use, only the file-name counter). The mutation
+// check (tests/film-person-connector-mutation.mjs) runs a mutant without it first and runs the whole file before it calls a mutant a survivor; a plain run always executes the section.
+if(process.env.CONNECTOR_SKIP_3B!=='1'){
  const fixture=path.join(root,'fixture.sqlite');
  fs.copyFileSync(template,fixture);
  for(const trigger of rows(fixture,"SELECT name FROM sqlite_master WHERE type='trigger'"))sql(fixture,'DROP TRIGGER '+trigger.name+';');
