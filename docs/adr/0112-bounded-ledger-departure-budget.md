@@ -1,4 +1,4 @@
-# ADR 0111: A bounded discovery ledger archives its backlog in a capped number of observations per commit
+# ADR 0112: A bounded discovery ledger archives its backlog in a capped number of observations per commit
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-11  

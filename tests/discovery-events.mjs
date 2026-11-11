@@ -1,6 +1,7 @@
-// AIR-410: the Discovery Workflow writes one immutable `discovery` Events Log entry per logical tick (a chain of instances of one generation, or one scheduled firing that finds the
-// queue confirmed empty). Counters are sums of saved chunk summaries, delivery survives a lost event write without repeating Discovery, and a read writes nothing.
-// series without the hourly gate, and fences a second writer. No production binding is read or written.
+// AIR-410 (ADR 0111): every scheduled hourly firing of the Discovery reconcile writes exactly one immutable `discovery` Events Log report for its UTC hour,
+// with the deltas since the previous report, whatever the Workflow is doing. Chunk counters are attributed by commit time and counted once (replay-safe),
+// delivery goes through a capped durable outbox with a create-only put, an unknown reading is `null` and never a 0, and a read writes nothing.
+// No production binding is read or written.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -134,273 +135,160 @@ const PLAN=[
 ];
 const COUNTS={chunks:3,checked:30,added:6,reused:3,screenedOut:6,tmdbCalls:15,touched:0};
 
-// 1. A chain of three chunks: one event, the sums of the three saved chunks, settled and delivered, nothing counted twice.
-seed({count:3});elect();
+// ---------- AIR-410 v2: one `discovery` report per scheduled hourly firing ----------
+const BASE=Date.UTC(2026,10,11,10),HOUR=3600000;
+const cron=n=>({scheduled:true,now:BASE+n*HOUR+(n%2)*1000});
+const reports=()=>discoveryEvents().sort((a,b)=>a.at<b.at?-1:1);
+const outbox=()=>workflowRecord()?.outbox||[];
+const hourId=(generation,n)=>'discovery-hour-'+generation.replace(/-/g,'').slice(0,12)+'-'+new Date(BASE+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
+const ZERO={checked:0,added:0,reused:0,screenedOut:0,touched:0,tmdbCalls:0};
+const sumOf=(events,name)=>events.reduce((total,event)=>total+event[name],0);
+const closed=(outcome,n,environment=env)=>call('closeHourlyDiscoveryReport')(environment,outcome,cron(n));
+
+// 1. A chain that crosses four scheduled hours with rollovers: one report per hour, deltas not totals, sums equal the committed chunks.
+seed({count:3});
 chunkStub(PLAN);
-const ended=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
-assert.equal(ended.reason,'complete');assert.equal(context.chunks,3);
 {
- const events=discoveryEvents();assert.equal(events.length,1,'one event for the tick');
- const [event]=events,tick=workflowRecord().tick;
- assert.equal(event.type,'discovery');assert.equal(event.kind,'run');assert.equal(event.status,'finished');assert.equal(event.reason,'complete');
- for(const [name,value] of Object.entries(COUNTS))assert.equal(event[name],value,name);
- assert.equal(event.remaining,0);assert.equal(event.queueEmpty,true);assert.equal(event.error,null);
- assert.equal(event.id,'discovery-'+tick.id);assert.equal(event.at,tick.settled.at);assert.equal(event.startedAt,tick.startedAt);
- assert.equal(tick.delivered,true,'the record says it was delivered');
- assert.ok(Date.parse(event.at)>=Date.parse(event.startedAt));
- assert.deepEqual(Object.keys(event).sort(),['added','at','checked','chunks','error','id','kind','queueEmpty','reason','remaining','reused','screenedOut','startedAt','status','tmdbCalls','touched','type'].sort(),'a compact event: counters only, no film, id or private field');
+ const first=await call('reconcileDiscoveryWorkflow')(env,cron(0));
+ assert.equal(first.started,true);assert.equal(creates.length,1);
+ assert.equal(reports().length,1,'the hour of the start has its report');
+ assert.equal(reports()[0].status,'running');assert.equal(reports()[0].chunks,0);
+ for(const name of Object.keys(ZERO))assert.equal(reports()[0][name],0,'a started chain with no chunk yet reports a proven 0: '+name);
+ const series0=workflowRecord().instanceId;
+ const r0=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0,chunkLimit:1},step);
+ assert.equal(r0.reason,'rollover');
+ const h1=await call('reconcileDiscoveryWorkflow')(env,cron(1));assert.equal(h1.reason,'in_progress');
+ const r1=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:1,chunkLimit:1},step);
+ assert.equal(r1.reason,'rollover');
+ await call('reconcileDiscoveryWorkflow')(env,cron(2));
+ const r2=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:2},step);
+ assert.equal(r2.reason,'complete');assert.equal(context.chunks,3);
+ await call('reconcileDiscoveryWorkflow')(env,cron(3));
+ const list=reports();
+ assert.equal(list.length,4,'one report for each of the four scheduled hours, none for the chain itself');
+ assert.deepEqual(list.map(event=>event.at),[0,1,2,3].map(n=>new Date(BASE+n*HOUR).toISOString()));
+ assert.deepEqual(list.map(event=>event.added),[0,1,2,3],'hour 0 had no chunk; later hours carry only their own chunk');
+ assert.deepEqual(list.map(event=>event.chunks),[0,1,1,1]);
+ assert.deepEqual(list.map(event=>event.checked),[0,10,10,10]);
+ assert.deepEqual(list.map(event=>event.tmdbCalls),[0,5,5,5]);
+ for(const name of Object.keys(COUNTS))if(name!=='chunks')assert.equal(sumOf(list,name),COUNTS[name],'sum of deltas = committed chunks: '+name);
+ assert.deepEqual(list.map(event=>event.status),['running','running','running','empty']);
+ assert.equal(list[3].queueEmpty,true);assert.equal(list[3].remaining,0);assert.equal(list[2].queueEmpty,false);
+ assert.deepEqual(list.map(event=>event.id),[0,1,2,3].map(n=>hourId(GENERATION,n)),'identity = generation + UTC hour');
+ assert.equal(list[1].from,new Date(BASE).toISOString(),'from is the end of the previous period');
+ assert.equal(list.every(event=>event.kind==='hour'&&event.type==='discovery'&&!event.incomplete),true);
+ assert.deepEqual(outbox(),[],'everything delivered');
+ assert.notEqual(series0,workflowRecord().instanceId);
+ assert.deepEqual(Object.keys(list[1]).sort(),['added','at','checked','chunks','error','from','generation','id','incomplete','kind','queueEmpty','reason','remaining','reused','screenedOut','status','tmdbCalls','touched','type'].sort(),'a compact event: counters only, no film titles');
 }
 
-// 2. Delivering again changes nothing; an unmarked tick finds its event and only marks it.
-{
- const [key]=eventKeys(),before=JSON.stringify(records.get(key)),before_puts=puts.filter(item=>item.startsWith('events/')).length;
- assert.equal((await call('deliverDiscoveryTick')(env)).delivered,false);
- const record=workflowRecord();record.tick.delivered=false;set('epg/discovery-workflow.json',record);
- const again=await call('deliverDiscoveryTick')(env);
- assert.equal(again.delivered,true);assert.equal(again.event,'exists');assert.equal(JSON.stringify(records.get(key)),before,'the first event is kept as it was');
- assert.equal(eventKeys().length,1);assert.equal(workflowRecord().tick.delivered,true);
- assert.equal(puts.filter(item=>item.startsWith('events/')).length,before_puts,'no second event write');
-}
-
-// 3. A lost event write after the settlement: the chain still ends, nothing runs again, and the next scheduled reconcile delivers it.
+// 2. Duplicate, delayed and missed crons. A repeated hour finds its report, a late cron keeps the hour, a gap is not backfilled.
 resetAll();seed({count:3});elect();chunkStub(PLAN);
-failEventPuts=true;
-const lost=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
-assert.equal(lost.reason,'complete');assert.equal(discoveryEvents().length,0,'the event was not written');
-assert.equal(workflowRecord().tick.settled.reason,'complete');assert.equal(workflowRecord().tick.delivered,false,'the record keeps the tick open for delivery');
-failEventPuts=false;
 {
- const chunksBefore=context.chunks;creates.length=0;
- const outcome=await call('reconcileDiscoveryWorkflow')(env);
- assert.equal(context.chunks,chunksBefore,'delivery repeats no Discovery chunk');assert.equal(creates.length,0,'and starts no instance');
- assert.equal(discoveryEvents().length,1);assert.equal(discoveryEvents()[0].chunks,3);assert.equal(workflowRecord().tick.delivered,true);
- assert.equal(outcome.started,false);
- assert.equal(eventKeys().length,1,'an unscheduled reconcile writes no empty tick');
+ await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:BASE});
+ await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:BASE});
+ await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:BASE+50*60000});
+ assert.equal(reports().length,1,'a duplicate or delayed cron of the same hour adds nothing');
+ const stored=JSON.stringify(reports()[0]);
+ await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0,chunkLimit:2},step);
+ const putsBefore=puts.length;
+ await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:BASE+10*60000});
+ assert.equal(puts.length,putsBefore,'a repeat of a closed hour writes nothing');assert.equal(JSON.stringify(reports()[0]),stored);
+ const late=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:BASE+4*HOUR+59*60000});
+ assert.equal(reports().length,2,'hours 1..3 were missed: no report is invented for them');
+ const [a,b]=reports();assert.equal(b.at,new Date(BASE+4*HOUR).toISOString());assert.equal(b.from,a.at,'the late report reaches back to the previous one');
+ assert.equal(b.added,3,'the chunks of the silent hours are in the next report, once');assert.equal(b.chunks,2);
+ assert.ok(late);
+ assert.equal(sumOf(reports(),'added'),3);
 }
 
-// 4. A rollover stays inside the tick: two instances, one event, the sums of both.
-resetAll();seed({count:3});elect();chunkStub(PLAN);
-const first=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0,chunkLimit:1},step);
-assert.equal(first.reason,'rollover');assert.equal(discoveryEvents().length,0,'no event at a rollover');
-const openTick=workflowRecord().tick;
-assert.equal(openTick.chunks,1);assert.equal(openTick.settled,null);assert.equal(workflowRecord().series,1,'the successor carries the same tick');
-const second=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:1},step);
-assert.equal(second.reason,'complete');
+// 2b. A delayed or replayed firing of an OLDER hour never closes the open accumulator: a chunk committed after hour 11 appears exactly once, in hour 12.
+resetAll();seed({count:3});const own2b=elect();
 {
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1);
- for(const [name,value] of Object.entries(COUNTS))assert.equal(event[name],value,'rollover '+name);
- assert.equal(event.id,'discovery-'+openTick.id,'the id is the id of the tick the first instance opened');
+ const outcome={started:false,reason:'in_progress',programmeRunId:GENERATION};
+ await closed(outcome,0);await closed(outcome,1);
+ await call('settleWorkflowIfOwner')(env,own2b,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:6,added:3,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:4,cheapRemaining:0,error:null},own2b+':1',GENERATION)}));
+ const before=JSON.stringify(reports()),recordBefore=JSON.stringify(workflowRecord()),putsBefore=puts.length;
+ const stale=await closed(outcome,0);
+ assert.equal(stale.closed,false);assert.equal(stale.reason,'stale_hour');
+ assert.equal(JSON.stringify(workflowRecord().report),JSON.stringify(JSON.parse(recordBefore).report),'the open accumulator is untouched');
+ assert.equal(workflowRecord().report.added,3);assert.equal(JSON.stringify(reports()),before,'no stored event changed');assert.equal(puts.length,putsBefore,'nothing was written');
+ assert.equal((await closed(outcome,1)).reason,'already_closed');
+ await closed(outcome,2);
+ assert.equal(reports().length,3);assert.deepEqual(reports().map(event=>event.added),[0,0,3],'the chunk is in hour 12, once');
+ assert.equal(sumOf(reports(),'added'),3);assert.equal(workflowRecord().report.added,0);
+ // The old hour's outbox may still drain: an entry left there by a failed put is delivered by the stale firing.
+ resetAll();seed({count:3});elect();
+ failEventPuts=true;await closed(outcome,0);await closed(outcome,1);failEventPuts=false;
+ assert.equal(outbox().length,2);
+ const drained=await closed(outcome,0);assert.equal(drained.reason,'stale_hour');
+ assert.deepEqual(outbox(),[],'the stale firing still delivers the outbox');assert.equal(reports().length,2);
 }
 
-// 5. A replay after a sleep counts a chunk once: a memoizing step returns the saved output and the chunk does not run again.
-resetAll();seed({count:3});elect();chunkStub([{checked:10,added:1,reused:1,screenedOut:2,tmdbCalls:5,remaining:10},{checked:10,added:2,reused:1,screenedOut:2,tmdbCalls:5,remaining:0}]);
+// 3. An hour with no change, a close without a scheduled clock, an external executor.
+resetAll();seed({count:3});elect();
 {
- const cache=new Map();let hibernated=false;
- const memo={
-  async do(name,fn){if(cache.has(name))return cache.get(name);const value=await fn();cache.set(name,value);return value;},
-  async sleepUntil(){if(!hibernated){hibernated=true;throw new Error('hibernate');}}
- };
- // After the first chunk the next plan waits: the backoff makes the instance sleep, and the sleep ends the invocation.
- const realStub=context.advanceDiscovery;
- context.advanceDiscovery=async(...args)=>{const outcome=await realStub(...args);if(context.chunks===1)set('epg/resolver-continuation.json',{stage:'paused',reason:'backoff',at:iso,hopId:'hop-1',remainingChunks:1,nextCatchUpAt:new Date(Date.now()+1000).toISOString(),retryAt:new Date(Date.now()+1000).toISOString(),programmeRunId:GENERATION});return outcome;};
- await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},memo),/hibernate/);
- assert.equal(context.chunks,1);assert.equal(workflowRecord().tick.chunks,1);
- set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso,hopId:'hop-1',remainingChunks:1,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
- const done=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},memo);
- assert.equal(done.reason,'complete');assert.equal(context.chunks,2,'the replayed chunk did not run again');
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1);
- assert.equal(event.chunks,2);assert.equal(event.added,3);assert.equal(event.checked,20);assert.equal(event.tmdbCalls,10);
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
+ const [a,b]=reports();assert.equal(reports().length,2);
+ for(const event of [a,b]){assert.equal(event.status,'running');assert.equal(event.chunks,0);for(const name of Object.keys(ZERO))assert.equal(event[name],0);}
+ const n=reports().length;
+ assert.equal((await call('closeHourlyDiscoveryReport')(env,{reason:'in_progress'},{})).reason,'not_scheduled');
+ assert.equal((await call('closeHourlyDiscoveryReport')(env,{reason:'in_progress'},{scheduled:true})).reason,'not_scheduled');
+ assert.equal((await call('closeHourlyDiscoveryReport')(env,{reason:'in_progress'},{scheduled:true,now:NaN})).reason,'not_scheduled');
+ assert.equal((await call('reconcileDiscoveryWorkflow')(env)).started,false);
+ assert.equal((await closed({reason:'stopped'},5,{...env,DISCOVERY_EXECUTOR:'external'})).reason,'not_workflow');
+ assert.equal(reports().length,n,'an unscheduled caller and an external executor write nothing');
 }
 
-// 6. Exhausted recovery is an honest failure, not a success; a recoverable stop settles nothing.
-resetAll();seed({count:3});
-{
- const ownId=elect(0);
- const record=workflowRecord();record.tick={...call('newDiscoveryTick')(GENERATION,Date.now()),chunks:2,checked:20,added:2,remaining:7,cheapRemaining:0};record.recovery={attempts:1,reason:'step_failure',at:iso,dueAt:null,quarantined:false};set('epg/discovery-workflow.json',record);
- const soft=await call('stopOwnedWorkflow')(env,ownId,'no_progress',GENERATION,0,2);
- assert.equal(soft.settled,true);assert.equal(workflowRecord().tick.settled,null,'a recoverable stop leaves the tick open');assert.equal(discoveryEvents().length,0);
- const hard=workflowRecord();hard.recovery={attempts:4,reason:'step_failure',at:iso,dueAt:null,quarantined:false};set('epg/discovery-workflow.json',hard);
- const exhausted=await call('stopOwnedWorkflow')(env,ownId,'no_progress',GENERATION,0,2);
- assert.equal(exhausted.reason,'recovery_exhausted');
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1);
- assert.equal(event.status,'failed');assert.equal(event.reason,'recovery_exhausted');assert.equal(event.checked,20);assert.equal(event.remaining,7);assert.equal(event.queueEmpty,false,'unknown or non-zero is never an empty queue');
- await call('stopOwnedWorkflow')(env,ownId,'no_progress',GENERATION,0,2);
- assert.equal(discoveryEvents().length,1,'a repeated stop keeps the first settlement and writes no second event');
+// 4. Every state has a report: waiting, exhausted, blocked refusals, idle, unknown reason.
+for(const [label,outcome,status,reason] of [
+ ['waiting',{started:false,reason:'recovery_waiting'},'waiting','recovery_waiting'],
+ ['exhausted',{started:false,reason:'recovery_exhausted'},'failed','recovery_exhausted'],
+ ['projector window',{started:false,reason:'projector_window'},'blocked','projector_window'],
+ ['authority held',{started:false,reason:'authority_held'},'blocked','authority_held'],
+ ['generation handoff',{started:false,reason:'generation_handoff'},'blocked','generation_handoff'],
+ ['unnamed refusal',{started:false,reason:'something_new'},'blocked','other'],
+ ['no reason',{started:false},'blocked','unknown'],
+ ['started',{started:true,reason:'started'},'running',null],
+]){
+ resetAll();seed({count:3});elect();
+ await closed({...outcome,programmeRunId:GENERATION},0);
+ const [event]=reports();assert.equal(reports().length,1,label);
+ assert.equal(event.status,status,label);assert.equal(event.reason,reason,label);assert.equal(event.queueEmpty,false,label);
 }
 
-// 6b. Zero checked with a queue that is not empty is told apart from an empty queue.
-resetAll();seed({count:3});
+// 5. Empty queue is claimed only when proven: both remainders are numeric zero, no error, the continuation complete for the generation.
 {
- const ownId=elect(0);
- const record=workflowRecord();record.tick={...call('newDiscoveryTick')(GENERATION,Date.now()),chunks:1,checked:0,remaining:4,cheapRemaining:0};set('epg/discovery-workflow.json',record);
- await call('stopOwnedWorkflow')(env,ownId,'stale_generation',GENERATION,0,1);
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1);
- assert.equal(event.checked,0);assert.equal(event.remaining,4);assert.equal(event.queueEmpty,false,'0 checked and 4 left is not an empty queue');assert.equal(event.status,'superseded');
-}
-
-// 7. A newer generation replaces the record: the tick of the old one is delivered as superseded, and the new chain starts its own.
-resetAll();seed({count:3});
-{
- elect(0);
- const record=workflowRecord();record.tick={...call('newDiscoveryTick')(GENERATION,Date.now()-60000),chunks:1,checked:10,added:1,remaining:30};set('epg/discovery-workflow.json',record);
- const oldTickId=record.tick.id;
- const stored=await call('readWorkflowState')(env);
- const created=await call('createWorkflowInstance')(env,OTHER,0,`discovery_${OTHER.replace(/-/g,'')}_0`,stored.etag,null,stored.record);
- assert.equal(created.started,true);
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1);
- assert.equal(event.id,'discovery-'+oldTickId);assert.equal(event.status,'superseded');assert.equal(event.reason,'stale_generation');assert.equal(event.queueEmpty,false);
- const next=workflowRecord().tick;assert.equal(next.programmeRunId,OTHER);assert.notEqual(next.id,oldTickId);assert.equal(next.chunks,0);assert.equal(next.settled,null);
-}
-
-// 7b. A failed event put at the replacement is not a lost event: the settled tick stays durable in the outbox of the new record, and the next
-// scheduled reconcile delivers exactly one superseded event.
-resetAll();seed({count:3});
-{
- elect(0);
- const record=workflowRecord();record.tick={...call('newDiscoveryTick')(GENERATION,Date.now()-60000),chunks:2,checked:20,added:2,remaining:30,cheapRemaining:0};set('epg/discovery-workflow.json',record);
- const oldTickId=record.tick.id;
- const stored=await call('readWorkflowState')(env);
- failEventPuts=true;
- const created=await call('createWorkflowInstance')(env,OTHER,0,`discovery_${OTHER.replace(/-/g,'')}_0`,stored.etag,null,stored.record);
- assert.equal(created.started,true,'a failed event put never blocks the new generation');
- assert.equal(discoveryEvents().length,0,'the put failed');
- const held=workflowRecord();
- assert.equal(held.outbox.length,1,'the old tick is kept in the outbox, not dropped');assert.equal(held.outbox[0].id,oldTickId);assert.equal(held.outbox[0].settled.reason,'stale_generation');assert.equal(held.tick.programmeRunId,OTHER);
- // The new record keeps the outbox through the owner's own writes.
- await call('settleWorkflowIfOwner')(env,`discovery_${OTHER.replace(/-/g,'')}_0`,{phase:'running',reason:'started'});
- assert.equal(workflowRecord().outbox.length,1,'an ordinary write of the record keeps the outbox');
- failEventPuts=false;
- await call('reconcileDiscoveryWorkflow')(env);
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1,'recovered exactly once');
- assert.equal(event.id,'discovery-'+oldTickId);assert.equal(event.status,'superseded');assert.equal(event.checked,20);
- assert.deepEqual(workflowRecord().outbox,[],'the entry leaves the outbox only after its put is confirmed');
- await call('reconcileDiscoveryWorkflow')(env);
- assert.equal(discoveryEvents().length,1,'a second reconcile writes nothing more');
- assert.equal(eventKeys().length,1);
-}
-
-// 7c. Several failed replacements accumulate in the outbox and every one of them is recovered: nine failed replacements, nine events.
-const gen=i=>`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`;
-async function replaceChain(count){
- // elect() builds the first record; each step replaces the previous generation while event puts fail.
- elect(0,gen(0));
- const record=workflowRecord();record.tick={...call('newDiscoveryTick')(gen(0),Date.now()-600000),chunks:1,checked:5,remaining:9,cheapRemaining:0};set('epg/discovery-workflow.json',record);
- const replacedTickIds=[],answers=[];
- for(let i=1;i<count;i++){
-  const state=await call('readWorkflowState')(env);
-  const answer=await call('createWorkflowInstance')(env,gen(i),0,`discovery_${gen(i).replace(/-/g,'')}_0`,state.etag,null,state.record);
-  answers.push(answer);
-  if(answer.started)replacedTickIds.push(state.record.tick.id);
- }
- return {replacedTickIds,answers};
-}
-resetAll();seed({count:3});
-{
- failEventPuts=true;
- const {replacedTickIds,answers}=await replaceChain(10);
- assert.ok(answers.every(answer=>answer.started===true),'a failed put never blocks a replacement while the outbox has room');
- assert.equal(workflowRecord().outbox.length,9,'nine replaced ticks, nine entries, none dropped');
- assert.deepEqual(workflowRecord().outbox.map(entry=>entry.id),replacedTickIds,'every replaced tick, oldest first');
- assert.equal(discoveryEvents().length,0);
- failEventPuts=false;
- const delivery=await call('deliverDiscoveryTick')(env);
- assert.equal(delivery.delivered,true);assert.equal(discoveryEvents().length,9,'all nine are recovered as nine events');
- assert.deepEqual(workflowRecord().outbox,[]);
- assert.deepEqual(new Set(discoveryEvents().map(event=>event.id)),new Set(replacedTickIds.map(id=>'discovery-'+id)),'one event per tick, with its own id');
- await call('deliverDiscoveryTick')(env);assert.equal(discoveryEvents().length,9,'a repeat writes nothing');
-}
-
-// 7c-2. Saturation fails closed: at the limit the replacement is refused, nothing is dropped, and the outbox drains when the puts work again.
-resetAll();seed({count:3});
-{
- const limit=call('DISCOVERY_TICK_OUTBOX_LIMIT');assert.equal(typeof limit,'number');assert.ok(limit>=9);
- failEventPuts=true;
- const {replacedTickIds,answers}=await replaceChain(limit+3);
- const started=answers.filter(answer=>answer.started===true),refused=answers.filter(answer=>answer.started===false);
- assert.equal(started.length,limit,'replacements go through while the outbox has room');
- assert.ok(refused.length>=2&&refused.every(answer=>answer.reason==='events_outbox_full'),'then every replacement is refused, with a named reason');
- const held=workflowRecord();
- assert.equal(held.outbox.length,limit,'the outbox holds exactly its limit and drops nothing');
- assert.deepEqual(held.outbox.map(entry=>entry.id),replacedTickIds.slice(0,limit),'the oldest entries are still there');
- assert.equal(held.programmeRunId,gen(limit),'the record is still the last generation that fit: the refused replacements wrote nothing');
- assert.equal(discoveryEvents().length,0);
- failEventPuts=false;
- const blockedStillSaturated=await call('reconcileDiscoveryWorkflow')(env);
- assert.equal(discoveryEvents().length,limit,'the reconcile delivers the whole outbox before it looks at the generation');
- assert.deepEqual(workflowRecord().outbox,[]);
- assert.ok(blockedStillSaturated);
- // The refused replacement now goes through and its replaced tick is delivered too: nothing was lost on the way.
- const state=await call('readWorkflowState')(env);
- const next=await call('createWorkflowInstance')(env,gen(limit+1),0,`discovery_${gen(limit+1).replace(/-/g,'')}_0`,state.etag,null,state.record);
- assert.equal(next.started,true);
- assert.equal(discoveryEvents().length,limit+1,'one event per replaced tick, the refused one included');
- assert.equal(new Set(discoveryEvents().map(event=>event.id)).size,limit+1);
-}
-
-// 7d. A partly failing delivery keeps exactly the entries whose put failed.
-resetAll();seed({count:3});
-{
- elect(0);
- const mk=(n)=>({...call('newDiscoveryTick')(GENERATION,Date.now()-n*60000),chunks:1,checked:n,remaining:1,cheapRemaining:0,settled:{at:new Date(Date.now()-n*30000).toISOString(),reason:'stale_generation'},delivered:false});
- const a=mk(5),b=mk(7);
- const record=workflowRecord();record.outbox=[a,b];set('epg/discovery-workflow.json',record);
- const realWrite=context.writeDiscoveryEvent;
- context.writeDiscoveryEvent=async(environment,event)=>{if(event.id==='discovery-'+a.id)throw new Error('put failed');return realWrite(environment,event);};
- const first=await call('deliverDiscoveryTick')(env);
- assert.equal(first.delivered,true);assert.equal(discoveryEvents().length,1);assert.equal(discoveryEvents()[0].id,'discovery-'+b.id);
- assert.deepEqual(workflowRecord().outbox.map(entry=>entry.id),[a.id],'the failed entry stays');
- context.writeDiscoveryEvent=realWrite;
- await call('deliverDiscoveryTick')(env);
- assert.equal(discoveryEvents().length,2);assert.deepEqual(workflowRecord().outbox,[]);
-}
-
-// 8. Empty queue: a scheduled firing that starts no chain and finds a confirmed zero writes one event per hour.
-resetAll();seed({stage:'complete',remaining:0,reason:null,count:3});
-set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
-set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
-{
- const hour=Math.floor(Date.now()/3600000)*3600000,clock=hour+17*60000;
- const advanceWasCalled=context.advanceDiscovery;context.advanceDiscovery=async()=>{throw new Error('Discovery must not run for an empty tick');};
- await call('reconcileDiscoveryWorkflow')(env);
- assert.equal(discoveryEvents().length,0,'an unscheduled reconcile claims nothing');
- const scheduled=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:clock});
- assert.equal(scheduled.started,false);assert.equal(creates.length,0,'no chain is started');
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1);
- assert.equal(event.kind,'empty');assert.equal(event.status,'finished');assert.equal(event.reason,'queue_empty');assert.equal(event.queueEmpty,true);assert.equal(event.remaining,0);
- for(const name of ['chunks','checked','added','reused','screenedOut','touched','tmdbCalls'])assert.equal(event[name],0,name);
- assert.equal(event.at,new Date(hour).toISOString(),'the tick of the hour');
- await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:clock+600000});
- assert.equal(discoveryEvents().length,1,'a second reconcile in the same hour finds the same event');
- await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:hour+3600000+5*60000});
- assert.equal(discoveryEvents().length,2,'the next hour is the next tick');
- assert.notEqual(discoveryEvents()[0].id,discoveryEvents()[1].id);
-
- // Not confirmed, not claimed: unknown, non-zero or cheap remaining, an error, a paused or unstarted pipeline, another generation, a held authority.
- const claim=async(label,mutate)=>{
+ const hour=BASE;
+ const confirmed=(label,mutate,expectEmpty)=>async()=>{
   resetAll();seed({stage:'complete',remaining:0,reason:null,count:3});
+  set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'complete',updatedAt:iso,waitingUntil:null,recovery:null});
   set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
   set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
   mutate();
-  await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:clock});
-  assert.equal(discoveryEvents().length,0,label);
+  await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+  const [event]=reports();assert.equal(reports().length,1,label);
+  assert.equal(event.queueEmpty,expectEmpty,label);assert.equal(event.status,expectEmpty?'empty':'idle',label);
+  return event;
  };
- await claim('remaining unknown',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:null,cheapRemaining:0,error:null,at:iso}));
- await claim('remaining not zero',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:4,cheapRemaining:0,error:null,at:iso}));
- await claim('cheap pass pending',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:3,error:null,at:iso}));
- for(const [label,value] of [['cheap remainder missing',undefined],['cheap remainder null',null],['cheap remainder a string','0'],['cheap remainder negative',-1],['cheap remainder fractional',0.5]])
-  await claim(label,()=>{const status={schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,error:null,at:iso};if(value!==undefined)status.cheapRemaining=value;set('epg/discovery-status.json',status);});
- await claim('status carries an error',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,error:'boom',at:iso}));
- await claim('status of another generation',()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:OTHER,remaining:0,cheapRemaining:0,error:null,at:iso}));
- await claim('no status at all',()=>records.delete('epg/discovery-status.json'));
- await claim('continuation of another generation',()=>set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER}));
- await claim('authority held',()=>{context.DiscoveryAuthority.readAuthority=async()=>({...readyDiscoveryGate(GENERATION),held:true,cutover:'held'});});
- armWorkflowAdmission();
- await claim('executor external',()=>{env.DISCOVERY_EXECUTOR='external';});
- env.DISCOVERY_EXECUTOR='workflow';
- context.advanceDiscovery=advanceWasCalled;
+ const empty=await confirmed('proven empty',()=>{},true)();
+ assert.equal(empty.reason,'queue_empty');assert.equal(empty.remaining,0);for(const name of Object.keys(ZERO))assert.equal(empty[name],0);
+ const status=patch=>()=>set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,error:null,at:iso,...patch});
+ await confirmed('remaining unknown',status({remaining:null}),false)();
+ await confirmed('remaining not zero',status({remaining:4}),false)();
+ await confirmed('cheap pass pending',status({cheapRemaining:3}),false)();
+ for(const [label,value] of [['cheap missing',undefined],['cheap null',null],['cheap string','0'],['cheap negative',-1],['cheap fractional',0.5]])
+  await confirmed(label,()=>{const value_={schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,error:null,at:iso};if(value!==undefined)value_.cheapRemaining=value;set('epg/discovery-status.json',value_);},false)();
+ await confirmed('status error',status({error:'boom'}),false)();
+ await confirmed('status of another generation',status({programmeRunId:OTHER}),false)();
+ await confirmed('no status',()=>records.delete('epg/discovery-status.json'),false)();
+ await confirmed('continuation of another generation',()=>set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER}),false)();
+ await confirmed('continuation still paused',()=>set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso,hopId:null,remainingChunks:2,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION}),false)();
+ void hour;
 }
 
-// 8b. An aggregated run is claimed empty only when its last saved chunk proved BOTH remainders to be zero.
+// 5b. A period's own chunks are the freshest reading: a last chunk without a proven cheap remainder is never an empty queue.
 for(const [label,spec,expected] of [
  ['both proven zero',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:0},true],
  ['cheap remainder not reported',{checked:4,added:0,reused:0,screenedOut:0,tmdbCalls:1,remaining:0,cheap:undefined},false],
@@ -410,43 +298,204 @@ for(const [label,spec,expected] of [
 ]){
  resetAll();seed({count:3});elect();chunkStub([spec]);
  await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
- const [event]=discoveryEvents();assert.equal(discoveryEvents().length,1,label);
- assert.equal(event.queueEmpty,expected,label);
+ await call('reconcileDiscoveryWorkflow')(env,cron(1));
+ const [event]=reports();assert.equal(reports().length,1,label);
+ assert.equal(event.queueEmpty,expected,label);assert.equal(event.checked,4,label);
 }
 
-// 9. A firing that starts a chain, or finds one running, is not an empty tick.
-resetAll();seed({count:3});chunkStub(PLAN);
+// 6. A replayed checkpoint counts once: the same chunk key adds nothing, a memoizing step does not run the chunk again.
 {
- const clock=Date.now();
- const started=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:clock});
- assert.equal(started.started,true);assert.equal(creates.length,1);assert.equal(discoveryEvents().length,0,'starting a chain writes no event');
- assert.equal(workflowRecord().tick.programmeRunId,GENERATION);assert.equal(workflowRecord().tick.chunks,0);assert.equal(workflowRecord().tick.settled,null);
- const again=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,now:clock+3600000});
- assert.equal(again.reason,'in_progress');assert.equal(discoveryEvents().length,0,'a running chain is not an empty queue');
+ const one={checked:5,added:2,reused:1,screenedOut:0,touched:0,tmdbCalls:3,remaining:9,cheapRemaining:0,error:null};
+ const add=(r,x,k)=>call('addChunkToDiscoveryReport')(r,x,k,GENERATION);
+ const a=add(null,one,'i_0:1'),b=add(a,one,'i_0:1'),c=add(b,one,'i_0:2');
+ assert.equal(JSON.stringify(b),JSON.stringify(a),'the same key adds nothing');assert.equal(c.added,4);assert.equal(c.chunks,2);assert.equal(c.checked,10);
+ const bad=add(null,{checked:5,added:'7',reused:-1,screenedOut:null,tmdbCalls:Infinity,remaining:null,cheapRemaining:0,error:null},'k');
+ assert.equal(bad.chunks,1);assert.equal(bad.checked,5);for(const name of ['added','reused','screenedOut','tmdbCalls'])assert.equal(bad[name],0,name);
+ assert.equal(bad.remaining,null,'an unknown remainder stays unknown');
+ let many=null;for(let i=0;i<40;i++)many=add(many,one,'k'+i);assert.ok(many.seen.length<=16,'the key list is bounded');assert.equal(many.added,80);
+}
+resetAll();seed({count:3});elect();chunkStub([{checked:10,added:1,reused:1,screenedOut:2,tmdbCalls:5,remaining:10},{checked:10,added:2,reused:1,screenedOut:2,tmdbCalls:5,remaining:0}]);
+{
+ const cache=new Map();let hibernated=false;
+ const memo={async do(name,fn){if(cache.has(name))return cache.get(name);const value=await fn();cache.set(name,value);return value;},async sleepUntil(){if(!hibernated){hibernated=true;throw new Error('hibernate');}}};
+ const realStub=context.advanceDiscovery;
+ context.advanceDiscovery=async(...args)=>{const outcome=await realStub(...args);if(context.chunks===1)set('epg/resolver-continuation.json',{stage:'paused',reason:'backoff',at:iso,hopId:'hop-1',remainingChunks:1,nextCatchUpAt:new Date(Date.now()+1000).toISOString(),retryAt:null,programmeRunId:GENERATION});return outcome;};
+ await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},memo),/hibernate/);
+ assert.equal(workflowRecord().report.chunks,1);
+ set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso,hopId:'hop-1',remainingChunks:1,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});
+ const done=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},memo);
+ assert.equal(done.reason,'complete');assert.equal(context.chunks,2,'the replayed chunk did not run again');
+ assert.equal(workflowRecord().report.chunks,2);assert.equal(workflowRecord().report.added,3);assert.equal(workflowRecord().report.checked,20);
+ await call('reconcileDiscoveryWorkflow')(env,cron(1));
+ const [event]=reports();assert.equal(reports().length,1);assert.equal(event.chunks,2);assert.equal(event.added,3);assert.equal(event.tmdbCalls,10);
 }
 
-// 10. The events API passes the new type through untouched and reading it writes nothing.
+// 7. A checkpoint racing the close: the close loses its compare-and-swap, reads again and the chunk lands in exactly one report.
+resetAll();seed({count:3});elect();
+{
+ const chunk={checked:7,added:4,reused:0,screenedOut:1,touched:0,tmdbCalls:2,remaining:5,cheapRemaining:0,error:null};
+ const realBucketPut=bucket.put;let raced=false;
+ bucket.put=async(key,value,options)=>{
+  if(!raced&&key==='epg/discovery-workflow.json'){raced=true;const state=await call('readWorkflowState')(env);
+   await call('settleWorkflowIfOwner')(env,state.record.instanceId,record=>({report:call('addChunkToDiscoveryReport')(record.report,chunk,state.record.instanceId+':1',GENERATION)}));}
+  return realBucketPut(key,value,options);
+ };
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ bucket.put=realBucketPut;
+ const [event]=reports();assert.equal(reports().length,1);assert.equal(event.added,4,'the raced chunk is in this report');assert.equal(workflowRecord().report.chunks,0,'and the new period starts empty');
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
+ assert.equal(reports()[1].added,0,'not counted again in the next one');
+ assert.equal(sumOf(reports(),'added'),4);
+}
+
+// 8. A lost event write is never a lost report: the outbox keeps it, the next firing delivers both, no Discovery step repeats.
 resetAll();seed({count:3});elect();chunkStub(PLAN);
-await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
 {
- const stored=discoveryEvents()[0],putsBefore=puts.length;
+ failEventPuts=true;
+ await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0,chunkLimit:2},step);
+ const lostOutcome=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
+ assert.equal(lostOutcome.closed,true);assert.equal(reports().length,0,'the put failed');
+ assert.equal(outbox().length,1,'the report is durable in the record');assert.equal(outbox()[0].added,3);assert.equal(outbox()[0].id,hourId(GENERATION,1));
+ assert.equal(workflowRecord().report.chunks,0,'the period was closed in the same write');
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2);
+ assert.equal(outbox().length,2,'the next hour is queued behind it');
+ failEventPuts=false;const chunksBefore=context.chunks;creates.length=0;
+ await call('reconcileDiscoveryWorkflow')(env,cron(3));
+ assert.equal(context.chunks,chunksBefore);
+ assert.deepEqual(reports().map(event=>event.id),[1,2,3].map(n=>hourId(GENERATION,n)),'all three, oldest first, once each');
+ assert.equal(sumOf(reports(),'added'),3);assert.deepEqual(outbox(),[]);
+ const putsBefore=puts.length;await call('deliverDiscoveryOutbox')(env);assert.equal(puts.length,putsBefore,'a second delivery writes nothing');
+}
+
+// 8b. Crash between the put and the outbox removal: the entry is already stored, so delivery only removes it and keeps the stored report.
+resetAll();seed({count:3});elect();
+{
+ const event=call('discoveryHourEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:GENERATION,status:'running',reason:null,report:{...call('newDiscoveryReport')(null),chunks:1,added:9},queue:{remaining:3,empty:false},incomplete:false});
+ await call('writeDiscoveryEvent')(env,event);
+ const record=workflowRecord();record.outbox=[{...event,added:1}];set('epg/discovery-workflow.json',record);
+ const before=JSON.stringify(reports()[0]);
+ await call('deliverDiscoveryOutbox')(env);
+ assert.equal(reports().length,1);assert.equal(JSON.stringify(reports()[0]),before,'the first stored event is kept as it was');assert.deepEqual(outbox(),[]);
+}
+
+// 9. The outbox is capped without a silent drop: at the limit a close coalesces into the open accumulator, and everything is reported once puts work again.
+resetAll();seed({count:3});const own=elect();
+{
+ const limit=call('DISCOVERY_REPORT_OUTBOX_LIMIT');assert.equal(typeof limit,'number');
+ failEventPuts=true;let total=0;
+ for(let hour=0;hour<limit+6;hour++){
+  await call('settleWorkflowIfOwner')(env,own,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:1,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:5,cheapRemaining:0,error:null},own+':'+hour,GENERATION)}));total++;
+  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},hour);
+ }
+ assert.equal(outbox().length,limit,'the outbox holds exactly its limit');
+ assert.equal(workflowRecord().report.added,6,'the six hours that did not fit stay in the accumulator, not dropped');
+ assert.equal(reports().length,0);
+ failEventPuts=false;
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},limit+6);
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},limit+7);
+ const real=reports().filter(event=>!event.incomplete);
+ assert.equal(sumOf(real,'added'),total,'every committed chunk is counted exactly once across the reports');
+ assert.equal(real.length>=limit,true);assert.deepEqual(outbox(),[]);
+ const saturated=reports().filter(event=>event.incomplete);
+ for(const event of saturated){for(const name of Object.keys(ZERO))assert.equal(event[name],null,'an event written without a reading never shows a 0');assert.equal(event.reason,'outbox_full');}
+}
+
+// 10. Unreadable or unwritable state: an incomplete event with unknown numbers, the accumulator untouched.
+resetAll();seed({count:3});const own10=elect();
+{
+ await call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10+':1',GENERATION)}));
+ const realRead=context.DiscoveryAuthority.readWorkflow,realWrite=context.DiscoveryAuthority.writeWorkflow;
+ context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ const held=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ assert.equal(held.closed,false);assert.equal(held.reason,'projector_window');
+ const [e0]=reports();assert.equal(e0.incomplete,true);assert.equal(e0.reason,'projector_window');assert.equal(e0.status,'running');
+ for(const name of ['checked','added','reused','screenedOut','touched','tmdbCalls','chunks','remaining','from'])assert.equal(e0[name],null,name+' is unknown, not 0');
+ assert.equal(workflowRecord().report.added,2,'the deltas wait for the next report');
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ context.DiscoveryAuthority.readWorkflow=async()=>{throw new Error('d1 down');};
+ const unreadable=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
+ assert.equal(unreadable.reason,'state_unreadable');assert.equal(reports()[1].incomplete,true);assert.equal(reports()[1].added,null);
+ context.DiscoveryAuthority.readWorkflow=realRead;
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2);
+ const [,,e2]=reports();assert.equal(e2.added,2,'the delayed deltas arrive once, in the next complete report');assert.equal(e2.incomplete,false);
+}
+
+// 11. DST and hour identity: UTC hours, the repeated local hour of the clock change has two reports, a new generation is a new identity.
+resetAll();seed({count:3});elect();
+{
+ const outcome={started:false,reason:'in_progress',programmeRunId:GENERATION};
+ const fall=Date.UTC(2026,9,25,0),spring=Date.UTC(2026,2,29,0);
+ for(const ms of [spring,spring+HOUR,fall,fall+HOUR,fall+2*HOUR])await call('closeHourlyDiscoveryReport')(env,outcome,{scheduled:true,now:ms+120000});
+ const ids=reports().map(event=>event.id);assert.equal(new Set(ids).size,5,'two Madrid 02:00 hours are two reports; no hour merges or skips');
+ assert.deepEqual(reports().map(event=>event.at).sort(),[spring,spring+HOUR,fall,fall+HOUR,fall+2*HOUR].map(ms=>new Date(ms).toISOString()));
+ assert.ok(ids.includes('discovery-hour-a30f67e93a11-20261025T01'));
+ const next=call('discoveryHourEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:OTHER,status:'running',reason:null,report:call('newDiscoveryReport')(null),queue:{remaining:null,empty:false},incomplete:false});
+ assert.notEqual(next.id,hourId(GENERATION,0));
+}
+
+// 12. A newer generation replaces the record: the open accumulator and the outbox are carried, nothing is written at the replacement.
+resetAll();seed({count:3});const own12=elect(0);
+{
+ await call('settleWorkflowIfOwner')(env,own12,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:8,added:5,reused:0,screenedOut:0,touched:0,tmdbCalls:2,remaining:0,cheapRemaining:0,error:null},own12+':1',GENERATION)}));
+ const state=await call('readWorkflowState')(env);state.record.outbox=[{...call('discoveryHourEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:GENERATION,status:'running',reason:null,report:call('newDiscoveryReport')(null),queue:{remaining:1,empty:false},incomplete:false})}];
+ set('epg/discovery-workflow.json',state.record);
+ const stored=await call('readWorkflowState')(env);
+ const created=await call('createWorkflowInstance')(env,OTHER,0,`discovery_${OTHER.replace(/-/g,'')}_0`,stored.etag,null,stored.record);
+ assert.equal(created.started,true);assert.equal(reports().length,0,'a replacement writes no event of its own');
+ assert.equal(workflowRecord().programmeRunId,OTHER);assert.equal(workflowRecord().report.added,5,'the deltas of the old generation are reported by the next hourly report');
+ assert.equal(workflowRecord().outbox.length,1);
+ // The deltas cross the change, the queue reading of the old generation does not: A's last chunk proved remaining 0 and cheapRemaining 0, and the
+ // continuation of B says complete, yet B has no reading of its own, so B's report keeps A's counters and says its queue is unknown.
+ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
+ records.delete('epg/discovery-status.json');
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(1));
+ assert.equal(reports().length,2);
+ const b=reports().find(event=>event.id.includes(OTHER.replace(/-/g,'').slice(0,12)));
+ assert.equal(b.added,5,'the committed deltas of the old generation are kept');assert.equal(b.checked,8);
+ assert.equal(b.remaining,null,'the backlog of generation A is not generation B\'s');assert.equal(b.queueEmpty,false,'and neither is its empty state');assert.notEqual(b.status,'empty');
+ // B's own chunk then speaks for B.
+ await call('settleWorkflowIfOwner')(env,`discovery_${OTHER.replace(/-/g,'')}_0`,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:2,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:0,cheapRemaining:0,error:null},'b:1',OTHER)}));
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(2));
+ const c=reports().find(event=>event.at===new Date(BASE+2*HOUR).toISOString());assert.equal(c.remaining,0);assert.equal(c.queueEmpty,true);assert.equal(c.status,'empty');
+ // A status file of another generation is not B's reading either.
+ resetAll();seed({count:3});elect(0,OTHER);
+ set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
+ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(1));
+ assert.equal(reports()[0].queueEmpty,false);assert.equal(reports()[0].remaining,null);
+}
+
+// 13. Legacy: a settled undelivered per-chain tick is delivered once as it was, an open legacy tick is dropped, a legacy outbox entry is delivered.
+resetAll();seed({count:3});elect();
+{
+ const tick={...{id:'t-1',programmeRunId:GENERATION,startedAt:iso,chunks:2,checked:20,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:4,remaining:7,cheapRemaining:0,error:null},settled:{at:iso,reason:'recovery_exhausted'},delivered:false};
+ const record=workflowRecord();record.tick=tick;record.outbox=[{...tick,id:'t-0',settled:{at:iso,reason:'stale_generation'}}];set('epg/discovery-workflow.json',record);
+ await call('deliverDiscoveryOutbox')(env);
+ assert.deepEqual(reports().map(event=>event.id).sort(),['discovery-t-0','discovery-t-1']);
+ assert.equal(reports().find(event=>event.id==='discovery-t-1').status,'failed');assert.equal(reports().find(event=>event.id==='discovery-t-0').status,'superseded');
+ assert.equal(workflowRecord().tick,undefined);assert.deepEqual(outbox(),[]);
+ const open=workflowRecord();open.tick={id:'t-2',programmeRunId:GENERATION,startedAt:iso,chunks:9,checked:90,added:9,settled:null};set('epg/discovery-workflow.json',open);
+ await call('deliverDiscoveryOutbox')(env);
+ assert.equal(workflowRecord().tick,undefined,'an open legacy tick is dropped');assert.equal(reports().length,2,'its lifetime totals are not a report');
+}
+
+// 14. The events API passes the new type through untouched and reading it writes nothing.
+resetAll();seed({count:3});elect();
+{
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ const stored=reports()[0],putsBefore=puts.length;
  const page=await call('eventPage')(env,null);
  assert.equal(JSON.stringify(page.events.filter(event=>event.type==='discovery')),JSON.stringify([stored]),'the event is returned exactly as stored');
  assert.equal(puts.length,putsBefore,'listing events writes nothing');
 }
 
-// 11. The pure helpers: only finite counts are added, an unknown part is not a zero.
+// 15. The pure helpers.
 {
- const base=call('newDiscoveryTick')(GENERATION,1000);
- const added=call('addChunkToDiscoveryTick')(base,{checked:5,added:'7',reused:-1,screenedOut:null,tmdbCalls:Infinity,remaining:null,cheapRemaining:0,error:null});
- assert.equal(added.chunks,1);assert.equal(added.checked,5);assert.equal(added.added,0);assert.equal(added.reused,0);assert.equal(added.screenedOut,0);assert.equal(added.tmdbCalls,0);
- assert.equal(call('discoveryQueueEmpty')(added.remaining,added.cheapRemaining,added.error),false,'unknown remaining is not empty');
- assert.equal(call('discoveryQueueEmpty')(0,0,null),true);
  for(const unknown of [null,undefined,-1,0.5,'0',NaN])assert.equal(call('discoveryQueueEmpty')(0,unknown,null),false,'an unproven cheap remainder is not a zero: '+String(unknown));
- for(const unknown of [null,undefined,-1,'0'])assert.equal(call('discoveryQueueEmpty')(unknown,0,null),false,'an unproven remaining is not a zero: '+String(unknown));
- assert.equal(call('discoveryQueueEmpty')(0,2,null),false);assert.equal(call('discoveryQueueEmpty')(0,0,'x'),false);assert.equal(call('discoveryQueueEmpty')(3,0,null),false);
- assert.equal(base.id.length>10&&base.id.includes('-'),true);
+ for(const unknown of [null,undefined,-1,'0'])assert.equal(call('discoveryQueueEmpty')(unknown,0,null),false);
+ assert.equal(call('discoveryQueueEmpty')(0,0,null),true);assert.equal(call('discoveryQueueEmpty')(0,2,null),false);assert.equal(call('discoveryQueueEmpty')(0,0,'x'),false);
+ assert.equal(call('discoveryHourStamp')(Date.UTC(2026,10,11,10,59,59)),'20261111T10');
 }
 
 bucket.put=realPut;
-console.log('Discovery events: tick sums, replay-safe counts, rollover inside the tick, lost write recovered without a repeated chunk, failed and superseded ticks, hourly empty tick only when confirmed, and nothing written by a read passed');
+console.log('Discovery events: hourly reports with deltas across rollovers, duplicate/late/missed crons, every state, strict empty queue, replay-safe counts, checkpoint race, outbox recovery and cap, unknown never shown as 0, DST hours, generation handoff and legacy delivery passed');

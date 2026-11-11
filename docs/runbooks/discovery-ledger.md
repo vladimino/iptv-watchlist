@@ -10,7 +10,7 @@ This page describes how to operate the discovery ledger modes of [ADR 0034](../a
 | --- | --- | --- |
 | unset or `full` | Single growing ledger, as before AIR-220 | Acts as `frozen`; never rebuilds the full ledger in the Worker |
 | `frozen` | Same as `full` (no marker written) | No new archive write. Departures stay in the active ledger; re-entries and counts still use the archive |
-| `bounded` | The first commit creates the archive from the departures of the previous ledger | Active ledger = the latest scan's candidates **plus**, while a backlog remains, the part of it that this commit does not archive yet ([ADR 0111](../adr/0111-bounded-ledger-departure-budget.md): the daily flow is archived at once, at most 4,000 observations of the backlog a commit); departures go into new write-once segment versions, a manifest version, then a CAS of `current.json`; then the generation is published |
+| `bounded` | The first commit creates the archive from the departures of the previous ledger | Active ledger = the latest scan's candidates **plus**, while a backlog remains, the part of it that this commit does not archive yet ([ADR 0112](../adr/0112-bounded-ledger-departure-budget.md): the daily flow is archived at once, at most 4,000 observations of the backlog a commit); departures go into new write-once segment versions, a manifest version, then a CAS of `current.json`; then the generation is published |
 
 The commit runs this under the discovery lease. It stops without publishing if:
 
@@ -151,13 +151,13 @@ The production split replaces the Worker's own first bounded commit, which would
 
 ## Switching `frozen` to `bounded` under D1 authority
 
-This is the plan for one operation, written so that it can be approved or refused as a whole. It grants nothing: setting `DISCOVERY_LEDGER_MODE=bounded` is a production writer change and needs its own operation-specific owner approval. The memory and drain figures are in the [AIR-429 evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md); the earlier rehearsal is [AIR-426](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md); the rule is [ADR 0111](../adr/0111-bounded-ledger-departure-budget.md) (Proposed until the owner accepts it).
+This is the plan for one operation, written so that it can be approved or refused as a whole. It grants nothing: setting `DISCOVERY_LEDGER_MODE=bounded` is a production writer change and needs its own operation-specific owner approval. The memory and drain figures are in the [AIR-429 evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md); the earlier rehearsal is [AIR-426](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md); the rule is [ADR 0112](../adr/0112-bounded-ledger-departure-budget.md) (Proposed until the owner accepts it).
 
 **What it does.** Nothing is switched by a deploy. With the flag set, every EPG commit archives the observations that left the scan since the previous generation (the daily flow) and at most 4,000 of the backlog the `frozen` ledger collected (26,491 on 10 November), lowest keys first. The rest stay active and not seen. The generation document carries `"drain":{"backlog":N,"cap":4000}` until the backlog is gone, and the status reports it in `archive.drain`. The backlog of B drains in at most `ceil(B / 4000)` commits (7 for 26,491), one per natural EPG publication, whatever the daily flow. Nothing is deleted.
 
 **Preconditions (read-only, all must hold):**
 
-1. The change that sends every D1 ledger to the paged chunk and the change of ADR 0111 are deployed: `Test and build`, `Test shard 2 of 2` and `Deploy to Cloudflare` succeeded on the merge commit.
+1. The change that sends every D1 ledger to the paged chunk and the change of ADR 0112 are deployed: `Test and build`, `Test shard 2 of 2` and `Deploy to Cloudflare` succeeded on the merge commit.
 2. `feature_flags` shows `DISCOVERY_LEDGER_MODE` absent or `frozen`; the archive pointer exists and the manifest it names is readable; the D1 transfer is `committed` and the seal is `done`; no EPG run is in stage `epg` or `seal`.
 3. The last completed EPG run published, and its ledger phase ran with the packed batches (`epg_phase` exit event with `batches` and `writeMs`).
 4. **The memory gate is decided by the owner.** The strict target of the card (not worse than the frozen commit) is not met by any cap: the floor, with only the daily flow departing, is 4-12 MB of Node old space above the frozen commit (see the evidence). The owner accepts that margin, or does not switch.

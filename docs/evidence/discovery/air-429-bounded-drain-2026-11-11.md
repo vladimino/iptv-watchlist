@@ -2,7 +2,7 @@
 
 **Captured:** 2026-11-11 (UTC). **Method:** offline only. The real planner (`planDiscoveryLedger` through `publishGenerationWithLedger` and `stageSealedGeneration`) and the real ledger seal ran against synthetic objects, a sqlite stand-in for D1 and an in-memory or on-disk bucket. No network, no R2, no D1, no production write, no flag, no run. The only production input is the shape measured on 10 November 2026 ([AIR-423](air-423-ledger-generation-diff-2026-11-10.md)): 47,059 active observations, 20,568 in the latest scan, 26,491 absent.
 
-This record decides nothing. [ADR 0111](../../adr/0111-bounded-ledger-departure-budget.md) is Proposed; setting `DISCOVERY_LEDGER_MODE=bounded` stays a separate owner decision ([runbook](../../runbooks/discovery-ledger.md#switching-frozen-to-bounded-under-d1-authority)).
+This record decides nothing. [ADR 0112](../../adr/0112-bounded-ledger-departure-budget.md) is Proposed; setting `DISCOVERY_LEDGER_MODE=bounded` stays a separate owner decision ([runbook](../../runbooks/discovery-ledger.md#switching-frozen-to-bounded-under-d1-authority)).
 
 ## Memory of one commit (Node old space, MB)
 
