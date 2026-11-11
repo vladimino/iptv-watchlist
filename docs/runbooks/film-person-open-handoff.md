@@ -12,7 +12,7 @@ Counts and digests only in any evidence; no ids, titles, payloads or credentials
 4. The bounded loader for the three empty classes (1,113 rows) has run with its own GO ([loader runbook](film-person-prepared-loader.md)); receipts and readback match.
 5. Every canonical producer is wired (P2/P3) but dormant at `prepared`; readers fail closed (P4); `handoffReadiness` is computed and ready (P6; today `GAPS` makes it never ready).
 6. The frozen-mirror classification (ADR 0117 decision 3) is recorded object by object.
-7. Receipts for cross-domain operations exist (ADR 0117 decision 4); no pending or failed receipt.
+7. Receipts for cross-domain operations exist (ADR 0117 decision 4, [ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): written atomically with each mutation, the activation baseline recorded and verified, `readUnreceipted` clean, and no pending, failed, unknown or abandoned receipt left (`listAttention` empty).
 8. No live projector lease; `projector_window` idle; no EPG, Ratings or Discovery run in flight; the quiet window is agreed in Madrid time.
 9. The `held` drill below passed on a safe copy.
 
@@ -28,7 +28,7 @@ Acceptance criteria: generation rises by exactly one per move; every writer atte
 
 Once the owner approves this single plan, its bounded preflight reads, the lease and exclusive window, the final empty-plan projector pass, the readback, the catch-up and the release are executed within it and need no separate approval each. The **holdpoints** are explicit owner GOs: (H1) the P5 live load of the three empty classes, (H2) the batch `prepared` to `open`, (H3) any live write probe, (H4) `held`, recovery or rollback and any repair.
 
-1. Bounded fenced preflight reads (counts only).
+1. Bounded fenced preflight reads (counts only), including the read-only `SELECT COUNT(*), MAX(revision) FROM canonical_revision` before the receipt baseline is recorded ([ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): expected 0, refuse above the 5,000 cap.
 2. Lease and exclusive window ([ADR 0103](../adr/0103-projector-exclusive-window.md)); stop if not granted. Producers are parked while it is held; cross-domain operations queue as durable receipts.
 3. Final projector pass with an empty plan; stop if any write is planned.
 4. **Holdpoint H2, the single batch:** assert lease held and unexpired, assert marker `prepared`/`open`/G, assert baseline `verified` with the expected reference, guarded `UPDATE` to `d1`/`open`/G+1, CAS fence. All or nothing.
