@@ -1218,6 +1218,8 @@ const noteStep=(env,fields)=>{try{const timer=env?.[STEP_TIMER];if(timer)timer.n
 async function timedPredictionStep(env,step,body,requestId,work){
  let timer=null,timed=env;
  try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
+ // AIR-441: the request's own authority scope (see PredictionD1.scopeRequest); without the prediction module, or if it cannot scope, the step runs as before.
+ try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.scopeRequest==='function')timed=PredictionD1.scopeRequest(timed);}catch{/* an unscoped step reads the marker every time */}
  let status=null;
  try{const response=await work(timed);status=response&&typeof response.status==='number'?response.status:null;return response;}
  catch(error){status=0;throw error;}

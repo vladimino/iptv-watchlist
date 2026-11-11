@@ -123,7 +123,7 @@ async function readAuthorityTogether(db){
   return {version:results[0].results[0]?.version??null,names:results[1].results.map(row=>row.name),row:results[2].results[0]??null};
  }catch{return null;}
 }
-export async function readPredictionAuthority(db,env){
+async function readAuthorityNow(db,env){
  // A local caller that omits the binding and does not set PREDICTION_DB_REQUIRED stays on the objects.
  // The deployed Worker sets that variable. A missing binding, or a bound database with no schema
  // contract, then fails closed and does not read R2. A binding that does not answer fails closed.
@@ -167,6 +167,64 @@ export async function readPredictionAuthority(db,env){
  return {mode:row.mode,tables:true,domain:'ready',version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
 }
 
+// AIR-441. One request of the runner (a next or a submit) asks for the authority marker a few dozen times: every routed read and every write begins with it.
+// Inside such a request, and only there, the answer is reused until the request's own database does anything but read, and callers that ask while a
+// read is in flight share it. The scope belongs to one request's database object (`scopeRequest`), never to the Worker: the next request, any
+// other route, the cron tick and every script read the marker afresh. Every write still carries the generation it was read at in its own fenced
+// batch, so a marker that moved in the meantime fails that write closed (`prediction_domain_cas`) instead of landing it; what a read inside the same
+// request can miss is a change that happened after the marker was read and before the request's next write, for at most the length of the request.
+const REQUEST_SCOPES=new WeakMap();
+const READ_ONLY_SQL=/^\s*(?:select|with|pragma)\b/i;
+function scopedDatabase(database,scope){
+ const statements=new WeakMap();
+ const forget=()=>{scope.read=null;};
+ const statementOf=(statement,sql)=>{
+  const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql);
+  const proxy=new Proxy(statement,{get(target,prop){
+   const value=Reflect.get(target,prop,target);
+   if(typeof value!=='function')return value;
+   if(prop==='bind')return(...args)=>statementOf(value.apply(target,args),sql);
+   if(prop==='first'||prop==='all'||prop==='raw'||prop==='run')return async(...args)=>{
+    const changes=prop==='run'||!reads;
+    if(changes)forget();
+    try{return await value.apply(target,args);}finally{if(changes)forget();}
+   };
+   return value.bind(target);
+  }});
+  statements.set(proxy,{target:statement,reads});
+  return proxy;
+ };
+ const proxy=new Proxy(database,{get(target,prop){
+  const value=Reflect.get(target,prop,target);
+  if(typeof value!=='function')return value;
+  if(prop==='prepare')return sql=>statementOf(value.call(target,sql),sql);
+  if(prop==='batch')return async(list,...rest)=>{
+   const known=Array.isArray(list)?list.map(item=>statements.get(item)):[];
+   const reads=known.length>0&&known.every(item=>item&&item.reads);
+   if(!reads)forget();
+   try{return await value.call(target,Array.isArray(list)?list.map((item,index)=>known[index]?known[index].target:item):list,...rest);}finally{if(!reads)forget();}
+  };
+  if(prop==='exec')return async(...args)=>{forget();try{return await value.apply(target,args);}finally{forget();}};
+  if(prop==='withSession')return(...args)=>{const session=scopedDatabase(value.apply(target,args),scope);return session;};
+  return value.bind(target);
+ }});
+ REQUEST_SCOPES.set(proxy,scope);
+ return proxy;
+}
+export function scopeRequest(env){
+ const database=env?.DB;
+ if(!database||typeof database!=='object'||typeof database.prepare!=='function')return env;
+ return {...env,DB:scopedDatabase(database,{read:null})};
+}
+export async function readPredictionAuthority(db,env){
+ const scope=REQUEST_SCOPES.get(db);
+ if(!scope)return readAuthorityNow(db,env);
+ if(scope.read)return {...await scope.read};
+ const reading=readAuthorityNow(db,env);
+ scope.read=reading;
+ reading.catch(()=>{if(scope.read===reading)scope.read=null;});
+ return {...await reading};
+}
 export async function reservePredictionWrite(env,key,generation,bodyText){
  if(typeof bodyText!=='string')throw failed('prediction_domain_unavailable');
  const authority=await readPredictionAuthority(env?.DB,env);
