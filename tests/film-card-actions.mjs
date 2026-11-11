@@ -65,8 +65,8 @@ assert.doesNotMatch(cardCss,/\.letterboxd-link(?!:)\{[^}]*color:/);
 assert.equal(card.match(/letterboxd\.com/g).length,1);
 assert.doesNotMatch(card,/letterboxd\.com\/film\/lid-not-a-slug/);
 assert.doesNotMatch(card,/letterboxd\.com\/film\/zhara|letterboxd\.com\/film\/жара/i);
-assert.deepEqual(channelsIn(card,'archive'),['Первый','Второй','Третий','Альфа','Бета']);
-assert.deepEqual(channelsIn(card,'future'),['Первый','Второй','Четвёртый']);
+assert.deepEqual(channelsIn(card,'archive'),['Первый'],'a selected channel lists only its own shows: the recordings of other channels are not offered');
+assert.deepEqual(channelsIn(card,'future'),['Первый']);
 assert.doesNotMatch(card,/Старый/);
 assert.equal((card.match(/data-channel="Первый"/g)||[]).length,2,'the exact 72h boundary stays out of both groups');
 
@@ -77,8 +77,8 @@ assert.deepEqual(channelsIn(card,'future'),['Второй','Четвёртый',
 
 runPlain(`state.channels=new Set(['Первый','Второй'])`);
 card=runPlain('card(film)');
-assert.deepEqual(channelsIn(card,'archive'),['Второй','Первый','Третий','Альфа','Бета']);
-assert.deepEqual(channelsIn(card,'future'),['Второй','Первый','Четвёртый']);
+assert.deepEqual(channelsIn(card,'archive'),['Второй','Первый'],'several channels: their shows only, the later one first');
+assert.deepEqual(channelsIn(card,'future'),['Второй','Первый']);
 runPlain(`state.period='archive'`);
 card=runPlain('card(film)');
 assert.match(card,/АРХИВ/);
@@ -89,7 +89,7 @@ card=runPlain('card(film)');
 assert.match(card,/ДАЛЬШЕ/);
 assert.doesNotMatch(card,/АРХИВ/);
 assert.doesNotMatch(card,/Альфа/);
-assert.deepEqual(channelsIn(card,'future'),['Второй','Первый','Четвёртый']);
+assert.deepEqual(channelsIn(card,'future'),['Второй','Первый']);
 runPlain(`state.period='all';state.channels=new Set()`);
 
 for(const url of [
@@ -169,7 +169,7 @@ assert.equal(added.searchParams.get('campaign'),'save');
 assert.equal(added.hash,'#films');
 assert.match(nodes.get('#movies').innerHTML,/href="https:\/\/letterboxd\.com\/film\/heat-1995\/"/);
 assert.match(nodes.get('#shortlist-cards').innerHTML,/href="https:\/\/letterboxd\.com\/film\/heat-1995\/"/);
-assert.deepEqual(channelsIn(nodes.get('#movies').innerHTML,'archive'),['Второй','Первый','Третий','Альфа','Бета']);
+assert.deepEqual(channelsIn(nodes.get('#movies').innerHTML,'archive'),['Второй','Первый'],'after adding a channel the card lists the shows of the selected channels only');
 assert.equal(run('presetQuery().includes("channel=")&&presetQuery().includes("q=")&&presetQuery().includes("mechanic=heist")'),true);
 const lengthAfterAdd=stack.length;
 run(`onMovieClick({target:{closest(selector){return selector==='[data-channel]'?{dataset:{channel:'Второй'}}:null;}},preventDefault(){},stopPropagation(){}})`);

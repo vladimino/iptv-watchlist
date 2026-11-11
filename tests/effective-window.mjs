@@ -137,10 +137,10 @@ for(const period of ['all','archive','soon'])for(const checked of [false,true]){
  assert.equal(run("presetQuery().includes('view=watchlist')"),checked);
  run(`viewClock=${t0};`);
  assert.equal(run('blackZone()'),false);
- const restored=period==='archive'?checked?1:0:checked?2:1;
+ const restored=period==='archive'?0:period==='soon'?1:checked?2:1; // an unscheduled film is listed only under «Все показы»
  assert.equal(run('visibleFilms().length'),restored,`${period} restores the schedule and keeps the box ${checked?'on':'off'}`);
- assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'soon')).length`),checked?2:1);
- assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'archive')).length`),checked?1:0);
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'soon')).length`),1,'the box never adds a film to «Скоро»');
+ assert.equal(run(`films.filter(film=>eligible(film)&&countedScope(film,'archive')).length`),0,'nor to «Архив»');
  assert.equal(run('state.includeUnscheduled'),checked);
  assert.equal(run('state.period'),period);
 }
