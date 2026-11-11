@@ -110,8 +110,15 @@ const LetterboxdRatings=(()=>{
  function detailsOf(run){
   // The stored contributions keep every confirmed film (a page holds about 50, the hard ceiling is STORE_CAP per group), so the exact count is known when the
   // event is built: it shows the first CHANGES_CAP films and counts the rest. Past the ceiling the count is a lower bound and the event says it is incomplete.
-  const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]).filter(page=>page&&page.state==='applied');
+  // AIR-443: a page contribution written before this change has no `news` marker: its `rated` list held Diary reconciliation (a rating the user was told about earlier) and
+  // its `resolved` list held settled references, so neither can be told from news and neither is passed on. The removal contribution (`removal.changes`) held lookups only.
+  const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]).filter(page=>page&&page.state==='applied').map(page=>page.news===2?page:{...page,rated:[],resolved:[],more:{...(page.more||{}),rated:0,resolved:0}});
   const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part,STORE_CAP):all,mergeChanges(null,null,STORE_CAP));
+  // The user-facing lists are news: a first fact (`added`), a real change (`updated`) and a rating first found for a removed film by a lookup (`rated`), each film once. `resolved` is
+  // service work (the `removal.resolved` counter keeps that measure) and is not listed, and neither is a `rated` film that the run already reported as `added` or `updated`.
+  const reported=new Set([...merged.added,...merged.updated].map(item=>item.id));
+  merged.rated=merged.rated.filter(item=>!reported.has(item.id));merged.resolved=[];delete merged.more.resolved;
+  // Incompleteness is judged on what the event can show: the hidden bookkeeping groups do not make it incomplete.
   const incomplete=pages.some(page=>page.incomplete===true)||Object.values(merged.more).some(count=>count>0);
   const shown={},more={};
   for(const group of CHANGE_GROUPS){
@@ -295,7 +302,7 @@ const LetterboxdRatings=(()=>{
    out[group]=[];
    for(const [index,item] of (groups[group]||[]).entries()){
     // Only the films an event can show (the first 25 of a group) are looked up by their removal event; the rest are only counted.
-    const known=labels.get(String(item.id))||{},own=item.title?{title:item.title,year:item.year??null}:(group==='rated'||group==='resolved')&&!known.title&&index<CHANGES_CAP?await removedLabel(env,item.id):{};
+    const known=labels.get(String(item.id))||{},own=item.title?{title:item.title,year:item.year??null}:(group==='added'||group==='rated'||group==='resolved')&&!known.title&&index<CHANGES_CAP?await removedLabel(env,item.id):{};
     out[group].push({...item,title:item.title||own.title||known.title||null,year:item.year??own.year??known.year??null,tmdb:item.tmdb||known.tmdb||null});
    }
   }
@@ -333,10 +340,9 @@ const LetterboxdRatings=(()=>{
     try{
      const groups={added:[],updated:[],rated:[],resolved:[]};
      for(const change of await LetterboxdFacts.planDiaryChanges(env,evidence))(change.kind==='added'?groups.added:groups.updated).push({id:change.lid,rating:change.rating,...(change.kind==='updated'?{from:change.from}:{})});
-     const queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
-     if(removalQueueV2(queue))for(const item of evidence)if(item.rating!=null&&half(item.rating)!=null&&queue.films[item.lid]&&queue.films[item.lid].state!=='rated')groups.rated.push({id:item.lid,rating:item.rating});
+     // AIR-443: a removed film whose rating the Diary supplies is not news here: a first fact is already `added` and a fact that exists is a rating the user was told about earlier.
      if(changeCount(groups)){
-      plan={...mergeChanges(null,await labelledChanges(env,groups),STORE_CAP),state:'planned'};planned[key]=plan;
+      plan={...mergeChanges(null,await labelledChanges(env,groups),STORE_CAP),state:'planned',news:2};planned[key]=plan;
       await own(current=>({...current,updatedAt:iso(clock()),diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),[key]:plan}}}));
      }
     }catch(e){if(e instanceof LeaseLost){leaseLost=true;return;}plan=null;incomplete=true;}
@@ -400,7 +406,7 @@ const LetterboxdRatings=(()=>{
    for(const item of list){
     const entry=removalQueueV2(queue)?queue.films[item.id]:null;
     if(item.kind==='rated'){if(entry?.state==='rated'&&half(entry.rating)!=null)groups.rated.push({id:item.id,rating:entry.rating});}
-    else{const ref=(entry?.refs||[]).find(value=>value.eventKey===item.eventKey);if(ref&&ref.resolved===true&&half(item.rating)!=null)groups.resolved.push({id:item.id,rating:item.rating});}
+    // AIR-443: settling a removal reference with a rating that is already known is service work (the `removal.resolved` counter), not a news line.
    }
    let labelled=groups;if(changeCount(groups)){try{labelled=await labelledChanges(env,groups);}catch{}}
    const done=new Set(list.map(intentKey));
@@ -558,5 +564,5 @@ const LetterboxdRatings=(()=>{
   const fe=gated.fenceEnv;
   return {status:200,body:await (action==='start'?start(fe,body):action==='step'?step(fe,body):migrate(fe,body))};
  }
- return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,detailsOf,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();
