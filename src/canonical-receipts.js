@@ -3,16 +3,31 @@
 // introduced in code only; applying it to production D1 is a separate owner GO.
 //
 // The protocol (owner decision 5: a cross-domain operation into canonical Film/Person has a durable receipt, a stable request id, bounded safe retries and a separate reconciliation):
-//   1. PENDING first. The receipt row is inserted (state `pending`, attempt 1, the planned-content digest, the marker generation) in a batch fenced on the marker (`d1`/`open` at
-//      that generation, the same fence head as every canonical mutation). If that insert is refused, nothing was written to canonical.
-//   2. COMMIT. The writer runs its own fenced commit (src/canonical-mutations.js `fenced.commit`, unchanged). A writer that adopts the receipt may append `appliedStatements` to its OWN
-//      batch, so `applied` is atomic with the content; a writer that does not is marked applied by a second batch right after (a crash between them leaves `pending`, which is safe).
-//   3. APPLIED. A definite failure marks `failed` (the batch rolled back whole: known NOT applied) or `abandoned` (a permanent input or data refusal); an unknown outcome (the transport
-//      or the database answered nothing usable) marks `unknown`. A receipt left `pending` past its attempt window is treated exactly like `unknown`.
-//   4. RECONCILE by READBACK, never by assumption: a non-terminal receipt that is DUE is settled by reading the target and comparing its content digest with the planned one. Equal means
-//      applied (the write landed and only the receipt was lost); different means it did not land and the SAME request id is replayed, at most `maxAttempts` times, on a stored backoff
-//      schedule. Nothing here is a timer: the due time is stored in `next_attempt_at` and whoever reconciles compares it with a clock they pass in.
-//   An observed canonical change (a `canonical_revision` row) with no applied receipt for its revision is `unreceipted`, reported and never treated as safe.
+//   0. BASELINE first (once, at activation). `recordBaseline` copies the current canonical_revision rows into canonical_receipt_baseline, in one fenced batch, before any receipt exists.
+//      A revision at or below its baseline entry predates receipts: it is `pre_receipt_baseline`, never claimed to have a receipt and never reported `unreceipted`. A receipt cannot be
+//      inserted before the baseline exists.
+//   1. PENDING. The receipt row is inserted (state `pending`, attempt 1, the planned-content digest, the marker generation) in a batch carrying the same fence head as every canonical
+//      mutation. If that insert is refused, nothing was written to canonical.
+//   2. COMMIT. The writer runs its own fenced commit (src/canonical-mutations.js `fenced.commit`, unchanged).
+//   3. APPLIED. Two ways, and they do NOT give the same guarantee:
+//      - ATOMIC (the rule for every writer that can: `hooks.atomic` true): the writer appends `appliedStatements()` to its OWN batch, so `applied` commits with the content or not at all.
+//        A lost answer cannot leave a landed write without its receipt, and the receipt can never say `applied` for a write that rolled back. Under `atomic` this module never marks
+//        applied by a second batch: a writer that returns without the receipt applied leaves it `unknown` (`atomic_mark_missing`).
+//      - SEPARATE MARK (weaker, allowed only where a writer cannot append statements): a second batch marks applied after the writer returned success. If the answer or the mark is lost,
+//        the receipt stays `pending` and only OPERATION-SPECIFIC EVIDENCE can settle it as applied (see 4). A content digest alone cannot: another actor may independently reach
+//        identical final content, and a later writer may overwrite it.
+//      A definite rollback marks `failed` (known NOT applied), a permanent refusal `abandoned`, any other outcome `unknown`; a `pending` receipt past its window is treated like `unknown`.
+//   4. RECONCILE by READBACK, never by assumption. A due non-terminal receipt is settled from what its operation's `readback` returns: {digest, revision, proof?}.
+//      - `proof: 'request'` means the operation proved THIS request's own effect (request-id evidence written inside the writer's own batch, for example) at `revision`: the receipt becomes
+//        `applied`, even if the content was overwritten since, and the writer does not run again.
+//      - A digest equal to the planned one WITHOUT that proof is `content_unproven`: the receipt is never marked applied; it is abandoned for review (`content_match_unproven`), because
+//        the identical content may be someone else's write. It is reported in `needsReview`.
+//      - Anything else did not land: the SAME request id is retried, at most `maxAttempts` times on a stored backoff, but only after the retry is re-validated (see 5).
+//   5. STALE REVISION. A retry reads the CURRENT canonical revision. If it equals the revision the receipt was planned against, the retry runs. If an unrelated writer advanced it, the
+//      retry is never blind: the operation's `revalidate(env,receipt,{currentRevision,observed})` must answer `proceed` (the writer re-checked its preconditions and re-plans against
+//      `currentRevision`); `superseded` abandons the receipt (`superseded_by_newer_revision`); no `revalidate`, or any other answer, abandons it for repair
+//      (`stale_revision_needs_repair`). The writer's own revision CAS still refuses anything planned against an older revision, so newer content is never overwritten by default.
+//   An observed canonical change (a `canonical_revision` row ABOVE its baseline) with no applied receipt for its revision is `unreceipted`, reported and never treated as safe.
 //
 // What it stores and never stores: operation kind, origin, target (kind, id), the SHA-256 digest of the planned content, revisions, the marker generation, state, attempts, due time,
 // timestamps and a short lowercase error class. No payload, no title, no name, no message text, no personal data. The error class is the error CODE, never its message.
@@ -23,10 +38,12 @@ import {fenced} from './canonical-mutations.js';
 export const RECEIPT_MIN_VERSION=19;
 export const RECEIPT_STATES=Object.freeze(['pending','applied','failed','unknown','abandoned']);
 const NON_TERMINAL=['pending','failed','unknown'];
-// The bounded retry policy. attempts counts every attempt including the first; the backoff after the n-th failed attempt is backoffMs[n-1] (the last entry repeats); an in-flight
-// (`pending`) attempt owns the receipt for attemptWindowMs; a receipt older than abandonAfterMs is abandoned instead of retried. The table caps attempts at 16 in SQL.
+// SAFE INITIAL DEFAULTS (owner-reviewable, ADR 0119): attempts counts every attempt including the first; the backoff after the n-th failed attempt is backoffMs[n-1] (the last entry
+// repeats); an in-flight (`pending`) attempt owns the receipt for attemptWindowMs; a receipt older than abandonAfterMs is abandoned instead of retried. The table caps attempts at 16.
 export const RETRY_POLICY=Object.freeze({maxAttempts:5,backoffMs:Object.freeze([60000,300000,1800000,7200000]),attemptWindowMs:120000,abandonAfterMs:7*24*60*60*1000});
 export const RECONCILE_LIMIT_MAX=50;
+// The baseline copies at most this many canonical_revision rows in one statement; a larger table is refused (a bounded activation step, not a bulk job).
+export const BASELINE_CAP=5000;
 // The closed set of operation kinds the P2a/P2b writers and the P3 producers register under. The SQL column accepts any lowercase identifier; this list is the code-reviewed set.
 export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement']);
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
@@ -93,11 +110,19 @@ function sameRequest(row,request){
  return row.operation===request.operation&&row.origin===request.origin&&row.target.kind===request.target.kind&&row.target.id===request.target.id&&row.contentDigest===request.digest;
 }
 
-// The pure reconciliation plan. receipts: stored receipts as `readReceipt` shows them; observed: {[requestId]: {digest,revision}|null} for the targets already read (a missing key means NOT read yet,
-// null means the target was read and holds nothing); marker: {state,generation} from readAuthority; now: ISO time. It reads nothing and writes nothing.
-// Actions: `readback` (read the target first), `mark_applied` (the target already holds the planned content: only the receipt was lost), `replay` (re-plan against the current revision and
-// run again with the SAME request id; `replan` is true when the marker generation moved), `abandon` (bounded: attempts exhausted or too old). Everything else is `waiting` with its reason,
-// or `attention` (an abandoned receipt: a known failure that needs repair, never silently dropped).
+// What a readback proves about a receipt. `applied`: the operation proved this request's own effect. `content_unproven`: the planned content is there but nothing says it is THIS request's
+// (another actor may have reached it): never applied. `absent`: the planned effect is not there.
+export function judgeReadback(observed,receipt){
+ if(observed&&observed.proof==='request')return 'applied';
+ if(observed&&observed.digest===receipt.contentDigest)return 'content_unproven';
+ return 'absent';
+}
+
+// The pure reconciliation plan. receipts: stored receipts as `readReceipt` shows them; observed: {[requestId]: {digest,revision,proof?}|null} for the targets already read (a missing key means NOT
+// read yet, null means the target was read and holds nothing); marker: {state,generation} from readAuthority; now: ISO time. It reads nothing and writes nothing.
+// Actions: `readback` (read the target first), `mark_applied` (the readback proved this request's own effect), `needs_review` (the content is there but unproven), `replay` (retry with the SAME
+// request id, after the stale-revision check of the pass; `replan` is true when the marker generation moved), `abandon` (bounded: attempts exhausted or too old). Everything else is `waiting`
+// with its reason, or `attention` (an abandoned receipt: a known failure that needs repair, never silently dropped).
 export function reconcilePlan({receipts,observed={},marker,now,policy=RETRY_POLICY}){
  const plan={actions:[],waiting:[],attention:[],counts:{applied:0,abandoned:0,pending:0,failed:0,unknown:0}};
  const at=timeOf(now);
@@ -111,7 +136,9 @@ export function reconcilePlan({receipts,observed={},marker,now,policy=RETRY_POLI
   if(marker?.state!=='open'){plan.waiting.push({requestId:receipt.requestId,reason:'marker_not_open',dueAt:receipt.nextAttemptAt});continue;}
   const seen=observed[receipt.requestId];
   if(seen===undefined){plan.actions.push({requestId:receipt.requestId,action:'readback'});continue;}
-  if(seen&&seen.digest===receipt.contentDigest){plan.actions.push({requestId:receipt.requestId,action:'mark_applied',revision:Number(seen.revision)||0});continue;}
+  const verdict=judgeReadback(seen,receipt);
+  if(verdict==='applied'){plan.actions.push({requestId:receipt.requestId,action:'mark_applied',revision:Number(seen.revision)||0});continue;}
+  if(verdict==='content_unproven'){plan.actions.push({requestId:receipt.requestId,action:'needs_review',reason:'content_match_unproven'});continue;}
   if(receipt.attempts>=policy.maxAttempts){plan.actions.push({requestId:receipt.requestId,action:'abandon',reason:'attempts_exhausted'});continue;}
   if(at-timeOf(receipt.createdAt)>policy.abandonAfterMs){plan.actions.push({requestId:receipt.requestId,action:'abandon',reason:'expired'});continue;}
   plan.actions.push({requestId:receipt.requestId,action:'replay',attempt:receipt.attempts+1,replan:receipt.markerGeneration!==marker.generation});
@@ -119,35 +146,40 @@ export function reconcilePlan({receipts,observed={},marker,now,policy=RETRY_POLI
  return plan;
 }
 
-// Observed canonical changes without an applied receipt. changes: [{kind,id,revision}] (the canonical_revision rows); receipts: stored receipts. A change is covered only by an APPLIED receipt of the
-// same target whose applied revision is that revision. A target with a non-terminal receipt is reported with reason `receipt_not_applied`, one with none with `no_receipt`: both are `unreceipted` and
-// `safe` is false while either exists. An absent receipt is never read as "fine".
-export function unreceiptedChanges({changes,receipts}){
+// Observed canonical changes without an applied receipt. changes: [{kind,id,revision}] (the canonical_revision rows); receipts: stored receipts; baseline: {'kind|id': revision} recorded at
+// activation (absent entry: 0). A revision at or below its baseline entry is `pre_receipt_baseline`: it predates receipts, is listed apart and is NOT unreceipted. Above it, a change is covered only
+// by an APPLIED receipt of the same target whose applied revision is that revision; a target with a non-terminal receipt is reported `receipt_not_applied`, one with none `no_receipt`: both are
+// `unreceipted` and `safe` is false while either exists. An absent receipt is never read as "fine".
+export function unreceiptedChanges({changes,receipts,baseline={}}){
  const applied=new Set(),open=new Set();
  for(const receipt of receipts||[]){
   const key=receipt.target.kind+'|'+receipt.target.id;
   if(receipt.state==='applied')applied.add(key+'|'+receipt.appliedRevision);
   else if(NON_TERMINAL.includes(receipt.state))open.add(key);
  }
- const unreceipted=[];let covered=0;
+ const unreceipted=[],preReceiptBaseline=[];let covered=0;
  for(const change of changes||[]){
   if(!(Number(change.revision)>=1))continue;
   const key=change.kind+'|'+change.id;
-  if(applied.has(key+'|'+Number(change.revision)))covered++;
-  else unreceipted.push({kind:change.kind,id:change.id,revision:Number(change.revision),reason:open.has(key)?'receipt_not_applied':'no_receipt'});
+  if(applied.has(key+'|'+Number(change.revision))){covered++;continue;}
+  if(Number(change.revision)<=Number(baseline[key]||0)){preReceiptBaseline.push({kind:change.kind,id:change.id,revision:Number(change.revision)});continue;}
+  unreceipted.push({kind:change.kind,id:change.id,revision:Number(change.revision),reason:open.has(key)?'receipt_not_applied':'no_receipt'});
  }
- return {unreceipted,covered,safe:unreceipted.length===0};
+ return {unreceipted,preReceiptBaseline,covered,safe:unreceipted.length===0};
 }
 
 // ---- the registration point ----
 
 // What a P2a/P2b writer (or a P3 producer adapter) registers for one operation kind:
-//   readback(env,target,receipt) -> {digest,revision}|null  the content digest of what the target holds NOW, computed through digestOf over the same canonical form as the planned digest;
-//   replay(env,receipt,ctx)      -> {revision}              re-plans against the CURRENT revision (ctx.currentRevision) and runs the writer's fenced commit again with the same request id.
-// A writer that wants `applied` atomic with its content appends ctx.appliedStatements() to its own batch before the commit. Both functions are the adopter's; this module owns the protocol.
+//   readback(env,target,receipt) -> {digest,revision,proof?}|null  the content digest of what the target holds NOW (digestOf over the same canonical form as the planned digest) and, when the
+//                                    operation can prove this request's own effect (request-id evidence written inside the writer's own batch), proof:'request' with the revision it landed at;
+//   replay(env,receipt,ctx)      -> {revision}                    runs the writer's fenced commit again with the same request id, planned against ctx.currentRevision;
+//   revalidate(env,receipt,ctx)  -> 'proceed'|'superseded'        optional: called only when the entity revision moved since planning; the writer re-checks its preconditions. Without it a moved
+//                                    revision abandons the receipt for repair;
+//   atomic: true                 the writer appends ctx.appliedStatements() to its own batch (the rule for every writer that can; the separate mark is the weaker path).
 export function defineOperation(spec){
- if(!OPERATION_KINDS.includes(spec?.operation)||typeof spec.readback!=='function'||typeof spec.replay!=='function')throw failed('film_person_invalid');
- return Object.freeze({operation:spec.operation,readback:spec.readback,replay:spec.replay});
+ if(!OPERATION_KINDS.includes(spec?.operation)||typeof spec.readback!=='function'||typeof spec.replay!=='function'||(spec.revalidate!==undefined&&typeof spec.revalidate!=='function'))throw failed('film_person_invalid');
+ return Object.freeze({operation:spec.operation,readback:spec.readback,replay:spec.replay,revalidate:spec.revalidate,atomic:spec.atomic===true});
 }
 export function operationRegistry(specs=[]){
  const map=new Map();
@@ -157,16 +189,25 @@ export function operationRegistry(specs=[]){
 
 // ---- storage ----
 
-export async function receiptsAvailable(env){
+// `no_schema` (schema below 19, or the table absent), `no_baseline` (schema 19 but the activation baseline is not recorded) or `ready`.
+export async function receiptsStatus(env){
  const db=database(env);
- if(!db)return false;
+ if(!db)return 'no_schema';
  try{
-  const row=await one(db,"SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canonical_write_receipt') AS present");
-  return Number(row?.version)>=RECEIPT_MIN_VERSION&&Number(row?.present)===1;
- }catch{return false;}
+  const row=await one(db,"SELECT (SELECT version FROM schema_contract WHERE id=1) AS version,(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='canonical_write_receipt') AS present,(SELECT COUNT(*) FROM canonical_receipt_watermark) AS baseline");
+  if(!(Number(row?.version)>=RECEIPT_MIN_VERSION&&Number(row?.present)===1))return 'no_schema';
+  return Number(row?.baseline)===1?'ready':'no_baseline';
+ }catch{return 'no_schema';}
 }
+export async function receiptsAvailable(env){return (await receiptsStatus(env))!=='no_schema';}
 // A producer must refuse to write canonical while this throws: without a receipt table the absence of a record proves nothing.
-export async function assertReceiptsAvailable(env){if(!(await receiptsAvailable(env)))throw failed('receipt_schema_missing');}
+export async function assertReceiptsAvailable(env){if((await receiptsStatus(env))==='no_schema')throw failed('receipt_schema_missing');}
+// ... and while the activation baseline is not recorded: no receipt may exist before it, and no change could be told from a pre-receipt one.
+async function assertReceiptsReady(env){
+ const status=await receiptsStatus(env);
+ if(status==='no_schema')throw failed('receipt_schema_missing');
+ if(status==='no_baseline')throw failed('receipt_baseline_missing');
+}
 
 export async function readReceipt(env,requestId){
  const db=database(env);
@@ -180,14 +221,20 @@ export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit
  const where='state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'');
  return (await many(db,'SELECT '+COLUMNS+' FROM canonical_write_receipt WHERE '+where+' ORDER BY next_attempt_at,request_id LIMIT ?',[...list,...(dueBefore?[dueBefore]:[]),cap])).map(view);
 }
-// Observed canonical changes with no applied receipt for their current revision, bounded; the result is the pure `unreceiptedChanges` answer over exactly those rows.
+
+async function currentRevisionOf(env,target){
+ return Number((await one(database(env),'SELECT COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0) AS revision',[target.kind,target.id]))?.revision??0);
+}
+
+// Observed canonical changes ABOVE their activation baseline with no applied receipt for their current revision, bounded, and the count of revisions that predate receipts.
 export async function readUnreceipted(env,{limit=100}={}){
- await assertReceiptsAvailable(env);
+ await assertReceiptsReady(env);
  const db=database(env);
  const cap=Math.min(Math.max(Number(limit)||1,1),500);
- const rows=await many(db,"SELECT r.kind AS kind,r.id AS id,r.revision AS revision,EXISTS (SELECT 1 FROM canonical_write_receipt o WHERE o.target_kind=r.kind AND o.target_id=r.id AND o.state IN ('pending','failed','unknown')) AS has_open FROM canonical_revision r WHERE r.revision>=1 AND NOT EXISTS (SELECT 1 FROM canonical_write_receipt w WHERE w.target_kind=r.kind AND w.target_id=r.id AND w.state='applied' AND w.applied_revision=r.revision) ORDER BY r.kind,r.id LIMIT ?",[cap]);
+ const rows=await many(db,"SELECT r.kind AS kind,r.id AS id,r.revision AS revision,EXISTS (SELECT 1 FROM canonical_write_receipt o WHERE o.target_kind=r.kind AND o.target_id=r.id AND o.state IN ('pending','failed','unknown')) AS has_open FROM canonical_revision r LEFT JOIN canonical_receipt_baseline b ON b.kind=r.kind AND b.id=r.id WHERE r.revision>COALESCE(b.revision,0) AND NOT EXISTS (SELECT 1 FROM canonical_write_receipt w WHERE w.target_kind=r.kind AND w.target_id=r.id AND w.applied_revision=r.revision) ORDER BY r.kind,r.id LIMIT ?",[cap]);
  const pseudo=rows.filter(row=>Number(row.has_open)===1).map(row=>({target:{kind:row.kind,id:row.id},state:'pending',appliedRevision:null}));
- return unreceiptedChanges({changes:rows,receipts:pseudo});
+ const below=await one(db,'SELECT COUNT(*) AS n FROM canonical_revision r JOIN canonical_receipt_baseline b ON b.kind=r.kind AND b.id=r.id WHERE r.revision<=b.revision');
+ return {...unreceiptedChanges({changes:rows,receipts:pseudo}),preReceiptBaselineCount:Number(below?.n??0)};
 }
 
 const INSERT='INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?)';
@@ -210,9 +257,10 @@ async function writeBatch(env,gate,statements){
  try{await db.batch(all.map(([sql,params])=>db.prepare(sql).bind(...params)));}
  catch(error){
   const message=String(error?.message||error);
+  if(/UNIQUE constraint failed: canonical_receipt_watermark/i.test(message))throw failed('receipt_baseline_exists',error);
+  if(/UNIQUE constraint failed: canonical_write_receipt/i.test(message))throw failed('receipt_exists',error);
   const trigger=/canonical_receipt_([a-z_]+)/.exec(message);
   if(trigger)throw failed('canonical_receipt_'+trigger[1],error);
-  if(/UNIQUE constraint failed: canonical_write_receipt/i.test(message))throw failed('receipt_exists',error);
   if(/CHECK constraint failed/i.test(message)){
    let again;
    try{again=await readAuthority(env);}catch{throw failed('film_person_unavailable',error);}
@@ -221,6 +269,22 @@ async function writeBatch(env,gate,statements){
   }
   throw failed('film_person_unavailable',error);
  }
+}
+
+// The activation baseline: ONE fenced batch that records the watermark row and copies every canonical_revision row. It is refused once a receipt or a baseline exists, while the marker is not
+// `open`, and when canonical_revision holds more than BASELINE_CAP rows. It never creates a receipt: the revisions it covers are `pre_receipt_baseline`, not retrospectively receipted.
+export async function recordBaseline(env,{now=()=>new Date().toISOString(),cap=BASELINE_CAP}={}){
+ await assertReceiptsAvailable(env);
+ const gate=assertWritable(await readAuthority(env));
+ const db=database(env);
+ const count=Number((await one(db,'SELECT COUNT(*) AS n FROM canonical_revision'))?.n??0);
+ if(count>cap)throw failed('film_person_bounded');
+ const at=typeof now==='function'?now():now;
+ await writeBatch(env,gate,[
+  ['INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,taken_at) VALUES (1,?,(SELECT COUNT(*) FROM canonical_revision),?)',[gate.generation,at]],
+  ['INSERT INTO canonical_receipt_baseline (kind,id,revision) SELECT kind,id,revision FROM canonical_revision',[]],
+ ]);
+ return {entries:count,generation:gate.generation,takenAt:at};
 }
 
 async function transition(env,gate,row,change,now){
@@ -235,11 +299,11 @@ async function transition(env,gate,row,change,now){
 }
 
 // Runs one attempt whose receipt is already `pending` at `attempt`, then settles it. A run error never escapes as a throw from here: it is returned, after the receipt is marked (a failed
-// mark leaves the receipt `pending`, which reconciliation treats as unknown).
-async function finishAttempt(env,{gate,row,attempt,run,clock,policy}){
+// mark leaves the receipt `pending`, which reconciliation treats as unknown). With `atomic`, the writer must have applied the receipt in its own batch: this function never marks it applied.
+async function finishAttempt(env,{gate,row,attempt,run,clock,policy,atomic=false,currentRevision}){
  let result;
  try{
-  result=await run({gate,requestId:row.requestId,attempt,target:row.target,appliedStatements:()=>appliedStatements({requestId:row.requestId,attempt,target:row.target,now:clock()})});
+  result=await run({gate,requestId:row.requestId,attempt,target:row.target,currentRevision,appliedStatements:()=>appliedStatements({requestId:row.requestId,attempt,target:row.target,now:clock()})});
  }catch(error){
   const {errorClass,outcome}=classify(error);
   const now=clock();
@@ -253,25 +317,52 @@ async function finishAttempt(env,{gate,row,attempt,run,clock,policy}){
  let after=null;
  try{after=await readReceipt(env,row.requestId);}catch{/* settled below */}
  if(after?.state==='applied')return {ran:true,state:'applied',result,receipt:after};
+ if(atomic){
+  try{const now=clock();await transition(env,gate,{...row,state:'pending',attempts:attempt},{kind:'failed',state:'unknown',errorClass:'atomic_mark_missing',nextAttemptAt:plus(now,backoffMs(attempt,policy))},now);}catch{/* stays pending */}
+  return {ran:true,state:'unknown',result,needsReview:true,errorClass:'atomic_mark_missing'};
+ }
  let revision=Number.isInteger(result?.revision)&&result.revision>=0?result.revision:null;
  try{
-  if(revision===null)revision=Number((await one(database(env),'SELECT COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0) AS revision',[row.target.kind,row.target.id]))?.revision??0);
+  if(revision===null)revision=await currentRevisionOf(env,row.target);
   await transition(env,gate,{...row,state:'pending',attempts:attempt},{kind:'applied',revision},clock());
  }catch{return {ran:true,state:'pending',result,markFailed:true};}
  return {ran:true,state:'applied',result};
 }
 
-// ONE cross-domain write with its durable receipt. input: {requestId,operation,origin,target:{kind,id},expectedRevision,digest,now?,policy?}. hooks: {run,readback}.
-//   run({gate,requestId,attempt,target,appliedStatements}) -> {revision?}  the writer's fenced commit (it may append appliedStatements() to its own batch);
-//   readback(env,target,receipt) -> {digest,revision}|null               the same readback an operation registers for reconciliation.
-// A new request id records `pending` first and then runs. An existing id never runs while its attempt is in flight or backing off; once due it is first settled by readback (the write may have
-// landed), and only if the target does not hold the planned content is it retried (bounded) with the same id. A different operation, target or content under an id is `receipt_conflict`.
-// A run error is rethrown after the receipt is marked.
+// Applies one planned action to a due receipt. A `replay` first reads the CURRENT revision: unchanged since planning, the retry proceeds; moved by an unrelated writer, it proceeds only when the
+// operation's `revalidate` says so (the writer re-checked its preconditions), otherwise the receipt is abandoned for repair or as superseded. Returns {state,...} or {retry:{currentRevision}}.
+async function applyAction(env,gate,row,action,{revalidate,observed,clock,policy}){
+ const now=clock();
+ if(action.action==='mark_applied'){await transition(env,gate,row,{kind:'applied',revision:action.revision},now);return {state:'applied',settled:'readback'};}
+ if(action.action==='needs_review'){await transition(env,gate,row,{kind:'abandoned',errorClass:action.reason},now);return {state:'abandoned',reason:action.reason,needsReview:true};}
+ if(action.action==='abandon'){await transition(env,gate,row,{kind:'abandoned',errorClass:action.reason},now);return {state:'abandoned',reason:action.reason};}
+ const currentRevision=await currentRevisionOf(env,row.target);
+ if(currentRevision!==row.plannedRevision){
+  const verdict=typeof revalidate==='function'?await revalidate(env,row,{currentRevision,observed}):'stale';
+  if(verdict!=='proceed'){
+   const reason=verdict==='superseded'?'superseded_by_newer_revision':'stale_revision_needs_repair';
+   await transition(env,gate,row,{kind:'abandoned',errorClass:reason},now);
+   return {state:'abandoned',reason};
+  }
+ }
+ await transition(env,gate,row,{kind:'retry',plannedRevision:currentRevision,nextAttemptAt:plus(now,policy.attemptWindowMs)},now);
+ return {retry:{currentRevision}};
+}
+
+// ONE cross-domain write with its durable receipt. input: {requestId,operation,origin,target:{kind,id},expectedRevision,digest,now?,policy?}. hooks: {run,readback,revalidate?,atomic?}.
+//   run({gate,requestId,attempt,target,currentRevision,appliedStatements}) -> {revision?}  the writer's fenced commit (with `atomic`, it appends appliedStatements() to its own batch);
+//   readback(env,target,receipt) -> {digest,revision,proof?}|null                         the same readback an operation registers for reconciliation;
+//   revalidate(env,receipt,{currentRevision,observed}) -> 'proceed'|'superseded'          needed to retry after another writer advanced the entity revision.
+// A new request id records `pending` first and then runs. An existing id never runs while its attempt is in flight or backing off; once due it is first settled from the readback (applied only on
+// proof of this request, content alone is `needs_review`), and only if the planned effect is absent is it retried (bounded, revalidated against the current revision) with the same id. A different
+// operation, target or content under an id is `receipt_conflict`. A run error is rethrown after the receipt is marked. Needs the schema AND the activation baseline.
 export async function receiptedWrite(env,input,hooks){
  const request=normalizeRequest(input);
  const policy=input.policy||RETRY_POLICY,clock=input.now||(()=>new Date().toISOString());
- await assertReceiptsAvailable(env);
+ const status=await receiptsStatus(env);
+ if(status==='no_schema')throw failed('receipt_schema_missing');
  const gate=assertWritable(await readAuthority(env));
+ if(status==='no_baseline')throw failed('receipt_baseline_missing');
  let row=await readReceipt(env,request.requestId),created=false;
  if(!row){
   const now=clock();
@@ -288,35 +379,33 @@ export async function receiptedWrite(env,input,hooks){
  if(!sameRequest(row,request))throw failed('receipt_conflict');
  if(row.state==='applied')return {ran:false,state:'applied',already:true,receipt:row};
  if(row.state==='abandoned')return {ran:false,state:'abandoned',receipt:row};
- let attempt=row.attempts;
+ let attempt=row.attempts,currentRevision=request.expectedRevision;
  if(!created){
   const now=clock();
-  if(timeOf(now)<timeOf(row.nextAttemptAt))return {ran:false,state:row.state,reason:row.state==='pending'?'in_flight':'backoff',nextAttemptAt:row.nextAttemptAt,receipt:row};
+  const due=reconcilePlan({receipts:[row],observed:{},marker:gate,now,policy});
+  if(due.waiting.length)return {ran:false,state:row.state,reason:due.waiting[0].reason,nextAttemptAt:row.nextAttemptAt,receipt:row};
   if(typeof hooks?.readback!=='function')throw failed('receipt_readback_required');
-  const observed=await hooks.readback(env,row.target,row);
-  if(observed&&observed.digest===row.contentDigest){
-   await transition(env,gate,row,{kind:'applied',revision:Number(observed.revision)||0},now);
-   return {ran:false,state:'applied',settled:'readback'};
-  }
-  const exhausted=row.attempts>=policy.maxAttempts?'attempts_exhausted':timeOf(now)-timeOf(row.createdAt)>policy.abandonAfterMs?'expired':null;
-  if(exhausted){await transition(env,gate,row,{kind:'abandoned',errorClass:exhausted},now);return {ran:false,state:'abandoned',reason:exhausted};}
-  await transition(env,gate,row,{kind:'retry',plannedRevision:request.expectedRevision,nextAttemptAt:plus(now,policy.attemptWindowMs)},now);
-  attempt=row.attempts+1;
+  const observed=(await hooks.readback(env,row.target,row))??null;
+  const action=reconcilePlan({receipts:[row],observed:{[row.requestId]:observed},marker:gate,now,policy}).actions[0];
+  const outcome=await applyAction(env,gate,row,action,{revalidate:hooks.revalidate,observed,clock,policy});
+  if(!outcome.retry)return {ran:false,...outcome};
+  attempt=row.attempts+1;currentRevision=outcome.retry.currentRevision;
  }
- const outcome=await finishAttempt(env,{gate,row,attempt,run:hooks.run,clock,policy});
+ const outcome=await finishAttempt(env,{gate,row,attempt,run:hooks.run,clock,policy,atomic:hooks.atomic===true,currentRevision});
  if(outcome.error)throw outcome.error;
  return {...outcome,attempt};
 }
 
 // The reconciler's one pass (a later P3 reconciler calls this; nothing calls it today and nothing schedules it): reads at most `limit` DUE non-terminal receipts, reads each target through its
-// registered operation, applies the pure plan (mark applied, abandon, replay with the same request id) and returns what it did. `now` is passed in; there is no timer.
+// registered operation, applies the pure plan (mark applied on proof, needs review, abandon, replay with the same request id after the stale-revision check) and returns what it did. `now` is
+// passed in; there is no timer.
 export async function reconcileReceipts(env,{operations,now=()=>new Date().toISOString(),limit=20,policy=RETRY_POLICY}={}){
  await assertReceiptsAvailable(env);
  const clock=typeof now==='function'?now:()=>now;
  const at=clock();
  const gate=await readAuthority(env);
  const due=await listReceipts(env,{dueBefore:at,limit});
- const result={marker:gate.state,considered:due.length,applied:[],replayed:[],abandoned:[],waiting:[],failed:[]};
+ const result={marker:gate.state,considered:due.length,applied:[],replayed:[],abandoned:[],needsReview:[],waiting:[],failed:[]};
  if(gate.state!=='open'){result.waiting=due.map(row=>({requestId:row.requestId,reason:'marker_not_open'}));return result;}
  const observed={},missing=new Set();
  for(const row of due){
@@ -328,18 +417,17 @@ export async function reconcileReceipts(env,{operations,now=()=>new Date().toISO
  const plan=reconcilePlan({receipts:due.filter(row=>!missing.has(row.requestId)),observed,marker:gate,now:at,policy});
  for(const action of plan.actions){
   const row=byId.get(action.requestId);
+  const operation=operations.get(row.operation);
   try{
-   if(action.action==='mark_applied'){await transition(env,gate,row,{kind:'applied',revision:action.revision},clock());result.applied.push(row.requestId);}
-   else if(action.action==='abandon'){await transition(env,gate,row,{kind:'abandoned',errorClass:action.reason},clock());result.abandoned.push({requestId:row.requestId,reason:action.reason});}
-   else if(action.action==='replay'){
-    const operation=operations.get(row.operation);
-    const t=clock();
-    const currentRevision=Number((await one(database(env),'SELECT COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0) AS revision',[row.target.kind,row.target.id]))?.revision??0);
-    await transition(env,gate,row,{kind:'retry',plannedRevision:currentRevision,nextAttemptAt:plus(t,policy.attemptWindowMs)},t);
-    const run=ctx=>operation.replay(env,row,{...ctx,currentRevision});
-    const outcome=await finishAttempt(env,{gate,row,attempt:row.attempts+1,run,clock,policy});
-    (outcome.state==='applied'?result.replayed:result.failed).push(outcome.state==='applied'?row.requestId:{requestId:row.requestId,outcome:outcome.outcome||'pending',errorClass:outcome.errorClass||null});
-   }
+   const outcome=await applyAction(env,gate,row,action,{revalidate:operation.revalidate,observed:observed[row.requestId],clock,policy});
+   if(outcome.retry){
+    const run=ctx=>operation.replay(env,row,ctx);
+    const finished=await finishAttempt(env,{gate,row,attempt:row.attempts+1,run,clock,policy,atomic:operation.atomic,currentRevision:outcome.retry.currentRevision});
+    if(finished.state==='applied')result.replayed.push(row.requestId);
+    else result.failed.push({requestId:row.requestId,outcome:finished.outcome||finished.state,errorClass:finished.errorClass||null});
+   }else if(outcome.needsReview)result.needsReview.push(row.requestId);
+   else if(outcome.state==='applied')result.applied.push(row.requestId);
+   else result.abandoned.push({requestId:row.requestId,reason:outcome.reason});
   }catch(error){result.failed.push({requestId:row.requestId,outcome:'unsettled',errorClass:errorClassOf(error)});}
  }
  result.waiting.push(...plan.waiting);

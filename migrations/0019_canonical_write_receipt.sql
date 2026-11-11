@@ -13,7 +13,8 @@
 -- `pending`, the earliest retry or readback while `failed` or `unknown`) are read by whoever reconciles; there is no timer, cron or task.
 -- Fence model, consistent with 0013: a receipt may be inserted or updated ONLY while the marker is d1/open (so at r2, prepared and held the
 -- table stays empty or frozen, and a producer cannot write it); reads are always allowed. An insert must carry the live marker generation.
--- Rows are never deleted (trigger); pruning terminal rows is a later, separately approved decision.
+-- Rows are never deleted (trigger); pruning terminal rows is a later, separately approved decision (not decided: rows are kept indefinitely).
+-- The activation baseline tables (canonical_receipt_watermark, canonical_receipt_baseline) scope what `unreceipted` means; both start EMPTY and are filled by a later, separately authorized step.
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
@@ -146,6 +147,74 @@ BEGIN
  SELECT RAISE(ABORT, 'canonical_receipt_delete');
 END;
 
+-- The activation baseline (ADR 0119): a canonical_revision that predates receipts must not be called "unreceipted", and must not be retrospectively given a receipt. canonical_receipt_watermark
+-- is one row, taken once; canonical_receipt_baseline holds one row per canonical_revision entity as it stood then (kind, id, revision). A revision at or below its baseline entry is
+-- `pre_receipt_baseline`; unreceipted applies only above it. Both tables are insert-only, and may be filled only while the marker is d1/open (the watermark under the live generation) and BEFORE the first
+-- receipt exists (a receipt needs the watermark, and the watermark is one row, so it can only precede them); a receipt cannot be inserted until the watermark exists. Taking it is a later, separately authorized activation step (src/canonical-receipts.js `recordBaseline`).
+CREATE TABLE canonical_receipt_watermark (
+ id INTEGER PRIMARY KEY CHECK (id = 1),
+ marker_generation INTEGER NOT NULL CHECK (marker_generation >= 0),
+ entries INTEGER NOT NULL CHECK (entries >= 0),
+ taken_at TEXT NOT NULL CHECK (length(taken_at) BETWEEN 20 AND 32)
+) STRICT;
+
+CREATE TABLE canonical_receipt_baseline (
+ kind TEXT NOT NULL CHECK (kind IN ('film', 'person')),
+ id TEXT NOT NULL CHECK ((kind = 'film' AND id GLOB 'film:?*') OR (kind = 'person' AND id GLOB 'person:?*')),
+ revision INTEGER NOT NULL CHECK (revision >= 1),
+ PRIMARY KEY (kind, id)
+) STRICT;
+
+CREATE TRIGGER canonical_receipt_watermark_insert
+BEFORE INSERT ON canonical_receipt_watermark
+FOR EACH ROW
+WHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open' AND generation = NEW.marker_generation)
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');
+END;
+
+CREATE TRIGGER canonical_receipt_baseline_insert
+BEFORE INSERT ON canonical_receipt_baseline
+FOR EACH ROW
+WHEN NOT EXISTS (SELECT 1 FROM film_person_authority WHERE id = 1 AND mode = 'd1' AND cutover = 'open')
+ OR NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)
+ OR EXISTS (SELECT 1 FROM canonical_write_receipt)
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_refused');
+END;
+
+CREATE TRIGGER canonical_receipt_watermark_no_update
+BEFORE UPDATE ON canonical_receipt_watermark
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
+END;
+
+CREATE TRIGGER canonical_receipt_watermark_no_delete
+BEFORE DELETE ON canonical_receipt_watermark
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
+END;
+
+CREATE TRIGGER canonical_receipt_baseline_no_update
+BEFORE UPDATE ON canonical_receipt_baseline
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
+END;
+
+CREATE TRIGGER canonical_receipt_baseline_no_delete
+BEFORE DELETE ON canonical_receipt_baseline
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_immutable');
+END;
+
+CREATE TRIGGER canonical_write_receipt_insert_baseline
+BEFORE INSERT ON canonical_write_receipt
+FOR EACH ROW
+WHEN NOT EXISTS (SELECT 1 FROM canonical_receipt_watermark WHERE id = 1)
+BEGIN
+ SELECT RAISE(ABORT, 'canonical_receipt_baseline_missing');
+END;
+
 CREATE TRIGGER IF NOT EXISTS schema_contract_no_downgrade
 BEFORE UPDATE OF version ON schema_contract
 FOR EACH ROW
@@ -156,5 +225,5 @@ END;
 
 UPDATE schema_contract
 SET version = 19,
-    note = 'Schema v19: durable canonical write receipt (empty). Follows a complete version 18.'
+    note = 'Schema v19: durable canonical write receipt and activation baseline (empty). Follows a complete version 18.'
 WHERE id = 1 AND version = 18;

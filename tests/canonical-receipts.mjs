@@ -15,11 +15,15 @@ import {failed} from '../src/film-person-authority.js';
 
 const M=await import(process.env.CANON_RECEIPTS_SOURCE?pathToFileURL(path.resolve(process.env.CANON_RECEIPTS_SOURCE)).href:'../src/canonical-receipts.js');
 const {receiptedWrite,reconcilePlan,reconcileReceipts,unreceiptedChanges,readUnreceipted,readReceipt,listReceipts,digestOf,canonicalJson,requestIdOf,backoffMs,classify,errorClassOf,defineOperation,operationRegistry,
- appliedStatements,receiptsAvailable,assertReceiptsAvailable,normalizeRequest,RETRY_POLICY,OPERATION_KINDS,RECEIPT_STATES}=M;
+ appliedStatements,receiptsAvailable,assertReceiptsAvailable,normalizeRequest,RETRY_POLICY,OPERATION_KINDS,RECEIPT_STATES,recordBaseline,judgeReadback,receiptsStatus,BASELINE_CAP}=M;
 
 const only=process.env.CANON_RECEIPTS_ONLY?new Set(process.env.CANON_RECEIPTS_ONLY.split(',')):null;
-const on=number=>!only||only.has(String(number));
+const on=(number,sub)=>!only||only.has(String(number))||(sub!==undefined&&only.has(number+'.'+sub));
+const onAny=number=>!only||[...only].some(item=>item===String(number)||item.startsWith(number+'.'));
+// Shared prebuilt templates (the mutation runner builds them once): CANON_RECEIPTS_TEMPLATES is a directory holding template.sqlite (schema 19) and template18.sqlite.
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-receipts-'));
+// The scenario databases are removed when the process ends (the mutation check starts it dozens of times: nothing may pile up in the temporary directory).
+process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
 const MIGRATION=process.env.CANON_RECEIPTS_MIGRATION||'migrations/0019_canonical_write_receipt.sql';
 const sql=name=>name==='0019_canonical_write_receipt'?fs.readFileSync(MIGRATION,'utf8'):fs.readFileSync('migrations/'+name+'.sql','utf8');
@@ -28,17 +32,28 @@ const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGM
 const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
 const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
 const template=path.join(root,'template.sqlite');
-assert.equal(sqlite(template,chain.map(sql).join('\n')).status,0);
 // A database one migration short (schema 18), for the schema-missing refusal.
 const template18=path.join(root,'template18.sqlite');
-assert.equal(sqlite(template18,chain.filter(name=>name!=='0019_canonical_write_receipt').map(sql).join('\n')).status,0);
+const shared=process.env.CANON_RECEIPTS_TEMPLATES;
+if(shared){
+ fs.copyFileSync(path.join(shared,'template18.sqlite'),template18);
+ if(process.env.CANON_RECEIPTS_MIGRATION){fs.copyFileSync(template18,template);assert.equal(sqlite(template,sql('0019_canonical_write_receipt')).status,0);}
+ else fs.copyFileSync(path.join(shared,'template.sqlite'),template);
+}else{
+ assert.equal(sqlite(template,chain.map(sql).join('\n')).status,0);
+ assert.equal(sqlite(template18,chain.filter(name=>name!=='0019_canonical_write_receipt').map(sql).join('\n')).status,0);
+}
 let n=0;
-function database(stage='open',source=template){
+const BASELINE="INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,taken_at) VALUES (1,2,(SELECT COUNT(*) FROM canonical_revision),'2026-11-11T09:00:00.000Z');INSERT INTO canonical_receipt_baseline (kind,id,revision) SELECT kind,id,revision FROM canonical_revision;";
+// A database at `open` carries the activation baseline unless `baseline` is false (the baseline tests take it themselves).
+function database(stage='open',source=template,baseline=true){
  const file=path.join(root,'rc-'+(n++)+'.sqlite');
  fs.copyFileSync(source,file);
  if(['prepared','open','held'].includes(stage))assert.equal(sqlite(file,VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
  if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
+ if(stage==='held'&&baseline&&source===template)assert.equal(sqlite(file,BASELINE).status,0);
  if(stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+ if(stage==='open'&&baseline&&source===template)assert.equal(sqlite(file,BASELINE).status,0);
  return file;
 }
 const envOf=(file,options)=>({DB:d1Standin(file,options)});
@@ -57,20 +72,26 @@ const filmRow=(file,id=FILM)=>rows(file,"SELECT original_title,contract_version 
 // The test operation: one Film written by the real fenced mutateFilm; the planned digest and the readback digest go through the same digestOf over the same canonical form.
 const filmContent=(title,contractVersion=1)=>({originalTitle:title,contractVersion});
 const plannedDigest=title=>digestOf(filmContent(title));
-const readbackFilm=async(env,target)=>{
+// The operation-specific evidence: a writer that wants its lost mark settled by readback writes the request id as an alias row inside its OWN batch; the readback proves the request's own effect
+// from that row, at the revision after the one it planned against, even when the content was overwritten since. A write without that evidence (another actor's) proves nothing.
+const readbackFilm=async(env,target,receipt)=>{
  const row=await env.DB.prepare('SELECT original_title,contract_version FROM film WHERE id=?').bind(target.id).first();
+ if(!row)return null;
  const rev=await env.DB.prepare('SELECT revision FROM canonical_revision WHERE kind=? AND id=?').bind(target.kind,target.id).first();
- return row?{digest:await digestOf(filmContent(row.original_title,row.contract_version)),revision:Number(rev?.revision??0)}:null;
+ const proof=receipt?!!(await env.DB.prepare("SELECT 1 AS x FROM film_alias WHERE film_id=? AND kind='request' AND value=?").bind(target.id,receipt.requestId).first()):false;
+ const out={digest:await digestOf(filmContent(row.original_title,row.contract_version)),revision:proof?receipt.plannedRevision+1:Number(rev?.revision??0)};
+ if(proof)out.proof='request';
+ return out;
 };
-const writeFilm=(env,title,expectedRevision=0,id=FILM)=>mutateFilm(env,{id,expectedRevision,at:T,film:{contractVersion:1,originalTitle:title}});
+const writeFilm=(env,title,expectedRevision=0,id=FILM,requestId=null)=>mutateFilm(env,{id,expectedRevision,at:T,film:{contractVersion:1,originalTitle:title,...(requestId?{aliases:[{kind:'request',value:requestId}]}:{})}});
 async function request(source,title=SECRET_TITLE,over={}){
  return {requestId:await requestIdOf({origin:'epg',operation:'film_mutation',source}),operation:'film_mutation',origin:'epg',target:{kind:'film',id:FILM},expectedRevision:0,digest:await plannedDigest(title),...over};
 }
 const hooksFor=(env,title=SECRET_TITLE,calls={run:0,readback:0})=>({
  run:async()=>{calls.run++;return writeFilm(env,title);},
- readback:async(...args)=>{calls.readback++;return readbackFilm(env,args[1]);},
+ readback:async(...args)=>{calls.readback++;return readbackFilm(env,args[1],args[2]);},
 });
-const FILM_OPERATION=env=>defineOperation({operation:'film_mutation',readback:(e,target)=>readbackFilm(env,target),replay:(e,receipt,ctx)=>mutateFilm(env,{id:receipt.target.id,expectedRevision:ctx.currentRevision,at:T,film:{contractVersion:1,originalTitle:SECRET_TITLE}})});
+const FILM_OPERATION=env=>defineOperation({operation:'film_mutation',readback:(e,target,receipt)=>readbackFilm(env,target,receipt),replay:(e,receipt,ctx)=>mutateFilm(env,{id:receipt.target.id,expectedRevision:ctx.currentRevision,at:T,film:{contractVersion:1,originalTitle:SECRET_TITLE}})});
 const rawInsert=(over={})=>{
  const r={id:'r-raw',op:'film_mutation',origin:'epg',kind:'film',target:FILM,digest:'a'.repeat(64),planned:0,gen:2,state:'pending',attempts:1,next:iso(120000),...over};
  const q=value=>value==null?'NULL':typeof value==='number'?String(value):"'"+String(value).replace(/'/g,"''")+"'";
@@ -84,6 +105,7 @@ if(on(1)){
  const file=database('r2');
  assert.equal(Number(one(file,'SELECT version FROM schema_contract WHERE id=1')),19);
  assert.equal(count(file),0,'the table starts empty');
+ assert.equal(Number(one(file,'SELECT COUNT(*) FROM canonical_receipt_watermark')),0);assert.equal(Number(one(file,'SELECT COUNT(*) FROM canonical_receipt_baseline')),0,'the baseline tables start empty');
  for(const name of ['canonical_write_receipt'])assert.equal(Number(one(file,"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='"+name+"'")),1);
  // Applying 0019 to a database that is not a complete version 18 changes nothing.
  const partial=path.join(root,'partial.sqlite');
@@ -116,6 +138,7 @@ if(on(1)){
 if(on(2)){
  for(const stage of ['r2','prepared','held']){
   const file=database(stage);
+  assert.equal(sqlite(file,'DROP TRIGGER canonical_write_receipt_insert_baseline').status,0,'the baseline trigger is dropped so that the marker trigger is the only one that can refuse');
   const result=sqlite(file,rawInsert({gen:stage==='r2'?0:stage==='prepared'?1:3}));
   assert.notEqual(result.status,0,stage+': an insert is refused');
   assert.match(message(result),/canonical_receipt_not_open/,stage);
@@ -199,11 +222,12 @@ if(on(3)){
 }
 
 // 4. The protocol over the real fenced writer: pending first, commit, applied; idempotent; refusal before open.
-if(on(4)){
+if(onAny(4)){
  const file=database('open');
  const env=envOf(file);
  const calls={run:0,readback:0};
  const input=await request('event-1');
+ if(on(4,1)){
  assert.deepEqual(RECEIPT_STATES,['pending','applied','failed','unknown','abandoned']);
  const first=await receiptedWrite(env,{...input,now:clockAt(0)},hooksFor(env,SECRET_TITLE,calls));
  assert.equal(first.state,'applied');assert.equal(first.ran,true);
@@ -228,6 +252,8 @@ if(on(4)){
  await assert.rejects(()=>receiptedWrite(env,{...input,requestId:'has space'},hooksFor(env)),code('film_person_invalid'));
  await assert.rejects(()=>receiptedWrite(env,{...input,digest:'xyz'},hooksFor(env)),code('film_person_invalid'));
  await assert.rejects(()=>receiptedWrite(env,{...input,target:{kind:'film',id:PERSON}},hooksFor(env)),code('film_person_invalid'));
+ }
+ if(on(4,2)){
  // A person target goes through the same protocol.
  const personEnv=envOf(database('open'));
  const personInput=await request('event-p',SECRET_NAME,{operation:'person_mutation',target:{kind:'person',id:PERSON}});
@@ -247,6 +273,7 @@ if(on(4)){
  await assert.rejects(()=>receiptedWrite(oldEnv,{...input,now:clockAt(0)},hooksFor(oldEnv,SECRET_TITLE,c18)),code('receipt_schema_missing'));
  assert.equal(c18.run,0,'without the receipt table a canonical write is refused, not made unreceipted');assert.equal(filmRow(old),null);
  assert.equal(await receiptsAvailable(env),true);
+ }
 }
 
 // 5. The in-batch applied statements: `applied` is atomic with the content; a failed content batch rolls the receipt move back too.
@@ -288,7 +315,8 @@ if(on(5)){
 }
 
 // 6. Retry, backoff and the bound; definite failures; permanent refusals; expiry.
-if(on(6)){
+if(onAny(6)){
+ if(on(6,1)){
  assert.deepEqual([1,2,3,4,5,9].map(attempts=>backoffMs(attempts)),[60000,300000,1800000,7200000,7200000,7200000],'a stored schedule, the last step repeats');
  assert.throws(()=>backoffMs(0),code('film_person_invalid'));
  assert.equal(RETRY_POLICY.maxAttempts,5);assert.ok(Object.isFrozen(RETRY_POLICY));
@@ -299,12 +327,14 @@ if(on(6)){
  assert.deepEqual(classify(failed('film_person_unavailable')),{errorClass:'film_person_unavailable',outcome:'unknown'});
  assert.deepEqual(classify(new Error('connect ETIMEDOUT 10.0.0.1')),{errorClass:'unclassified',outcome:'unknown'},'a message is never stored');
  assert.equal(errorClassOf({code:'Has Capital'}),'unclassified');
+ }
  const file=database('open');
  const env=envOf(file);
  const input=await request('event-retry');
  const calls={run:0,readback:0};
  const conflict=async()=>{calls.run++;throw failed('film_person_revision_conflict');};
  const hooks={run:conflict,readback:async()=>{calls.readback++;return null;}};
+ if(on(6,2)){
  // attempt 1 fails definitively: failed, due after the first backoff.
  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks),code('film_person_revision_conflict'));
  let row=await readReceipt(env,input.requestId);
@@ -329,6 +359,8 @@ if(on(6)){
  assert.equal(row.state,'abandoned');assert.equal(row.errorClass,'attempts_exhausted');assert.ok(row.settledAt);
  assert.equal((await receiptedWrite(env,{...input,now:clockAt(1e9)},hooks)).state,'abandoned','an abandoned receipt is never run again');
  assert.equal(calls.run,5);
+ }
+ if(on(6,3)){
  // a permanent refusal is abandoned at once.
  const permanent=await request('event-permanent');
  await assert.rejects(()=>receiptedWrite(env,{...permanent,now:clockAt(0)},{run:async()=>{throw failed('film_person_invalid');},readback:async()=>null}),code('film_person_invalid'));
@@ -348,16 +380,18 @@ if(on(6)){
  const blind=await request('event-blind');
  await assert.rejects(()=>receiptedWrite(env,{...blind,now:clockAt(0)},{run:conflict}));
  await assert.rejects(()=>receiptedWrite(env,{...blind,now:clockAt(60000)},{run:conflict}),code('receipt_readback_required'));
+
+ }
 }
 
 // 7. Unknown outcomes settled by READBACK, both ways, and a crash between the commit and the mark.
-if(on(7)){
+if(onAny(7)){
  // applied-then-lost: the commit landed, the answer was lost. The receipt is unknown; readback finds the content, marks applied, and the writer does NOT run again.
- {
+ if(on(7,1)){
   const file=database('open'),env=envOf(file);
   const input=await request('event-applied-lost');
   const calls={run:0,readback:0};
-  const lost={run:async()=>{calls.run++;await writeFilm(env,SECRET_TITLE);throw new Error('network reset');},readback:async(...a)=>{calls.readback++;return readbackFilm(env,a[1]);}};
+  const lost={run:async()=>{calls.run++;await writeFilm(env,SECRET_TITLE,0,FILM,input.requestId);throw new Error('network reset');},readback:async(...a)=>{calls.readback++;return readbackFilm(env,a[1],a[2]);}};
   await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},lost),/network reset/);
   let row=await readReceipt(env,input.requestId);
   assert.equal(row.state,'unknown');assert.equal(row.errorClass,'unclassified');assert.equal(row.nextAttemptAt,iso(60000));
@@ -371,11 +405,11 @@ if(on(7)){
   assert.equal(row.state,'applied');assert.equal(row.appliedRevision,1);assert.equal(row.errorClass,null);assert.equal(row.attempts,1);
  }
  // lost-before-send: the request never reached the database. Readback finds nothing, the SAME request id is replayed, and the second attempt applies.
- {
+ if(on(7,2)){
   const file=database('open'),env=envOf(file);
   const input=await request('event-lost-before');
   const calls={run:0,readback:0};
-  const hooks={run:async()=>{calls.run++;if(calls.run===1)throw new Error('fetch failed');return writeFilm(env,SECRET_TITLE);},readback:async(...a)=>{calls.readback++;return readbackFilm(env,a[1]);}};
+  const hooks={run:async()=>{calls.run++;if(calls.run===1)throw new Error('fetch failed');return writeFilm(env,SECRET_TITLE);},readback:async(...a)=>{calls.readback++;return readbackFilm(env,a[1],a[2]);}};
   await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks),/fetch failed/);
   assert.equal((await readReceipt(env,input.requestId)).state,'unknown');assert.equal(filmRow(file),null,'nothing landed');
   const retried=await receiptedWrite(env,{...input,now:clockAt(60000)},hooks);
@@ -386,23 +420,23 @@ if(on(7)){
   assert.equal(revision(file,FILM),1);
  }
  // a readback of DIFFERENT content (another writer's value) is not "applied": the receipt retries instead of claiming it.
- {
+ if(on(7,3)){
   const file=database('open'),env=envOf(file);
   await writeFilm(env,'Somebody else');
   const input=await request('event-other-content',SECRET_TITLE,{expectedRevision:1});
-  const hooks={run:async()=>{throw new Error('timeout');},readback:async(...a)=>readbackFilm(env,a[1])};
+  const hooks={run:async()=>{throw new Error('timeout');},readback:async(...a)=>readbackFilm(env,a[1],a[2])};
   await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks));
   const result=await receiptedWrite(env,{...input,now:clockAt(60000)},{run:async()=>writeFilm(env,SECRET_TITLE,1),readback:hooks.readback});
   assert.equal(result.state,'applied');assert.equal(result.attempt,2);assert.equal(filmRow(file).original_title,SECRET_TITLE);
  }
  // crash between the commit and the mark: the receipt stays pending, the writer's result is returned, and after its window readback marks it applied.
- {
+ if(on(7,4)){
   const file=database('open');
   const env=envOf(file,{onBatch:async list=>{if(list.some(item=>/SET state='applied'/.test(item.text)))throw new Error('D1 unavailable');}});
   const plain=envOf(file);
   const input=await request('event-mark-lost');
   const calls={run:0,readback:0};
-  const hooks={run:async()=>{calls.run++;return writeFilm(plain,SECRET_TITLE);},readback:async(...a)=>{calls.readback++;return readbackFilm(plain,a[1]);}};
+  const hooks={run:async()=>{calls.run++;return writeFilm(plain,SECRET_TITLE,0,FILM,input.requestId);},readback:async(...a)=>{calls.readback++;return readbackFilm(plain,a[1],a[2]);}};
   const first=await receiptedWrite(env,{...input,now:clockAt(0)},hooks);
   assert.equal(first.ran,true);assert.equal(first.state,'pending');assert.equal(first.markFailed,true);
   let row=await readReceipt(plain,input.requestId);
@@ -414,7 +448,7 @@ if(on(7)){
   assert.equal((await readReceipt(plain,input.requestId)).state,'applied');
  }
  // the marker moved between the read and the receipt insert: the stale generation fails and nothing is recorded or written.
- {
+ if(on(7,5)){
   const file=database('open');
   const env=envOf(file,{onBatch:async()=>{if(!env.moved){env.moved=true;assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1").status,0);}}});
   const input=await request('event-stale');
@@ -426,11 +460,11 @@ if(on(7)){
   assert.equal(ok.state,'applied');assert.equal((await readReceipt(env,input.requestId)).markerGeneration,4);
  }
  // a retry after the marker moved carries the live generation (held, then open again: generation 4).
- {
+ if(on(7,6)){
   const file=database('open'),env=envOf(file);
   const input=await request('event-regeneration');
   let first=true;
-  const hooks={run:async()=>{if(first){first=false;throw new Error('timeout');}return writeFilm(env,SECRET_TITLE);},readback:async(...a)=>readbackFilm(env,a[1])};
+  const hooks={run:async()=>{if(first){first=false;throw new Error('timeout');}return writeFilm(env,SECRET_TITLE);},readback:async(...a)=>readbackFilm(env,a[1],a[2])};
   await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks),/timeout/);
   assert.equal((await readReceipt(env,input.requestId)).markerGeneration,2);
   assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1").status,0);
@@ -440,15 +474,15 @@ if(on(7)){
   assert.equal(row.markerGeneration,4);assert.equal(row.attempts,2);
  }
  // a held marker after the commit: the receipt stays pending (a held database accepts no receipt write) and is settled once reopened.
- {
+ if(on(7,7)){
   const file=database('open'),env=envOf(file);
   const input=await request('event-held-after');
-  const hooks={run:async()=>{await writeFilm(env,SECRET_TITLE);assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);return {revision:1};},readback:async(...a)=>readbackFilm(env,a[1])};
+  const hooks={run:async()=>{await writeFilm(env,SECRET_TITLE,0,FILM,input.requestId);assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);return {revision:1};},readback:async(...a)=>readbackFilm(env,a[1],a[2])};
   const first=await receiptedWrite(env,{...input,now:clockAt(0)},hooks);
   assert.equal(first.state,'pending');assert.equal(first.markFailed,true);
   assert.equal((await readReceipt(env,input.requestId)).state,'pending','held: the receipt is frozen, never guessed');
   let reads=0;
-  const counting=defineOperation({operation:'film_mutation',readback:async(...a)=>{reads++;return readbackFilm(env,a[1]);},replay:async()=>{throw new Error('must not replay');}});
+  const counting=defineOperation({operation:'film_mutation',readback:async(...a)=>{reads++;return readbackFilm(env,a[1],a[2]);},replay:async()=>{throw new Error('must not replay');}});
   const held=await reconcileReceipts(env,{operations:operationRegistry([counting]),now:clockAt(RETRY_POLICY.attemptWindowMs)});
   assert.equal(reads,0,'a held marker reads no target');
   assert.equal(held.marker,'held');assert.deepEqual(held.waiting.map(item=>item.reason),['marker_not_open']);assert.equal(held.applied.length,0);
@@ -475,18 +509,24 @@ if(on(8)){
  for(const state of ['prepared','held','r2'])assert.deepEqual(plan([rc('m1')],{},iso(5000),{state,generation:2}).waiting.map(item=>item.reason),['marker_not_open']);
  // a due receipt is read back first; equal digest -> mark_applied (with the observed revision); different or absent -> replay; null (target empty) -> replay
  assert.deepEqual(plan([rc('u1',{state:'unknown'})]).actions,[{requestId:'u1',action:'readback'}]);
- assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'a'.repeat(64),revision:4}}).actions,[{requestId:'u1',action:'mark_applied',revision:4}]);
+ assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'a'.repeat(64),revision:4,proof:'request'}}).actions,[{requestId:'u1',action:'mark_applied',revision:4}]);
+ // the planned content WITHOUT proof of this request is never applied: it is for review
+ assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'a'.repeat(64),revision:4}}).actions,[{requestId:'u1',action:'needs_review',reason:'content_match_unproven'}]);
+ // proof of the request wins even when the content was overwritten since
+ assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'c'.repeat(64),revision:1,proof:'request'}}).actions,[{requestId:'u1',action:'mark_applied',revision:1}]);
+ assert.equal(judgeReadback({digest:'a'.repeat(64),proof:'request'},{contentDigest:'z'}),'applied');assert.equal(judgeReadback({digest:'a'.repeat(64)},{contentDigest:'a'.repeat(64)}),'content_unproven');assert.equal(judgeReadback(null,{contentDigest:'a'}),'absent');
  assert.deepEqual(plan([rc('u1',{state:'unknown'})],{u1:{digest:'b'.repeat(64),revision:4}}).actions,[{requestId:'u1',action:'replay',attempt:2,replan:false}]);
  assert.deepEqual(plan([rc('u1',{state:'failed'})],{u1:null}).actions,[{requestId:'u1',action:'replay',attempt:2,replan:false}]);
- assert.equal(plan([rc('u1',{state:'pending'})],{u1:{digest:'a'.repeat(64),revision:2}}).actions[0].action,'mark_applied','an in-flight attempt past its window is settled like an unknown one');
+ assert.equal(plan([rc('u1',{state:'pending'})],{u1:{digest:'a'.repeat(64),revision:2,proof:'request'}}).actions[0].action,'mark_applied','an in-flight attempt past its window is settled like an unknown one');
  // a moved generation asks for a re-plan
  assert.equal(plan([rc('g1',{markerGeneration:1})],{g1:null}).actions[0].replan,true);
  // the bound: attempts exhausted and age
  assert.deepEqual(plan([rc('x1',{attempts:5})],{x1:null}).actions,[{requestId:'x1',action:'abandon',reason:'attempts_exhausted'}]);
  assert.deepEqual(plan([rc('x2',{attempts:4})],{x2:null}).actions[0].action,'replay');
  assert.deepEqual(reconcilePlan({receipts:[rc('x3')],observed:{x3:null},marker,now:iso(RETRY_POLICY.abandonAfterMs+1)}).actions,[{requestId:'x3',action:'abandon',reason:'expired'}]);
- // even an exhausted receipt whose target already holds the content is applied, not abandoned
- assert.equal(plan([rc('x4',{attempts:5})],{x4:{digest:'a'.repeat(64),revision:1}}).actions[0].action,'mark_applied');
+ // even an exhausted receipt is settled by proof (applied) or sent to review (content alone), not abandoned as absent
+ assert.equal(plan([rc('x4',{attempts:5})],{x4:{digest:'a'.repeat(64),revision:1,proof:'request'}}).actions[0].action,'mark_applied');
+ assert.equal(plan([rc('x4',{attempts:5})],{x4:{digest:'a'.repeat(64),revision:1}}).actions[0].action,'needs_review');
  // deterministic order by due time then id; pure (no input mutated)
  const input=[rc('b',{nextAttemptAt:iso(2000)}),rc('a',{nextAttemptAt:iso(2000)}),rc('c',{nextAttemptAt:iso(1000)})];
  const copy=JSON.stringify(input);
@@ -506,6 +546,9 @@ if(on(9)){
  assert.equal(unreceiptedChanges({changes:[],receipts:[]}).safe,true,'no change, nothing unreceipted');
  assert.equal(unreceiptedChanges({changes:[{kind:'film',id:'film:a',revision:1}],receipts:[]}).safe,false,'no receipt is never safe');
  assert.equal(unreceiptedChanges({changes:[{kind:'film',id:'film:a',revision:1}],receipts:[{target:{kind:'film',id:'film:a'},state:'abandoned',appliedRevision:null}]}).unreceipted[0].reason,'no_receipt','an abandoned receipt covers nothing');
+ // the baseline: a revision at or below its baseline entry predates receipts and is not unreceipted; above it, it is
+ r=unreceiptedChanges({changes:[{kind:'film',id:'film:a',revision:2},{kind:'film',id:'film:b',revision:3},{kind:'film',id:'film:c',revision:1}],receipts:[],baseline:{'film|film:a':2,'film|film:b':2}});
+ assert.deepEqual(r.preReceiptBaseline,[{kind:'film',id:'film:a',revision:2}]);assert.deepEqual(r.unreceipted.map(item=>item.id),['film:b','film:c']);assert.equal(r.safe,false);
  // against the database: a write outside the protocol is unreceipted; a receipted one is covered; a later unreceipted bump is reported again.
  const file=database('open'),env=envOf(file);
  await writeFilm(env,'Plain write');
@@ -531,15 +574,16 @@ if(on(9)){
 }
 
 // 10. The reconciler pass over registered operations: settles by readback, replays with the same id, abandons, and is bounded.
-if(on(10)){
+if(onAny(10)){
  const file=database('open'),env=envOf(file);
  const registry=operationRegistry([FILM_OPERATION(env)]);
  assert.throws(()=>operationRegistry([FILM_OPERATION(env),FILM_OPERATION(env)]),code('film_person_invalid'));
  assert.throws(()=>defineOperation({operation:'nope',readback(){},replay(){}}),code('film_person_invalid'));
  assert.throws(()=>defineOperation({operation:'film_mutation',readback(){}}),code('film_person_invalid'));
+ if(on(10,1)){
  // three receipts: applied-then-lost (unknown), lost-before-send (unknown), and an unregistered operation.
  const landed=await request('event-1',SECRET_TITLE,{target:{kind:'film',id:'film:tmdb:10'}});
- await assert.rejects(()=>receiptedWrite(env,{...landed,now:clockAt(0)},{run:async()=>{await writeFilm(env,SECRET_TITLE,0,'film:tmdb:10');throw new Error('lost answer');},readback:readbackFilm}));
+ await assert.rejects(()=>receiptedWrite(env,{...landed,now:clockAt(0)},{run:async()=>{await writeFilm(env,SECRET_TITLE,0,'film:tmdb:10',landed.requestId);throw new Error('lost answer');},readback:readbackFilm}));
  const never=await request('event-2',SECRET_TITLE,{target:{kind:'film',id:'film:tmdb:11'}});
  await assert.rejects(()=>receiptedWrite(env,{...never,now:clockAt(0)},{run:async()=>{throw new Error('connect failed');},readback:readbackFilm}));
  const other=await request('event-3',SECRET_TITLE,{operation:'film_merge',target:{kind:'film',id:'film:tmdb:12'}});
@@ -561,6 +605,8 @@ if(on(10)){
  // a second pass has nothing due that it can settle again: idempotent.
  const second=await reconcileReceipts(env,{operations:registry,now:clockAt(60000)});
  assert.deepEqual(second.applied,[]);
+ }
+ if(on(10,2)){
  // bounded: limit caps the receipts read
  const many=database('open'),menv=envOf(many);
  for(let i=0;i<7;i++){const input=await request('bulk-'+i,SECRET_TITLE,{target:{kind:'film',id:'film:tmdb:'+(100+i)}});await assert.rejects(()=>receiptedWrite(menv,{...input,now:clockAt(0)},{run:async()=>{throw new Error('x');},readback:readbackFilm}));}
@@ -577,10 +623,12 @@ if(on(10)){
  const r2=database('prepared');
  const idle=await reconcileReceipts(envOf(r2),{operations:registry,now:clockAt(99999999)});
  assert.equal(idle.considered,0);assert.equal(count(r2),0);
+ }
 }
 
 // 11. No payload and no personal data are stored; the statement budget of the protocol.
-if(on(11)){
+if(onAny(11)){
+ if(on(11,1)){
  const file=database('open');
  const watched=envOf(file);
  const input=await request('event-private',SECRET_TITLE);
@@ -592,6 +640,8 @@ if(on(11)){
  const allowed={request_id:/^[A-Za-z0-9:._/=+@-]+$/,operation:/^[a-z_]+$/,origin:/^[a-z_]+$/,target_kind:/^(film|person)$/,target_id:/^(film|person):/,content_digest:/^[0-9a-f]{64}$/,error_class:/^[a-z_]+$/};
  for(const row of receiptRows(file))for(const [column,pattern] of Object.entries(allowed))if(row[column]!=null)assert.match(String(row[column]),pattern,column);
  assert.deepEqual(Object.keys(receiptRows(file)[0]).sort(),['applied_revision','attempts','content_digest','created_at','error_class','marker_generation','next_attempt_at','operation','origin','planned_revision','request_id','settled_at','state','target_id','target_kind','updated_at'],'the whole column set');
+ }
+ if(on(11,2)){
  // the budget: a new request is ONE read of the table availability, the five marker reads, ONE receipt read, ONE insert batch, the writer, ONE re-read of the receipt and ONE mark batch (in-batch applied adopters skip the mark batch).
  const file2=database('open');
  const env2=envOf(file2);
@@ -610,6 +660,7 @@ if(on(11)){
  const b0=env2.DB.calls.batches;
  await receiptedWrite(env2,{...input2,now:clockAt(5)},hooksFor(env2));
  assert.equal(env2.DB.calls.batches,b0,'an applied receipt replay writes nothing');
+ }
 }
 
 // 12. Dormant: no source file imports the module, it is not bundled, it has no R2 or network reference, and the fenced mutation module is untouched by it.
@@ -625,6 +676,212 @@ if(on(12)){
  assert.deepEqual(Object.keys(await import('../src/film-person-authority.js')).includes('receiptedWrite'),false);
  assert.ok(OPERATION_KINDS.includes('film_mutation')&&OPERATION_KINDS.includes('person_state')&&OPERATION_KINDS.includes('localization_conflict'));
  assert.equal(canonicalJson({b:1,a:[{d:undefined,c:2}]}),'{"a":[{"c":2}],"b":1}');
+}
+
+// 13. What `applied` means: the atomic path, and the weaker separate-mark path that can never claim more than it can prove.
+if(on(13)){
+ // two actors reach identical content: the lost mark is NOT settled as applied by the content alone, it goes to review, and the writer does not run again.
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-twin');
+  const calls={run:0,readback:0};
+  const hooks={run:async()=>{calls.run++;await writeFilm(env,SECRET_TITLE);throw new Error('answer lost');},readback:async(...a)=>{calls.readback++;return readbackFilm(env,a[1],a[2]);}};
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks),/answer lost/);
+  const settled=await receiptedWrite(env,{...input,now:clockAt(60000)},hooks);
+  assert.equal(settled.state,'abandoned');assert.equal(settled.needsReview,true);assert.equal(settled.reason,'content_match_unproven');assert.equal(settled.ran,false);
+  assert.equal(calls.run,1,'no second write');
+  const row=await readReceipt(env,input.requestId);
+  assert.equal(row.state,'abandoned');assert.equal(row.errorClass,'content_match_unproven');assert.equal(row.appliedRevision,null,'never reported applied');
+  // the reconciler reports it the same way
+  const file2=database('open'),env2=envOf(file2);
+  const in2=await request('event-twin-2');
+  await assert.rejects(()=>receiptedWrite(env2,{...in2,now:clockAt(0)},{run:async()=>{await writeFilm(env2,SECRET_TITLE);throw new Error('x');},readback:readbackFilm}));
+  const pass=await reconcileReceipts(env2,{operations:operationRegistry([FILM_OPERATION(env2)]),now:clockAt(60000)});
+  assert.deepEqual(pass.needsReview,[in2.requestId]);assert.deepEqual(pass.applied,[]);assert.equal(pass.attention===undefined,false);
+ }
+ // the same content written by the request WITH evidence in its own batch is applied; and when it was overwritten later by a newer revision it is STILL applied (the effect happened), without a second write.
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-overwritten');
+  const calls={run:0};
+  const hooks={run:async()=>{calls.run++;await writeFilm(env,SECRET_TITLE,0,FILM,input.requestId);throw new Error('answer lost');},readback:readbackFilm};
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks));
+  await writeFilm(env,'A newer title by another writer',1);
+  assert.equal(revision(file,FILM),2);
+  const pass=await reconcileReceipts(env,{operations:operationRegistry([FILM_OPERATION(env)]),now:clockAt(60000)});
+  assert.deepEqual(pass.applied,[input.requestId]);assert.equal(calls.run,1);
+  assert.equal(filmRow(file).original_title,'A newer title by another writer','the newer content is untouched');
+  assert.equal((await readReceipt(env,input.requestId)).appliedRevision,1,'the revision this request landed at, not the current one');
+ }
+ // the mark is lost, then reconcile: settled by the request's own evidence (covered in section 7 for a held marker and a crashed mark).
+ // ATOMIC mode: the writer's own batch applies the receipt; this module never marks it by a second batch.
+ {
+  const file=database('open');
+  const batches=[];
+  const env=envOf(file,{onBatch:async list=>{batches.push(list.map(item=>item.text).join(' '));}});
+  const input=await request('event-atomic-mode');
+  const entities=[{kind:'film',id:FILM,expected:0}];
+  const writer=skip=>async ctx=>{
+   const statements=fenced.head(ctx.gate,entities);
+   statements.push(['INSERT INTO film (id,contract_version,original_title,updated_at) VALUES (?,?,?,?)',[FILM,1,SECRET_TITLE,T]]);
+   statements.push([fenced.BUMP,['film',FILM,T]]);
+   if(!skip)statements.push(...ctx.appliedStatements());
+   await fenced.commit(env,ctx.gate,statements,entities);
+   return {revision:1};
+  };
+  const done=await receiptedWrite(env,{...input,now:clockAt(0)},{run:writer(false),readback:readbackFilm,atomic:true});
+  assert.equal(done.state,'applied');
+  assert.equal(batches.filter(text=>text.includes("SET state='applied'")).length,1,'exactly one batch carries the applied mark: the writer\'s own');
+  assert.ok(batches.find(text=>text.includes("SET state='applied'")).includes('INSERT INTO film '),'and it is the one that carries the content');
+  // an atomic writer that forgets appliedStatements is NOT marked applied by this module: unknown, for review
+  const file2=database('open'),env2=envOf(file2);
+  const in2=await request('event-atomic-forgot');
+  const forgetful=async ctx=>{const st=fenced.head(ctx.gate,entities);st.push(['INSERT INTO film (id,contract_version,original_title,updated_at) VALUES (?,?,?,?)',[FILM,1,SECRET_TITLE,T]]);st.push([fenced.BUMP,['film',FILM,T]]);await fenced.commit(env2,ctx.gate,st,entities);return {revision:1};};
+  const result=await receiptedWrite(env2,{...in2,now:clockAt(0)},{run:forgetful,readback:readbackFilm,atomic:true});
+  assert.equal(result.state,'unknown');assert.equal(result.needsReview,true);assert.equal(result.errorClass,'atomic_mark_missing');
+  const row=await readReceipt(env2,in2.requestId);
+  assert.equal(row.state,'unknown');assert.equal(row.errorClass,'atomic_mark_missing');assert.equal(row.appliedRevision,null);
+  assert.equal(defineOperation({operation:'film_mutation',readback(){},replay(){},atomic:true}).atomic,true);
+  assert.equal(defineOperation({operation:'film_mutation',readback(){},replay(){}}).atomic,false);
+ }
+}
+
+// 14. A retry never blindly overwrites: an unrelated writer advanced the entity revision between attempts (direct retry and the reconcile pass).
+if(on(14)){
+ const other='Another writer title';
+ // direct retry, no revalidate: abandoned for repair, the newer content stays
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-stale-direct');
+  const calls={run:0};
+  const hooks={run:async()=>{calls.run++;throw new Error('timeout');},readback:readbackFilm};
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks));
+  await writeFilm(env,other);
+  const result=await receiptedWrite(env,{...input,now:clockAt(60000)},hooks);
+  assert.equal(result.state,'abandoned');assert.equal(result.reason,'stale_revision_needs_repair');assert.equal(calls.run,1,'no retry was run');
+  assert.equal(filmRow(file).original_title,other);assert.equal(revision(file,FILM),1);
+  assert.equal((await readReceipt(env,input.requestId)).errorClass,'stale_revision_needs_repair');
+ }
+ // direct retry, revalidate says superseded: abandoned, newer content stays
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-stale-superseded');
+  const hooks={run:async()=>{throw new Error('timeout');},readback:readbackFilm,revalidate:async()=>'superseded'};
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks));
+  await writeFilm(env,other);
+  const result=await receiptedWrite(env,{...input,now:clockAt(60000)},hooks);
+  assert.equal(result.reason,'superseded_by_newer_revision');assert.equal(filmRow(file).original_title,other);
+ }
+ // direct retry, revalidate says proceed: the writer is given the CURRENT revision (not the original expectation) and its CAS passes; planned_revision follows
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-stale-proceed');
+  let seen=null;
+  const hooks={run:async ctx=>{if(ctx.attempt===1)throw new Error('timeout');seen=ctx.currentRevision;return writeFilm(env,SECRET_TITLE,ctx.currentRevision);},readback:readbackFilm,revalidate:async(e,receipt,ctx)=>{assert.equal(ctx.currentRevision,1);return 'proceed';}};
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks));
+  await writeFilm(env,other);
+  const result=await receiptedWrite(env,{...input,now:clockAt(60000)},hooks);
+  assert.equal(result.state,'applied');assert.equal(seen,1);assert.equal(revision(file,FILM),2);
+  const row=await readReceipt(env,input.requestId);
+  assert.equal(row.plannedRevision,1);assert.equal(row.appliedRevision,2);
+ }
+ // a retry whose revision did NOT move needs no revalidation (the writer's own CAS still holds)
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-stale-none');
+  let first=true,asked=0;
+  const hooks={run:async()=>{if(first){first=false;throw new Error('timeout');}return writeFilm(env,SECRET_TITLE);},readback:readbackFilm,revalidate:async()=>{asked++;return 'proceed';}};
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooks));
+  assert.equal((await receiptedWrite(env,{...input,now:clockAt(60000)},hooks)).state,'applied');assert.equal(asked,0);
+ }
+ // the reconcile pass: no revalidate on the operation -> abandoned for repair, newer content untouched; a revalidating operation proceeds against the current revision
+ {
+  const file=database('open'),env=envOf(file);
+  const input=await request('event-stale-pass');
+  await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},{run:async()=>{throw new Error('timeout');},readback:readbackFilm}));
+  await writeFilm(env,other);
+  const replay=async()=>{throw new Error('must not replay a stale revision blindly');};
+  const bare=defineOperation({operation:'film_mutation',readback:(e,t,r)=>readbackFilm(env,t,r),replay});
+  const pass=await reconcileReceipts(env,{operations:operationRegistry([bare]),now:clockAt(60000)});
+  assert.deepEqual(pass.abandoned,[{requestId:input.requestId,reason:'stale_revision_needs_repair'}]);
+  assert.equal(filmRow(file).original_title,other);assert.equal(revision(file,FILM),1);
+  const file2=database('open'),env2=envOf(file2);
+  const in2=await request('event-stale-pass-2');
+  await assert.rejects(()=>receiptedWrite(env2,{...in2,now:clockAt(0)},{run:async()=>{throw new Error('timeout');},readback:readbackFilm}));
+  await writeFilm(env2,other);
+  let asked=null;
+  const checking=defineOperation({operation:'film_mutation',readback:(e,t,r)=>readbackFilm(env2,t,r),revalidate:async(e,receipt,ctx)=>{asked=ctx.currentRevision;return 'proceed';},replay:(e,receipt,ctx)=>writeFilm(env2,SECRET_TITLE,ctx.currentRevision)});
+  const pass2=await reconcileReceipts(env2,{operations:operationRegistry([checking]),now:clockAt(60000)});
+  assert.deepEqual(pass2.replayed,[in2.requestId]);assert.equal(asked,1);assert.equal(revision(file2,FILM),2);
+  const file3=database('open'),env3=envOf(file3);
+  const in3=await request('event-stale-pass-3');
+  await assert.rejects(()=>receiptedWrite(env3,{...in3,now:clockAt(0)},{run:async()=>{throw new Error('timeout');},readback:readbackFilm}));
+  await writeFilm(env3,other);
+  const superseding=defineOperation({operation:'film_mutation',readback:(e,t,r)=>readbackFilm(env3,t,r),revalidate:async()=>'superseded',replay});
+  const pass3=await reconcileReceipts(env3,{operations:operationRegistry([superseding]),now:clockAt(60000)});
+  assert.deepEqual(pass3.abandoned,[{requestId:in3.requestId,reason:'superseded_by_newer_revision'}]);assert.equal(filmRow(file3).original_title,other);
+ }
+}
+
+// 15. The activation baseline: what `unreceipted` covers, and that a fresh schema 19 does not pretend history has receipts.
+if(on(15)){
+ const file=database('open',template,false),env=envOf(file);
+ // pre-existing revisions (written before any receipt exists), no baseline yet: receipts are refused, nothing reads as safe
+ await writeFilm(env,'Old film one');await writeFilm(env,'Old film two',0,'film:tmdb:2');
+ assert.equal(await receiptsStatus(env),'no_baseline');
+ const input=await request('event-baseline');
+ const calls={run:0,readback:0};
+ await assert.rejects(()=>receiptedWrite(env,{...input,now:clockAt(0)},hooksFor(env,SECRET_TITLE,calls)),code('receipt_baseline_missing'));
+ assert.equal(calls.run,0,'no write without the baseline');assert.equal(count(file),0);
+ await assert.rejects(()=>readUnreceipted(env),code('receipt_baseline_missing'));
+ assert.match(message(sqlite(file,rawInsert())),/canonical_receipt_baseline_missing/,'and the table refuses a receipt before the baseline');
+ // recording the baseline: one fenced batch, every entity, no receipt
+ const taken=await recordBaseline(env,{now:clockAt(5)});
+ assert.equal(taken.entries,2);assert.equal(await receiptsStatus(env),'ready');
+ assert.deepEqual(rows(file,'SELECT kind,id,revision FROM canonical_receipt_baseline ORDER BY id').map(row=>row.revision),[1,1]);
+ assert.equal(Number(one(file,'SELECT entries FROM canonical_receipt_watermark')),2);assert.equal(count(file),0,'no receipt was invented for the history');
+ // the history is pre_receipt_baseline, not unreceipted, and not safe-by-receipt either: it is counted apart
+ let found=await readUnreceipted(env);
+ assert.deepEqual(found.unreceipted,[]);assert.equal(found.preReceiptBaselineCount,2);assert.equal(found.safe,true);
+ // a change above the baseline without a receipt IS unreceipted; a receipted one is not
+ await writeFilm(env,'After activation',1);
+ found=await readUnreceipted(env);
+ assert.deepEqual(found.unreceipted,[{kind:'film',id:FILM,revision:2,reason:'no_receipt'}]);assert.equal(found.safe,false);assert.equal(found.preReceiptBaselineCount,1);
+ const covered=await request('event-after',SECRET_TITLE,{target:{kind:'film',id:'film:tmdb:3'}});
+ await receiptedWrite(env,{...covered,now:clockAt(0)},{run:()=>writeFilm(env,SECRET_TITLE,0,'film:tmdb:3'),readback:readbackFilm});
+ found=await readUnreceipted(env);
+ assert.deepEqual(found.unreceipted.map(item=>item.id),[FILM],'only the unreceipted change');
+ // the baseline is taken once, insert-only, and never after a receipt
+ await assert.rejects(()=>recordBaseline(env,{now:clockAt(6)}),code('receipt_baseline_exists'),'a second baseline, receipts or not');
+ const once=database('open',template,false),onceEnv=envOf(once);
+ await recordBaseline(onceEnv,{now:clockAt(1)});
+ await assert.rejects(()=>recordBaseline(onceEnv,{now:clockAt(2)}),code('receipt_baseline_exists'),'once');
+ for(const statement of ["UPDATE canonical_receipt_baseline SET revision=revision+1","DELETE FROM canonical_receipt_baseline","UPDATE canonical_receipt_watermark SET entries=0","DELETE FROM canonical_receipt_watermark"])assert.match(message(sqlite(file,statement)),/canonical_receipt_baseline_immutable/,statement);
+ assert.match(message(sqlite(file,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:late',1)")),/canonical_receipt_baseline_refused/,'a baseline row after a receipt exists');
+ // refused unless the marker is open, and bounded
+ for(const stage of ['prepared','held']){
+  const f=database(stage,template,false);
+  await assert.rejects(()=>recordBaseline(envOf(f)),code(stage==='held'?'film_person_held':'film_person_not_open'));
+  assert.equal(Number(one(f,'SELECT COUNT(*) FROM canonical_receipt_watermark')),0);
+ }
+ const f2=database('open',template,false);
+ await writeFilm(envOf(f2),'x');await writeFilm(envOf(f2),'y',0,'film:tmdb:9');
+ await assert.rejects(()=>recordBaseline(envOf(f2),{cap:1}),code('film_person_bounded'));
+ assert.equal(await receiptsStatus(envOf(f2)),'no_baseline','a refused baseline leaves nothing behind');
+ assert.equal(BASELINE_CAP,5000);
+ // a baseline under a stale generation is refused in SQL
+ const f3=database('open',template,false);
+ assert.match(message(sqlite(f3,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,taken_at) VALUES (1,1,0,'2026-11-11T09:00:00.000Z')")),/canonical_receipt_baseline_refused/);
+ // raw inserts: a baseline row needs the watermark; a held marker accepts neither
+ const f4=database('open',template,false);
+ assert.match(message(sqlite(f4,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:x',1)")),/canonical_receipt_baseline_refused/,'a baseline row without the watermark');
+ assert.equal(sqlite(f4,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+ assert.match(message(sqlite(f4,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,taken_at) VALUES (1,3,0,'2026-11-11T09:00:00.000Z')")),/canonical_receipt_baseline_refused/,'a watermark while held');
+ const held=database('held');
+ assert.match(message(sqlite(held,"INSERT INTO canonical_receipt_baseline (kind,id,revision) VALUES ('film','film:x',1)")),/canonical_receipt_baseline_refused/,'a baseline row while held');
+ // schema 18: no status
+ assert.equal(await receiptsStatus(envOf(database('open',template18))),'no_schema');
+ await assert.rejects(()=>recordBaseline(envOf(database('open',template18))),code('receipt_schema_missing'));
 }
 
 console.log('canonical-receipts: the durable canonical write receipt (schema 19) is writable only at open, records pending before the commit, settles unknown outcomes by readback both ways, bounds its retries, reports unreceipted changes, stores no payload, and stays dormant');
