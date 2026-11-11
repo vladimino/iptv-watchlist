@@ -762,9 +762,12 @@ async function copyEpgGeneration(env,runId){
 // published generation P whose pointer etag is `fence.pointerEtag`), looks up re-entering keys in the archive one segment at
 // a time, writes the departures as new write-once segment versions and a manifest, and swaps the archive pointer only while
 // the published pointer, the lease and the commit's run are unchanged. Any fence loss throws before anything is published.
-async function writeLedgerSegment(env,key,value,fence){
+// `timing`, when given, receives the milliseconds of the bucket put alone (AIR-444): the fence and the serialization are not in it.
+async function writeLedgerSegment(env,key,value,fence,timing=null){
  await fence();const text=JSON.stringify(value);
+ const putAt=Date.now();
  const saved=await env.BUCKET.put(key,text,{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
+ if(timing)timing.putMs+=Date.now()-putAt;
  if(saved===null)throw new Error('Discovery archive version already exists');
  return {sha256:await textSha256(text),bytes:new TextEncoder().encode(text).length};
 }
@@ -1014,6 +1017,19 @@ async function* iterateLedgerItems(env,view,holder,reentry,options,active){
 }
 // AIR-444: the segment writes of one archive commit take the full fence at most this many writes or milliseconds apart (see planDiscoveryLedger).
 const ARCHIVE_SEGMENT_FENCE_EVERY=8,ARCHIVE_SEGMENT_FENCE_MS=20000;
+// Sanitized counters of the archive loop, for its exit and its error marker. The four times do not overlap: `fenceMs` is every full fence of the
+// commit (segments, manifest and pointer), `readMs` the reads of the existing segments, `putMs` the bucket puts of the segments alone; what is left of
+// `elapsedMs` is serialization, hashing and the manifest and pointer puts.
+function archiveCounters(tally,startedAt){return {elapsedMs:Date.now()-startedAt,segments:tally.segments,fences:tally.fences,fencesSkipped:tally.skipped,fenceMs:tally.fenceMs,readMs:tally.readMs,putMs:tally.putMs,bytes:tally.bytes};}
+// A closed vocabulary for the error marker; never the message of the error.
+function archiveStopReason(error){
+ if(error?.code==='epg_step_fenced')return error.detail==='lease_expired'?'step_lease_expired':'step_fenced';
+ const message=String(error?.message||'');
+ if(/fence lost: lease/i.test(message))return 'discovery_lease';
+ if(/fence lost/i.test(message))return 'fence_lost';
+ if(/version already exists/i.test(message))return 'version_exists';
+ return 'other';
+}
 async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit',holder=null}){
  const sourceHolder=holder||discoveryHolder(latest);
  const view=await readLedgerView(env);
@@ -1032,7 +1048,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  }
  // AIR-444: every archive fence is also a mutation boundary of the EPG step, so a step that keeps working keeps its step lease (assertStep renews it
  // once half of it is spent) and one that lost it stops here, before the next write, as `epg_step_fenced`.
- const planStarted=Date.now(),tally={fences:0,skipped:0,fenceMs:0,segments:0,putMs:0,bytes:0};
+ const planStarted=Date.now(),tally={fences:0,skipped:0,fenceMs:0,readMs:0,segments:0,putMs:0,bytes:0};
  const fenceChecks=async()=>{
   await epgStepGuard(env);
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
@@ -1086,13 +1102,14 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  const archiveStarted=Date.now();
  epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,departures:departures.length,backlog:drain?drain.backlog:0});
  if(departures.length){
+  try{
   const writeId=crypto.randomUUID(),at=new Date().toISOString(),count=start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS,bySegment=new Map();
   for(const record of departures){const segment=ledgerArchiveSegment(record.key,count);if(!bySegment.has(segment))bySegment.set(segment,[]);bySegment.get(segment).push(record);}
   const segments=Array.from({length:count},(_,segment)=>start?.segments?.[segment]||{segment,object:null,sha256:null,items:0,bytes:0});
   for(const [segment,records] of [...bySegment].sort((a,b)=>a[0]-b[0])){
-   const segmentItems=await readLedgerSegment(env,start,segment);
+   const readAt=Date.now(),segmentItems=await readLedgerSegment(env,start,segment);tally.readMs+=Date.now()-readAt;
    for(const record of records){const payload=JSON.parse(record.json);if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};}
-   const object=ledgerArchiveSegmentKey(segment,writeId),putAt=Date.now(),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},segmentFence);tally.segments++;tally.bytes+=written.bytes;tally.putMs+=Date.now()-putAt;
+   const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},segmentFence,tally);tally.segments++;tally.bytes+=written.bytes;
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   }
   manifestId=crypto.randomUUID();
@@ -1102,8 +1119,9 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   await fence();
   const swapped=await env.BUCKET.put(LEDGER_ARCHIVE_POINTER,JSON.stringify({manifestId}),{onlyIf:archiveEtag?{etagMatches:archiveEtag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
   if(swapped===null)throw new Error('Discovery archive fence lost: archive pointer changed');
+  }catch(error){epgPhase(runId,'seal_stage_archive','error',{...archiveCounters(tally,archiveStarted),reason:archiveStopReason(error)});throw error;}
  }
- if(departures.length)epgPhase(runId,'seal_stage_archive','exit',{elapsedMs:Date.now()-archiveStarted,segments:tally.segments,fences:tally.fences,fencesSkipped:tally.skipped,fenceMs:tally.fenceMs,putMs:tally.putMs,bytes:tally.bytes});
+ if(departures.length)epgPhase(runId,'seal_stage_archive','exit',archiveCounters(tally,archiveStarted));
  const alsoArchived=[...also].sort(),archive=manifest?{version:'v1',manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes,alsoArchived,uniqueArchivedItems:manifest.totals.items-alsoArchived.length}:null;
  const ledgerOut={ledgerMode:effective,...(drain&&drain.backlog>0?{drain:{backlog:drain.backlog,cap:drain.cap}}:{}),archive};
  if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut,itemBytes:collected.itemBytes,itemCount:collected.itemCount};
