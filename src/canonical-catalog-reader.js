@@ -3,7 +3,7 @@
 // reader, performs SELECTs only, never touches R2 and never writes. the fenced writers and the localization sources stay unbundled.
 // - catalogReaderGate: legacy/r2/prepared -> mode 'existing' (today's runtime answers, byte-identical); open -> mode 'd1'; held, an unreadable or malformed
 //   marker -> throws film_person_held / film_person_unavailable. It never answers "go back to R2" for held or unknown.
-// - catalogTitlesFromD1 (slice 2, P4b): the provisional localized titles behind GET /api/programme and GET /api/watchlist, ONE bounded SELECT over a JSON id list, in the shape of
+// - catalogTitlesFromD1 (slice 2, P4b): the provisional localized titles behind GET /api/programme and GET /api/watchlist, bounded SELECTs (chunks of one JSON id list), in the shape of
 //   a titles.json row; catalogReaderStill re-checks the marker after any read, so a move between the gate and the answer (prepared -> open, held) is refused.
 // - catalogAdmittedFilmFromD1: the film route's rated-archive fallback at `open`, from film_rated_admission (readAdmissions), the D1 identity claims, the redirect
 //   table and the tmdb_retirement_decision ledger. The marker generation is read again after the reads, so a move mid-read is refused.
@@ -81,7 +81,10 @@ export async function catalogAdmittedFilmFromD1(env,tmdbId){
 // Slice 2 (P4b): the titles.json consumers of the programme and watchlist routes. titles.json is a former mutable canonical mirror (frozen at `open`, owner decision 4); the
 // same facts live in film_dimension('localization') (materialised by the canonical writers) and film_external_id. One SELECT per request: the film ids go in as ONE JSON text
 // (json_each), never one statement per film. The count of films is capped (the rows cannot exceed the ids asked for: one localization row per Film), and a request above the cap fails closed (503), never a silent partial answer.
-export const TITLE_READ_MAX_FILMS=2000;
+// One statement per chunk of at most TITLE_READ_CHUNK ids (the id list is one bound JSON text, about 45 KB at the chunk size). The real catalogue (about 9.3k Films, about 6.7k in the
+// programme window) takes 5 statements; the cap only stops a runaway document.
+export const TITLE_READ_CHUNK=1500;
+export const TITLE_READ_MAX_FILMS=20000;
 const TITLE_SQL=`SELECT d.film_id AS film_id,d.value AS value,d.provenance_json AS provenance_json,(SELECT e.value FROM film_external_id e WHERE e.film_id=d.film_id AND e.scheme='tmdb' AND e.trusted=1 AND e.conflicting=0 ORDER BY e.value LIMIT 1) AS tmdb FROM film_dimension d WHERE d.dimension='localization' AND d.status='provisional' AND d.value IS NOT NULL AND d.value<>'' AND d.film_id IN (SELECT value FROM json_each(?)) ORDER BY d.film_id DESC LIMIT ?`;
 // The film id the canonical writers give a stored spelling (the rule of canonicalFilmId in src/domain/film-person.js, repeated here: this module imports nothing else).
 const titleFilmId=id=>{const tmdb=/^tmdb_(\d+)$/.exec(id);return tmdb?'film:tmdb:'+tmdb[1]:'film:'+id;};
@@ -106,9 +109,12 @@ export async function catalogTitlesFromD1(env,films,gate){
  if(byId.size){
   const wanted=new Map();
   for(const id of byId.keys()){const own='film:'+id,tmdb=titleFilmId(id);wanted.set(own,id);if(tmdb!==own&&!wanted.has(tmdb))wanted.set(tmdb,id);}
-  let rows;
-  try{rows=await many(db,TITLE_SQL,[JSON.stringify([...wanted.keys()]),wanted.size]);}
-  catch(error){throw failed('canonical_read_unavailable',error);}
+  const keys=[...wanted.keys()],rows=[];
+  for(let at=0;at<keys.length;at+=TITLE_READ_CHUNK){
+   const chunk=keys.slice(at,at+TITLE_READ_CHUNK);
+   try{rows.push(...await many(db,TITLE_SQL,[JSON.stringify(chunk),chunk.length]));}
+   catch(error){throw failed('canonical_read_unavailable',error);}
+  }
   for(const row of rows){
    const id=wanted.get(row.film_id);
    // The id's own spelling wins over its tmdb spelling when both Films exist (the rows come own spelling first: ORDER BY film_id DESC).

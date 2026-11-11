@@ -61,9 +61,14 @@ const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:Canoni
 async function localizedTitleStore(env,pinned,gate,films){
  if(!gate)return (await loadJSON(pinned,'titles.json'))||{};
  if(gate.mode==='d1')return CanonicalCatalogReader.catalogTitlesFromD1(env,films,gate);
- const titles=(await loadJSON(pinned,'titles.json'))||{};
- await CanonicalCatalogReader.catalogReaderStill(env,gate);
- return titles;
+ return (await loadJSON(pinned,'titles.json'))||{};
+}
+// The LAST async boundary: after every awaited read of the route (titles, owner reviews, sync.json, documents) and right before a successful answer, the marker is read again
+// and must still have the state AND generation the first read saw, on the open path and on the legacy/r2/prepared path alike. A 200 shape that carries no title (the empty
+// watchlist) is fenced the same way. Error answers are not fenced: they carry no stored facts.
+async function titleReadFinish(env,gate,response){
+ if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);
+ return response;
 }
 const titleReadRefusal=error=>TITLE_READ_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
 async function epgPublication(env){
@@ -1661,7 +1666,7 @@ async fetch(request,env,execution){
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
-    return json(presented);
+    return await titleReadFinish(env,gate,json(presented));
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
@@ -1671,11 +1676,11 @@ async fetch(request,env,execution){
     let data=await loadJSON(pinned,'watchlist.json');
     const report=await loadJSON(pinned,'programme.json');
     if(pinned.epgPin?.authority!=='d1'&&report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};
-    if(!data)return json({films:[]});
+    if(!data)return await titleReadFinish(env,gate,json({films:[]}));
     const titles=await localizedTitleStore(env,pinned,gate,data?.films||[]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
-    return json(presentLocalized(data,titles,reviews.body));
+    return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
    }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);

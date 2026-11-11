@@ -9,6 +9,8 @@ import path from 'node:path';
 
 const READER=[
  ['the helper needs an open gate',"if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');",''],
+ ['the id list is chunked',"at+=TITLE_READ_CHUNK){","at+=TITLE_READ_CHUNK*100){"],
+ ['a chunk asks for its own size of rows',"[JSON.stringify(chunk),chunk.length]","[JSON.stringify(chunk),1]"],
  ['the film count is capped',"if(byId.size>TITLE_READ_MAX_FILMS)throw failed('canonical_read_unavailable');",''],
  ['the tmdb spelling of an id is asked for',"if(tmdb!==own&&!wanted.has(tmdb))wanted.set(tmdb,id);","void tmdb;"],
  ['the id own spelling wins',"(out[id]&&row.film_id!=='film:'+id)","false"],
@@ -26,7 +28,10 @@ const WORKER=[
  ['/api/programme reads the marker first',"const gate=await titleReadGate(env);\n    const pinned=await pinEpg(env);\n    const data=","const gate=null;\n    const pinned=await pinEpg(env);\n    const data="],
  ['/api/watchlist reads the marker first',"const gate=await titleReadGate(env);\n    const pinned=await pinEpg(env);\n    let data=","const gate=null;\n    const pinned=await pinEpg(env);\n    let data="],
  ['open reads D1, not the frozen mirror',"if(gate.mode==='d1')return CanonicalCatalogReader.catalogTitlesFromD1(env,films,gate);",""],
- ['the R2 answer is re-checked against the marker',"await CanonicalCatalogReader.catalogReaderStill(env,gate);\n return titles;","return titles;"],
+ ['the final re-check runs',"if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);\n return response;","return response;"],
+ ['the programme answer is fenced',"return await titleReadFinish(env,gate,json(presented));","return json(presented);"],
+ ['the watchlist answer is fenced',"return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));","return json(presentLocalized(data,titles,reviews.body));"],
+ ['the empty watchlist answer is fenced',"return await titleReadFinish(env,gate,json({films:[]}));","return json({films:[]});"],
  ['the programme route asks for every film of both documents',"[...(data?.films||[]),...(watchlist?.films||[])]","[...(data?.films||[])]"],
  ['the watchlist route asks for its films',"localizedTitleStore(env,pinned,gate,data?.films||[])","localizedTitleStore(env,pinned,gate,[])"],
  ['a refusal is a 503',"TITLE_READ_REFUSALS.includes(error?.code)?json(","false?json("],

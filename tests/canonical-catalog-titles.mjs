@@ -170,6 +170,33 @@ for(const route of ROUTES){
   assert.ok(flipped);assert.equal(r.status,503,route+' held then reopened');assert.equal(parse(r).reason,'film_person_generation_moved','the generation is compared, not only the state');}
 }
 
+// 4b. The LAST async boundary. The marker moves while the route awaits the owner-review read or the sync.json read, AFTER the titles were read: still a 503 and never a stale 200,
+// on both routes, on the open path and on the legacy/r2/prepared path, whatever the move. The empty watchlist answer (a normal 200 shape) is fenced the same way.
+{
+ const FLIPS=[['prepared',TO_OPEN],['r2',MARKER.prepared],['open',TO_HELD],['open',TO_HELD+TO_REOPEN]];
+ const HOOKS={'/api/programme':['admin/owner-reviews.json','sync.json'],'/api/watchlist':['admin/owner-reviews.json']};
+ for(const route of ROUTES)for(const hook of HOOKS[route])for(const [state,sql] of FLIPS){
+  const file=database(state);seed();let flipped=false;
+  onR2=async key=>{if(key===hook&&!flipped){flipped=true;sqlite(file,sql);}};
+  const r=await ask(route,{DB:standin(file,state)});
+  assert.ok(flipped,route+' '+hook+' '+state);
+  assert.equal(r.status,503,route+' '+hook+' '+state+': no stale 200');
+  assert.deepEqual(parse(r),{error:'storage_unavailable',reason:'film_person_generation_moved'},route+' '+hook+' '+state);
+ }
+ for(const [state,sql] of FLIPS){
+  const file=database(state);seed();records.delete('watchlist.json');for(const key of ['programme.json','epg/generations/'+G1+'/programme.json'])records.get(key).watchlistCount=99;
+  let flipped=false;onR2=async key=>{if(key.includes('programme.json')&&!flipped){flipped=true;sqlite(file,sql);}};
+  const r=await ask('/api/watchlist',{DB:standin(file,state)});
+  assert.ok(flipped,'empty '+state);assert.equal(r.status,503,'the empty answer is fenced: '+state);
+ }
+ {const file=database('r2');seed();records.delete('watchlist.json');for(const key of ['programme.json','epg/generations/'+G1+'/programme.json'])records.get(key).watchlistCount=99;
+  const r=await ask('/api/watchlist',{DB:standin(file,'r2')});assert.equal(r.status,200);assert.deepEqual(parse(r),{films:[]},'an unmoved marker answers the empty shape');}
+ // The helper's own re-check (a direct call, no route behind it).
+ const file=database('open');let flipped=false;
+ const reader=vm.runInContext('CanonicalCatalogReader',ctx);
+ await assert.rejects(()=>reader.catalogTitlesFromD1({DB:standin(file,'open',{onQuery:async text=>{if(!flipped&&/json_each/.test(text)){flipped=true;sqlite(file,TO_HELD);}}})},FILMS,{mode:'d1',state:'open',generation:2}),error=>error.code==='film_person_generation_moved');
+}
+
 // 5. Bounded and SELECT-only: one title statement whatever the size, no batch, no write; the cap fails closed.
 {
  const bulk=Array.from({length:300},(_,i)=>({id:'zzbulk'+i,tmdbId:String(5000+i),title:'T'+i,original:'T'+i,year:2000}));
@@ -183,7 +210,23 @@ for(const route of ROUTES){
  assert.equal(statements.filter(text=>/json_each/.test(text)).length,1,'ONE title statement for 300+ Films');
  assert.ok(statements.every(text=>/^\s*(SELECT|WITH)/i.test(text)),'SELECT only');
  assert.equal(d1.calls.batches,0,'no batch');
- assert.ok(statements.length<=14,'a bounded number of statements per request: '+statements.length);
+ assert.ok(statements.length<=20,'a bounded number of statements per request: '+statements.length);
+ // The real catalogue is far above one statement: more than one chunk of ids is several bounded statements, a row in the LAST chunk is still found, and the answer equals the R2 path.
+ {
+  const CH=vm.runInContext('CanonicalCatalogReader',ctx).TITLE_READ_CHUNK;
+  const filler=Array.from({length:CH+200},(_,i)=>({id:'zzc'+i,tmdbId:String(70000+i),title:'C'+i,original:'C'+i,year:2000}));
+  const last=filler.at(-1),first=filler[0],big=database('open');
+  sqlite(big,[first,last].map((f,i)=>`INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:${f.id}',1,NULL,'${f.original}','${T}');INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,updated_at) VALUES ('film:${f.id}','localization','provisional','wikidata','provisional','{"sources":null}','Ч${i}',NULL,'${T}');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:${f.id}','tmdb','${f.tmdbId}',1,0,NULL);`).join('\n'));
+  const titles={...titlesJson(),[first.id]:{title:'Ч0',tmdbId:first.tmdbId,status:'provisional',sources:null},[last.id]:{title:'Ч1',tmdbId:last.tmdbId,status:'provisional',sources:null}};
+  seed([...FILMS,...filler],titles);
+  const seen=[];const open=await ask('/api/watchlist',{DB:standin(big,'open',{onQuery:text=>{seen.push(text);}})});
+  assert.equal(open.status,200);assert.ok(!reads.includes('titles.json'));
+  assert.ok(seen.filter(text=>/json_each/.test(text)).length>=2,'more than one bounded statement for the real catalogue size');
+  assert.equal(parse(open).films.find(f=>f.id===last.id).title,'Ч1','a row in the last chunk is found');
+  seed([...FILMS,...filler],titles);const r2=await ask('/api/watchlist',{DB:standin(database('r2'),'r2')});
+  seed([...FILMS,...filler],titles);const again=await ask('/api/watchlist',{DB:standin(big,'open')});
+  assert.equal(JSON.stringify(parse(again).films.map(f=>f.title).slice(-3)),JSON.stringify(parse(r2).films.map(f=>f.title).slice(-3)));
+ }
  const reader=vm.runInContext('CanonicalCatalogReader',ctx),gate={mode:'d1',state:'open',generation:2},MAX=reader.TITLE_READ_MAX_FILMS;
  await assert.rejects(()=>reader.catalogTitlesFromD1({DB:standin(file,'open')},Array.from({length:MAX+1},(_,i)=>({id:'x'+i})),gate),error=>error.code==='canonical_read_unavailable','above the cap: closed, not partial');
  assert.deepEqual({...await reader.catalogTitlesFromD1({DB:standin(file,'open')},Array.from({length:MAX},(_,i)=>({id:'x'+i})),gate)},{},'at the cap: answered');
