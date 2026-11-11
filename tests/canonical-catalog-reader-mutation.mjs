@@ -27,7 +27,7 @@ const READER=[
  ['no admission row, no Film',"if(!admission)result={state:'absent'};","if(!admission)result={state:'found',film:{id:'tmdb_'+tmdbId,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:null,original:null,year:null,runtime:null,genres:[],url:null,directors:[],actors:[],shows:[]}};"],
  ['the admission names the typed id',"else if(String(admission.tmdb)!==tmdbId)throw failed('canonical_read_unavailable');",''],
  ['the marker is re-read after the reads',"if(again.state!=='open'||again.generation!==gate.generation)throw failed('film_person_generation_moved');",''],
- ['the generation is compared',"||again.generation!==gate.generation)",")"],
+ ['the generation is compared',"||again.generation!==gate.generation)throw failed('film_person_generation_moved');\n return result;",")throw failed('film_person_generation_moved');\n return result;"],
  ['a typed read error keeps its code',"if(error?.code)throw error;",''],
  ['an untyped read error fails closed',"throw failed('canonical_read_unavailable',error);\n }\n const again","throw error;\n }\n const again"],
 ];
