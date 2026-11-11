@@ -15,10 +15,10 @@ function world({ledger=0,mode='d1'}={}){
  const file=migrated();
  for(const name of later)sql(file,fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
  sql(file,"UPDATE discovery_authority SET mode='"+mode+"', cutover='open' WHERE id=1");
- const seen={statements:[],queries:0,storm:false,writes:0};
+ const seen={statements:[],queries:0,batched:0,storm:false,writes:0};
  const db=d1Standin(file,{
   onQuery:text=>{seen.queries++;seen.statements.push(text);if(!/^\s*SELECT/i.test(text))seen.writes++;if(seen.storm&&BIG_TABLES.test(text))sql(file,'UPDATE discovery_authority SET generation=generation+1 WHERE id=1');},
-  onBatch:statements=>{for(const item of statements){seen.statements.push(item.text);if(!/^\s*SELECT/i.test(item.text))seen.writes++;}},
+  onBatch:statements=>{for(const item of statements){seen.batched++;seen.statements.push(item.text);if(!/^\s*SELECT/i.test(item.text))seen.writes++;}},
  });
  return {file,db,seen,ledger};
 }
@@ -58,7 +58,7 @@ for(const ledger of [3,1500]){
  workflow(w,{phase:'running',instanceId:'wf-1',series:3,programmeRunId:'run-1',updatedAt:iso(at-30000),reason:null,chunksThisInstance:5});
  sql(w.file,"UPDATE discovery_authority SET published_programme_run_id='run-1', programme_run_id='run-1' WHERE id=1");
  const h=worker(w,{DISCOVERY_EXECUTOR:'workflow'});
- w.seen.statements.length=0;w.seen.queries=0;w.seen.writes=0;
+ w.seen.statements.length=0;w.seen.queries=0;w.seen.batched=0;w.seen.writes=0;
  const t0=performance.now(),r=await h.get(OPERATIONAL),ms=performance.now()-t0;
  assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));
  const body=r.data;
@@ -71,16 +71,16 @@ for(const ledger of [3,1500]){
  assert.ok(!w.seen.statements.some(text=>BIG_TABLES.test(text)),'no statement touches the ledger, decisions, catalog or segments: '+w.seen.statements.filter(text=>BIG_TABLES.test(text)).slice(0,2).join(' | '));
  assert.equal(w.seen.writes,0,'every statement is a read');
  assert.equal(h.bucket.putCount??0,0);
- measures[ledger]={queries:w.seen.queries,ms};
+ measures[ledger]={queries:w.seen.queries+w.seen.batched,batched:w.seen.batched,ms};
  // The same world read in detail, quiet: what the operational view avoids.
  await h.bucket.put('programme.json',JSON.stringify({runId:'run-1',films:[]}));
- w.seen.statements.length=0;w.seen.queries=0;const t1=performance.now(),full=await h.get(DETAILED),fullMs=performance.now()-t1;
+ w.seen.statements.length=0;w.seen.queries=0;w.seen.batched=0;const t1=performance.now(),full=await h.get(DETAILED),fullMs=performance.now()-t1;
  assert.equal(full.status,200,'the detailed view still answers when nothing changes: '+JSON.stringify(full.data).slice(0,200));assert.ok(Object.hasOwn(full.data,'candidates')&&Object.hasOwn(full.data,'statuses'),'its fields are unchanged');
- measures[ledger].detailedQueries=w.seen.queries;measures[ledger].detailedMs=fullMs;
- console.log('ledger',ledger,'observations: operational',measures[ledger].queries,'statements',ms.toFixed(0),'ms; detailed',w.seen.queries,'statements',fullMs.toFixed(0),'ms');
+ measures[ledger].detailedQueries=w.seen.queries+w.seen.batched;measures[ledger].detailedMs=fullMs;
+ console.log('ledger',ledger,'observations: operational',measures[ledger].queries,'statements (of which',measures[ledger].batched,'in one batch)',ms.toFixed(0),'ms; detailed',measures[ledger].detailedQueries,'statements',fullMs.toFixed(0),'ms');
  // The same record set read directly: one snapshot, at most 7 statements.
  const direct=await Authority.readOperationalSnapshot({DB:w.db});
- assert.equal(direct.handled,true);assert.ok(direct.statements<=7);
+ assert.equal(direct.handled,true);assert.ok(direct.statements<=7);assert.equal(measures[ledger].batched,7,'the snapshot is one batch of 7 single-row SELECTs');
  void seedEnv;
 }
 assert.equal(measures[3].queries,measures[1500].queries,'the cost does not follow the ledger: '+JSON.stringify(measures));
