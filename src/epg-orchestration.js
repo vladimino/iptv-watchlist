@@ -91,6 +91,9 @@ const EpgOrchestration=(()=>{
  // An error thrown by a step, by class only: its message is never copied into a record.
  function classifyThrown(error){
   const code=String(error?.code||''),message=String(error?.message||'');
+  // AIR-444: a step lease that ran out is stopped exactly like any fence (unsafe, no retry) but under its own name; only a moved mode revision, a lost or
+  // released lease or a published-generation fence is an epoch mismatch.
+  if(code==='epg_step_fenced'&&error?.detail==='lease_expired')return 'step_lease_expired';
   if(code==='published_epg_fence'||code==='epg_step_fenced')return 'epoch_mismatch';
   if(code==='epg_step_unreadable')return 'd1_unavailable';
   if(code==='discovery_seal_unfinished')return 'evidence_contradictory';
@@ -137,7 +140,8 @@ const EpgOrchestration=(()=>{
  async function assertStep(env,now=Date.now()){
   const step=env?.epgStep;
   if(!step)return;
-  const fenced=()=>Object.assign(new Error('epg_step_fenced'),{code:'epg_step_fenced'});
+  // `detail` says which check refused, so a lease that simply ran out is told apart from a real change of the mode revision (AIR-444).
+  const fenced=(detail='mode')=>Object.assign(new Error('epg_step_fenced'),{code:'epg_step_fenced',detail});
   // A read that failed says nothing about the fence: the mutation is refused all the same (fail closed), but the executor classes it as a
   // transient D1 failure (cooldown and retry inside the instance), never as an epoch change that stops the instance for good.
   const unreadable=()=>Object.assign(new Error('epg_step_unreadable'),{code:'epg_step_unreadable'});
@@ -150,9 +154,9 @@ const EpgOrchestration=(()=>{
    let lease=null;try{lease=row?.lease?JSON.parse(row.lease):null;}catch{throw fenced();}
    const modeRevision=row?.mode_revision==null?null:Number(row.mode_revision);
    if(modeRevision!==(step.modeRevision??null))throw fenced();
-   if(!lease||lease.holder!==step.holder||lease.released===true)throw fenced();
+   if(!lease||lease.holder!==step.holder||lease.released===true)throw fenced('lease_lost');
    const expires=Date.parse(lease.expiresAt||'');
-   if(!Number.isFinite(expires)||now>=expires-BOUNDARY_MARGIN_MS)throw fenced();
+   if(!Number.isFinite(expires)||now>=expires-BOUNDARY_MARGIN_MS)throw fenced('lease_expired');
    return {lease,expires,leaseRevision:Number(row.lease_revision)};
   }
   const seen=await look();
@@ -353,7 +357,7 @@ const EpgOrchestration=(()=>{
   try{outcome=await drive(fe,control,{now});}
   catch(error){outcome={failure:{code:classifyThrown(error)}};}
   finally{await endStep(env,taken.step).catch(()=>false);}
-  if(outcome.failure?.code==='epoch_mismatch')return {kind:'stop',reason:'epoch_mismatch'};
+  if(outcome.failure?.code==='epoch_mismatch'||outcome.failure?.code==='step_lease_expired')return {kind:'stop',reason:outcome.failure.code};
   // Commit. A thrown commit is not retried blind: the next action reads the control record and sync.json first.
   const key=outcome.run?checkpointKey(outcome.run):control.checkpoint?.key??null;
   const next={...control,runId:outcome.runId??control.runId,updatedAt:iso(now),nextWakeAt:outcome.wake?iso(outcome.wake):null,lastStep:{latencyMs:Math.max(0,clock()-began),started:outcome.started===true,note:outcome.note||null}};
