@@ -84,7 +84,7 @@ function discoveryReportState(outcome,record,empty){
 }
 // A report is written only from facts that were read and persisted: the deltas of the period and the queue reading. An hour whose close cannot be persisted writes
 // no event at all (see `closeHourlyDiscoveryReport`); an unreadable queue is said as `queueUnreadable` beside the real deltas, never as a report of unknowns.
-// `incomplete` stays `false` on every event written now; only events written before ADR 0116 can carry `true` with every number `null`, and they keep their card.
+// `incomplete` stays `false` on every event written now; only events written before ADR 0117 can carry `true` with every number `null`, and they keep their card.
 function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue}){
  const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
  const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:report.chunks,queueEmpty:queue.empty===true,remaining:queue.remaining,queueUnreadable:queue.incomplete===true,incomplete:false,error:queue.error||null};
@@ -176,7 +176,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
    incompleteReason='write_conflict';
   }
  }catch{incompleteReason='state_unreadable';}
- // Not persisted: the hour still gets one truthful line, a compact notice that its REPORT could not be completed (ADR 0116). It carries no counters and no
+ // Not persisted: the hour still gets one truthful line, a compact notice that its REPORT could not be completed (ADR 0117). It carries no counters and no
  // queue facts, so it can neither show unknowns nor imply that Discovery failed (only a Discovery state confirmed by the reconcile is named). The accumulator is
  // untouched, so the next successful report carries the deltas once. The notice does not travel through the record whose write failed: it is put create-only
  // straight into the journal under a stable id per generation and hour, and when the journal refuses it, it waits in a small separate ledger (its own
@@ -189,56 +189,88 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
 }
 const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','outbox_full','projector_window','write_conflict']);
 const DISCOVERY_REPORT_FAULT_KEY='events/discovery-report-faults.json';
-const DISCOVERY_REPORT_FAULT_LIMIT=48;
+// The ledger never evicts: it holds one compact tuple per undelivered hour, up to a year of hours (about 40 bytes each, well under 1 MB). Past that bound the NEWEST
+// notice is refused and logged as `lost`; an older one is never dropped to make room. A drain delivers at most `DISCOVERY_REPORT_FAULT_DRAIN` entries per firing,
+// oldest first, so one invocation's R2 work stays bounded however long the outage was.
+const DISCOVERY_REPORT_FAULT_LIMIT=8760;
+const DISCOVERY_REPORT_FAULT_DRAIN=64;
 const DISCOVERY_REPORT_FAULT_ATTEMPTS=3;
+const DISCOVERY_REPORT_FAULT_STATUSES=[null,'failed','waiting','blocked'];
+const DISCOVERY_REPORT_REASON_LIST=['no_record','state_unreadable','outbox_full','projector_window','write_conflict'];
 function logDiscoveryReportClose({hourKey,reason,generation,delivery}){
  try{console.warn(JSON.stringify({event:'discovery_hour_close_failed',hourKey:String(hourKey||'').slice(0,12),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',generation:String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||null,notice:['delivered','queued','lost'].includes(delivery)?delivery:'lost'}));}catch{}
 }
-// The notice of an hour whose report could not be completed. Its `status` is a Discovery state only when the reconcile of that firing confirmed one that
-// needs the owner's eyes (`failed`, `waiting`, `blocked`); `running` and `idle` say nothing about Discovery and are not stored.
+// The notice of an hour whose report could not be completed. It has the SAME identity as the report of that hour (`discovery-hour-<generation>-<UTC hour>`), so the
+// Events Log can never hold two events for one hourly firing: the notice is put create-only and never replaces anything, and a report that comes later replaces the notice
+// of its hour (see `writeDiscoveryEvent`). `status` is a Discovery state only when the reconcile of that firing confirmed one that needs the owner's eyes
+// (`failed`, `waiting`, `blocked`); `running` and `idle` say nothing about Discovery and are not stored.
 function discoveryReportFailedEvent({at,hourKey,generation,reason,status}){
  const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
- return {id:'discovery-hour-'+compact+'-'+hourKey+'-report-failed',type:'discovery',kind:'report_failed',at,generation:compact.slice(0,8),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',status:['failed','waiting','blocked'].includes(status)?status:null};
+ return {id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'report_failed',at,generation:compact.slice(0,8),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',status:['failed','waiting','blocked'].includes(status)?status:null};
 }
-function validDiscoveryReportFailure(event){return !!event&&typeof event==='object'&&event.type==='discovery'&&event.kind==='report_failed'&&typeof event.id==='string'&&event.id.length<=64&&Number.isFinite(Date.parse(event.at));}
-// The ledger of notices the journal refused: one small R2 object under its own key and its own etag, bounded (the oldest entries leave first and `dropped`
-// counts them), never part of the executor record.
+// A ledger entry is the compact tuple [generation (12), UTC hour key, reason index, status index]: the notice is rebuilt from it exactly, so nothing is lost by the encoding.
+function encodeDiscoveryReportFault(event){
+ const parts=String(event.id).match(/^discovery-hour-([0-9A-Za-z]{1,12})-(\d{8}T\d{2})$/);
+ if(!parts)return null;
+ const reason=DISCOVERY_REPORT_REASON_LIST.indexOf(event.reason),status=DISCOVERY_REPORT_FAULT_STATUSES.indexOf(event.status??null);
+ return reason<0||status<0?null:[parts[1],parts[2],reason,status];
+}
+function decodeDiscoveryReportFault(tuple){
+ if(!Array.isArray(tuple)||tuple.length!==4)return null;
+ const [generation,hourKey,reason,status]=tuple;
+ if(typeof generation!=='string'||!/^[0-9A-Za-z]{1,12}$/.test(generation)||typeof hourKey!=='string'||!/^\d{8}T\d{2}$/.test(hourKey))return null;
+ if(!Number.isInteger(reason)||reason<0||reason>=DISCOVERY_REPORT_REASON_LIST.length||!Number.isInteger(status)||status<0||status>=DISCOVERY_REPORT_FAULT_STATUSES.length)return null;
+ const at=hourKey.slice(0,4)+'-'+hourKey.slice(4,6)+'-'+hourKey.slice(6,8)+'T'+hourKey.slice(9,11)+':00:00.000Z';
+ if(!Number.isFinite(Date.parse(at)))return null;
+ return discoveryReportFailedEvent({at,hourKey,generation,reason:DISCOVERY_REPORT_REASON_LIST[reason],status:DISCOVERY_REPORT_FAULT_STATUSES[status]});
+}
+// The ledger of notices the journal refused: one small R2 object under its own key and its own etag, never part of the executor record.
 async function readDiscoveryReportFaults(env){
  const object=await env.BUCKET.get(DISCOVERY_REPORT_FAULT_KEY);
- if(!object)return {etag:null,faults:[],dropped:0};
+ if(!object)return {etag:null,faults:[]};
  let doc=null;try{doc=await object.json();}catch{doc=null;}
- const faults=Array.isArray(doc?.faults)?doc.faults.filter(validDiscoveryReportFailure).slice(-DISCOVERY_REPORT_FAULT_LIMIT):[];
- return {etag:object.etag,faults,dropped:Number.isInteger(doc?.dropped)&&doc.dropped>0?doc.dropped:0};
+ return {etag:object.etag,faults:Array.isArray(doc?.faults)?doc.faults.filter(tuple=>decodeDiscoveryReportFault(tuple)!==null):[]};
 }
-async function writeDiscoveryReportFaults(env,state,faults,dropped){
- const kept=faults.slice(-DISCOVERY_REPORT_FAULT_LIMIT),over=faults.length-kept.length;
- const saved=await env.BUCKET.put(DISCOVERY_REPORT_FAULT_KEY,JSON.stringify({schemaVersion:1,faults:kept,dropped:dropped+over}),{httpMetadata:{contentType:'application/json'},onlyIf:state.etag?{etagMatches:state.etag}:{etagDoesNotMatch:'*'}});
+async function writeDiscoveryReportFaults(env,state,faults){
+ const saved=await env.BUCKET.put(DISCOVERY_REPORT_FAULT_KEY,JSON.stringify({schemaVersion:2,faults}),{httpMetadata:{contentType:'application/json'},onlyIf:state.etag?{etagMatches:state.etag}:{etagDoesNotMatch:'*'}});
  return saved!==null;
 }
-// Delivers one notice: a create-only put under its stable id (a repeat finds the key and keeps the first), and only when the journal refuses it, a durable
-// entry in the ledger for a later firing. `lost` means both stores refused (a storage outage): nothing was persisted, the log line is the trace.
+const sameFault=(a,b)=>a[0]===b[0]&&a[1]===b[1];
+// Delivers one notice: a create-only put under its canonical id (a repeat, or a report already stored for that hour, is kept as it is), and only when the journal
+// refuses it, a durable entry in the ledger for a later firing. `lost` means the ledger is at its bound (the newest entry is refused, no older one is evicted) or both
+// stores refused (a storage outage): nothing was persisted, and the log line is the trace.
 async function deliverDiscoveryReportFailure(env,event){
  const written=await putDiscoveryEvent(env,event);
  if(written==='written'||written==='exists')return 'delivered';
+ const tuple=encodeDiscoveryReportFault(event);
+ if(!tuple)return 'lost';
  try{
   for(let attempt=0;attempt<DISCOVERY_REPORT_FAULT_ATTEMPTS;attempt++){
    const state=await readDiscoveryReportFaults(env);
-   if(state.faults.some(entry=>entry.id===event.id))return 'queued';
-   if(await writeDiscoveryReportFaults(env,state,[...state.faults,event],state.dropped))return 'queued';
+   if(state.faults.some(entry=>sameFault(entry,tuple)))return 'queued';
+   if(state.faults.length>=DISCOVERY_REPORT_FAULT_LIMIT)return 'lost';
+   if(await writeDiscoveryReportFaults(env,state,[...state.faults,tuple]))return 'queued';
   }
  }catch{}
  return 'lost';
 }
-// Drains the ledger: every entry is put create-only and leaves the ledger only after a confirmed put. Never throws.
+// Drains the ledger: the oldest entries first, at most DISCOVERY_REPORT_FAULT_DRAIN a firing, each put create-only; an entry leaves the ledger only after a confirmed
+// put (written, or the key already holds the notice or the report of that hour). Never throws.
 async function deliverDiscoveryReportFaults(env){
  try{
+  const first=await readDiscoveryReportFaults(env);
+  if(!first.faults.length)return {delivered:0,pending:0};
+  const done=[];
+  for(const tuple of first.faults.slice(0,DISCOVERY_REPORT_FAULT_DRAIN)){
+   const event=decodeDiscoveryReportFault(tuple);
+   const written=event?await putDiscoveryEvent(env,event):'written';
+   if(written==='written'||written==='exists')done.push(tuple);
+  }
+  if(!done.length)return {delivered:0,pending:first.faults.length};
   for(let attempt=0;attempt<DISCOVERY_REPORT_FAULT_ATTEMPTS;attempt++){
-   const state=await readDiscoveryReportFaults(env);
-   if(!state.faults.length)return {delivered:0,pending:0};
-   const left=[];let delivered=0;
-   for(const event of state.faults){const written=await putDiscoveryEvent(env,event);if(written==='written'||written==='exists')delivered++;else left.push(event);}
-   if(!delivered)return {delivered:0,pending:left.length};
-   if(await writeDiscoveryReportFaults(env,state,left,state.dropped))return {delivered,pending:left.length};
+   const state=attempt===0?first:await readDiscoveryReportFaults(env);
+   const left=state.faults.filter(entry=>!done.some(item=>sameFault(item,entry)));
+   if(await writeDiscoveryReportFaults(env,state,left))return {delivered:done.length,pending:left.length};
   }
  }catch{}
  return {delivered:0,pending:null};

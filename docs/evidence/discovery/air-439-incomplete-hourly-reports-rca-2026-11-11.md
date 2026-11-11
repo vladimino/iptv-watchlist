@@ -34,10 +34,10 @@ Which of the five reasons each of the four stored events carries. The reason is 
 
 - **Empty queue:** the 08:00 UTC report is a confirmed empty queue (numeric zeros and a `complete` continuation); unchanged.
 - **Unavailable queue status:** now a persisted report with real deltas and `queueUnreadable`.
-- **Failed close:** now one compact `report_failed` notice for the hour (stable id, no numbers, Discovery named only when confirmed), delivered independently of the failed record; one `discovery_hour_close_failed` log line with the typed reason and the delivery result.
+- **Failed close:** now one compact `report_failed` notice for the hour (canonical id of the hour, no numbers, Discovery named only when confirmed; a report of the same hour replaces it), delivered independently of the failed record; one `discovery_hour_close_failed` log line with the typed reason and the delivery result.
 - **No scheduled firing:** not observed in this window; a gap is for the Monitor, as before.
 - **Real Discovery degradation:** not hidden; a failed close never changes what the reconcile does, and `failed` / `blocked` / `waiting` statuses are written whenever the close succeeds.
 
 ## Verification
 
-Offline only: `tests/discovery-events.mjs` (a held projector window, an unreadable record, a lost compare-and-swap, no record, an outbox at its limit, a notice per hour with a stable identity, a replay and a duplicate, a prolonged failure, the journal refusing the notice and the ledger drained by later firings, a bounded ledger, an unread queue beside real deltas, a failed hour between two reports, no second count of a delta) and `tests/activity-ui.mjs` (the card for `queueUnreadable`, hostile fields, the legacy `incomplete` card). The safe read-only operational status and a few natural hourly events after deploy remain the owner's acceptance.
+Offline only: `tests/discovery-events.mjs` (a held projector window, an unreadable record, a lost compare-and-swap, no record, an outbox at its limit, a notice per hour with a stable identity, a replay and a duplicate, a prolonged failure, the journal refusing the notice and the ledger drained by later firings, a lossless ledger drained oldest first and bounded per firing, one event per hour, an unread queue beside real deltas, a failed hour between two reports, no second count of a delta) and `tests/activity-ui.mjs` (the card for `queueUnreadable`, hostile fields, the legacy `incomplete` card). The safe read-only operational status and a few natural hourly events after deploy remain the owner's acceptance.

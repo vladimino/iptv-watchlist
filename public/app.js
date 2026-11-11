@@ -2355,7 +2355,7 @@ function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeForma
     :`<p class="event-note">Повторно использовано: ${num(event.reused)} · отсеяно: ${num(event.screenedOut)} · запросов к TMDB: ${num(event.tmdbCalls)}.</p>${from?`<p class="event-note">Период: с ${from}.</p>`:''}${event.queueUnreadable===true&&!empty?'<p class="event-note">Остаток очереди сейчас прочитать не удалось; найденное за период посчитано.</p>':''}`);
  }
  else if(event.type==='discovery'&&event.kind==='report_failed'){
-  // ADR 0116: the REPORT of an hour could not be completed. No counters and no queue facts are drawn (none were read), and Discovery is named only when the
+  // ADR 0117: the REPORT of an hour could not be completed. No counters and no queue facts are drawn (none were read), and Discovery is named only when the
   // reconcile of that firing confirmed a state that needs attention; every sentence is fixed text chosen by `status`.
   const state=event.status==='failed'?'Discovery остановлен после повторных ошибок':event.status==='waiting'?'Discovery ждёт повтора':event.status==='blocked'?'Discovery не запустился: временный отказ':null;
   body=`<p>Отчёт за час не удалось сформировать</p><p class="event-note">Накопленные данные войдут в следующий успешный отчёт.</p>${state?`<p class="event-note">${state}.</p>`:''}`;
