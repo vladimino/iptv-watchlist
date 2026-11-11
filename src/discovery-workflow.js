@@ -157,7 +157,9 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
    const state=await readWorkflowState(env);record=state.record;
    if(!record){incompleteReason='no_record';break;}
    const report=normalizeDiscoveryReport(record.report);
-   if(report.lastClosedHour===hourKey){await deliverDiscoveryOutbox(env);return {closed:false,reason:'already_closed',hourKey};}
+   // The compact UTC keys sort chronologically: this hour or an older one is already closed (or superseded by a later close). A delayed or replayed
+   // firing of it must not close the open accumulator, which holds chunks of a later period, under an id that already exists.
+   if(typeof report.lastClosedHour==='string'&&hourKey<=report.lastClosedHour){await deliverDiscoveryOutbox(env);return {closed:false,reason:hourKey===report.lastClosedHour?'already_closed':'stale_hour',hourKey};}
    const pending=(Array.isArray(record.outbox)?record.outbox.length:0);
    if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
    const queue=await discoveryReportQueue(env,report,generationOf(record));

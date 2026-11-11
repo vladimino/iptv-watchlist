@@ -202,6 +202,29 @@ resetAll();seed({count:3});elect();chunkStub(PLAN);
  assert.equal(sumOf(reports(),'added'),3);
 }
 
+// 2b. A delayed or replayed firing of an OLDER hour never closes the open accumulator: a chunk committed after hour 11 appears exactly once, in hour 12.
+resetAll();seed({count:3});const own2b=elect();
+{
+ const outcome={started:false,reason:'in_progress',programmeRunId:GENERATION};
+ await closed(outcome,0);await closed(outcome,1);
+ await call('settleWorkflowIfOwner')(env,own2b,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:6,added:3,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:4,cheapRemaining:0,error:null},own2b+':1',GENERATION)}));
+ const before=JSON.stringify(reports()),recordBefore=JSON.stringify(workflowRecord()),putsBefore=puts.length;
+ const stale=await closed(outcome,0);
+ assert.equal(stale.closed,false);assert.equal(stale.reason,'stale_hour');
+ assert.equal(JSON.stringify(workflowRecord().report),JSON.stringify(JSON.parse(recordBefore).report),'the open accumulator is untouched');
+ assert.equal(workflowRecord().report.added,3);assert.equal(JSON.stringify(reports()),before,'no stored event changed');assert.equal(puts.length,putsBefore,'nothing was written');
+ assert.equal((await closed(outcome,1)).reason,'already_closed');
+ await closed(outcome,2);
+ assert.equal(reports().length,3);assert.deepEqual(reports().map(event=>event.added),[0,0,3],'the chunk is in hour 12, once');
+ assert.equal(sumOf(reports(),'added'),3);assert.equal(workflowRecord().report.added,0);
+ // The old hour's outbox may still drain: an entry left there by a failed put is delivered by the stale firing.
+ resetAll();seed({count:3});elect();
+ failEventPuts=true;await closed(outcome,0);await closed(outcome,1);failEventPuts=false;
+ assert.equal(outbox().length,2);
+ const drained=await closed(outcome,0);assert.equal(drained.reason,'stale_hour');
+ assert.deepEqual(outbox(),[],'the stale firing still delivers the outbox');assert.equal(reports().length,2);
+}
+
 // 3. An hour with no change, a close without a scheduled clock, an external executor.
 resetAll();seed({count:3});elect();
 {
@@ -402,7 +425,7 @@ resetAll();seed({count:3});elect();
 {
  const outcome={started:false,reason:'in_progress',programmeRunId:GENERATION};
  const fall=Date.UTC(2026,9,25,0),spring=Date.UTC(2026,2,29,0);
- for(const ms of [fall,fall+HOUR,fall+2*HOUR,spring,spring+HOUR])await call('closeHourlyDiscoveryReport')(env,outcome,{scheduled:true,now:ms+120000});
+ for(const ms of [spring,spring+HOUR,fall,fall+HOUR,fall+2*HOUR])await call('closeHourlyDiscoveryReport')(env,outcome,{scheduled:true,now:ms+120000});
  const ids=reports().map(event=>event.id);assert.equal(new Set(ids).size,5,'two Madrid 02:00 hours are two reports; no hour merges or skips');
  assert.deepEqual(reports().map(event=>event.at).sort(),[spring,spring+HOUR,fall,fall+HOUR,fall+2*HOUR].map(ms=>new Date(ms).toISOString()));
  assert.ok(ids.includes('discovery-hour-a30f67e93a11-20261025T01'));
