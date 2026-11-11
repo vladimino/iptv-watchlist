@@ -114,7 +114,8 @@ assert.match(html('#film-screen-score'),/Прогноз<\/span><strong>4\.6<\/st
 assert.doesNotMatch(html('#film-screen-score'),/Оценка Letterboxd/,'no rating card for a film outside the watchlist');
 assert.match(html('#film-screen-fingerprint'),/Расследование|investigation|Механика/i);
 assert.match(html('#film-screen-credits'),/Режиссёр/);assert.match(html('#film-screen-credits'),/Актёр/);
-assert.match(html('#film-screen-availability'),/Осталось показов <strong>0<\/strong>/,'zero shows is an honest placeholder');
+assert.match(html('#film-screen-availability'),/Нет показов в текущем окне программы/,'zero shows is an honest placeholder');
+assert.doesNotMatch(html('#film-screen-availability'),/Осталось показов/);
 assert.equal(html('#film-screen-synopsis'),'','no synopsis block');
 assert.equal(html('#film-compare-result'),'','no compare result');
 assert.equal(query('#film-compare').hidden,true,'the compare block is hidden');
