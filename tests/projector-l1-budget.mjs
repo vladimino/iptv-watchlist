@@ -103,7 +103,7 @@ async function writePhase({diffMs,expiresInMs=null,wallMs,bulkOptions={groupSize
  const marker=m.db.sql('SELECT mode,cutover,generation FROM film_person_authority WHERE id=1')[0];
  bulk.expectedMarker={mode:marker.mode,cutover:marker.cutover,generation:Number(marker.generation)};
  const adapter=projector.d1EnrichmentAdapter(stand);
- const result=await projector.d1EnrichmentWrite(adapter,clone(plan),{leaseId,started,queryBudget:800,wallMs,bulk,windowOwner:windowed?leaseId:null,windowExpiresAt});
+ const result=await projector.d1EnrichmentWrite(adapter,clone(plan),{leaseId,started,queryBudget:800,wallMs,bulk,authority:bulk.expectedMarker,windowOwner:windowed?leaseId:null,windowExpiresAt});
  return {result,log,m,started,windowExpiresAt,end:clock.t};
 }
 // The admission rule the code states: a group starts while (deadline - now - reserve) covers the longest group seen so far (the first estimate before any).
