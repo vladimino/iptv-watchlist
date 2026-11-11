@@ -82,11 +82,13 @@ function discoveryReportState(outcome,record,empty){
  if(reason&&DISCOVERY_REPORT_BLOCKED.has(reason))return {status:'blocked',reason};
  return {status:'blocked',reason:reason?'other':'unknown'};
 }
-// `incomplete` events carry no counters (every number is null): the reading they would come from was not available.
-function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue,incomplete}){
+// A report is written only from facts that were read and persisted: the deltas of the period and the queue reading. An hour whose close cannot be persisted writes
+// no event at all (see `closeHourlyDiscoveryReport`); an unreadable queue is said as `queueUnreadable` beside the real deltas, never as a report of unknowns.
+// `incomplete` stays `false` on every event written now; only events written before ADR 0116 can carry `true` with every number `null`, and they keep their card.
+function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue}){
  const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
- const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:incomplete?null:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:incomplete?null:report.chunks,queueEmpty:!incomplete&&queue.empty===true,remaining:incomplete?null:queue.remaining,incomplete:incomplete===true||queue?.incomplete===true,error:incomplete?null:queue.error||null};
- for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=incomplete?null:report[name];
+ const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:report.chunks,queueEmpty:queue.empty===true,remaining:queue.remaining,queueUnreadable:queue.incomplete===true,incomplete:false,error:queue.error||null};
+ for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=report[name];
  if(queue?.reason&&!event.reason)event.reason=queue.reason;
  return event;
 }
@@ -150,7 +152,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
  if(discoveryExecutorMode(env)!=='workflow')return {closed:false,reason:'not_workflow'};
  const hourMs=Math.floor(options.now/3600000)*3600000,hourKey=discoveryHourStamp(hourMs),at=new Date(hourMs).toISOString();
  const generationOf=record=>outcome?.programmeRunId||record?.programmeRunId||null;
- const state_=discoveryReportState(outcome,null,false);
+
  let incompleteReason='state_unreadable',record=null;
  try{
   for(let attempt=0;attempt<DISCOVERY_REPORT_CLOSE_ATTEMPTS;attempt++){
@@ -164,7 +166,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
    if(pending>=DISCOVERY_REPORT_OUTBOX_LIMIT){await deliverDiscoveryOutbox(env);incompleteReason='outbox_full';break;}
    const queue=await discoveryReportQueue(env,report,generationOf(record));
    const {status,reason}=discoveryReportState(outcome,record,queue.empty);
-   const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue,incomplete:false});
+   const event=discoveryHourEvent({at,hourKey,generation:generationOf(record),status,reason,report,queue});
    const {tick,...rest}=record;
    const next={...rest,report:{...newDiscoveryReport(at,report.seen),lastClosedHour:hourKey},outbox:[...(Array.isArray(record.outbox)?record.outbox:[]),event]};
    const written=await writeWorkflowStateSoft(env,next,state.etag);
@@ -173,12 +175,15 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
    incompleteReason='write_conflict';
   }
  }catch{incompleteReason='state_unreadable';}
- // Not persisted: an event without numbers says so, the accumulator keeps its deltas for the next report and nothing is double counted.
+ // Not persisted: nothing is written to the Events Log. The accumulator keeps its deltas, so the next successful report carries them (its `from` shows how far
+ // back it reaches); the failure is one bounded typed log line, never an event of unknowns and never a zero.
  const generation=generationOf(record);
- const event=discoveryHourEvent({at,hourKey,generation,status:state_.status,reason:state_.reason||incompleteReason,report:null,queue:null,incomplete:true});
- event.reason=incompleteReason==='no_record'?(state_.reason||'no_record'):incompleteReason;
- const written=await putDiscoveryEvent(env,event);
- return {closed:false,reason:incompleteReason,hourKey,event:written};
+ logDiscoveryReportClose({hourKey,reason:incompleteReason,generation});
+ return {closed:false,reason:incompleteReason,hourKey};
+}
+const DISCOVERY_REPORT_CLOSE_REASONS=new Set(['no_record','state_unreadable','outbox_full','projector_window','write_conflict']);
+function logDiscoveryReportClose({hourKey,reason,generation}){
+ try{console.warn(JSON.stringify({event:'discovery_hour_close_failed',hourKey:String(hourKey||'').slice(0,12),reason:DISCOVERY_REPORT_CLOSE_REASONS.has(reason)?reason:'other',generation:String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||null}));}catch{}
 }
 // Counts the statements prepared through env.DB. Statements and batches are passed through untouched, because a
 // native D1 batch only accepts native prepared statements.

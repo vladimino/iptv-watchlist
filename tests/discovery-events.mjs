@@ -23,7 +23,8 @@ const binding={
  async get(){return {status:'running'};}
 };
 const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,LETTERBOXD_USERNAME:'tester',DISCOVERY_WORKFLOW:binding};
-const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,console:{log(){},error(){},warn(){}},ASSETS:{},fetch:async()=>new Response('unexpected',{status:599})});
+const warnings=[];
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,console:{log(){},error(){},warn(line){try{warnings.push(JSON.parse(line));}catch{warnings.push({unparsed:true});}}},ASSETS:{},fetch:async()=>new Response('unexpected',{status:599})});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/continuation.js','src/discovery-workflow.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
@@ -111,7 +112,7 @@ const workflowRecord=()=>records.get('epg/discovery-workflow.json');
 const realPut=bucket.put;
 let failEventPuts=false;
 bucket.put=async(key,...rest)=>{if(failEventPuts&&key.startsWith('events/items/'))throw new Error('event put failed');return realPut(key,...rest);};
-const resetAll=()=>{records.clear();etags.clear();puts.length=0;creates.length=0;failEventPuts=false;};
+const resetAll=()=>{warnings.length=0;records.clear();etags.clear();puts.length=0;creates.length=0;failEventPuts=false;};
 binding.create=async request=>{creates.push(request);return {id:request.id};};
 Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
 armWorkflowAdmission();
@@ -179,7 +180,7 @@ chunkStub(PLAN);
  assert.equal(list.every(event=>event.kind==='hour'&&event.type==='discovery'&&!event.incomplete),true);
  assert.deepEqual(outbox(),[],'everything delivered');
  assert.notEqual(series0,workflowRecord().instanceId);
- assert.deepEqual(Object.keys(list[1]).sort(),['added','at','checked','chunks','error','from','generation','id','incomplete','kind','queueEmpty','reason','remaining','reused','screenedOut','status','tmdbCalls','touched','type'].sort(),'a compact event: counters only, no film titles');
+ assert.deepEqual(Object.keys(list[1]).sort(),['added','at','checked','chunks','error','from','generation','id','incomplete','kind','queueEmpty','queueUnreadable','reason','remaining','reused','screenedOut','status','tmdbCalls','touched','type'].sort(),'a compact event: counters only, no film titles');
 }
 
 // 2. Duplicate, delayed and missed crons. A repeated hour finds its report, a late cron keeps the hour, a gap is not backfilled.
@@ -393,31 +394,67 @@ resetAll();seed({count:3});const own=elect();
  failEventPuts=false;
  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},limit+6);
  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},limit+7);
- const real=reports().filter(event=>!event.incomplete);
+ const real=reports();
+ assert.equal(real.every(event=>event.incomplete===false&&Number.isInteger(event.added)&&Number.isInteger(event.checked)),true,'no event of unknowns is ever written: every stored report carries real numbers');
  assert.equal(sumOf(real,'added'),total,'every committed chunk is counted exactly once across the reports');
- assert.equal(real.length>=limit,true);assert.deepEqual(outbox(),[]);
- const saturated=reports().filter(event=>event.incomplete);
- for(const event of saturated){for(const name of Object.keys(ZERO))assert.equal(event[name],null,'an event written without a reading never shows a 0');assert.equal(event.reason,'outbox_full');}
+ assert.equal(real.length>=1,true);assert.deepEqual(outbox(),[]);
+ assert.equal(warnings.some(entry=>entry.event==='discovery_hour_close_failed'&&entry.reason==='outbox_full'),true,'the saturated hours are one typed log line each, not events');
 }
 
-// 10. Unreadable or unwritable state: an incomplete event with unknown numbers, the accumulator untouched.
+// 10. Unreadable or unwritable state: nothing is written to the Events Log, the accumulator is untouched, one bounded typed log line says why, and the next close reports the deltas once.
 resetAll();seed({count:3});const own10=elect();
 {
  await call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10+':1',GENERATION)}));
  const realRead=context.DiscoveryAuthority.readWorkflow,realWrite=context.DiscoveryAuthority.writeWorkflow;
  context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
  const held=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
- assert.equal(held.closed,false);assert.equal(held.reason,'projector_window');
- const [e0]=reports();assert.equal(e0.incomplete,true);assert.equal(e0.reason,'projector_window');assert.equal(e0.status,'running');
- for(const name of ['checked','added','reused','screenedOut','touched','tmdbCalls','chunks','remaining','from'])assert.equal(e0[name],null,name+' is unknown, not 0');
+ assert.equal(held.closed,false);assert.equal(held.reason,'projector_window');assert.equal(held.event,undefined);
+ assert.equal(reports().length,0,'a held projector window writes no event: no empty report in the journal');
  assert.equal(workflowRecord().report.added,2,'the deltas wait for the next report');
  context.DiscoveryAuthority.writeWorkflow=realWrite;
  context.DiscoveryAuthority.readWorkflow=async()=>{throw new Error('d1 down');};
  const unreadable=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
- assert.equal(unreadable.reason,'state_unreadable');assert.equal(reports()[1].incomplete,true);assert.equal(reports()[1].added,null);
+ assert.equal(unreadable.reason,'state_unreadable');assert.equal(reports().length,0,'an unreadable state writes no event');
  context.DiscoveryAuthority.readWorkflow=realRead;
- await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2);
- const [,,e2]=reports();assert.equal(e2.added,2,'the delayed deltas arrive once, in the next complete report');assert.equal(e2.incomplete,false);
+ // a lost compare-and-swap on every attempt
+ const realWrite2=context.DiscoveryAuthority.writeWorkflow;context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});
+ const conflict=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2);
+ context.DiscoveryAuthority.writeWorkflow=realWrite2;
+ assert.equal(conflict.closed,false);assert.equal(reports().length,0,'a lost compare-and-swap writes no event');assert.equal(workflowRecord().report.added,2);
+ assert.deepEqual(warnings.map(entry=>entry.reason).filter(Boolean).slice(0,2),['projector_window','state_unreadable']);
+ assert.equal(warnings.every(entry=>entry.event==='discovery_hour_close_failed'&&typeof entry.hourKey==='string'&&entry.hourKey.length<=12),true,'bounded typed log lines, no payload');
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},3);
+ const [e3]=reports();assert.equal(reports().length,1);assert.equal(e3.added,2,'the delayed deltas arrive once, in the next report');assert.equal(e3.incomplete,false);assert.equal(e3.checked,3);
+ assert.equal(e3.from,null,'the first report has no earlier period');
+ // a failed hour between two reports: the next one starts where the last closed report ended, so the reach back is visible and the delta is counted once
+ await call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:1,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:5,cheapRemaining:0,error:null},own10+':2',GENERATION)}));
+ context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},4);
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.equal(reports().length,1,'the failed hour 4 wrote nothing');
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},5);
+ const [,e5]=reports();assert.equal(reports().length,2);assert.equal(e5.from,e3.at,'the report after the failed hour reaches back to the last closed one');assert.equal(e5.added,1,'counted once');
+}
+// 10a. No record at all (no Workflow instance yet): no event, no zero.
+resetAll();seed({count:3});
+{
+ records.delete('epg/discovery-workflow.json');
+ const none=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+ assert.equal(none.closed,false);assert.equal(reports().length,0);assert.equal(warnings.some(entry=>entry.reason==='no_record'),true);
+}
+// 10b. The hour closes and the deltas are real, but the queue cannot be read: the report keeps its numbers and says only that the remainder is unread.
+resetAll();seed({count:3});const own10b=elect();
+{
+ await call('settleWorkflowIfOwner')(env,own10b,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:7,added:4,reused:1,screenedOut:2,touched:0,tmdbCalls:3,remaining:9,cheapRemaining:0,error:null},own10b+':1',OTHER)}));
+ const realLoad=context.loadJSON,realCont=context.readContinuation;
+ context.readContinuation=async()=>{throw new Error('continuation down');};
+ const done=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ context.readContinuation=realCont;
+ assert.equal(done.closed,true);
+ const [event]=reports();
+ assert.deepEqual([event.added,event.checked,event.reused,event.screenedOut,event.tmdbCalls,event.incomplete],[4,7,1,2,3,false],'the real deltas are kept');
+ assert.deepEqual([event.remaining,event.queueEmpty,event.queueUnreadable],[null,false,true],'the unread remainder is not a zero and not an empty queue');
+ assert.equal(warnings.length,0,'a persisted close is not a failure');
 }
 
 // 11. DST and hour identity: UTC hours, the repeated local hour of the clock change has two reports, a new generation is a new identity.
