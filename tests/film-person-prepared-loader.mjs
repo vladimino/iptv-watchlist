@@ -14,6 +14,10 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {ACCEPTED_DISCREPANCIES} from '../src/film-person-cutover-accepted.js';
 const L=await import(process.env.LOADER_MODULE?pathToFileURL(path.resolve(process.env.LOADER_MODULE)).href:'../scripts/film-person-prepared-loader.mjs');
 
+// AIR-374: LOADER_SECTIONS=<n,...> runs sections 1-3 (cheap, and they build what the others use) plus only the listed ones of 4-10; without it every section runs. The mutation check
+// (tests/film-person-prepared-loader-mutation.mjs) gives each mutant the section that kills it as a hint and runs the whole file before it calls a mutant a survivor.
+const ONLY=new Set((process.env.LOADER_SECTIONS||'').split(',').filter(Boolean).map(Number));
+const section=number=>ONLY.size===0||ONLY.has(number);
 const started=Date.now();
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-prepared-loader-'));
 process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
@@ -196,6 +200,7 @@ assert.deepEqual(tableDigests(main.file),settled,'a replay of the emitted batche
 }
 
 // ================= 4. the fence: whatever moves under a batch fails the WHOLE batch =================
+if(section(4)){
 // Each case: a fresh database, the batches emitted, ONE thing changed, the first batch refused and nothing of it written.
 const holdWindow=(file,owner=WINDOW)=>sql(file,`UPDATE projector_window SET state='held',owner=${q(owner)},requested_at=${Date.now()},expires_at=${Date.now()+250000} WHERE id=1;`);
 async function refused(label,change,{windowOwner=null,world:w=world,batch=0}={}){
@@ -268,6 +273,7 @@ await refused('retention Film became a redirect',file=>sql(file,"INSERT INTO fil
  await assert.rejects(()=>applyBound(target.file,[out.batches[0]]));
  assert.deepEqual(tableDigests(target.file),snapshot,'the stored row is neither updated nor replaced');
 }
+}
 
 // ================= 5. the plan refuses on any mismatch =================
 const stateOf=async file=>L.readLoadState(d1Standin(file));
@@ -278,6 +284,7 @@ const refusal=async(label,{state,sources=source(world.bytes),expected=world.expe
  assert.equal(out.plan,undefined);
 };
 const main0=freshDb(world,{triggers:false});
+if(section(5)){
 await refusal('marker r2',{state:await stateAfter(file=>sql(file,"UPDATE film_person_authority SET mode='r2',generation=2 WHERE id=1;"))},'marker_not_prepared:r2/open');
 await refusal('marker d1/open',{state:await stateAfter(file=>sql(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;"))},'marker_not_prepared:d1/open');
 await refusal('marker held',{state:await stateAfter(file=>sql(file,"UPDATE film_person_authority SET mode='d1',cutover='held',generation=2 WHERE id=1;"))},'marker_not_prepared:d1/held');
@@ -339,8 +346,10 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  const dup=Buffer.from(JSON.stringify(dupWorld.receipts));
  await refusal('one short code on two Films',{sources:{...source(world.bytes),verifiedFilms:{bytes:dup}}},'duplicate_source_code');
 }
+}
 
 // ================= 6. bounded per run, resumable: what does not fit is deferred and goes into the next run =================
+if(section(6)){
 {
  const target=freshDb(world,{triggers:false});
  const first=await planOf(world,target.file,{limits:{batchRows:3,runBatches:2}});
@@ -362,8 +371,10 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  assert.equal(L.readbackLedger({plan:(await planOf(world,target.file)).plan,state:await stateOf(target.file)}).ok,true);
  assert.equal(L.RUN_STATEMENTS>=1113&&L.RUN_BATCHES>=30&&L.BATCH_ROWS<=L.BATCH_STATEMENT_CAP,true,'the default bounds hold the 1,113 accepted rows in one run');
 }
+}
 
 // ================= 7. the accepted production counts, end to end (708 / 401 / 4) =================
+if(section(7)){
 {
  const big=makeWorld({admissions:708,retention:401,retirements:4,noise:true});
  const target=freshDb(big,{triggers:false});
@@ -402,8 +413,10 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  assert.ok(L.readbackLedger({plan:p,state:await stateOf(target.file)}).reasons.includes('generation_moved'));
  assert.ok(L.readbackLedger({plan:p,state:await stateOf(target.file),expectGeneration:2}).reasons.includes('gate_not_the_pinned_one'));
 }
+}
 
 // ================= 8. the sources: read-only, allowlisted, never retried across a changed object =================
+if(section(8)){
 {
  const objects=Object.fromEntries(Object.entries(L.SOURCE_KEYS).map(([id,key])=>[key,world.bytes[id]]));
  const calls=[];
@@ -434,8 +447,10 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  fs.rmSync(path.join(dir,L.SOURCE_FILES.viewIndex));
  stops(()=>L.readSourcesFromDirectory(dir),'source_missing');
 }
+}
 
 // ================= 9. the module cannot write anything but SQL text =================
+if(section(9)){
 {
  const text=fs.readFileSync('scripts/film-person-prepared-loader.mjs','utf8');
  assert.ok(!/\.batch\(|\.run\(|\.exec\(|createD1Adapter|fetch\(|\bput\b|PutObject|writeFileSync\([^)]*sqlite/i.test(text.replace(/^\s*\/\/.*$/gm,'')),'no database or bucket write call exists in the loader');
@@ -443,8 +458,10 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  const grep=spawnSync('grep',['-rln','film-person-prepared-loader','src','worker.js','build.mjs','wrangler.toml'],{encoding:'utf8'});
  assert.equal(grep.stdout.trim(),'','no Worker or src/ file imports the loader');
 }
+}
 
 // ================= 10. the CLI: dry by default, --apply and the pinned digest for SQL, private paths only =================
+if(section(10)){
 {
  const w=makeWorld({admissions:708,retention:401,retirements:4,noise:false});
  const target=freshDb(w,{triggers:true});
@@ -467,7 +484,8 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  assert.equal(wrong.status,1);assert.match(wrong.stderr,/STOP plan_digest_mismatch/);assert.ok(!fs.existsSync(out));
  const insideOut=path.join(process.cwd(),'tmp-loader-out-'+process.pid);
  const inside=run(['sql',...common,'--apply','--plan-digest',shown.digest,'--out',insideOut]);
- assert.equal(inside.status,1);assert.match(inside.stderr,/private_path_inside_repository/);assert.ok(!fs.existsSync(insideOut));fs.rmSync(insideOut,{recursive:true,force:true});
+ const leftInside=fs.existsSync(insideOut);fs.rmSync(insideOut,{recursive:true,force:true});
+ assert.equal(inside.status,1);assert.match(inside.stderr,/private_path_inside_repository/);assert.ok(!leftInside);
  const real=run(['sql',...common,'--apply','--plan-digest',shown.digest,'--out',out]);
  assert.equal(real.status,0,real.stderr);
  const files=fs.readdirSync(out).sort();assert.equal(files.length,shown.batches);
@@ -492,6 +510,7 @@ assert.deepEqual(L.buildLoadPlan({sources:source(world.bytes),state:await stateO
  assert.equal(mismatch.status,2,'sources of another world are refused against the copy');
  const refusedSql=run(['sql','--copy',small.file,'--source-dir',dir,'--at',AT,'--lease-id',LEASE,'--apply','--plan-digest','1'.repeat(64),'--out',path.join(root,'cli-out3')]);
  assert.equal(refusedSql.status,2);assert.ok(JSON.parse(refusedSql.stdout).reasons.length>0&&!fs.existsSync(path.join(root,'cli-out3')),'a refused plan emits no SQL');
+}
 }
 
 console.log('film-person-prepared-loader: ok ('+(Date.now()-started)+' ms)');
