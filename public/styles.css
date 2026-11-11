@@ -190,15 +190,22 @@ html.film-screen .status-footer,html.events-screen .status-footer{margin-top:28p
 .film-screen .credit-link{overflow-wrap:anywhere}
 .film-facts{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
 .film-fact{margin:0;padding:7px 12px;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:#d5dece}
-.film-callouts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
-.film-callouts .film-nearest:only-child{grid-column:1 / -1}
-.film-nearest{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 12px;min-width:0;margin:0;padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow-wrap:anywhere}
-.film-nearest>span:first-child{color:var(--lime);font-size:12px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}
+.film-avail-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.film-avail-head .film-fact{margin:0}
+.film-avail-pill{padding:7px 12px;border-radius:999px;border:1px solid var(--line);font-size:13px;font-weight:650;letter-spacing:.06em;text-transform:uppercase}
+.film-avail-pill.is-available{color:var(--lime);border-color:#748e47;background:#293821}
+.film-avail-pill.is-soon{color:#e6c98f;border-color:#8a7440;background:#2c2618}
+.film-avail-pill.is-unavailable{color:var(--muted)}
+.film-hint{margin:6px 0 0;color:var(--muted);font-size:13px}
+.film-show-group{margin-top:14px}
+.film-show-group h3{margin:0;color:var(--muted);font-size:12px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}
+.film-show-group h3 span{margin-left:4px;color:var(--text)}
+.film-show-list .show-phase{grid-column:1 / -1;color:var(--muted);font-size:13px}
+.film-show-list details.more>summary{cursor:pointer;padding:10px 0;color:var(--muted)}
 .film-show-list{display:flex;flex-direction:column;margin-top:8px}
 .film-show-list .show-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:baseline;border-top:1px solid var(--line);padding:10px 0}
 .film-show-list .channel{min-width:0;overflow-wrap:anywhere}
-.film-show-list .is-live,.film-show-list .is-nearest{background:#232b22;margin:0 -8px;padding-left:8px;padding-right:8px;border-radius:8px}
-.film-show-list .is-next{background:#1c241c;margin:0 -8px;padding-left:8px;padding-right:8px;border-radius:8px}
+.film-show-list .is-on-air{background:#232b22;margin:0 -8px;padding-left:8px;padding-right:8px;border-radius:8px}
 #film-screen-identity{display:none}
 .film-similar[hidden]{display:none}
 .film-similar-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:12px}
@@ -229,7 +236,7 @@ html.film-screen .status-footer,html.events-screen .status-footer{margin-top:28p
 .film-screen .started-button{width:100%}
 .film-score-card{flex-basis:calc(50% - 5px);max-width:none}
 .film-why{max-width:none}
-.film-callouts,.film-people-row,.film-facet-row,.film-execution{grid-template-columns:1fr}
+.film-people-row,.film-facet-row,.film-execution{grid-template-columns:1fr}
 .film-compare-matrix th,.film-compare-matrix td{padding:7px 4px}
 .film-show-list .show-row{grid-template-columns:1fr}
 .film-show-list .show-time{text-align:left}
