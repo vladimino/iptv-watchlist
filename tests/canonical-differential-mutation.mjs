@@ -50,6 +50,15 @@ const PRODUCER_MUTANTS=[
  ['the receipt schema floor is lowered',"table:'canonical_write_receipt',minSchema:19","table:'canonical_write_receipt',minSchema:18"],
  ['the accepted class count is changed',"table:'film_rated_admission',expected:708","table:'film_rated_admission',expected:707"],
 ];
+// Each readiness mutant is first run against only the section of tests/canonical-handoff-readiness.mjs that should kill it (READINESS_ONLY). A mutant the hinted section does
+// not kill is run again against the WHOLE file, so a stale hint can never hide a survivor; the hint only saves time.
+const HINTS={
+ 'a gap is cleared without its writers being registered':'3e','a gap is cleared though the registry does not mark it covered':'3e','a gap is cleared with no scenario':'3e','a gap with no entry counts as cleared':'3e','cleared and open gaps are swapped':'1',
+ 'a named difference that is not accepted does not block':'3f','the receipt table is not required':'3b','the receipt schema version is not required':'3b','an unregistered receipts protocol does not block':'3b','the receipt schema floor is lowered':'3b',
+ 'an unwired producer does not block':'3c','an unmoved reader does not block':'3c','too many rows in a class do not block':'3d','too few rows in a class do not block':'3d','an unreadable class table does not block':'3d',
+ 'a live projector lease does not block':'3a','a requested projector window does not block':'3a','an expired projector window blocks':'3a','the marker state is not checked':'3a','the baseline is not checked':'3a','ready ignores the blockers':'3a',
+ 'an epg producer is registered as wired':'2','a reader is registered as moved':'2','the accepted class count is changed':'2',
+};
 for(const [name,from] of REGISTRY_MUTANTS)assert.equal(registry.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+REGISTRY);
 for(const [name,from] of PRODUCER_MUTANTS)assert.ok(producers.split(from).length>=2,'the mutation text of "'+name+'" must occur in '+PRODUCERS);
 for(const [name,from] of PRODUCER_MUTANTS)assert.equal(producers.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+PRODUCERS);
@@ -67,12 +76,12 @@ try{
  // 1. injected unclassified differences, in an IDENTICAL-looking scenario and in a refresh
  for(const id of ['normal_refresh','localization_conflict_rows'])queue.push({name:'an unclassified difference injected into '+id,test:'tests/canonical-differential.mjs',env:{DIFFERENTIAL_INJECT:id}});
  REGISTRY_MUTANTS.forEach(([name,from,to],index)=>{const file=path.join(dir,'registry'+index+'.mjs');fs.writeFileSync(file,absolute(registry,'src').replace(from,()=>to));queue.push({name,test:'tests/canonical-differential.mjs',env:{DIFFERENTIAL_REGISTRY_SOURCE:file}});});
- PRODUCER_MUTANTS.forEach(([name,from,to],index)=>{const file=path.join(dir,'producers'+index+'.mjs');fs.writeFileSync(file,absolute(producers,'src').replace(from,()=>to));queue.push({name,test:'tests/canonical-handoff-readiness.mjs',env:{PRODUCERS_SOURCE:file}});});
+ PRODUCER_MUTANTS.forEach(([name,from,to],index)=>{const file=path.join(dir,'producers'+index+'.mjs');fs.writeFileSync(file,absolute(producers,'src').replace(from,()=>to));queue.push({name,test:'tests/canonical-handoff-readiness.mjs',env:{PRODUCERS_SOURCE:file},hint:HINTS[name]?{READINESS_ONLY:HINTS[name]}:null});});
  const total=queue.length;
  assert.equal(await run('tests/canonical-differential.mjs',{}),0,'the unmutated harness passes');
  assert.equal(await run('tests/canonical-handoff-readiness.mjs',{}),0,'the unmutated readiness test passes');
  const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();if(await run(item.test,item.env)===0)survivors.push(item.name);}}));
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();{const first=await run(item.test,{...item.env,...(item.hint||{})});if(first===0&&(!item.hint||await run(item.test,item.env)===0))survivors.push(item.name);}}}));
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
  console.log('canonical-differential-mutation: ok ('+total+' mutants killed)');
 }finally{fs.rmSync(dir,{recursive:true,force:true});fs.rmSync(helperRoot,{recursive:true,force:true});}

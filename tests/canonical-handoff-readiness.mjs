@@ -11,6 +11,8 @@ import {copyOf,envOf,fresh,opened,root,sqlite} from './canonical-differential-he
 import {P6_DIFFERENTIAL_EXCEPTIONS} from '../src/canonical-film-writers.js';
 import {EXTRA_EXCEPTIONS,DIFFERENTIAL_COVERAGE} from '../src/canonical-differential-registry.js';
 
+const ONLY=(process.env.READINESS_ONLY||'').split(',').filter(Boolean);
+const on=key=>!ONLY.length||ONLY.some(item=>key.startsWith(item));
 const NOW='2026-11-11T12:00:00.000Z',NOW_MS=Date.parse(NOW);
 const source=process.env.PRODUCERS_SOURCE?path.resolve(process.env.PRODUCERS_SOURCE):'src/canonical-producers.js';
 const mod=await import(pathToFileURL(source).href);
@@ -34,7 +36,7 @@ const run=async(file,evidence)=>handoffReadiness(envOf(file),{now:NOW,evidence})
 const only=async(label,file,evidence,...expected)=>{const out=await run(file,evidence);assert.deepEqual(out.blockers,expected,label+': exactly this blocker, no other: '+out.blockers);assert.equal(out.ready,false,label);return out;};
 
 // 1. The fully satisfied synthetic fixture is READY, with every former gap cleared by evidence.
-{
+if(on('1')){
  const out=await run(satisfied(),good());
  assert.deepEqual(out.blockers,[],'no blocker: '+out.blockers);
  assert.equal(out.ready,true);
@@ -42,7 +44,7 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
 }
 
 // 2. Today's repository (the real registries, a prepared and verified marker, empty classes) is NOT ready; the exact remaining blockers.
-{
+if(on('2')){
  const out=await handoffReadiness(envOf(fresh()),{now:NOW});
  assert.equal(out.ready,false);
  const expected=[
@@ -64,19 +66,26 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
 {
  const base=satisfied();
  // marker, baseline, schema, lease, window
+ if(on('3a')){
  await only('marker open',opened(base),good(),'marker_not_prepared:open');
  {const f=copyOf(base,'x');sqlite(f,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','l1','2099-01-01T00:00:00.000Z','2026-11-11T09:00:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='l1',lease_until='2099-01-01T00:00:00.000Z'");await only('live lease',f,good(),'projector_lease_live');}
  for(const state of ['requested','held']){const f=copyOf(base,'x');sqlite(f,"UPDATE projector_window SET state='"+state+"',owner='o',requested_at="+(NOW_MS-1000)+",expires_at="+(NOW_MS+60000)+" WHERE id=1");await only('window '+state,f,good(),'projector_window_not_idle:'+state);}
  {const f=copyOf(base,'x');sqlite(f,"UPDATE projector_window SET state='held',owner='o',requested_at="+(NOW_MS-200000)+",expires_at="+(NOW_MS-1000)+" WHERE id=1");assert.deepEqual((await run(f,good())).blockers,[],'an expired window is idle');}
  {const f=copyOf(base,'x');sqlite(f,"DROP TRIGGER IF EXISTS film_person_baseline_reopen_needs_r2;UPDATE film_person_baseline SET state='loading' WHERE id=1");await only('baseline not verified',f,good(),'baseline_not_verified:loading');}
+ }
  // receipts
+ if(on('3b')){
  {const f=copyOf(base,'x');sqlite(f,'DROP TABLE canonical_write_receipt');await only('receipt table absent',f,good(),'receipts_schema_missing');}
  {const f=copyOf(base,'x');sqlite(f,'DROP TRIGGER IF EXISTS schema_contract_no_downgrade;UPDATE schema_contract SET version=18 WHERE id=1');await only('schema below 19',f,good(),'receipts_schema_missing');}
  await only('receipts protocol unregistered',base,{...good(),receipts:{...RECEIPTS_PROTOCOL,registered:false}},'receipts_protocol_unregistered');
+ }
  // producers and readers, one at a time
+ if(on('3c')){
  for(const item of PRODUCER_WIRING)await only('unwired '+item.name,base,{...good(),wiring:good().wiring.map(w=>w.name===item.name?{...w,wired:false}:w)},'producer_not_wired:'+item.name);
  for(const item of READER_REGISTRY)await only('unmoved '+item.name,base,{...good(),readers:good().readers.map(r=>r.name===item.name?{...r,moved:false}:r)},'reader_not_moved:'+item.name);
+ }
  // the three classes: one row fewer or more, and an unreadable table
+ if(on('3d')){
  for(const [index,item] of SMALL.entries()){
   const more=copyOf(base,'x');
   if(item.name==='retention')sqlite(more,"INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:tmdb:2','watchlist_fact',0,'{}','r','"+NOW+"','"+NOW+"')");
@@ -86,7 +95,9 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
   await only('class off by expectation '+item.name,base,{...good(),classes:SMALL.map((c,i)=>i===index?{...c,expected:c.expected+5}:c)},'empty_class_not_loaded:'+item.name+':'+item.expected+'/'+(item.expected+5));
  }
  await only('class table unreadable',base,{...good(),classes:[...SMALL.slice(0,2),{name:'retirement',table:'no_such_table',expected:1}]},'empty_class_unreadable:retirement');
+ }
  // each former gap: its writer missing from CALLS or from RECONCILE, an uncovered or empty coverage entry, or no entry
+ if(on('3e')){
  for(const entry of DIFFERENTIAL_COVERAGE){
   const expectedBlocker='gap:'+entry.gap;
   await only('not covered '+entry.gap,base,{...good(),coverage:DIFFERENTIAL_COVERAGE.map(item=>item===entry?{...item,covered:false}:item)},expectedBlocker);
@@ -100,11 +111,14 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
   assert.deepEqual((await run(base,{...good(),calls:{CALLS:without(CALLS,writer),RECONCILE}})).blockers,affected,writer+' missing from CALLS blocks exactly its gaps');
   assert.deepEqual((await run(base,{...good(),calls:{CALLS,RECONCILE:without(RECONCILE,writer)}})).blockers,affected,writer+' missing from RECONCILE blocks exactly its gaps');
  }
+ }
  // every named difference the owner has not accepted blocks, one at a time
+ if(on('3f')){
  for(const item of ALL_EXCEPTIONS)await only('exception '+item.id,base,{...good(),exceptions:good().exceptions.map(x=>x.id===item.id?{...x,status:'draft'}:x)},'exception_not_accepted:'+item.id);
+ }
 }
 // 4. Read-only: only SELECT statements, no batch, and the database is byte-for-byte the same file content afterwards.
-{
+if(on('4')){
  const file=satisfied();const seen=[];
  const env={DB:d1Standin(file,{onQuery:async text=>{seen.push(text);}})};
  const before=fs.readFileSync(file);
@@ -120,7 +134,7 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
 
 // 5. The registries are DATA: a comment cannot change a blocker. A copy of the module whose comments are removed, and one whose comments claim everything is wired,
 // moved, covered and registered, give exactly today's blockers; only editing the data (a boolean in the registry) flips a blocker.
-{
+if(on('5')){
  const text=fs.readFileSync(source,'utf8');
  const stripped=text.replace(/^\s*\/\/.*$/gm,'');
  const boasting=text.replace(/^(export const (PRODUCER_WIRING|READER_REGISTRY|RECEIPTS_PROTOCOL|EMPTY_CLASSES|GAPS))/gm,'// wired: true moved: true registered: true covered: true cleared\n$1');
@@ -143,7 +157,7 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
 
 // 6. The registries agree with the repository: a producer marked wired needs the Worker bundle to carry the adapters; receipts registered need the migration; nothing is
 // bundled today; only the producers module imports the registry.
-{
+if(on('6')){
  const bundle=fs.readFileSync('build.mjs','utf8')+(fs.existsSync('scripts/bundle-scope.mjs')?fs.readFileSync('scripts/bundle-scope.mjs','utf8'):'');
  const bundled=/canonical-producers/.test(bundle);
  if(PRODUCER_WIRING.some(item=>item.wired))assert.ok(bundled,'a producer is marked wired but the Worker bundle does not carry the producers module');
@@ -163,4 +177,4 @@ const only=async(label,file,evidence,...expected)=>{const out=await run(file,evi
  assert.ok(Object.isFrozen(PRODUCER_WIRING)&&Object.isFrozen(READER_REGISTRY)&&Object.isFrozen(RECEIPTS_PROTOCOL)&&Object.isFrozen(EMPTY_CLASSES)&&Object.isFrozen(DIFFERENTIAL_COVERAGE));
 }
 
-console.log('canonical-handoff-readiness: computed readiness is not ready today ('+JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8')).length+' blockers: receipts, producer wiring, readers, loaded classes, unaccepted named differences), ready in a fully satisfied synthetic fixture, every blocker flips independently, read-only, registries are data and agree with the repository');
+console.log('canonical-handoff-readiness: computed readiness is not ready today ('+(fs.existsSync(path.join(root,'today.json'))?JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8')).length:'n/a')+' blockers: receipts, producer wiring, readers, loaded classes, unaccepted named differences), ready in a fully satisfied synthetic fixture, every blocker flips independently, read-only, registries are data and agree with the repository');
