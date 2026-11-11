@@ -1,9 +1,9 @@
 # ADR 0115: Discovery has a light operational status view beside the detailed status
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-11  
 **Recorded at:** 2026-11-11  
-**Approval source:** scope of [AIR-430](https://trello.com/c/z3Rr6odf); the card asks for an ADR (proposed → approved) for the new API shape  
+**Approval source:** explicit Product Owner acceptance of ADR 0115 in the IPTV Ratings conversation on 2026-11-11, following independent technical review of [PR #510](https://github.com/vladimino/iptv-watchlist/pull/510#pullrequestreview-5856151763); scope recorded in [AIR-430](https://trello.com/c/z3Rr6odf)  
 **Related work:** [AIR-430](https://trello.com/c/z3Rr6odf), [AIR-344](https://trello.com/c/8TV5soDb), [AIR-428](https://trello.com/c/8U3uMYCJ), [ADR 0085](0085-d1-authoritative-discovery.md), [ADR 0083](0083-inert-discovery-workflow.md)  
 **Supersedes:** None  
 **Superseded by:** None
