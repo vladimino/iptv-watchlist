@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
 const listeners={document:new Map(),window:new Map()};
 function add(map,type,fn){const list=map.get(type)||[];list.push(fn);map.set(type,list);}
@@ -60,7 +62,7 @@ const context=vm.createContext({
   }));
  },
 });
-vm.runInContext(fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
+vm.runInContext(AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,''),context);
 const run=code=>vm.runInContext(code,context);
 // The fixture archive closes 72 hours after 2026-10-19T12:00:00Z. Later than that, the black zone shows films with no broadcasts, and the search below changes the grid.
 run('viewClock=Date.parse("2026-10-18T12:00:00Z")');
@@ -242,13 +244,13 @@ paints=0;shortPaints=0;
 run(`viewClock=${clock+1000};refreshTimeSensitiveView();`);
 assert.equal(paints,1,'crossing the last-chance boundary rerenders the programme');
 assert.equal(run('isLastChance(films[0])'),true);
-run(`films[0].shows=[{start:${clock-3600000},end:${clock+4*3600000},channel:'Кино'}];viewClock=${clock};render();`);
+run(`films[0].shows=[{start:${clock-3600000},end:${clock+4*3600000},channel:'Кино'}];state.shortlistMode='soon';viewClock=${clock};render();`);
 paints=0;shortPaints=0;
 run(`viewClock=${clock+30000};refreshTimeSensitiveView();`);
 assert.equal(paints,0,'a tick that changes no show or deadline does not rebuild the cards');
 assert.equal(shortPaints,0,'the shortlist stays mounted when the on-air show does not change');
-assert.match(el('#shortlist-cards').innerHTML,/Сейчас/);
-run('viewClock=null');
+assert.match(el('#shortlist-cards').innerHTML,/Сейчас в эфире/,'a show on air is «Скоро» until it ends');
+run("state.shortlistMode='available';viewClock=null");
 run(`urlReady=true;state.query='';state.from=1900;state.to=MAX_YEAR;state.genres=new Set(['Фантастика']);state.directors='d-missing';state.actors='';state.mechanics=new Set();state.moods=new Set();state.lastChanceOnly=false;enrichment.films.back={actualRating:4,fingerprint:{plotMechanics:['heist'],moodIds:['dark']}};`);
 run('render()');
 assert.match(window.location.href,/genre=/);

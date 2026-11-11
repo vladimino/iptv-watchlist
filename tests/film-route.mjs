@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {scoped as scopedAvailability} from '../scripts/bundle-scope.mjs';
+const AVAILABILITY_LIB=scopedAvailability('src/domain/film-availability.js','FilmAvailability')+'\n';
 
-const source=fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
+const source=AVAILABILITY_LIB+fs.readFileSync('public/return-home.js','utf8')+fs.readFileSync('public/app.js','utf8').replace(/init\(\);\s*$/,'');
 const nodes=new Map();
 const focused=[];
 function element(selector){
@@ -48,7 +50,7 @@ const film={id:'heat-1995',title:'Жара',original:'Heat',year:1995,runtime:17
 const catalog={id:'tmdb_42',title:'Жара',original:'Refuge',year:2023,runtime:90,genres:['Драма'],directors:[],actors:[],shows:[],synopsis:'каталожный сюжет',catalogOnly:true};
 live.film=film;live.catalog=catalog;
 run(`films=[film,catalog];report={people:{directors:[],actors:[]},updatedAt:'2026-10-24T12:00:00Z',window:{from:${Date.parse('2026-10-21T12:00:00Z')},to:${Date.parse('2026-10-25T12:00:00Z')}}};enrichment={films:{}};urlReady=true`);
-run(`state.period='archive';state.query='жара';state.sort='personal';state.sortExplicit=true;state.shortlistMode='today';state.genres=new Set(['Драма']);state.channels=new Set(['Первый'])`);
+run(`state.period='archive';state.query='жара';state.sort='personal';state.sortExplicit=true;state.shortlistMode='soon';state.genres=new Set(['Драма']);state.channels=new Set(['Первый'])`);
 const listHref=run(`urlForState('https://iptv.example/?campaign=save#films').href`);
 window.history.replaceState(null,'',listHref);
 const listSearch=new URL(listHref).search;
@@ -57,7 +59,7 @@ assert.match(listSearch,/q=/);
 assert.match(listSearch,/sort=personal/);
 assert.match(listSearch,/genre=/);
 assert.match(listSearch,/channel=/);
-assert.match(listSearch,/shortlist=today/);
+assert.match(listSearch,/shortlist=soon/);
 
 function click(resolver){
  fetches.length=0;
