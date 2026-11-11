@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
+import {DEFAULT_WEIGHT, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -261,9 +261,15 @@ fs.unlinkSync(me);`;
     const whole = planTests({directory: 'tests'});
     const halves = [1, 2].map(index => planTests({directory: 'tests', shard: {index, count: 2}}));
     assert.deepEqual([...halves[0].parallel, ...halves[0].serial, ...halves[1].parallel, ...halves[1].serial].sort(), [...whole.parallel, ...whole.serial].sort(), 'the two shards of the real suite are the whole suite, once');
-    assert.ok(Math.abs(halves[0].total - halves[1].total) <= 2, 'the shards have the same number of files');
-    // the first files of the plan are the slow ones (START_FIRST): they alternate
-    assert.deepEqual(whole.parallel.slice(0, 6).map(file => halves[0].parallel.includes(file) ? 1 : 2), [1, 2, 1, 2, 1, 2]);
+    // AIR-374: the shards are balanced by WEIGHTS (greedy, heaviest first), not by file count: the weights of the two shards differ by less than the lightest listed file, and the two heaviest files are apart
+    const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
+    const load = halves.map(half => [...half.parallel, ...half.serial].reduce((sum, file) => sum + weightOf(file), 0));
+    assert.ok(Math.abs(load[0] - load[1]) <= Math.min(...Object.values(WEIGHTS)), `the shards carry the same weight: ${load.join(' vs ')}`);
+    assert.ok(Math.abs(halves[0].total - halves[1].total) <= 30, 'neither shard is nearly empty');
+    const heaviest = Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
+    assert.notEqual(halves[0].parallel.includes(heaviest[0]), halves[0].parallel.includes(heaviest[1]), 'the two heaviest files are in different shards');
+    assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');
+    assert.deepEqual(planTests({directory: 'tests', shard: {index: 2, count: 2}}), halves[1], 'the split does not depend on who asks');
     assert.deepEqual(parseShard('2/3'), {index: 2, count: 3});
     assert.equal(parseShard(undefined), null);
     assert.equal(parseShard(''), null);
