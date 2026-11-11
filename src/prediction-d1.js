@@ -6,6 +6,9 @@
 // This module does not import. The Worker bundle wraps it in a scope. It does not insert a film row.
 
 export const PREDICTION_CONTRACT=7;
+// AIR-438: hands the D1 binding to the step timer's wrapper. This module is where the prediction domain reaches D1, so the one place the timer
+// touches the binding is here and not in the Worker core, which holds no direct reference to it.
+export function timedBinding(env,wrap){const database=env.DB;return database&&typeof database==='object'?wrap(database):null;}
 export const PREDICTION_HISTORY_LIMIT=80;
 export const PREDICTION_QUEUE_CHARS=900000;
 export const PREDICTION_INDEX_CHUNK=80;
