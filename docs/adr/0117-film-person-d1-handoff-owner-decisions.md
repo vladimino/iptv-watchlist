@@ -41,7 +41,7 @@ Sequence, as ONE owner-approved concrete activation plan with explicit holdpoint
 5. **Readback:** marker `d1`/`open`/G+1, route `canonical`, projector compare-only.
 6. **One catch-up canonical reconcile** of what producers could not write while `prepared` (receipts, decision 4), then release the window and the lease.
 
-**Why no overlapping canonical ownership and no lost canonical intent.** The fence proves that no two writers can hold successful canonical authority at the same time; it does not prove uninterrupted execution. A projector batch in flight carries the marker CHECK for G, so after step 4 it fails whole; adapters cannot pass their fence before the move; the move is one atomic batch, so one fence can pass at any generation. The quiet window deliberately parks producers before and after that batch, so there are intervals with no executing writer. Intent is not lost because, while the window is held, cross-domain operations are queued or recorded as durable receipts (decision 4); after the release a bounded catch-up reconcile applies them, and a pending or unknown receipt is settled by readback and replay with the same request id, never assumed done or absent. The catch-up is **not** atomic with the marker move. Decision 1 (unconditional projector fence) is a **precondition**: today the projector asserts the marker only with `D1_ENRICHMENT_BULK=on` (`bulk.expectedMarker`, from the AIR-374 plan; not re-verified here).
+**Why no overlapping canonical ownership and no lost canonical intent.** The fence proves that no two writers can hold successful canonical authority at the same time; it does not prove uninterrupted execution. A projector batch in flight carries the marker CHECK for G, so after step 4 it fails whole; adapters cannot pass their fence before the move; the move is one atomic batch, so one fence can pass at any generation. The quiet window deliberately parks producers before and after that batch, so there are intervals with no executing writer. Intent is not lost because, while the window is held, cross-domain operations are queued or recorded as durable receipts (decision 4); after the release a bounded catch-up reconcile applies them, and a pending or unknown receipt is settled by readback and replay with the same request id, never assumed done or absent. The catch-up is **not** atomic with the marker move. The unconditional projector fence is implemented by [ADR 0116](0116-projector-marker-and-generation-fence-on-every-batch.md) / PR #524 and is an activation prerequisite; production activation remains separate.
 
 ## `open` to `held`
 
@@ -61,7 +61,7 @@ This ADR and its runbook authorize nothing: no marker move, lease, window, held,
 
 ## Evidence
 
-[Offline design evidence, 2026-11-11](../evidence/d1-migration/air-374-handoff-design-2026-11-11.md). Not verified: production state after the 11 Nov 10:57 UTC baseline record; the decision-1 ADR text; the exact set of mirror objects.
+[Offline design evidence, 2026-11-11](../evidence/d1-migration/air-374-handoff-design-2026-11-11.md). Not verified: production state after the 11 Nov 10:57 UTC baseline record; the exact set of mirror objects.
 
 ## Follow-ups
 
