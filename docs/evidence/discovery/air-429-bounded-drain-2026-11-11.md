@@ -20,11 +20,11 @@ Smallest `--max-old-space-size` at which the commit completes, bisected at about
 
 Repeated runs of the same scenario differ by up to 8 MB, so differences below that are noise. Holding the departures as JSON text instead of objects lowered the floor (cap 0) from 185 to 177 MB.
 
-**Result against the card's target.** The target "no worse than the frozen baseline" is **not met** by any cap: even with no backlog archived the planner needs 4-12 MB above the frozen commit, because the daily flow itself departs. A cap removes the 35-47 MB the uncapped first commit adds; it cannot go below that floor. This is stated so the owner can decide whether the margin is acceptable. It is not a NO-GO by measurement alone: the isolate headroom is unmeasured, and the margin is within the noise of the isolate model. The flag stays unset.
+**Result against the card's target.** The target "no worse than the frozen baseline" is **not met** by any cap: even with no backlog archived the planner needs 4-12 MB above the frozen commit, because the daily flow itself departs. A cap of 4,000 saves about 31-43 MB against the uncapped first commit (220 MB in this series; [AIR-426](air-426-bounded-transition-rehearsal-2026-11-11.md) measured 216 MB in another run); it cannot go below that floor. This is stated so the owner can decide whether the margin is acceptable. It is not a NO-GO by measurement alone: the isolate headroom is unmeasured, and the margin is within the noise of the isolate model. The flag stays unset.
 
 ## Drain at production size
 
-`BOUNDED_PERF=47059:20568 node tests/discovery-bounded-d1-rehearsal.mjs` (cap 4,000, the scan unchanged between generations):
+`BOUNDED_PERF=47059:20568 node tests/discovery-bounded-d1-rehearsal.mjs` (cap 4,000, the scan unchanged between generations, so **no daily flow**; the memory table above uses a flow of 4,818 a day, and the two tables must not be combined):
 
 | Day | Staging ms | R2 puts | R2 MB | Document MB | D1 archive rows | Backlog left | Seal round trips / batches |
 | --- | --- | --- | --- | --- | --- | --- | --- |
