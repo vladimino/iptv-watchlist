@@ -79,6 +79,54 @@ scope();
 // 9. Ranking: on equal predictions a ready archive comes before a soon film; ties are otherwise unchanged.
 assert.equal(ids(run('buildFinds(input,now)',[futureOnly,archiveRepeat,onAirOnly]))[0],'tmdb_1','the ready archive is first on equal predictions');
 
+// 9b. Overlapping shows: the named channel is the one whose effective end is the promised time, never another show's channel with this show's end.
+{
+ const stamp=ms=>run('madridStamp(input)',ms);
+ const overlap=film('tmdb_20',20,'Наложение',[show(-2,'Первый',4),show(-1,'Второй',1.5)]);          // 08:00-12:00 and 09:00-10:30 at 10:00
+ let a=run('findsAiring(input,now)',overlap);
+ assert.equal(a.availability.appearsAt,now+30*min);assert.equal(a.show.channel,'Второй');assert.equal(a.kind,'live');assert.equal(a.text,`Сейчас в эфире · Второй · архив появится после ${stamp(now+30*min)}`);
+ const futureEarlier=film('tmdb_21',21,'Будущий кончится раньше',[show(-2,'Первый',6),show(0.25,'Второй',0.75)]);   // on air until +4 h, a future show ends at +1 h
+ a=run('findsAiring(input,now)',futureEarlier);
+ assert.equal(a.availability.appearsAt,now+hour);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Второй');assert.match(a.text,new RegExp(` · Второй · архив появится после ${stamp(now+hour)}$`));
+ const sameEnd=film('tmdb_22',22,'Один конец',[show(-1,'Первый',2),show(-0.5,'Второй',1.5)]);       // both end at +1 h: the earlier start is named
+ assert.equal(run('findsAiring(input,now).show.channel',sameEnd),'Первый');
+ const ignored=film('tmdb_23',23,'Начался без конца',[{channelId:'c',channel:'Первый',start:now-hour},show(3,'Второй')],{runtime:null});   // the started show with no end is ignored
+ a=run('findsAiring(input,now)',ignored);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Второй');assert.equal(a.availability.appearsAtKnown,true);
+ const partial=film('tmdb_24',24,'Один конец неизвестен',[{channelId:'c',channel:'Первый',start:now+2*hour},show(3,'Второй')],{runtime:null});   // one future end is unknown: no hour is promised
+ a=run('findsAiring(input,now)',partial);
+ assert.equal(a.availability.appearsAtKnown,false);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Первый','the nearest start is named');assert.match(a.text,/время появления архива неизвестно$/);
+}
+
+// 9c. A film page opened on its own (a catalog film held only by Finds, nothing in the grid or the Finds cards) arms the clock timer too: the badge on the
+// poster is removed at the effective end by the page's own re-render, with no request.
+{
+ const timers=[],requests=[],cleared=[];
+ const stub=()=>new Proxy({hidden:false,dataset:{},style:{},classList:{add(){},remove(){},toggle(){}},children:[],addEventListener(){},setAttribute(){},removeAttribute(){},focus(){},contains(){return false;},closest(){return null;},querySelector(){return null;},querySelectorAll(){return [];}},{get:(t,k)=>k in t?t[k]:'' ,set:(t,k,v)=>{t[k]=v;return true;}});
+ const els=new Map(),el=sel=>{if(!els.has(sel))els.set(sel,stub());return els.get(sel);};
+ const live=vm.createContext({Date,Intl,Set,Map,URL,URLSearchParams,JSON,console,window:{addEventListener(){},history:{replaceState(){}},location:{pathname:'/',search:''}},location:{pathname:'/',search:'',href:'/'},history:{replaceState(){}},
+  document:{querySelector:el,querySelectorAll:()=>[],addEventListener(){},activeElement:null,documentElement:{classList:{toggle(){},add(){},remove(){}}}},
+  fetch:async url=>{requests.push(String(url));return {ok:false,status:503,json:async()=>({})};},
+  setTimeout:(fn,ms)=>{const timer={fn,ms,unref(){}};timers.push(timer);return timer;},clearTimeout:timer=>{cleared.push(timer);}});
+ vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),live);
+ vm.runInContext(app.replace(/init\(\);\s*$/,''),live);
+ const t0=Date.now(),H=3600000;
+ const solo={id:'tmdb_30',tmdbId:'30',canonicalIdentity:'tmdb:30',title:'Только страница',original:'Only page',year:2020,runtime:100,genres:['Драма'],poster:null,url:'https://www.themoviedb.org/movie/30',directors:[],actors:[],shows:[{channelId:'c',channel:'Один',start:t0-H/2,end:t0+20*60000}],prediction:{predictedRating:4.5,probability4Plus:.8,confidence:'high',matchSignals:[],mainRisk:null,moodIds:[]},fingerprint:null};
+ live.solo=solo;
+ vm.runInContext(`report={runId:'G1',films:[],window:{from:${t0-72*H},to:${t0+24*H}},cutoff:${t0}};viewClock=null;films=[];findsSource={films:[solo],programmeRunId:'G1',generatedAt:null,ready:true,error:false,watchedMarkEnabled:false};filmScreen='tmdb_30';`,live);
+ assert.equal(vm.runInContext('resolveFilm(filmScreen).source',live),'catalog','the page film comes from the Finds catalog answer only');
+ assert.equal(vm.runInContext('document.querySelectorAll(".movie-card").length',live),0);
+ vm.runInContext('renderFilmShell()',live);
+ assert.equal(timers.length,1,'the film page alone armed one timer');
+ const delay=timers[0].ms;assert.ok(delay>=20*60000&&delay<=21*60000+2000,'the timer is due at the effective end (+1 s), got '+delay);
+ assert.equal(el('#film-poster').innerHTML.includes('class="soon-badge"'),true,'the hourglass is on the poster before the end');
+ // a second render of the same page does not stack timers (an equal moment is already pending)
+ vm.runInContext('renderFilmShell()',live);assert.equal(timers.length,1);assert.equal(cleared.length,0);
+ // the clock moves past the end: the timer's own callback re-renders the page and the hourglass is gone, with no request
+ solo.shows[0].end=t0-1000;timers[0].fn();
+ assert.equal(el('#film-poster').innerHTML.includes('soon-badge'),false,'the hourglass disappears at the effective end');
+ assert.deepEqual(requests,[],'no request was needed');
+}
+
 // 10. The shared badge on every poster surface: one helper, one selector, accessible text, and it works without a poster.
 const label=m=>m.match(/aria-label="([^"]+)"/)[1];
 const soonMarkup=run('soonBadge(input)',futureOnly);

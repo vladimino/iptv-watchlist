@@ -361,6 +361,7 @@ function renderFilmShell(){
  if(identity)identity.textContent=filmScreen||'';
  if(status)status.textContent=film?(film.catalogOnly?'Только в каталоге':''):id?text[1]:'';
  fillFilmPage(film);
+ armSoonTick();
 }
 function applyFilmScreen(id){
  const next=id||null;
@@ -1196,7 +1197,7 @@ function soonTail(avail){
 // poster with `posterFrame`; it answers '' unless the film is `soon`, so a film with a ready archive never shows it, and it disappears when the archive appears.
 // Selector contract: `.soon-badge` (role img, aria-label and title carry the text) inside a `position:relative` poster container (`.poster-frame`,
 // `.finds-poster`, `.film-similar-poster`, `#film-poster`).
-let soonTickAt=null,soonTimer=null;
+let soonTickAt=null,soonTimer=null,soonArmedAt=null;
 function noteSoonTick(at){if(Number.isFinite(at)&&(soonTickAt===null||at<soonTickAt))soonTickAt=at;}
 function soonBadge(film,{now=viewingClock(),shows=film?.shows}={}){
  const avail=filmAvail(film,now,shows);if(!avail||avail.state!=='soon')return '';
@@ -1208,11 +1209,12 @@ function posterFrame(poster,badge){return badge?`<div class="poster-frame">${bad
 // A live page re-renders at the next moment a hourglass should disappear, with no request; a fixed view clock never changes state, so it arms nothing.
 function armSoonTick(){
  const at=soonTickAt;soonTickAt=null;
- if(typeof setTimeout!=='function'||typeof clearTimeout!=='function')return;
- if(soonTimer){clearTimeout(soonTimer);soonTimer=null;}
- if(at===null||viewClock!=null||!report)return;
+ if(typeof setTimeout!=='function'||typeof clearTimeout!=='function'||at===null||viewClock!=null||!report)return;
+ if(soonTimer&&soonArmedAt!==null&&soonArmedAt<=at)return; // an earlier or equal moment is already pending
+ if(soonTimer)clearTimeout(soonTimer);
+ soonArmedAt=at;
  const delay=Math.min(Math.max(at-Date.now()+1000,1000),3600000);
- soonTimer=setTimeout(()=>{soonTimer=null;render();refreshFilmPoster();},delay);soonTimer?.unref?.();
+ soonTimer=setTimeout(()=>{soonTimer=null;soonArmedAt=null;render();refreshFilmPoster();},delay);soonTimer?.unref?.();
 }
 function findsScope(){return state.channels?.size||state.period!=='all'?{channels:state.channels?.size?new Set(state.channels):null,period:state.period}:null;}
 function findsOnChannel(show,channels){const name=typeof show?.channel==='string'?show.channel:'';return !!name&&(channels.has(name)||channels.has(name.trim()));}
@@ -1378,7 +1380,12 @@ function findsAiringFromLifecycle(film,now,scope,avail){
   return {kind:'catchup',text:`Архив · ${findsChannel(last)} · до ${madridStamp(avail.archiveUntil)}`,show:last,availability:avail};
  }
  if(avail.state==='soon'){
-  const live=shows.find(show=>phase(show)==='on_air'),next=shows.find(show=>phase(show)==='future');
+  // With overlapping shows the named show is the one whose effective end is `appearsAt` (the earliest), so the channel and the time always belong together;
+  // with no promised hour (an unknown end) the show on air, else the nearest start, is named.
+  const options={runtimeMinutes:film.runtime},candidates=shows.filter(show=>['on_air','future'].includes(phase(show)));
+  const endOf=show=>lib.showPhase({start:show.start,end:show.end},now,options).end;
+  const promised=avail.appearsAtKnown&&avail.appearsAt!==null?candidates.find(show=>endOf(show)===avail.appearsAt):null;
+  const live=promised&&phase(promised)==='on_air'?promised:promised?null:shows.find(show=>phase(show)==='on_air'),next=promised&&phase(promised)==='future'?promised:promised?null:shows.find(show=>phase(show)==='future');
   if(live)return {kind:'live',text:`Сейчас в эфире · ${findsChannel(live)} · ${soonTail(avail)}`,show:live,availability:avail};
   if(next)return {kind:'next',text:`${madridStamp(next.start)} · ${findsChannel(next)} · ${soonTail(avail)}`,show:next,availability:avail};
  }
