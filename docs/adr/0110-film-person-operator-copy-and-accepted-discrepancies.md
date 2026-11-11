@@ -23,7 +23,7 @@ Accepted: one additional, separately named recording path, `cutover_accepted` ve
 
 Every other rule of `cutover_minimum` v1 applies unchanged; the gate calls the v1 gate and drops only its zero-unexplained reasons. `recordBaselineVerified` reaches the new gate only through `path: {gate: 'cutover_accepted', version: 1}`, with no fallback to or from the other paths, and stores `cutover_accepted/v1:<acceptedDigest>`.
 
-**Not decided here.** No baseline is recorded and the marker is not moved: each is a separate owner GO. Nothing is repaired. The `d1` activation is not authorized, and the accepted empty `ratedAdmission`, `retention` and `retirement` tables stay open gaps for it ([AIR-374](https://trello.com/c/y3oT4gAK), the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C)).
+**Not decided here.** No baseline is recorded and the marker is not moved: each is a separate owner GO. Nothing is repaired. The `d1` activation is not authorized, and the accepted empty `ratedAdmission`, `retention` and `retirement` tables stay open gaps for it ([AIR-374](https://trello.com/c/ha7ais3w), the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C)).
 
 ## Conditions for acceptance
 
@@ -63,7 +63,7 @@ Offline code only. Nothing is bundled into the Worker and no production state ch
 
 ## Follow-ups
 
-[AIR-374](https://trello.com/c/y3oT4gAK) (the `d1` activation) and the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C).
+[AIR-374](https://trello.com/c/ha7ais3w) (the `d1` activation) and the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C).
 
 ## Amendment 2026-11-11
 
