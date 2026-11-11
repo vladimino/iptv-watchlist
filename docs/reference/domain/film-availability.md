@@ -1,6 +1,6 @@
 # Film availability lifecycle
 
-Contract of [ADR 0114](../../adr/0114-film-availability-lifecycle.md) (Proposed; the owner decisions behind it are recorded in the ADR). One pure function, `filmAvailability(shows, now, {runtimeMinutes})` in `src/domain/film-availability.js`, says what a **film** offers at an instant. The same source runs in the Worker (bundle name `FilmAvailability`) and in the browser (`/film-availability.js`, loaded before `app.js`). It reads only the shows it is given: no storage, network, clock or time zone, and it changes nothing.
+Contract of [ADR 0114](../../adr/0114-film-availability-lifecycle.md) (Accepted; the owner decisions behind it are recorded in the ADR). One pure function, `filmAvailability(shows, now, {runtimeMinutes})` in `src/domain/film-availability.js`, says what a **film** offers at an instant. The same source runs in the Worker (bundle name `FilmAvailability`) and in the browser (`/film-availability.js`, loaded before `app.js`). It reads only the shows it is given: no storage, network, clock or time zone, and it changes nothing.
 
 IPTV is used to choose a film from the archive (catch-up), not to watch linear television.
 
