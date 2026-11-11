@@ -56,6 +56,8 @@ const classes={
  'discovery.js|env.BUCKET.put|CONTINUATION_DIAGNOSTICS_KEY':{count:1,input:false,guard:null},
  'discovery.js|env.BUCKET.put|CONTINUATION_KEY':{count:1,input:false,guard:null,note:'lease-free in R2 mode; in D1 mode routed through DiscoveryAuthority.writeContinuation with windowHeldGuard'},
  'discovery.js|saveJSON|CONTINUATION_KEY':{count:1,input:false,guard:null},
+ // ADR 0118: the ledger of Discovery report-failure notices (events/discovery-report-faults.json): an Events Log delivery buffer in its own key and its own etag, never read by the projector.
+ 'discovery-workflow.js|env.BUCKET.put|DISCOVERY_REPORT_FAULT_KEY':{count:1,input:false,guard:null,note:'a bounded buffer of Events Log notices; not a projector input'},
  'discovery-workflow.js|env.BUCKET.put|DISCOVERY_WORKFLOW_STATE_KEY':{count:1,input:false,guard:null,note:'routed through DiscoveryAuthority.writeWorkflow with windowHeldGuard in D1 mode'},
  'admin/discovery-recovery.js|env.BUCKET.put|drActionKey(idempotencyKey)':{count:1,input:false,guard:null},
  'admin/discovery-recovery.js|env.BUCKET.put|DiscoveryIndex.observationIndexManifestKey(run)':{count:1,input:false,guard:null},

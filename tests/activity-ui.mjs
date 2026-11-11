@@ -30,6 +30,23 @@ assert.match(vm.runInContext('eventHTML(partial,older)',context),/Пакет п�
  const unknown=card({...hour,incomplete:true,from:null,chunks:null,checked:null,added:null,reused:null,screenedOut:null,touched:null,tmdbCalls:null,remaining:null,reason:'outbox_full'});
  assert.match(unknown,/Отчёт за час неполный/);assert.match(unknown,/<dt>Новых фильмов<\/dt><dd>неизвестно<\/dd>/);assert.match(unknown,/<dt>Разобрано наблюдений<\/dt><dd>неизвестно<\/dd>/);assert.doesNotMatch(unknown,/<dd>0<\/dd>/,'an unread period never shows 0');assert.doesNotMatch(unknown,/Новых фильмов не найдено|пуста/);
  html=card({...hour,added:null,checked:5});assert.match(html,/Отчёт за час неполный/,'a null counter makes the report incomplete');
+ // ADR 0118: real deltas with an unread queue keep their numbers and say only that the remainder was not read; an event of unknowns is no longer written, but one stored earlier keeps its card.
+ const unread=card({...hour,added:3,checked:11,remaining:null,queueEmpty:false,queueUnreadable:true,incomplete:false});
+ assert.doesNotMatch(unread,/Отчёт за час неполный/);assert.match(unread,/<dt>Новых фильмов<\/dt><dd>3<\/dd>/);assert.match(unread,/<dt>Разобрано наблюдений<\/dt><dd>11<\/dd>/);
+ assert.match(unread,/<dt>Осталось в очереди<\/dt><dd>не удалось прочитать<\/dd>/);assert.match(unread,/Остаток очереди сейчас прочитать не удалось/);assert.doesNotMatch(unread,/Очередь Discovery пуста/,'an unread queue is never an empty one');
+ assert.doesNotMatch(card({...hour,added:3,checked:11,remaining:4,queueUnreadable:true}),/не удалось прочитать<\/dd>/,'a known remainder is shown as a number');
+ assert.doesNotMatch(card({...hour,added:3,checked:11,remaining:null,queueUnreadable:'<b>x</b>'}),/<b>|не удалось прочитать/,'only a real true counts, nothing else reaches the page');
+ assert.match(card({...hour,added:0,checked:0,remaining:null,queueEmpty:false}),/<dd>неизвестно<\/dd>/,'a missing remainder without the flag keeps its old word');
+ // ADR 0118: the notice of an hour whose REPORT could not be completed: fixed sentences, no numbers, Discovery named only when a state was confirmed.
+ const notice={id:'discovery-hour-a30f67e93a11-20261111T10-report-failed',type:'discovery',kind:'report_failed',at:'2026-11-11T10:00:00.000Z',generation:'a30f67e9',reason:'write_conflict',status:null};
+ let failed=card(notice);
+ assert.match(failed,/Отчёт за час не удалось сформировать/);assert.match(failed,/Накопленные данные войдут в следующий успешный отчёт/);
+ assert.doesNotMatch(failed,/<dl>|<dd>|неизвестно|Отчёт за час неполный|<dd>0<\/dd>|write_conflict/,'no numbers, no unknowns, no zeros, no reason code');
+ assert.doesNotMatch(failed,/Discovery (остановлен|ждёт|не запустился)/,'reporting failed, not Discovery: nothing about Discovery is implied');
+ assert.match(card({...notice,status:'failed'}),/Discovery остановлен после повторных ошибок/);assert.match(card({...notice,status:'waiting'}),/Discovery ждёт повтора/);assert.match(card({...notice,status:'blocked'}),/Discovery не запустился: временный отказ/);
+ assert.doesNotMatch(card({...notice,status:'running'}),/Discovery (остановлен|ждёт|не запустился)/,'a running chain is not shown as a problem');
+ const hostileNotice=card({...notice,id:'discovery-hour-<b>',status:'<svg onload=1>',reason:'<script>',added:'<img src=x onerror=alert(1)>'});
+ assert.doesNotMatch(hostileNotice,/<img|<script|<svg|onerror|onload/,'hostile fields never become markup');
  const hostile=card({...hour,id:'discovery-hour-<b>',added:'<img src=x onerror=alert(1)>',checked:'<script>alert(1)</script>',reused:{toString(){return '<i>';}},screenedOut:-5,tmdbCalls:1.5,remaining:'<u>',status:'<svg onload=1>',from:'<s>',error:'<script>'});
  assert.doesNotMatch(hostile,/<img|<script|<svg|<i>|<u>|<s>|onerror|onload/,'hostile fields never become markup');assert.match(hostile,/data-event-id="discovery-hour-&lt;b&gt;"/);
  html=card({...hour,from:'not a date'});assert.doesNotMatch(html,/Invalid|NaN/);

@@ -23,7 +23,8 @@ const binding={
  async get(){return {status:'running'};}
 };
 const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,LETTERBOXD_USERNAME:'tester',DISCOVERY_WORKFLOW:binding};
-const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,console:{log(){},error(){},warn(){}},ASSETS:{},fetch:async()=>new Response('unexpected',{status:599})});
+const warnings=[];
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,console:{log(){},error(){},warn(line){try{warnings.push(JSON.parse(line));}catch{warnings.push({unparsed:true});}}},ASSETS:{},fetch:async()=>new Response('unexpected',{status:599})});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/continuation.js','src/discovery-workflow.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
@@ -109,9 +110,9 @@ const eventKeys=()=>[...records.keys()].filter(key=>key.startsWith('events/items
 const discoveryEvents=()=>eventKeys().map(key=>records.get(key)).filter(event=>event?.type==='discovery');
 const workflowRecord=()=>records.get('epg/discovery-workflow.json');
 const realPut=bucket.put;
-let failEventPuts=false;
-bucket.put=async(key,...rest)=>{if(failEventPuts&&key.startsWith('events/items/'))throw new Error('event put failed');return realPut(key,...rest);};
-const resetAll=()=>{records.clear();etags.clear();puts.length=0;creates.length=0;failEventPuts=false;};
+let failEventPuts=false,failFaultPuts=false;
+bucket.put=async(key,...rest)=>{if(failEventPuts&&key.startsWith('events/items/'))throw new Error('event put failed');if(failFaultPuts&&key===FAULT_KEY)throw new Error('ledger put failed');return realPut(key,...rest);};
+const resetAll=()=>{warnings.length=0;records.clear();etags.clear();puts.length=0;creates.length=0;failEventPuts=false;failFaultPuts=false;};
 binding.create=async request=>{creates.push(request);return {id:request.id};};
 Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
 armWorkflowAdmission();
@@ -138,7 +139,10 @@ const COUNTS={chunks:3,checked:30,added:6,reused:3,screenedOut:6,tmdbCalls:15,to
 // ---------- AIR-410 v2: one `discovery` report per scheduled hourly firing ----------
 const BASE=Date.UTC(2026,10,11,10),HOUR=3600000;
 const cron=n=>({scheduled:true,now:BASE+n*HOUR+(n%2)*1000});
-const reports=()=>discoveryEvents().sort((a,b)=>a.at<b.at?-1:1);
+const reports=()=>discoveryEvents().filter(event=>event.kind!=='report_failed').sort((a,b)=>a.at<b.at?-1:1);
+const notices=()=>discoveryEvents().filter(event=>event.kind==='report_failed').sort((a,b)=>a.at<b.at?-1:1);
+const FAULT_KEY='epg/discovery-report-faults.json'.replace('epg/','events/');
+const ledger=()=>records.get(FAULT_KEY)?.faults||[];
 const outbox=()=>workflowRecord()?.outbox||[];
 const hourId=(generation,n)=>'discovery-hour-'+generation.replace(/-/g,'').slice(0,12)+'-'+new Date(BASE+n*HOUR).toISOString().replace(/[-:]/g,'').slice(0,11);
 const ZERO={checked:0,added:0,reused:0,screenedOut:0,touched:0,tmdbCalls:0};
@@ -179,7 +183,7 @@ chunkStub(PLAN);
  assert.equal(list.every(event=>event.kind==='hour'&&event.type==='discovery'&&!event.incomplete),true);
  assert.deepEqual(outbox(),[],'everything delivered');
  assert.notEqual(series0,workflowRecord().instanceId);
- assert.deepEqual(Object.keys(list[1]).sort(),['added','at','checked','chunks','error','from','generation','id','incomplete','kind','queueEmpty','reason','remaining','reused','screenedOut','status','tmdbCalls','touched','type'].sort(),'a compact event: counters only, no film titles');
+ assert.deepEqual(Object.keys(list[1]).sort(),['added','at','checked','chunks','error','from','generation','id','incomplete','kind','queueEmpty','queueUnreadable','reason','remaining','reused','screenedOut','status','tmdbCalls','touched','type'].sort(),'a compact event: counters only, no film titles');
 }
 
 // 2. Duplicate, delayed and missed crons. A repeated hour finds its report, a late cron keeps the hour, a gap is not backfilled.
@@ -393,31 +397,193 @@ resetAll();seed({count:3});const own=elect();
  failEventPuts=false;
  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},limit+6);
  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},limit+7);
- const real=reports().filter(event=>!event.incomplete);
+ const real=reports();
+ assert.equal(real.every(event=>event.incomplete===false&&Number.isInteger(event.added)&&Number.isInteger(event.checked)),true,'every stored report has real numbers, never unknowns');
  assert.equal(sumOf(real,'added'),total,'every committed chunk is counted exactly once across the reports');
- assert.equal(real.length>=limit,true);assert.deepEqual(outbox(),[]);
- const saturated=reports().filter(event=>event.incomplete);
- for(const event of saturated){for(const name of Object.keys(ZERO))assert.equal(event[name],null,'an event written without a reading never shows a 0');assert.equal(event.reason,'outbox_full');}
+ assert.equal(real.length>=1,true);assert.deepEqual(outbox(),[]);
+ const saturated=notices();
+ assert.equal(saturated.length>=1,true,'each saturated hour that could not be reported has its own notice');
+ for(const event of saturated){assert.equal(event.reason,'outbox_full');for(const name of Object.keys(ZERO))assert.equal(Object.hasOwn(event,name),false,'a notice carries no counter, so it can show neither a 0 nor an unknown: '+name);}
+ assert.equal(new Set(saturated.map(event=>event.id)).size,saturated.length,'one stable identity per hour');
 }
 
-// 10. Unreadable or unwritable state: an incomplete event with unknown numbers, the accumulator untouched.
+// 10. A close that cannot be persisted: one compact notice for the hour (no counters, no queue facts), independent of the record whose write failed; the
+// accumulator is untouched, the typed reason is logged once, and the next successful report carries the deltas exactly once.
 resetAll();seed({count:3});const own10=elect();
 {
- await call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10+':1',GENERATION)}));
+ const add=(n,added)=>call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10+':'+n,GENERATION)}));
+ await add(1,2);
  const realRead=context.DiscoveryAuthority.readWorkflow,realWrite=context.DiscoveryAuthority.writeWorkflow;
- context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ const windowBusy=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ // a held projector window
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
  const held=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
- assert.equal(held.closed,false);assert.equal(held.reason,'projector_window');
- const [e0]=reports();assert.equal(e0.incomplete,true);assert.equal(e0.reason,'projector_window');assert.equal(e0.status,'running');
- for(const name of ['checked','added','reused','screenedOut','touched','tmdbCalls','chunks','remaining','from'])assert.equal(e0[name],null,name+' is unknown, not 0');
+ assert.equal(held.closed,false);assert.equal(held.reason,'projector_window');assert.equal(held.notice,'delivered');
+ assert.equal(reports().length,0);assert.equal(notices().length,1);
+ const [n0]=notices();
+ assert.deepEqual([n0.type,n0.kind,n0.reason,n0.status],['discovery','report_failed','projector_window',null],'a typed reason, no Discovery state is implied by a running chain');
+ assert.equal(n0.id,'discovery-hour-'+GENERATION.replace(/-/g,'').slice(0,12)+'-'+new Date(BASE).toISOString().replace(/[-:]/g,'').slice(0,11),'the canonical identity of the hour: the same id as the report of that hour would have');
+ for(const name of ['checked','added','reused','screenedOut','touched','tmdbCalls','chunks','remaining','queueEmpty','from','incomplete','error'])assert.equal(Object.hasOwn(n0,name),false,name+' is not in a notice: nothing is invented');
  assert.equal(workflowRecord().report.added,2,'the deltas wait for the next report');
+ // a duplicate or replayed firing of the same failed hour finds the same notice
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ assert.equal(notices().length,1,'a replay keeps one notice for the hour');
+ // an unreadable record, then a lost compare-and-swap, then no record: one notice each, each with its own typed reason and its own hour
  context.DiscoveryAuthority.writeWorkflow=realWrite;
  context.DiscoveryAuthority.readWorkflow=async()=>{throw new Error('d1 down');};
- const unreadable=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
- assert.equal(unreadable.reason,'state_unreadable');assert.equal(reports()[1].incomplete,true);assert.equal(reports()[1].added,null);
+ assert.equal((await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1)).reason,'state_unreadable');
  context.DiscoveryAuthority.readWorkflow=realRead;
+ context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});
+ assert.equal((await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2)).reason,'write_conflict');
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.deepEqual(notices().map(event=>event.reason),['projector_window','state_unreadable','write_conflict']);
+ assert.equal(reports().length,0,'no report of unknowns');assert.equal(workflowRecord().report.added,2,'the accumulator was never reset or double counted');
+ assert.equal(warnings.every(entry=>entry.event==='discovery_hour_close_failed'&&typeof entry.hourKey==='string'&&entry.hourKey.length<=12&&entry.notice==='delivered'),true,'bounded typed log lines, no payload');
+ // the Discovery state is named only when the reconcile of that firing confirmed one that needs attention
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ await closed({started:false,reason:'recovery_exhausted',programmeRunId:GENERATION},3);
+ await closed({started:false,reason:'recovery_waiting',programmeRunId:GENERATION},4);
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.deepEqual(notices().slice(3).map(event=>event.status),['failed','waiting'],'a confirmed Discovery state is named; a running chain is not');
+ // a prolonged failure: one notice per hour, the accumulator keeps growing and nothing is lost
+ await add(2,5);
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ for(let hour=5;hour<11;hour++)await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},hour);
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.equal(notices().length,11);assert.equal(new Set(notices().map(event=>event.id)).size,11,'every hour has its own stable identity');assert.equal(workflowRecord().report.added,7);
+ // the later successful close reports everything once
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},11);
+ const [r11]=reports();assert.equal(reports().length,1);assert.equal(r11.added,7,'the delayed deltas arrive once, in the next successful report');assert.equal(r11.checked,6);assert.equal(r11.incomplete,false);assert.equal(r11.from,null,'the first report has no earlier period');
+ // a failed hour between two reports: the next report reaches back to the last closed one and counts the delta once
+ await add(3,1);
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},12);context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},13);
+ const [,r13]=reports();assert.equal(r13.from,r11.at);assert.equal(r13.added,1);
+ assert.deepEqual(outbox(),[]);
+}
+// 10a. No record at all (no Workflow instance yet): a notice, no zero, no report.
+resetAll();seed({count:3});
+{
+ records.delete('epg/discovery-workflow.json');
+ const none=await closed({started:false,reason:'stopped',programmeRunId:GENERATION},0);
+ assert.equal(none.closed,false);assert.equal(reports().length,0);assert.equal(notices().length,1);assert.equal(notices()[0].reason,'no_record');assert.equal(warnings.some(entry=>entry.reason==='no_record'),true);
+}
+// 10c. The journal itself refuses the notice: it waits in a separate ledger (its own compare-and-swap, not the record), every later scheduled firing drains it, a repeat or a
+// duplicate delivers nothing twice, nothing is ever evicted, and a storage outage in both places is logged and never claimed as delivered.
+resetAll();seed({count:3});const own10c=elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ const windowBusy=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ await call('settleWorkflowIfOwner')(env,own10c,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:4,added:3,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10c+':1',GENERATION)}));
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;failEventPuts=true;
+ const queued=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ assert.equal(queued.notice,'queued');assert.equal(notices().length,0,'the journal refused it');assert.equal(ledger().length,1,'the ledger holds it durably');
+ assert.equal(warnings.at(-1).notice,'queued','the log says it is queued, not delivered');
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);assert.equal(ledger().length,1,'the same failed hour again: one ledger entry (an idempotent identity)');
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);assert.equal(ledger().length,2);
+ // the journal is back and the record is writable: the next scheduled firing drains the ledger first, then closes its own hour, and the deltas are counted once
+ failEventPuts=false;context.DiscoveryAuthority.writeWorkflow=realWrite;
  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2);
- const [,,e2]=reports();assert.equal(e2.added,2,'the delayed deltas arrive once, in the next complete report');assert.equal(e2.incomplete,false);
+ assert.equal(notices().length,2,'both queued notices were delivered');assert.deepEqual(ledger(),[],'delivered entries left the ledger');
+ assert.equal(reports().length,1);assert.equal(reports()[0].added,3);
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},2);await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},3);
+ assert.equal(notices().length,2);assert.equal(reports().length,2,'replay and duplicate delivery change nothing');
+}
+// 10d. A journal outage of more than 48 hours loses nothing: every failed hour is queued, the drain is bounded per firing and oldest first, and every hour is delivered once.
+resetAll();seed({count:3});elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ const windowBusy=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ const HOURS=200,drain=call('DISCOVERY_REPORT_FAULT_DRAIN');assert.equal(typeof drain,'number');
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;failEventPuts=true;
+ for(let hour=0;hour<HOURS;hour++)await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},hour);
+ assert.equal(ledger().length,HOURS,'200 failed hours, 200 ledger entries: nothing evicted');assert.equal(records.has(FAULT_KEY)&&Object.hasOwn(records.get(FAULT_KEY),'dropped'),false,'there is no dropped counter: nothing is dropped');
+ assert.equal(new Set(ledger().map(entry=>entry[1])).size,HOURS,'one entry per hour');
+ failEventPuts=false;
+ const before=ledger().length;await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},HOURS);   // this firing fails to close as well: the window is still held
+ assert.equal(notices().length,drain+1,'one firing drains at most the bound from the ledger, oldest first, plus its own notice');
+ assert.deepEqual(notices().map(event=>event.at).slice(0,3),[0,1,2].map(hour=>new Date(BASE+hour*HOUR).toISOString()),'the oldest hours came first');
+ for(let n=0;n<10;n++)await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},HOURS+1+n);
+ assert.equal(notices().length,HOURS+11,'every failed hour, including those of the recovery firings, has exactly one notice');assert.equal(new Set(notices().map(event=>event.id)).size,notices().length);
+ assert.deepEqual(ledger(),[],'the ledger is empty once everything is delivered');
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ // the bound is explicit and never evicts: at the limit the NEWEST notice is refused (and logged), the older ones stay and are delivered
+ resetAll();seed({count:3});elect();
+ const limit=call('DISCOVERY_REPORT_FAULT_LIMIT');assert.equal(limit,8760,'a year of hourly notices');
+ const gen=GENERATION.replace(/-/g,'').slice(0,12),tuples=Array.from({length:limit},(_,n)=>{const d=new Date(Date.UTC(2025,10,11,0)+n*HOUR).toISOString();return [gen,d.replace(/[-:]/g,'').slice(0,11),3,0];});
+ set(FAULT_KEY,{schemaVersion:2,faults:tuples});
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;failEventPuts=true;
+ const refused=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ assert.equal(refused.notice,'lost');assert.equal(ledger().length,limit,'no older entry was evicted to make room');assert.equal(ledger()[0][1],tuples[0][1],'the oldest is still there');assert.equal(warnings.at(-1).notice,'lost');
+ failEventPuts=false;context.DiscoveryAuthority.writeWorkflow=realWrite;
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},1);
+ assert.equal(notices().length,drain);assert.equal(ledger().length,limit-drain,'the oldest ones were delivered and left');
+}
+// 10e. One hour, one event: a report always replaces the notice of its hour, a notice never replaces a report, and the deltas of a report are never dropped.
+resetAll();seed({count:3});const own10e=elect();
+{
+ const realWrite=context.DiscoveryAuthority.writeWorkflow;
+ const windowBusy=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
+ const add=(n,added)=>call('settleWorkflowIfOwner')(env,own10e,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:5,added,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10e+':'+n,GENERATION)}));
+ const hourEvents=()=>discoveryEvents().filter(event=>event.at===new Date(BASE).toISOString());
+ // (a) the close fails and its notice is delivered; a duplicate or concurrent firing of the SAME hour then saves the close: exactly one visible event, and it is the report
+ await add(1,2);
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ assert.equal((await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0)).notice,'delivered');
+ assert.deepEqual(hourEvents().map(event=>event.kind),['report_failed']);
+ context.DiscoveryAuthority.writeWorkflow=realWrite;
+ assert.equal((await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0)).closed,true);
+ assert.deepEqual(hourEvents().map(event=>event.kind),['hour'],'exactly one event for the hour, and the report replaced the notice');
+ assert.deepEqual([hourEvents()[0].added,hourEvents()[0].checked],[2,5],'the deltas were delivered once, not dropped');
+ assert.equal(eventKeys().length,1,'one object in the journal');
+ // a later duplicate firing of that hour changes nothing
+ await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);assert.equal(eventKeys().length,1);assert.deepEqual(hourEvents().map(event=>event.kind),['hour']);
+ // (b) a notice that arrives AFTER the report (a slower concurrent firing) never replaces it
+ const late=call('discoveryReportFailedEvent')({at:new Date(BASE).toISOString(),hourKey:new Date(BASE).toISOString().replace(/[-:]/g,'').slice(0,11),generation:GENERATION,reason:'write_conflict',status:null});
+ assert.equal(await call('deliverDiscoveryReportFailure')(env,late),'delivered');
+ assert.deepEqual(hourEvents().map(event=>event.kind),['hour'],'the report stays, the late notice finds its hour taken');assert.equal(eventKeys().length,1);
+ // (c) the ledger variant: the notice is queued while the journal refuses; the report of the same hour is then delivered first and the drain finds the hour taken
+ resetAll();seed({count:3});const own10e2=elect();
+ await call('settleWorkflowIfOwner')(env,own10e2,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:7,added:4,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10e2+':1',GENERATION)}));
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;failEventPuts=true;
+ assert.equal((await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0)).notice,'queued');assert.equal(ledger().length,1);
+ context.DiscoveryAuthority.writeWorkflow=realWrite;failEventPuts=false;
+ // the next firing of the same hour drains first (the ledger notice is written), then its close succeeds and its report replaces it
+ assert.equal((await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0)).closed,true);
+ assert.deepEqual(hourEvents().map(event=>event.kind),['hour']);assert.equal(hourEvents()[0].added,4);assert.deepEqual(ledger(),[]);assert.equal(eventKeys().length,1);
+ // (d) the report is delivered while the notice's ledger entry is still queued: the drain later finds the hour taken by the report, keeps it and empties the ledger
+ resetAll();seed({count:3});const own10e3=elect();
+ await call('settleWorkflowIfOwner')(env,own10e3,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10e3+':1',GENERATION)}));
+ const hourKey0=new Date(BASE).toISOString().replace(/[-:]/g,'').slice(0,11);
+ set(FAULT_KEY,{schemaVersion:2,faults:[[GENERATION.replace(/-/g,'').slice(0,12),hourKey0,4,0]]});
+ const state=await call('readWorkflowState')(env),report=call('discoveryHourEvent')({at:new Date(BASE).toISOString(),hourKey:hourKey0,generation:GENERATION,status:'running',reason:null,report:{...call('newDiscoveryReport')(null),chunks:1,added:1,checked:3},queue:{remaining:5,empty:false}});
+ assert.equal(await call('writeDiscoveryEvent')(env,report),'written');
+ assert.equal((await call('deliverDiscoveryReportFaults')(env)).delivered,1);assert.deepEqual(ledger(),[]);assert.deepEqual(hourEvents().map(event=>event.kind),['hour']);assert.equal(eventKeys().length,1);
+ // (e) the replacement is a compare-and-swap: an interleaved writer makes it fail and the report stays in the outbox to be retried, never dropped
+ resetAll();
+ const noticeEvent=call('discoveryReportFailedEvent')({at:new Date(BASE).toISOString(),hourKey:hourKey0,generation:GENERATION,reason:'write_conflict',status:null});
+ assert.equal(await call('writeDiscoveryEvent')(env,noticeEvent),'written');assert.equal(await call('writeDiscoveryEvent')(env,noticeEvent),'exists','a repeat of the notice keeps the first');
+ const realGet=bucket.get;let interleaved=false;
+ bucket.get=async(key,...rest)=>{const object=await realGet(key,...rest);if(!interleaved&&key.startsWith('events/items/')&&object){interleaved=true;await realPut(key,JSON.stringify({...noticeEvent,reason:'state_unreadable'}),{});}return object;};
+ assert.equal(await call('writeDiscoveryEvent')(env,report),'failed','an interleaved writer: the compare-and-swap refuses, the caller keeps the report');
+ bucket.get=realGet;
+ assert.equal(await call('writeDiscoveryEvent')(env,report),'written','the retry replaces the notice');assert.equal(await call('writeDiscoveryEvent')(env,report),'exists');
+ assert.deepEqual(hourEvents().map(event=>event.kind),['hour']);
+}
+
+// 10b. The hour closes and the deltas are real, but the queue cannot be read: the report keeps its numbers and says only that the remainder is unread.
+resetAll();seed({count:3});const own10b=elect();
+{
+ await call('settleWorkflowIfOwner')(env,own10b,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:7,added:4,reused:1,screenedOut:2,touched:0,tmdbCalls:3,remaining:9,cheapRemaining:0,error:null},own10b+':1',OTHER)}));
+ const realLoad=context.loadJSON,realCont=context.readContinuation;
+ context.readContinuation=async()=>{throw new Error('continuation down');};
+ const done=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
+ context.readContinuation=realCont;
+ assert.equal(done.closed,true);
+ const [event]=reports();
+ assert.deepEqual([event.added,event.checked,event.reused,event.screenedOut,event.tmdbCalls,event.incomplete],[4,7,1,2,3,false],'the real deltas are kept');
+ assert.deepEqual([event.remaining,event.queueEmpty,event.queueUnreadable],[null,false,true],'the unread remainder is not a zero and not an empty queue');
+ assert.equal(warnings.length,0,'a persisted close is not a failure');
 }
 
 // 11. DST and hour identity: UTC hours, the repeated local hour of the clock change has two reports, a new generation is a new identity.

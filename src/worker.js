@@ -605,7 +605,21 @@ async function writeEvent(env,event){
 // AIR-361: a `ratings` event is immutable and its id is the runId: a second put of the same run finds the key and keeps the first.
 async function writeRatingsEvent(env,event){const saved=await env.BUCKET.put(removalEventKey(event),JSON.stringify(event),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});return saved!==null?'written':'exists';}
 // AIR-410: a `discovery` event is immutable and its id is the tick id: a second put of the same tick finds the key and keeps the first.
-async function writeDiscoveryEvent(env,event){const saved=await env.BUCKET.put(removalEventKey(event),JSON.stringify(event),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});return saved!==null?'written':'exists';}
+// One Discovery event per generation and hour (ADR 0118): the put is create-only, so a repeat keeps the first. The only replacement allowed is a REPORT (`kind` `hour`)
+// over the `report_failed` notice of the same hour, by a compare-and-swap on the notice's etag: a report always wins over its hour's notice, a notice never replaces
+// anything, so the Events Log cannot hold two events for one hourly firing and the deltas of a report are never dropped because a notice got there first.
+async function writeDiscoveryEvent(env,event){
+ const key=removalEventKey(event),httpMetadata={contentType:'application/json'};
+ const saved=await env.BUCKET.put(key,JSON.stringify(event),{httpMetadata,onlyIf:{etagDoesNotMatch:'*'}});
+ if(saved!==null)return 'written';
+ if(event?.kind!=='hour')return 'exists';
+ const current=await env.BUCKET.get(key);
+ if(!current)return 'failed';
+ let stored=null;try{stored=await current.json();}catch{stored=null;}
+ if(stored?.kind!=='report_failed')return 'exists';
+ const replaced=await env.BUCKET.put(key,JSON.stringify(event),{httpMetadata,onlyIf:{etagMatches:current.etag}});
+ return replaced!==null?'written':'failed';
+}
 async function eventPage(env,cursor){const page=await env.BUCKET.list({prefix:'events/items/',limit:20,...(cursor?{cursor}:{})});const events=await Promise.all(page.objects.map(o=>loadJSON(env,o.key)));for(const event of events.filter(Boolean)){if(event.film)event.film=eventFilm(event.film);if(Array.isArray(event.added))event.added=event.added.map(f=>eventFilm(f));if(Array.isArray(event.removed))event.removed=event.removed.map(f=>eventRemovedFilm(f));}return {events:events.filter(Boolean),cursor:page.truncated?page.cursor:null};}
 async function bootstrapEvents(env){if(await loadJSON(env,'events/bootstrap.json'))return;const report=await loadJSON(env,'programme.json'),list=await loadJSON(env,'watchlist.json');if(report)await writeEvent(env,epgEvent(report,'baseline-epg'));if(list)await writeEvent(env,watchlistEvent(null,list,null,report,'baseline-watchlist'));let cursor;do{const page=await env.BUCKET.list({prefix:'started/',...(cursor?{cursor}:{})});for(const o of page.objects){const mark=await loadJSON(env,o.key);if(mark?.lastEvent){await writeEvent(env,mark.lastEvent);continue;}if(mark&&mark.started!==false&&mark.startedAt){const film=report?.films.find(f=>String(f.id)===mark.id)||list?.films.find(f=>String(f.id)===mark.id);if(film)await writeEvent(env,{id:'baseline-started-'+mark.id,type:'started',at:mark.startedAt,film:eventFilm(film,eventTitles(report))});}}cursor=page.truncated?page.cursor:undefined;}while(cursor);await saveJSON(env,'events/bootstrap.json',{at:new Date().toISOString()});}
 async function startedFilms(env){let cursor;const ids=[];do{const page=await env.BUCKET.list({prefix:'started/',include:['customMetadata'],...(cursor?{cursor}:{})});for(const object of page.objects){const match=object.key.match(/^started\/([a-zA-Z0-9_-]+)\.json$/);if(match&&object.customMetadata?.started!=='false')ids.push(match[1]);}cursor=page.truncated?page.cursor:undefined;}while(cursor);return ids;}
