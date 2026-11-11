@@ -6,7 +6,7 @@
 **Approval source:** Owner explicitly accepted ADR 0099 on 2026-11-07 after the [independent architecture review PASS of PR #400](https://github.com/vladimino/iptv-watchlist/pull/400#issuecomment-6709978903) at HEAD `eca6265`. The architecture and eight-part decomposition are accepted, subject to the two implementation invariants below. This decision authorizes no schema apply, production import, authority activation, flag or Task edit, or other production operation.  
 **Related work:** [AIR-321](https://trello.com/c/KHJM2gnK), [AIR-275](https://trello.com/c/4x7hH0gI), [AIR-343](https://trello.com/c/hCy6fLne), [ADR 0009](0009-canonical-film-person-identity.md), [ADR 0056](0056-d1-enrichment-write-through.md), [ADR 0058](0058-canonical-person-grouping.md), [ADR 0073](0073-d1-authoritative-metadata-cache.md), [ADR 0079](0079-d1-authoritative-published-epg.md), [ADR 0081](0081-d1-authoritative-owner-reviews.md), [ADR 0085](0085-d1-authoritative-discovery-ledger.md), [ADR 0086](0086-watchlist-fact-keeps-the-film.md), [ADR 0087](0087-rated-archive-admission.md), [audit and decomposition](../evidence/d1-migration/air-321-canonical-film-person-audit-2026-11-07.md)  
 **Supersedes:** None (it would amend, not rewrite, the single-writer boundary of ADR 0056 once Accepted)  
-**Superseded by:** None
+**Superseded by:** None (section 6 recovery and mirror policy refined in part by [ADR 0117](0117-film-person-d1-handoff-owner-decisions.md), 2026-11-11)
 
 ## Context
 
@@ -41,6 +41,8 @@ D1 holds `film`, `person`, credits, aliases, external ids and redirects, but onl
 - Code rollback reverts neither D1, nor the marker, nor external writers.
 
 ## Recovery and migration boundary
+
+*Note of 2026-11-11:* [ADR 0117](0117-film-person-d1-handoff-owner-decisions.md) records owner decisions that refine section 6 and this paragraph: after activation the primary recovery is `held` plus a forward fix `held` to `open` proven on a safe copy, the reverse reconciler is deferred, and the canonical R2 `titles.json`/`people.json` are frozen at `open`. The text below is kept as accepted on 2026-11-07.
 
 Reversible before activation by moving the marker back; after activation only through `held` and an owner-approved reverse reconciliation. Schema apply, import, marker flip and any rollback are separate owner-approved production operations, each its own card gate. This ADR authorizes none of them.
 
