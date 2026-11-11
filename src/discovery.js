@@ -1560,11 +1560,14 @@ async function presentContinuationDiscovery(env){
  const workflow=await noteDiscoveryWorkflow(env);
  return {discovery:delegatedContract(contract,workflow),executor:'workflow',delegated:true,workflow};
 }
-async function discoveryExecutorReadout(env,continuation){
+// `options.workflow` (the record, or null for none) is the Workflow state the caller already holds as part of a consistent snapshot; without it the state is
+// read here. Only the platform liveness of that record's instance is observed anew.
+async function discoveryExecutorReadout(env,continuation,options={}){
  const configured=discoveryExecutorMode(env);
  const now=Date.now();
  let stored=null;
- if(typeof readWorkflowState==='function'){try{stored=(await readWorkflowState(env)).record;}catch{stored={phase:'unknown'};}}
+ if(Object.hasOwn(options,'workflow'))stored=options.workflow;
+ else if(typeof readWorkflowState==='function'){try{stored=(await readWorkflowState(env)).record;}catch{stored={phase:'unknown'};}}
  let liveness=null;
  if(stored?.instanceId&&typeof workflowInstanceStatus==='function'&&typeof env?.DISCOVERY_WORKFLOW?.get==='function')liveness=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,stored.instanceId);
  const facts=typeof workflowReadoutFacts==='function'?workflowReadoutFacts(stored,liveness,now):{active:!!stored&&['starting','running','waiting','uncertain'].includes(stored?.phase),stalled:false,alive:false,dead:false,recoveryDue:stored?.recovery?.dueAt||null,recoveryWaiting:false,quarantined:false,updatedAt:stored?.updatedAt||null};
@@ -1615,6 +1618,70 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
 function catalogFilmById(catalog,id){
  for(const key in catalog||{}){const film=catalog[key];if(String(film?.id)===id)return film;}
  return undefined;
+}
+// AIR-430. The operational status of Discovery: what an operator or a monitor needs while writers commit continuously. It reads only the small
+// authoritative records (one consistent D1 snapshot of the authority row, status, continuation, workflow, lease and projector window; the same
+// small R2 objects outside D1 authority), never the ledger, the decisions or the catalog, never TMDB, and it writes nothing. The backlog is only
+// what the last checkpoints stored, each fact with its own time, source and programme generation (`known`, `stale` once older than OPERATIONAL_STALE_MS,
+// `foreign` when it belongs to another programme, `unknown` without a time); no exact figure is computed. A record that cannot be read is named in `unavailable`; it is never filled from another source. The detailed view
+// (`discoveryPipelineStatus`) keeps its snapshot fence and may be refused with `discovery_fence` while Discovery commits.
+const OPERATIONAL_STALE_MS=3*3600000;
+const operationalNumber=value=>Number.isFinite(value)&&value>=0?value:null;
+async function discoveryOperationalStatus(env){
+ const now=Date.now(),unavailable=[];
+ let snapshot=null,records,authority;
+ if(typeof DiscoveryAuthority!=='undefined'){
+  try{snapshot=await DiscoveryAuthority.readOperationalSnapshot(env);}
+  catch(error){unavailable.push('authority');authority={state:'unavailable',cause:diagnosticErrorCode(error)};}
+ }
+ let source;
+ if(snapshot?.handled){
+  source='d1_snapshot';authority=snapshot.authority;records=snapshot.records||{status:null,continuation:null,workflow:null,lease:null,window:null};
+  for(const name of snapshot.unreadable||[])unavailable.push(name);
+  if(authority.state==='held')unavailable.push('records');
+ }else if(authority?.state==='unavailable'){
+  source='none';records={status:null,continuation:null,workflow:null,lease:null,window:null};
+ }else{
+  // Outside D1 authority the same records are small R2 objects, each read on its own; one that fails is named, not guessed.
+  source='r2_objects';authority={state:'r2',mode:'r2',cutover:null,transfer:null,generation:null,programmeRunId:null,publishedProgrammeRunId:null};
+  const read=async(name,key)=>{try{return await loadJSON(env,key);}catch{unavailable.push(name);return null;}};
+  const [status,continuation,workflow,lease,generation]=await Promise.all([read('status','epg/discovery-status.json'),read('continuation','epg/resolver-continuation.json'),read('workflow','epg/discovery-workflow.json'),read('lease',DISCOVERY_LEASE_KEY),read('generation',EPG_GENERATION_KEY)]);
+  records={status,continuation,workflow,lease,window:null};
+  authority.publishedProgrammeRunId=generation?.phase==='published'?generation.programmeRunId||null:null;
+ }
+ const continuation=records.continuation,last=records.status,published=authority.publishedProgrammeRunId||null;
+ const health=healthSummary(continuationHealth(continuation,records.lease,last,now,published));
+ const running=continuation?.stage==='running';
+ const contract=discoveryContract(continuation,running?runningOverride(continuationHealth(continuation,records.lease,last,now,published)):{});
+ // The backlog is two stored facts, each with its own time and programme generation, never one figure with the newest of the two times: the
+ // chunk budget the continuation holds, and the ledger counts the last chunk stored. A fact of another programme than the published (or current) one is
+ // `foreign` and its values are withheld; one without a time is `unknown`; one older than OPERATIONAL_STALE_MS is `stale` and keeps its own time.
+ const current=published||authority.programmeRunId||continuation?.programmeRunId||null;
+ const fact=(record,at,values)=>{
+  const observed=Date.parse(at||''),run=record?.programmeRunId||null;
+  if(!record)return {state:'unknown',source:null,observedAt:null,ageMs:null,programmeRunId:null,...Object.fromEntries(Object.keys(values).map(key=>[key,null]))};
+  const base={source:null,observedAt:Number.isFinite(observed)?new Date(observed).toISOString():null,ageMs:Number.isFinite(observed)?Math.max(0,now-observed):null,programmeRunId:run};
+  const blank=Object.fromEntries(Object.keys(values).map(key=>[key,null]));
+  if(current&&run&&run!==current)return {state:'foreign',...base,...blank};
+  if(!Number.isFinite(observed)||!Object.values(values).some(value=>value!==null))return {state:'unknown',...base,...blank};
+  return {state:now-observed>OPERATIONAL_STALE_MS?'stale':'known',...base,...values};
+ };
+ const backlog={
+  chunks:{...fact(continuation,continuation?.at,{remainingChunks:operationalNumber(continuation?.remainingChunks)}),source:'continuation'},
+  ledger:{...fact(last,last?.finishedAt||null,{remaining:operationalNumber(last?.remaining),cheapRemaining:operationalNumber(last?.cheapRemaining)}),source:'status'},
+ };
+ let executor={configured:discoveryExecutorMode(env)};
+ // The executor facts come from the Workflow record of the same snapshot; only the platform liveness of that instance is observed now, and says so.
+ if(executor.configured!=='external'){try{executor=await discoveryExecutorReadout(env,continuation,{workflow:records.workflow});executor={...executor,workflowSource:'snapshot'};if(executor.liveness!=null)executor.livenessObserved={at:new Date(now).toISOString(),source:'workflow_binding',atomicWithSnapshot:false};}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
+ const window=records.window&&records.window.expiresAt>now&&records.window.state!=='idle'?{state:records.window.state,expiresAt:new Date(records.window.expiresAt).toISOString()}:{state:'idle',expiresAt:null};
+ return {view:'operational',schemaVersion:1,observedAt:new Date(now).toISOString(),source,authority:{state:authority.state,mode:authority.mode??null,cutover:authority.cutover??null,transfer:authority.transfer??null,generation:authority.generation??null,cause:authority.cause||null},
+  programmeRunId:published||continuation?.programmeRunId||null,publishedProgrammeRunId:published,projectorWindow:window,
+  discovery:{state:contract.state,reason:contract.reason,nextAction:contract.nextAction,remainingChunks:contract.remainingChunks,nextCatchUpAt:contract.nextCatchUpAt,retryAt:contract.retryAt},
+  continuationHealth:health,lease:records.lease?{liveUntil:Number.isFinite(records.lease.expiresAt)&&records.lease.expiresAt>0?new Date(records.lease.expiresAt).toISOString():null,live:records.lease.expiresAt>now}:null,
+  lastCheckpoint:continuation?{stage:continuation.stage||null,reason:continuation.reason??null,at:continuation.at||null,programmeRunId:continuation.programmeRunId||null}:null,
+  lastChunk:last?{stage:typeof last.stage==='string'?last.stage.slice(0,40):null,checked:operationalNumber(last.checked),remaining:operationalNumber(last.remaining),finishedAt:typeof last.finishedAt==='string'?last.finishedAt:null}:null,
+  backlog,executor,unavailable:[...new Set(unavailable)],
+  detailed:{view:'detailed',note:'The detailed view reads the whole ledger under a snapshot fence and can be refused with discovery_fence while Discovery commits; that is not a failure of Discovery.'}};
 }
 async function discoveryPipelineStatus(env){
  const pinned=await pinEpg(env);

@@ -1425,6 +1425,42 @@ export async function readWorkflow(env){
  if(row?.payload_json){try{record=JSON.parse(row.payload_json);}catch{throw failed('discovery_unavailable');}}
  return {handled:true,record,etag:'d1:workflow:'+Number(row?.revision||0)};
 }
+// AIR-430. The small operational records in one consistent snapshot: the authority row, the transfer state, the status and continuation
+// payloads, the workflow record, the lease and the projector window. One `batch` of single-row SELECTs, so no two records can come from
+// different generations and no generation compare is needed (which is why a Discovery commit cannot make this read fail with `discovery_fence`,
+// as it does a whole-ledger scan). Bounded: at most 7 statements whatever the size of the ledger, the decisions or the catalog. Read-only; it
+// never touches an observation, a show, a decision, an admission or a segment. A held cutover is reported as `held`, not thrown; a record that
+// cannot be parsed is `null` and listed in `unreadable`. `handled: false` means the R2 objects are the authority.
+export async function readOperationalSnapshot(env){
+ const opened=await readAuthority(env);
+ if(!opened.ready&&!opened.held)return {handled:false};
+ const publicGate=gate=>({state:gate.held?'held':gate.transfer==='loading'?'loading':'ready',mode:gate.mode,cutover:gate.cutover,transfer:gate.transfer,generation:gate.generation,programmeRunId:gate.programmeRunId,publishedProgrammeRunId:gate.publishedProgrammeRunId});
+ if(opened.held)return {handled:true,authority:publicGate(opened),records:null,unreadable:[],statements:0};
+ const db=database(env),wanted=[
+  ['authority','SELECT mode, cutover, programme_run_id AS programmeRunId, generation, published_programme_run_id AS publishedProgrammeRunId FROM discovery_authority WHERE id=1'],
+  ['transfer','SELECT state FROM discovery_transfer WHERE id=1'],
+  ['status','SELECT payload_json FROM discovery_status WHERE id=1'],
+  ['continuation','SELECT revision, payload_json FROM discovery_continuation WHERE id=1'],
+  ['workflow','SELECT revision, payload_json FROM discovery_workflow WHERE id=1'],
+  ['lease','SELECT lease_id, expires_at FROM discovery_lease WHERE id=1'],
+ ];
+ if(opened.windowTable)wanted.push(['window','SELECT state, owner, requested_at AS requestedAt, expires_at AS expiresAt FROM projector_window WHERE id=1']);
+ let results;
+ try{
+  if(binding(db)&&typeof db.batch==='function')results=(await db.batch(wanted.map(([,sql])=>db.prepare(sql).bind()))).map(item=>item.results||[]);
+  else{results=[];for(const [,sql] of wanted)results.push(await many(db,sql));}
+ }catch(error){throw failed('discovery_unavailable',error);}
+ const rows=Object.fromEntries(wanted.map(([name],index)=>[name,results[index]?.[0]??null])),unreadable=[];
+ const parse=(name,row)=>{if(!row?.payload_json)return null;try{return JSON.parse(row.payload_json);}catch{unreadable.push(name);return null;}};
+ const gate=rows.authority&&rows.transfer?{...opened,mode:rows.authority.mode,cutover:rows.authority.cutover,generation:Number(rows.authority.generation),programmeRunId:rows.authority.programmeRunId??null,publishedProgrammeRunId:rows.authority.publishedProgrammeRunId??null,transfer:rows.transfer.state}:opened;
+ // The mode can change between the gate read and the batch; the snapshot's own row decides, and a no-longer-open authority is not served as D1 records.
+ if(gate.mode!=='d1'||gate.cutover!=='open')return gate.mode==='d1'&&gate.cutover==='held'?{handled:true,authority:publicGate({...gate,held:true}),records:null,unreadable:[],statements:wanted.length}:{handled:false};
+ return {handled:true,authority:publicGate(gate),statements:wanted.length,unreadable,records:{
+  status:parse('status',rows.status),continuation:parse('continuation',rows.continuation),workflow:parse('workflow',rows.workflow),
+  lease:rows.lease?.lease_id?{id:rows.lease.lease_id,expiresAt:Number(rows.lease.expires_at)}:null,
+  window:rows.window?{state:rows.window.state,owner:rows.window.owner,requestedAt:rows.window.requestedAt==null?null:Number(rows.window.requestedAt),expiresAt:rows.window.expiresAt==null?null:Number(rows.window.expiresAt)}:null,
+ }};
+}
 export async function writeWorkflow(env,record,etag){
  const gate=await readAuthority(env);
  if(gate.held)throw failed('discovery_fence');
