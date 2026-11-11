@@ -88,7 +88,21 @@ async function loadEpgSnapshot(env){
 // changed. Films whose shows belong to another generation, whose prediction is not current for the profile,
 // whose identity is unverified, or that are watched, rated or on the watchlist are not returned.
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
-function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
+// AIR-433 (ADR 0114, owner decisions of 2026-11-11): one lifecycle for every catalog entry. The film `availability`, `availableNow`, `availableUntil` and the
+// per-show `status` all come from the shared helper, so they cannot contradict each other. The effective end of a show is its EPG end, else start + the film
+// runtime (minutes), else unknown. `shows[].end` stays the EPG end only when it is valid (a time after the start); an absent, null or malformed end is `null`, never 0. Show status: future | on_air | archive | expired | unknown. `availableNow` is `availability.state === 'available'` (a ready
+// recording exists; a show on air is not one). `availableUntil` is the end of the archive window of the latest ready show, null when nothing is ready.
+function catalogLifecycle(shows,runtime,now){
+ const options={runtimeMinutes:runtime},list=shows.map(show=>({start:Number(show.start),end:show.end}));
+ const availability=FilmAvailability.filmAvailability(list,now,options);
+ const {state,label,appearsAt,appearsAtKnown,appearsAtEstimated,archiveUntil,onAir}=availability;
+ return {
+  shows:shows.map(show=>{const phase=FilmAvailability.showPhase({start:Number(show.start),end:show.end},now,options);
+   return {channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:phase.endSource==='epg'?phase.end:null,effectiveEnd:phase.end,status:phase.phase==='invalid'?'unknown':phase.phase};}),
+  availableNow:state==='available',
+  availableUntil:archiveUntil===null?null:new Date(archiveUntil).toISOString(),
+  availability:{state,label,appearsAt,appearsAtKnown,appearsAtEstimated,archiveUntil,onAir}};
+}
 function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}
 // Poster fallback from the stored Letterboxd metadata cache (`metadata.json`). Nothing is fetched or invented. A cached poster is
 // reused for the same stored id (cached TMDB id equal or absent) or for the same TMDB id, and only while every cached record for that
@@ -243,7 +257,7 @@ function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
  };
 }
 function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
- const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map();
+ const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map(),orderOf=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const bridge={index,metadata,watchlist,programme,catalog},consumedTmdb=catalogConsumedTmdb(bridge),watchlistTmdb=catalogWatchlistTmdb(bridge);
  const letterboxdFor=catalogLetterboxdUrls({metadata,watchlist,programme,catalog}),hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
@@ -262,20 +276,20 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
   if(!shows.length)continue;
   // Checked last, so the count covers only films the response would otherwise offer.
   if(hidden?.(film)){hiddenIdentities.add(identity);continue;}
-  const latest=Math.max(...shows.map(show=>Number(show.start))),availableUntil=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now);
+  // `order` is only the list order and the choice between two ids of one identity (the latest start + 72 h, as before); it is not a field of the entry.
+  const latest=Math.max(...shows.map(show=>Number(show.start))),order=latest+CATALOG_ARCHIVE_MS,future=shows.filter(show=>Number(show.start)>now),lifecycle=catalogLifecycle(shows,film.runtime,now);
   const prediction=item.prediction,fingerprint=item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=canonicalMoodFacet(fingerprint,prediction);
   const artwork=posterFor(film),letterboxdUrl=letterboxdFor(film);
   const entry={id,tmdbId:String(film.tmdbId),canonicalIdentity:identity,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
    directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
-   shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
-   availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:new Date(availableUntil).toISOString(),
+   ...lifecycle,nextStart:future.length?Number(future[0].start):null,
    prediction:{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds},
    fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
-  posterSource.set(entry,artwork.source);
+  posterSource.set(entry,artwork.source);orderOf.set(entry,order);
   const kept=byIdentity.get(identity);
-  if(!kept||Date.parse(entry.availableUntil)>Date.parse(kept.availableUntil)||(entry.availableUntil===kept.availableUntil&&id<kept.id))byIdentity.set(identity,entry);
+  if(!kept||order>orderOf.get(kept)||(order===orderOf.get(kept)&&id<kept.id))byIdentity.set(identity,entry);
  }
- const films=[...byIdentity.values()].sort((a,b)=>Date.parse(a.availableUntil)-Date.parse(b.availableUntil)||a.id.localeCompare(b.id,'en'));
+ const films=[...byIdentity.values()].sort((a,b)=>orderOf.get(a)-orderOf.get(b)||a.id.localeCompare(b.id,'en'));
  const channels=new Map();
  for(const film of films)for(const channelId of new Set(film.shows.map(show=>show.channelId))){const show=film.shows.find(item=>item.channelId===channelId),entry=channels.get(channelId)||{channelId,channel:show.channel,films:0};entry.films++;channels.set(channelId,entry);}
  // Where each returned poster came from, counted over the returned films only, so a plain GET shows how many still lack an asset.
@@ -296,11 +310,10 @@ function catalogFilmPage({film,programmeRunId,index,profile,metadata,watchlist,p
  const current=!!(profile&&item?.prediction&&freshness.indexed(item,film));
  const prediction=current?item.prediction:null,fingerprint=current&&item.fingerprint&&item.fingerprint.fingerprintHash===item.fingerprintHash?item.fingerprint:null,facet=prediction?canonicalMoodFacet(fingerprint,prediction):null;
  const shows=programmeRunId&&film.showsProgrammeRunId===programmeRunId&&Array.isArray(film.shows)?dedupeShows(film.shows).sort((a,b)=>Number(a.start)-Number(b.start)||String(a.channelId||'').localeCompare(String(b.channelId||''),'en')):[];
- const future=shows.filter(show=>Number(show.start)>now),latest=shows.length?Math.max(...shows.map(show=>Number(show.start))):null;
+ const future=shows.filter(show=>Number(show.start)>now);
  return {id,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:film.title||null,original:film.original||null,year:film.year??null,runtime:film.runtime??null,genres:Array.isArray(film.genres)?film.genres:[],poster:artwork.poster,url:film.url||null,...(letterboxdUrl?{letterboxdUrl}:{}),
   directors:(film.directors||[]).map(catalogPerson),actors:(film.actors||[]).map(catalogPerson),
-  shows:shows.map(show=>({channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,status:catalogShowStatus(show,now)})),
-  availableNow:shows.some(show=>Number(show.start)<=now),nextStart:future.length?Number(future[0].start):null,availableUntil:latest===null?null:new Date(latest+CATALOG_ARCHIVE_MS).toISOString(),
+  ...catalogLifecycle(shows,film.runtime,now),nextStart:future.length?Number(future[0].start):null,
   prediction:prediction?{predictedRating:prediction.predictedRating,probability4Plus:prediction.probability4Plus??null,confidence:prediction.confidence??null,...(Object.hasOwn(prediction,'confidenceAssessment')?{confidenceAssessment:prediction.confidenceAssessment,fingerprintHash:prediction.fingerprintHash??null}:{}),matchSignals:Array.isArray(prediction.matchSignals)?prediction.matchSignals:[],mainRisk:prediction.mainRisk??null,moodIds:facet.moodIds}:null,
   fingerprint:fingerprint?{plotMechanics:fingerprint.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(fingerprint.execution)}:null};
 }

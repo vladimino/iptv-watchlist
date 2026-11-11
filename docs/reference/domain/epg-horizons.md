@@ -6,7 +6,7 @@ Contract introduced by [AIR-188](https://trello.com/c/XQQVS3KG). It separates tw
 |---|---|---|
 | Retention / display | `EPG_RETAIN_FUTURE_MS` = 168 hours ahead, and the unchanged 72-hour archive behind | Shows stored in the published programme generation and shown to the reader |
 | Hot processing | `EPG_HOT_FUTURE_MS` = 24 hours ahead | Discovery candidates, uncertain matches, raw candidate counts, catalog-only availability, resolver and prediction priority |
-| IPTV catch-up | 72 hours | Unchanged; `availableUntil` is still the last start plus 72 hours |
+| IPTV catch-up | 72 hours | Unchanged, counted from the show start; in the catalog API `availableUntil` is the end of the window of the latest ready show, or `null` when no recording is ready ([film availability](film-availability.md), ADR 0114) |
 
 ## What the scan keeps
 
@@ -51,6 +51,10 @@ The programme status (`programmeStatus` in `public/app.js`) distinguishes:
 | None | Saved window over | «Нет актуального окна» |
 
 The known end is the feed's last show (from `retained`), never the display edge, so an older programme is not passed off as fresh and no show is invented.
+
+## Film availability on these horizons
+
+The product reads two of the horizons above: the 72-hour catch-up and a rolling next 24 hours (the hot edge). The 168-hour retention is storage and is never a product horizon. The film-level lifecycle on them (`available`, `soon`, `unavailable`; an archive outranks live and future; `soon` is ready at the end of the show) is the [film availability lifecycle](film-availability.md) ([ADR 0114](../../adr/0114-film-availability-lifecycle.md)). It changes none of the horizons above.
 
 ## Consumers that stay on 24 hours
 

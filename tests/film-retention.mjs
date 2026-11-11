@@ -129,6 +129,7 @@ const doubled=reconcileDepartedFilms({existing:[{id:'film:a',tmdbId:'3',trusted:
 assert.equal(doubled[0].outcome,'conflict');
 
 const catalogCtx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),catalogCtx);
 for(const file of ['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),catalogCtx);
 const now=Date.now();
 const offer=(id,tmdbId,extra)=>({id,tmdbId,canonicalIdentity:'tmdb:'+tmdbId,title:id,original:id,year:2020,runtime:100,genres:[],directors:[],actors:[],shows:[{start:now,channelId:'c',channel:'C'}],showsProgrammeRunId:'run',...extra});

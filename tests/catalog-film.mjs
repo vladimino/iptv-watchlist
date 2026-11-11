@@ -73,6 +73,7 @@ const bucket={
 };
 const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const worker=ctx.worker,constant=name=>vm.runInContext(name,ctx);
@@ -112,11 +113,26 @@ const base={
  assert.deepEqual([film.id,film.tmdbId,film.canonicalIdentity,film.title,film.year,film.runtime],['tmdb_7','7','tmdb:7','Film tmdb_7',2020,100]);
  assert.match(film.url,/themoviedb\.org\/movie\/7/);assert.equal(Object.hasOwn(film,'letterboxdUrl'),false);
  assert.deepEqual(film.directors,[{id:'tmdb_director/1',name:'Режиссёр'}]);assert.equal(film.shows.length,2);assert.equal(film.shows[0].status,'on_air');assert.equal(film.shows[1].status,'future');
- assert.equal(film.availableNow,true);assert.equal(film.nextStart,film.shows[1].start);
+ assert.equal(film.availableNow,false,'the first show is on air: no ready recording yet');assert.equal(film.availableUntil,null);assert.equal(film.nextStart,film.shows[1].start);
+ // AIR-433 (ADR 0114): the film page entry carries the film-level availability beside the legacy fields. This fixture's first show started an hour ago and runs two
+ // hours, so it is on air: the film is `soon`, ready at the END of that show, and the repeat in two hours does not change that (the archive case is in catalog-available.mjs).
+ assert.equal(film.availability.state,'soon');assert.equal(film.availability.label,'Скоро');assert.equal(film.availability.onAir,true);assert.equal(film.availability.appearsAt,film.shows[0].end);assert.equal(film.availability.archiveUntil,null);
  assert.equal(film.prediction.predictedRating,4.5);assert.deepEqual(film.fingerprint.plotMechanics,['investigation']);
  // The permanent page does not need a current window, a prediction floor or an empty watchlist.
- r=await get('10');assert.equal(r.status,200);assert.equal(r.body.film.shows.length,1,'an old show is still this film\'s show for the current generation');assert.equal(r.body.film.prediction,null,'no stored prediction: none invented');
- r=await get('9');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[]);assert.equal(r.body.film.availableUntil,null);assert.equal(r.body.film.nextStart,null);assert.equal(r.body.film.availableNow,false,'zero shows is a valid film page');
+ r=await get('10');assert.equal(r.status,200);assert.equal(r.body.film.shows.length,1,'an old show is still this film\'s show for the current generation');assert.deepEqual([r.body.film.shows[0].status,r.body.film.availability.state,r.body.film.availableNow,r.body.film.availableUntil],['expired','unavailable',false,null],'the 72 h window counted from the start is over');assert.equal(r.body.film.prediction,null,'no stored prediction: none invented');
+ // owner decisions of 2026-11-11 (AIR-433): the same lifecycle as the list: the end is the EPG end, else start + runtime, else unknown.
+ {
+  const run=(id,runtime,shows)=>catalogFilm('tmdb_'+id,id,{runtime,shows});
+  seed({...base,tmdb_20:run(20,100,[{channelId:'c1',channel:'One',start:now-hour}]),tmdb_21:run(21,null,[{channelId:'c1',channel:'One',start:now-hour}]),tmdb_22:run(22,100,[{channelId:'c1',channel:'One',start:now-3*hour}]),tmdb_23:run(23,100,[{channelId:'c1',channel:'One',start:now+3*hour}])});
+  const one=async id=>(await get(id)).body.film;
+  let f=await one('20');assert.deepEqual([f.shows[0].status,f.shows[0].end,f.shows[0].effectiveEnd,f.availability.state,f.availability.appearsAt,f.availability.appearsAtEstimated,f.availableNow],['on_air',null,now-hour+100*60000,'soon',now-hour+100*60000,true,false],'no EPG end: start + runtime');
+  f=await one('21');assert.deepEqual([f.shows[0].status,f.shows[0].effectiveEnd,f.availability.state,f.availableNow,f.availableUntil],['unknown',null,'unavailable',false,null],'no end and no runtime: unknown, nothing invented');
+  f=await one('22');assert.deepEqual([f.shows[0].status,f.availability.state,f.availableNow,f.availableUntil],['archive','available',true,new Date(now-3*hour+72*hour).toISOString()],'ended by its runtime: ready');
+  f=await one('23');assert.deepEqual([f.shows[0].status,f.availability.state,f.availability.appearsAt,f.availableNow],['future','soon',now+3*hour+100*60000,false]);
+  seed({...base,tmdb_24:run(24,100,[{channelId:'c1',channel:'One',start:now-hour,end:null}])});f=await one('24');assert.deepEqual([f.shows[0].end,f.shows[0].effectiveEnd,f.shows[0].status],[null,now-hour+100*60000,'on_air'],'an explicit EPG end null stays null, never 0');
+  seed(base);
+ }
+ r=await get('9');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[]);assert.equal(r.body.film.availability.state,'unavailable','no shows: unavailable');assert.equal(r.body.film.availableUntil,null);assert.equal(r.body.film.nextStart,null);assert.equal(r.body.film.availableNow,false,'zero shows is a valid film page');
  r=await get('8');assert.equal(r.status,200);assert.equal(r.body.film.prediction,null,'a stale prediction is not shown');assert.equal(r.body.film.fingerprint,null);
  r=await get('12');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[],'shows of an earlier generation are not availability now');
  // States.
@@ -195,6 +211,7 @@ const base={
    fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
   vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),world);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),world);
   vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);
+  vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
   for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
   fetches.length=0;
   const callsBefore={batches:db.calls.batches,statements:db.calls.statements};statementsSeen.length=0;
