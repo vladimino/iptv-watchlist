@@ -89,7 +89,7 @@ async function loadEpgSnapshot(env){
 // whose identity is unverified, or that are watched, rated or on the watchlist are not returned.
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
 function catalogShowStatus(show,now){return Number(show.start)>now?'future':Number(show.end)>now?'on_air':'archive';}
-// AIR-433 (ADR 0112): the film-level availability of the shows an entry carries, additive beside `availableNow`, `nextStart` and `availableUntil`.
+// AIR-433 (ADR 0114): the film-level availability of the shows an entry carries, additive beside `availableNow`, `nextStart` and `availableUntil`.
 // `status` above is the legacy per-show field and is unchanged: it says `archive` for a show without an end, `availability` never does.
 const catalogAvailability=(shows,now)=>typeof FilmAvailability==='undefined'?{}:{availability:(({state,label,appearsAt,appearsAtKnown,archiveUntil,onAir})=>({state,label,appearsAt,appearsAtKnown,archiveUntil,onAir}))(FilmAvailability.filmAvailability(shows.map(show=>({start:show.start,end:show.end})),now))};
 function catalogPerson(person){return {id:String(person.id),name:person.name||person.original||null};}

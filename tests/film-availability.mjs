@@ -1,4 +1,4 @@
-// AIR-433 (ADR 0112): the film-level availability lifecycle. Table-driven, offline, no storage, no clock of its own.
+// AIR-433 (ADR 0114): the film-level availability lifecycle. Table-driven, offline, no storage, no clock of its own.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -80,6 +80,21 @@ for(const now of [NaN,Infinity,undefined,null])assert.equal(filmAvailability([sh
   else{assert.ok(order.indexOf(state)>=rank,'no step back at '+(t-NOW)/M+' min: '+state);rank=order.indexOf(state);}
  }
  assert.equal(rank,2,'the lifecycle reached available');
+}
+
+// ---- the transition the diagram names: the last archive expires while a repeat is on air or ahead (available -> soon), and a late generation (unavailable -> available) ----
+{
+ const first={start:NOW-ARCHIVE+30*M,end:NOW-ARCHIVE+90*M};                 // the archive show: its window closes 30 minutes from now
+ const repeatAhead={start:NOW+5*H,end:NOW+7*H};
+ for(const [name,repeat] of [['repeat a minute after the expiry',{start:NOW+31*M,end:NOW+3*H}],['repeat hours ahead',repeatAhead]]){
+  const before=filmAvailability([first,repeat],NOW);assert.equal(before.state,'available',name+': before the archive expires');
+  const expiry=first.start+ARCHIVE,after=filmAvailability([first,repeat],expiry);
+  assert.equal(after.state,'soon',name+': the last archive has expired and the repeat is the film now');assert.equal(after.archiveUntil,null);assert.ok(after.appearsAt>expiry);
+ }
+ const onAirAtExpiry=filmAvailability([first,{start:first.start+ARCHIVE-10*M,end:first.start+ARCHIVE+60*M}],first.start+ARCHIVE);
+ assert.deepEqual([onAirAtExpiry.state,onAirAtExpiry.onAir,onAirAtExpiry.appearsAt],['soon',true,first.start+ARCHIVE+60*M],'a repeat on air at the moment the archive expires');
+ // unavailable -> available: the same instant, a newer generation now lists a show that has already ended
+ assert.equal(filmAvailability([],NOW).state,'unavailable');assert.equal(filmAvailability([{start:NOW-3*H,end:NOW-2*H}],NOW).state,'available');
 }
 
 // ---- the rolling 24 hours is elapsed time, not calendar days: 23:50 Madrid, a change of day, DST nights ----

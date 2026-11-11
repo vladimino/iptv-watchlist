@@ -4,7 +4,7 @@ import {scoped,scopedReplacing,scopePersonIdentity} from './scripts/bundle-scope
 const assets={};
 for(const [path,file,type] of [['/','index.html','text/html'],['/styles.css','styles.css','text/css'],['/app.js','app.js','text/javascript'],['/admin','admin.html','text/html'],['/admin.css','admin.css','text/css']]) assets[path]={body:fs.readFileSync('public/'+file,'utf8'),type};
 assets['/return-home.js']={body:fs.readFileSync('public/return-home.js','utf8'),type:'text/javascript'};
-// AIR-433 (ADR 0112): the film availability lifecycle, one pure module for the browser and the Worker; the same source is scoped into the Worker bundle below.
+// AIR-433 (ADR 0114): the film availability lifecycle, one pure module for the browser and the Worker; the same source is scoped into the Worker bundle below.
 assets['/film-availability.js']={body:scoped('src/domain/film-availability.js','FilmAvailability'),type:'text/javascript'};
 assets['/status-footer.js']={body:fs.readFileSync('public/status-footer.js','utf8'),type:'text/javascript'};
 assets['/admin/actions']={body:fs.readFileSync('public/admin-actions.html','utf8'),type:'text/html'};

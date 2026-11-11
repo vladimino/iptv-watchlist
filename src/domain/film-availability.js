@@ -1,4 +1,4 @@
-// AIR-433 (ADR 0112): the film-level availability lifecycle, one pure function shared by the browser and the Worker.
+// AIR-433 (ADR 0114): the film-level availability lifecycle, one pure function shared by the browser and the Worker.
 //
 // IPTV is used to pick a film from the ARCHIVE (catch-up), not to watch linear TV. So, per FILM and at an instant `now`:
 //   available    some show has ENDED and is still inside the 72-hour catch-up window (a ready recording exists)
@@ -58,7 +58,8 @@ export function showPhase(show, now, { archiveMs = AVAILABILITY_ARCHIVE_MS } = {
 //   state          'available' | 'soon' | 'unavailable'
 //   label          the Russian user-facing word
 //   appearsAt      soon only: the earliest known END among the shows that will become the archive (a show on air now, or one starting inside the next 24 h),
-//                  as milliseconds; null when no such end is known
+//                  as milliseconds; null when no such end is known. It is the SCHEDULED end from the programme guide, not proof that the provider has the
+//                  recording ready at that instant: no probe is made and no recording delay is assumed (a product decision, not made here)
 //   appearsAtKnown soon only: true when every candidate show has a known end (so the instant can be shown as exact); false means do not promise an hour
 //   archiveUntil   available only: the last instant a ready recording is offered (the latest start of a ready show + 72 h), milliseconds
 //   archiveShow    available only: the ready show that ends that window latest ({start, end})

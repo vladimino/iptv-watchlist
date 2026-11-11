@@ -254,7 +254,7 @@ assert.deepEqual(puts,[]);
  assert.deepEqual(puts,[]);assert.deepEqual(fetches,[]);
 }
 
-// AIR-433 (ADR 0112): the film-level availability beside the legacy fields. An archive wins over a repeat, a film on air or only ahead is `soon` and is
+// AIR-433 (ADR 0114): the film-level availability beside the legacy fields. An archive wins over a repeat, a film on air or only ahead is `soon` and is
 // ready at the END of the show, a show without an end is never a ready archive (the legacy per-show status still says `archive` for it), and the legacy
 // fields keep their values.
 {

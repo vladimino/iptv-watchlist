@@ -27,16 +27,16 @@ flowchart TD
 
 ## Film availability lifecycle
 
-On the published shows a film is, at every instant, in one of three states ([ADR 0114](../adr/0114-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is computed from the shows, never stored. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the END of the show.
+On the published shows a film is, at every instant, in one of three states ([ADR 0114](../adr/0114-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is a **snapshot recomputed from the shows** at each instant and is never stored, so any of the three can be the first one seen; the diagram lists the transitions time or a new generation can cause. A repeat or a show on air never changes `available` while a ready recording exists. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the END of the show.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> unavailable
-    unavailable --> soon: a show starts within the next 24 h or is on air
-    soon --> available: the show ends (its recording is ready)
-    available --> unavailable: 72 h after the start of the last ready show
+    unavailable --> soon: a show starts within 24 h or is on air
+    soon --> available: the show ends (scheduled end)
     soon --> unavailable: the candidate shows are gone without an archive
-    available --> available: a repeat or a show on air changes nothing
+    available --> unavailable: 72 h after the start of the last ready show
+    available --> soon: the last archive expires while a repeat is on air or starts within 24 h
+    unavailable --> available: a published generation brings a show that already ended
 ```
 
 The 72-hour catch-up and the rolling 24 hours are the existing [EPG horizons](../reference/domain/epg-horizons.md); the 168-hour retention is storage only.

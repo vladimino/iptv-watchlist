@@ -114,7 +114,7 @@ const base={
  assert.match(film.url,/themoviedb\.org\/movie\/7/);assert.equal(Object.hasOwn(film,'letterboxdUrl'),false);
  assert.deepEqual(film.directors,[{id:'tmdb_director/1',name:'Режиссёр'}]);assert.equal(film.shows.length,2);assert.equal(film.shows[0].status,'on_air');assert.equal(film.shows[1].status,'future');
  assert.equal(film.availableNow,true);assert.equal(film.nextStart,film.shows[1].start);
- // AIR-433 (ADR 0112): the film page entry carries the film-level availability beside the legacy fields. This fixture's first show started an hour ago and runs two
+ // AIR-433 (ADR 0114): the film page entry carries the film-level availability beside the legacy fields. This fixture's first show started an hour ago and runs two
  // hours, so it is on air: the film is `soon`, ready at the END of that show, and the repeat in two hours does not change that (the archive case is in catalog-available.mjs).
  assert.equal(film.availability.state,'soon');assert.equal(film.availability.label,'Скоро');assert.equal(film.availability.onAir,true);assert.equal(film.availability.appearsAt,film.shows[0].end);assert.equal(film.availability.archiveUntil,null);
  assert.equal(film.prediction.predictedRating,4.5);assert.deepEqual(film.fingerprint.plotMechanics,['investigation']);
