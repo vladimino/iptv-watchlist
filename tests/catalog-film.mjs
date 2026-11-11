@@ -289,6 +289,13 @@ const base={
  let r=await ask(fake({version:12}));assert.equal(r.status,200,'legacy');
  reads.length=0;r=await ask(fake());assert.ok(reads.includes(ADM),'r2 still reads the R2 receipt');assert.equal(r.status,200,'r2: the receipt is the R2 identity decision, a pending projection is still a Film');assert.equal(r.body.film.id,'tmdb_300');
  r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.equal(r.status,200,'prepared');
+ // AIR-374 P4: the marker is read again after the R2 and D1 reads; an answer read under one state and generation is never returned after the marker moved.
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'open',generation:2}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'prepared to open mid-read refuses the answer');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'prepared',cutover:'open',generation:2}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'a new generation of the same state refuses the answer');
+ r=await ask(fake({drift:{after:1,marker:{mode:'prepared',cutover:'open',generation:1}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'r2 to prepared mid-read refuses the answer');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'held',generation:3}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'prepared to held mid-read fails closed');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'open',generation:1}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'a state change at the same generation refuses the answer');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.equal(r.status,200,'an unchanged prepared marker still answers');
  // The authority names D1 or is unreadable: never R2.
  r=await ask(fake({marker:{mode:'d1',cutover:'held',generation:2}}));assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','film_person_held'],'held fails closed');
  // AIR-374 P4: at open D1 answers (film_rated_admission, identity claims, redirects, the retirement ledger) and the R2 receipt and retirements object are never read.

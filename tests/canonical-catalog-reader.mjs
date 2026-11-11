@@ -135,10 +135,14 @@ for(const state of STATES){
  for(const p of PATHS)answers[state][p]=await get(p);
  answers[state].post=await get('status','POST');
  assert.equal(touched,0,state+': no R2 access');
- if(state==='open'){
-  // The marker moves AFTER the views' own reads: the gate at the start saw `open`, the answer is refused because the marker is checked again before it is returned.
+ if(state==='open'||state==='prepared'){
+  // The marker moves AFTER the views' own reads: the gate at the start saw this state and generation; the answer is refused (typed 503, no stale body) because the marker is checked again
+  // before it is returned. An unchanged marker answers byte-identically to the stored answer above.
+  const held="UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1";
+  const opened="UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1";
   const reopen="UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1";
-  for(const p of ['status','persons/director/michael-mann/identity'])for(const [name,sql,reason] of [['held',"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1",'film_person_held'],['held then reopened at a NEW generation',reopen,'film_person_generation_moved']]){
+  const scenarios=state==='open'?[['held',held,'film_person_held'],['held then reopened at a NEW generation',reopen,'film_person_generation_moved']]:[['opened (prepared to open)',opened,'film_person_generation_moved']];
+  for(const p of ['status','persons/director/michael-mann/identity'])for(const [name,sql,reason] of scenarios){
    const copy=file+'.'+Math.random().toString(36).slice(2)+'.sqlite';fs.copyFileSync(file,copy);
    let moved=false,authorityReads=0;
    const e={DB:d1Standin(copy,{onQuery:async text=>{
@@ -147,11 +151,17 @@ for(const state of STATES){
    }}),BUCKET:env.BUCKET};
    const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p),e,new URL('https://iptv.test/api/d1/'+p));
    const text=await res.text();
-   assert.ok(moved,p+' '+name+': the marker moved during the view reads');
-   assert.equal(res.status,503,p+' '+name+': refused');
-   assert.deepEqual(JSON.parse(text),{error:'storage_unavailable',reason},p+' '+name+': typed 503, never a stale authoritative:true body');
-   assert.ok(!text.includes('authoritative'),p+' '+name+': nothing of the stale view');
+   assert.ok(moved,state+' '+p+' '+name+': the marker moved during the view reads');
+   assert.equal(res.status,503,state+' '+p+' '+name+': refused');
+   assert.deepEqual(JSON.parse(text),{error:'storage_unavailable',reason},state+' '+p+' '+name+': typed 503, never a stale body');
+   assert.ok(!text.includes('authoritative'),state+' '+p+' '+name+': nothing of the stale view');
    fs.rmSync(copy,{force:true});
+  }
+  for(const p of ['status','persons/director/michael-mann/identity']){
+   // an unchanged marker: the extra read changes nothing about the answer
+   const copy=file+'.same.sqlite';fs.copyFileSync(file,copy);
+   const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p),{DB:d1Standin(copy),BUCKET:env.BUCKET},new URL('https://iptv.test/api/d1/'+p));
+   assert.equal(await res.text(),answers[state][p].text,state+' '+p+': an unchanged marker answers byte-identically');fs.rmSync(copy,{force:true});
   }
  }
  assert.equal(answers[state].post.status,405,state+': a non-GET is not gated');

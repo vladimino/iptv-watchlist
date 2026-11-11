@@ -354,6 +354,13 @@ async function catalogArchiveFallback(env,tmdbId){
  // the identity claims and the retirement ledger come from D1. held and an unreadable marker fail closed (503) and never reach R2.
  if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);
  if(!gate.r2Allowed){const error=new Error(gate.state==='held'?'film_person_held':'film_person_not_open_read');error.code=error.message;throw error;}
+ const result=await catalogArchiveFallbackR2(env,tmdbId,gate);
+ // The marker is read again after the R2 and D1 reads: an answer read under one state and generation is never returned after the marker moved (r2 to prepared, prepared to open, held).
+ const again=await FilmPersonAuthority.readAuthority(env);
+ if(again.state!==gate.state||again.generation!==gate.generation){const error=new Error('film_person_generation_moved');error.code='film_person_generation_moved';throw error;}
+ return result;
+}
+async function catalogArchiveFallbackR2(env,tmdbId,gate){
  const retirements=await loadJSON(env,'identity/tmdb-retirements.json');
  if(retirements!=null){
   const set=tmdbRetirementSet(retirements);

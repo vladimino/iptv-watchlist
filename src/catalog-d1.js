@@ -270,7 +270,7 @@ async function catalogD1Route(request,env,url){
   // generation; a move to held, an unreadable marker or a new generation refuses (a response already read is never returned as authoritative).
   try{
    const again=await CanonicalCatalogReader.catalogReaderGate(env);
-   if(authoritative&&again.generation!==first.generation)throw Object.assign(new Error('film_person_generation_moved'),{code:'film_person_generation_moved'});
+   if(again.state!==first.state||again.generation!==first.generation)throw Object.assign(new Error('film_person_generation_moved'),{code:'film_person_generation_moved'});
   }catch(error){return refuse(error);}
  }
  return response;

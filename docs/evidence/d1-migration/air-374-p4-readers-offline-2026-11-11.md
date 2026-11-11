@@ -20,7 +20,7 @@
 | --- | --- |
 | `tests/canonical-catalog-reader.mjs` (new) | Marker states legacy, r2, prepared, open, held, unknown (malformed row, missing companion table, failed read) x the gate, the D1 fallback reader and six `/api/d1/*` routes; no R2 handle touched; prepared byte-identical to r2; open differs only in `authoritative`; marker moves mid-read refused (also held-then-reopened); SELECT-only; static allowlist of the reader's importers (`canonical-read-model.js`, `film-admission.js`) and the unbundled list. |
 | `tests/catalog-film.mjs` (extended) | Worker route at open: found, absent, conflict, retired (ledger, redirect), failed reads, moved marker; asserts neither R2 object is read at open and the receipt is still read at r2. |
-| `tests/canonical-catalog-reader-mutation.mjs` (new) | 38 mutants (19 reader, 16 `/api/d1` gate including the post-read re-check, 3 worker branch) all killed; controls pass. |
+| `tests/canonical-catalog-reader-mutation.mjs` (new) | 41 mutants (19 reader, 16 `/api/d1` gate including the post-read state and generation re-check, 6 worker branch including its re-check) all killed; controls pass. |
 | `tests/catalog-d1.mjs`, `tests/get-write-audit.mjs` | Updated loader only / unchanged and green: no new writing read. |
 
 The assertion that nothing imports `canonical-read-model.js` is kept unchanged: the new bundled module is imported by it, not the reverse. A stricter allowlist assertion for the reader was added.

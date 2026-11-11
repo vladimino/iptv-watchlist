@@ -44,8 +44,8 @@ const CATALOG_D1=[
  ['unbounded identity carries the flag',"limitations,false,authoritative)","limitations,false)"],
  ['the gate runs before any read',"let response=await catalogD1Dispatch(request,env,url,authoritative);","let response=await catalogD1Dispatch(request,env,url,false);"],
  ['the marker is re-read after the reads',"if(first){\n  // The marker is read again","if(false){\n  // The marker is read again"],
- ['the re-read compares the generation',"authoritative&&again.generation!==first.generation","authoritative&&false"],
- ['the re-read applies to an authoritative answer',"if(authoritative&&again.generation","if(false&&again.generation"],
+ ['the re-read compares the generation',"||again.generation!==first.generation)","||false)"],
+ ['the re-read covers every answer, not only an open one',"if(again.state!==first.state||again.generation!==first.generation)throw","if(authoritative&&(again.state!==first.state||again.generation!==first.generation))throw"],
  ['a failed re-read refuses',"}catch(error){return refuse(error);}\n }\n return response;","}catch(error){}\n }\n return response;"],
  ['the re-read follows the overlay',"response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first){","response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first&&false){"],
 ];
@@ -53,6 +53,9 @@ const WORKER=[
  ['open reads D1, not R2',"if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);",''],
  ['held and unknown never reach R2',"if(!gate.r2Allowed){const error","if(false){const error"],
  ['the new refusal codes are a 503',"'film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative']","]"],
+ ['the R2 answer is re-checked against the marker',"const again=await FilmPersonAuthority.readAuthority(env);\n if(again.state!==gate.state||again.generation!==gate.generation){","const again=gate;\n if(again.state!==gate.state||again.generation!==gate.generation){"],
+ ['the R2 re-check compares the state',"if(again.state!==gate.state||again.generation!==gate.generation){const error=new Error('film_person_generation_moved')","if(again.generation!==gate.generation){const error=new Error('film_person_generation_moved')"],
+ ['the R2 re-check compares the generation',"if(again.state!==gate.state||again.generation!==gate.generation){const error=new Error('film_person_generation_moved')","if(again.state!==gate.state){const error=new Error('film_person_generation_moved')"],
 ];
 const TARGETS=[
  {source:'src/canonical-catalog-reader.js',test:'tests/canonical-catalog-reader.mjs',variable:'CANONICAL_CATALOG_READER_MODULE',only:'reader',url:true,mutants:READER},

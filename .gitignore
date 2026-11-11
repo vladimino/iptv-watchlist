@@ -39,3 +39,4 @@ __pycache__/
 
 # Owner credential files shared into a worktree. Never commit.
 .config/
+tmp-loader-out-*/
