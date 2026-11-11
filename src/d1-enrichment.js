@@ -437,11 +437,13 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
    }finally{timing.windowMs=Date.now()-windowAt;}
   }
   // ADR 0106: the Film/Person marker the plan is made under, read BEFORE the diff and carried into every group and batch. An absent, unreadable or foreign marker writes nothing.
-  if(bulk){
-   let marker=null;
-   try{marker=await db.get(D1_ENRICHMENT_MARKER_READ,[]);}catch{marker=null;}
-   if(!marker||!['r2','prepared'].includes(marker.mode)||marker.cutover!=='open'||!Number.isInteger(Number(marker.generation))){summary.outcome='deferred';summary.reason='authority_unavailable';summary.inputKey='film_person_authority';summary.bulk={stop:'authority_unavailable'};return summary;}
-   bulk.expectedMarker={mode:marker.mode,cutover:marker.cutover,generation:Number(marker.generation)};
+  // AIR-374 P1 / ADR 0117: the same read and the same refusal for EVERY write run, with or without the grouped path. The grouped path additionally needs a real marker (a legacy database has none to assert in its group cycle).
+  let authority=null;
+  if(mode==='on'){
+   const read=await d1EnrichmentReadAuthority(db);
+   if(read.refused||(bulk&&read.expected.legacy)){summary.outcome='deferred';summary.reason='authority_unavailable';summary.inputKey='film_person_authority';if(bulk)summary.bulk={stop:'authority_unavailable'};return summary;}
+   authority=read.expected;
+   if(bulk)bulk.expectedMarker={mode:authority.mode,cutover:authority.cutover,generation:authority.generation};
   }
   const diffAt=Date.now();
   let plan;
@@ -472,7 +474,7 @@ async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',quer
    timing:{leaseMs:timing.leaseMs,windowMs:timing.windowMs,diffMs:timing.diffMs,writeGateMs:timing.writeGateMs},films:summary.films,people:summary.people,stored:summary.stored,
    changedFilms:summary.changedFilms,changedPeople:summary.changedPeople,plan:{films:plan.films.length,people:plan.people.length,sync:(plan.sync||[]).length,absent:plan.absent.length},
    queries:db.queries,bulk:Boolean(bulk),bulkBudget:summary.bulkBudget||null}));
-  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs:wallPolicy.wallMs,windowOwner:windowState.granted?leaseId:null,marks,bulk,windowExpiresAt});}
+  try{written=await d1EnrichmentWrite(db,plan,{leaseId,started,queryBudget,wallMs:wallPolicy.wallMs,windowOwner:windowState.granted?leaseId:null,marks,bulk,windowExpiresAt,authority});}
   finally{
    timing.writeMs=Date.now()-writeAt;
    // From the budget clock's start (the grant, or the run start with no window): to the first fenced transaction entered (`preTxnMs`), to the first
@@ -656,8 +658,24 @@ const D1_ENRICHMENT_BULK_FALLBACK_SHARE=0.05,D1_ENRICHMENT_BULK_FALLBACK_MIN_GRO
 // is always the earlier of that and the window's own absolute expiry (300 s from the request, ADR 0103: waiting and release are inside it), and a group is started only with the reserve left. Without the grouped path, without a
 // held window or without the marker the budget is the 60 s it always was. The cap of 300 s is never exceeded by this value (it is clamped), and an explicit `wallMs` option of the caller wins over the policy.
 const D1_ENRICHMENT_L1_WALL_MS=180000,D1_ENRICHMENT_L1_WALL_MAX_MS=300000;
-const D1_ENRICHMENT_MARKER_READ='SELECT mode,cutover,generation FROM film_person_authority WHERE id=1';
-const D1_ENRICHMENT_MARKER_GUARD="INSERT INTO projection_fence (held) SELECT COUNT(*) FROM film_person_authority WHERE id=1 AND mode IN ('r2','prepared') AND cutover='open' AND generation=?";
+// AIR-374 P1 / ADR 0117: the marker read, the guard SQL and the allowed-state rules are single-sourced in the bundled FilmPersonAuthority module.
+// Reads the marker the run is planned under, BEFORE the diff, for every write run (independent of D1_ENRICHMENT_BULK and every other flag).
+// {expected} is the legacy marker (no table) or {mode,cutover:'open',generation} of r2/prepared; {refused:true} is every other state (d1, held, malformed, unreadable): nothing is written.
+async function d1EnrichmentReadAuthority(db){
+ let row=null;
+ try{row=await db.get(FilmPersonAuthority.PROJECTOR_MARKER_READ,[]);}
+ catch(error){
+  if(/no such table/i.test(String(error?.message||error)))return {expected:{legacy:true}};
+  return {refused:true};
+ }
+ const expected=FilmPersonAuthority.projectorExpectation(row);
+ return expected?{expected}:{refused:true};
+}
+// Whether the marker is still exactly what the run was planned under (re-read after a refused batch; never told by the error text).
+async function d1EnrichmentAuthorityHolds(db,expected){
+ try{return FilmPersonAuthority.projectorHolds(expected,await db.get(FilmPersonAuthority.PROJECTOR_MARKER_READ,[]));}
+ catch(error){return expected?.legacy===true&&/no such table/i.test(String(error?.message||error));}
+}
 const D1_ENRICHMENT_READ_GUARD='INSERT INTO projection_fence (held) SELECT CASE WHEN ';
 function d1EnrichmentBulkMode(env){return env?.D1_ENRICHMENT_BULK==='on'?'on':'off';}
 // The options of a run: defaults plus the run's own overrides. Null when the grouped path is not selected.
@@ -718,7 +736,7 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
  const wholeCost=prefetchStatements+estimatedWrites+tracedWrites+reads.length;
  if(wholeCost>statementsLeft)return fallback('over_budget',{estimate:wholeCost});
  // (b) one read batch
- const batch=[{sql:D1_ENRICHMENT_MARKER_READ,params:[]}];
+ const batch=[{sql:FilmPersonAuthority.PROJECTOR_MARKER_READ,params:[]}];
  reads.forEach((read,index)=>{batch.push({sql:read.sql,params:read.params});batch.push({sql:'SELECT '+digests[index]+' AS d',params:read.params});});
  let out;const prefetchAt=Date.now();
  try{out=await db.readBatch(batch);}
@@ -727,8 +745,8 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
  const marker=out[0]?.[0];
  if(!marker)return {...stats,outcome:'stop',reason:'authority_unavailable'};
  // The generation observed at prefetch must be the one the run was planned under: a transition between the diff and here fails closed.
- const generation=expectedMarker.generation;
- if(!['r2','prepared'].includes(marker.mode)||marker.cutover!=='open'||Number(marker.generation)!==generation)return {...stats,outcome:'stop',reason:'authority_moved'};
+ const markerGuard=FilmPersonAuthority.projectorGuard(expectedMarker);
+ if(!markerGuard||!FilmPersonAuthority.projectorHolds(expectedMarker,marker))return {...stats,outcome:'stop',reason:'authority_moved'};
  const answers=new Map(),expected=[];
  for(let index=0;index<reads.length;index++){
   answers.set(d1EnrichmentReadKey(reads[index].sql,reads[index].params),out[1+index*2]);
@@ -738,7 +756,7 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
  }
  // (c) the second planning pass, reading the answer only, collecting its writes
  const writes=[windowOwner?{sql:D1_ENRICHMENT_WINDOW_FENCE,params:[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString(),windowOwner,Date.now()]}:{sql:D1_ENRICHMENT_FENCE,params:[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]},
-  {sql:D1_ENRICHMENT_MARKER_GUARD,params:[generation]}];
+  {sql:markerGuard.sql,params:markerGuard.params}];
  reads.forEach((read,index)=>{writes.push({sql:D1_ENRICHMENT_READ_GUARD+digests[index]+'=? THEN 1 ELSE 0 END',params:[...read.params,expected[index]]});stats.guards++;});
  const collector={
   async get(sql,params=[]){const rows=answers.get(d1EnrichmentReadKey(sql,params));if(rows)return rows[0]??null;stats.prefetchMisses++;return null;},
@@ -765,8 +783,7 @@ async function d1EnrichmentGroupCycle(db,items,{leaseId,windowOwner=null,maxStat
     const held=await db.get("SELECT 1 AS ok FROM projector_window WHERE state='held' AND owner=? AND expires_at>?",[windowOwner,Date.now()]).catch(()=>null);
     if(!held)return {...stats,outcome:'stop',reason:'window_lost'};
    }
-   const now=await db.get(D1_ENRICHMENT_MARKER_READ,[]).catch(()=>null);
-   if(!now||!['r2','prepared'].includes(now.mode)||now.cutover!=='open'||Number(now.generation)!==generation)return {...stats,outcome:'stop',reason:'authority_moved'};
+   if(!await d1EnrichmentAuthorityHolds(db,expectedMarker))return {...stats,outcome:'stop',reason:'authority_moved'};
    return fallback('guard_refused');
   }
   // A constraint the per-entity path reports on its own (a trusted external id taken by another Film of the group, a missing Person, a unique role id): the batch rolled back whole, the group is replayed one by one.
@@ -786,7 +803,9 @@ async function d1EnrichmentWrite(db,plan,options){
  try{return await d1EnrichmentWriteRun(db,plan,options);}
  finally{if(typeof db.setStatementLimit==='function')db.setStatementLimit(Infinity);}
 }
-async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={},bulk=null,windowExpiresAt=null}){
+async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,windowOwner=null,marks={},bulk=null,windowExpiresAt=null,authority=null}){
+ // No marker read, no write: a caller that did not read the marker gets a guard that refuses every batch.
+ const guard=FilmPersonAuthority.projectorGuard(authority)||{sql:"INSERT INTO projection_fence (held) SELECT 0",params:[]};
  const repository=CanonicalRepository.createCanonicalRepository(db);
  const result={writtenPeople:0,writtenFilms:0,released:0,syncWrites:0,errorCount:0,errors:[],remaining:0,leaseLost:false,windowLost:false};
  const fenced=async(write)=>{
@@ -797,16 +816,13 @@ async function d1EnrichmentWriteRun(db,plan,{leaseId,started,queryBudget,wallMs,
     // Inside a window every batch also asserts, in the same statement, that this run still owns an unexpired `held` window.
     if(windowOwner)await db.run(D1_ENRICHMENT_WINDOW_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString(),windowOwner,Date.now()]);
     else await db.run(D1_ENRICHMENT_FENCE,[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]);
-    // ADR 0106: with the grouped path selected every write, grouped or not, asserts the marker the run was planned under.
-    if(bulk?.expectedMarker)await db.run(D1_ENRICHMENT_MARKER_GUARD,[bulk.expectedMarker.generation]);
+    // AIR-374 P1 / ADR 0117: EVERY write, grouped or not and whatever flag is set, asserts the marker mode, cutover and generation the run was planned under (ADR 0106 had it only for the grouped path).
+    await db.run(guard.sql,guard.params);
     await write();
     await db.run('DELETE FROM projection_fence');
    });
   }catch(error){
-   if(bulk?.expectedMarker&&/CHECK constraint failed/i.test(String(error?.message||error))){
-    const now=await db.get(D1_ENRICHMENT_MARKER_READ,[]).catch(()=>null);
-    if(!now||!['r2','prepared'].includes(now.mode)||now.cutover!=='open'||Number(now.generation)!==bulk.expectedMarker.generation){try{error.fenceCause='authority';}catch{}throw error;}
-   }
+   if(/CHECK constraint failed/i.test(String(error?.message||error))&&!await d1EnrichmentAuthorityHolds(db,authority)){try{error.fenceCause='authority';}catch{}throw error;}
    // A refused fence is told apart by re-reading, never by the error text: the lease lost and the window lost are different outcomes.
    if(windowOwner&&/CHECK constraint failed/i.test(String(error?.message||error))){
     const held=await db.get('SELECT 1 AS ok FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?',[D1_ENRICHMENT_PROJECTION,leaseId,new Date().toISOString()]).catch(()=>null);

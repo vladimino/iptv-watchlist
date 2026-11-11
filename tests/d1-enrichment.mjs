@@ -168,7 +168,7 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
  assert.equal(summary.outcome,'budget',JSON.stringify(summary));
  assert.ok(summary.remaining>0);
  let guard=0,last;
- do{last=await run(env,{queryBudget:6});}while(last.outcome==='budget'&&++guard<20);
+ do{last=await run(env,{queryBudget:7});}while(last.outcome==='budget'&&++guard<20);
  assert.equal(last.outcome,'complete');
  assert.deepEqual([(await run(env)).changedFilms,(await run(env)).changedPeople],[0,0]);
 }

@@ -111,6 +111,9 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  await assert.rejects(()=>db.batch([db.prepare(fence[0]).bind(...fence[1]),db.prepare("INSERT INTO film (id,contract_version,updated_at) VALUES ('film:stale',1,?)").bind(AT)]));
  assert.equal(count(file2,'film'),0);
  assert.equal(projectorFence(null),null);assert.equal(projectorFence({state:'legacy'}),null);
+ // The fence is built from the condition the real projector carries, with the mode and the generation it read (ADR 0117).
+ assert.deepEqual(projectorFence({state:'prepared',r2Allowed:true,generation:3})[1],['prepared',3]);
+ assert.ok(projectorFence({state:'r2',r2Allowed:true,generation:0})[0].includes((await import('../src/film-person-authority.js')).PROJECTOR_MARKER_CONDITION));
  assert.deepEqual(log.map(item=>item.label),['r2','prepared','open']);
 }
 
@@ -350,6 +353,8 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  const ready=await handoffReadiness(env,{now:AT});
  assert.equal(ready.ready,false);
  assert.ok(GAPS.length>0&&ready.gaps.length===GAPS.length);
+ assert.ok(!GAPS.some(item=>/projector revision/.test(item)),'AIR-374 P1 / ADR 0117 (owner decision 1): the projector revision bump is not a readiness blocker; the unconditional marker fence replaces it');
+ assert.equal(GAPS.length,7,'the other producer gaps are unchanged');
  assert.ok(ready.blockers.every(item=>item.startsWith('gap:')),'a prepared marker, a verified baseline and schema 16 leave only the gaps: '+ready.blockers.filter(item=>!item.startsWith('gap:')));
  assert.equal(env.DB.calls.batches,batches);assert.equal(tables(file),before);
  const r2=await handoffReadiness(state(database('r2')),{now:AT});

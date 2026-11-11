@@ -54,6 +54,36 @@ export async function readAuthority(env){
  return {state,r2Allowed:state==='r2'||state==='prepared',open:state==='open',held:state==='held',generation,version:numeric,baseline:baseline.state};
 }
 
+// AIR-374 P1 / ADR 0117 (Accepted owner decision 1). The ONE source of the enrichment projector's marker fence. Every SQL batch the projector
+// writes asserts, in the same atomic batch, the marker mode, cutover and generation it read BEFORE its diff, whatever flag is set. The
+// projector may write only in the states legacy (no marker table: it cannot be asserted in SQL except as "still absent"), `r2` and `prepared`,
+// both with cutover `open`. A transition bumps the generation (transitionAuthority), so a batch planned before it fails whole. The Worker
+// bundle uses this for the projector (src/d1-enrichment.js); the dormant producer routing module (its `projectorFence`) consumes the same condition.
+export const PROJECTOR_MARKER_READ='SELECT mode,cutover,generation FROM film_person_authority WHERE id=1';
+export const PROJECTOR_MARKER_CONDITION="EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode=? AND cutover='open' AND generation=?)";
+export const PROJECTOR_MARKER_GUARD='INSERT INTO projection_fence (held) SELECT CASE WHEN '+PROJECTOR_MARKER_CONDITION+' THEN 1 ELSE 0 END';
+// Legacy (the marker table does not exist): the batch holds only while it still does not, so a migration landing mid-run fails it whole.
+export const PROJECTOR_LEGACY_GUARD="INSERT INTO projection_fence (held) SELECT CASE WHEN EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='film_person_authority') THEN 0 ELSE 1 END";
+const PROJECTOR_MODES=['r2','prepared'];
+// The marker row the projector may write under, as {mode,cutover:'open',generation}; null for every other row (d1, held, malformed).
+export function projectorExpectation(row){
+ if(!row||!PROJECTOR_MODES.includes(row.mode)||row.cutover!=='open')return null;
+ const generation=Number(row.generation);
+ return Number.isInteger(generation)&&generation>=0?{mode:row.mode,cutover:'open',generation}:null;
+}
+// Whether a freshly read marker row is still exactly what the batch was planned under. A legacy expectation (no marker table) is never
+// satisfied by a read that succeeded: the table exists now, empty or not; the caller proves "still absent" by the read failing with `no such table`.
+export function projectorHolds(expected,row){
+ if(expected?.legacy===true)return false;
+ const now=projectorExpectation(row);
+ return !!expected&&!!now&&now.mode===expected.mode&&now.generation===expected.generation;
+}
+// The fence statement {sql,params} for what was read: the legacy guard, the marker guard, or null for a state the projector may not write in.
+export function projectorGuard(expected){
+ if(expected?.legacy===true)return {sql:PROJECTOR_LEGACY_GUARD,params:[]};
+ return expected&&PROJECTOR_MODES.includes(expected.mode)&&Number.isInteger(expected.generation)?{sql:PROJECTOR_MARKER_GUARD,params:[expected.mode,expected.generation]}:null;
+}
+
 // The gate for a canonical mutation: only an `open` authority lets one write. Every other state refuses before any statement.
 export function assertWritable(gate){
  if(gate?.state==='open')return gate;
