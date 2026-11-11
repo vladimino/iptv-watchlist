@@ -163,6 +163,21 @@ function openDiscoveryMerge(latest,reentry,options,duplicates){
 // AIR-220 / ADR 0034: bounded discovery ledger. The active ledger holds the latest scan's candidates; candidates that left
 // the EPG move losslessly into a write-once segmented archive behind one compare-and-swap pointer.
 const LEDGER_ARCHIVE_PREFIX='epg/discovery-archive/v1/',LEDGER_ARCHIVE_POINTER=LEDGER_ARCHIVE_PREFIX+'current.json',LEDGER_ARCHIVE_SEGMENTS=64,LEDGER_ARCHIVE_CHAIN_LIMIT=8;
+// AIR-429. In `bounded` mode the observations that left the scan on an earlier day (the backlog a `frozen` ledger accumulated) are
+// archived at most this many a commit, in key order, so that the first bounded commit does not hold the whole backlog in memory. The
+// observations that left the scan since the previous generation (the daily flow) are archived at once; they are what a steady bounded
+// commit archives anyway. A function, so that a test can use a small cap.
+const LEDGER_DRAIN_CAP=4000;
+function ledgerDrainCap(){return LEDGER_DRAIN_CAP;}
+// What the cap keeps in the active ledger: `held(key)` is true for a backlog observation (not seen in the previous generation's scan
+// and not in this one) that this commit does not archive. `backlog` is how many of them stay after this commit.
+function planLedgerDrain(backlogKeys,latestKeys,cap){
+ const absent=[];
+ for(const key of backlogKeys||[])if(!latestKeys.has(key))absent.push(key);
+ absent.sort();
+ const limit=Number.isSafeInteger(cap)&&cap>=0?cap:0,departing=new Set(absent.slice(0,limit)),held=new Set(absent.slice(limit));
+ return {held:key=>held.has(key),backlog:held.size,archiving:departing.size,cap:limit};
+}
 // `full` (default) keeps today's single growing ledger; `bounded` archives departures; `frozen` stops archiving but keeps the
 // archive as history. Only the exact strings are accepted.
 function discoveryLedgerMode(env){const value=env?.DISCOVERY_LEDGER_MODE;return value==='bounded'||value==='frozen'?value:'full';}

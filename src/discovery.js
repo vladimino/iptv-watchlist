@@ -112,7 +112,7 @@ function ledgerCountsFrom(source,counts){
 function d1LedgerCounts(source,counts){
  const proven=source.ledger||{ledgerMode:'unknown',reason:'not_read'},known=proven.ledgerMode!=='unknown',recorded=known?proven.archive:null;
  const unique=recorded&&Number.isInteger(recorded.uniqueArchivedItems)?recorded.uniqueArchivedItems:known&&!recorded?0:null;
- const block={ledgerMode:proven.ledgerMode,ledgerModeSource:known?'generation_document':'unavailable',...(known?{}:{ledgerModeReason:proven.reason||'unknown'}),activeItems:counts.ledgerTotal,activeSource:'d1',uniqueArchivedItems:unique,manifestId:recorded?.manifestId??null,segments:recorded?recorded.segments:known?0:null,items:recorded?recorded.items:known?0:null,bytes:recorded?recorded.bytes:known?0:null,archiveSource:!known?'unavailable':recorded?'r2_generation_document':'none',d1:source.archive.d1};
+ const block={ledgerMode:proven.ledgerMode,...(known&&proven.drain?{drain:proven.drain}:{}),ledgerModeSource:known?'generation_document':'unavailable',...(known?{}:{ledgerModeReason:proven.reason||'unknown'}),activeItems:counts.ledgerTotal,activeSource:'d1',uniqueArchivedItems:unique,manifestId:recorded?.manifestId??null,segments:recorded?recorded.segments:known?0:null,items:recorded?recorded.items:known?0:null,bytes:recorded?recorded.bytes:known?0:null,archiveSource:!known?'unavailable':recorded?'r2_generation_document':'none',d1:source.archive.d1};
  return {...counts,ledgerTotal:counts.ledgerTotal+(unique??0),ledgerTotalScope:unique===null?'active_only':'active_and_archive',archive:block};
 }
 // The ledger mode and archive header of one published generation, proven from its own R2 document. The document is
@@ -122,7 +122,7 @@ function d1LedgerCounts(source,counts){
 // record, another generation, an unfinished seal, a changed or missing document, unexpected bytes, a read error) is `unknown` with a
 // reason: the feature flag is never used as evidence, because it says what the next commit will do, not what this generation is.
 const LEDGER_HEADER_BYTES=512,LEDGER_TAIL_BYTES=96;
-const LEDGER_HEADER_PATTERN=/^\],"ledgerMode":"(bounded|frozen)","archive":(null\}$|\{"version":"v1","manifestId":"([A-Za-z0-9_-]{1,100})","segments":(\d{1,9}),"items":(\d{1,12}),"bytes":(\d{1,15}),"alsoArchived":\[)/;
+const LEDGER_HEADER_PATTERN=/^\],"ledgerMode":"(bounded|frozen)"(?:,"drain":\{"backlog":(\d{1,9}),"cap":(\d{1,9})\})?,"archive":(null\}$|\{"version":"v1","manifestId":"([A-Za-z0-9_-]{1,100})","segments":(\d{1,9}),"items":(\d{1,12}),"bytes":(\d{1,15}),"alsoArchived":\[)/;
 async function provenGenerationLedger(env,programmeRunId){
  const unknown=reason=>({ledgerMode:'unknown',reason});
  try{
@@ -139,7 +139,10 @@ async function provenGenerationLedger(env,programmeRunId){
   if(text===']}')return {ledgerMode:'full',archive:null};
   const match=LEDGER_HEADER_PATTERN.exec(text);
   if(!match)return unknown('generation_document_unreadable');
-  if(match[2].startsWith('null'))return {ledgerMode:match[1],archive:null};
+  // AIR-429: a bounded generation that still holds backlog says so (`drain`); it is bounded, and its active ledger is the scan plus that backlog.
+  const drain=match[2]===undefined?null:{backlog:Number(match[2]),cap:Number(match[3])};
+  if(drain&&(match[1]!=='bounded'||drain.backlog<1))return unknown('generation_document_unreadable');
+  if(match[4].startsWith('null'))return {ledgerMode:match[1],...(drain?{drain}:{}),archive:null};
   const size=Number(head.size);
   if(!Number.isSafeInteger(size)||size<=seal.cursorBytes)return unknown('generation_document_unreadable');
   const tailAt=Math.max(seal.cursorBytes,size-LEDGER_TAIL_BYTES);
@@ -147,9 +150,9 @@ async function provenGenerationLedger(env,programmeRunId){
   if(!tail||tail.etag!==seal.sourceEtag)return unknown('generation_document_changed');
   const closing=/"uniqueArchivedItems":(\d{1,12})\}\}$/.exec((await tail.text()).slice(-LEDGER_TAIL_BYTES));
   if(!closing)return unknown('generation_document_unreadable');
-  const items=Number(match[5]),unique=Number(closing[1]);
+  const items=Number(match[7]),unique=Number(closing[1]);
   if(unique>items)return unknown('generation_document_unreadable');
-  return {ledgerMode:match[1],archive:{manifestId:match[3],segments:Number(match[4]),items,bytes:Number(match[6]),uniqueArchivedItems:unique}};
+  return {ledgerMode:match[1],...(drain?{drain}:{}),archive:{manifestId:match[5],segments:Number(match[6]),items,bytes:Number(match[8]),uniqueArchivedItems:unique}};
  }catch{return unknown('read_failed');}
 }
 // AIR-344: the status readers' view of the pinned ledger, read once. An R2 ledger is streamed item by item and no item is
