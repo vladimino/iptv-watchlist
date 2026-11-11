@@ -38,7 +38,8 @@ sequenceDiagram
                 MCP->>R2: Persist mutable fingerprint, prediction and queue
             else Valid output, schema v7 marker is d1
                 MCP->>R2: Write and verify the immutable body
-                MCP->>D1: Commit the pointer and the queue (the written film leaves the stored queue; no catalog read)
+                MCP->>D1: Commit the pointer and the queue
+                Note over MCP,D1: The written film leaves the stored queue, no catalog read
             else Isolated invalid output
                 MCP->>Queue: Record per-film failure and retryAt (conditional write)
             end
