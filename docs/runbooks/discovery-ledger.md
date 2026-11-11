@@ -10,7 +10,7 @@ This page describes how to operate the discovery ledger modes of [ADR 0034](../a
 | --- | --- | --- |
 | unset or `full` | Single growing ledger, as before AIR-220 | Acts as `frozen`; never rebuilds the full ledger in the Worker |
 | `frozen` | Same as `full` (no marker written) | No new archive write. Departures stay in the active ledger; re-entries and counts still use the archive |
-| `bounded` | The first commit creates the archive from the departures of the previous ledger | Active ledger = the latest scan's candidates; departures go into new write-once segment versions, a manifest version, then a CAS of `current.json`; then the generation is published |
+| `bounded` | The first commit creates the archive from the departures of the previous ledger | Active ledger = the latest scan's candidates **plus**, while a backlog remains, the part of it that this commit does not archive yet ([ADR 0112](../adr/0112-bounded-ledger-departure-budget.md): the daily flow is archived at once, at most 4,000 observations of the backlog a commit); departures go into new write-once segment versions, a manifest version, then a CAS of `current.json`; then the generation is published |
 
 The commit runs this under the discovery lease. It stops without publishing if:
 
@@ -151,31 +151,30 @@ The production split replaces the Worker's own first bounded commit, which would
 
 ## Switching `frozen` to `bounded` under D1 authority
 
-This is the plan for one operation, written so that it can be approved or refused as a whole. It grants nothing: setting `DISCOVERY_LEDGER_MODE=bounded` is a production writer change and needs its own operation-specific owner approval. The offline proof, the memory figures and the variants are in the [dated rehearsal](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md).
+This is the plan for one operation, written so that it can be approved or refused as a whole. It grants nothing: setting `DISCOVERY_LEDGER_MODE=bounded` is a production writer change and needs its own operation-specific owner approval. The memory and drain figures are in the [AIR-429 evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md); the earlier rehearsal is [AIR-426](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md); the rule is [ADR 0112](../adr/0112-bounded-ledger-departure-budget.md) (Accepted as a design; it does not authorize the switch).
 
-**What it does.** Nothing is switched by a deploy. With the flag set, the next EPG commit makes the archive from every observation that the latest scan does not contain: one request writes the 64 segment versions and the manifest to R2, swaps the archive pointer, and stages a generation document with the scan only. The ledger seal that follows archives the departed rows in D1 (nothing is deleted) and writes the scan. The first such commit moves everything that accumulated while the ledger was `frozen`; the commits after it move one day.
+**What it does.** Nothing is switched by a deploy. With the flag set, every EPG commit archives the observations that left the scan since the previous generation (the daily flow) and at most 4,000 of the backlog the `frozen` ledger collected (26,491 on 10 November), lowest keys first. The rest stay active and not seen. The generation document carries `"drain":{"backlog":N,"cap":4000}` until the backlog is gone, and the status reports it in `archive.drain`. The backlog of B drains in at most `ceil(B / 4000)` commits (7 for 26,491), one per natural EPG publication, whatever the daily flow. Nothing is deleted.
 
 **Preconditions (read-only, all must hold):**
 
-1. The change that sends every D1 ledger to the paged chunk, whatever its size, is deployed. Without it a scan of 20,000 observations or fewer stops every chunk of its series.
+1. The change that sends every D1 ledger to the paged chunk and the change of ADR 0112 are deployed: `Test and build`, `Test shard 2 of 2` and `Deploy to Cloudflare` succeeded on the merge commit.
 2. `feature_flags` shows `DISCOVERY_LEDGER_MODE` absent or `frozen`; the archive pointer exists and the manifest it names is readable; the D1 transfer is `committed` and the seal is `done`; no EPG run is in stage `epg` or `seal`.
-3. The last completed EPG run published, and its ledger phase ran with the packed batches (the `epg_phase` exit event of a ledger step carries `batches` and `writeMs`). The first bounded seal does about twice the D1 work of a frozen one.
-4. The owner is reachable around the next due time (17:00 Madrid) and has decided the variant. Variant A below is the only one executable without new code.
+3. The last completed EPG run published, and its ledger phase ran with the packed batches (`epg_phase` exit event with `batches` and `writeMs`).
+4. **The memory gate is decided by the owner.** The strict target of the card (not worse than the frozen commit) is not met by any cap: the floor, with only the daily flow departing, is 4-12 MB of Node old space above the frozen commit (see the evidence). The owner accepts that margin, or does not switch.
+5. The owner is reachable around the next due time (17:00 Madrid).
 
-**Variants.** (A) Set the flag and let the Worker's commit make the first archive. (B) An offline split of the published generation: not available, the split tool stops on an existing archive. (C) Cap the departures a commit archives so that the ledger drains over several commits: a code change and a change of the ADR 0034 boundary, an owner decision.
-
-**Holdpoints for (A).**
+**Holdpoints.**
 
 1. **Owner GO**, naming the flag and its value, the time window and the rollback below. Set the Worker variable only after a published run and well before the next due time; a deploy does not set it.
 2. **Read back** `feature_flags` (`bounded`, valid). Start nothing: the next natural run is the first bounded commit. No manual `epg_sync_start` or `epg_sync_step`.
-3. **Watch the natural run** with `epg_status` and the `epg_phase` events, reads only: the commit stage, then `orchestration.seal` (`cursorItems` of `itemTotal`) moving, the ledger phase finishing, publication.
-4. **Verify after publication:** the pipeline status proves `ledgerMode: bounded` from the generation document; active observations equal the scan; the D1 archive rows equal the departures; the R2 manifest totals equal the archive before plus the departures; the next day's commit writes no new archive objects beyond that day's departures.
+3. **Watch each natural run** with `epg_status` and the `epg_phase` events, reads only: the commit stage, `orchestration.seal` moving, publication.
+4. **Verify after every publication:** `ledgerMode: bounded` proven from the generation document; `archive.drain.backlog` fell by 4,000 (or to zero); active observations equal the scan plus the backlog; D1 archive rows grew by the departures; the manifest totals equal the archive before plus the departures. After the last one, `drain` is absent and active observations equal the scan.
 
-**Stop conditions.** The commit ends with a memory or resource error, or the EPG run records a failure on the commit stage: do not retry by hand and do not reset a lease or transfer. Set the flag back (below) and read the state. A published generation stays valid throughout: the archive pointer is swapped only while the published pointer, the lease and the run are unchanged, and a stopped commit leaves the previous generation published with an archive that it can still read.
+**Stop conditions.** A commit ends with a memory or resource error, or the EPG run records a failure on the commit stage, or the backlog does not fall between two publications: do not retry by hand and do not reset a lease or transfer. Unset the flag (below) and read the state. A published generation stays valid throughout: the archive pointer is swapped only while the published pointer, the lease and the run are unchanged, and a stopped commit leaves the previous generation published with an archive it can read. The executor retries within its failure budget (5 consecutive, 12 total failures), after which the run stays failed until someone acts.
 
-**Rollback.** Unset the flag (rollback R1 above): the next commit acts as `frozen`, writes no archive and archives no D1 row, and re-entry still reads the archive. Nothing is rebuilt or deleted. A code rollback does not undo the archive, the D1 archive rows or the flag. A run that stopped on the commit keeps its place in stage `epg`; the executor retries within its failure budget, which can end in a quarantine of the run. Clearing a quarantine is its own approval, and nothing here has exercised it for this case.
+**Rollback.** Unset the flag (rollback R1 above): the next commit acts as `frozen`, writes no archive and archives no D1 row, and re-entry still reads the archive. A backlog still held stays active; nothing is rebuilt or deleted. A code rollback does not undo the archive, the D1 archive rows or the flag.
 
-**Not known before the first run.** The isolate memory of the first commit (the Node-relative model needs 25 % more than the daily commit), the cost of a D1 archive batch, and how long the ledger phase takes on the instance that runs it. These are what the watch measures; none is a reason to run the commit earlier than the owner decides.
+**Not known before the first run.** The isolate memory headroom against the Node-relative figures, the cost of a D1 archive batch and the D1 write quota left, and how long the ledger phase takes on the instance that runs it. These are what the watch measures; none is a reason to run a commit earlier than the owner decides.
 
 ## Stage 2 install (owner approval required for every run that writes)
 

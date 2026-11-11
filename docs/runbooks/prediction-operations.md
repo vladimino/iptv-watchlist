@@ -66,7 +66,7 @@ While `mode` is `d1`, a prediction read that cannot verify the immutable body fa
 
 ## Prediction queue conflicts
 
-A runner step (`next`, `submit`, `complete`) advances the stored queue and does not rebuild it, so Discovery chunks do not stall a run ([ADR 0112](../adr/0112-prediction-runner-advances-persisted-queue.md)); a `start` answer with `queueStale` means the rebuild could not read the catalog and the run uses the stored queue (read it as the state of its `refreshedAt`). Every writer of the prediction queue writes conditionally and rebuilds on conflict ([queue writes](../reference/api/prediction-runner.md#queue-writes), [ADR 0064](../adr/0064-prediction-queue-conditional-writes.md)). Until the schema v7 marker is `d1`, the condition is the object etag. In that mode it is the D1 generation. A conflict that outlasts 5 attempts is reported, never written over:
+A runner step (`next`, `submit`, `complete`) advances the stored queue and does not rebuild it, so Discovery chunks do not stall a run ([ADR 0113](../adr/0113-prediction-runner-advances-persisted-queue.md)); a `start` answer with `queueStale` means the rebuild could not read the catalog and the run uses the stored queue (read it as the state of its `refreshedAt`). Every writer of the prediction queue writes conditionally and rebuilds on conflict ([queue writes](../reference/api/prediction-runner.md#queue-writes), [ADR 0064](../adr/0064-prediction-queue-conditional-writes.md)). Until the schema v7 marker is `d1`, the condition is the object etag. In that mode it is the D1 generation. A conflict that outlasts 5 attempts is reported, never written over:
 
 | Where | What it looks like | What to do |
 | --- | --- | --- |

@@ -8,8 +8,8 @@ import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
 import {migrated,sql} from './discovery-paged-write.mjs';
 
-const records=new Map(),etags=new Map();let revision=0;const reads=new Map();
-const env={BUCKET:{async get(key){reads.set(key,(reads.get(key)||0)+1);return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)}},list:async()=>({objects:[],truncated:false})}};
+const records=new Map(),etags=new Map();let revision=0,putHook=null;const reads=new Map();
+const env={BUCKET:{async get(key){reads.set(key,(reads.get(key)||0)+1);return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null},async put(key,value,options={}){if(putHook&&key==='enrichment/prediction-queue.json'&&JSON.parse(value).trigger===putHook.trigger){const hook=putHook;putHook=null;await hook.run();}const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)}},list:async()=>({objects:[],truncated:false})}};
 const logs=[];const capture={log:()=>{},info:()=>{},error:(...a)=>logs.push(a.join(' ')),warn:(...a)=>logs.push(a.join(' '))};
 const file=migrated();
 sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
@@ -22,7 +22,7 @@ const db=d1Standin(file,{onQuery:text=>{
  if(stats.storm&&/FROM discovery_admission/.test(text))sql(file,'UPDATE discovery_authority SET generation=generation+1 WHERE id=1');
 }});
 env.DB=db;
-const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,DiscoveryAuthority:Authority,encodeURIComponent,decodeURIComponent});
+const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console:capture,setTimeout,DiscoveryAuthority:Authority,encodeURIComponent,decodeURIComponent});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);for(const f of ['src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/prediction-diagnostics.js','src/worker.js'])vm.runInContext(fs.readFileSync(f,'utf8').replace('export default','globalThis.worker='),ctx);
 async function api(path,body){const r=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),env);return {status:r.status,data:await r.json()}}
 const lines=()=>logs.filter(l=>l.includes('prediction_boundary_failed')).map(l=>JSON.parse(l));
@@ -152,6 +152,56 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  // The enrichment status also survives an unreadable Discovery status record.
  assert.ok(['object'].includes(typeof statusRead.value.data.discovery)||statusRead.value.data.discovery===null);
 }
+// 6. AIR-431 review: a start whose stored queue lists films with no admission any more settles them out and takes replacements; it never repeats a
+//    batch of missing films. First N missing, then every film missing (eventual progress, then an honest noop).
+{
+ stats.storm=false;resetLease();publish('p9');
+ insertAdmissions(Array.from({length:40},(_,k)=>film(5001+k,now)));assert.equal((await api('queue/reconcile',{})).status,200);
+ const gone=queue().hotPending.slice(0,25);assert.equal(gone.length,25,'more than one batch of missing films');
+ sql(file,"UPDATE discovery_admission SET state='superseded' WHERE film_id IN ("+gone.map(id=>"'"+id+"'").join(',')+")");
+ stats.storm=true;resetLease();
+ const partial=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
+ assert.equal(partial.status,200,JSON.stringify(partial.data).slice(0,300));assert.equal(partial.data.status,'running');
+ const partialRun=records.get('enrichment/runs/'+partial.data.runId+'.json');
+ assert.ok(partialRun.selectedIds.length>0&&partialRun.selectedIds.every(id=>!gone.includes(id)),'replacements were selected, none of the missing films');
+ assert.ok(gone.every(id=>!queue().pending.includes(id)&&!queue().hotPending.includes(id)&&!queue().coldPending.includes(id)&&!queue().priority[id]),'the missing films left the queue');
+ assert.equal(queue().priorityCount,queue().hotPending.length);
+ // Every remaining film missing: a start settles them all under its round cap and answers noop; the next start has nothing to repeat.
+ sql(file,"UPDATE discovery_admission SET state='superseded' WHERE state='current'");
+ resetLease();
+ const emptied=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});
+ assert.equal(emptied.status,200,JSON.stringify(emptied.data).slice(0,300));assert.equal(emptied.data.status,'noop','nothing left is a noop, not an endless retry_backoff');
+ assert.equal(queue().pending.length+queue().coldPending.length,0,'the queue holds none of the missing films');
+ resetLease();assert.equal((await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data.status,'noop');
+ sql(file,"UPDATE discovery_admission SET state='current' WHERE CAST(tmdb_id AS INTEGER)<="+(TOTAL+2));
+ sql(file,"UPDATE discovery_admission SET state='superseded' WHERE CAST(tmdb_id AS INTEGER)>"+(TOTAL+2));
+}
+
+// 7. AIR-431 review: the gate holds inside the conditional write. A reconcile that rebuilds the queue for a newer programme between the step's gate
+//    and its write (a forced CAS conflict) makes the retried mutation see the new generation, and the old settlement does not touch it.
+{
+ stats.storm=false;resetLease();publish('p10');
+ insertAdmissions(Array.from({length:30},(_,k)=>film(6001+k,now)));assert.equal((await api('queue/reconcile',{})).status,200);resetLease();
+ const run7=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(run7.status,'running',JSON.stringify(run7).slice(0,300));
+ const item=(await api('next',{runId:run7.runId,batchSize:1})).data.items[0];
+ // In the newer generation the submitted film is pending again (as if its prediction had not counted there): the old settlement must not remove it.
+ putHook={trigger:'batch_progress',run:async()=>{publish('p11');const r=await api('queue/reconcile',{});assert.equal(r.status,200);const q=queue();if(!q.hotPending.includes(item.filmId)){q.hotPending.push(item.filmId);q.pending.push(item.filmId);q.priorityCount=q.hotPending.length;q.priority[item.filmId]={hot:true,rank:1};records.set('enrichment/prediction-queue.json',q);etags.set('enrichment/prediction-queue.json',String(++revision));}}};
+ const sub=await api('submit',{runId:run7.runId,items:[{filmId:item.filmId,fingerprint,prediction}]});
+ assert.equal(putHook,null,'the conflict was forced');assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));assert.equal(sub.data.results[0].status,'created');
+ assert.equal(queue().programmeRunId,'p11','the newer generation is what is stored');assert.equal(queue().trigger,'manual_reconcile','the old settlement did not write over it');assert.equal(queue().advancedAt,undefined);assert.ok(queue().hotPending.includes(item.filmId),'the newer generation still lists the film: the old settlement was refused by the gate inside the write');
+ // Complete: with nothing ready (all deferred by retry) the completion's own write meets the same conflict. The new generation keeps its lastBatch and
+ // counters; the run is still completed.
+ const deferred={};for(const id of [...queue().pending,...queue().coldPending])deferred[id]={kind:'parse_error',retryable:true,attempts:1,retryAt:Date.now()+3600000,failedAt:new Date().toISOString(),lastRunId:'other'};
+ const q=queue();q.retries=deferred;records.set('enrichment/prediction-queue.json',q);etags.set('enrichment/prediction-queue.json',String(++revision));
+ const metricsBefore=JSON.stringify(queue().metrics),lastBatchBefore=JSON.stringify(queue().lastBatch);
+ putHook={trigger:'batch_complete',run:async()=>{publish('p12');const r=await api('queue/reconcile',{});assert.equal(r.status,200);}};
+ const fin=await api('complete',{runId:run7.runId,reason:'eligible_queue_empty'});
+ assert.equal(putHook,null,'the conflict was forced for the completion');assert.equal(fin.status,200,JSON.stringify(fin.data).slice(0,300));assert.ok(['complete','partial'].includes(fin.data.status));
+ assert.equal(queue().programmeRunId,'p12');assert.notEqual(queue().lastBatch?.runId,run7.runId,'the new generation keeps its own lastBatch');
+ assert.equal(JSON.stringify(queue().metrics.hotProcessedTotal),JSON.stringify(JSON.parse(metricsBefore).hotProcessedTotal),'its counters were not moved by the old completion');
+ assert.equal(records.get('enrichment/runs/'+run7.runId+'.json').status,fin.data.status);
+}
+
 // 5. readAdmissionsById: indexed lookups in chunks, current rows only, one authority check, closed like routeRead.
 {
  stats.storm=false;
