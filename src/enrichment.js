@@ -2140,7 +2140,12 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   await updatePublishedFiles(env,{'discovery-latest.json':{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items},'discovered-films.json':replaced.catalog});
   await refreshPredictionQueue(env,report,'epg_scan');const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'scan_committed',report.runId));return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned,...presented});
  }
- if(['/api/enrichment/discovery/status','/api/enrichment/pipeline/status'].includes(path)&&request.method==='GET')return json(await discoveryPipelineStatus(env));
+ if(['/api/enrichment/discovery/status','/api/enrichment/pipeline/status'].includes(path)&&request.method==='GET'){
+  // AIR-430: `view=operational` is the light status (small records only, no ledger scan); no `view` or `view=detailed` is the unchanged full status.
+  const view=url.searchParams.get('view');
+  if(view!==null&&!['operational','detailed'].includes(view))return json({error:'Invalid view',allowed:['operational','detailed']},400);
+  return json(view==='operational'?await discoveryOperationalStatus(env):await discoveryPipelineStatus(env));
+ }
  // Read-only audit export. No lazy rating initialization, source fetch, or enrichment generation.
  if(path==='/api/enrichment/diagnostics/export'&&request.method==='GET'){
   const group=url.searchParams.get('group')||'global';

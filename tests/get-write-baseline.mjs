@@ -23,8 +23,8 @@ export const PREFIX_ROUTES={
  '/api/migration-export/':['/api/migration-export/manifest'],
  '/api/ui/filter-presets/':['/api/ui/filter-presets/abc'],
 };
-// Reads the dispatcher serves through a pattern, not a prefix: the permanent catalog film lookup (AIR-387).
-export const SAMPLES=['/api/catalog/film/42','/api/catalog/film/999','/api/catalog/film/abc','/api/catalog/film/0'];
+// Reads the dispatcher serves through a pattern, not a prefix: the permanent catalog film lookup (AIR-387), and the operational Discovery status view (AIR-430), a query variant of two audited routes.
+export const SAMPLES=['/api/enrichment/pipeline/status?view=operational','/api/enrichment/discovery/status?view=operational','/api/catalog/film/42','/api/catalog/film/999','/api/catalog/film/abc','/api/catalog/film/0'];
 // A query a route needs to reach its real code (without it the route answers 400).
 export const QUERY={'/api/enrichment/history':'?filmId=w1','/api/letterboxd/diary':'?filmId=w1'};
 // Static pages: assets, never storage.
