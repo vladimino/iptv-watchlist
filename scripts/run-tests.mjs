@@ -46,6 +46,12 @@ const START_FIRST=[
  'run-tests-runner.mjs',
  'd1-enrichment.mjs',
  'events-type-filter.mjs',
+ // AIR-374: the three heaviest mutation checks (60 s to 120 s in a CI shard on 11 Nov 2026) start at the beginning of their shard instead of in the alphabetical tail, where such a file ends the
+ // shard late. A fourth entry keeps the count even: positions 13 to 16 alternate shard 2, 1, 2, 1 and each of the three stays in the shard it already had, so only four small files changed shard.
+ 'film-person-connector-mutation.mjs',
+ 'film-person-cutover-record-mutation.mjs',
+ 'film-person-prepared-loader-mutation.mjs',
+ 'film-person-prepared-loader.mjs',
 ];
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
