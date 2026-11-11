@@ -978,7 +978,10 @@ function filmHistoryAction(action){
  if(action==='open'){const film=currentFilm();return film?loadFilmHistory(String(film.id)):undefined;}
  if(action==='close'){filmHistory={...filmHistory,token:filmHistory.token+1,status:'idle',events:[],data:null};renderFilmHistory();$('#film-screen-history [data-history-action]')?.focus?.({preventScroll:true});}
 }
-function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability','film-similar-cards'])setFilmHtml(id,'');const similar=$('#film-similar');if(similar)similar.hidden=true;similarMarkup='';{const compare=$('#film-compare');if(compare)compare.hidden=false;}if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`;if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');const catalogRoute=!!film.catalogRoute,compare=$('#film-compare');if(compare)compare.hidden=catalogRoute;if(actions)actions.innerHTML=`${letterboxdLink(film,{catalog:catalogRoute})}${catalogRoute?'':startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',catalogRoute?'':filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',catalogRoute?'':filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));renderSimilar();}
+// The film page poster with the shared «Скоро» badge over all of the film's shows; also refreshed on its own when the clock moves a film out of `soon`.
+function filmPosterHTML(film){return (film.poster?`<img class="film-page-poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="220" height="330" referrerpolicy="no-referrer">`:`<div class="film-page-poster no-poster" aria-label="Постер недоступен">${escapeHTML(film.year||'Кино')}</div>`)+soonBadge(film);}
+function refreshFilmPoster(){const poster=$('#film-poster'),film=typeof currentFilm==='function'?currentFilm():null;if(poster&&film)poster.innerHTML=filmPosterHTML(film);}
+function fillFilmPage(film){const poster=$('#film-poster'),original=$('#film-screen-original'),meta=$('#film-screen-meta'),genres=$('#film-screen-genres'),actions=$('#film-screen-actions');if(!film){for(const id of ['film-poster','film-screen-original','film-screen-meta','film-screen-genres','film-screen-actions','film-screen-score','film-screen-history','film-screen-synopsis','film-screen-credits','film-screen-fingerprint','film-compare-result','film-screen-availability','film-similar-cards'])setFilmHtml(id,'');const similar=$('#film-similar');if(similar)similar.hidden=true;similarMarkup='';{const compare=$('#film-compare');if(compare)compare.hidden=false;}if(original)original.textContent='';if(meta)meta.textContent='';if(genres)genres.textContent='';return;}if(poster)poster.innerHTML=filmPosterHTML(film);if(original)original.textContent=film.original&&film.original!==film.title?film.original:'';const bits=[];if(film.year)bits.push(String(film.year));if(Number(film.runtime)>0)bits.push(`${Math.round(Number(film.runtime))} мин`);if(meta)meta.textContent=bits.join(' · ');if(genres)genres.textContent=(film.genres||[]).filter(Boolean).join(' · ');const catalogRoute=!!film.catalogRoute,compare=$('#film-compare');if(compare)compare.hidden=catalogRoute;if(actions)actions.innerHTML=`${letterboxdLink(film,{catalog:catalogRoute})}${catalogRoute?'':startedButton(film,true)}`;setFilmHtml('film-screen-score',filmScore(film));setFilmHtml('film-screen-history',filmHistorySection(film));setFilmHtml('film-screen-synopsis',catalogRoute?'':filmSynopsis(film));setFilmHtml('film-screen-credits',filmCredits(film));setFilmHtml('film-screen-fingerprint',filmFingerprint(film));setFilmHtml('film-compare-result',catalogRoute?'':filmCompare(film));setFilmHtml('film-screen-availability',filmAvailability(film));renderSimilar();}
 function creditLinks(people,key){return (people||[]).map(p=>`<button type="button" class="credit-link" data-credit-kind="${key}" data-credit-id="${escapeHTML(p.id)}" title="Показать фильмы: ${escapeHTML(p.name)}">${escapeHTML(p.name)}</button>`).join(', ');}
 function credits(film){return `<div class="film-credits">${film.directors?.length?`<p><span class="credit-label">${film.directors.length>1?'Режиссёры':'Режиссёр'}</span> ${creditLinks(film.directors,'directors')}</p>`:''}${film.actors?.length?`<p><span class="credit-label">В ролях</span> ${creditLinks(film.actors,'actors')}</p>`:''}</div>`;}
 function selectPerson(key,id){const p=report.people?.[key]?.find(person=>person.id===id);if(!p)return;const onFilm=filmIdFromLocation();state[key]=id;const input=$('#'+key+'-input');if(input){input.value=p.name;input.setAttribute('aria-expanded','false');input.removeAttribute('aria-activedescendant');}const options=$('#'+key+'-options');if(options)options.hidden=true;render();if(onFilm)input?.focus?.({preventScroll:true});}
@@ -1027,7 +1030,7 @@ function lastChanceBadge(film){
 }
 function card(film){
  const item=filmEnrichmentItem(film),hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
- return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
+ return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${posterFrame(film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`,soonBadge(film))}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='future'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':state.period==='all'&&!film.shows.some(isFuture)?'<p class="archive-only">В следующие сутки показов нет</p>':''}${startedButton(film)}</article>`;
 }
 function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=availabilityTime(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
 
@@ -1175,6 +1178,42 @@ async function loadFindsPerson(route,cacheKey,generation){
 // The owner's «Смотрел» mark (ADR-0032): POST /api/catalog/watched with the card's TMDB id only. A marked film leaves Finds at once,
 // before the catalog answer is refreshed; the notice offers an undo, which posts watched: false.
 const findsMarks=new Map();let findsNotice=null;
+// AIR-435 (ADR 0114): the client reads the film availability lifecycle through the same module the Worker embeds (`/film-availability.js`, loaded before this
+// file), so a card, the Finds section and the catalog API never disagree. `filmAvail` is the one reading: the shows given (all of the film's by default),
+// the film runtime as the fallback for a show without a valid end, and the clock of the caller. It is computed at render time, so the state changes with the
+// clock and needs no new request. Without the module (an isolated test context) it answers `null` and every consumer keeps its previous behavior.
+function availabilityLib(){return typeof FilmAvailability==='undefined'?null:FilmAvailability;}
+function filmAvail(film,now=viewingClock(),shows=film?.shows){
+ const lib=availabilityLib();if(!lib||!film)return null;
+ const list=(shows||[]).map(show=>({start:showStart(show),end:show?.end})).filter(show=>show.start!==null);
+ return lib.filmAvailability(list,now,{runtimeMinutes:film.runtime});
+}
+function soonTail(avail){
+ if(avail.appearsAt!==null&&avail.appearsAtKnown)return avail.appearsAtEstimated?`архив ожидается около ${madridStamp(avail.appearsAt)} (по длительности фильма)`:`архив появится после ${madridStamp(avail.appearsAt)}`;
+ return 'время появления архива неизвестно';
+}
+// The one «Скоро» indicator: a small hourglass in the corner of a poster. Every poster surface calls `soonBadge` (never its own markup) and wraps the
+// poster with `posterFrame`; it answers '' unless the film is `soon`, so a film with a ready archive never shows it, and it disappears when the archive appears.
+// Selector contract: `.soon-badge` (role img, aria-label and title carry the text) inside a `position:relative` poster container (`.poster-frame`,
+// `.finds-poster`, `.film-similar-poster`, `#film-poster`).
+let soonTickAt=null,soonTimer=null;
+function noteSoonTick(at){if(Number.isFinite(at)&&(soonTickAt===null||at<soonTickAt))soonTickAt=at;}
+function soonBadge(film,{now=viewingClock(),shows=film?.shows}={}){
+ const avail=filmAvail(film,now,shows);if(!avail||avail.state!=='soon')return '';
+ noteSoonTick(avail.appearsAt);
+ const label=`Скоро: ${soonTail(avail)}`;
+ return `<span class="soon-badge" role="img" aria-label="${escapeHTML(label)}" title="${escapeHTML(label)}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 3h12M6 21h12M7 3c0 5 3 6 5 9-2 3-5 4-5 9M17 3c0 5-3 6-5 9 2 3 5 4 5 9"/></svg></span>`;
+}
+function posterFrame(poster,badge){return badge?`<div class="poster-frame">${badge}${poster}</div>`:poster;}
+// A live page re-renders at the next moment a hourglass should disappear, with no request; a fixed view clock never changes state, so it arms nothing.
+function armSoonTick(){
+ const at=soonTickAt;soonTickAt=null;
+ if(typeof setTimeout!=='function'||typeof clearTimeout!=='function')return;
+ if(soonTimer){clearTimeout(soonTimer);soonTimer=null;}
+ if(at===null||viewClock!=null||!report)return;
+ const delay=Math.min(Math.max(at-Date.now()+1000,1000),3600000);
+ soonTimer=setTimeout(()=>{soonTimer=null;render();refreshFilmPoster();},delay);soonTimer?.unref?.();
+}
 function findsScope(){return state.channels?.size||state.period!=='all'?{channels:state.channels?.size?new Set(state.channels):null,period:state.period}:null;}
 function findsOnChannel(show,channels){const name=typeof show?.channel==='string'?show.channel:'';return !!name&&(channels.has(name)||channels.has(name.trim()));}
 function findsInPeriod(model,show,period){return period==='archive'?inArchive(model,show):period==='future'?inFuture(model,show):inArchive(model,show)||inFuture(model,show);}
@@ -1184,7 +1223,22 @@ function findsShows(film,now,scope=findsScope()){
  if(scope){const model=viewingWindow(now);shows=shows.filter(show=>(!scope.channels||findsOnChannel(show,scope.channels))&&findsInPeriod(model,show,scope.period));}
  return shows.sort((a,b)=>a.start-b.start);
 }
-function findsUntil(film,now,scope=findsScope()){const shows=findsShows(film,now,scope);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;}
+// The shows of a film inside the product windows on the selected channels (none in the black zone, where the programme does not cover the clock). The period filter is not applied here: it constrains the lifecycle STATE (below).
+function findsWindowShows(film,now,scope=findsScope()){
+ if(blackZone())return [];
+ const from=now-72*3600000,to=now+24*3600000;
+ const shows=(film?.shows||[]).map(show=>({...show,start:showStart(show)})).filter(show=>show.start!==null&&show.start>from&&show.start<to);
+ return (scope?.channels?shows.filter(show=>findsOnChannel(show,scope.channels)):shows).sort((a,b)=>a.start-b.start);
+}
+// The lifecycle of a find over the shows of the selected channels. `null` only when the shared module is absent (an isolated context).
+function findsAvail(film,now,scope=findsScope()){return filmAvail(film,now,findsWindowShows(film,now,scope));}
+// Archive-first period filter: «Архив» keeps films with a ready archive, «Скоро» (period `future`) keeps films with no ready archive that are on air or ahead.
+function findsPeriodAllows(state,period){return period==='archive'?state==='available':period==='future'?state==='soon':state==='available'||state==='soon';}
+function findsUntil(film,now,scope=findsScope()){
+ const avail=findsAvail(film,now,scope);
+ if(avail)return avail.state==='available'?avail.archiveUntil:null;
+ const shows=findsShows(film,now,scope);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;
+}
 function findsIdentity(film){return String(film.canonicalIdentity||(film.tmdbId?'tmdb:'+film.tmdbId:'')||film.id);}
 function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film of films||[]){ids.add(String(film.id));if(film.tmdbId)tmdb.add(String(film.tmdbId));}return {ids,tmdb};}
 function effectiveConfidence(prediction){
@@ -1278,13 +1332,16 @@ function findsEligible(film,now=nowMs(),known=watchlistIdentities(),scope=findsS
  const local=enrichment.films?.[String(film.id)];
  if(local&&local.actualRating!==null&&local.actualRating!==undefined)return false;
  if(!findsStrong(film.prediction))return false;
+ const avail=findsAvail(film,now,scope);
+ if(avail)return findsPeriodAllows(avail.state,scope?.period);
  return findsShows(film,now,scope).length>0;
 }
 function franchiseKey(film){const base=String(film.original||film.title||'').normalize('NFKC').toLocaleLowerCase('ru').replace(/[:\-–—]/g,' ');return base.replace(/(?:^|\s)(?:part|часть|глава|chapter|episode|эпизод|vol\.?|том)\s*[\divxlc]+(?=\s|$)/gu,' ').replace(/\s(?:\d|[ivxlc]{1,5})\s*$/,' ').replace(/[^\p{L}\p{N}]+/gu,' ').trim();}
 function findsSignal(film){return `${film.prediction.predictedRating.toFixed(1)}|${film.prediction.probability4Plus.toFixed(2)}`;}
+function findsRank(film,now,scope){const avail=findsAvail(film,now,scope);return avail?.state==='available'?0:1;}
 function findsCompare(a,b,now,scope=findsScope(),context=null){
  if(context){const ma=findsMatched(a,context),mb=findsMatched(b,context);const person=mb.people.length-ma.people.length;if(person)return person;const facet=(mb.mechanics.length+mb.moods.length)-(ma.mechanics.length+ma.moods.length)||mb.genres.length-ma.genres.length;if(facet)return facet;}
- return b.prediction.predictedRating-a.prediction.predictedRating||b.prediction.probability4Plus-a.prediction.probability4Plus||(findsUntil(a,now,scope)??Infinity)-(findsUntil(b,now,scope)??Infinity)||String(a.title||'').localeCompare(String(b.title||''),'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
+ return b.prediction.predictedRating-a.prediction.predictedRating||b.prediction.probability4Plus-a.prediction.probability4Plus||findsRank(a,now,scope)-findsRank(b,now,scope)||(findsUntil(a,now,scope)??Infinity)-(findsUntil(b,now,scope)??Infinity)||String(a.title||'').localeCompare(String(b.title||''),'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));}
 function buildFinds(input=findsSource.films,now=nowMs(),scope=findsScope(),context=findsContext()){
  const known=watchlistIdentities();
  const candidates=(input||[]).filter(film=>findsEligible(film,now,known,scope)&&findsMatchesContext(film,context,now,scope)).sort((a,b)=>findsCompare(a,b,now,scope,context));
@@ -1301,6 +1358,8 @@ function buildFinds(input=findsSource.films,now=nowMs(),scope=findsScope(),conte
 }
 function findsChannel(show){return typeof show?.channel==='string'&&show.channel.trim()?show.channel.trim():'Канал не указан';}
 function findsAiring(film,now=nowMs(),scope=findsScope()){
+ const avail=findsAvail(film,now,scope);
+ if(avail)return findsAiringFromLifecycle(film,now,scope,avail);
  const shows=findsShows(film,now,scope);
  const live=shows.find(show=>show.start<=now&&finiteTime(show.end)!==null&&finiteTime(show.end)>now);
  if(live)return {kind:'live',text:`Сейчас в эфире · ${findsChannel(live)}`,show:live};
@@ -1309,6 +1368,21 @@ function findsAiring(film,now=nowMs(),scope=findsScope()){
  const last=shows.filter(show=>show.start<=now).pop();
  if(!last)return {kind:'none',text:'Нет показов в текущем окне',show:null};
  return {kind:'catchup',text:`Архив · ${findsChannel(last)} · до ${madridStamp(findsUntil(film,now,scope))}`,show:last};
+}
+// A ready archive is always named first, even when a repeat is nearer (`catchup`); with none, a show on air (`live`) or the nearest start inside 24 hours
+// (`next`) is named with when the archive is expected, and with no usable end the text says the time is unknown instead of guessing.
+function findsAiringFromLifecycle(film,now,scope,avail){
+ const shows=findsWindowShows(film,now,scope),lib=availabilityLib(),phase=show=>lib.showPhase({start:show.start,end:show.end},now,{runtimeMinutes:film.runtime}).phase;
+ if(avail.state==='available'){
+  const ready=shows.filter(show=>phase(show)==='archive'),last=ready.find(show=>show.start===avail.archiveShow.start)||ready.pop();
+  return {kind:'catchup',text:`Архив · ${findsChannel(last)} · до ${madridStamp(avail.archiveUntil)}`,show:last,availability:avail};
+ }
+ if(avail.state==='soon'){
+  const live=shows.find(show=>phase(show)==='on_air'),next=shows.find(show=>phase(show)==='future');
+  if(live)return {kind:'live',text:`Сейчас в эфире · ${findsChannel(live)} · ${soonTail(avail)}`,show:live,availability:avail};
+  if(next)return {kind:'next',text:`${madridStamp(next.start)} · ${findsChannel(next)} · ${soonTail(avail)}`,show:next,availability:avail};
+ }
+ return {kind:'none',text:'Нет показов в текущем окне',show:null,availability:avail};
 }
 // Similar films on the open film's page. Two sources already in memory: the loaded watchlist (`films`) and the cached
 // catalog answer (`findsSource`). No second reader and no request. List filters, the Finds person check and channel
@@ -1465,7 +1539,7 @@ function similarCard(row,now){
  const original=film.original&&film.original!==film.title?`<p class="original">${escapeHTML(film.original)}</p>`:'';
  const genres=(film.genres||[]).filter(Boolean);
  const both=scores.includes('score-actual')&&scores.includes('score-predicted');
- return `<article class="film-similar-card ${catalog?'is-catalog':'is-watchlist'}${scores?both?' has-both-scores':' has-score':''}" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${scores}<div class="film-head"><div class="film-similar-poster">${catalog?similarBadge('new'):''}${similarPoster(film)}</div><div class="film-info"><h3>${similarTitle(film)}${letterboxdLink(film,{catalog})}</h3>${original}<span class="film-year">${escapeHTML(year)}${runtime}</span>${genres.length?`<div class="film-tags">${genres.map(escapeHTML).join(' · ')}</div>`:''}${catalog?'':similarBadge(row.badge)}</div></div><p class="film-similar-airing">${escapeHTML(airing.text)}</p><p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;
+ return `<article class="film-similar-card ${catalog?'is-catalog':'is-watchlist'}${scores?both?' has-both-scores':' has-score':''}" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${scores}<div class="film-head"><div class="film-similar-poster">${catalog?similarBadge('new'):''}${soonBadge(film,{now,shows:findsWindowShows(film,now,null)})}${similarPoster(film)}</div><div class="film-info"><h3>${similarTitle(film)}${letterboxdLink(film,{catalog})}</h3>${original}<span class="film-year">${escapeHTML(year)}${runtime}</span>${genres.length?`<div class="film-tags">${genres.map(escapeHTML).join(' · ')}</div>`:''}${catalog?'':similarBadge(row.badge)}</div></div><p class="film-similar-airing">${escapeHTML(airing.text)}</p><p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;
 }
 // The last markup written into #film-similar-cards. An identical refresh keeps that DOM, so a focused title stays focused.
 let similarMarkup='';
@@ -1483,7 +1557,7 @@ function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
  const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),match=findsMatchText(film,context),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
  const label=escapeHTML(film.title||film.original||''),verifiedId=similarVerifiedIdentity(film)?'tmdb_'+film.tmdbId:null,title=verifiedId?`<a class="film-open" href="${filmHref(verifiedId)}" data-film-id="${escapeHTML(verifiedId)}">${label}</a>`:label;
- return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
+ return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${airing.availability?.state==='soon'?soonBadge(film,{now,shows:findsWindowShows(film,now,scope)}):''}${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
 }
 function findsMarkAction(film){
  if(!findsSource.watchedMarkEnabled||!film.tmdbId)return '';
@@ -1621,6 +1695,7 @@ function render(){
   renderShortlist(visible,valid);
   resultsView={visible:visible.length,valid};
   renderFinds();
+  armSoonTick();
   const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
   updateProgrammeStatus();
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
