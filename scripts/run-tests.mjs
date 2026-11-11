@@ -49,7 +49,7 @@ export const WEIGHTS={
  'discovery-bounded-drain.mjs':41,
  'projector-view-parity.mjs':34,
  'projector-bulk-spike.mjs':32,
- 'canonical-differential-mutation.mjs':31,
+ 'canonical-differential-mutation.mjs':24,
  'canonical-receipts-mutation.mjs':31,
  'projector-marker-fence-mutation.mjs':31,
  'run-tests-runner.mjs':29,

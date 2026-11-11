@@ -24,7 +24,7 @@ import {PERSON_STATE_CALLS,PERSON_STATE_RECONCILE} from './canonical-person-stat
 import {P6_DIFFERENTIAL_EXCEPTIONS} from './canonical-film-writers.js';
 import {DIFFERENTIAL_COVERAGE,EXTRA_EXCEPTIONS} from './canonical-differential-registry.js';
 import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
-import {OPERATION_KINDS,RECEIPT_MIN_VERSION,listAttention,operationRegistry,readUnreceipted,receiptsStatus,verifyBaseline} from './canonical-receipts.js';
+import {OPERATION_KINDS,RECEIPT_MIN_VERSION,listAttention,operationRegistry,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
 
 export const SHADOW_ITEM_CAP=200;
 export const SHADOW_LIST_CAP=200;
@@ -339,7 +339,8 @@ export async function shadowCompare(env,items){
 // Read-only readiness for the AIR-374 handoff, COMPUTED (P6, ADR 0117). It never writes and reads nothing but counts, the marker, the schema contract and the lease and
 // window rows. `ready` is true only when no blocker remains; it is information for the owner's decision, never a permission. A blocker is:
 // - marker_unreadable:<code>, marker_not_prepared:<state>, baseline_not_verified:<state>, schema_below_16:<n>, schema_unreadable, no_database;
-// - projector_lease_live, projector_window_not_idle:<state> (an absent window table is no window);
+// - projector_lease_live, projector_window_not_idle:<state> (an absent window table is no window); and ONLY on a read error: schema_unreadable, projector_lease_unreadable, projector_window_unreadable,
+//   receipts_unreadable, empty_class_unreadable:<class>, marker_unreadable:<code>; now_invalid for an unparseable `now`;
 // - gap:<former gap> unless every writer of it is registered in CALLS and RECONCILE AND the differential registry marks it covered;
 // - exception_not_accepted:<id> for each named projector-vs-canonical difference the owner has not accepted;
 // - receipts_schema_missing, receipts_baseline_missing (marker open or held, no sealed baseline), receipts_baseline_unverified, unreceipted_changes, receipts_attention_open, receipts_unreadable,
@@ -358,20 +359,33 @@ export async function handoffReadiness(env,{now=new Date().toISOString(),evidenc
   if(gate.baseline!=='verified')blockers.push('baseline_not_verified:'+String(gate.baseline));
  }
  const db=database(env);
- let version=0,tables=new Set();
+ // FAIL CLOSED (Controller review of PR #533): every read below is its own step and a read ERROR is always a named blocker, never an implicit free, idle, zero or ok. The only accepted
+ // "absent" is a table that sqlite_master shows absent AND whose absence is documented as "not applicable": projector_window (migration 0018; absent means no window).
+ let version=0,tables=new Set(),schemaOk=false;
+ const nowMs=Date.parse(now);
+ if(!Number.isFinite(nowMs))blockers.push('now_invalid');
  if(db){
   try{
-   version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??0);
-   if(version<16)blockers.push('schema_below_16:'+version);
+   version=Number((await one(db,'SELECT version AS contract_version FROM schema_contract WHERE id=1'))?.contract_version);
    tables=new Set((await many(db,"SELECT name FROM sqlite_master WHERE type='table'")).map(row=>row.name));
-   const lease=await one(db,"SELECT lease_until FROM projection_run WHERE projection='enrichment' AND lease_id IS NOT NULL AND lease_until>?",[now]).catch(()=>null);
-   if(lease)blockers.push('projector_lease_live');
-   const nowMs=Date.parse(now);
-   if(tables.has('projector_window')){
-    const window=await one(db,'SELECT state,expires_at FROM projector_window WHERE id=1');
-    if(window&&window.state!=='idle'&&Number(window.expires_at)>nowMs)blockers.push('projector_window_not_idle:'+window.state);
-   }
+   if(!Number.isFinite(version))throw new Error('contract_version');
+   schemaOk=true;
+   if(version<16)blockers.push('schema_below_16:'+version);
   }catch{blockers.push('schema_unreadable');}
+  // The projector lease: no row, or an expired lease, is FREE; a read error or a missing projection_run table is not.
+  try{
+   if(!tables.has('projection_run'))throw new Error('projection_run absent');
+   const lease=await one(db,"SELECT lease_until FROM projection_run WHERE projection='enrichment' AND lease_id IS NOT NULL AND lease_until>?",[now]);
+   if(lease)blockers.push('projector_lease_live');
+  }catch{blockers.push('projector_lease_unreadable');}
+  // The exclusive window: the table absent is "no window"; a read error, a missing row or an unreadable state is not idle.
+  if(tables.has('projector_window')||!schemaOk){
+   try{
+    const window=await one(db,'SELECT state,expires_at FROM projector_window WHERE id=1');
+    if(!window||!['idle','requested','held'].includes(window.state))throw new Error('projector_window row');
+    if(window.state!=='idle'&&!(Number(window.expires_at)<=nowMs))blockers.push('projector_window_not_idle:'+window.state);
+   }catch{blockers.push('projector_window_unreadable');}
+  }
  }else blockers.push('no_database');
  // A former gap is cleared only by evidence the code can check: each of its writers is registered for dispatch and for readback, and the harness-verified registry marks it covered.
  const cleared=[],open=[];
@@ -384,14 +398,18 @@ export async function handoffReadiness(env,{now=new Date().toISOString(),evidenc
  for(const item of exceptions)if(item.status!=='accepted')blockers.push('exception_not_accepted:'+item.id);
  // Receipts (ADR 0119), read-only. Schema below 19 or a missing receipt/baseline table: receipts_schema_missing. The activation baseline is recorded by the activation operation AFTER
  // `open` (recordBaseline refuses before), so it is required here only once the marker is open or held; at `prepared` it is expected to be absent and is not a blocker.
- const status=db?await receiptsStatus(env):'no_schema';
- if(status==='no_schema')blockers.push('receipts_schema_missing');
- else if(status==='no_baseline'){if(gate&&['open','held'].includes(gate.state))blockers.push('receipts_baseline_missing');}
+ if(!db||!schemaOk)blockers.push(db?'receipts_unreadable':'receipts_schema_missing');
+ else if(version<RECEIPT_MIN_VERSION||!tables.has(RECEIPTS_PROTOCOL.table)||!tables.has('canonical_receipt_baseline_seal'))blockers.push('receipts_schema_missing');
  else{
   try{
-   if(!(await verifyBaseline(env)).ok)blockers.push('receipts_baseline_unverified');
-   if((await readUnreceipted(env)).unreceipted.length)blockers.push('unreceipted_changes');
-   if((await listAttention(env)).length)blockers.push('receipts_attention_open');
+   const sealed=Number((await one(db,'SELECT COUNT(*) AS sealed FROM canonical_receipt_baseline_seal'))?.sealed);
+   if(!Number.isFinite(sealed))throw new Error('seal');
+   if(sealed!==1){if(gate&&['open','held'].includes(gate.state))blockers.push('receipts_baseline_missing');}
+   else{
+    if(!(await verifyBaseline(env)).ok)blockers.push('receipts_baseline_unverified');
+    if((await readUnreceipted(env)).unreceipted.length)blockers.push('unreceipted_changes');
+    if((await listAttention(env)).length)blockers.push('receipts_attention_open');
+   }
   }catch{blockers.push('receipts_unreadable');}
  }
  const atomic=kind=>{for(const spec of operations.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};

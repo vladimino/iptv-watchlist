@@ -145,6 +145,39 @@ if(on('2')){
  for(const item of ALL_EXCEPTIONS)await only('exception '+item.id,base,{...good(),exceptions:good().exceptions.map(x=>x.id===item.id?{...x,status:'draft'}:x)},'exception_not_accepted:'+item.id);
  }
 }
+// 3g. FAIL CLOSED on every read: an injected SELECT failure (the statement is rewritten to one that fails) on the FULLY SATISFIED fixture (where ready:true is reachable) is ALWAYS ready:false
+// with its own named blocker, never an implicit free lease, idle window, zero count or ok. The documented "absent" (no projector_window table = no window) stays idle.
+if(on('3g')){
+ const failing=(file,pattern)=>({DB:d1Standin(file,{rewrite:sql=>pattern.test(sql)?'SELECT nope FROM nowhere':sql})});
+ const base=satisfied();
+ assert.deepEqual((await run(base,good())).blockers,[],'control: the fixture is ready');
+ const injected=async(label,file,pattern,...expected)=>{
+  const out=await handoffReadiness(failing(file,pattern),{now:NOW,evidence:good()});
+  assert.equal(out.ready,false,label+': never ready on a read error');
+  for(const name of expected)assert.ok(out.blockers.includes(name),label+': names '+name+', got '+out.blockers);
+  return out;
+ };
+ await injected('marker read',base,/FROM film_person_authority WHERE id=1/,'marker_unreadable:film_person_unavailable');
+ await injected('schema contract read',base,/AS contract_version FROM schema_contract/,'schema_unreadable');
+ await injected('table list read',base,/FROM sqlite_master WHERE type='table'/,'schema_unreadable');
+ await injected('projector lease read',base,/FROM projection_run WHERE projection='enrichment'/,'projector_lease_unreadable');
+ await injected('projector window read',base,/FROM projector_window WHERE id=1/,'projector_window_unreadable');
+ await injected('receipt seal read',base,/FROM canonical_receipt_baseline_seal/,'receipts_unreadable');
+ await injected('class count read',base,/COUNT\(\*\) AS n FROM film_retention/,'empty_class_unreadable:retention');
+ {const f=copyOf(base,'x');sqlite(f,'DROP TABLE projection_run');assert.ok((await run(f,good())).blockers.includes('projector_lease_unreadable'),'a missing projection_run table is not a free lease');}
+ {const f=copyOf(base,'x');sqlite(f,'DELETE FROM projector_window');assert.ok((await run(f,good())).blockers.includes('projector_window_unreadable'),'a missing window row is not idle');}
+ {const f=copyOf(base,'x');sqlite(f,'DROP TABLE projector_window');assert.deepEqual((await run(f,good())).blockers,[],'a genuinely absent window table means no window (migration 0018)');}
+ assert.ok((await handoffReadiness(envOf(base),{now:'not a time',evidence:good()})).blockers.includes('now_invalid'),'an unparseable clock is not ready');
+ // the receipt reads after the baseline: an open fixture with a sealed baseline (the marker blocks, the read errors must still be named)
+ const open1=opened(base);
+ await mutateFilm(envOf(open1),{id:'film:tmdb:76',expectedRevision:0,at:NOW,film:{contractVersion:1}});
+ await recordBaseline(envOf(open1));
+ assert.deepEqual((await run(open1,good())).blockers,['marker_not_prepared:open'],'control: a sealed baseline reads clean');
+ await injected('baseline verification read',open1,/FROM canonical_receipt_watermark/,'receipts_unreadable');
+ await injected('unreceipted read',open1,/FROM canonical_revision r LEFT JOIN/,'receipts_unreadable');
+ await injected('attention read',open1,/state IN \('abandoned','unknown'\)/,'receipts_unreadable');
+}
+
 // 4. Read-only: only SELECT statements, no batch, and the database is byte-for-byte the same file content afterwards.
 if(on('4')){
  const file=satisfied();const seen=[];
