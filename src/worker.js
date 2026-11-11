@@ -1012,6 +1012,8 @@ async function* iterateLedgerItems(env,view,holder,reentry,options,active){
   }
  }finally{stopped=true;release();kick();try{await task;}catch{}}
 }
+// AIR-444: the segment writes of one archive commit take the full fence at most this many writes or milliseconds apart (see planDiscoveryLedger).
+const ARCHIVE_SEGMENT_FENCE_EVERY=8,ARCHIVE_SEGMENT_FENCE_MS=20000;
 async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publishedRunId,kind='commit',holder=null}){
  const sourceHolder=holder||discoveryHolder(latest);
  const view=await readLedgerView(env);
@@ -1028,12 +1030,23 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   const counted=await collectLedgerDecisions(env,view,sourceHolder,[],options,()=>true);
   return {emit:()=>iterateLedgerItems(env,view,sourceHolder,[],options,()=>true),holder:sourceHolder,ledger:{},itemBytes:counted.itemBytes,itemCount:counted.itemCount};
  }
- const fence=async()=>{
+ // AIR-444: every archive fence is also a mutation boundary of the EPG step, so a step that keeps working keeps its step lease (assertStep renews it
+ // once half of it is spent) and one that lost it stops here, before the next write, as `epg_step_fenced`.
+ const planStarted=Date.now(),tally={fences:0,skipped:0,fenceMs:0,segments:0,putMs:0,bytes:0};
+ const fenceChecks=async()=>{
+  await epgStepGuard(env);
   if(!await renewDiscoveryLease(env,lease))throw new Error('Discovery archive fence lost: lease');
   if(typeof PublishedEpg!=='undefined'){const gate=await PublishedEpg.readAuthority(env);if(gate.cutover==='held')throw new Error('Discovery archive fence lost: published generation changed');const live=await PublishedEpg.currentGeneration(env);if(live){if(live.fence!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}return;}}
   const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if((pointer?.etag??null)!==pointerEtag)throw new Error('Discovery archive fence lost: published generation changed');
   if(kind==='commit'){const run=await loadJSON(env,'sync.json');if(run?.runId!==runId||run.stage!=='epg')throw new Error('Discovery archive fence lost: sync run changed');}
  };
+ const fence=async()=>{const at=Date.now();try{await fenceChecks();}finally{tally.fences++;tally.fenceMs+=Date.now()-at;lastFenceAt=Date.now();sinceFence=0;}};
+ // AIR-444: a segment is a create-only object under its own write id that nothing reads until the archive pointer moves, and the pointer moves only
+ // after a full fence and a compare-and-swap. The 64 segment writes therefore take the full fence every ARCHIVE_SEGMENT_FENCE_EVERY writes or
+ // ARCHIVE_SEGMENT_FENCE_MS, whichever comes first (the Discovery lease lives 90 s), instead of every write: on 11 Nov 2026 each full fence cost about
+ // 4 s and the 64 of them were 273 s of a 348 s step. The manifest write and the pointer swap keep the full fence.
+ let lastFenceAt=0,sinceFence=Infinity;
+ const segmentFence=async()=>{if(sinceFence<ARCHIVE_SEGMENT_FENCE_EVERY&&Date.now()-lastFenceAt<ARCHIVE_SEGMENT_FENCE_MS){sinceFence++;tally.skipped++;return;}await fence();sinceFence=1;};
  const prevKeys=view.prevKeys;
  const start=await readLedgerManifest(env,startId);
  if(startId&&!start)throw new Error('Discovery archive manifest missing');
@@ -1070,6 +1083,8 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  for(const key of found)also.add(key);
  for(const key of [...also])if(!activeKeys.has(key))also.delete(key);
  let manifestId=startId,manifest=start;
+ const archiveStarted=Date.now();
+ epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,departures:departures.length,backlog:drain?drain.backlog:0});
  if(departures.length){
   const writeId=crypto.randomUUID(),at=new Date().toISOString(),count=start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS,bySegment=new Map();
   for(const record of departures){const segment=ledgerArchiveSegment(record.key,count);if(!bySegment.has(segment))bySegment.set(segment,[]);bySegment.get(segment).push(record);}
@@ -1077,7 +1092,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   for(const [segment,records] of [...bySegment].sort((a,b)=>a[0]-b[0])){
    const segmentItems=await readLedgerSegment(env,start,segment);
    for(const record of records){const payload=JSON.parse(record.json);if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};}
-   const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},fence);
+   const object=ledgerArchiveSegmentKey(segment,writeId),putAt=Date.now(),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},segmentFence);tally.segments++;tally.bytes+=written.bytes;tally.putMs+=Date.now()-putAt;
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   }
   manifestId=crypto.randomUUID();
@@ -1088,6 +1103,7 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
   const swapped=await env.BUCKET.put(LEDGER_ARCHIVE_POINTER,JSON.stringify({manifestId}),{onlyIf:archiveEtag?{etagMatches:archiveEtag}:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
   if(swapped===null)throw new Error('Discovery archive fence lost: archive pointer changed');
  }
+ if(departures.length)epgPhase(runId,'seal_stage_archive','exit',{elapsedMs:Date.now()-archiveStarted,segments:tally.segments,fences:tally.fences,fencesSkipped:tally.skipped,fenceMs:tally.fenceMs,putMs:tally.putMs,bytes:tally.bytes});
  const alsoArchived=[...also].sort(),archive=manifest?{version:'v1',manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes,alsoArchived,uniqueArchivedItems:manifest.totals.items-alsoArchived.length}:null;
  const ledgerOut={ledgerMode:effective,...(drain&&drain.backlog>0?{drain:{backlog:drain.backlog,cap:drain.cap}}:{}),archive};
  if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut,itemBytes:collected.itemBytes,itemCount:collected.itemCount};
@@ -1229,9 +1245,10 @@ async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,
   if(planned.emit){source=planned.emit();itemBytes=planned.itemBytes;itemCount=planned.itemCount;}
   else{const encoded=(planned.items||[]).map(item=>encoder.encode(JSON.stringify(item)));itemBytes=encoded.reduce((n,bytes)=>n+bytes.byteLength,0);itemCount=encoded.length;source=(async function*(){for(const bytes of encoded)yield bytes;})();}
   if(!Number.isSafeInteger(itemBytes)||!Number.isSafeInteger(itemCount)||itemBytes<0||itemCount<0)throw new Error('Discovery document length is unknown');
-  const key=epgGenerationKey(run.runId,'discovery-latest.json');
+  const key=epgGenerationKey(run.runId,'discovery-latest.json'),emitStarted=Date.now();
   await putKnownLength(env.BUCKET,key,discoveryDocumentLength(framing,itemBytes,itemCount),discoveryDocumentStream(framing,source),{httpMetadata:{contentType:'application/json'}});
   const stored=await env.BUCKET.head(key);if(!stored?.etag)throw new Error('Generation ledger was not stored');
+  epgPhase(run.runId,'seal_stage_emit','exit',{elapsedMs:Date.now()-emitStarted,items:itemCount,bytes:itemBytes});
   await env.BUCKET.put(sealPayloadKey(run.runId),JSON.stringify({runId:run.runId,report:pending['programme.json'],catalog:pending['discovered-films.json'],watchlist:nextWatchlist,uncertain,fence:publication.fence,expectedProgrammeRunId:publication.programmeRunId??null}),{httpMetadata:{contentType:'application/json'}});
   run.seal={jobId:crypto.randomUUID(),phase:'ledger',sourceKey:key,etag:stored.etag,itemTotal:itemCount,prefixBytes:framing.prefix.byteLength,stagedAt:new Date().toISOString()};
   run.stage='seal';run.updatedAt=new Date().toISOString();delete run.error;

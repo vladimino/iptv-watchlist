@@ -580,11 +580,11 @@ for(const stage of ['epg','seal']){
   const lease=(await epg.readLease(env)).record;
   assert.ok(Date.parse(lease.expiresAt)>now,'renewed while the step is alive');
   assert.equal(await epg.drainState(env,now),'step_lease_live');
-  await assert.rejects(epg.assertStep(ext.env,Date.parse(lease.expiresAt)+60000),/epg_step_fenced/,'an expired lease stops a step that stopped checking in');
+  await assert.rejects(epg.assertStep(ext.env,Date.parse(lease.expiresAt)+60000),error=>error.code==='epg_step_fenced'&&error.detail==='lease_expired','an expired lease stops a step that stopped checking in, and says it was the lease that ran out (AIR-444)');
   // Another holder after expiry takes over; the old holder is fenced even if the mode revision did not move.
   const other=await epg.acquireStep(env,{kind:'executor',modeRevision:null,now:Date.parse(lease.expiresAt)+60000});
   assert.ok(other.step);
-  await assert.rejects(epg.assertStep(ext.env,Date.parse(lease.expiresAt)+61000),/epg_step_fenced/,'the old holder is not the holder');
+  await assert.rejects(epg.assertStep(ext.env,Date.parse(lease.expiresAt)+61000),error=>error.code==='epg_step_fenced'&&error.detail==='lease_lost','the old holder is not the holder: a lost lease, not an expired one');
  }
  // (d) One live step at a time: a second external step is busy until the first ends, with its own catch-up time.
  {
@@ -741,6 +741,22 @@ for(const stage of ['epg','seal']){
   await h.epg.ensure(h.env,{now:due});
   const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
   assert.equal(outcome.stopped,true);assert.equal(outcome.reason,'epoch_mismatch');
+ }
+ // (b2) AIR-444: a step that ran past its 5-minute lease (the 11 Nov 2026 `seal_stage` took 348 s) is fenced by the lease, not by an epoch change. It
+ // stops the instance exactly like any fence (unsafe, no retry, nothing quarantined) but is named `step_lease_expired`; a moved mode revision and a
+ // lost lease stay `epoch_mismatch`; the epoch itself is untouched in every case.
+ for(const [detail,expected] of [['lease_expired','step_lease_expired'],['lease_lost','epoch_mismatch'],['mode','epoch_mismatch'],[undefined,'epoch_mismatch']]){
+  let thrown=false;
+  const base=pipeline({metadataSteps:0});
+  const fenced=async(pathname,body,state,env)=>{if(pathname==='/api/sync/epg'&&!thrown){thrown=true;throw Object.assign(new Error('epg_step_fenced'),{code:'epg_step_fenced',...(detail?{detail}:{})});}return base(pathname,body,state,env);};
+  const h=cloudflare({pipeline:fenced});
+  const r=runner(h,{startAt:due});
+  await h.epg.ensure(h.env,{now:due});
+  const modeBefore=await h.epg.readMode(h.env);
+  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(outcome.stopped,true,String(detail));assert.equal(outcome.reason,expected,'the stop for '+String(detail));
+  assert.equal((await h.epg.readMode(h.env)).record.epoch,modeBefore.record.epoch,'the epoch did not change');
+  const rec=await control(h);assert.equal(rec.quarantine??null,null,'the stop writes no quarantine, exactly as an epoch stop did: '+String(detail));
  }
  // (c) An instance that ended while the control record still says running (its stop could not be recorded) is reconciled by the next ensure:
  // a counted transient `instance_terminated` and a cooldown, then a successor series that finishes the day once.

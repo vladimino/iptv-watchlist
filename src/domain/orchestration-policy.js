@@ -17,7 +17,7 @@ export const EPG_LATE_MS = 15 * 60000;
 
 export const TRANSIENT_CODES = Object.freeze(['network_error', 'timeout', 'rate_limited', 'upstream_blocked', 'upstream_5xx', 'exceeded_memory', 'exceeded_cpu', 'worker_1102', 'wakeup_lost', 'instance_terminated', 'instance_errored', 'create_uncertain', 'owner_unknown', 'd1_unavailable', 'step_failed']);
 export const PERMANENT_CODES = Object.freeze(['credentials_missing', 'credentials_rejected', 'contract_unsupported', 'config_invalid']);
-export const UNSAFE_CODES = Object.freeze(['evidence_unreadable', 'evidence_contradictory', 'checkpoint_malformed', 'lease_malformed', 'stale_generation_write', 'owner_conflict', 'epoch_mismatch', 'authority_held', 'authority_loading']);
+export const UNSAFE_CODES = Object.freeze(['evidence_unreadable', 'evidence_contradictory', 'checkpoint_malformed', 'lease_malformed', 'stale_generation_write', 'owner_conflict', 'epoch_mismatch', 'step_lease_expired', 'authority_held', 'authority_loading']);
 
 // The class of a failure code. A code that is not in the contract is refused, never guessed.
 export function failureClass(code) {
