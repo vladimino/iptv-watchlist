@@ -1,4 +1,4 @@
-// AIR-374 P2a / ADR 0118: mutation check of the canonical Film writers. Each mutant is a copy of src/canonical-film-writers.js with ONE safety rule removed or
+// AIR-374 P2a / ADR 0120: mutation check of the canonical Film writers. Each mutant is a copy of src/canonical-film-writers.js with ONE safety rule removed or
 // inverted; tests/canonical-film-writers.mjs, pointed at the mutant through FILM_WRITERS_SOURCE, must FAIL on it. A surviving mutant is a rule no test depends on.
 // Mutants are written OUTSIDE the repository tree (a temporary directory, removed afterwards), with the relative imports turned into absolute file URLs.
 // Fast by construction: the target test builds one template database per stage and copies it, and the mutants run four at a time.
@@ -18,7 +18,13 @@ const MUTANTS=[
  ['a blank title overwrites',"if(!blank(filmIn.originalTitle)){","if(filmIn.originalTitle!==undefined&&filmIn.originalTitle!==null){"],
  ['a reviewed or owner identity row does not hold the title',"else if(strong(identityDim)&&!incomingOwner)skipped.push({field:'originalTitle'","else if(false)skipped.push({field:'originalTitle'"],
  ['an untrusted source overwrites the title',"else if(rank(source)<0)skipped.push({field:'originalTitle'","else if(false)skipped.push({field:'originalTitle'"],
- ['a lower source overwrites the title',"else if(rank(source)<rank(identityDim?.source))skipped.push","else if(false)skipped.push"],
+ ['a lower source overwrites the title',"else if(rank(source)<rank(titleSourceOf(identityDim)))skipped.push","else if(false)skipped.push"],
+ ['an equal source cannot overwrite',"else if(rank(source)<rank(titleSourceOf(identityDim)))skipped.push","else if(rank(source)<=rank(titleSourceOf(identityDim)))skipped.push"],
+ ['the title rank is read from identity.source',"else if(rank(source)<rank(titleSourceOf(identityDim)))skipped.push","else if(rank(source)<rank(identityDim?.source))skipped.push"],
+ ['a bare owner name ranks as the owner',"(filmIn.source!=='owner'||filmIn.authority==='owner')","true"],
+ ['the title provenance replaces the other keys',"provenance_json=json_set(COALESCE(provenance_json,'{}'),'$.titleSource',json(?))","provenance_json=json_object('titleSource',json(?))"],
+ ['a dimension write drops the stored provenance keys',"provenance:{...kept,...rest}","provenance:{...rest}"],
+ ['a named clock clear is ignored',"for(const name of clear)final[NAMES[name]]=null;",""],
  ['canonical_identity needs no trusted tmdb id',"||!snapshot.trustedTmdb.includes(wanted.slice(5)))",")"],
  ['a canonical_identity change needs no evidence',"else if(input.evidence?.verified!==true)throw failed('film_person_identity_conflict');","else if(false)throw failed('film_person_identity_conflict');"],
  ['a reviewed identity row is replaced by an automatic one',"if(strong(row)&&!(row.authority==='owner'?(params[2]==='reviewed'&&params[7]==='owner'):(params[2]==='reviewed'&&(params[7]==='dictionary'||params[7]==='owner'||params[3]==='dictionary')))){skipped.push({field:'dimension:'+name","if(false){skipped.push({field:'dimension:'+name"],

@@ -90,9 +90,9 @@ export function planEpgIdentity(input){
  return {producer:'epg_identity',atomic:false,epgGeneration:input.epgGeneration??null,calls,skipped:[]};
 }
 
-// AIR-374 P2a / ADR 0118: the film-side facts the projector writes today (identity overwrite, metadata, sync clocks, membership, lifecycle rows, effective
+// AIR-374 P2a / ADR 0120: the film-side facts the projector writes today (identity overwrite, metadata, sync clocks, membership, lifecycle rows, effective
 // localization) as ONE fenced call per Film. Dormant like every other planner: dispatch runs it only when the route is canonical. `revisions` is the map of
-// readRevisions; the call is idempotent by CONTENT under a stable requestId (no receipt table exists for it, see ADR 0118).
+// readRevisions; the call is idempotent by CONTENT under a stable requestId (no receipt table exists for it, see ADR 0120).
 // input: {id, at, requestId, revisions?:{id:n}, updatedAt?, film:{contractVersion?, canonicalIdentity?, originalTitle?, source?, authority?}, evidence?, dimensions?,
 //   localization?, metadata?, sync?, watchlist?, epgGeneration?}
 export function planFilmWrite(input){

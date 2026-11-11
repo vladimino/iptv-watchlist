@@ -1,4 +1,4 @@
-// AIR-374 P2a / ADR 0118: the fenced canonical Film writers (identity overwrite, film_metadata, film_sync_state, watchlist membership, lifecycle rows and the
+// AIR-374 P2a / ADR 0120: the fenced canonical Film writers (identity overwrite, film_metadata, film_sync_state, watchlist membership, lifecycle rows and the
 // effective localization) on the sqlite3-CLI D1 stand-in. No Worker, R2, TMDB or production access; the module stays dormant. One template database per marker
 // stage is built once and copied per scenario. FILM_WRITERS_SOURCE points the test at a mutant copy (tests/canonical-film-writers-mutation.mjs).
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import {fenced,MUTATION_STATEMENT_CAP} from '../src/canonical-mutations.js';
 import {planFilmWrite,writerRoute,dispatch,readback,readRevisions,GAPS} from '../src/canonical-producers.js';
 
 const writers=await import(process.env.FILM_WRITERS_SOURCE?pathToFileURL(process.env.FILM_WRITERS_SOURCE).href:'../src/canonical-film-writers.js');
-const {planFilmFacts,readFilmSnapshot,writeFilmFacts,FILM_FACTS_SOURCE_CAP}=writers;
+const {planFilmFacts,readFilmSnapshot,writeFilmFacts,FILM_FACTS_SOURCE_CAP,TITLE_SOURCE_ORDER,P6_DIFFERENTIAL_EXCEPTIONS}=writers;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-film-writers-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -41,7 +41,7 @@ function fresh(stage='open',options={}){
 }
 const T='2026-11-11T10:00:00.000Z',T2='2026-11-11T11:00:00.000Z';
 const code=expected=>error=>error.code===expected;
-const dump=(file,tables)=>JSON.stringify(tables.map(table=>[table,rows(file,'SELECT * FROM '+table+' ORDER BY 1,2')]));
+const dump=(file,tables,strip=false)=>JSON.stringify(tables.map(table=>[table,rows(file,'SELECT * FROM '+table+' ORDER BY 1,2').map(row=>{if(strip&&table==='film_dimension'&&row.provenance_json){const p=JSON.parse(row.provenance_json);delete p.titleSource;return {...row,provenance_json:Object.keys(p).length?JSON.stringify(p):null};}return row;})]));
 const OWNED=['film','film_metadata','film_sync_state','watchlist_film','film_dimension','film_external_id'];
 const dim=(dimension,extra={})=>({dimension,status:'resolved',source:'discovery',sourceVersion:'tmdb:603',provenance:{tmdbId:'603'},nextAction:'stop',attempts:0,updatedAt:T,...extra});
 const META={schemaVersion:1,year:1999,runtime:136,synopsis:'A hacker learns the truth.',poster:'/p.jpg',url:'https://example.test/m',genres:['sci-fi','action'],peopleVersion:2,payload:{k:'v'},r2Key:'metadata/603.json',contentSha256:'a'.repeat(64),updatedAt:T};
@@ -174,9 +174,9 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
  const {file,env}=fresh();
  await seed(env,ID,{originalTitle:'Seed'});
  let revision=1;
- const write=async(film,over={})=>{const r=await writeFilmFacts(env,{id:ID,expectedRevision:revision,at:T,requestId:'q'+revision,film:{contractVersion:1,...film},dimensions:{identity:dim('identity',{source:film.source})},...over});if(r.written)revision++;return r;};
+ const write=async(film,over={})=>{const r=await writeFilmFacts(env,{id:ID,expectedRevision:revision,at:T,requestId:'q'+revision,film:{contractVersion:1,...film},dimensions:{identity:dim('identity')},...over});if(r.written)revision++;return r;};
  const title=()=>rows(file,'SELECT original_title t,canonical_identity c FROM film')[0];
- assert.equal((await write({originalTitle:'Seed',source:'discovery'},{dimensions:{identity:dim('identity',{source:'discovery'})}})).written,true,'the identity row of the lowest source is written');
+ assert.equal((await write({originalTitle:'Seed',source:'discovery'})).written,true,'the identity row of the lowest source is written');
  assert.equal((await write({originalTitle:'From Epg',source:'epg'})).written,true,'a higher source overwrites');
  assert.equal(title().t,'From Epg');
  const lower=await write({originalTitle:'From Discovery',source:'discovery'});
@@ -184,7 +184,10 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
  // the stored identity row says epg: a discovery write is lower, and it does not lower the recorded source either
  const lower2=await write({originalTitle:'Lower',source:'discovery'});
  assert.ok(lower2.skipped.some(item=>item.field==='originalTitle'&&item.reason==='lower_precedence'),JSON.stringify(lower2));
- assert.equal(rows(file,"SELECT source FROM film_dimension WHERE dimension='identity'")[0].source,'epg','the recorded source is not lowered');
+ const prov=()=>JSON.parse(rows(file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p);
+ assert.equal(prov().titleSource.source,'epg','the recorded title source is not lowered');
+ assert.equal(rows(file,"SELECT source FROM film_dimension WHERE dimension='identity'")[0].source,'discovery','identity.source is not overloaded');
+ assert.equal(prov().tmdbId,'603','existing provenance keys survive');
  assert.equal((await write({originalTitle:'From Tmdb',source:'tmdb'})).written,true);
  assert.equal(title().t,'From Tmdb');
  const unknown=await write({originalTitle:'From Nowhere',source:'mystery'});
@@ -209,6 +212,51 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
  await seed(env,'film:tmdb:700');
  sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:700','"+ID+"','t')");
  await assert.rejects(writeFilmFacts(env,{id:'film:tmdb:700',expectedRevision:1,at:T,requestId:'x',film:{contractVersion:1}}),code('film_person_redirect'));
+}
+
+// 7b. Title ranking: every adjacent pair, equal rank, the owner over everything, unknown sources, and the provenance shape.
+{
+ assert.deepEqual([...TITLE_SOURCE_ORDER],['owner','dictionary','tmdb','letterboxd','watchlist','epg','discovery']);
+ for(let i=0;i<TITLE_SOURCE_ORDER.length-1;i++){
+  const hi=TITLE_SOURCE_ORDER[i],lo=TITLE_SOURCE_ORDER[i+1];
+  const {file,env}=fresh();
+  await seed(env);
+  let revision=1;
+  const w=async(source,value)=>{const r=await writeFilmFacts(env,{id:ID,expectedRevision:revision,at:T,requestId:'p'+revision,film:{contractVersion:1,originalTitle:value,source,authority:source==='owner'?'owner':undefined},dimensions:{identity:dim('identity',{provenance:{tmdbId:'603',keep:'me'}})}});if(r.written)revision++;return r;};
+  const state=()=>({t:rows(file,'SELECT original_title t FROM film')[0].t,p:JSON.parse(rows(file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p)});
+  await w(lo,'lo');assert.equal(state().p.titleSource.source,lo);
+  assert.equal((await w(hi,'hi')).written,true,hi+' over '+lo);assert.equal(state().t,'hi');assert.equal(state().p.titleSource.source,hi);
+  const refused=await w(lo,'lo2');assert.equal(state().t,'hi',lo+' under '+hi);assert.ok(refused.skipped.some(item=>item.reason==='lower_precedence'));
+  assert.equal(state().p.titleSource.source,hi,'a refused title leaves its provenance');
+  assert.equal((await w(hi,'hi2')).written,true,'equal rank overwrites');assert.equal(state().t,'hi2');
+  assert.deepEqual([state().p.tmdbId,state().p.keep],['603','me'],'other provenance keys survive');
+  assert.deepEqual(Object.keys(state().p.titleSource).sort(),['at','source']);
+ }
+ const {file,env}=fresh();
+ await seed(env);
+ let revision=1;
+ const w=async(film,extra={})=>{const r=await writeFilmFacts(env,{id:ID,expectedRevision:revision,at:T,requestId:'u'+revision,film:{contractVersion:1,...film},...extra});if(r.written)revision++;return r;};
+ const t=()=>rows(file,'SELECT original_title t FROM film')[0].t;
+ await w({originalTitle:'Fill',source:'mystery'},{dimensions:{identity:dim('identity')}});
+ assert.equal(t(),'Fill','an unknown source may fill an empty field');
+ assert.equal(JSON.parse(rows(file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p).titleSource,undefined,'but records no ranked source');
+ assert.equal((await w({originalTitle:'Ranked',source:'discovery'})).written,true,'any trusted source replaces an unranked title');
+ assert.ok((await w({originalTitle:'Nope',source:'mystery'})).skipped.some(item=>item.reason==='untrusted_source'));
+ assert.ok((await w({originalTitle:'Nope',source:null})).skipped.some(item=>item.reason==='untrusted_source'));
+ await w({originalTitle:'Owner',source:'owner',authority:'owner'});
+ assert.equal(t(),'Owner','the owner wins over every source');
+ assert.ok((await w({originalTitle:'Impostor',source:'owner'})).skipped.some(item=>item.reason==='untrusted_source'),'a bare owner name without owner authority is not the owner');
+ for(const source of TITLE_SOURCE_ORDER.slice(1))await w({originalTitle:'X'+source,source});
+ assert.equal(t(),'Owner','nothing below the owner replaces it');
+ // the same title from a higher source upgrades only the provenance; a blank title changes nothing
+ const other=fresh();await seed(other.env);
+ let rev2=1;
+ const w2=async(film,extra={})=>{const r=await writeFilmFacts(other.env,{id:ID,expectedRevision:rev2,at:T,requestId:'v'+rev2,film:{contractVersion:1,...film},dimensions:{identity:dim('identity')},...extra});if(r.written)rev2++;return r;};
+ await w2({originalTitle:'Same',source:'discovery'});
+ const up=await w2({originalTitle:'Same',source:'tmdb'});
+ assert.equal(up.written,true);assert.equal(JSON.parse(rows(other.file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p).titleSource.source,'tmdb');
+ assert.equal((await w2({originalTitle:'Same',source:'epg'})).written,false,'a lower source on the same title changes nothing');
+ assert.equal((await w({originalTitle:'  ',source:'owner',authority:'owner'})).written,false);
 }
 
 // 8. Effective localization: the sources and the effective row move in one batch, the best source wins, catalog-d1's title SQL stays valid.
@@ -247,6 +295,15 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
  assert.deepEqual(rows(file,'SELECT runtime,synopsis,genres_json,year FROM film_metadata')[0],{runtime:140,synopsis:META.synopsis,genres_json:JSON.stringify(META.genres),year:1999},'a merge keeps what the call leaves blank');
  await w({sync:{metadataAt:T2}});
  assert.deepEqual(rows(file,'SELECT metadata_at,synopsis_fetched_at,people_names_version FROM film_sync_state')[0],{metadata_at:T2,synopsis_fetched_at:T,people_names_version:2});
+ // null and missing leave the stored clock; clearing one is explicit
+ await w({sync:{metadataAt:T2,synopsisFetchedAt:T,peopleNamesVersion:2,peopleLocalizedAt:T}});
+ const idle=await w({sync:{metadataAt:null,synopsisFetchedAt:undefined,peopleNamesVersion:null,peopleLocalizedAt:''}});
+ assert.equal(idle.written,false,'null, missing and blank clocks change nothing');
+ assert.deepEqual(rows(file,'SELECT metadata_at,synopsis_fetched_at,people_names_version,people_localized_at FROM film_sync_state')[0],{metadata_at:T2,synopsis_fetched_at:T,people_names_version:2,people_localized_at:T});
+ await w({sync:{clear:['synopsisFetchedAt','peopleNamesVersion']}});
+ assert.deepEqual(rows(file,'SELECT metadata_at,synopsis_fetched_at,people_names_version,people_localized_at FROM film_sync_state')[0],{metadata_at:T2,synopsis_fetched_at:null,people_names_version:null,people_localized_at:T},'a named clock is cleared, the others stay');
+ await assert.rejects(w({sync:{metadataAt:T,clear:['metadataAt']}}),code('film_person_invalid'));
+ await assert.rejects(w({sync:{clear:['nope']}}),code('film_person_invalid'));
  await w({sync:null});assert.equal(rows(file,'SELECT COUNT(*) c FROM film_sync_state')[0].c,0);
  await w({metadata:null});assert.equal(rows(file,'SELECT COUNT(*) c FROM film_metadata')[0].c,0);
  assert.equal(rows(file,'SELECT COUNT(*) c FROM watchlist_film')[0].c,1);
@@ -268,11 +325,13 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
  const canonical=fresh('open');
  await seed(canonical.env);
  await writeFilmFacts(canonical.env,facts());
- assert.equal(dump(canonical.file,OWNED),dump(projected.file,OWNED),'identical rows for identical inputs');
+ assert.equal(dump(canonical.file,OWNED,true),dump(projected.file,OWNED),'identical rows for identical inputs, apart from the named exception identity_provenance_title_source');
+ assert.ok(JSON.parse(rows(canonical.file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p).titleSource,'the named exception is visible');
+ assert.deepEqual(P6_DIFFERENTIAL_EXCEPTIONS.filter(item=>item.status==='accepted').map(item=>item.id).sort(),['identity_provenance_title_source','sync_null_clock_keeps_stored']);
  // clearing: the projector's releaseFilm / null sync / null metadata give the rows the canonical clear gives
  await repo.releaseFilm(ID);await repo.projectFilmSyncState({filmId:ID,sync:null});await repo.projectFilm({film,metadata:null,watchlist:null});
  await writeFilmFacts(canonical.env,{...facts({requestId:'clear',expectedRevision:2}),metadata:null,sync:null,watchlist:false});
- assert.equal(dump(canonical.file,OWNED),dump(projected.file,OWNED),'identical rows after the clear');
+ assert.equal(dump(canonical.file,OWNED,true),dump(projected.file,OWNED),'identical rows after the clear');
 }
 
 // 11. Producers: the planner, dispatch and readback registration; the route stays dormant below open; the module is imported only by the producers module.

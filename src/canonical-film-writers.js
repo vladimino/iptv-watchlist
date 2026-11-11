@@ -1,4 +1,4 @@
-// AIR-374 P2a / ADR 0118 (Proposed, rules DRAFT-FOR-OWNER-REVIEW). Fenced canonical writers for the FILM-side producer GAPs of the producer adapters module:
+// AIR-374 P2a / ADR 0120 (accepted rules: title order, titleSource, sync clocks; the others still draft). Fenced canonical writers for the FILM-side producer GAPs of the producer adapters module:
 // the identity overwrite (canonical_identity, original_title), film_metadata (set, merge, clear), film_sync_state (set, release), watchlist_film
 // membership (set, clear), the film_dimension lifecycle rows (identity, metadata) and the EFFECTIVE localization row, which is materialised in the same
 // batch as the automatic source write so the SQL of src/catalog-d1.js never sees a source with no effective value.
@@ -10,15 +10,17 @@
 //   canonical rule is stricter (never blank, never overwrite reviewed/owner, trusted-source precedence) the difference is the documented rule.
 // - writeFilmFacts(env,input) is the ONE fenced batch: the marker generation, the Film revision and the absence of a redirect are proven in the batch itself
 //   (fenced.head / fenced.assertSql), the revision is bumped, and a lost fence or revision rolls it back whole (film_person_fence / film_person_revision_conflict).
+// - Title provenance (owner-approved 11 Nov 2026): the source of the stored original_title is kept in a DISTINCT key `titleSource` of film_dimension.identity.provenance_json,
+//   shape {"source":"<trusted source>","at":"<ISO instant of the write>"}; every other provenance key is preserved, a row without the key reads as unranked.
 // - Idempotency (owner decision 5): every call carries a stable requestId. Without a receipt table the replay is a no-op by CONTENT: if D1 already holds
 //   exactly the rows the call would write (updated_at aside), no batch is opened. A durable per-request receipt for these writes would need a table beyond the
-//   existing ones; that is documented in ADR 0118 and NOT added here (no migration in this change).
+//   existing ones; that is documented in ADR 0120 and NOT added here (no migration in this change).
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced,MUTATION_STATEMENT_CAP} from './canonical-mutations.js';
 import {resolveLocalization} from './localization-sources.js';
 
 export const FILM_FACTS_SOURCE_CAP=10;
-// Trusted sources of the identity overwrite, highest first. A value of an unlisted source can fill an empty field but never overwrite anything.
+// Owner-approved order (11 Nov 2026) for the selection/overwrite of original_title ONLY, highest first; it is not a ranking of any other field. A value of an unlisted source can fill an empty field but never overwrite anything.
 export const TITLE_SOURCE_ORDER=Object.freeze(['owner','dictionary','tmdb','letterboxd','watchlist','epg','discovery']);
 const TMDB_IDENTITY=/^tmdb:[1-9]\d{0,11}$/;
 const SOURCE=/^[a-z][a-z0-9_]{0,39}$/;
@@ -30,6 +32,15 @@ const blank=value=>value===undefined||value===null||(typeof value==='string'&&va
 const json=value=>value==null?null:JSON.stringify(value);
 const parse=text=>{if(text==null)return null;try{return JSON.parse(text);}catch{return null;}};
 const instant=value=>{if(typeof value!=='string'||!ISO.test(value))return null;const ms=Date.parse(value);return Number.isFinite(ms)?new Date(ms).toISOString():null;};
+// Machine-readable differences from the projector that the P6 differential harness must report as NAMED exceptions, never as parity.
+export const P6_DIFFERENTIAL_EXCEPTIONS=Object.freeze([
+ {id:'sync_null_clock_keeps_stored',status:'accepted',area:'film_sync_state',rule:'A missing or null clock in a partial sync update leaves the stored clock unchanged; clearing needs sync.clear or sync:null. The projector writes a missing clock as null.'},
+ {id:'identity_provenance_title_source',status:'accepted',area:'film_dimension.identity.provenance_json',rule:'The canonical writer adds a titleSource key {source,at} when it writes original_title; the projector writes the provenance it is given.'},
+ {id:'blank_never_overwrites',status:'draft',area:'film, film_metadata, film_dimension localization',rule:'A blank incoming value keeps the stored one; the projector overwrites.'},
+ {id:'reviewed_owner_rows_protected',status:'draft',area:'film_dimension, film.original_title, film.canonical_identity',rule:'A reviewed or owner identity/lifecycle row is never replaced by an automatic write; the projector guards only localization.'},
+ {id:'redirected_film_refused',status:'draft',area:'watchlist_film and all film rows',rule:'A redirected Film is refused (film_person_redirect); the projector skips membership release silently.'},
+]);
+const titleSourceOf=row=>{try{const value=JSON.parse(row?.provenance_json||'null')?.titleSource;return plain(value)&&typeof value.source==='string'?value.source:null;}catch{return null;}};
 const rank=source=>{const index=TITLE_SOURCE_ORDER.indexOf(source);return index<0?-1:TITLE_SOURCE_ORDER.length-index;};
 const strong=row=>!!row&&(row.status==='reviewed'||row.authority==='owner');
 
@@ -127,10 +138,10 @@ export function planFilmFacts(snapshot,input){
  const stored=snapshot.film;
  // (a) identity overwrite rules
  const identityDim=snapshot.dimensions.identity;
- const incomingIdentity=input.dimensions?.identity;
- const source=filmIn.source??incomingIdentity?.source??null;
+ // `owner` ranks only with authority owner; a bare source name of owner is untrusted.
+ const source=typeof filmIn.source==='string'&&(filmIn.source!=='owner'||filmIn.authority==='owner')?filmIn.source:null;
  const incomingOwner=filmIn.authority==='owner'&&source==='owner';
- let canonicalIdentity=stored?.canonical_identity??null,originalTitle=stored?.original_title??null;
+ let canonicalIdentity=stored?.canonical_identity??null,originalTitle=stored?.original_title??null,titleWritten=false;
  if(!blank(filmIn.canonicalIdentity)){
   const wanted=String(filmIn.canonicalIdentity).trim();
   if(!TMDB_IDENTITY.test(wanted)||!snapshot.trustedTmdb.includes(wanted.slice(5)))skipped.push({field:'canonicalIdentity',reason:'needs_trusted_tmdb_id'});
@@ -142,12 +153,12 @@ export function planFilmFacts(snapshot,input){
  }else if(filmIn.canonicalIdentity!==undefined)skipped.push({field:'canonicalIdentity',reason:'blank'});
  if(!blank(filmIn.originalTitle)){
   const wanted=String(filmIn.originalTitle).trim();
-  if(originalTitle===null||originalTitle==='')originalTitle=wanted;
-  else if(originalTitle===wanted){/* unchanged */}
+  if(originalTitle===null||originalTitle===''){originalTitle=wanted;titleWritten=rank(source)>=0;}
+  else if(originalTitle===wanted){titleWritten=rank(source)>rank(titleSourceOf(identityDim));}
   else if(strong(identityDim)&&!incomingOwner)skipped.push({field:'originalTitle',reason:identityDim.authority==='owner'?'owner_kept':'reviewed_kept'});
   else if(rank(source)<0)skipped.push({field:'originalTitle',reason:'untrusted_source'});
-  else if(rank(source)<rank(identityDim?.source))skipped.push({field:'originalTitle',reason:'lower_precedence'});
-  else originalTitle=wanted;
+  else if(rank(source)<rank(titleSourceOf(identityDim)))skipped.push({field:'originalTitle',reason:'lower_precedence'});
+  else{originalTitle=wanted;titleWritten=true;}
  }else if(filmIn.originalTitle!==undefined)skipped.push({field:'originalTitle',reason:'blank'});
  const filmChanged=!stored||stored.contract_version!==filmIn.contractVersion||(stored.canonical_identity??null)!==canonicalIdentity||(stored.original_title??null)!==originalTitle;
  statements.push(['INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=excluded.canonical_identity,original_title=excluded.original_title,updated_at=excluded.updated_at',[id,filmIn.contractVersion,canonicalIdentity,originalTitle,updatedAt]]);
@@ -158,12 +169,23 @@ export function planFilmFacts(snapshot,input){
   const state=input.dimensions?.[name];
   if(state===undefined)continue;
   if(state.dimension!==name)throw failed('film_person_invalid');
-  const params=dimensionParams(id,state),row=snapshot.dimensions[name];
+  const row=snapshot.dimensions[name];
+  // Existing provenance keys survive a write; the titleSource key is changed only together with the title it ranks (below).
+  let given=state;
+  if(name==='identity'){const {titleSource:_ignored,...rest}=plain(state.provenance)?state.provenance:{};const kept=plain(parse(row?.provenance_json))?parse(row.provenance_json):{};given={...state,provenance:{...kept,...rest}};if(!Object.keys(given.provenance).length)given={...state,provenance:state.provenance??null};}
+  const params=dimensionParams(id,given);
   if(strong(row)&&!(row.authority==='owner'?(params[2]==='reviewed'&&params[7]==='owner'):(params[2]==='reviewed'&&(params[7]==='dictionary'||params[7]==='owner'||params[3]==='dictionary')))){skipped.push({field:'dimension:'+name,reason:row.authority==='owner'?'owner_kept':'reviewed_kept'});continue;}
-  // The identity row's source is the recorded provenance of the title. A call whose title lost on precedence must not also lower that provenance.
-  if(name==='identity'&&row&&skipped.some(item=>item.field==='originalTitle'&&(item.reason==='lower_precedence'||item.reason==='untrusted_source'))&&rank(state.source)<rank(row.source)){skipped.push({field:'dimension:identity',reason:'lower_precedence'});continue;}
   if(!sameDimension(row,params))changes.push('dimension:'+name);
   statements.push([dimensionUpsert(),params]);
+ }
+ // The provenance of the title: titleSource {source,at} inside identity.provenance_json, written only with the title it ranks, other keys untouched.
+ if(titleWritten){
+  const wroteIdentity=statements.some(item=>item[1]?.[1]==='identity'&&String(item[0]).startsWith('INSERT INTO film_dimension'));
+  if(!snapshot.dimensions.identity&&!wroteIdentity)skipped.push({field:'titleSource',reason:'no_identity_row'});
+  else{
+   if(titleSourceOf(identityDim)!==source)changes.push('titleSource');
+   statements.push(["UPDATE film_dimension SET provenance_json=json_set(COALESCE(provenance_json,'{}'),'$.titleSource',json(?)) WHERE film_id=? AND dimension='identity'",[JSON.stringify({source,at}),id]]);
+  }
  }
  // (e) effective localization, in the same batch as the source write
  if(input.localization?.state!==undefined){
@@ -203,7 +225,12 @@ export function planFilmFacts(snapshot,input){
   if(!plain(input.sync))throw failed('film_person_invalid');
   const held=snapshot.sync||{};
   const pick=(next,old)=>blank(next)?(old??null):next;
+  // Missing or null leaves the stored clock; clearing one is the explicit `clear` list (or sync:null to release the row).
+  const clear=input.sync.clear===undefined?[]:input.sync.clear;
+  const NAMES={metadataAt:0,synopsisFetchedAt:1,peopleNamesVersion:2,peopleLocalizedAt:3};
+  if(!Array.isArray(clear)||clear.some(name=>!(name in NAMES)||!blank(input.sync[name])))throw failed('film_person_invalid');
   const final=[pick(input.sync.metadataAt,held.metadata_at),pick(input.sync.synopsisFetchedAt,held.synopsis_fetched_at),Number.isInteger(input.sync.peopleNamesVersion)?input.sync.peopleNamesVersion:(held.people_names_version??null),pick(input.sync.peopleLocalizedAt,held.people_localized_at)];
+  for(const name of clear)final[NAMES[name]]=null;
   const same=!!snapshot.sync&&final[0]===(held.metadata_at??null)&&final[1]===(held.synopsis_fetched_at??null)&&final[2]===(held.people_names_version??null)&&final[3]===(held.people_localized_at??null);
   if(!same)changes.push('sync');
   statements.push([SYNC_UPSERT,[id,...final]]);
