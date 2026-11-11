@@ -196,7 +196,7 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 - [`scripts/film-person-connector-run.mjs`](../../scripts/film-person-connector-run.mjs): the connector path as a reviewed tool, with a small CLI (`plan`, `load`, `verify`, `run`, `seal`, `sql`). **Inactive:** not bundled, no Worker or `src/` import. It never calls the connector (only the human-facing operator session can) and its only network is the read-only R2 client it is given (`R2_SNAPSHOT_*`). The D1 side is the local copy: one read-only `SELECT` at a time, plus the three projector-lease statements applied to the copy. Private files (the copy, the measurement, the ledger) must be outside the repository; the CLI refuses a path inside it.
 - [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js): the `cutover_accepted` version 1 gate and the two pinned permissions. **Inactive:** only the recorder names it, through a dynamic import inside its own path.
-- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 45 connector mutants, every one killed; a mutant that does not parse or load fails the check).
+- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 48 connector mutants, every one killed; a mutant that does not parse or load fails the check).
 
 ### The `cutover_accepted` gate
 
@@ -229,6 +229,8 @@ A value that **differs** is never accepted: `differs` must be 0 in every class, 
 Missing or inconsistent evidence gives `verified:false` with its reasons, and both this gate and the recorder refuse the ledger. **This is operator attestation, not cryptographic proof.** The evidence files are plain JSON the operator saved from the connector, and the synthetic test builds such files with a fake connector. The checks stop an incomplete, mixed or moved run from being recorded; they do not authenticate one.
 
 **Recording.** `recordBaselineVerified` takes `path: RECORDING_PATHS.cutover_accepted` (`{gate: 'cutover_accepted', version: 1}`) and stores `cutover_accepted/v1:<acceptedDigest>`. There is no fallback: the strict and v1 paths refuse this ledger and this path refuses a ledger without the section.
+
+**The derived inputs are evidence, not scratch space.** `run` verifies the D1-derived values from a pristine deep copy taken right after the capture (`run.derivedProblems`), hands `runParity` its own deep copy and the tool's class-entry read a second one, and notes in the measurement whether `runParity`'s view build changed the values it was handed (`run.derivedInputsMutatedByView`; it never affects `verified`). Reason, observed on 11 Nov 2026 on production-shaped data (offline, see [the evidence](../evidence/d1-migration/air-373-derived-inputs-pristine-offline-2026-11-11.md)): the reviewed view build (`buildExpected`, called inside `runParity`) adds fields to the published EPG snapshot **in place** (owner-reviewed localized titles on programme and watchlist entries), so `verifyDerived` was `[]` right after the capture and `derived_digest:publishedEpg` afterwards. Verifying after `runParity` therefore refused every real run, and the second view build ran on already changed data.
 
 ### The tables that are copied
 
