@@ -37,10 +37,10 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  const found=ratings(bucket);assert.equal(found.length,1);const event=found[0];
  assert.equal(event.removal.rated,1,'one removed film rated');assert.equal(event.removal.resolved,1,'one reference settled');assert.equal(event.diary.written,4);
  const d=plain(event.details);
- eq(d.added.map(f=>[f.id,f.title,f.year,f.tmdb,f.rating]).sort(),[['lidA','Фильм А',2001,'111',4],['lidB','Фильм Б',2010,null,null],['lidR',null,null,null,3.5]].sort(),'new watched facts, with the rating when the entry has one; the removed film is not in metadata, so no name here');
+ eq(d.added.map(f=>[f.id,f.title,f.year,f.tmdb,f.rating]).sort(),[['lidA','Фильм А',2001,'111',4],['lidB','Фильм Б',2010,null,null],['lidR','Удалённый фильм',1999,null,3.5]].sort(),'new watched facts, with the rating when the entry has one; the removed film is named from its removal event');
  eq(d.updated.map(f=>[f.id,f.title,f.tmdb,f.from,f.rating]),[['lidU','Фильм У','222',3,4.5]],'a changed rating keeps the stored earlier one');
- eq(d.rated.map(f=>[f.id,f.title,f.year,f.rating]),[['lidR','Удалённый фильм',1999,3.5]],'the removed film is named from its removal event');
- eq(d.resolved.map(f=>[f.id,f.title,f.year,f.rating]),[['lidR','Удалённый фильм',1999,3.5]],'and the settled reference names the same film; the two counters measure different things');
+ // AIR-443: the removed film is one news line (its new fact), not also a `rated` and a `resolved` line; the counters keep their separate measures.
+ assert.equal(d.rated,undefined,'no second line for the same film');assert.equal(d.resolved,undefined,'a settled reference is service work, not news');
  assert.equal(d.more,undefined,'nothing over the cap');
  assert.doesNotMatch(JSON.stringify(event.details),/https?:|letterboxd\.com|rows|payload/i,'no urls, rows or raw data in the details');
  // The aggregates are untouched by the details: written/unchanged/rated/resolved keep their meaning.
@@ -60,7 +60,7 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
  net.diary.set(1,diaryPage([diaryRow('twice',8,'2026-11-08','v1')]));
  await runOnce(R,env,clock);
  const event=ratings(bucket)[0];
- assert.equal(event.removal.resolved,2,'two references settled');assert.equal(event.details.resolved.length,1,'the film is named once');assert.equal(event.details.rated.length,1);
+ assert.equal(event.removal.resolved,2,'two references settled');assert.equal(event.details.resolved,undefined,'a settled reference is not listed');assert.equal(event.details.added.length,1,'the film is named once, as the new fact it is');assert.equal(event.details.rated,undefined);
 }
 
 // 1c. AIR-393 durability: a crash at every point between the facts and the end of the step still gives the event the exact films, and a replay of a
@@ -205,14 +205,52 @@ const queueEntry=(slug,eventKey,eventAt)=>({url:`https://letterboxd.com/film/${s
   assert.equal(killedOnce,true,label+': the step was killed');assert.equal(reply.state,'finished',label+': '+JSON.stringify(reply));
   const event=ratings(bucket)[0],d=plain(event.details||{});
   eq((d.rated||[]).map(f=>f.id).sort(),['gone0','gone1','gone2'],label+': every rating found by a lookup is named');
-  eq((d.resolved||[]).map(f=>f.id).sort(),['gone0','gone1','gone2','settled1'],label+': every settled reference is named, a film with two references once');
-  assert.equal(d.resolved.find(f=>f.id==='gone0').title,'Удалён 0',label);assert.equal(d.resolved.find(f=>f.id==='settled1').rating,3.5,label);
+  // AIR-443: settling references is service work: not a news line (the counter keeps it), and a film already known (settled1) is not announced again.
+  assert.equal(d.resolved,undefined,label+': no list of settled references');assert.equal(JSON.stringify(d).includes('settled1'),false,label+': a rating known earlier is not announced again');
+  assert.equal(d.rated.find(f=>f.id==='gone0').title,'Удалён 0',label);
   assert.equal(bucket.value(RUN).removal.intents?.length||0,0,label+': no intent is left behind');
   // Nothing is claimed twice and the queue semantics are unchanged: every reference ended resolved.
   const queue=bucket.value(QUEUE);assert.ok(Object.entries(queue.films).filter(([id])=>id!=='unrated1'&&id!=='noevent1').every(([,entry])=>(entry.refs||[]).every(ref=>ref.resolved===true)),label);
   assert.equal(JSON.stringify(d).includes('unrated1'),false,label+': a looked-up film that was not rated is not claimed (the intent is dropped, the effect never happened)');
-  assert.equal(JSON.stringify(d.resolved).includes('noevent1'),false,label+': a reference that could not be settled is not claimed as resolved');
+  assert.equal(JSON.stringify(d).includes('noevent1'),false,label+': a reference that could not be settled is not claimed');
  }
+}
+
+// 1h. AIR-443, the Toy Soldiers case across three runs: day A records a new fact (news), day B removes the film from the watchlist (queued), day C settles the removal
+// with the rating that is already known. Day C must not announce the same unchanged rating again, in any list, while the removal event still receives the rating and
+// the counters keep their separate measures. A real change of that rating later is news once.
+{
+ const {clock,net,bucket,env,R}=setup();
+ bucket.set('metadata.json',{toy:{id:'toy',title:'Игрушечные солдатики',year:1991,tmdbId:'10750'}});
+ net.diary.set(1,diaryPage([diaryRow('toy',7,'2026-11-09','v1')]));
+ migrated(bucket);
+ const dayA=await runOnce(R,env,clock);assert.equal(dayA.reply.state,'finished');
+ let list=ratings(bucket);assert.equal(list.length,1);eq(plain(list[0].details).added.map(f=>[f.id,f.rating]),[['toy',3.5]],'day A: the new fact is the one news line');
+ // Day B: the watchlist event registers the removal; the queue holds the film with its reference.
+ clock.now+=24*H;const eventAt=at(clock.now-H),eventKey=eventKeyOf(eventAt,'day-b-watchlist');
+ bucket.set(eventKey,{...removalEvent('day-b-watchlist',[{id:'toy',title:'Игрушечные солдатики',year:1991}]),at:eventAt});
+ migrated(bucket,{films:{toy:{...queueEntry('toy',eventKey,eventAt),enqueuedAt:eventAt,nextAttemptAt:eventAt}}});
+ // Day C: the Diary still lists the same viewing; the fact is unchanged and the queued film is settled by it.
+ clock.now+=24*H;const dayC=await runOnce(R,env,clock);assert.equal(dayC.reply.state,'finished',JSON.stringify(dayC.reply));
+ list=ratings(bucket);assert.equal(list.length,2,'one event per run');
+ const eventC=list.find(event=>event.runId===dayC.runId),detailsC=plain(eventC.details||{});
+ assert.equal(JSON.stringify(detailsC).includes('toy'),false,'day C names the unchanged rating nowhere: no added, rated or resolved line');
+ assert.equal(detailsC.rated,undefined);assert.equal(detailsC.resolved,undefined);assert.equal(detailsC.added,undefined);
+ assert.equal(eventC.removal.rated,1,'the aggregate keeps counting the technical work');assert.equal(eventC.removal.resolved,1);assert.equal(eventC.diary.added+eventC.diary.updated+eventC.diary.written,0,'the fact itself was not rewritten');
+ assert.equal(JSON.stringify(bucket.value(eventKey)).includes('3.5'),true,'the removal event still receives the rating');
+ assert.equal(list.filter(event=>JSON.stringify(event.details||{}).includes('toy')).length,1,'the film is news in exactly one event');
+ // A real change of the rating is news once, as an update with the earlier value.
+ net.diary.set(1,diaryPage([diaryRow('toy',8,'2026-11-10','v2')]));clock.now+=24*H;
+ const dayD=await runOnce(R,env,clock);assert.equal(dayD.reply.state,'finished');
+ const detailsD=plain(ratings(bucket).find(event=>event.runId===dayD.runId).details);eq(detailsD.updated.map(f=>[f.id,f.from,f.rating]),[['toy',3.5,4]],'day D: the real change is one update line');assert.equal(detailsD.rated,undefined);
+}
+
+// 1i. A run recorded before this change (its stored contribution lists `resolved` and a `rated` film that the same run reported as added) builds the event without the repeats.
+{
+ const {R}=setup();
+ const run={diary:{pageChanges:{1:{state:'applied',added:[{id:'a',rating:4}],updated:[],rated:[{id:'a',rating:4},{id:'b',rating:3}],resolved:[{id:'a',rating:4},{id:'b',rating:3}],more:{resolved:2}}}},removal:{changes:{added:[],updated:[],rated:[],resolved:[{id:'c',rating:2}],more:{}}}};
+ const out=plain(R.detailsOf(run));
+ {eq(out.details.added.map(f=>f.id),['a']);eq(out.details.rated.map(f=>f.id),['b'],'a film is not listed as rated when the run reported it as added');assert.equal(out.details.resolved,undefined);assert.equal(out.details.more?.resolved,undefined);}
 }
 
 // 1d. A repeated merge of the same contribution is ignored, never added again.

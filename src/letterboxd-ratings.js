@@ -113,6 +113,11 @@ const LetterboxdRatings=(()=>{
   const pages=Object.keys(run?.diary?.pageChanges||{}).sort().map(key=>run.diary.pageChanges[key]).filter(page=>page&&page.state==='applied');
   const merged=[...pages,run?.removal?.changes].reduce((all,part)=>part?mergeChanges(all,part,STORE_CAP):all,mergeChanges(null,null,STORE_CAP));
   const incomplete=pages.some(page=>page.incomplete===true)||Object.values(merged.more).some(count=>count>0);
+  // AIR-443: the user-facing lists are news: a first fact (`added`), a real change (`updated`) and a rating first found for a removed film by a lookup (`rated`), each film once.
+  // `resolved` is service work (a removal reference settled; the `removal.resolved` counter keeps that measure) and is no longer listed; neither is a `rated` film that the
+  // same run already reported as `added` or `updated`. Runs recorded before this change are filtered the same way at the moment their event is built.
+  const reported=new Set([...merged.added,...merged.updated].map(item=>item.id));
+  merged.rated=merged.rated.filter(item=>!reported.has(item.id));merged.resolved=[];delete merged.more.resolved;
   const shown={},more={};
   for(const group of CHANGE_GROUPS){
    const list=merged[group];if(list.length)shown[group]=list.slice(0,CHANGES_CAP);
@@ -295,7 +300,7 @@ const LetterboxdRatings=(()=>{
    out[group]=[];
    for(const [index,item] of (groups[group]||[]).entries()){
     // Only the films an event can show (the first 25 of a group) are looked up by their removal event; the rest are only counted.
-    const known=labels.get(String(item.id))||{},own=item.title?{title:item.title,year:item.year??null}:(group==='rated'||group==='resolved')&&!known.title&&index<CHANGES_CAP?await removedLabel(env,item.id):{};
+    const known=labels.get(String(item.id))||{},own=item.title?{title:item.title,year:item.year??null}:(group==='added'||group==='rated'||group==='resolved')&&!known.title&&index<CHANGES_CAP?await removedLabel(env,item.id):{};
     out[group].push({...item,title:item.title||own.title||known.title||null,year:item.year??own.year??known.year??null,tmdb:item.tmdb||known.tmdb||null});
    }
   }
@@ -334,7 +339,7 @@ const LetterboxdRatings=(()=>{
      const groups={added:[],updated:[],rated:[],resolved:[]};
      for(const change of await LetterboxdFacts.planDiaryChanges(env,evidence))(change.kind==='added'?groups.added:groups.updated).push({id:change.lid,rating:change.rating,...(change.kind==='updated'?{from:change.from}:{})});
      const queue=(await read(env,REMOVAL_LOOKUP_KEY)).value;
-     if(removalQueueV2(queue))for(const item of evidence)if(item.rating!=null&&half(item.rating)!=null&&queue.films[item.lid]&&queue.films[item.lid].state!=='rated')groups.rated.push({id:item.lid,rating:item.rating});
+     // AIR-443: a removed film whose rating the Diary supplies is not news here: a first fact is already `added` and a fact that exists is a rating the user was told about earlier.
      if(changeCount(groups)){
       plan={...mergeChanges(null,await labelledChanges(env,groups),STORE_CAP),state:'planned'};planned[key]=plan;
       await own(current=>({...current,updatedAt:iso(clock()),diary:{...(current.diary||{}),pageChanges:{...(current.diary?.pageChanges||{}),[key]:plan}}}));
@@ -400,7 +405,7 @@ const LetterboxdRatings=(()=>{
    for(const item of list){
     const entry=removalQueueV2(queue)?queue.films[item.id]:null;
     if(item.kind==='rated'){if(entry?.state==='rated'&&half(entry.rating)!=null)groups.rated.push({id:item.id,rating:entry.rating});}
-    else{const ref=(entry?.refs||[]).find(value=>value.eventKey===item.eventKey);if(ref&&ref.resolved===true&&half(item.rating)!=null)groups.resolved.push({id:item.id,rating:item.rating});}
+    // AIR-443: settling a removal reference with a rating that is already known is service work (the `removal.resolved` counter), not a news line.
    }
    let labelled=groups;if(changeCount(groups)){try{labelled=await labelledChanges(env,groups);}catch{}}
    const done=new Set(list.map(intentKey));
@@ -558,5 +563,5 @@ const LetterboxdRatings=(()=>{
   const fe=gated.fenceEnv;
   return {status:200,body:await (action==='start'?start(fe,body):action==='step'?step(fe,body):migrate(fe,body))};
  }
- return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
+ return {KEYS,CONTRACT_VERSION,readDocument:read,writeDocument:put,ratingsEventOf,reconcileEvent,mergeChanges,detailsOf,removalChangeFields,validate,handle,LEASE_MS,LEASE_MARGIN_MS,ABANDONED_MS,STEP_LOOKUPS,SETTLE_PER_STEP,migrationState,separateActive,staleness,start,step,migrate,status,health,syncHandover,readRun:async env=>(await read(env,KEYS.run)).value};
 })();
