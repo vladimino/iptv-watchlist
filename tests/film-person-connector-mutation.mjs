@@ -130,6 +130,10 @@ const CONNECTOR=[
  ['wall-clock guard',"if(chunks.length&&Date.now()-START>WALL_MS)break;",""],
  ['wall clock starts at the call',"const START=Date.now();","const START=0;"],
  ['wall-clock budget is below the 60 s limit',"export const WALL_CLOCK_MS=40_000;","export const WALL_CLOCK_MS=400_000;"],
+ // AIR-373, 11 Nov 2026: the reviewed view build changes the published EPG snapshot in place; the derived inputs are verified and handed on as copies
+ ['derived inputs verified from the pristine copy',"run.derivedProblems=verifyDerived(manifest,pristine);","run.derivedProblems=verifyDerived(manifest,parityInput);"],
+ ['one view build, one copy',"const ledgerInput=derivedCopy();","const ledgerInput=parityInput;"],
+ ['derived guard also fires on the mutated flag',"run.derivedInputsMutatedByView=verifyDerived(manifest,parityInput).length>0;","run.derivedInputsMutatedByView=false;"],
  ['pad ignored',"if('pad' in value){const {pad:_pad,...rest}=value;value=rest;}",""],
 ];
 const TARGETS=[

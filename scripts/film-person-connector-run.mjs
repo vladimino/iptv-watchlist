@@ -331,18 +331,28 @@ export async function runMeasurement({driver,plan,client,asOf,now=()=>new Date()
  const cap=await captureProjectorInputs({client,db:binding,now});
  if(!cap.ok)return {ok:false,reasons:cap.reasons.map(item=>'capture:'+item)};
  const manifest=cap.manifest;
- // the measurement of record: the merged runParity, unmodified
- const parity=await runParity({manifest,bodies:cap.bodies,derivedValues:cap.derivedValues,db:binding,client,leaseId,asOf,now});
+ // The captured derived values are read-only evidence. The reviewed view build stamps localized fields onto the published EPG snapshot IN PLACE (observed on
+ // production-shaped data on 11 Nov 2026), so each consumer gets its own deep copy and the digest check runs on a copy taken before any of them.
+ const pristine=structuredClone(cap.derivedValues);
+ const derivedCopy=()=>structuredClone(pristine);
+ // the measurement of record: the merged runParity, unmodified, on its own copy
+ const parityInput=derivedCopy();
+ const parity=await runParity({manifest,bodies:cap.bodies,derivedValues:parityInput,db:binding,client,leaseId,asOf,now});
  if(!parity.ok||!parity.ledger)return {ok:false,reasons:parity.reasons.map(item=>'parity:'+item)};
  // The cutover ledger needs the class entries, which runParity does not return. They are read again from the SAME copy with the same reviewed functions, and
  // the resulting parity ledger must have the digest of runParity's ledger (checked in `seal`), so this second read can never describe another state.
- run.manifest=manifest;run.manifestProblems=verifyManifest(manifest,cap.bodies);run.derivedProblems=verifyDerived(manifest,cap.derivedValues);
+ run.manifest=manifest;run.manifestProblems=verifyManifest(manifest,cap.bodies);run.derivedProblems=verifyDerived(manifest,pristine);
+ // noted only, never an input to `verified`: whether runParity's view build changed the values it was handed
+ run.derivedInputsMutatedByView=verifyDerived(manifest,parityInput).length>0;
  run.gates.captureBefore=manifest.d1.before;run.gates.captureAfter=manifest.d1.after;
  run.witness.captureBefore=manifest.witness.before;run.witness.captureAfter=manifest.witness.after;
  let classes,cut;
  try{
   run.gates.parityBefore=await readCaptureGate(guarded,{now});run.witness.parityBefore=await readWitness(readerOf(guarded));
-  const built=buildExpected({manifest,bodies:cap.bodies,derivedValues:cap.derivedValues,asOf});
+  // the tool's own view build gets another fresh copy, which must still be the captured evidence: it never sees what runParity's build did to its own
+  const ledgerInput=derivedCopy();
+  if(verifyDerived(manifest,ledgerInput).length)return {ok:false,reasons:['derived_inputs_not_pristine']};
+  const built=buildExpected({manifest,bodies:cap.bodies,derivedValues:ledgerInput,asOf});
   classes=expectedFromInputs(built.inputs,extraClasses({...built,asOf}));
   cut=await readStableCut(readerOf(binding),{leaseId:run.leaseId,now});
   run.cut={done:cut.done===true,consistent:cut.consistent===true,reasons:cut.reasons,unavailable:cut.unavailable??null,pages:cut.pages,leaseBefore:cut.gateBefore?.lease??null,leaseAfter:cut.gateAfter?.lease??null};

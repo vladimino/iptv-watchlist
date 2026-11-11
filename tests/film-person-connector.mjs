@@ -16,7 +16,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 import {RECORDING_PATHS,readWitness,recordBaselineVerified} from '../src/film-person-baseline.js';
 import {transitionAuthority} from '../src/film-person-authority.js';
 import {ACCEPTED_DISCREPANCIES,COPY_TABLES,DISCOVERY_COPY_TABLES,cutoverAcceptedGate,requiredStatementIds} from '../src/film-person-cutover-accepted.js';
-import {GATE_STATEMENTS,factsSql} from '../scripts/film-person-capture.mjs';
+import {GATE_STATEMENTS,buildExpected,factsSql,verifyDerived} from '../scripts/film-person-capture.mjs';
 import {runCutoverMinimum} from '../scripts/film-person-cutover-run.mjs';
 import {renderSql} from '../scripts/d1-backfill.mjs';
 import {createReadOnlyClient,readCredentials} from '../scripts/r2-snapshot-export.mjs';
@@ -25,6 +25,7 @@ const K=await import(process.env.CONNECTOR_MODULE?pathToFileURL(path.resolve(pro
 const started=Date.now();
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-connector-'));
 process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
+const stable=value=>JSON.stringify(value,(key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.entries(item).sort(([a],[b])=>a<b?-1:1)):item);
 const sha=text=>createHash('sha256').update(text).digest('hex');
 const runner=(args,input)=>sqliteSync(args,{input});
 const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:text});if(r.status!==0)throw new Error(r.stderr);};
@@ -47,6 +48,7 @@ INSERT INTO published_epg_document VALUES ('run-1','programme',0,${q(JSON.string
 UPDATE published_epg_authority SET mode='d1',cutover='open',programme_run_id='run-1',generation=3;
 UPDATE owner_review_authority SET mode='d1',generation=1;
 UPDATE discovery_authority SET mode='d1',cutover='open',programme_run_id='run-1',generation=5;
+INSERT INTO owner_review_entry (kind,source_key,payload_json,identity_link,identity_state,generation) VALUES ('film','alpha',${q(JSON.stringify({localization:{status:'reviewed',provenance:{authority:'owner'},value:'Alpha (owner)'}}))},NULL,'unlinked',1);
 INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:kept',1,'Kept','${DAY}');
 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<2100) INSERT INTO canonical_revision (kind,id,revision,updated_at) SELECT 'film','film:r'||i,i,'${DAY}' FROM n;`);
 
@@ -422,6 +424,24 @@ assert.equal(measured.ok,true,measured.reasons.join());
  assert.ok(m.counts.select>100&&m.counts.leaseWrites>10&&m.counts.refused===0,JSON.stringify(m.counts));
  assert.deepEqual([m.expected.classes.film.map(item=>item[0]),m.actual.classes.film.map(item=>item[0])],[['film:alpha'],['film:kept']],'the private measurement keeps the keys');
  assert.doesNotMatch(JSON.stringify(measured.summary),/film:|Film alpha|letterboxd/,'the summary names no id');
+ // REGRESSION (AIR-373, 11 Nov 2026): the reviewed view build stamps the owner localization onto the published EPG snapshot IN PLACE. First prove that this
+ // fixture really has that effect with the merged buildExpected on its own (otherwise the regression below proves nothing), then that the tool is immune.
+ {
+  const owner={contractVersion:1,films:{alpha:{localization:{status:'reviewed',provenance:{authority:'owner'},value:'Alpha (owner)'}}},people:{}};
+  const derived={publishedEpg:{generation:3,programmeRunId:'run-1',programme:structuredClone(programme),watchlist:structuredClone(watchlist)},ownerReviews:owner};
+  const real=m.run.manifest,digest=value=>sha(stable(value));
+  const manifest={...real,objects:[],routes:{publishedEpg:true,discovery:false,ownerReview:true},derived:{publishedEpg:{...real.derived.publishedEpg,sha256:digest({programme:derived.publishedEpg.programme,watchlist:derived.publishedEpg.watchlist})},ownerReviews:{generation:real.d1.after.owner.generation,sha256:digest(owner)}}};
+  derived.publishedEpg.generation=real.derived.publishedEpg.generation;derived.publishedEpg.programmeRunId=real.derived.publishedEpg.programmeRunId;
+  assert.deepEqual(verifyDerived(manifest,derived),[],'the stand-in manifest matches the untouched snapshot');
+  buildExpected({manifest,bodies:{},derivedValues:derived,asOf:measured.measurement.asOf});
+  assert.deepEqual(verifyDerived(manifest,derived),['derived_digest:publishedEpg'],'the merged view build changes the snapshot in place: the premise of this regression');
+  assert.equal(derived.publishedEpg.programme.films[0].title,'Alpha (owner)');
+  assert.deepEqual(m.run.derivedProblems,[],'the values handed to the measurement matched the manifest');
+  assert.equal(m.run.derivedInputsMutatedByView,true,'the tool saw runParity change its input and only notes it');
+  assert.equal(m.run.manifest.routes.publishedEpg,true);
+  // the class entries the tool derived are the ones runParity compared: seal checks the ledger digest, and the entries here are those of a direct run
+  assert.equal(measured.ok,true);
+ }
  // THE TABLE LIST: the tables the reviewed code named in this run are exactly COPY_TABLES (a view counts as its tables)
  const objects=rows(copyFile,"SELECT type, name, sql FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'connector_copy_%'");
  const bare=text=>text.replace(/'(?:[^']|'')*'/g,"''");
