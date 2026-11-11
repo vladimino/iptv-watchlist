@@ -124,4 +124,123 @@ const generation=file=>sql(file,'SELECT generation FROM prediction_domain_author
  assert.deepEqual(on,off,'the interleaved writer changes nothing about how the step ends: '+JSON.stringify({off,on}));
  assert.deepEqual(on.created,['created']);assert.equal(on.films,1);
 }
+// 6. Write detection fails closed: only a plain single SELECT keeps the held answer. A mutating WITH, a PRAGMA, a commented or multi-statement text, an INSERT or UPDATE
+// with RETURNING run through first() or all(), and a statement the scope did not prepare all drop it.
+{
+ const BUMP='UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1';
+ const writes=[
+  ['mutating WITH through all()','WITH moved AS (SELECT generation FROM prediction_domain_authority WHERE id=1) '+BUMP+' RETURNING generation','all'],
+  ['mutating WITH through first()','WITH moved AS (SELECT generation FROM prediction_domain_authority WHERE id=1) '+BUMP+' RETURNING generation','first'],
+  ['UPDATE RETURNING through all()',BUMP+' RETURNING generation','all'],
+  ['UPDATE RETURNING through first()',BUMP+' RETURNING generation','first'],
+  ['commented UPDATE','/* read */ '+BUMP+' RETURNING generation','all'],
+  ['two statements','SELECT 1 AS x; '+BUMP,'all'],
+  ['lowercase update','update prediction_domain_authority set generation=generation+1 where id=1 returning generation','all'],
+  ['leading spaces and newline','\n  '+BUMP+' RETURNING generation','first']
+ ];
+ for(const [name,text,how] of writes){
+  const w=await flowWorld({films:3}),scoped=PredictionD1.scopeRequest(w.env);
+  const held=await PredictionD1.readPredictionAuthority(scoped.DB,scoped);
+  await scoped.DB.prepare(text).bind()[how]();
+  const seen=await PredictionD1.readPredictionAuthority(scoped.DB,scoped);
+  assert.equal(seen.generation,generation(w.file),name+': the held answer was dropped');assert.equal(seen.generation,held.generation+1,name);
+ }
+ // The same statements inside a batch, next to a plain read, and a PRAGMA that sets.
+ for(const [name,text] of [['WITH in a batch','WITH moved AS (SELECT 1 AS x) '+BUMP+' RETURNING generation'],['PRAGMA that sets','PRAGMA user_version=7'],['PRAGMA that reads','PRAGMA user_version']]){
+  const w=await flowWorld({films:3}),scoped=PredictionD1.scopeRequest(w.env);
+  await PredictionD1.readPredictionAuthority(scoped.DB,scoped);
+  const before=w.stats.batches;
+  await scoped.DB.batch([scoped.DB.prepare('SELECT 1 AS x').bind(),scoped.DB.prepare(text).bind()]);
+  await PredictionD1.readPredictionAuthority(scoped.DB,scoped);
+  assert.equal(w.stats.batches-before,2,name+': the batch is not all reads, so the next read is a new batch');
+ }
+ // A statement the scope did not prepare is not known to be a read.
+ const w=await flowWorld({films:3}),scoped=PredictionD1.scopeRequest(w.env);
+ await PredictionD1.readPredictionAuthority(scoped.DB,scoped);
+ const before=w.stats.batches;await scoped.DB.batch([w.env.DB.prepare('SELECT 1 AS x').bind()]);await PredictionD1.readPredictionAuthority(scoped.DB,scoped);
+ assert.equal(w.stats.batches-before,2,'an unknown statement drops the held answer');
+ // Plain reads keep it: a SELECT with a trailing semicolon, spaces, a subquery.
+ for(const text of ['SELECT 1 AS x;','  select count(*) AS n FROM prediction_pointer  ','SELECT (SELECT COUNT(*) FROM prediction_lease) AS n']){
+  const v=await flowWorld({films:3}),sc=PredictionD1.scopeRequest(v.env);await PredictionD1.readPredictionAuthority(sc.DB,sc);
+  const b=v.stats.batches;await sc.DB.prepare(text).bind().all();await PredictionD1.readPredictionAuthority(sc.DB,sc);assert.equal(v.stats.batches-b,0,text);
+ }
+}
+
+// 7. Transitions of the authority marker and the schema under a request that holds the answer. Each is applied by SQL from outside, between the read and the request's
+// write. The write of the request is the lease save of a step. Outcomes are compared with the same request in a world without the scope.
+{
+ const lease=()=>({owner:'run-x',runId:'run-x',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+60000});
+ const attempt=async(scope,transition)=>{
+  const w=await flowWorld({scope,films:3}),env=scope?PredictionD1.scopeRequest(w.env):w.env;
+  await PredictionD1.readPredictionAuthority(env.DB,env);
+  let blocked=null;try{transition(w.file);}catch(error){blocked=String(error.message||error).split('\n')[0];}
+  let outcome;try{const saved=await PredictionD1.saveMutable(env,'enrichment/runner-lease.json',lease());outcome=saved.handled?'landed':saved.claimed?'rerouted':'declined';}catch(error){outcome='rejected:'+(error.code||'error');}
+  const count=()=>{try{return sql(w.file,'SELECT COUNT(*) AS n FROM prediction_lease')[0].n;}catch{return null;}};
+  return {outcome,blocked,leaseRows:count(),generation:generation(w.file)};
+ };
+ const same=[
+  ['the writes marker held in mode d1 (no generation change)',file=>sql(file,"UPDATE prediction_domain_authority SET writes='held'"),'landed'],
+  ['the schema version raised',file=>sql(file,'UPDATE schema_contract SET version=version+1 WHERE id=1'),'landed']
+ ];
+ for(const [name,transition,expected] of same){
+  const off=await attempt(false,transition),on=await attempt(true,transition);
+  assert.deepEqual(on,off,name+': the same outcome with and without the scope: '+JSON.stringify({off,on}));assert.equal(on.outcome,expected,name);
+ }
+ // A downgrade is refused by the database itself, so no request can ever hold a version that a later read would not reach.
+ const downgrade=await attempt(true,file=>sql(file,'UPDATE schema_contract SET version=version-1 WHERE id=1'));
+ assert.match(downgrade.blocked||'',/schema_contract_downgrade|downgrade/i,'schema_contract never goes down');assert.equal(downgrade.outcome,'landed');
+ // The generation moved, or the mode reverted without a generation change (as the real revert statement does): the stale request writes nothing to D1.
+ for(const [name,transition] of [['the generation moved',file=>sql(file,'UPDATE prediction_domain_authority SET generation=generation+1')],['the mode reverted without a generation change',file=>sql(file,"UPDATE prediction_domain_authority SET mode='r2', writes='open'")]]){
+  const on=await attempt(true,transition);
+  assert.equal(on.outcome,'rejected:prediction_domain_cas',name+': '+JSON.stringify(on));assert.equal(on.leaseRows,0,name+': nothing landed');
+ }
+ // A table of the domain that disappears is a migration the contract forbids (migrations only add). Were it to happen: a write that needs the table fails, with the
+ // batch rolled back and nothing left behind; a write that does not need it still lands for the rest of that request, where a fresh read would refuse the whole domain.
+ const needed=await attempt(true,file=>sql(file,'DROP TABLE prediction_lease'));
+ assert.ok(needed.outcome.startsWith('rejected'),'a write whose table is gone fails: '+JSON.stringify(needed));
+ const unrelatedOff=await attempt(false,file=>sql(file,'DROP TABLE prediction_lineage')),unrelatedOn=await attempt(true,file=>sql(file,'DROP TABLE prediction_lineage'));
+ assert.equal(unrelatedOff.outcome,'rejected:prediction_domain_unavailable','a fresh read refuses a domain with a table missing');
+ assert.equal(unrelatedOn.outcome,'landed','the held answer lets an unrelated write land for the rest of the request (documented: this transition is forbidden by the migration contract)');
+}
+
+// 8. Lease expiry, parallel steps and a crash with its replay end the same way with and without the scope.
+{
+ const normalize=value=>JSON.parse(JSON.stringify(value).replace(/\d{4}-\d\d-\d\dT[\d:.]+Z/g,'<time>').replace(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}/g,'<uuid>').replace(/[0-9a-f]{64}/g,'<sha>'));
+ const films=w=>sql(w.file,'SELECT film_id FROM prediction_pointer ORDER BY film_id').map(r=>r.film_id);
+ const lost=async scope=>{
+  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),runId=start.data.runId;
+  const next=await w.api('next',{runId,batchSize:1});
+  sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json=json_set(document_json,'$.expiresAt',1) WHERE name='runner'");
+  const submit=await w.api('submit',{runId,items:[{filmId:next.data.items[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
+  return {status:submit.status,body:normalize(submit.data.status||submit.data.error||null),films:films(w)};
+ };
+ const lostOff=await lost(false),lostOn=await lost(true);
+ assert.deepEqual(lostOn,lostOff,'an expired runner lease: '+JSON.stringify({lostOff,lostOn}));assert.equal(lostOn.films.length,0,'nothing is predicted under an expired lease');
+ const parallel=async scope=>{
+  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),runId=start.data.runId;
+  const both=await Promise.all([w.api('next',{runId,batchSize:1}),w.api('next',{runId,batchSize:1})]);
+  return {statuses:both.map(r=>r.status).sort(),reasons:both.map(r=>r.data.reason||null).sort()};
+ };
+ const parOff=await parallel(false),parOn=await parallel(true);
+ assert.deepEqual(parOn,parOff,'two writers at once: '+JSON.stringify({parOff,parOn}));assert.deepEqual(parOn.statuses,[200,409]);
+ const crash=async scope=>{
+  const w=await flowWorld({scope,films:40}),{start}=await w.reconcileAndStart(),runId=start.data.runId;
+  const next=await w.api('next',{runId,batchSize:1}),filmId=next.data.items[0].filmId;
+  const payload={runId,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]};
+  // The process dies at the second write batch of the submit: the first has committed, the second never runs.
+  const base=w.stats.writeBatches;w.hooks.write=(statements,count)=>{if(count===base+2)throw new Error('cancelled');};
+  const dead=await w.api('submit',payload);w.hooks.write=null;
+  const afterCrash=films(w);
+  // The crash stopped the run (a stop, not a lost film): a new run picks the film up again and the replayed submit lands once.
+  const second=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}}),nextAgain=await w.api('next',{runId:second.data.runId,batchSize:1});
+  const sameFilm=nextAgain.data.items[0].filmId===filmId;
+  const replayPayload={runId:second.data.runId,items:[{filmId,fingerprint:w.fingerprint,prediction:w.prediction}]};
+  const replay=await w.api('submit',replayPayload),again=await w.api('submit',replayPayload);
+  return {dead:dead.status,afterCrash,second:second.status,sameFilm,replay:[replay.status,replay.data.results?.map(r=>r.status)],again:[again.status,again.data.results?.map(r=>r.status)],films:films(w)};
+ };
+ const crashOff=await crash(false),crashOn=await crash(true);
+ assert.deepEqual(crashOn,crashOff,'a crash and its replay: '+JSON.stringify({crashOff,crashOn}));
+ assert.equal(crashOn.dead,502);assert.equal(crashOn.sameFilm,true,'the same film is offered again');assert.deepEqual(crashOn.replay[1],['created']);
+ assert.equal(crashOn.films.length,1,'the film is predicted once');assert.deepEqual(crashOn.again[1],['already_current'],'the replay is idempotent');
+}
 console.log('prediction authority scope tests passed');
