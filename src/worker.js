@@ -4,7 +4,12 @@ function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='sha
 // `options.item`, for a discovery ledger stored in R2, parses the `items` array one element at a time and keeps what
 // `item` returns for each (AIR-342): the document is never held whole as text and tree. Any other key, a D1-routed
 // read, or an object without a readable body is parsed as before.
+// AIR-442. A `next` or `submit` carries a request scope (enrichment.js: `createRequestScope`): the run record, its diagnostics row and `latest-run.json` are read at most once
+// per request and a write of identical bytes to a key it already knows is not repeated. Every other key, and every request without a scope, goes through unchanged.
 const loadJSON=async(env,key,options=null)=>{
+ const hit=typeof requestScopeRead==='function'?requestScopeRead(env,key):null;
+ if(hit)return hit.value;
+ const learned=value=>{if(typeof requestScopeLearn==='function')requestScopeLearn(env,key,value);return value;};
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeRead(env,key);
   if(routed.handled)return routed.value;
@@ -41,17 +46,36 @@ const loadJSON=async(env,key,options=null)=>{
   if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return storedJSON(object,key,options);}
   else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return storedJSON(object,key,options);}}}
  }
- if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key);if(routed.handled)return routed.value;}
- if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return routed.value;}
+ if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key);if(routed.handled)return learned(routed.value);}
+ if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return learned(routed.value);}
  const o=await env.BUCKET.get(key);let value=o?await storedJSON(o,key,options):null;
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
  if(key==='enrichment/view-index.json'&&typeof RatingsD1!=='undefined')value=await RatingsD1.overlayView(env,value);
- return value;
+ return learned(value);
 };
 async function publishedOwnerReviews(env){
  if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
  return OwnerReview.loadForRead(env);
 }
+// AIR-374 P4b (owner decision 4): the titles.json dictionary behind GET /api/programme and GET /api/watchlist. The marker is read FIRST on every GET: legacy, r2 and prepared read the
+// R2 mirror exactly as before; at `open` the mirror is frozen and the same rows come from D1 (one bounded SELECT); held and an unreadable marker throw before any read and never reach R2.
+// The marker is read again after the reads, so prepared -> open (or held) mid-request is a 503, never a stale R2 answer. The bundle always defines CanonicalCatalogReader (the guard
+// serves only the vm-scoped tests that load the Worker without it; tests/canonical-catalog-titles.mjs asserts the bundle).
+const TITLE_READ_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
+const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader.catalogReaderGate(env);
+async function localizedTitleStore(env,pinned,gate,films){
+ if(!gate)return (await loadJSON(pinned,'titles.json'))||{};
+ if(gate.mode==='d1')return CanonicalCatalogReader.catalogTitlesFromD1(env,films,gate);
+ return (await loadJSON(pinned,'titles.json'))||{};
+}
+// The LAST async boundary: after every awaited read of the route (titles, owner reviews, sync.json, documents) and right before a successful answer, the marker is read again
+// and must still have the state AND generation the first read saw, on the open path and on the legacy/r2/prepared path alike. A 200 shape that carries no title (the empty
+// watchlist) is fenced the same way. Error answers are not fenced: they carry no stored facts.
+async function titleReadFinish(env,gate,response){
+ if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);
+ return response;
+}
+const titleReadRefusal=error=>TITLE_READ_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
 async function epgPublication(env){
  return epgPublicationReadOnly(env);
 }
@@ -532,6 +556,12 @@ async function updatePublishedFiles(env,files){
 // with (the owner closed admission, or the lease ran out) stops here and the write does not happen. A no-op outside such a step.
 async function epgStepGuard(env){if(env?.epgStep&&typeof EpgOrchestration!=='undefined')await EpgOrchestration.assertStep(env);}
 const saveJSON=async(env,key,value)=>{
+ // AIR-442: in a request with a scope, a write of bytes identical to what the step already knows is stored under this key is not repeated; any other write drops what the scope knows
+ // before it is attempted (a failure leaves it unknown) and records the value after it succeeded.
+ const unchanged=typeof requestScopeUnchanged==='function'?requestScopeUnchanged(env,key,value):null;
+ if(unchanged)return unchanged;
+ if(typeof requestScopeForget==='function')requestScopeForget(env,key);
+ const learned=result=>{if(typeof requestScopeLearn==='function')requestScopeLearn(env,key,value);return result;};
  await epgStepGuard(env);
  if(typeof DiscoveryAuthority!=='undefined'&&DiscoveryAuthority.ownsKey(key)){
   const routed=await DiscoveryAuthority.routeWrite(env,key,value);
@@ -539,13 +569,13 @@ const saveJSON=async(env,key,value)=>{
  }
  if(typeof PredictionD1!=='undefined'){
   const routed=await PredictionD1.saveMutable(env,key,value);
-  if(routed?.handled)return {etag:'d1'};
+  if(routed?.handled)return learned({etag:'d1'});
   const text=routed?.text??JSON.stringify(value);
   let settled=false;
-  try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});settled=true;return saved;}
+  try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});settled=true;return learned(saved);}
   finally{if(routed?.token&&settled)await PredictionD1.completePredictionWrite(env,key,routed.token);}
  }
- return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}});
+ return learned(await env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}}));
 };
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
@@ -1635,32 +1665,34 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){
    try{
+    const gate=await titleReadGate(env);
     const pinned=await pinEpg(env);
     const data=await loadJSON(pinned,'programme.json');
     if(!data)return json({error:'Первое обновление ещё выполняется'},503);
     const watchlist=await loadJSON(pinned,'watchlist.json');
-    const titles=await loadJSON(pinned,'titles.json')||{};
+    const titles=await localizedTitleStore(env,pinned,gate,[...(data?.films||[]),...(watchlist?.films||[])]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
     const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body);
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
-    return json(presented);
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
+    return await titleReadFinish(env,gate,json(presented));
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
    try{
+    const gate=await titleReadGate(env);
     const pinned=await pinEpg(env);
     let data=await loadJSON(pinned,'watchlist.json');
     const report=await loadJSON(pinned,'programme.json');
     if(pinned.epgPin?.authority!=='d1'&&report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};
-    if(!data)return json({films:[]});
-    const titles=await loadJSON(pinned,'titles.json')||{};
+    if(!data)return await titleReadFinish(env,gate,json({films:[]}));
+    const titles=await localizedTitleStore(env,pinned,gate,data?.films||[]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
-    return json(presentLocalized(data,titles,reviews.body));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
+    return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   {const permanent=/^\/api\/catalog\/film\/([^/]+)$/.exec(url.pathname);if(permanent&&request.method==='GET'){let id;try{id=decodeURIComponent(permanent[1]);}catch{id='';}return await catalogFilmRoute(env,id);}}

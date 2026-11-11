@@ -16,10 +16,11 @@ for(const [x,y] of [[again.next.r2Bytes,b.next.r2Bytes],[again.submit.r2Bytes,b.
 // What a request asks of the model does not change what the Worker reads: one item or twenty cost the same calls in `next`.
 const r1=await measure({S:20,r:1,s:1,catalogSize:130}),r20=await measure({S:20,r:20,s:1,catalogSize:130});
 assert.equal(r1.next.calls,r20.next.calls);assert.ok(r20.next.responseBytes>r1.next.responseBytes,'the answer carries every item');
-// The stored queue is moved whole by every step: its bytes follow the number of films, not the batch.
+// The stored queue is moved whole by every step: its bytes follow the number of films, not the batch. Since AIR-442 a `next` reads it once (before: about three times),
+// so the bytes per film are a third of what they were; the bound below is the one-read figure, the 300 B floor of AIR-438 was the three-read one.
 const small=await measure({S:12,r:1,s:1,catalogSize:130}),large=await measure({S:12,r:1,s:1,catalogSize:1000});
 const queue=m=>m.next.classes['r2:queue'].bytes,perFilm=(queue(large)-queue(small))/(1000-130);
-assert.ok(perFilm>300&&perFilm<2500,'queue bytes per film '+perFilm);
+assert.ok(perFilm>100&&perFilm<2500,'queue bytes per film '+perFilm);
 assert.ok(queue(large)>5*queue(small),'a larger queue is a larger step');
 assert.equal(small.next.calls,large.next.calls,'the number of calls does not depend on the queue size, the bytes do');
 // Items that share a submit share its fixed cost.
