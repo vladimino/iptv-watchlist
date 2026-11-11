@@ -80,7 +80,7 @@ With D1-authoritative discovery and migration `0012` applied, the EPG commit sta
 
 A discovery chunk reads a D1 ledger through the paged path whatever its size (a ledger of 20,000 rows or fewer is read whole by `loadJSON`, but the chunk does not save a whole decision map from it: that save fails closed for any decision whose observation is not active). The previous generation stays published until `publish`. A discovery chunk during the window between the ledger commit and `publish` sees a programme mismatch and answers busy. Without the table the previous inline seal applies. Reads during the `loading` window follow the section above.
 
-## Bounded ledger departure budget ([ADR 0112](../../adr/0112-bounded-ledger-departure-budget.md), Proposed)
+## Bounded ledger departure budget ([ADR 0112](../../adr/0112-bounded-ledger-departure-budget.md), Accepted)
 
 In `bounded` mode ([ADR 0034](../../adr/0034-bounded-discovery-ledger.md)) an active observation of the published generation that the new scan does not contain leaves the active ledger for the archive. Since [AIR-429](https://trello.com/c/HD3hVd7F) the commit separates two kinds:
 

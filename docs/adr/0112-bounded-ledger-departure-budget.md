@@ -1,9 +1,9 @@
 # ADR 0112: A bounded discovery ledger archives its backlog in a capped number of observations per commit
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-11  
 **Recorded at:** 2026-11-11  
-**Approval source:** the owner's review of [PR #505](https://github.com/vladimino/iptv-watchlist/pull/505) chose a departure budget (variant C) over setting the flag and letting the first bounded commit archive everything, and asked for a superseding ADR ([AIR-429](https://trello.com/c/HD3hVd7F)). This record is **not yet accepted**: acceptance and any production switch are separate owner decisions.  
+**Approval source:** the Product Owner chose variant C (a capped departure budget) in the review of [PR #505](https://github.com/vladimino/iptv-watchlist/pull/505#issuecomment-6786658333) ([AIR-426](https://trello.com/c/Jf6G2IiP)), and the [AIR-429](https://trello.com/c/HD3hVd7F) card authorizes the implementation with this superseding record. Accepted as the design and code decision only: it does **not** authorize production activation. `DISCOVERY_LEDGER_MODE=bounded` stays off until a separate owner-approved L3 rollout plan and a decision on the memory margin (173 MB frozen against 185-189 MB capped, Node old space; the target of the card is not met) and on the unmeasured Workers isolate and D1 costs.  
 **Related work:** [AIR-429](https://trello.com/c/HD3hVd7F), [AIR-426](https://trello.com/c/Jf6G2IiP), [AIR-423](https://trello.com/c/NpeuCGhK), [ADR 0034](0034-bounded-discovery-ledger.md), [ADR 0085](0085-d1-authoritative-discovery.md), [ADR 0092](0092-resumable-bounded-ledger-seal.md), [dated evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md)  
 **Supersedes:** [ADR 0034](0034-bounded-discovery-ledger.md) section 1 (the active-ledger boundary) in part: while a backlog remains, the active ledger is the latest scan plus that backlog, not the scan alone. The archive objects, their fences, re-entry and every other decision of that record stay.  
 **Superseded by:** None
