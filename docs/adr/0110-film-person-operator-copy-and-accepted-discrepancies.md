@@ -23,7 +23,7 @@ Accepted: one additional, separately named recording path, `cutover_accepted` ve
 
 Every other rule of `cutover_minimum` v1 applies unchanged; the gate calls the v1 gate and drops only its zero-unexplained reasons. `recordBaselineVerified` reaches the new gate only through `path: {gate: 'cutover_accepted', version: 1}`, with no fallback to or from the other paths, and stores `cutover_accepted/v1:<acceptedDigest>`.
 
-**Not decided here.** No baseline is recorded and the marker is not moved: each is a separate owner GO. Nothing is repaired. The `d1` activation is not authorized, and the accepted empty `ratedAdmission`, `retention` and `retirement` tables stay open gaps for it ([AIR-374](https://trello.com/c/y3oT4gAK), the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C)).
+**Not decided here.** No baseline is recorded and the marker is not moved: each is a separate owner GO. Nothing is repaired. The `d1` activation is not authorized, and the accepted empty `ratedAdmission`, `retention` and `retirement` tables stay open gaps for it ([AIR-374](https://trello.com/c/ha7ais3w), the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C)).
 
 ## Conditions for acceptance
 
@@ -63,7 +63,7 @@ Offline code only. Nothing is bundled into the Worker and no production state ch
 
 ## Follow-ups
 
-[AIR-374](https://trello.com/c/y3oT4gAK) (the `d1` activation) and the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C).
+[AIR-374](https://trello.com/c/ha7ais3w) (the `d1` activation) and the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C).
 
 ## Amendment 2026-11-11
 
@@ -81,3 +81,5 @@ The text above stays as accepted on 2026-11-10; this section changes only the co
 - Unchanged: the strict gate, `cutover_minimum` v1, `OWNER_LINK_WAIVER`, `OPERATOR_COPY_PERMISSION` v1 and every other rule of the gate.
 
 **What this does not authorize.** No production operation. Recording the baseline and `r2` to `prepared` remain separate owner GOs, and a seal over the 11 Nov evidence still has to pass the version 2 gate (the 11 Nov run itself also had operator-evidence slips, such as hand-typed lease times and `lease_not_released`, so it is not a pass). A later run with one more unexplained row in any class fails again and needs a new owner decision and version 3.
+
+**Executed 2026-11-11 (UTC).** The version 2 gate sealed the run of 10:17 to 10:44 UTC (gate pass, no reasons) after the first seal was refused with `over_cap:personAlias` and a hand-typed lease release time; the seal was re-run on the same files. The baseline was recorded as `verified` (reference `cutover_accepted/v2:<acceptedDigest>`) and the marker moved `r2` to `prepared` (generation 1), each on its own owner GO with a readback. The record is operator attestation, not cryptographic proof, and R2 and D1 were not one snapshot. See the [dated evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md). The text above is unchanged.

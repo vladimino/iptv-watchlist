@@ -182,6 +182,8 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 ## Connector path (offline code, nothing executed)
 
+**Status, 11 Nov 2026 (UTC): executed.** The heading describes the code as merged; the path has since run once in production. The measuring run (10:17 to 10:44 UTC), the baseline record (`verified`, reference `cutover_accepted/v2:<acceptedDigest>`) and the `r2` to `prepared` move (marker `prepared` / `open` / generation 1) are recorded in [the evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md) with their operator caveats. The marker is now `prepared`; the projector is still the only writer and R2 the authority. Moving on to `open` is a separate owner decision.
+
 **Authority.** Owner decisions of 10 Nov 2026 for [AIR-373](https://trello.com/c/ugu3sQmp), recorded in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md), now **Accepted** following the successful [independent review](https://github.com/vladimino/iptv-watchlist/pull/501#pullrequestreview-5850223602):
 
 1. *"ignore the discrepancies and prepare the migration"*: unexplained differences of the measured kind do not block recording the baseline and `r2` to `prepared`.
@@ -291,5 +293,5 @@ Not proved, and listed in every gate result:
 - The Discovery tables are compared by aggregates (row count, sums of generation and payload length, largest generation); a change that keeps them is not seen.
 - The owner-link values are not compared.
 - The accepted differences are not repaired. **`prepared` keeps the projector as the only writer and R2 as the authority**, so the empty `ratedAdmission`, `retention` and `retirement` tables change no behaviour at `prepared`. They are open gaps for the later `d1` activation ([AIR-374](https://trello.com/c/y3oT4gAK), the producer gaps of [AIR-371](https://trello.com/c/gt1afd0C)), which nothing here authorizes.
-- The tool has never run against the real connector. The shape of an `execute` result and the atomicity of a multi-statement request sent through the connector are assumed from the D1 HTTP API (the write unit of `scripts/d1-backfill.mjs`), not observed.
+- _(Superseded 11 Nov 2026: the tool has since run against the real connector, see the status above; the connector response budget had to be lowered by hand from 8 MB to 4 MB.)_ Before that run the tool had never run against the real connector. The shape of an `execute` result and the atomicity of a multi-statement request sent through the connector are assumed from the D1 HTTP API (the write unit of `scripts/d1-backfill.mjs`), not observed.
 
