@@ -37,6 +37,16 @@ initialize([f('timed',4,100,now-.5*hour,{shows:[sh(now-.5*hour,now+.5*hour)]})],
 assert.deepEqual([ids(result('soon')),ids(result('available'))],[['timed'],[]]);
 for(const [at,soon,available] of [[now+.5*hour-1,1,0],[now+.5*hour,0,1],[now-.5*hour+72*hour-1,0,1],[now-.5*hour+72*hour,0,0]]){ctx.at=at;vm.runInContext('viewClock=at',ctx);const mode=m=>JSON.parse(vm.runInContext('JSON.stringify(buildShortlist(visibleFilms(),"'+m+'",at))',ctx)).length;assert.deepEqual([mode('soon'),mode('available')],[soon,available],'clock '+(at-now));}
 vm.runInContext('viewClock=now',ctx);
+// Overlapping slots: the channel and the hour in the text belong to the same show, the one whose end IS the film's earliest archive time.
+// Now 12:00: A on air 10:00-14:00, B on air 11:00-12:30 → B named with 12:30 (not A with B's hour).
+const stampOf=at=>vm.runInContext('madridStamp('+at+')',ctx);
+initialize([f('overlap',4,100,null,{shows:[sh(now-2*hour,now+2*hour,'А'),sh(now-hour,now+.5*hour,'Б')]})],{overlap:pred(4.5)});
+let line=text('overlap','soon');assert.match(line,/^Сейчас в эфире · Б · архив появится после /);assert.ok(line.endsWith(stampOf(now+.5*hour)),'B\'s own end, shown with B');assert.doesNotMatch(line,/ · А · /);
+// A on air until 14:00, a later start on B that ends earlier than A: B is named with its own start and its own end.
+initialize([f('mix',4,100,null,{shows:[sh(now-hour,now+3*hour,'А'),sh(now+.5*hour,now+1.5*hour,'Б')]})],{mix:pred(4.5)});
+line=text('mix','soon');assert.match(line,/ · Б · архив появится после /);assert.ok(line.endsWith(stampOf(now+1.5*hour)));assert.ok(line.startsWith(stampOf(now+.5*hour)),'a future show is named by its start');
+// A tie on the end prefers the selected channel.
+initialize([f('tie',4,100,null,{shows:[sh(now-hour,now+hour,'А'),sh(now-.5*hour,now+hour,'Б')]})],{tie:pred(4.5)});vm.runInContext('state.channels=new Set(["Б"])',ctx);assert.match(text('tie','soon'),/ · Б · /);vm.runInContext('state.channels=new Set()',ctx);
 // A show with no EPG end uses the film runtime; with neither the hour stays unknown and nothing is promised.
 initialize([f('rt',4,100,null,{shows:[{start:now-.5*hour,offset:-.5,channel:'К'}]}),f('unk',4,null,null,{runtime:null,shows:[{start:now+3*hour,offset:3,channel:'К'}]})],{rt:pred(4.5),unk:pred(4.5)});
 assert.deepEqual(['rt','unk'].filter(id=>text(id,'soon')!=='Нет показов в текущем окне'),['rt','unk']);assert.match(text('rt','soon'),/архив ожидается около .* \(по длительности фильма\)/);assert.match(text('unk','soon'),/время появления архива неизвестно$/);

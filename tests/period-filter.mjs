@@ -50,6 +50,10 @@ assert.deepEqual(set('future'),set('soon'),'the old period name is an alias, nev
 for(const [period,expected] of [['archive',['archive','onair-repeat','repeat']],['soon',['future','ongoing','runtime']],['all',['archive','future','onair-repeat','ongoing','repeat','runtime']]]){run(`state.period='${period}'`);assert.deepEqual(run('visibleFilms().map(f=>f.id)').slice().sort(),expected,period);}
 run("state.period='soon'");let card=run("card(films.find(f=>f.id==='ongoing'))");assert.match(card,/class="soon-badge"/,'one shared hourglass');assert.match(card,/ДАЛЬШЕ/);assert.doesNotMatch(card,/АРХИВ/);
 run("state.period='all'");card=run("card(films.find(f=>f.id==='repeat'))");assert.match(card,/АРХИВ/);assert.match(card,/ДАЛЬШЕ/,'the repeat stays visible as information');assert.doesNotMatch(card,/soon-badge/,'a film with a ready archive never shows the hourglass');
+// The retired «Следующие сутки» copy is gone: a film with an archive and no repeat has no extra note, and no filter or card text uses the phrase.
+install([film('lonely',[show(t0-6*hour)])],t0);run("state.period='all'");card=run("card(films[0])");assert.doesNotMatch(card,/следующие сутки|archive-only/i,'no legacy note on an archive-only card');assert.doesNotMatch(card,/ДАЛЬШЕ/);
+assert.doesNotMatch(source.split('\n').filter(line=>!line.startsWith('//')).join('\n').replace(/<dt>В следующие сутки<\/dt>/,''),/[Сс]ледующие сутки/,'the phrase survives only as the EPG event log field, not in filters or cards');
+install(catalog(),t0);
 // «Последний шанс» is an archive notion and the expiring sort puts soon films after the archive ones.
 run("state.sort='expiring';state.period='all'");assert.deepEqual(run('visibleFilms().map(f=>f.id)').slice(0,3).sort(),['archive','onair-repeat','repeat'].sort());
 install([film('ending',[show(t0-71*hour,1)]),film('ongoing',[show(t0-hour)])],t0);run('state.lastChanceOnly=true');assert.deepEqual(run('visibleFilms().map(f=>f.id)'),['ending'],'a soon film is never a last chance');
