@@ -76,6 +76,14 @@ for(const [name,path,method] of readTools){
  assert.equal(viaMcp.body.error,undefined,name);
  assert.deepEqual(domain(viaMcp.body.result),viaHttp,name);
 }
+// AIR-430: the pipeline status takes `view`; both values are the HTTP body of the same path, anything else is a tool error and reads nothing.
+for(const view of ['operational','detailed']){
+ const viaHttp=await http(env(),'/api/enrichment/pipeline/status?view='+view,'GET'),viaMcp=await tool(env(),'epg_pipeline_status',{view});
+ assert.equal(viaMcp.response.status,200,view);assert.equal(viaMcp.body.error,undefined,view);
+ if(view==='operational'){assert.equal(domain(viaMcp.body.result).body.view,'operational');assert.equal(viaHttp.body.view,'operational');}
+ else assert.deepEqual(domain(viaMcp.body.result),await http(env(),'/api/enrichment/pipeline/status','GET'),'detailed is the default body');
+}
+for(const bad of [{view:'everything'},{view:1},{path:'/api/enrichment/pipeline/status'}])assert.equal((await tool(env(),'epg_pipeline_status',bad)).body.result.isError,true,JSON.stringify(bad));
 assert.equal((await tool(env(),'enrichment_profile',{})).body.result.structuredContent.httpStatus,404);
 assert.equal((await tool(env(),'enrichment_profile',{})).body.result.isError,true);
 

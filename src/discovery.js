@@ -1616,6 +1616,55 @@ function catalogFilmById(catalog,id){
  for(const key in catalog||{}){const film=catalog[key];if(String(film?.id)===id)return film;}
  return undefined;
 }
+// AIR-430. The operational status of Discovery: what an operator or a monitor needs while writers commit continuously. It reads only the small
+// authoritative records (one consistent D1 snapshot of the authority row, status, continuation, workflow, lease and projector window; the same
+// small R2 objects outside D1 authority), never the ledger, the decisions or the catalog, never TMDB, and it writes nothing. The backlog is only
+// what the last checkpoint stored, with its own time and source, `stale` once older than OPERATIONAL_STALE_MS and `unknown` without one; no exact
+// figure is computed. A record that cannot be read is named in `unavailable`; it is never filled from another source. The detailed view
+// (`discoveryPipelineStatus`) keeps its snapshot fence and may be refused with `discovery_fence` while Discovery commits.
+const OPERATIONAL_STALE_MS=3*3600000;
+const operationalNumber=value=>Number.isFinite(value)&&value>=0?value:null;
+async function discoveryOperationalStatus(env){
+ const now=Date.now(),unavailable=[];
+ let snapshot=null,records,authority;
+ if(typeof DiscoveryAuthority!=='undefined'){
+  try{snapshot=await DiscoveryAuthority.readOperationalSnapshot(env);}
+  catch(error){unavailable.push('authority');authority={state:'unavailable',cause:diagnosticErrorCode(error)};}
+ }
+ let source;
+ if(snapshot?.handled){
+  source='d1_snapshot';authority=snapshot.authority;records=snapshot.records||{status:null,continuation:null,workflow:null,lease:null,window:null};
+  for(const name of snapshot.unreadable||[])unavailable.push(name);
+  if(authority.state==='held')unavailable.push('records');
+ }else if(authority?.state==='unavailable'){
+  source='none';records={status:null,continuation:null,workflow:null,lease:null,window:null};
+ }else{
+  // Outside D1 authority the same records are small R2 objects, each read on its own; one that fails is named, not guessed.
+  source='r2_objects';authority={state:'r2',mode:'r2',cutover:null,transfer:null,generation:null,programmeRunId:null,publishedProgrammeRunId:null};
+  const read=async(name,key)=>{try{return await loadJSON(env,key);}catch{unavailable.push(name);return null;}};
+  const [status,continuation,workflow,lease,generation]=await Promise.all([read('status','epg/discovery-status.json'),read('continuation','epg/resolver-continuation.json'),read('workflow','epg/discovery-workflow.json'),read('lease',DISCOVERY_LEASE_KEY),read('generation',EPG_GENERATION_KEY)]);
+  records={status,continuation,workflow,lease,window:null};
+  authority.publishedProgrammeRunId=generation?.phase==='published'?generation.programmeRunId||null:null;
+ }
+ const continuation=records.continuation,last=records.status,published=authority.publishedProgrammeRunId||null;
+ const health=healthSummary(continuationHealth(continuation,records.lease,last,now,published));
+ const running=continuation?.stage==='running';
+ const contract=discoveryContract(continuation,running?runningOverride(continuationHealth(continuation,records.lease,last,now,published)):{});
+ const observed=[last?.finishedAt,last?.at,continuation?.at].map(value=>Date.parse(value||'')).filter(Number.isFinite).sort((a,b)=>b-a)[0];
+ const known=Number.isFinite(observed)&&(Number.isInteger(continuation?.remainingChunks)||Number.isFinite(last?.remaining)||Number.isFinite(last?.cheapRemaining));
+ const backlog=known?{state:now-observed>OPERATIONAL_STALE_MS?'stale':'known',source:'checkpoint',observedAt:new Date(observed).toISOString(),ageMs:Math.max(0,now-observed),remainingChunks:operationalNumber(continuation?.remainingChunks),remaining:operationalNumber(last?.remaining),cheapRemaining:operationalNumber(last?.cheapRemaining)}:{state:'unknown',source:'checkpoint',observedAt:null,ageMs:null,remainingChunks:null,remaining:null,cheapRemaining:null};
+ let executor={configured:discoveryExecutorMode(env)};
+ if(executor.configured!=='external'){try{executor=await discoveryExecutorReadout(env,continuation);}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
+ const window=records.window&&records.window.expiresAt>now&&records.window.state!=='idle'?{state:records.window.state,expiresAt:new Date(records.window.expiresAt).toISOString()}:{state:'idle',expiresAt:null};
+ return {view:'operational',schemaVersion:1,observedAt:new Date(now).toISOString(),source,authority:{state:authority.state,mode:authority.mode??null,cutover:authority.cutover??null,transfer:authority.transfer??null,generation:authority.generation??null,cause:authority.cause||null},
+  programmeRunId:published||continuation?.programmeRunId||null,publishedProgrammeRunId:published,projectorWindow:window,
+  discovery:{state:contract.state,reason:contract.reason,nextAction:contract.nextAction,remainingChunks:contract.remainingChunks,nextCatchUpAt:contract.nextCatchUpAt,retryAt:contract.retryAt},
+  continuationHealth:health,lease:records.lease?{liveUntil:Number.isFinite(records.lease.expiresAt)&&records.lease.expiresAt>0?new Date(records.lease.expiresAt).toISOString():null,live:records.lease.expiresAt>now}:null,
+  lastCheckpoint:continuation?{stage:continuation.stage||null,reason:continuation.reason??null,at:continuation.at||null,programmeRunId:continuation.programmeRunId||null}:null,
+  lastChunk:last?{stage:typeof last.stage==='string'?last.stage.slice(0,40):null,checked:operationalNumber(last.checked),remaining:operationalNumber(last.remaining),finishedAt:typeof last.finishedAt==='string'?last.finishedAt:null}:null,
+  backlog,executor,unavailable:[...new Set(unavailable)],
+  detailed:{view:'detailed',note:'The detailed view reads the whole ledger under a snapshot fence and can be refused with discovery_fence while Discovery commits; that is not a failure of Discovery.'}};
+}
 async function discoveryPipelineStatus(env){
  const pinned=await pinEpg(env);
  // AIR-344: the small records are read together; the decisions, the ledger and the catalog one after another, and the
