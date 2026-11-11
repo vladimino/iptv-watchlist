@@ -186,8 +186,10 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
  // The window did not pass inside this firing, but the close is still provable: the queue is empty (numeric zeros and a `complete` continuation of this generation),
  // and the accumulator that was just read holds no chunk and no counter, so there is nothing to attribute, lose or count twice, and no writer can add anything while
  // the window is held. The report of that hour is then published straight to the journal, as the normal empty report, without the record write the window refuses.
+ // Two guards keep it a proof: the reconcile of this firing confirmed the executor stopped on an empty queue (status `empty`, never running, blocked or failed), and the record that
+ // holds the zero accumulator belongs to the very generation the outcome, the status file and the continuation were proven for (no inference across a rollover).
  // It is `provisional`: the accumulator and `lastClosedHour` are untouched, and a report of the same hour that closes later replaces it (see `writeDiscoveryEvent`).
- if(incompleteReason==='projector_window'&&held&&held.queue.empty===true&&held.queue.incomplete===false&&discoveryReportIsZero(held.report)){
+ if(incompleteReason==='projector_window'&&held&&held.state.status==='empty'&&held.queue.empty===true&&held.queue.incomplete===false&&typeof held.record?.programmeRunId==='string'&&held.record.programmeRunId===generationOf(held.record)&&discoveryReportIsZero(held.report)){
   const provisional={...discoveryHourEvent({at,hourKey,generation:generationOf(held.record),status:held.state.status,reason:held.state.reason,report:held.report,queue:held.queue}),provisional:true};
   const written=await putDiscoveryEvent(env,provisional);
   if(written==='written'||written==='exists'){

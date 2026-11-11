@@ -627,6 +627,17 @@ resetAll();seed({count:3});const own10e=elect();
  // a continuation that is not complete is not an empty queue either
  settle();set('epg/resolver-continuation.json',{stage:'paused',reason:null,at:iso,hopId:'h',remainingChunks:3,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION});context.DiscoveryAuthority.writeWorkflow=windowBusy;
  await closeWith(0,async()=>{});assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed']);
+ // (h) the shortcut is pinned: the record holds generation A while the outcome, status and continuation prove generation B (a rollover): no provisional empty, the notice
+ settle(OTHER);set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:0,instanceId:INSTANCE,phase:'stopped',reason:'complete',updatedAt:iso,waitingUntil:null,recovery:null});
+ context.DiscoveryAuthority.writeWorkflow=windowBusy;
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},{...cron(0),wait:async()=>{}});
+ assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed'],'a record of another generation never proves this one empty');
+ // (i) the shortcut needs the confirmed empty status: a running or blocked reconcile with a separately observed zero queue publishes no empty event
+ for(const outcome of [{started:true,reason:'started',programmeRunId:GENERATION},{started:false,reason:'in_progress',programmeRunId:GENERATION},{started:false,reason:'lease_held',programmeRunId:GENERATION}]){
+  settle();context.DiscoveryAuthority.writeWorkflow=windowBusy;
+  await call('closeHourlyDiscoveryReport')(env,outcome,{...cron(0),wait:async()=>{}});
+  assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed'],'only a confirmed empty status takes the shortcut: '+outcome.reason);
+ }
  // (f) a real write failure (a lost compare-and-swap, an unreadable record, no record) is never read as an empty queue
  settle();context.DiscoveryAuthority.writeWorkflow=async()=>({handled:true,saved:false});
  assert.equal((await closeWith(0,async()=>{})).reason,'write_conflict');assert.deepEqual(hourAt(0).map(event=>event.kind),['report_failed']);
