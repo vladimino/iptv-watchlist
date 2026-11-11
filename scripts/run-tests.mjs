@@ -34,7 +34,7 @@ const SERIAL_ONLY=new Set([
 // the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
 // every file still runs exactly once, in exactly one shard.
 export const WEIGHTS={
- 'generation-stage.mjs':150,
+ 'generation-stage.mjs':118,
  'film-person-connector-mutation.mjs':115,
  'generation-stage-withheld.mjs':90,
  'film-person-prepared-loader-mutation.mjs':75,
@@ -48,7 +48,7 @@ export const WEIGHTS={
  'canonical-differential-mutation.mjs':31,
  'd1-enrichment-bucket-unicode.mjs':31,
  'd1-enrichment-stored-pages.mjs':31,
- 'canonical-film-writers-mutation.mjs':30,
+ 'canonical-film-writers-mutation.mjs':18,
  'film-person-capture-mutation.mjs':30,
  'discovery-bounded-drain.mjs':26,
  'projector-bulk.mjs':26,
