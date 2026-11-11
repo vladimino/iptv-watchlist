@@ -17,6 +17,7 @@ import {fenced,mutateFilm,mutatePerson} from './canonical-mutations.js';
 import {compareLocalization,recordLocalizationSources} from './localization-sources.js';
 import {admitRatedFilm,retainFilm,verifiedAdmission} from './film-admission.js';
 import {recordRetirementDecision} from './tmdb-retirement-decisions.js';
+import {PERSON_STATE_CALLS,PERSON_STATE_RECONCILE} from './canonical-person-state.js';
 
 export const SHADOW_ITEM_CAP=200;
 export const SHADOW_LIST_CAP=200;
@@ -128,6 +129,20 @@ export function planRetirement(input){
  return {producer:'retirement',calls:[{fn:'recordRetirementDecision',input:{...input}}],skipped:[]};
 }
 
+// AIR-374 P2b: the Person's dimension state (identity, effective localization, the held-value alias and conflict) and the standalone localization conflicts of one
+// Film or Person. Both are fenced writers of the person-state module and stay dormant before `open` (dispatch runs nothing). The Person row must exist (mutatePerson runs
+// first); `revision` is the entity revision the caller read. requestId is the stable idempotency key; replay is recognised by content (no receipt table, no migration).
+// input: {id, revision, at, requestId, person:{identity?, localization?, localizationConflicts?}}
+export function planPersonState(input){
+ if(!plain(input)||typeof input.id!=='string'||!input.id.startsWith('person:')||typeof input.requestId!=='string'||!input.requestId||typeof input.at!=='string'||!plain(input.person)||(!input.person.identity&&!input.person.localization))return skipped('person_state','invalid_input');
+ return {producer:'person_state',calls:[{fn:'recordPersonState',input:{id:input.id,expectedRevision:Number.isInteger(input.revision)?input.revision:0,at:input.at,requestId:input.requestId,person:input.person}}],skipped:[]};
+}
+// input: {kind:'film'|'person', id, revision, at, requestId, conflicts:[{value,source,provenance,at,reason}]}
+export function planLocalizationConflicts(input){
+ if(!plain(input)||!['film','person'].includes(input.kind)||typeof input.id!=='string'||!input.id.startsWith(input.kind+':')||typeof input.requestId!=='string'||!input.requestId||typeof input.at!=='string'||!Array.isArray(input.conflicts)||!input.conflicts.length)return skipped('localization_conflict','invalid_input');
+ return {producer:'localization_conflict',calls:[{fn:'recordLocalizationConflicts',input:{kind:input.kind,id:input.id,expectedRevision:Number.isInteger(input.revision)?input.revision:0,at:input.at,requestId:input.requestId,conflicts:input.conflicts}}],skipped:[]};
+}
+
 // One batch of plans must come from one EPG generation: a plan from another generation is never mixed in.
 export function planBatch(plans){
  const generations=new Set(plans.filter(plan=>plan.epgGeneration!==undefined&&plan.epgGeneration!==null).map(plan=>plan.epgGeneration));
@@ -136,6 +151,7 @@ export function planBatch(plans){
 }
 
 const CALLS={mutateFilm,mutatePerson,recordLocalizationSources,admitRatedFilm,retainFilm,recordRetirementDecision};
+Object.assign(CALLS,PERSON_STATE_CALLS);
 
 // Executes a plan only when the route is canonical. In legacy, r2 and prepared nothing runs and no statement reaches the database; held and
 // unreadable markers throw. Each call is one fenced batch. A thrown unknown outcome (film_person_unavailable) is returned as `unknown` and is
@@ -169,6 +185,7 @@ const RECONCILE={
  retainFilm:{kind:()=>'film',id:input=>input.id,byRequestId:true},
  recordRetirementDecision:{kind:()=>'film',id:input=>input.filmId,byRequestId:true},
 };
+Object.assign(RECONCILE,PERSON_STATE_RECONCILE);
 export async function readRevisions(env,ids){
  const db=database(env);
  const list=[...new Set(ids)];
@@ -231,6 +248,8 @@ export async function readback(env,call){
  const row=await one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',[kind,id]);
  const revision=Number(row?.revision??0),expected=Number(input.expectedRevision??0);
  const base={id,kind,revision,expected,moved:revision>expected};
+ // AIR-374 P2b: the person-state writers are replay-safe by content (no receipt table): replaying the same call is a no-op when it had applied.
+ if(spec.byReplay)return {...base,outcome:'settle_by_replay',applied:null,note:'replay the same call: when the rows already hold the wanted state it is a no-op without a batch'};
  if(spec.byRequestId)return {...base,outcome:'settle_by_request_id',applied:null,note:'replay the same call: an applied request id is a no-op'};
  if(revision<=expected)return {...base,outcome:'not_applied',applied:false};
  if(await contentPresent(db,call.fn,input))return {...base,outcome:'content_present',applied:null,note:'the wanted content exists; a competing writer may have written it'};

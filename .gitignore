@@ -39,4 +39,6 @@ __pycache__/
 
 # Owner credential files shared into a worktree. Never commit.
 .config/
+
+# Temporary output of tests/film-person-prepared-loader.mjs, normally removed by the test itself
 tmp-loader-out-*/
