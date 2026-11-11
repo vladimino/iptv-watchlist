@@ -52,6 +52,25 @@ async function publishedOwnerReviews(env){
  if(typeof OwnerReview==='undefined'||typeof OwnerReview.loadForRead!=='function')return {ok:true,body:await loadJSON(env,'admin/owner-reviews.json')};
  return OwnerReview.loadForRead(env);
 }
+// AIR-374 P4b (owner decision 4): the titles.json dictionary behind GET /api/programme and GET /api/watchlist. The marker is read FIRST on every GET: legacy, r2 and prepared read the
+// R2 mirror exactly as before; at `open` the mirror is frozen and the same rows come from D1 (one bounded SELECT); held and an unreadable marker throw before any read and never reach R2.
+// The marker is read again after the reads, so prepared -> open (or held) mid-request is a 503, never a stale R2 answer. The bundle always defines CanonicalCatalogReader (the guard
+// serves only the vm-scoped tests that load the Worker without it; tests/canonical-catalog-titles.mjs asserts the bundle).
+const TITLE_READ_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
+const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader.catalogReaderGate(env);
+async function localizedTitleStore(env,pinned,gate,films){
+ if(!gate)return (await loadJSON(pinned,'titles.json'))||{};
+ if(gate.mode==='d1')return CanonicalCatalogReader.catalogTitlesFromD1(env,films,gate);
+ return (await loadJSON(pinned,'titles.json'))||{};
+}
+// The LAST async boundary: after every awaited read of the route (titles, owner reviews, sync.json, documents) and right before a successful answer, the marker is read again
+// and must still have the state AND generation the first read saw, on the open path and on the legacy/r2/prepared path alike. A 200 shape that carries no title (the empty
+// watchlist) is fenced the same way. Error answers are not fenced: they carry no stored facts.
+async function titleReadFinish(env,gate,response){
+ if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);
+ return response;
+}
+const titleReadRefusal=error=>TITLE_READ_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
 async function epgPublication(env){
  return epgPublicationReadOnly(env);
 }
@@ -1635,32 +1654,34 @@ async fetch(request,env,execution){
   if(url.pathname==='/api/started'&&request.method==='POST'){let body;try{body=await request.json();}catch{return json({error:'Invalid JSON'},400);}if(!body||typeof body!=='object')return json({error:'Invalid request'},400);return await setStarted(env,body);}
   if(url.pathname==='/api/programme'&&request.method==='GET'){
    try{
+    const gate=await titleReadGate(env);
     const pinned=await pinEpg(env);
     const data=await loadJSON(pinned,'programme.json');
     if(!data)return json({error:'Первое обновление ещё выполняется'},503);
     const watchlist=await loadJSON(pinned,'watchlist.json');
-    const titles=await loadJSON(pinned,'titles.json')||{};
+    const titles=await localizedTitleStore(env,pinned,gate,[...(data?.films||[]),...(watchlist?.films||[])]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
     const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body);
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;
-    return json(presented);
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
+    return await titleReadFinish(env,gate,json(presented));
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/watchlist'&&request.method==='GET'){
    try{
+    const gate=await titleReadGate(env);
     const pinned=await pinEpg(env);
     let data=await loadJSON(pinned,'watchlist.json');
     const report=await loadJSON(pinned,'programme.json');
     if(pinned.epgPin?.authority!=='d1'&&report?.films?.length===report.watchlistCount&&data?.updatedAt!==report.updatedAt)data={updatedAt:report.updatedAt,films:report.films};
-    if(!data)return json({films:[]});
-    const titles=await loadJSON(pinned,'titles.json')||{};
+    if(!data)return await titleReadFinish(env,gate,json({films:[]}));
+    const titles=await localizedTitleStore(env,pinned,gate,data?.films||[]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
-    return json(presentLocalized(data,titles,reviews.body));
-   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);throw error;}
+    return await titleReadFinish(env,gate,json(presentLocalized(data,titles,reviews.body)));
+   }catch(error){if(error?.code==='published_epg_fence')return json({error:'published_epg_fence',retry:true},409);const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
   }
   if(url.pathname==='/api/catalog/available'&&request.method==='GET')return await catalogAvailableRoute(env);
   {const permanent=/^\/api\/catalog\/film\/([^/]+)$/.exec(url.pathname);if(permanent&&request.method==='GET'){let id;try{id=decodeURIComponent(permanent[1]);}catch{id='';}return await catalogFilmRoute(env,id);}}
