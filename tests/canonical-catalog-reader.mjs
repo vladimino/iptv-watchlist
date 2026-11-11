@@ -16,6 +16,8 @@ import {canonicalReaderMode} from '../src/canonical-read-model.js';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const MODULE=process.env.CANONICAL_CATALOG_READER_MODULE;
+// The mutation check points ONE target at the part of this file that exercises it (reader: sections 1 and 2; route: section 3); unset runs everything.
+const ONLY=process.env.CANONICAL_CATALOG_READER_ONLY||'';
 const reader=await import(MODULE||'../src/canonical-catalog-reader.js');
 const READER_FILE=MODULE?fileURLToPath(MODULE):'src/canonical-catalog-reader.js';
 const D1_FILE=process.env.CATALOG_D1_MODULE?fileURLToPath(process.env.CATALOG_D1_MODULE):'src/catalog-d1.js';
@@ -28,11 +30,13 @@ const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHER
 const MARKER={r2:'',prepared:VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;"};
 MARKER.open=MARKER.prepared+"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1;";
 MARKER.held=MARKER.open+"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;";
-let n=0;
+let n=0;const BASE=new Map();
 function database(state){
  const file=path.join(root,'cr-'+(n++)+'.sqlite');
  const upTo=state==='legacy'?names.findIndex(name=>name.startsWith('0013')):names.length;
- sqlite(file,names.slice(0,upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ // The migration chain is replayed once per chain length; every fixture is a copy of that file (the chain is the slow part, not the marker moves).
+ if(!BASE.has(upTo)){const shared=process.env.CANONICAL_CATALOG_BASE_DIR,base=path.join(shared||root,'base-'+upTo+'.sqlite');if(!(shared&&fs.existsSync(base)))sqlite(base,names.slice(0,upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));BASE.set(upTo,base);}
+ fs.copyFileSync(BASE.get(upTo),file);
  if(state==='unknown-row'){sqlite(file,MARKER.prepared);sqlite(file,'DROP TRIGGER film_person_authority_no_delete;DELETE FROM film_person_authority;');}
  else if(state==='unknown-table')sqlite(file,'DROP TABLE film_person_cas;');
  else if(MARKER[state])sqlite(file,MARKER[state]);
@@ -44,16 +48,16 @@ const code=expected=>error=>error.code===expected;
 const refusal=state=>state==='held'?'film_person_held':'film_person_unavailable';
 
 // 1. The gate: existing runtime for legacy/r2/prepared, d1 for open, a typed refusal for held and every unknown state. Never R2.
-for(const state of STATES){
+if(ONLY!=='route')for(const state of STATES){
  const env={DB:standin(database(state),state)};
  if(['legacy','r2','prepared'].includes(state))assert.equal((await reader.catalogReaderGate(env)).mode,'existing',state);
  else if(state==='open')assert.equal((await reader.catalogReaderGate(env)).mode,'d1',state);
  else await assert.rejects(()=>reader.catalogReaderGate(env),code(refusal(state)),state);
 }
-assert.equal((await canonicalReaderMode({DB:d1Standin(database('open'))})).mode,'d1','the bulk read model shares the one gate');
+if(ONLY!=='route')assert.equal((await canonicalReaderMode({DB:d1Standin(database('open'))})).mode,'d1','the bulk read model shares the one gate');
 
 // 2. The D1 fallback reader: only at open; every other state refuses before a catalog statement. There is no R2 handle in this environment at all.
-{
+if(ONLY!=='route'){
  const SHA='a'.repeat(64),T='2026-11-07T10:00:00.000Z',RK='letterboxd/admissions/verified-films.json';
  const film=id=>`('film:tmdb:${id}',1,'tmdb:${id}','Orig','${T}')`;
  const claimed=[304,305,306,307];
@@ -114,6 +118,7 @@ INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:tmdb:303','film:
 }
 
 // 3. The /api/d1/* gate in the Worker scope: the route module is loaded as the Worker bundle loads it (owner-review overlay is reachable only through this route).
+if(ONLY!=='reader'){
 const ctx=vm.createContext({Response,Request,URL,JSON,Promise,Number,String,Math,Map,Set,Error});
 vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);
 vm.runInContext(scopedReplacing(READER_FILE,'CanonicalCatalogReader',IMPORT),ctx);
@@ -130,6 +135,25 @@ for(const state of STATES){
  for(const p of PATHS)answers[state][p]=await get(p);
  answers[state].post=await get('status','POST');
  assert.equal(touched,0,state+': no R2 access');
+ if(state==='open'){
+  // The marker moves AFTER the views' own reads: the gate at the start saw `open`, the answer is refused because the marker is checked again before it is returned.
+  const reopen="UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1";
+  for(const p of ['status','persons/director/michael-mann/identity'])for(const [name,sql,reason] of [['held',"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1",'film_person_held'],['held then reopened at a NEW generation',reopen,'film_person_generation_moved']]){
+   const copy=file+'.'+Math.random().toString(36).slice(2)+'.sqlite';fs.copyFileSync(file,copy);
+   let moved=false,authorityReads=0;
+   const e={DB:d1Standin(copy,{onQuery:async text=>{
+    if(/FROM film_person_authority/.test(text)){authorityReads++;return;}
+    if(!moved&&authorityReads>0&&/FROM (film|person)\b|COUNT\(/i.test(text)){moved=true;sqlite(copy,sql);}
+   }}),BUCKET:env.BUCKET};
+   const res=await ctx.route(new Request('https://iptv.test/api/d1/'+p),e,new URL('https://iptv.test/api/d1/'+p));
+   const text=await res.text();
+   assert.ok(moved,p+' '+name+': the marker moved during the view reads');
+   assert.equal(res.status,503,p+' '+name+': refused');
+   assert.deepEqual(JSON.parse(text),{error:'storage_unavailable',reason},p+' '+name+': typed 503, never a stale authoritative:true body');
+   assert.ok(!text.includes('authoritative'),p+' '+name+': nothing of the stale view');
+   fs.rmSync(copy,{force:true});
+  }
+ }
  assert.equal(answers[state].post.status,405,state+': a non-GET is not gated');
 }
 const body=(state,p)=>JSON.parse(answers[state][p].text);
@@ -150,8 +174,10 @@ assert.equal(body('open','persons/director/michael-mann/identity').bounded,true,
 assert.equal(answers.open['films/tmdb:9'].status,404);
 assert.equal(body('open','persons').authoritative,undefined,'a view that never carried the flag does not gain one');
 
+}
+
 // 4. Static wiring: the one new bundled module, the allowlisted importers, and the modules that stay unbundled.
-{
+if(!ONLY){
  const build=fs.readFileSync('build.mjs','utf8');
  assert.match(build,/scopedReplacing\('src\/canonical-catalog-reader\.js','CanonicalCatalogReader'/,'build.mjs bundles the reader');
  for(const unbundled of ['canonical-producers','canonical-mutations','canonical-read-model','localization-sources','film-admission','tmdb-retirement-decisions','film-person-baseline'])assert.ok(!build.includes('src/'+unbundled+'.js'),unbundled+' stays out of the bundle');

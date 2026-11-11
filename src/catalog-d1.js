@@ -253,16 +253,25 @@ async function catalogD1Dispatch(request,env,url,authoritative=false){
 // before (`authoritative:false`); held, an unreadable or malformed marker answer 503 and read nothing; open reads the same D1 rows and says `authoritative:true`.
 // A non-GET request is not gated (405 as before). The gate is one set of SELECTs of the marker tables; nothing is written.
 async function catalogD1Route(request,env,url){
- let authoritative=false;
+ let authoritative=false,first=null;
+ const refuse=error=>{
+  const code=error?.code||'';
+  if(code==='film_person_held'||code==='film_person_unavailable'||code==='film_person_generation_moved')return json({error:'storage_unavailable',reason:code},503);
+  throw error;
+ };
  if(request.method==='GET'){
-  try{authoritative=(await CanonicalCatalogReader.catalogReaderGate(env)).mode==='d1';}
-  catch(error){
-   const code=error?.code||'';
-   if(code==='film_person_held'||code==='film_person_unavailable')return json({error:'storage_unavailable',reason:code},503);
-   throw error;
-  }
+  try{first=await CanonicalCatalogReader.catalogReaderGate(env);authoritative=first.mode==='d1';}
+  catch(error){return refuse(error);}
  }
- const response=await catalogD1Dispatch(request,env,url,authoritative);
- if(typeof OwnerReview==='undefined'||typeof OwnerReview.overlayCatalogResponse!=='function')return response;
- return OwnerReview.overlayCatalogResponse(env,response);
+ let response=await catalogD1Dispatch(request,env,url,authoritative);
+ if(typeof OwnerReview!=='undefined'&&typeof OwnerReview.overlayCatalogResponse==='function')response=await OwnerReview.overlayCatalogResponse(env,response);
+ if(first){
+  // The marker is read again after every D1 and overlay read, immediately before the answer: a view read at `open` is returned only if the marker is still open at the same
+  // generation; a move to held, an unreadable marker or a new generation refuses (a response already read is never returned as authoritative).
+  try{
+   const again=await CanonicalCatalogReader.catalogReaderGate(env);
+   if(authoritative&&again.generation!==first.generation)throw Object.assign(new Error('film_person_generation_moved'),{code:'film_person_generation_moved'});
+  }catch(error){return refuse(error);}
+ }
+ return response;
 }

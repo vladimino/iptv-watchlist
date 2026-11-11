@@ -33,15 +33,21 @@ const READER=[
 ];
 const CATALOG_D1=[
  ['only GET is gated, and GET is gated',"if(request.method==='GET'){","if(false){"],
- ['authoritative only for d1',".mode==='d1';",".mode==='d1'||true;"],
- ['authoritative is not constant false',"authoritative=(await CanonicalCatalogReader.catalogReaderGate(env)).mode==='d1';","authoritative=(await CanonicalCatalogReader.catalogReaderGate(env)).mode==='never';"],
- ['held is a 503',"if(code==='film_person_held'||code==='film_person_unavailable')return json({error:'storage_unavailable',reason:code},503);","if(code==='film_person_held')return json({error:'storage_unavailable',reason:code},503);"],
- ['unknown is a 503',"if(code==='film_person_held'||code==='film_person_unavailable')return json({error:'storage_unavailable',reason:code},503);","if(code==='film_person_unavailable')return json({error:'storage_unavailable',reason:code},503);"],
+ ['authoritative only for d1',"authoritative=first.mode==='d1';","authoritative=first.mode==='d1'||true;"],
+ ['authoritative is not constant false',"authoritative=first.mode==='d1';","authoritative=first.mode==='never';"],
+ ['held is a 503',"if(code==='film_person_held'||code==='film_person_unavailable'||","if(code==='film_person_unavailable'||"],
+ ['unknown is a 503',"||code==='film_person_unavailable'||code==='film_person_generation_moved')","||code==='film_person_generation_moved')"],
+ ['a moved marker is a 503',"||code==='film_person_generation_moved')return json","||false)return json"],
  ['status carries the flag',"json(await d1Status(env.DB,env,authoritative))","json(await d1Status(env.DB,env))"],
  ['identity carries the flag',"d1PersonIdentity(env.DB,'person:'+key,authoritative)","d1PersonIdentity(env.DB,'person:'+key)"],
  ['bounded identity carries the flag',"limitations,true,authoritative)","limitations,true)"],
  ['unbounded identity carries the flag',"limitations,false,authoritative)","limitations,false)"],
- ['the gate runs before any read',"const response=await catalogD1Dispatch(request,env,url,authoritative);","const response=await catalogD1Dispatch(request,env,url,false);"],
+ ['the gate runs before any read',"let response=await catalogD1Dispatch(request,env,url,authoritative);","let response=await catalogD1Dispatch(request,env,url,false);"],
+ ['the marker is re-read after the reads',"if(first){\n  // The marker is read again","if(false){\n  // The marker is read again"],
+ ['the re-read compares the generation',"authoritative&&again.generation!==first.generation","authoritative&&false"],
+ ['the re-read applies to an authoritative answer',"if(authoritative&&again.generation","if(false&&again.generation"],
+ ['a failed re-read refuses',"}catch(error){return refuse(error);}\n }\n return response;","}catch(error){}\n }\n return response;"],
+ ['the re-read follows the overlay',"response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first){","response=await OwnerReview.overlayCatalogResponse(env,response);\n if(first&&false){"],
 ];
 const WORKER=[
  ['open reads D1, not R2',"if(gate.state==='open')return CanonicalCatalogReader.catalogAdmittedFilmFromD1(env,tmdbId);",''],
@@ -49,15 +55,15 @@ const WORKER=[
  ['the new refusal codes are a 503',"'film_person_generation_moved','canonical_read_unavailable','admission_unavailable','canonical_read_not_authoritative']","]"],
 ];
 const TARGETS=[
- {source:'src/canonical-catalog-reader.js',test:'tests/canonical-catalog-reader.mjs',variable:'CANONICAL_CATALOG_READER_MODULE',url:true,mutants:READER},
- {source:'src/catalog-d1.js',test:'tests/canonical-catalog-reader.mjs',variable:'CATALOG_D1_MODULE',url:true,mutants:CATALOG_D1},
+ {source:'src/canonical-catalog-reader.js',test:'tests/canonical-catalog-reader.mjs',variable:'CANONICAL_CATALOG_READER_MODULE',only:'reader',url:true,mutants:READER},
+ {source:'src/catalog-d1.js',test:'tests/canonical-catalog-reader.mjs',variable:'CATALOG_D1_MODULE',only:'route',url:true,mutants:CATALOG_D1},
  {source:'src/worker.js',test:'tests/catalog-film.mjs',variable:'CATALOG_WORKER_FILE',url:false,mutants:WORKER},
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'canonical-catalog-mutants-'));
 assert.ok(path.relative(process.cwd(),dir).startsWith('..'),'the mutants are written outside the repository tree');
 const absolute=(text,from)=>text.replace(/(from\s*|import\()'(\.\.?\/[^']+)'/g,(_match,head,specifier)=>head+JSON.stringify(pathToFileURL(path.resolve(path.dirname(from),specifier)).href));
-const run=(test,variable,value)=>new Promise(resolve=>{
- const child=spawn(process.execPath,[test],{env:{...process.env,[variable]:value},stdio:['ignore','ignore','pipe']});
+const run=(test,variable,value,only)=>new Promise(resolve=>{
+ const child=spawn(process.execPath,[test],{env:{...process.env,[variable]:value,...(only?{CANONICAL_CATALOG_READER_ONLY:only}:{}),CANONICAL_CATALOG_BASE_DIR:dir},stdio:['ignore','ignore','pipe']});
  let err='';child.stderr.on('data',chunk=>{err+=chunk;});
  child.on('close',code=>resolve({code,broken:/SyntaxError|ERR_MODULE_NOT_FOUND|does not provide an export/.test(err)?err.slice(0,300):null}));
 });
@@ -73,10 +79,16 @@ try{
   target.mutants.forEach(([name,from,to],index)=>queue.push({name,target,value:put('mutant'+index,original.replace(from,()=>to))}));
  }
  const survivors=[],broken=[];let killed=0;
+ // The unmutated copies run first and one after the other: the first of them replays the migration chain into the shared fixture directory, every mutant then copies it.
+ for(const item of queue.filter(entry=>entry.control)){
+  const out=await run(item.target.test,item.target.variable,item.value,item.target.only);
+  assert.equal(out.code,0,'the unmutated copy must pass: '+item.name+' '+(out.broken||''));
+ }
+ queue.splice(0,queue.length,...queue.filter(entry=>!entry.control));
  const workers=Array.from({length:Math.max(2,Math.min(8,os.availableParallelism()))},async()=>{
   while(queue.length){
    const item=queue.shift();
-   const out=await run(item.target.test,item.target.variable,item.value);
+   const out=await run(item.target.test,item.target.variable,item.value,item.target.only);
    if(item.control){assert.equal(out.code,0,'the unmutated copy must pass: '+item.name+' '+(out.broken||''));continue;}
    if(out.broken)broken.push(item.name+': '+out.broken);else if(out.code===0)survivors.push(item.name);else killed++;
   }

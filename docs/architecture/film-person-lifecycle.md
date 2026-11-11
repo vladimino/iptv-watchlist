@@ -71,7 +71,7 @@ flowchart LR
     marker --> refuse
 ```
 
-The marker is read before `GET /api/d1/*` and before the catalog film route's rated-archive fallback. Only `open` reads D1 for them; `held` and every unreadable state answer `503` and never reach R2, and at `open` the frozen R2 receipt is not read (owner decision 4). The marker is read again after the fallback's D1 reads, so a result that straddles a marker move is refused. Other readers of the canonical mirrors are not yet moved; see the [P4 evidence](../evidence/d1-migration/air-374-p4-readers-offline-2026-11-11.md).
+The marker is read before `GET /api/d1/*` and before the catalog film route's rated-archive fallback. Only `open` reads D1 for them; `held` and every unreadable state answer `503` and never reach R2, and at `open` the frozen R2 receipt is not read (owner decision 4). The marker is read again after the fallback's D1 reads and, for `GET /api/d1/*`, after every view and overlay read, immediately before the answer: a result read at `open` is returned only while the marker is still open at the same generation, otherwise `503`. Other readers of the canonical mirrors are not yet moved; see the [P4 evidence](../evidence/d1-migration/air-374-p4-readers-offline-2026-11-11.md).
 
 The projector asserts the marker and generation in every write batch, not only the grouped one ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md), AIR-374); the guard SQL is single-sourced in `src/film-person-authority.js` and the dormant `projectorFence` consumes it.
 
