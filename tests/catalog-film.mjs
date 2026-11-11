@@ -129,6 +129,7 @@ const base={
   f=await one('21');assert.deepEqual([f.shows[0].status,f.shows[0].effectiveEnd,f.availability.state,f.availableNow,f.availableUntil],['unknown',null,'unavailable',false,null],'no end and no runtime: unknown, nothing invented');
   f=await one('22');assert.deepEqual([f.shows[0].status,f.availability.state,f.availableNow,f.availableUntil],['archive','available',true,new Date(now-3*hour+72*hour).toISOString()],'ended by its runtime: ready');
   f=await one('23');assert.deepEqual([f.shows[0].status,f.availability.state,f.availability.appearsAt,f.availableNow],['future','soon',now+3*hour+100*60000,false]);
+  seed({...base,tmdb_24:run(24,100,[{channelId:'c1',channel:'One',start:now-hour,end:null}])});f=await one('24');assert.deepEqual([f.shows[0].end,f.shows[0].effectiveEnd,f.shows[0].status],[null,now-hour+100*60000,'on_air'],'an explicit EPG end null stays null, never 0');
   seed(base);
  }
  r=await get('9');assert.equal(r.status,200);assert.deepEqual(r.body.film.shows,[]);assert.equal(r.body.film.availability.state,'unavailable','no shows: unavailable');assert.equal(r.body.film.availableUntil,null);assert.equal(r.body.film.nextStart,null);assert.equal(r.body.film.availableNow,false,'zero shows is a valid film page');

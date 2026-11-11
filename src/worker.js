@@ -90,7 +90,7 @@ async function loadEpgSnapshot(env){
 const CATALOG_ARCHIVE_MS=72*3600000,CATALOG_FUTURE_MS=24*3600000;
 // AIR-433 (ADR 0114, owner decisions of 2026-11-11): one lifecycle for every catalog entry. The film `availability`, `availableNow`, `availableUntil` and the
 // per-show `status` all come from the shared helper, so they cannot contradict each other. The effective end of a show is its EPG end, else start + the film
-// runtime (minutes), else unknown. Show status: future | on_air | archive | expired | unknown. `availableNow` is `availability.state === 'available'` (a ready
+// runtime (minutes), else unknown. `shows[].end` stays the EPG end only when it is valid (a time after the start); an absent, null or malformed end is `null`, never 0. Show status: future | on_air | archive | expired | unknown. `availableNow` is `availability.state === 'available'` (a ready
 // recording exists; a show on air is not one). `availableUntil` is the end of the archive window of the latest ready show, null when nothing is ready.
 function catalogLifecycle(shows,runtime,now){
  const options={runtimeMinutes:runtime},list=shows.map(show=>({start:Number(show.start),end:show.end}));
@@ -98,7 +98,7 @@ function catalogLifecycle(shows,runtime,now){
  const {state,label,appearsAt,appearsAtKnown,appearsAtEstimated,archiveUntil,onAir}=availability;
  return {
   shows:shows.map(show=>{const phase=FilmAvailability.showPhase({start:Number(show.start),end:show.end},now,options);
-   return {channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:Number.isFinite(Number(show.end))?Number(show.end):null,effectiveEnd:phase.end,status:phase.phase==='invalid'?'unknown':phase.phase};}),
+   return {channelId:show.channelId??null,channel:show.channel??null,start:Number(show.start),end:phase.endSource==='epg'?phase.end:null,effectiveEnd:phase.end,status:phase.phase==='invalid'?'unknown':phase.phase};}),
   availableNow:state==='available',
   availableUntil:archiveUntil===null?null:new Date(archiveUntil).toISOString(),
   availability:{state,label,appearsAt,appearsAtKnown,appearsAtEstimated,archiveUntil,onAir}};

@@ -293,6 +293,15 @@ assert.deepEqual(puts,[]);
   r=await get();f=by('tmdb_18');
   assert.deepEqual([f.shows[0].status,f.shows[0].effectiveEnd,f.availability.state,f.availableNow,f.availableUntil],['unknown',null,'unavailable',false,null],'runtime '+String(runtime));
  }
+ // `shows[].end` is the EPG end or null: an explicit null, an absent, empty, malformed, boolean, zero or not-after-start end is `null` (never 0) and the
+ // effective end is start + runtime (100 minutes in this fixture), so the show is on air for 40 more minutes
+ for(const bad of [null,undefined,'','later',true,false,0,'0',now-hour,now-2*hour]){
+  seed();const startAt=now-hour,one={channelId:'c1',channel:'One',start:startAt};if(bad!==undefined)one.end=bad;
+  setCatalogShows('tmdb_18',[one]);r=await get();f=by('tmdb_18');
+  assert.deepEqual([f.shows[0].end,f.shows[0].effectiveEnd,f.shows[0].status,f.availability.state],[null,startAt+100*min,'on_air','soon'],'EPG end '+JSON.stringify(bad));
+ }
+ {seed();const startAt=now-3*hour;setCatalogShows('tmdb_18',[{channelId:'c1',channel:'One',start:startAt,end:startAt+30*min}]);r=await get();f=by('tmdb_18');
+  assert.deepEqual([f.shows[0].end,f.shows[0].effectiveEnd,f.shows[0].status],[startAt+30*min,startAt+30*min,'archive'],'a valid EPG end is kept and wins over the runtime');}
  // a future show without end and without runtime stays `future`: the film is soon, with no promised hour
  seed();records.get('epg/discovered-films.json').tmdb_15.runtime=null;records.get('epg/generations/'+G1+'/discovered-films.json').tmdb_15.runtime=null;
  setCatalogShows('tmdb_15',[{channelId:'c1',channel:'One',start:now+3*hour}]);r=await get();f=by('tmdb_15');
