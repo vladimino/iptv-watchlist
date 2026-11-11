@@ -24,6 +24,16 @@ Offline, in D1 mode, selection batch 12, one item per step, on `main` `09d6113`:
 | Change 1: the three authority statements in one batch | 101 | 47 |
 | Change 1 and change 2: the authority answer held for the request | 65 | 34 |
 
+After [AIR-442](https://trello.com/c/j564oeLD) reached `main` (`36e0aa3`) the film-state reads and several other calls were already fewer, so the same fixture was measured again, on `main` and on this branch merged with it:
+
+| Round trips, `main` `36e0aa3` | `next` | `submit` |
+| --- | --- | --- |
+| `main` | 165 | 73 |
+| Change 1: the three authority statements in one batch | 85 | 37 |
+| Change 1 and change 2: the authority answer held for the request | 58 | 28 |
+
+The first table is the measurement of `09d6113` that the card was worked from; the second is the state a merge has to be judged on.
+
 The authority statements are 132 of the 189 in `next` (44 times three) and 69 of the 93 in `submit`. The number of SQL statements is the same after change 1 (205 and 115); only the round trips fall.
 
 ## 3. The changes
@@ -47,7 +57,7 @@ The held answer carries the schema version, the table list and the marker (mode,
 | A table the write needs dropped | the write fails, the batch is rolled back | SQL error inside one batch |
 | A table the write does not need dropped | the write lands for the rest of that request; a fresh read would refuse the whole domain | **the one case the scope tolerates that a fresh read would not.** Migrations only add tables ([migrations README](../../../migrations/README.md)), so this is a contract violation, not a path of the system |
 
-What change 2 can miss is a routed **read** inside the same request after such a change, for at most the length of the request (seconds, bounded by the lease of the step). Mode moves are owner operations under their own holds; a request that holds mode `d1` while the mode is reverted writes nothing. The owner can drop change 2 by reverting its commit alone; change 1 stands without it (65 to 101 and 34 to 47 round trips).
+What change 2 can miss is a routed **read** inside the same request after such a change, for at most the length of the request (seconds, bounded by the lease of the step). Mode moves are owner operations under their own holds; a request that holds mode `d1` while the mode is reverted writes nothing. The owner can drop change 2 by reverting its commit alone; change 1 stands without it (58 to 85 and 28 to 37 round trips on `main` `36e0aa3`; 65 to 101 and 34 to 47 on `09d6113`).
 
 ## 5. What the tests prove (`tests/prediction-authority-scope.mjs`)
 
@@ -62,7 +72,7 @@ What change 2 can miss is a routed **read** inside the same request after such a
 
 ## 6. Acceptance gate (not passed)
 
-After the deploy, two natural Prediction runs are read without starting anything: `prediction_step_timing` lines grouped by Worker version, the D1 count per `next` and `submit` (production before: about 239 and 103), and p50/p95 of `wallMs` with the regional latency noted. The expected direction, from the offline counts, is about 189 → 65 for `next` and 93 → 34 for `submit` in this fixture's units; production counts differ (per-film reads, the programme read through D1) and no speed is promised.
+After the deploy, two natural Prediction runs are read without starting anything: `prediction_step_timing` lines grouped by Worker version, the D1 count per `next` and `submit` (production before: about 239 and 103), and p50/p95 of `wallMs` with the regional latency noted. The expected direction, from the offline counts on `main` `36e0aa3`, is about 165 → 58 for `next` and 73 → 28 for `submit` in this fixture's units; production counts differ (per-film reads, the programme read through D1) and no speed is promised.
 
 ## 7. Not known
 
