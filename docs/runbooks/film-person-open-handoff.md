@@ -45,6 +45,10 @@ Any failed or ambiguous assertion; batch outcome unknown (read the marker, do no
 
 Recovery is `open` to `held`, then the forward fix `held` to `open`; both are holdpoint H4 and need an explicit owner GO, and only with the drill passed. **Once D1-only writes exist, setting `r2` or a git revert is not a rollback.** The reverse reconciler is deferred.
 
+## Dated note, 11 Nov 2026 (P6, offline): `handoffReadiness` is computed
+
+Preflight item 5 is now checkable by code. `handoffReadiness` (read-only, unbundled) lists a blocker for each of: a former producer gap without a registered fenced writer and a differential entry; a named projector-versus-canonical difference not accepted by the owner (`exception_not_accepted:<id>`); `receipts_schema_missing` and `receipts_protocol_unregistered` (ADR 0117 decision 5, migration 0019 not applied or introduced); `producer_not_wired:<name>` for EPG commit, metadata sync, Discovery admission and rated admission/retention; `reader_not_moved:<name>`; `empty_class_not_loaded:<class>:<found>/<expected>` (708, 401, 4); a live projector lease; a window that is not idle; and the marker and baseline. It does not replace the owner's holdpoints and authorizes nothing. With the repository at the time of this note it is NOT ready. The registries are data; the PRs that wire a producer or move a reader update their entry, and the owner accepting a named difference changes its `status` in its list. This note adds to the design above and rewrites no accepted text.
+
 ## Not covered
 
 The offline tool that emits the preflight reads, the batch and the readback is a follow-up (not shipped). Not verified: production state at the time of the GO.

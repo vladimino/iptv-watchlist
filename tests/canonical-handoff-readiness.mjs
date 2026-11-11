@@ -1,0 +1,166 @@
+// AIR-374 P6 (offline) / ADR 0117: the COMPUTED handoffReadiness (src/canonical-producers.js). Read-only and dormant. On the real migration chain over the sqlite3-CLI D1 stand-in:
+// today's repository is NOT ready (receipts missing, producers unwired, readers unmoved, classes unloaded, named differences not accepted); a synthetic, fully satisfied fixture
+// is ready; every blocker flips independently; the registries are data, so editing a comment changes nothing. PRODUCERS_SOURCE points the test at a mutant copy
+// (tests/canonical-handoff-readiness-mutation.mjs).
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {d1Standin} from './d1-standin.mjs';
+import {copyOf,envOf,fresh,opened,root,sqlite} from './canonical-differential-helper.mjs';
+import {P6_DIFFERENTIAL_EXCEPTIONS} from '../src/canonical-film-writers.js';
+import {EXTRA_EXCEPTIONS,DIFFERENTIAL_COVERAGE} from '../src/canonical-differential-registry.js';
+
+const NOW='2026-11-11T12:00:00.000Z',NOW_MS=Date.parse(NOW);
+const source=process.env.PRODUCERS_SOURCE?path.resolve(process.env.PRODUCERS_SOURCE):'src/canonical-producers.js';
+const mod=await import(pathToFileURL(source).href);
+const {handoffReadiness,CALLS,RECONCILE,GAPS,PRODUCER_WIRING,READER_REGISTRY,RECEIPTS_PROTOCOL,EMPTY_CLASSES}=mod;
+const ALL_EXCEPTIONS=[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS];
+
+// A synthetic fully satisfied fixture: schema 19 with a receipt table, the three classes loaded at SMALL counts (2, 1, 1), a free lease, an idle window, marker prepared with a
+// verified baseline. The evidence replaces the registries only here: every producer wired, every reader moved, receipts registered, every named difference accepted.
+const SMALL=[{name:'ratedAdmission',table:'film_rated_admission',expected:2},{name:'retention',table:'film_retention',expected:1},{name:'retirement',table:'tmdb_retirement_decision',expected:1}];
+function satisfied(){
+ const file=fresh();
+ sqlite(file,"DROP TRIGGER schema_contract_no_downgrade;UPDATE schema_contract SET version=19 WHERE id=1;CREATE TABLE canonical_write_receipt (id INTEGER PRIMARY KEY);");
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:1',1,'"+NOW+"'),('film:tmdb:2',1,'"+NOW+"');"
+  +"INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:1','1','a','"+'a'.repeat(64)+"','k','tmdb_1','"+NOW+"','r','"+NOW+"'),('film:tmdb:2','2','b','"+'a'.repeat(64)+"','k','tmdb_2','"+NOW+"','r','"+NOW+"');"
+  +"INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:tmdb:1','watchlist_fact',1,'{}','r','"+NOW+"','"+NOW+"');"
+  +"INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,payload_json,recorded_at) VALUES ('d1','film:tmdb:1','retire','abc','1','5','{}','{\"by\":\"owner\",\"at\":\"x\",\"source\":\"y\"}','owner_request','{}','"+NOW+"');");
+ return file;
+}
+const good=()=>({wiring:PRODUCER_WIRING.map(item=>({...item,wired:true})),readers:READER_REGISTRY.map(item=>({...item,moved:true})),receipts:{...RECEIPTS_PROTOCOL,registered:true},classes:SMALL,exceptions:ALL_EXCEPTIONS.map(item=>({...item,status:'accepted'}))});
+const run=async(file,evidence)=>handoffReadiness(envOf(file),{now:NOW,evidence});
+const only=async(label,file,evidence,...expected)=>{const out=await run(file,evidence);assert.deepEqual(out.blockers,expected,label+': exactly this blocker, no other: '+out.blockers);assert.equal(out.ready,false,label);return out;};
+
+// 1. The fully satisfied synthetic fixture is READY, with every former gap cleared by evidence.
+{
+ const out=await run(satisfied(),good());
+ assert.deepEqual(out.blockers,[],'no blocker: '+out.blockers);
+ assert.equal(out.ready,true);
+ assert.deepEqual([out.gaps.length,out.clearedGaps.length],[0,GAPS.length]);
+}
+
+// 2. Today's repository (the real registries, a prepared and verified marker, empty classes) is NOT ready; the exact remaining blockers.
+{
+ const out=await handoffReadiness(envOf(fresh()),{now:NOW});
+ assert.equal(out.ready,false);
+ const expected=[
+  ...ALL_EXCEPTIONS.filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
+  'receipts_schema_missing','receipts_protocol_unregistered',
+  ...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name),
+  ...['worker_programme_read','worker_watchlist_read','worker_catalog_read','admin_read','admin_limbo','admin_health','owner_review_d1_gate'].map(name=>'reader_not_moved:'+name),
+  ...EMPTY_CLASSES.map(item=>'empty_class_not_loaded:'+item.name+':0/'+item.expected),
+ ];
+ assert.deepEqual(out.blockers,expected,'the computed blockers of this repository');
+ assert.deepEqual(out.blockers.filter(item=>/^(gap|marker|baseline|schema|projector)/.test(item)),[],'the marker, baseline, schema, lease and window are not what blocks');
+ assert.deepEqual(EMPTY_CLASSES.map(item=>item.expected),[708,401,4],'the accepted class counts');
+ assert.deepEqual(PRODUCER_WIRING.map(item=>item.name),['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
+ assert.equal(RECEIPTS_PROTOCOL.registered,false);assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
+ fs.writeFileSync(path.join(root,'today.json'),JSON.stringify(out.blockers));
+}
+
+// 3. Each blocker flips INDEPENDENTLY from the ready fixture: it alone appears, and only it.
+{
+ const base=satisfied();
+ // marker, baseline, schema, lease, window
+ await only('marker open',opened(base),good(),'marker_not_prepared:open');
+ {const f=copyOf(base,'x');sqlite(f,"INSERT INTO projection_run (projection,lease_id,lease_until,started_at) VALUES ('enrichment','l1','2099-01-01T00:00:00.000Z','2026-11-11T09:00:00.000Z') ON CONFLICT(projection) DO UPDATE SET lease_id='l1',lease_until='2099-01-01T00:00:00.000Z'");await only('live lease',f,good(),'projector_lease_live');}
+ for(const state of ['requested','held']){const f=copyOf(base,'x');sqlite(f,"UPDATE projector_window SET state='"+state+"',owner='o',requested_at="+(NOW_MS-1000)+",expires_at="+(NOW_MS+60000)+" WHERE id=1");await only('window '+state,f,good(),'projector_window_not_idle:'+state);}
+ {const f=copyOf(base,'x');sqlite(f,"UPDATE projector_window SET state='held',owner='o',requested_at="+(NOW_MS-200000)+",expires_at="+(NOW_MS-1000)+" WHERE id=1");assert.deepEqual((await run(f,good())).blockers,[],'an expired window is idle');}
+ {const f=copyOf(base,'x');sqlite(f,"DROP TRIGGER IF EXISTS film_person_baseline_reopen_needs_r2;UPDATE film_person_baseline SET state='loading' WHERE id=1");await only('baseline not verified',f,good(),'baseline_not_verified:loading');}
+ // receipts
+ {const f=copyOf(base,'x');sqlite(f,'DROP TABLE canonical_write_receipt');await only('receipt table absent',f,good(),'receipts_schema_missing');}
+ {const f=copyOf(base,'x');sqlite(f,'DROP TRIGGER IF EXISTS schema_contract_no_downgrade;UPDATE schema_contract SET version=18 WHERE id=1');await only('schema below 19',f,good(),'receipts_schema_missing');}
+ await only('receipts protocol unregistered',base,{...good(),receipts:{...RECEIPTS_PROTOCOL,registered:false}},'receipts_protocol_unregistered');
+ // producers and readers, one at a time
+ for(const item of PRODUCER_WIRING)await only('unwired '+item.name,base,{...good(),wiring:good().wiring.map(w=>w.name===item.name?{...w,wired:false}:w)},'producer_not_wired:'+item.name);
+ for(const item of READER_REGISTRY)await only('unmoved '+item.name,base,{...good(),readers:good().readers.map(r=>r.name===item.name?{...r,moved:false}:r)},'reader_not_moved:'+item.name);
+ // the three classes: one row fewer or more, and an unreadable table
+ for(const [index,item] of SMALL.entries()){
+  const more=copyOf(base,'x');
+  if(item.name==='retention')sqlite(more,"INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:tmdb:2','watchlist_fact',0,'{}','r','"+NOW+"','"+NOW+"')");
+  else if(item.name==='ratedAdmission')sqlite(more,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:tmdb:3',1,'"+NOW+"');INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES ('film:tmdb:3','3','c','"+'a'.repeat(64)+"','k','tmdb_3','"+NOW+"','r','"+NOW+"')");
+  else sqlite(more,"INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,payload_json,recorded_at) VALUES ('d2','film:tmdb:2','retire','abd','2','6','{}','{\"by\":\"owner\",\"at\":\"x\",\"source\":\"y\"}','owner_request','{}','"+NOW+"')");
+  await only('class too many '+item.name,more,good(),'empty_class_not_loaded:'+item.name+':'+(item.expected+1)+'/'+item.expected);
+  await only('class off by expectation '+item.name,base,{...good(),classes:SMALL.map((c,i)=>i===index?{...c,expected:c.expected+5}:c)},'empty_class_not_loaded:'+item.name+':'+item.expected+'/'+(item.expected+5));
+ }
+ await only('class table unreadable',base,{...good(),classes:[...SMALL.slice(0,2),{name:'retirement',table:'no_such_table',expected:1}]},'empty_class_unreadable:retirement');
+ // each former gap: its writer missing from CALLS or from RECONCILE, an uncovered or empty coverage entry, or no entry
+ for(const entry of DIFFERENTIAL_COVERAGE){
+  const expectedBlocker='gap:'+entry.gap;
+  await only('not covered '+entry.gap,base,{...good(),coverage:DIFFERENTIAL_COVERAGE.map(item=>item===entry?{...item,covered:false}:item)},expectedBlocker);
+  await only('no scenarios '+entry.gap,base,{...good(),coverage:DIFFERENTIAL_COVERAGE.map(item=>item===entry?{...item,scenarios:[]}:item)},expectedBlocker);
+  await only('no entry '+entry.gap,base,{...good(),coverage:DIFFERENTIAL_COVERAGE.filter(item=>item!==entry)},expectedBlocker);
+ }
+ const without=(table,name)=>Object.fromEntries(Object.entries(table).filter(([key])=>key!==name));
+ for(const writer of new Set(DIFFERENTIAL_COVERAGE.flatMap(item=>item.writers))){
+  const affected=DIFFERENTIAL_COVERAGE.filter(item=>item.writers.includes(writer)).map(item=>'gap:'+item.gap);
+  assert.ok(typeof CALLS[writer]==='function'&&RECONCILE[writer],writer+' is registered for dispatch and readback today');
+  assert.deepEqual((await run(base,{...good(),calls:{CALLS:without(CALLS,writer),RECONCILE}})).blockers,affected,writer+' missing from CALLS blocks exactly its gaps');
+  assert.deepEqual((await run(base,{...good(),calls:{CALLS,RECONCILE:without(RECONCILE,writer)}})).blockers,affected,writer+' missing from RECONCILE blocks exactly its gaps');
+ }
+ // every named difference the owner has not accepted blocks, one at a time
+ for(const item of ALL_EXCEPTIONS)await only('exception '+item.id,base,{...good(),exceptions:good().exceptions.map(x=>x.id===item.id?{...x,status:'draft'}:x)},'exception_not_accepted:'+item.id);
+}
+// 4. Read-only: only SELECT statements, no batch, and the database is byte-for-byte the same file content afterwards.
+{
+ const file=satisfied();const seen=[];
+ const env={DB:d1Standin(file,{onQuery:async text=>{seen.push(text);}})};
+ const before=fs.readFileSync(file);
+ const out=await handoffReadiness(env,{now:NOW,evidence:good()});
+ assert.equal(out.ready,true);
+ assert.ok(seen.length>0&&seen.every(text=>/^\s*SELECT/i.test(text)),'only SELECT statements: '+seen.filter(text=>!/^\s*SELECT/i.test(text)));
+ assert.equal(env.DB.calls.batches,0);
+ assert.ok(before.equals(fs.readFileSync(file)),'the database file is unchanged');
+ // an unreadable marker, a missing database and a missing contract are blockers, never ready
+ assert.ok((await handoffReadiness({},{now:NOW})).blockers.some(item=>item==='no_database'||item.startsWith('marker_unreadable')||item.startsWith('marker_not')));
+ assert.equal((await handoffReadiness({},{now:NOW})).ready,false);
+}
+
+// 5. The registries are DATA: a comment cannot change a blocker. A copy of the module whose comments are removed, and one whose comments claim everything is wired,
+// moved, covered and registered, give exactly today's blockers; only editing the data (a boolean in the registry) flips a blocker.
+{
+ const text=fs.readFileSync(source,'utf8');
+ const stripped=text.replace(/^\s*\/\/.*$/gm,'');
+ const boasting=text.replace(/^(export const (PRODUCER_WIRING|READER_REGISTRY|RECEIPTS_PROTOCOL|EMPTY_CLASSES|GAPS))/gm,'// wired: true moved: true registered: true covered: true cleared\n$1');
+ assert.notEqual(stripped,text);assert.notEqual(boasting,text);
+ const today=JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8'));
+ const load=async(body,name)=>{
+  const dir=path.dirname(path.resolve(source));
+  const rewritten=body.replace(/from '\.\/([^']+)'/g,(_,file)=>"from '"+pathToFileURL(path.join(dir,file)).href+"'");
+  const file=path.join(root,name);fs.writeFileSync(file,rewritten);
+  return import(pathToFileURL(file).href);
+ };
+ for(const [label,body] of [['comments removed',stripped],['boasting comments',boasting]]){
+  const copy=await load(body,label.replace(/\W/g,'')+'.mjs');
+  assert.deepEqual((await copy.handoffReadiness(envOf(fresh()),{now:NOW})).blockers,today,label+': the blockers are unchanged');
+ }
+ const flipped=await load(text.replace("name:'epg_commit',site:'epgSync commit (worker.js)',wired:false","name:'epg_commit',site:'epgSync commit (worker.js)',wired:true"),'flip.mjs');
+ const after=(await flipped.handoffReadiness(envOf(fresh()),{now:NOW})).blockers;
+ assert.deepEqual(today.filter(item=>!after.includes(item)),['producer_not_wired:epg_commit'],'editing the data flips exactly its blocker');
+}
+
+// 6. The registries agree with the repository: a producer marked wired needs the Worker bundle to carry the adapters; receipts registered need the migration; nothing is
+// bundled today; only the producers module imports the registry.
+{
+ const bundle=fs.readFileSync('build.mjs','utf8')+(fs.existsSync('scripts/bundle-scope.mjs')?fs.readFileSync('scripts/bundle-scope.mjs','utf8'):'');
+ const bundled=/canonical-producers/.test(bundle);
+ if(PRODUCER_WIRING.some(item=>item.wired))assert.ok(bundled,'a producer is marked wired but the Worker bundle does not carry the producers module');
+ else assert.ok(!bundled,'no producer is wired: the producers module is not bundled');
+ const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name));
+ const introduced=migrations.some(name=>fs.readFileSync('migrations/'+name,'utf8').includes(RECEIPTS_PROTOCOL.table));
+ if(RECEIPTS_PROTOCOL.registered)assert.ok(introduced,'receipts are registered but no migration introduces '+RECEIPTS_PROTOCOL.table);
+ assert.equal(introduced,false,'migration 0019 is introduced by the receipts PR, not by this one');
+ assert.ok(!/canonical-differential-registry/.test(bundle));
+ const importers=[];
+ const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-differential-registry'))importers.push(full.replace(/\\/g,'/'));}};
+ walk('src');
+ assert.deepEqual(importers,['src/canonical-producers.js'],'only the producers module imports the differential registry');
+ assert.equal(fs.readFileSync('src/canonical-differential-registry.js','utf8').split('\n').filter(line=>/^import /.test(line)).length,0,'the registry is data and imports nothing');
+ for(const item of READER_REGISTRY)assert.equal(typeof item.moved,'boolean');
+ for(const item of PRODUCER_WIRING)assert.equal(typeof item.wired,'boolean');
+ assert.ok(Object.isFrozen(PRODUCER_WIRING)&&Object.isFrozen(READER_REGISTRY)&&Object.isFrozen(RECEIPTS_PROTOCOL)&&Object.isFrozen(EMPTY_CLASSES)&&Object.isFrozen(DIFFERENTIAL_COVERAGE));
+}
+
+console.log('canonical-handoff-readiness: computed readiness is not ready today ('+JSON.parse(fs.readFileSync(path.join(root,'today.json'),'utf8')).length+' blockers: receipts, producer wiring, readers, loaded classes, unaccepted named differences), ready in a fully satisfied synthetic fixture, every blocker flips independently, read-only, registries are data and agree with the repository');

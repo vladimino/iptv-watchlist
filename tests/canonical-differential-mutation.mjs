@@ -1,0 +1,78 @@
+// AIR-374 P6 (offline): mutation check of the differential harness and the computed handoffReadiness. Three kinds of mutant, each must make its target test FAIL:
+//  1. a deliberately UNCLASSIFIED difference injected into a scenario (DIFFERENTIAL_INJECT) fails tests/canonical-differential.mjs: an unclassified difference never passes;
+//  2. a copy of src/canonical-differential-registry.js with one claim wrong (a scenario that did not run, a table not compared, an unproven exception, a gap that was
+//     renamed) fails the harness: the registry cannot say more than the harness proved;
+//  3. a copy of src/canonical-producers.js with ONE readiness rule removed or inverted fails tests/canonical-handoff-readiness.mjs (PRODUCERS_SOURCE).
+// A surviving mutant is a rule no test depends on. Mutants live OUTSIDE the repository tree (a temporary directory, removed afterwards), with the relative imports turned into
+// absolute file URLs; they run four at a time and every target test takes about a second.
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+
+import {root as helperRoot,template} from './canonical-differential-helper.mjs';
+const REGISTRY='src/canonical-differential-registry.js',PRODUCERS='src/canonical-producers.js';
+const registry=fs.readFileSync(REGISTRY,'utf8'),producers=fs.readFileSync(PRODUCERS,'utf8');
+const REGISTRY_MUTANTS=[
+ ['a coverage entry names a scenario that never ran',"['first_write','normal_refresh'],['film_metadata']","['first_write','no_such_scenario'],['film_metadata']"],
+ ['a coverage entry claims a table the harness does not compare',"['localization_conflict_rows'],['localization_conflict']","['localization_conflict_rows'],['localization_conflict','canonical_revision']"],
+ ['a coverage entry claims a table its scenarios never fill',"['first_write','normal_refresh'],['film_metadata']","['first_write','normal_refresh'],['film_metadata','film_redirect']"],
+ ['a former gap is renamed in the registry',"cover('film_sync_state clocks'","cover('film_sync_state clocks and more'"],
+ ['an exception nothing exercises is registered',"{id:'credit_ordinals_kept'","{id:'never_met_anywhere',status:'draft',area:'x',rule:'x'},\n {id:'credit_ordinals_kept'"],
+ ['an exception the harness meets is dropped',"{id:'credit_ordinals_kept',status:'draft',area:'film_person_credit.ordinal',rule:'The projector renumbers ordinals from its source; the canonical writers keep an existing ordinal and append a new credit after the highest of its role.'},",""],
+ ['a coverage entry has no writer',"cover('film_sync_state clocks',['writeFilmFacts']","cover('film_sync_state clocks',[]"],
+];
+const PRODUCER_MUTANTS=[
+ ['a gap is cleared without its writers being registered',"entry.writers.every(name=>typeof calls.CALLS[name]==='function'&&!!calls.RECONCILE[name])","true"],
+ ['a gap is cleared though the registry does not mark it covered',"entry.covered===true&&","true&&"],
+ ['a gap is cleared with no scenario',"&&entry.scenarios?.length>0&&entry.tables?.length>0;","&&true;"],
+ ['a gap with no entry counts as cleared',"const registered=!!entry&&","const registered=!entry||"],
+ ['cleared and open gaps are swapped',"(registered?cleared:open).push(gap);","(registered?open:cleared).push(gap);"],
+ ['a named difference that is not accepted does not block',"if(item.status!=='accepted')blockers.push('exception_not_accepted:'","if(false)blockers.push('exception_not_accepted:'"],
+ ['the receipt table is not required',"version>=receipts.minSchema&&tables.has(receipts.table)","version>=receipts.minSchema"],
+ ['the receipt schema version is not required',"version>=receipts.minSchema&&tables.has(receipts.table)","tables.has(receipts.table)"],
+ ['an unregistered receipts protocol does not block',"if(receipts.registered!==true)blockers.push","if(false)blockers.push"],
+ ['an unwired producer does not block',"if(item.wired!==true)blockers.push","if(false)blockers.push"],
+ ['an unmoved reader does not block',"if(item.moved!==true)blockers.push","if(false)blockers.push"],
+ ['too many rows in a class do not block',"if(found!==item.expected)blockers.push","if(found<item.expected)blockers.push"],
+ ['too few rows in a class do not block',"if(found!==item.expected)blockers.push","if(found>item.expected)blockers.push"],
+ ['an unreadable class table does not block',"{blockers.push('empty_class_unreadable:'+item.name);continue;}","{continue;}"],
+ ['a live projector lease does not block',"if(lease)blockers.push('projector_lease_live');","if(false)blockers.push('projector_lease_live');"],
+ ['a requested projector window does not block',"window.state!=='idle'&&Number(window.expires_at)>nowMs","window.state==='held'&&Number(window.expires_at)>nowMs"],
+ ['an expired projector window blocks',"window.state!=='idle'&&Number(window.expires_at)>nowMs","window.state!=='idle'"],
+ ['the marker state is not checked',"if(gate.state!=='prepared')blockers.push","if(false)blockers.push"],
+ ['the baseline is not checked',"if(gate.baseline!=='verified')blockers.push","if(false)blockers.push"],
+ ['ready ignores the blockers',"return {ready:blockers.length===0,","return {ready:true,"],
+ ['an epg producer is registered as wired',"name:'epg_commit',site:'epgSync commit (worker.js)',wired:false","name:'epg_commit',site:'epgSync commit (worker.js)',wired:true"],
+ ['a reader is registered as moved',"name:'admin_read',moved:false","name:'admin_read',moved:true"],
+ ['the receipt schema floor is lowered',"table:'canonical_write_receipt',minSchema:19","table:'canonical_write_receipt',minSchema:18"],
+ ['the accepted class count is changed',"table:'film_rated_admission',expected:708","table:'film_rated_admission',expected:707"],
+];
+for(const [name,from] of REGISTRY_MUTANTS)assert.equal(registry.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+REGISTRY);
+for(const [name,from] of PRODUCER_MUTANTS)assert.ok(producers.split(from).length>=2,'the mutation text of "'+name+'" must occur in '+PRODUCERS);
+for(const [name,from] of PRODUCER_MUTANTS)assert.equal(producers.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+PRODUCERS);
+const dir=fs.mkdtempSync(path.join(process.env.TMPDIR||os.tmpdir(),'differential-mutants-'));
+const shared=template();
+const absolute=(text,base)=>text.replace(/from '\.\/([^']+)'/g,(_,file)=>"from '"+pathToFileURL(path.resolve(base,file)).href+"'");
+const run=(test,env)=>new Promise(resolve=>{
+ const child=spawn(process.execPath,[test],{env:{...process.env,TMPDIR:dir,DIFFERENTIAL_TEMPLATE:shared,...env},stdio:['ignore','ignore','pipe']});
+ let err='';child.stderr.on('data',chunk=>{err+=chunk;});
+ // a mutant that does not even load is a broken mutant, not a killed one
+ child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+});
+try{
+ const queue=[];
+ // 1. injected unclassified differences, in an IDENTICAL-looking scenario and in a refresh
+ for(const id of ['normal_refresh','localization_conflict_rows'])queue.push({name:'an unclassified difference injected into '+id,test:'tests/canonical-differential.mjs',env:{DIFFERENTIAL_INJECT:id}});
+ REGISTRY_MUTANTS.forEach(([name,from,to],index)=>{const file=path.join(dir,'registry'+index+'.mjs');fs.writeFileSync(file,absolute(registry,'src').replace(from,()=>to));queue.push({name,test:'tests/canonical-differential.mjs',env:{DIFFERENTIAL_REGISTRY_SOURCE:file}});});
+ PRODUCER_MUTANTS.forEach(([name,from,to],index)=>{const file=path.join(dir,'producers'+index+'.mjs');fs.writeFileSync(file,absolute(producers,'src').replace(from,()=>to));queue.push({name,test:'tests/canonical-handoff-readiness.mjs',env:{PRODUCERS_SOURCE:file}});});
+ const total=queue.length;
+ assert.equal(await run('tests/canonical-differential.mjs',{}),0,'the unmutated harness passes');
+ assert.equal(await run('tests/canonical-handoff-readiness.mjs',{}),0,'the unmutated readiness test passes');
+ const survivors=[];
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();if(await run(item.test,item.env)===0)survivors.push(item.name);}}));
+ assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
+ console.log('canonical-differential-mutation: ok ('+total+' mutants killed)');
+}finally{fs.rmSync(dir,{recursive:true,force:true});fs.rmSync(helperRoot,{recursive:true,force:true});}
