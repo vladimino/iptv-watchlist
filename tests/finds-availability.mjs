@@ -23,6 +23,7 @@ const run=(expression,input)=>{ui.input=input;return vm.runInContext(expression,
 const ids=list=>Array.from(list).map(item=>item.id);
 const scope=(channels=[],period='all')=>vm.runInContext(`state.channels=new Set(${JSON.stringify(channels)});state.period=${JSON.stringify(period)};`,ui);
 const clock=value=>vm.runInContext(`viewClock=${value}`,ui);
+const stampOf=ms=>run('madridStamp(input)',ms);
 const badges=markup=>(markup.match(/class="soon-badge"/g)||[]).length;
 scope();
 
@@ -40,19 +41,19 @@ assert.equal(airing.kind,'catchup');assert.match(airing.text,/^Архив · О�
 assert.doesNotMatch(run('findsCard(input,now)',archiveRepeat),/soon-badge/,'no hourglass for a film with a ready archive');
 // 2. Future only: «Скоро» with the expected archive time from the END of the show, and one hourglass.
 airing=run('findsAiring(input,now)',futureOnly);
-assert.equal(airing.kind,'next');assert.equal(airing.availability.state,'soon');assert.match(airing.text,/ · Два · архив появится после /);
+assert.equal(airing.kind,'next');assert.equal(airing.availability.state,'soon');assert.equal(airing.text,`${stampOf(now+5*hour)} · Два`,'the short form: start and channel only, no promise of the archive');
 assert.equal(airing.availability.appearsAt,now+7*hour,'ready at the end of the show, not at its start');
 assert.equal(badges(run('findsCard(input,now)',futureOnly)),1,'exactly one hourglass on the find (no double render)');
 // 3. Ongoing only: still «Скоро» until the end.
 airing=run('findsAiring(input,now)',onAirOnly);
-assert.equal(airing.kind,'live');assert.match(airing.text,/^Сейчас в эфире · Один · архив появится после /);assert.equal(airing.availability.appearsAt,now+90*min);
+assert.equal(airing.kind,'live');assert.equal(airing.text,'Сейчас в эфире · Один');assert.equal(airing.availability.appearsAt,now+90*min);
 assert.equal(badges(run('findsCard(input,now)',onAirOnly)),1);
 // 4. No EPG end but a film runtime: the end is start + runtime, said honestly as an estimate.
 airing=run('findsAiring(input,now)',noEndRuntime);
-assert.equal(airing.kind,'live');assert.equal(airing.availability.appearsAt,now-30*min+100*min);assert.match(airing.text,/архив ожидается около .* \(по длительности фильма\)/);
+assert.equal(airing.kind,'live');assert.equal(airing.availability.appearsAt,now-30*min+100*min);assert.equal(airing.text,'Сейчас в эфире · Три','an estimated end changes the badge label, not the line');
 // 5. No end and no runtime: the hour is unknown and nothing is invented; a started show with neither is not a find at all.
 airing=run('findsAiring(input,now)',noEndNoRuntime);
-assert.equal(airing.kind,'next');assert.match(airing.text,/время появления архива неизвестно$/);assert.equal(airing.availability.appearsAt,null);
+assert.equal(airing.kind,'next');assert.equal(airing.text,`${stampOf(now+3*hour)} · Три`,'an unknown end changes nothing in the line');assert.equal(airing.availability.appearsAt,null);
 assert.equal(run('findsAiring(input,now).kind',startedNoEnd),'none','a started show with no determinable end is neither an archive nor a promise');
 assert.deepEqual(ids(run('buildFinds(input,now)',catalog)).sort(),['tmdb_1','tmdb_2','tmdb_3','tmdb_4','tmdb_5'],'the started show with no end is not offered');
 
@@ -84,17 +85,17 @@ assert.equal(ids(run('buildFinds(input,now)',[futureOnly,archiveRepeat,onAirOnly
  const stamp=ms=>run('madridStamp(input)',ms);
  const overlap=film('tmdb_20',20,'Наложение',[show(-2,'Первый',4),show(-1,'Второй',1.5)]);          // 08:00-12:00 and 09:00-10:30 at 10:00
  let a=run('findsAiring(input,now)',overlap);
- assert.equal(a.availability.appearsAt,now+30*min);assert.equal(a.show.channel,'Второй');assert.equal(a.kind,'live');assert.equal(a.text,`Сейчас в эфире · Второй · архив появится после ${stamp(now+30*min)}`);
+ assert.equal(a.availability.appearsAt,now+30*min);assert.equal(a.show.channel,'Второй');assert.equal(a.kind,'live');assert.equal(a.text,'Сейчас в эфире · Второй');
  const futureEarlier=film('tmdb_21',21,'Будущий кончится раньше',[show(-2,'Первый',6),show(0.25,'Второй',0.75)]);   // on air until +4 h, a future show ends at +1 h
  a=run('findsAiring(input,now)',futureEarlier);
- assert.equal(a.availability.appearsAt,now+hour);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Второй');assert.match(a.text,new RegExp(` · Второй · архив появится после ${stamp(now+hour)}$`));
+ assert.equal(a.availability.appearsAt,now+hour);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Второй');assert.equal(a.text,`${stamp(now+0.25*hour)} · Второй`);
  const sameEnd=film('tmdb_22',22,'Один конец',[show(-1,'Первый',2),show(-0.5,'Второй',1.5)]);       // both end at +1 h: the earlier start is named
  assert.equal(run('findsAiring(input,now).show.channel',sameEnd),'Первый');
  const ignored=film('tmdb_23',23,'Начался без конца',[{channelId:'c',channel:'Первый',start:now-hour},show(3,'Второй')],{runtime:null});   // the started show with no end is ignored
  a=run('findsAiring(input,now)',ignored);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Второй');assert.equal(a.availability.appearsAtKnown,true);
  const partial=film('tmdb_24',24,'Один конец неизвестен',[{channelId:'c',channel:'Первый',start:now+2*hour},show(3,'Второй')],{runtime:null});   // one future end is unknown: no hour is promised
  a=run('findsAiring(input,now)',partial);
- assert.equal(a.availability.appearsAtKnown,false);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Первый','the nearest start is named');assert.match(a.text,/время появления архива неизвестно$/);
+ assert.equal(a.availability.appearsAtKnown,false);assert.equal(a.kind,'next');assert.equal(a.show.channel,'Первый','the nearest start is named');assert.equal(a.text,`${stamp(now+2*hour)} · Первый`);
 }
 
 // 9c. A film page opened on its own (a catalog film held only by Finds, nothing in the grid or the Finds cards) arms the clock timer too: the badge on the
@@ -145,6 +146,23 @@ const similar=run('similarCard({film:input,source:"catalog",theme:null,predictio
 assert.equal(badges(similar),1,'the similar card shows it once');
 assert.equal(badges(run('similarCard({film:input,source:"catalog",theme:null,prediction:{rating:4.5,probability:.8},options:{},badge:"new"},now)',archiveRepeat)),0);
 assert.equal(badges(run('card(input)',{...futureOnly,offset:0,shows:futureOnly.shows,runtime:100,genres:['Драма'],original:'x',year:2020})||''),1,'a list card carries it once');
+
+// 10b. The line under the poster is short: the hourglass and its label already say «Скоро» and when the archive is expected, so neither the Finds line nor the
+// similar-film line repeats it. The label text itself is unchanged.
+{
+ const tail=/архив появится|архив ожидается|время появления архива/;
+ for(const item of [futureOnly,onAirOnly,noEndRuntime,noEndNoRuntime,overlapFilm()]){
+  const finds=run('findsCard(input,now)',item),similar=run('similarCard({film:input,source:"catalog",theme:null,prediction:{rating:4.5,probability:.8},options:{},badge:"new"},now)',item);
+  const line=markup=>markup.match(/<p class="(?:finds-airing|film-similar-airing)"[^>]*>([^<]*)<\/p>/)[1];
+  assert.doesNotMatch(line(finds),tail,item.id);assert.doesNotMatch(line(similar),tail,item.id);
+  assert.equal(line(finds),run('findsAiring(input,now).text',item).replace(/&/g,'&amp;'),'the card shows exactly the line '+item.id);
+  assert.equal(badges(finds),1,'one hourglass on the find '+item.id);assert.equal(badges(similar),1,'one hourglass on the similar card '+item.id);assert.match(finds,/class="finds-badge"/,'NEW stays');
+  assert.match(label(run('soonBadge(input)',item)),/^Скоро: /,'the badge label keeps its text');
+ }
+ // an archive with a repeat: the archive line, no hourglass, nothing about a future archive
+ const archived=run('findsCard(input,now)',archiveRepeat);assert.match(archived,/data-airing="catchup">Архив · Один · до [^<]+<\/p>/);assert.equal(badges(archived),0);
+}
+function overlapFilm(){return film('tmdb_20',20,'Наложение',[show(-2,'Первый',4),show(-1,'Второй',1.5)]);}
 
 // 11. CSS contract: the badge sits in a positioned poster container in the opposite corner from NEW, is not interactive, and does not reuse NEW or last chance.
 assert.match(css,/\.poster-frame\{position:relative;flex:none\}/);

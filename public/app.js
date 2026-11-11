@@ -1475,8 +1475,9 @@ function findsAiringFromLifecycle(film,now,scope,avail){
   const endOf=show=>lib.showPhase({start:show.start,end:show.end},now,options).end;
   const promised=avail.appearsAtKnown&&avail.appearsAt!==null?candidates.find(show=>endOf(show)===avail.appearsAt):null;
   const live=promised&&phase(promised)==='on_air'?promised:promised?null:shows.find(show=>phase(show)==='on_air'),next=promised&&phase(promised)==='future'?promised:promised?null:shows.find(show=>phase(show)==='future');
-  if(live)return {kind:'live',text:`Сейчас в эфире · ${findsChannel(live)} · ${soonTail(avail)}`,show:live,availability:avail};
-  if(next)return {kind:'next',text:`${madridStamp(next.start)} · ${findsChannel(next)} · ${soonTail(avail)}`,show:next,availability:avail};
+  // The line stays short: the hourglass already says «Скоро» and its label carries the expected archive time (`soonTail`), so the line never repeats it.
+  if(live)return {kind:'live',text:`Сейчас в эфире · ${findsChannel(live)}`,show:live,availability:avail};
+  if(next)return {kind:'next',text:`${madridStamp(next.start)} · ${findsChannel(next)}`,show:next,availability:avail};
  }
  return {kind:'none',text:'Нет показов в текущем окне',show:null,availability:avail};
 }
