@@ -148,14 +148,22 @@ BEGIN
 END;
 
 -- The activation baseline (ADR 0119): a canonical_revision that predates receipts must not be called "unreceipted", and must not be retrospectively given a receipt. canonical_receipt_watermark
--- is one row, taken once; canonical_receipt_baseline holds one row per canonical_revision entity as it stood then (kind, id, revision). A revision at or below its baseline entry is
+-- is one row, taken once, and PROVES the boundary: per kind, the count, the highest revision and the SHA-256 digest of the (id, revision) pairs it copied, plus the marker generation it was
+-- taken under (the code verifies them read-only against the copied rows: `verifyBaseline`); canonical_receipt_baseline holds one row per canonical_revision entity as it stood then (kind, id, revision). A revision at or below its baseline entry is
 -- `pre_receipt_baseline`; unreceipted applies only above it. Both tables are insert-only, and may be filled only while the marker is d1/open (the watermark under the live generation) and BEFORE the first
 -- receipt exists (a receipt needs the watermark, and the watermark is one row, so it can only precede them); a receipt cannot be inserted until the watermark exists. Taking it is a later, separately authorized activation step (src/canonical-receipts.js `recordBaseline`).
 CREATE TABLE canonical_receipt_watermark (
  id INTEGER PRIMARY KEY CHECK (id = 1),
  marker_generation INTEGER NOT NULL CHECK (marker_generation >= 0),
  entries INTEGER NOT NULL CHECK (entries >= 0),
- taken_at TEXT NOT NULL CHECK (length(taken_at) BETWEEN 20 AND 32)
+ film_count INTEGER NOT NULL CHECK (film_count >= 0),
+ film_max_revision INTEGER NOT NULL CHECK (film_max_revision >= 0),
+ film_digest TEXT NOT NULL CHECK (length(film_digest) = 64 AND film_digest NOT GLOB '*[^0-9a-f]*'),
+ person_count INTEGER NOT NULL CHECK (person_count >= 0),
+ person_max_revision INTEGER NOT NULL CHECK (person_max_revision >= 0),
+ person_digest TEXT NOT NULL CHECK (length(person_digest) = 64 AND person_digest NOT GLOB '*[^0-9a-f]*'),
+ taken_at TEXT NOT NULL CHECK (length(taken_at) BETWEEN 20 AND 32),
+ CHECK (entries = film_count + person_count)
 ) STRICT;
 
 CREATE TABLE canonical_receipt_baseline (

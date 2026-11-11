@@ -9,13 +9,14 @@
 //   1. PENDING. The receipt row is inserted (state `pending`, attempt 1, the planned-content digest, the marker generation) in a batch carrying the same fence head as every canonical
 //      mutation. If that insert is refused, nothing was written to canonical.
 //   2. COMMIT. The writer runs its own fenced commit (src/canonical-mutations.js `fenced.commit`, unchanged).
-//   3. APPLIED. Two ways, and they do NOT give the same guarantee:
-//      - ATOMIC (the rule for every writer that can: `hooks.atomic` true): the writer appends `appliedStatements()` to its OWN batch, so `applied` commits with the content or not at all.
-//        A lost answer cannot leave a landed write without its receipt, and the receipt can never say `applied` for a write that rolled back. Under `atomic` this module never marks
-//        applied by a second batch: a writer that returns without the receipt applied leaves it `unknown` (`atomic_mark_missing`).
-//      - SEPARATE MARK (weaker, allowed only where a writer cannot append statements): a second batch marks applied after the writer returned success. If the answer or the mark is lost,
-//        the receipt stays `pending` and only OPERATION-SPECIFIC EVIDENCE can settle it as applied (see 4). A content digest alone cannot: another actor may independently reach
-//        identical final content, and a later writer may overwrite it.
+//   3. APPLIED, ATOMICALLY (owner decision, PR #530 comment 6802553275: the ONLY mode a production adapter may use): the writer appends `appliedStatements()` to its OWN fenced batch, AFTER the revision
+//      bump, so the canonical mutation and the receipt's move to `applied` commit together or not at all: a lost answer cannot leave a landed write without its receipt, and the receipt can never say
+//      `applied` for a write that rolled back. `defineOperation`/`operationRegistry`/`receiptedWrite` REFUSE (`receipt_atomic_required`) anything that is not `atomic:true`, unless it carries a named
+//      exception record (id, review, proof, ownerAcceptance) whose id is in APPROVED_EXCEPTIONS: that list is EMPTY, no operation has an exception, and the separate-mark path below is a legacy mechanism
+//      that exists only behind it, never a default and not approved for P3. Under `atomic` this module never marks applied by a second batch: a writer that returns without the receipt applied leaves it
+//      `unknown` (`atomic_mark_missing`).
+//      LEGACY, exception-gated only: a second batch marks `applied` after the writer returned. If the answer or the mark is lost the receipt stays `pending`, and only OPERATION-SPECIFIC EVIDENCE can settle it
+//      as applied (see 4): a content digest alone cannot, because another actor may independently reach identical final content and a later writer may overwrite it.
 //      A definite rollback marks `failed` (known NOT applied), a permanent refusal `abandoned`, any other outcome `unknown`; a `pending` receipt past its window is treated like `unknown`.
 //   4. RECONCILE by READBACK, never by assumption. A due non-terminal receipt is settled from what its operation's `readback` returns: {digest, revision, proof?}.
 //      - `proof: 'request'` means the operation proved THIS request's own effect (request-id evidence written inside the writer's own batch, for example) at `revision`: the receipt becomes
@@ -32,6 +33,8 @@
 // What it stores and never stores: operation kind, origin, target (kind, id), the SHA-256 digest of the planned content, revisions, the marker generation, state, attempts, due time,
 // timestamps and a short lowercase error class. No payload, no title, no name, no message text, no personal data. The error class is the error CODE, never its message.
 // The table is writable only while the marker is `d1`/`open` (a trigger); at `r2` and `prepared` it stays empty and nothing here reaches it (`assertWritable` refuses first).
+// APPEND-ONLY during initial stabilization: nothing here deletes, prunes, expires, archives or rewrites a terminal row (a trigger refuses it too); `abandoned` stays visible (`listAttention`). The 7-day rule below
+// is about the state of an operation (abandon instead of retry), not about deleting rows. Retention and lifecycle are an owner decision that returns later, after growth and cost are measured.
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 
@@ -44,6 +47,10 @@ export const RETRY_POLICY=Object.freeze({maxAttempts:5,backoffMs:Object.freeze([
 export const RECONCILE_LIMIT_MAX=50;
 // The baseline copies at most this many canonical_revision rows in one statement; a larger table is refused (a bounded activation step, not a bulk job).
 export const BASELINE_CAP=5000;
+// ATOMIC MODE IS REQUIRED (owner decision, PR #530 comment 6802553275): a production adapter performs its canonical mutation AND the receipt transition to `applied` in the SAME fenced batch.
+// The separate-mark path (a second batch after the writer returned) exists ONLY as a named exception, and an exception is accepted only when its id is in this list. NO operation has one today:
+// the list is empty, and adding an entry needs an independent review, a safety proof and an owner acceptance id recorded in the exception record. It is a legacy mechanism, never a default.
+export const APPROVED_EXCEPTIONS=Object.freeze([]);
 // The closed set of operation kinds the P2a/P2b writers and the P3 producers register under. The SQL column accepts any lowercase identifier; this list is the code-reviewed set.
 export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement']);
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
@@ -177,13 +184,28 @@ export function unreceiptedChanges({changes,receipts,baseline={}}){
 //   revalidate(env,receipt,ctx)  -> 'proceed'|'superseded'        optional: called only when the entity revision moved since planning; the writer re-checks its preconditions. Without it a moved
 //                                    revision abandons the receipt for repair;
 //   atomic: true                 the writer appends ctx.appliedStatements() to its own batch (the rule for every writer that can; the separate mark is the weaker path).
-export function defineOperation(spec){
- if(!OPERATION_KINDS.includes(spec?.operation)||typeof spec.readback!=='function'||typeof spec.replay!=='function'||(spec.revalidate!==undefined&&typeof spec.revalidate!=='function'))throw failed('film_person_invalid');
- return Object.freeze({operation:spec.operation,readback:spec.readback,replay:spec.replay,revalidate:spec.revalidate,atomic:spec.atomic===true});
+// An operation registers with `atomic:true` or not at all, unless it carries a named `exception` {id, review, proof, ownerAcceptance} whose id is approved (`approved` is a test seam; production
+// callers never pass it, so only APPROVED_EXCEPTIONS counts). Anything else is refused with `receipt_atomic_required`.
+export function exceptionOf(spec,approved=APPROVED_EXCEPTIONS){
+ if(spec?.atomic===true)return null;
+ const exception=spec?.exception;
+ const named=exception&&typeof exception==='object'&&[exception.id,exception.review,exception.proof,exception.ownerAcceptance].every(value=>typeof value==='string'&&value.length>=3);
+ if(!named||!approved.includes(exception.id))throw failed('receipt_atomic_required');
+ return Object.freeze({id:exception.id,review:exception.review,proof:exception.proof,ownerAcceptance:exception.ownerAcceptance});
 }
-export function operationRegistry(specs=[]){
+export function defineOperation(spec,{approved=APPROVED_EXCEPTIONS}={}){
+ if(!OPERATION_KINDS.includes(spec?.operation)||typeof spec.readback!=='function'||typeof spec.replay!=='function'||(spec.revalidate!==undefined&&typeof spec.revalidate!=='function'))throw failed('film_person_invalid');
+ const exception=exceptionOf(spec,approved);
+ return Object.freeze({operation:spec.operation,readback:spec.readback,replay:spec.replay,revalidate:spec.revalidate,atomic:spec.atomic===true,exception});
+}
+export function operationRegistry(specs=[],{approved=APPROVED_EXCEPTIONS}={}){
  const map=new Map();
- for(const spec of specs){if(map.has(spec.operation))throw failed('film_person_invalid');map.set(spec.operation,spec);}
+ for(const spec of specs){
+  if(map.has(spec.operation))throw failed('film_person_invalid');
+  if(spec.atomic!==true&&!spec.exception)throw failed('receipt_atomic_required');
+  if(spec.atomic!==true)exceptionOf(spec,approved);
+  map.set(spec.operation,spec);
+ }
  return map;
 }
 
@@ -226,15 +248,55 @@ async function currentRevisionOf(env,target){
  return Number((await one(database(env),'SELECT COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0) AS revision',[target.kind,target.id]))?.revision??0);
 }
 
-// Observed canonical changes ABOVE their activation baseline with no applied receipt for their current revision, bounded, and the count of revisions that predate receipts.
+// Verifies the activation baseline READ-ONLY: recomputes, from the baseline rows, the per-kind count, highest revision and digest and compares them with what the watermark proved at the boundary,
+// checks the entries total, that the boundary generation is not ahead of the marker, and that no entity regressed below its baseline revision. {ok, reasons:[...]}; never throws for a bad baseline.
+export async function verifyBaseline(env){
+ const db=database(env);
+ const reasons=[];
+ const mark=await one(db,'SELECT marker_generation,entries,film_count,film_max_revision,film_digest,person_count,person_max_revision,person_digest FROM canonical_receipt_watermark WHERE id=1');
+ if(!mark)return {ok:false,reasons:['watermark_missing']};
+ const rows=await many(db,'SELECT kind,id,revision FROM canonical_receipt_baseline ORDER BY kind,id LIMIT ?',[BASELINE_CAP+1]);
+ if(rows.length>BASELINE_CAP)reasons.push('baseline_oversized');
+ else{
+  const proof=await proofOf(rows);
+  if(Number(mark.entries)!==rows.length)reasons.push('entries_mismatch');
+  for(const kind of ['film','person']){
+   if(Number(mark[kind+'_count'])!==proof[kind].count)reasons.push('count_mismatch:'+kind);
+   if(Number(mark[kind+'_max_revision'])!==proof[kind].max)reasons.push('max_mismatch:'+kind);
+   if(mark[kind+'_digest']!==proof[kind].digest)reasons.push('digest_mismatch:'+kind);
+  }
+ }
+ let live=null;
+ try{live=await readAuthority(env);}catch{reasons.push('marker_unreadable');}
+ if(live&&Number(mark.marker_generation)>live.generation)reasons.push('generation_ahead');
+ const regressed=await one(db,'SELECT COUNT(*) AS n FROM canonical_receipt_baseline b WHERE NOT EXISTS (SELECT 1 FROM canonical_revision r WHERE r.kind=b.kind AND r.id=b.id AND r.revision>=b.revision)');
+ if(Number(regressed?.n??0)>0)reasons.push('revision_regressed');
+ return {ok:reasons.length===0,reasons};
+}
+
+// Observed canonical changes ABOVE their activation baseline with no applied receipt for their current revision, bounded, and the count of revisions that predate receipts. The baseline is verified
+// first: a baseline that does not verify makes the answer non-clean (`safe` false, `baseline.ok` false) whatever else it says. A revision above the baseline without an applied receipt is
+// `unreceipted`: a post-boundary mutation cannot read clean without a genuine receipt, and no receipt is ever fabricated for history.
 export async function readUnreceipted(env,{limit=100}={}){
  await assertReceiptsReady(env);
  const db=database(env);
  const cap=Math.min(Math.max(Number(limit)||1,1),500);
+ const baseline=await verifyBaseline(env);
  const rows=await many(db,"SELECT r.kind AS kind,r.id AS id,r.revision AS revision,EXISTS (SELECT 1 FROM canonical_write_receipt o WHERE o.target_kind=r.kind AND o.target_id=r.id AND o.state IN ('pending','failed','unknown')) AS has_open FROM canonical_revision r LEFT JOIN canonical_receipt_baseline b ON b.kind=r.kind AND b.id=r.id WHERE r.revision>COALESCE(b.revision,0) AND NOT EXISTS (SELECT 1 FROM canonical_write_receipt w WHERE w.target_kind=r.kind AND w.target_id=r.id AND w.applied_revision=r.revision) ORDER BY r.kind,r.id LIMIT ?",[cap]);
  const pseudo=rows.filter(row=>Number(row.has_open)===1).map(row=>({target:{kind:row.kind,id:row.id},state:'pending',appliedRevision:null}));
  const below=await one(db,'SELECT COUNT(*) AS n FROM canonical_revision r JOIN canonical_receipt_baseline b ON b.kind=r.kind AND b.id=r.id WHERE r.revision<=b.revision');
- return {...unreceiptedChanges({changes:rows,receipts:pseudo}),preReceiptBaselineCount:Number(below?.n??0)};
+ const changes=unreceiptedChanges({changes:rows,receipts:pseudo});
+ return {...changes,preReceiptBaselineCount:Number(below?.n??0),baseline,safe:changes.safe&&baseline.ok};
+}
+
+// Receipts that need a person: every `abandoned` receipt (never silently discarded), every `unknown` one, with the reason class. `needs_review` marks the classes that say a human must look
+// (content match without proof, an atomic writer that did not apply its receipt, a stale revision, a superseded one). Read-only and bounded; there is no cleanup of any kind.
+const REVIEW_CLASSES=new Set(['content_match_unproven','atomic_mark_missing','stale_revision_needs_repair','superseded_by_newer_revision']);
+export async function listAttention(env,{limit=100}={}){
+ await assertReceiptsAvailable(env);
+ const cap=Math.min(Math.max(Number(limit)||1,1),500);
+ const rows=(await many(database(env),"SELECT "+COLUMNS+" FROM canonical_write_receipt WHERE state IN ('abandoned','unknown') ORDER BY updated_at DESC,request_id LIMIT ?",[cap])).map(view);
+ return rows.map(row=>({...row,needsReview:REVIEW_CLASSES.has(row.errorClass)}));
 }
 
 const INSERT='INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?)';
@@ -271,20 +333,35 @@ async function writeBatch(env,gate,statements){
  }
 }
 
-// The activation baseline: ONE fenced batch that records the watermark row and copies every canonical_revision row. It is refused once a receipt or a baseline exists, while the marker is not
-// `open`, and when canonical_revision holds more than BASELINE_CAP rows. It never creates a receipt: the revisions it covers are `pre_receipt_baseline`, not retrospectively receipted.
+// The per-kind proof of a set of (kind, id, revision) rows: count, highest revision, and the SHA-256 of the ordered (id, revision) pairs (the same function records and verifies it).
+async function proofOf(rows){
+ const out={film:{count:0,max:0,sum:0,digest:null},person:{count:0,max:0,sum:0,digest:null}};
+ for(const kind of ['film','person']){
+  const list=rows.filter(row=>row.kind===kind).sort((x,y)=>x.id<y.id?-1:x.id>y.id?1:0).map(row=>[row.id,Number(row.revision)]);
+  out[kind]={count:list.length,max:list.reduce((m,[,r])=>Math.max(m,r),0),sum:list.reduce((t,[,r])=>t+r,0),digest:await digestOf(list)};
+ }
+ return out;
+}
+// The activation baseline: ONE fenced batch that records the watermark row (the boundary proof: marker generation, and per kind the count, highest revision and digest) and copies every canonical_revision
+// row. WHO RECORDS IT: the activation operation of the owner-authorized `open` flip, under the same lease and window, once. HOW IT IS PROVEN: the rows are read, their proof is computed here, and the batch
+// starts by asserting in SQL that canonical_revision still has exactly that count, highest revision and revision sum per kind (and the marker the generation read), so a revision written in between fails
+// the whole batch; `verifyBaseline` later recomputes the proof read-only. It is insert-only, refused once a baseline exists, while the marker is not `open`, and above BASELINE_CAP rows. It never creates a
+// receipt: the revisions it covers are `pre_receipt_baseline`, not retrospectively receipted.
 export async function recordBaseline(env,{now=()=>new Date().toISOString(),cap=BASELINE_CAP}={}){
  await assertReceiptsAvailable(env);
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
- const count=Number((await one(db,'SELECT COUNT(*) AS n FROM canonical_revision'))?.n??0);
- if(count>cap)throw failed('film_person_bounded');
+ const rows=await many(db,'SELECT kind,id,revision FROM canonical_revision ORDER BY kind,id LIMIT ?',[cap+1]);
+ if(rows.length>cap)throw failed('film_person_bounded');
+ const proof=await proofOf(rows);
  const at=typeof now==='function'?now():now;
+ const same=kind=>"(SELECT COUNT(*) FROM canonical_revision WHERE kind='"+kind+"')=? AND COALESCE((SELECT MAX(revision) FROM canonical_revision WHERE kind='"+kind+"'),0)=? AND COALESCE((SELECT SUM(revision) FROM canonical_revision WHERE kind='"+kind+"'),0)=?";
  await writeBatch(env,gate,[
-  ['INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,taken_at) VALUES (1,?,(SELECT COUNT(*) FROM canonical_revision),?)',[gate.generation,at]],
+  [fenced.assertSql(same('film')+' AND '+same('person')),[proof.film.count,proof.film.max,proof.film.sum,proof.person.count,proof.person.max,proof.person.sum]],
+  ['INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,film_digest,person_count,person_max_revision,person_digest,taken_at) VALUES (1,?,?,?,?,?,?,?,?,?)',[gate.generation,rows.length,proof.film.count,proof.film.max,proof.film.digest,proof.person.count,proof.person.max,proof.person.digest,at]],
   ['INSERT INTO canonical_receipt_baseline (kind,id,revision) SELECT kind,id,revision FROM canonical_revision',[]],
  ]);
- return {entries:count,generation:gate.generation,takenAt:at};
+ return {entries:rows.length,generation:gate.generation,takenAt:at,film:{count:proof.film.count,max:proof.film.max,digest:proof.film.digest},person:{count:proof.person.count,max:proof.person.max,digest:proof.person.digest}};
 }
 
 async function transition(env,gate,row,change,now){
@@ -358,6 +435,9 @@ async function applyAction(env,gate,row,action,{revalidate,observed,clock,policy
 // operation, target or content under an id is `receipt_conflict`. A run error is rethrown after the receipt is marked. Needs the schema AND the activation baseline.
 export async function receiptedWrite(env,input,hooks){
  const request=normalizeRequest(input);
+ // Atomic mode is the only mode unless the hooks carry an approved named exception (see APPROVED_EXCEPTIONS); this is checked before anything is read or written.
+ const atomic=hooks?.atomic===true;
+ if(!atomic)exceptionOf({exception:hooks?.exception},hooks?.approvedExceptions||APPROVED_EXCEPTIONS);
  const policy=input.policy||RETRY_POLICY,clock=input.now||(()=>new Date().toISOString());
  const status=await receiptsStatus(env);
  if(status==='no_schema')throw failed('receipt_schema_missing');
@@ -391,7 +471,7 @@ export async function receiptedWrite(env,input,hooks){
   if(!outcome.retry)return {ran:false,...outcome};
   attempt=row.attempts+1;currentRevision=outcome.retry.currentRevision;
  }
- const outcome=await finishAttempt(env,{gate,row,attempt,run:hooks.run,clock,policy,atomic:hooks.atomic===true,currentRevision});
+ const outcome=await finishAttempt(env,{gate,row,attempt,run:hooks.run,clock,policy,atomic,currentRevision});
  if(outcome.error)throw outcome.error;
  return {...outcome,attempt};
 }

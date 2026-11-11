@@ -12,7 +12,7 @@ Counts and digests only in any evidence; no ids, titles, payloads or credentials
 4. The bounded loader for the three empty classes (1,113 rows) has run with its own GO ([loader runbook](film-person-prepared-loader.md)); receipts and readback match.
 5. Every canonical producer is wired (P2/P3) but dormant at `prepared`; readers fail closed (P4); `handoffReadiness` is computed and ready (P6; today `GAPS` makes it never ready).
 6. The frozen-mirror classification (ADR 0117 decision 3) is recorded object by object.
-7. Receipts for cross-domain operations exist (ADR 0117 decision 4); no pending or failed receipt.
+7. Receipts for cross-domain operations exist (ADR 0117 decision 4, [ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): written atomically with each mutation, the activation baseline recorded and verified, `readUnreceipted` clean, and no pending, failed, unknown or abandoned receipt left (`listAttention` empty).
 8. No live projector lease; `projector_window` idle; no EPG, Ratings or Discovery run in flight; the quiet window is agreed in Madrid time.
 9. The `held` drill below passed on a safe copy.
 
