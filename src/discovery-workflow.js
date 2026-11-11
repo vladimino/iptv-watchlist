@@ -83,8 +83,8 @@ function discoveryReportState(outcome,record,empty){
  return {status:'blocked',reason:reason?'other':'unknown'};
 }
 // A report is written only from facts that were read and persisted: the deltas of the period and the queue reading. An hour whose close cannot be persisted writes
-// no event at all (see `closeHourlyDiscoveryReport`); an unreadable queue is said as `queueUnreadable` beside the real deltas, never as a report of unknowns.
-// `incomplete` stays `false` on every event written now; only events written before ADR 0117 can carry `true` with every number `null`, and they keep their card.
+// no report of unknowns: it gets one compact `report_failed` notice instead (see `closeHourlyDiscoveryReport`); an unreadable queue is said as `queueUnreadable` beside the real deltas, never as a report of unknowns.
+// `incomplete` stays `false` on every event written now; only events written before ADR 0118 can carry `true` with every number `null`, and they keep their card.
 function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue}){
  const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
  const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:report.chunks,queueEmpty:queue.empty===true,remaining:queue.remaining,queueUnreadable:queue.incomplete===true,incomplete:false,error:queue.error||null};
@@ -176,7 +176,7 @@ async function closeHourlyDiscoveryReport(env,outcome,options){
    incompleteReason='write_conflict';
   }
  }catch{incompleteReason='state_unreadable';}
- // Not persisted: the hour still gets one truthful line, a compact notice that its REPORT could not be completed (ADR 0117). It carries no counters and no
+ // Not persisted: the hour still gets one truthful line, a compact notice that its REPORT could not be completed (ADR 0118). It carries no counters and no
  // queue facts, so it can neither show unknowns nor imply that Discovery failed (only a Discovery state confirmed by the reconcile is named). The accumulator is
  // untouched, so the next successful report carries the deltas once. The notice does not travel through the record whose write failed: it is put create-only
  // straight into the journal under a stable id per generation and hour, and when the journal refuses it, it waits in a small separate ledger (its own

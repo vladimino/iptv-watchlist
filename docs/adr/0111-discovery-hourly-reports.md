@@ -6,7 +6,7 @@
 **Approval source:** the Product Owner's reopening of [AIR-410](https://trello.com/c/M9yidPgX) on 11 November 2026, which fixes the approved semantics (one report per real scheduled hourly cron, deltas, every state)  
 **Related work:** [AIR-410](https://trello.com/c/M9yidPgX), [PR #476](https://github.com/vladimino/iptv-watchlist/pull/476) (first delivery, merge `2e07e3d`), [ADR 0093](0093-discovery-workflow-cron-reconcile.md), [ADR 0103](0103-projector-exclusive-window.md), [RCA of 11 Nov 2026](../evidence/discovery/air-410-hourly-reports-rca-2026-11-11.md)  
 **Supersedes:** None as an ADR: the per-chain tick model of AIR-410's first delivery was documented in the events reference and architecture pages, not in an ADR, and those pages are rewritten here  
-**Superseded by:** None in full; the incomplete-event part of Decision 4 is superseded by [ADR 0117](0117-discovery-report-failure-notice.md)
+**Superseded by:** None in full; the incomplete-event part of Decision 4 is superseded by [ADR 0118](0118-discovery-report-failure-notice.md)
 
 ## Context
 

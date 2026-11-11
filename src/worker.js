@@ -605,7 +605,7 @@ async function writeEvent(env,event){
 // AIR-361: a `ratings` event is immutable and its id is the runId: a second put of the same run finds the key and keeps the first.
 async function writeRatingsEvent(env,event){const saved=await env.BUCKET.put(removalEventKey(event),JSON.stringify(event),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});return saved!==null?'written':'exists';}
 // AIR-410: a `discovery` event is immutable and its id is the tick id: a second put of the same tick finds the key and keeps the first.
-// One Discovery event per generation and hour (ADR 0117): the put is create-only, so a repeat keeps the first. The only replacement allowed is a REPORT (`kind` `hour`)
+// One Discovery event per generation and hour (ADR 0118): the put is create-only, so a repeat keeps the first. The only replacement allowed is a REPORT (`kind` `hour`)
 // over the `report_failed` notice of the same hour, by a compare-and-swap on the notice's etag: a report always wins over its hour's notice, a notice never replaces
 // anything, so the Events Log cannot hold two events for one hourly firing and the deltas of a report are never dropped because a notice got there first.
 async function writeDiscoveryEvent(env,event){

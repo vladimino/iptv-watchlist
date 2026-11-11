@@ -7,6 +7,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [L3 draft: activating the D1 projector exclusive window](d1-projector-window-activation.md) (AIR-383, not executed)
 - [Film/Person schema 13–16: read-only preflight and apply sequence](film-person-schema-preflight.md)
 - [Film/Person baseline: parity ledger, bounded import and the `prepared` gate](film-person-baseline.md)
+- [Film/Person `prepared` loader: rated admission, retention and TMDB retirement](film-person-prepared-loader.md) (AIR-374 P5, offline, not executed)
 - [Production monitor and incident response](monitoring.md)
 - [Local development setup](local-setup.md)
 - [Recovery procedures](recovery/README.md)
@@ -25,6 +26,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [TMDB TV identity correction for four retired movie ids: offline plan and production steps (owner approval required)](tmdb-tv-identity-correction.md)
 - [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md); also [one stuck observation](discovery-ledger.md#one-stuck-observation): the owner page read and the guarded reconsideration
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
+- [Film/Person `open` handoff, `held` and forward fix: design only, authorizes nothing](film-person-open-handoff.md) (AIR-374, not executed)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).

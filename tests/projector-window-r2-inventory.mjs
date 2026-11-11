@@ -91,7 +91,7 @@ const FILE_SITES={
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
- 'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0117: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
+ 'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
  // events): not a projector input and not on a Discovery, admin-recovery or publication path.
@@ -107,7 +107,7 @@ const FILE_SITES={
  'src/prediction-d1.js':{r2:5,wrapper:0,dynamic:0},
  'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
- // ADR 0117: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
+ // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  'src/worker.js':{r2:16,wrapper:47,dynamic:18},
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
