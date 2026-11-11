@@ -110,7 +110,20 @@ function leaseName(kind){return kind==='writer'?'writer':'runner';}
 function idleAuthority(version,bindingPresent,domain='absent'){
  return {mode:'r2',tables:false,domain,version,ready:false,binding:bindingPresent,generation:0,queueGeneration:0,profileGeneration:0,writes:null};
 }
-export async function readPredictionAuthority(db,env){
+const AUTHORITY_TABLES_SQL="SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")";
+const AUTHORITY_ROW_SQL='SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1';
+// AIR-441. The schema contract, the table list and the authority marker in one batch of reads, the same three statements read in one snapshot. Returns null
+// whenever the batch cannot answer (a table of the domain is missing, the binding has no batch, the answer has another shape), and the caller then
+// asks them one at a time. It never reads anything the stepwise reader did not.
+async function readAuthorityTogether(db){
+ if(!binding(db)||typeof db.batch!=='function')return null;
+ try{
+  const results=await db.batch([db.prepare('SELECT version FROM schema_contract WHERE id=1').bind(),db.prepare(AUTHORITY_TABLES_SQL).bind(),db.prepare(AUTHORITY_ROW_SQL).bind()]);
+  if(!Array.isArray(results)||results.length!==3||results.some(item=>!item||!Array.isArray(item.results)))return null;
+  return {version:results[0].results[0]?.version??null,names:results[1].results.map(row=>row.name),row:results[2].results[0]??null};
+ }catch{return null;}
+}
+async function readAuthorityNow(db,env){
  // A local caller that omits the binding and does not set PREDICTION_DB_REQUIRED stays on the objects.
  // The deployed Worker sets that variable. A missing binding, or a bound database with no schema
  // contract, then fails closed and does not read R2. A binding that does not answer fails closed.
@@ -121,8 +134,12 @@ export async function readPredictionAuthority(db,env){
   if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
   return idleAuthority(null,false);
  }
+ // One round trip answers the three questions below when the database has the whole domain; any refusal of that batch (a table missing, a binding that
+ // cannot batch) falls back to asking them one at a time, which is the reading, and the classification of its failures, that this function always had.
+ const together=await readAuthorityTogether(db);
  let version;
- try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
+ if(together)version=together.version;
+ else try{version=(await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??null;}
  catch(error){
   if(/no such table/i.test(String(error?.message||error))){
    if(env?.PREDICTION_DB_REQUIRED==='on')throw failed('prediction_domain_unavailable');
@@ -136,18 +153,81 @@ export async function readPredictionAuthority(db,env){
  }
  if(Number(version)<PREDICTION_CONTRACT)return idleAuthority(version,true);
  let names;
- try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
+ if(together)names=together.names;
+ else try{names=(await many(db,"SELECT name FROM sqlite_master WHERE type='table' AND name IN ("+TABLES.map(name=>"'"+name+"'").join(',')+")")).map(row=>row.name);}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  const present=TABLES.filter(name=>names.includes(name)).length;
  if(present===0)return idleAuthority(Number(version),true);
  if(present!==TABLES.length)throw failed('prediction_domain_unavailable');
  let row;
- try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1');}
+ if(together)row=together.row;
+ else try{row=await one(db,'SELECT mode, generation, queue_generation AS queueGeneration, profile_generation AS profileGeneration, writes FROM prediction_domain_authority WHERE id=1');}
  catch(error){throw failed('prediction_domain_unavailable',error);}
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.writes!=='open'&&row.writes!=='held'))throw failed('prediction_domain_unavailable');
  return {mode:row.mode,tables:true,domain:'ready',version:Number(version),ready:row.mode==='d1',binding:true,generation:Number(row.generation),queueGeneration:Number(row.queueGeneration),profileGeneration:Number(row.profileGeneration),writes:row.writes};
 }
 
+// AIR-441. One request of the runner (a next or a submit) asks for the authority marker a few dozen times: every routed read and every write begins with it.
+// Inside such a request, and only there, the answer is reused until the request's own database does anything but read, and callers that ask while a
+// read is in flight share it. The scope belongs to one request's database object (`scopeRequest`), never to the Worker: the next request, any
+// other route, the cron tick and every script read the marker afresh. Every write still carries the generation it was read at in its own fenced
+// batch, so a marker that moved in the meantime fails that write closed (`prediction_domain_cas`) instead of landing it; what a read inside the same
+// request can miss is a change that happened after the marker was read and before the request's next write, for at most the length of the request.
+const REQUEST_SCOPES=new WeakMap();
+// A statement counts as a read only if it is a plain SELECT, one statement, with nothing before it. SQLite lets a WITH statement end in an UPDATE, INSERT or DELETE
+// (with RETURNING it can be run through first() or all()), a PRAGMA can set as well as read, and a comment can hide either; every other shape, and every statement the
+// scope did not prepare itself, is treated as a write and drops the held answer.
+const READ_ONLY_SQL=/^select\b[^;]*;?\s*$/i;
+function scopedDatabase(database,scope){
+ const statements=new WeakMap();
+ const forget=()=>{scope.read=null;};
+ const statementOf=(statement,sql)=>{
+  const reads=typeof sql==='string'&&READ_ONLY_SQL.test(sql.trimStart());
+  const proxy=new Proxy(statement,{get(target,prop){
+   const value=Reflect.get(target,prop,target);
+   if(typeof value!=='function')return value;
+   if(prop==='bind')return(...args)=>statementOf(value.apply(target,args),sql);
+   if(prop==='first'||prop==='all'||prop==='raw'||prop==='run')return async(...args)=>{
+    const changes=prop==='run'||!reads;
+    if(changes)forget();
+    try{return await value.apply(target,args);}finally{if(changes)forget();}
+   };
+   return value.bind(target);
+  }});
+  statements.set(proxy,{target:statement,reads});
+  return proxy;
+ };
+ const proxy=new Proxy(database,{get(target,prop){
+  const value=Reflect.get(target,prop,target);
+  if(typeof value!=='function')return value;
+  if(prop==='prepare')return sql=>statementOf(value.call(target,sql),sql);
+  if(prop==='batch')return async(list,...rest)=>{
+   const known=Array.isArray(list)?list.map(item=>statements.get(item)):[];
+   const reads=known.length>0&&known.every(item=>item&&item.reads);
+   if(!reads)forget();
+   try{return await value.call(target,Array.isArray(list)?list.map((item,index)=>known[index]?known[index].target:item):list,...rest);}finally{if(!reads)forget();}
+  };
+  if(prop==='exec')return async(...args)=>{forget();try{return await value.apply(target,args);}finally{forget();}};
+  if(prop==='withSession')return(...args)=>{const session=scopedDatabase(value.apply(target,args),scope);return session;};
+  return value.bind(target);
+ }});
+ REQUEST_SCOPES.set(proxy,scope);
+ return proxy;
+}
+export function scopeRequest(env){
+ const database=env?.DB;
+ if(!database||typeof database!=='object'||typeof database.prepare!=='function')return env;
+ return {...env,DB:scopedDatabase(database,{read:null})};
+}
+export async function readPredictionAuthority(db,env){
+ const scope=REQUEST_SCOPES.get(db);
+ if(!scope)return readAuthorityNow(db,env);
+ if(scope.read)return {...await scope.read};
+ const reading=readAuthorityNow(db,env);
+ scope.read=reading;
+ reading.catch(()=>{if(scope.read===reading)scope.read=null;});
+ return {...await reading};
+}
 export async function reservePredictionWrite(env,key,generation,bodyText){
  if(typeof bodyText!=='string')throw failed('prediction_domain_unavailable');
  const authority=await readPredictionAuthority(env?.DB,env);

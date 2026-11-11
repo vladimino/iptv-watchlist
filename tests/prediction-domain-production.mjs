@@ -133,8 +133,9 @@ assert.equal(one(busy,'SELECT COUNT(*) FROM prediction_queue'),0);
 
 const racedFile=path.join(root,'raced.sqlite');
 let bumped=false;
-const raced=d1Standin(racedFile,{onBatch(){
- if(bumped)return;
+const raced=d1Standin(racedFile,{onBatch(statements){
+ // The race is with the write: a batch of reads (the authority read of AIR-441 is one) is not the write that loses it.
+ if(bumped||statements.every(item=>/^\s*SELECT/i.test(item.text)))return;
  bumped=true;
  const update=sqliteSync(['-bail',racedFile],{input:'UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1;\n',encoding:'utf8'});
  if(update.status!==0)throw new Error(update.stderr);
@@ -323,7 +324,8 @@ assert.equal(one(released,"SELECT writes FROM prediction_domain_authority"),'ope
 
 const partialFile=path.join(root,'partial.sqlite');
 let partialBatches=0;
-const partialDb=d1Standin(partialFile,{onBatch(){partialBatches++;if(partialBatches===3)throw new Error('stop after two commits');}});
+// Commits are the write batches: the batch of reads that answers the authority (AIR-441) is not one.
+const partialDb=d1Standin(partialFile,{onBatch(statements){if(statements.every(item=>/^\s*SELECT/i.test(item.text)))return;partialBatches++;if(partialBatches===3)throw new Error('stop after two commits');}});
 for(const name of names)partialDb.sql(fs.readFileSync('migrations/'+name+'.sql','utf8').replace(/;\s*$/,''));
 const partialBucket=new MemoryBucket();
 await put(partialBucket,'enrichment/prediction-queue.json',{schemaVersion:3,pending:['partial']});
