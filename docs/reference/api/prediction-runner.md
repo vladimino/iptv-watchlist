@@ -68,6 +68,27 @@ Which films are outstanding after a taste-profile change is decided by the queue
 Tests: node tests/continuous-drain.mjs; node tests/queue-compatibility.mjs; node tests/fingerprint-migration-queue.mjs; node tests/throughput.mjs; node tests/enrichment.mjs. The multi-batch integration test uses an isolated R2 implementation and deterministic validated model outputs; it is not a production LLM throughput benchmark.
 
 
+## Step timing line (AIR-438)
+
+Every `next` and `submit` writes one log line `{"event":"prediction_step_timing", ...}` after it answers; `start`, `heartbeat` and `complete` do not. It is observation only: the Worker's environment is replaced for the length of the step by a copy whose R2 bucket and D1 database time each call and forward it unchanged, so no call is added, reordered, retried or awaited differently and the answer, the leases and the compare-and-swap writes are those of an uninstrumented step ([evidence](../../evidence/prediction/air-438-step-latency-and-batch-sizing-2026-11-11.md)). A failure of the timing code is swallowed and never changes the outcome.
+
+| Field | Meaning |
+| --- | --- |
+| `step`, `requestId`, `runId`, `status` | The step (`next` or `submit`), the request id the answer carries, the run id (`null` when not a safe token) and the HTTP status (`0` when the step threw) |
+| `wallMs` | The step's wall time as the Worker sees it, including the lease, the diagnostics appends and the answer |
+| `busyMs` | The **union** of the intervals of every R2 and D1 call: calls that run in parallel are counted once |
+| `overlapMs` | By how much the sum of the calls' times exceeds `busyMs` (parallelism) |
+| `unattributedMs` | `wallMs` minus `busyMs`: the awaits and scheduling between calls, and any compute the clock sees. The Workers clock may advance only across I/O, so synchronous compute can read as close to zero. Always reported, never folded into a stage |
+| `r2` | `n` operations (a `get` that reads its body counts twice: the answer, then the `body`), summed `ms`, `busyMs`, `bytesIn` (approximate for a string: characters) and `bytesOut` (object size at a body read) |
+| `d1` | `n`, `ms`, `busyMs`, `statements`, `batches`, `rowsRead`, `rowsWritten` (from the answers' own metadata, never a new read) |
+| `classes` | Per class `{n, ms, maxMs, bytes, ops}`. R2 classes: `r2:run`, `r2:run_latest`, `r2:profile`, `r2:lease`, `r2:film_state`, `r2:film_other`, `r2:source`, `r2:view_index`, `r2:queue`, `r2:programme`, `r2:diagnostics`, `r2:list`, `r2:other`. D1 classes: `d1:<table>` from the table name in the statement's static SQL text (up to 60 characters of `[a-z0-9_]`), `d1:batch` for a batch, `d1:other`. At most 40 classes |
+| `notes` | Whitelisted counters: `items`, `selected`, `pending`, `batchSize` (`next`); `bodyItems`, `predictionOnly`, `fingerprintAndPrediction`, `created`, `recalculated`, `alreadyCurrent`, `failures` (`submit`) |
+| `truncated` | Present and `true` when the interval list (4,000) or the class list overflowed; the totals stay exact |
+
+The line never holds a film id, a key, a statement, a body, a fingerprint, a prediction or a model output. An R2 class is a name from a closed vocabulary; a D1 class is a table identifier, never a value. Percentiles are not computed in the Worker; they are read from the logs ([runbook](../../runbooks/prediction-operations.md#reading-the-step-timing-line-air-438)).
+
+**Batch sizes the contract has.** The selection batch of a run is `min(adaptive plan, body.batchSize)` with the plan capped at 12 while `capacity.remainingPercent` is unknown and at 20 (`MAX_PREDICTION_BATCH`); `start` refuses more than 20. HTTP `next` accepts `batchSize` 1 to 20 and HTTP `submit` 1 to 10 items. The MCP tools send `batchSize: 1` for `prediction_next` and accept exactly one item in `prediction_submit`, and `enrichment_runner` publishes `modelBatching.enabled: false` with one ready fingerprint per call. Each `next` reads the stored fingerprint and prediction of every film in the run's selection, so its cost grows with the selection batch; its calls do not grow with the number of items it returns.
+
 ## Stored prediction record and its lineage
 
 A committed prediction (`enrichment/films/<id>/predictions.json` `current`, the same record in `history` with `replacedAt` once replaced) holds the model's fields as submitted (`predictedRating`, `probability4Plus`, `confidence`, `matchSignals`, `mainRisk`, `moodLabels`) and the Worker's: `filmId`, `generatedAt`, `tasteProfileVersion`, `tasteProfileHash`, `fingerprintHash`, `fingerprintSchemaVersion`, `fingerprintPromptVersion`, `predictionPromptVersion`, `runId`, `trigger` (`scheduled` or `manual`) of the run that produced it, and, on a snapshot written by this submit path, `confidenceAssessment`. The bundle keeps every replaced record; a recalculation never removes one. `fingerprintPromptVersion`, `runId` and `trigger` exist only on records committed since they were added ([ADR 0038](../../adr/0038-durable-rating-and-prediction-lineage.md)); an older record without them has an unknown prompt version and run, and no reader may fill them from the current state. Why a record was replaced is derived from the two records (a different profile, fingerprint or prompt version), not stored. One film's records and rating events are read through [the film history API](film-history.md).
