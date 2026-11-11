@@ -35,7 +35,8 @@ const stops=async(work,reason,label=reason)=>assert.rejects(async()=>work(),erro
 
 // ---------- "production": the migrated schema (built once) with all three D1 routes on, some canonical rows and a table that needs more than one page ----------
 const template=path.join(root,'template.sqlite');
-sql(template,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+// The capture gate expects the schema production holds (SCHEMA_EXPECTED, 18); migration 0019 is in the repository but NOT applied (ADR 0119), so this fixture stops at 18.
+sql(template,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=18).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 const production=path.join(root,'production.sqlite');
 fs.copyFileSync(template,production);
 for(const trigger of rows(production,"SELECT name FROM sqlite_master WHERE type='trigger'"))sql(production,'DROP TRIGGER '+trigger.name+';');
@@ -225,7 +226,9 @@ const dataFiles=[];
 // A second, separate "production" (the schema plus one table of very large rows, published_epg_document, followed by tables of small rows) behind its own fake
 // connector that counts its requests. Nothing here touches the main fixture or its copy.
 const padded=file=>{const value=JSON.parse(fs.readFileSync(file,'utf8'));value.pad='x'.repeat(200000);const out=path.join(root,'padded-'+(fileNumber++)+'.json');fs.writeFileSync(out,JSON.stringify(value));return out;};
-{
+// AIR-374: CONNECTOR_SKIP_3B=1 skips this self-contained section (its own fixture, connector and copies: it reads and writes nothing the later sections use, only the file-name counter). The mutation
+// check (tests/film-person-connector-mutation.mjs) runs a mutant without it first and runs the whole file before it calls a mutant a survivor; a plain run always executes the section.
+if(process.env.CONNECTOR_SKIP_3B!=='1'){
  const fixture=path.join(root,'fixture.sqlite');
  fs.copyFileSync(template,fixture);
  for(const trigger of rows(fixture,"SELECT name FROM sqlite_master WHERE type='trigger'"))sql(fixture,'DROP TRIGGER '+trigger.name+';');

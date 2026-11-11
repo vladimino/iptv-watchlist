@@ -130,16 +130,16 @@ const CONNECTOR=[
  ['ledger bound to runParity',"if(unverified.digest!==core.parity.ledgerDigest)return {ok:false,reasons:['parity_ledger_mismatch']};",''],
  ['plan arguments',"throw stop('plan_invalid');","void 0;"],
  // AIR-373, 11 Nov 2026: per-table page size, wall-clock guard, ignored `pad`
- ['page size reset per table',"if(done){i++;after=0;limit=PAGE_ROWS;}else after=last;","if(done){i++;after=0;}else after=last;"],
- ['cursor limit resumes its own table',"limit=CURSOR&&CURSOR.limit>0?CURSOR.limit:PAGE_ROWS,used=0;","limit=PAGE_ROWS,used=0;"],
- ['wall-clock guard',"if(chunks.length&&Date.now()-START>WALL_MS)break;",""],
+ ['page size reset per table',"if(done){i++;after=0;limit=PAGE_ROWS;}else after=last;","if(done){i++;after=0;}else after=last;",'full'],
+ ['cursor limit resumes its own table',"limit=CURSOR&&CURSOR.limit>0?CURSOR.limit:PAGE_ROWS,used=0;","limit=PAGE_ROWS,used=0;",'full'],
+ ['wall-clock guard',"if(chunks.length&&Date.now()-START>WALL_MS)break;","",'full'],
  ['wall clock starts at the call',"const START=Date.now();","const START=0;"],
- ['wall-clock budget is below the 60 s limit',"export const WALL_CLOCK_MS=40_000;","export const WALL_CLOCK_MS=400_000;"],
+ ['wall-clock budget is below the 60 s limit',"export const WALL_CLOCK_MS=40_000;","export const WALL_CLOCK_MS=400_000;",'full'],
  // AIR-373, 11 Nov 2026: the reviewed view build changes the published EPG snapshot in place; the derived inputs are verified and handed on as copies
  ['derived inputs verified from the pristine copy',"run.derivedProblems=verifyDerived(manifest,pristine);","run.derivedProblems=verifyDerived(manifest,parityInput);"],
  ['one view build, one copy',"const ledgerInput=derivedCopy();","const ledgerInput=parityInput;"],
  ['derived guard also fires on the mutated flag',"run.derivedInputsMutatedByView=verifyDerived(manifest,parityInput).length>0;","run.derivedInputsMutatedByView=false;"],
- ['pad ignored',"if('pad' in value){const {pad:_pad,...rest}=value;value=rest;}",""],
+ ['pad ignored',"if('pad' in value){const {pad:_pad,...rest}=value;value=rest;}","",'full'],
 ];
 const TARGETS=[
  {source:'src/film-person-cutover-accepted.js',test:'tests/film-person-cutover-accepted.mjs',variable:'ACCEPTED_MODULE',mutants:ACCEPTED},
@@ -150,8 +150,8 @@ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'connector-mutants-'));
 assert.ok(path.relative(process.cwd(),dir).startsWith('..'),'the mutants are written outside the repository tree');
 // A copy outside the tree keeps working: every relative import of the original becomes an absolute file URL.
 const absolute=(text,from)=>text.replace(/(from\s*|import\()'(\.\.?\/[^']+)'/g,(_match,head,specifier)=>head+JSON.stringify(pathToFileURL(path.resolve(path.dirname(from),specifier)).href));
-const run=(test,variable,file)=>new Promise(resolve=>{
- const child=spawn(process.execPath,[test],{env:{...process.env,[variable]:file},stdio:['ignore','ignore','pipe']});
+const run=(test,variable,file,extra={})=>new Promise(resolve=>{
+ const child=spawn(process.execPath,[test],{env:{...process.env,[variable]:file,...extra},stdio:['ignore','ignore','pipe']});
  let err='';child.stderr.on('data',chunk=>{err+=chunk;});
  child.on('close',code=>resolve({code,broken:/SyntaxError|ERR_MODULE_NOT_FOUND|ReferenceError|does not provide an export/.test(err)?err.slice(0,300):null}));
 });
@@ -165,18 +165,22 @@ try{
   const control=path.join(dir,stem+'.control.mjs');
   fs.writeFileSync(control,absolute(original,target.source));
   queue.push({name:'control '+target.source,test:target.test,variable:target.variable,file:control,control:true});
-  target.mutants.forEach(([name,from,to],index)=>{
+  target.mutants.forEach(([name,from,to,hint],index)=>{
    const file=path.join(dir,stem+'.mutant'+index+'.mjs');
    fs.writeFileSync(file,absolute(original.replace(from,()=>to),target.source));
-   queue.push({name,test:target.test,variable:target.variable,file});
+   queue.push({name,test:target.test,variable:target.variable,file,lean:target.test.endsWith('film-person-connector.mjs')&&hint!=='full'});
   });
  }
  const survivors=[],broken=[];
- let killed=0;
+ let killed=0,fullRuns=0;
  const workers=Array.from({length:Math.max(2,Math.min(8,os.availableParallelism()))},async()=>{
   while(queue.length){
    const item=queue.shift();
-   const out=await run(item.test,item.variable,item.file);
+   // AIR-374: a connector mutant first runs WITHOUT section 3b of the connector test (CONNECTOR_SKIP_3B, an independent section that costs a third of the file). A mutant that passes
+   // that run is run against the WHOLE file before it is called a survivor, so a wrong or stale choice costs time and never hides a survivor; the optional last element 'full' of a mutant
+   // (the ones only section 3b kills) skips the first run. The unmutated control always runs the whole file.
+   let out=await run(item.test,item.variable,item.file,item.lean?{CONNECTOR_SKIP_3B:'1'}:{});
+   if(item.lean&&!out.broken&&out.code===0){fullRuns++;out=await run(item.test,item.variable,item.file);}
    if(item.control){assert.equal(out.code,0,'the unmutated copy must pass: '+item.name+' '+(out.broken||''));continue;}
    if(out.broken)broken.push(item.name+': '+out.broken);
    else if(out.code===0)survivors.push(item.name);
@@ -187,6 +191,6 @@ try{
  assert.deepEqual(broken,[],'broken mutants (they do not parse or load, so they prove nothing)');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
  assert.equal(killed,ACCEPTED.length+RECORDER.length+CONNECTOR.length);
- console.log('film-person-connector-mutation: ok ('+ACCEPTED.length+' gate mutants, '+RECORDER.length+' recorder mutants and '+CONNECTOR.length+' connector mutants killed)');
+ console.log('film-person-connector-mutation: ok ('+ACCEPTED.length+' gate mutants, '+RECORDER.length+' recorder mutants and '+CONNECTOR.length+' connector mutants killed'+(fullRuns?', '+fullRuns+' needed the whole connector test: mark them \'full\'':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
 assert.ok(!fs.existsSync(dir));
