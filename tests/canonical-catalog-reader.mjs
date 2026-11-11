@@ -192,7 +192,7 @@ if(!ONLY){
  assert.match(build,/scopedReplacing\('src\/canonical-catalog-reader\.js','CanonicalCatalogReader'/,'build.mjs bundles the reader');
  for(const unbundled of ['canonical-producers','canonical-mutations','canonical-read-model','localization-sources','film-admission','tmdb-retirement-decisions','film-person-baseline'])assert.ok(!build.includes('src/'+unbundled+'.js'),unbundled+' stays out of the bundle');
  const importers=needle=>{const out=[];const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes(needle))out.push(full);}};walk('src');return out.sort();};
- assert.deepEqual(importers("from './canonical-catalog-reader.js'"),['src/canonical-read-model.js','src/film-admission.js'],'the explicit allowlist of the reader\'s importers');
+ assert.deepEqual(importers("from './canonical-catalog-reader.js'"),['src/canonical-producers.js','src/canonical-read-model.js','src/film-admission.js'],'the explicit allowlist of the reader\'s importers');
  assert.deepEqual(importers('canonical-read-model'),[],'nothing in src imports the bulk read model, which is not bundled');
  const text=fs.readFileSync(READER_FILE,'utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s+(INTO|FROM)?\s*\w/.test(text)&&!/R2|BUCKET|fetch\(/.test(text),'the reader has no write statement and no R2 or network access');

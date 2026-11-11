@@ -10,8 +10,10 @@
 // - plan* functions are pure: they turn the existing producers' data into fenced AIR-367..370 calls, or say why not.
 // - dispatch executes a plan only when the route is canonical; an unknown batch outcome is reported, never blindly retried, and is settled
 //   by readback (the entity revision) and a replay with the same request id.
-// - shadowCompare / handoffReadiness are read-only and bounded. handoffReadiness stays not ready while GAPS lists a producer write that no
-//   fenced mutation covers yet.
+// - shadowCompare / handoffReadiness are read-only and bounded. AIR-374 P6 (ADR 0117): handoffReadiness is COMPUTED. A former GAP counts as cleared only when its
+//   fenced writer is registered in CALLS and RECONCILE here and the differential registry (src/canonical-differential-registry.js, verified against the harness
+//   run by tests/canonical-differential.mjs) marks it covered; every other condition of a `prepared` to `open` handoff is a named blocker. It is information for the
+//   owner's decision, never a permission, and nothing in the Worker calls it.
 import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced,mutateFilm,mutatePerson} from './canonical-mutations.js';
 import {compareLocalization,recordLocalizationSources} from './localization-sources.js';
@@ -19,6 +21,10 @@ import {admitRatedFilm,retainFilm,verifiedAdmission} from './film-admission.js';
 import {recordRetirementDecision} from './tmdb-retirement-decisions.js';
 import {filmFactsPresent,writeFilmFacts} from './canonical-film-writers.js';
 import {PERSON_STATE_CALLS,PERSON_STATE_RECONCILE} from './canonical-person-state.js';
+import {P6_DIFFERENTIAL_EXCEPTIONS} from './canonical-film-writers.js';
+import {DIFFERENTIAL_COVERAGE,EXTRA_EXCEPTIONS} from './canonical-differential-registry.js';
+import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
+import {OPERATION_KINDS,RECEIPT_MIN_VERSION,listAttention,operationRegistry,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
 
 export const SHADOW_ITEM_CAP=200;
 export const SHADOW_LIST_CAP=200;
@@ -35,6 +41,30 @@ export const GAPS=Object.freeze([
  'canonical_identity and original_title overwrite (the fenced write only fills)',
  // AIR-374 P1 / ADR 0117 (owner decision 1): "projector revision bumps" is no longer a readiness blocker. The projector does not write the historic
  // canonical_revision in prepared (an entity's initial revision is 0); every projector batch instead asserts the marker and generation unconditionally.
+]);
+// AIR-374 P6: the registries handoffReadiness computes from. They are DATA (frozen objects), never read from comments or documentation, and every flip is a code change
+// a reviewer sees: the PR that wires a producer, moves a reader or introduces the receipts protocol changes its own entry, and a test refuses an entry that the code
+// contradicts (a producer marked wired while the Worker bundle does not carry this module).
+// P3: the natural producer call sites. A producer counts as WIRED only when the receipts registry (PRODUCER_OPERATIONS, built by operationRegistry of src/canonical-receipts.js, which refuses
+// anything that is not atomic) holds an atomic operation for EVERY operation kind the producer needs (`requires`). There is no flag to flip: the P3 PR that wires a producer registers its operations
+// (a spec with readback, replay and atomic:true), and the Worker bundle must then carry this module (a test checks both). Today the registry is empty, so none is wired.
+export const PRODUCER_WIRING=Object.freeze([
+ Object.freeze({name:'epg_commit',site:'epgSync commit (worker.js)',requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])}),
+ Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
+ Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
+ Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
+]);
+export const PRODUCER_OPERATIONS=operationRegistry([]);
+// P4: the readers are NOT listed here. handoffReadiness derives them from CANONICAL_READER_REGISTRY of src/canonical-catalog-reader.js (the one registry, owner decision 4): every entry of
+// class 'freeze' with moved:false is `reader_not_moved:<name>`; an entry of class 'exception' never blocks and must not be marked moved.
+// ADR 0117 owner decision 5 / ADR 0119: durable cross-domain receipts inside the existing D1. The protocol is "registered" only when PRODUCER_OPERATIONS holds at least one atomic operation
+// (derived, never a flag); the schema and the baseline are read from the database.
+export const RECEIPTS_PROTOCOL=Object.freeze({table:'canonical_write_receipt',minSchema:RECEIPT_MIN_VERSION});
+// ADR 0117 owner decision 2: the three classes loaded while `prepared` (counts accepted by the owner on 11 Nov 2026).
+export const EMPTY_CLASSES=Object.freeze([
+ Object.freeze({name:'ratedAdmission',table:'film_rated_admission',expected:708}),
+ Object.freeze({name:'retention',table:'film_retention',expected:401}),
+ Object.freeze({name:'retirement',table:'tmdb_retirement_decision',expected:4}),
 ]);
 const ROLES=new Set(['director','actor']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
@@ -163,7 +193,7 @@ export function planBatch(plans){
  return {ok:true,plans};
 }
 
-const CALLS={writeFilmFacts,mutateFilm,mutatePerson,recordLocalizationSources,admitRatedFilm,retainFilm,recordRetirementDecision};
+export const CALLS={writeFilmFacts,mutateFilm,mutatePerson,recordLocalizationSources,admitRatedFilm,retainFilm,recordRetirementDecision};
 Object.assign(CALLS,PERSON_STATE_CALLS);
 
 // Executes a plan only when the route is canonical. In legacy, r2 and prepared nothing runs and no statement reaches the database; held and
@@ -190,7 +220,7 @@ export async function dispatch(env,plan){
 
 // What each call kind can settle by itself. A request id makes a replay a no-op (the writer opens no batch for a request it already applied);
 // mutateFilm, mutatePerson and writeFilmFacts carry NO per-request receipt: they are idempotent in content, not by request id (writeFilmFacts opens no batch when D1 already holds its rows).
-const RECONCILE={
+export const RECONCILE={
  writeFilmFacts:{kind:()=>'film',id:input=>input.id,byRequestId:false,content:(db,input)=>filmFactsPresent(db,input)},
  mutateFilm:{kind:()=>'film',id:input=>input.id,byRequestId:false},
  mutatePerson:{kind:()=>'person',id:input=>input.id,byRequestId:false},
@@ -306,9 +336,21 @@ export async function shadowCompare(env,items){
  return report;
 }
 
-// Read-only readiness for the AIR-374 handoff. It never writes. `ready` is false while the marker, the baseline, the later schemas, the
-// projector lease or GAPS say so; it is information for the owner's decision, never a permission.
-export async function handoffReadiness(env,{now=new Date().toISOString()}={}){
+// Read-only readiness for the AIR-374 handoff, COMPUTED (P6, ADR 0117). It never writes and reads nothing but counts, the marker, the schema contract and the lease and
+// window rows. `ready` is true only when no blocker remains; it is information for the owner's decision, never a permission. A blocker is:
+// - marker_unreadable:<code>, marker_not_prepared:<state>, baseline_not_verified:<state>, schema_below_16:<n>, schema_unreadable, no_database;
+// - projector_lease_live, projector_window_not_idle:<state> (an absent window table is no window); and ONLY on a read error: schema_unreadable, projector_lease_unreadable, projector_window_unreadable,
+//   receipts_unreadable, empty_class_unreadable:<class>, marker_unreadable:<code>; now_invalid for an unparseable `now`;
+// - gap:<former gap> unless every writer of it is registered in CALLS and RECONCILE AND the differential registry marks it covered;
+// - exception_not_accepted:<id> for each named projector-vs-canonical difference the owner has not accepted;
+// - receipts_schema_missing, receipts_baseline_missing (marker open or held, no sealed baseline), receipts_baseline_unverified, unreceipted_changes, receipts_attention_open, receipts_unreadable,
+//   and receipts_protocol_unregistered (PRODUCER_OPERATIONS holds no atomic operation);
+// - producer_not_wired:<name> (a producer needs an atomic registered operation for every kind it requires) and reader_not_moved:<name> (class 'freeze', moved:false), reader_exception_marked_moved:<name>, reader_class_invalid:<name> from CANONICAL_READER_REGISTRY;
+// - empty_class_not_loaded:<name>:<found>/<expected> and empty_class_unreadable:<name>.
+// `evidence` replaces a registry only in tests (a synthetic fully satisfied fixture); production callers pass none.
+export async function handoffReadiness(env,{now=new Date().toISOString(),evidence={}}={}){
+ const wiring=evidence.wiring||PRODUCER_WIRING,readers=evidence.readers||CANONICAL_READER_REGISTRY,operations=evidence.operations||PRODUCER_OPERATIONS,classes=evidence.classes||EMPTY_CLASSES;
+ const coverage=evidence.coverage||DIFFERENTIAL_COVERAGE,exceptions=evidence.exceptions||[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS],calls=evidence.calls||{CALLS,RECONCILE};
  const blockers=[];
  let gate=null;
  try{gate=await readAuthority(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
@@ -317,14 +359,73 @@ export async function handoffReadiness(env,{now=new Date().toISOString()}={}){
   if(gate.baseline!=='verified')blockers.push('baseline_not_verified:'+String(gate.baseline));
  }
  const db=database(env);
+ // FAIL CLOSED (Controller review of PR #533): every read below is its own step and a read ERROR is always a named blocker, never an implicit free, idle, zero or ok. The only accepted
+ // "absent" is a table that sqlite_master shows absent AND whose absence is documented as "not applicable": projector_window (migration 0018; absent means no window).
+ let version=0,tables=new Set(),schemaOk=false;
+ const nowMs=Date.parse(now);
+ if(!Number.isFinite(nowMs))blockers.push('now_invalid');
  if(db){
   try{
-   const version=Number((await one(db,'SELECT version FROM schema_contract WHERE id=1'))?.version??0);
+   version=Number((await one(db,'SELECT version AS contract_version FROM schema_contract WHERE id=1'))?.contract_version);
+   tables=new Set((await many(db,"SELECT name FROM sqlite_master WHERE type='table'")).map(row=>row.name));
+   if(!Number.isFinite(version))throw new Error('contract_version');
+   schemaOk=true;
    if(version<16)blockers.push('schema_below_16:'+version);
-   const lease=await one(db,"SELECT lease_until FROM projection_run WHERE projection='enrichment' AND lease_id IS NOT NULL AND lease_until>?",[now]).catch(()=>null);
-   if(lease)blockers.push('projector_lease_live');
   }catch{blockers.push('schema_unreadable');}
+  // The projector lease: no row, or an expired lease, is FREE; a read error or a missing projection_run table is not.
+  try{
+   if(!tables.has('projection_run'))throw new Error('projection_run absent');
+   const lease=await one(db,"SELECT lease_until FROM projection_run WHERE projection='enrichment' AND lease_id IS NOT NULL AND lease_until>?",[now]);
+   if(lease)blockers.push('projector_lease_live');
+  }catch{blockers.push('projector_lease_unreadable');}
+  // The exclusive window: the table absent is "no window"; a read error, a missing row or an unreadable state is not idle.
+  if(tables.has('projector_window')||!schemaOk){
+   try{
+    const window=await one(db,'SELECT state,expires_at FROM projector_window WHERE id=1');
+    if(!window||!['idle','requested','held'].includes(window.state))throw new Error('projector_window row');
+    if(window.state!=='idle'&&!(Number(window.expires_at)<=nowMs))blockers.push('projector_window_not_idle:'+window.state);
+   }catch{blockers.push('projector_window_unreadable');}
+  }
  }else blockers.push('no_database');
- for(const gap of GAPS)blockers.push('gap:'+gap);
- return {ready:blockers.length===0,blockers,gaps:[...GAPS]};
+ // A former gap is cleared only by evidence the code can check: each of its writers is registered for dispatch and for readback, and the harness-verified registry marks it covered.
+ const cleared=[],open=[];
+ for(const gap of GAPS){
+  const entry=coverage.find(item=>item.gap===gap);
+  const registered=!!entry&&entry.covered===true&&Array.isArray(entry.writers)&&entry.writers.length>0&&entry.writers.every(name=>typeof calls.CALLS[name]==='function'&&!!calls.RECONCILE[name])&&entry.scenarios?.length>0&&entry.tables?.length>0;
+  (registered?cleared:open).push(gap);
+ }
+ for(const gap of open)blockers.push('gap:'+gap);
+ for(const item of exceptions)if(item.status!=='accepted')blockers.push('exception_not_accepted:'+item.id);
+ // Receipts (ADR 0119), read-only. Schema below 19 or a missing receipt/baseline table: receipts_schema_missing. The activation baseline is recorded by the activation operation AFTER
+ // `open` (recordBaseline refuses before), so it is required here only once the marker is open or held; at `prepared` it is expected to be absent and is not a blocker.
+ if(!db||!schemaOk)blockers.push(db?'receipts_unreadable':'receipts_schema_missing');
+ else if(version<RECEIPT_MIN_VERSION||!tables.has(RECEIPTS_PROTOCOL.table)||!tables.has('canonical_receipt_baseline_seal'))blockers.push('receipts_schema_missing');
+ else{
+  try{
+   const sealed=Number((await one(db,'SELECT COUNT(*) AS sealed FROM canonical_receipt_baseline_seal'))?.sealed);
+   if(!Number.isFinite(sealed))throw new Error('seal');
+   if(sealed!==1){if(gate&&['open','held'].includes(gate.state))blockers.push('receipts_baseline_missing');}
+   else{
+    if(!(await verifyBaseline(env)).ok)blockers.push('receipts_baseline_unverified');
+    if((await readUnreceipted(env)).unreceipted.length)blockers.push('unreceipted_changes');
+    if((await listAttention(env)).length)blockers.push('receipts_attention_open');
+   }
+  }catch{blockers.push('receipts_unreadable');}
+ }
+ const atomic=kind=>{for(const spec of operations.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};
+ if(![...operations.values()].some(spec=>spec.atomic===true))blockers.push('receipts_protocol_unregistered');
+ for(const item of wiring)if(!item.requires.every(kind=>OPERATION_KINDS.includes(kind)&&atomic(kind)))blockers.push('producer_not_wired:'+item.name);
+ for(const item of readers){
+  if(item.class==='freeze'){if(item.moved!==true)blockers.push('reader_not_moved:'+item.name);}
+  else if(item.class==='exception'){if(item.moved===true)blockers.push('reader_exception_marked_moved:'+item.name);}
+  else blockers.push('reader_class_invalid:'+item.name);
+ }
+ for(const item of classes){
+  if(!db||!tables.has(item.table)){blockers.push('empty_class_unreadable:'+item.name);continue;}
+  try{
+   const found=Number((await one(db,'SELECT COUNT(*) AS n FROM '+item.table))?.n);
+   if(found!==item.expected)blockers.push('empty_class_not_loaded:'+item.name+':'+found+'/'+item.expected);
+  }catch{blockers.push('empty_class_unreadable:'+item.name);}
+ }
+ return {ready:blockers.length===0,blockers,gaps:open,clearedGaps:cleared,formerGaps:[...GAPS]};
 }
