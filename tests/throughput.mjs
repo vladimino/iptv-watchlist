@@ -26,6 +26,8 @@ const savedFp=structuredClone(records.get('enrichment/films/'+item.filmId+'/fing
 await api('submit',{runId:start.runId,items:[{filmId:item.filmId,fingerprint:{...fingerprint,risks:['Do not overwrite']},prediction}]});assert.deepEqual(records.get('enrichment/films/'+item.filmId+'/fingerprint.json'),savedFp);assert.deepEqual(records.get('enrichment/films/'+item.filmId+'/predictions.json'),savedP);assert.equal(records.get('enrichment/runs/'+start.runId+'.json').results[item.filmId],'created');
 // A new urgent hot candidate can enter an already reserved batch ahead of all older work.
 catalog.tmdb_999=film('tmdb_999',now-71.9*3600000,{discoveredAt:new Date().toISOString()});records.set('epg/discovered-films.json',catalog);
+// AIR-431: the new hot film reaches the stored queue through its named refresh (as the resolver checkpoint does); next advances that queue.
+await api('queue/reconcile',{});
 next=(await api('next',{runId:start.runId,batchSize:1})).data;assert.equal(next.items[0].filmId,'tmdb_999');
 // Per-film checkpoints survive a second item's storage failure. Fingerprint of the failed item is reused next hour.
 next=(await api('next',{runId:start.runId,batchSize:2})).data;const [a,b]=next.items;failKey='enrichment/films/'+b.filmId+'/predictions.json';submit=(await api('submit',{runId:start.runId,items:[{filmId:a.filmId,fingerprint,prediction},{filmId:b.filmId,fingerprint,prediction}]})).data;assert.equal(submit.failed,1);assert(records.has('enrichment/films/'+a.filmId+'/predictions.json'));assert(records.has('enrichment/films/'+b.filmId+'/fingerprint.json'));assert.equal(records.get('enrichment/runs/'+start.runId+'.json').results[a.filmId],'created');
@@ -44,7 +46,7 @@ failKey='enrichment/view-index.json';await api('submit',{runId:start.runId,items
 await api('complete',{runId:start.runId,reason:'storage_error'});
 // Cold-only work is bounded and immediately preempted when hot appears; cold retains only canonical metadata until capacity is free.
 records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',{tmdb_901:catalog.tmdb_901});await api('queue/reconcile',{});start=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(start.batchSize,1);next=(await api('next',{runId:start.runId,batchSize:1})).data;assert.equal(next.items[0].filmId,'tmdb_901');
-const coldRecords=records.get('epg/discovered-films.json');coldRecords.tmdb_1000=film('tmdb_1000',now-71.8*3600000);records.set('epg/discovered-films.json',coldRecords);next=(await api('next',{runId:start.runId,batchSize:1})).data;assert.equal(next.items[0].filmId,'tmdb_1000');assert(!next.items.some(x=>x.filmId==='tmdb_901'));
+const coldRecords=records.get('epg/discovered-films.json');coldRecords.tmdb_1000=film('tmdb_1000',now-71.8*3600000);records.set('epg/discovered-films.json',coldRecords);await api('queue/reconcile',{});next=(await api('next',{runId:start.runId,batchSize:1})).data;assert.equal(next.items[0].filmId,'tmdb_1000');assert(!next.items.some(x=>x.filmId==='tmdb_901'));
 await api('complete',{runId:start.runId,reason:'time_budget'});
 // Leased writers serialize overlapping starts/submissions.
 records.set('enrichment/writer-lease.json',{id:'other',expiresAt:Date.now()+60000});assert.equal((await api('start',{scope:'watchlist_all'})).data.status,'busy');records.get('enrichment/writer-lease.json').expiresAt=0;
