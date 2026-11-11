@@ -39,6 +39,7 @@ const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,Abort
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);
 vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),world);
 vm.runInContext(scoped('src/discovery-authority.js','DiscoveryAuthority'),world);
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
 const worker=world.worker,constant=name=>vm.runInContext(name,world);
 

@@ -1,6 +1,7 @@
 // Finds display-only exclusion (ADR-0028, relaxed by ADR-0033 for the v2 rule tag): the offline builder and the read path of GET /api/catalog/available. Strict
 // original title + exact year, uniqueness in the export and the catalog, identity wins, per-generation evaluation, the
 // retired FINDS_TITLE_EXCLUSION binding (inert, ADR 0041), fail-open on any invalid list, and no per-film data or list hash in the response. Synthetic data only.
+import {scoped} from '../scripts/bundle-scope.mjs';
 import assert from 'node:assert/strict';
 import {createHash,webcrypto} from 'node:crypto';
 import fs from 'node:fs';
@@ -24,6 +25,7 @@ const bucket={
 };
 const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},fetch:async()=>{throw new Error('unexpected fetch');}});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),context);
 for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),context);
 const worker=context.worker,constant=name=>vm.runInContext(name,context);
 
