@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
-import {scoped} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import * as PublishedEpgModule from '../src/published-epg.js';
 import {sqliteSync} from './sqlite-session.mjs';
 
@@ -66,16 +66,17 @@ const env=db=>({DB:db,BUCKET:{async get(){throw new Error('R2 must not be read b
 
 // ---- 2. the route through the Worker ----
 const records=new Map();let puts=[],fetches=[];
+const reads=[];
 const bucket={
- async get(key){return records.has(key)?{etag:'e',json:async()=>structuredClone(records.get(key))}:null;},
+ async get(key){reads.push(key);return records.has(key)?{etag:'e',json:async()=>structuredClone(records.get(key))}:null;},
  async put(key,value){records.set(key,JSON.parse(value));puts.push(key);return {etag:'e'};},
  async list({prefix=''}={}){return {objects:[...records.keys()].filter(k=>k.startsWith(prefix)).sort().map(key=>({key,customMetadata:{}})),truncated:false};}
 };
 const ctx=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},
  fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
-vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
-for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
+vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),ctx);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),ctx);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),ctx);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),ctx);
+for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js',process.env.CATALOG_WORKER_FILE||'src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const worker=ctx.worker,constant=name=>vm.runInContext(name,ctx);
 const envW={BUCKET:bucket};
 const get=async id=>{const r=await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/catalog/film/'+id),envW,{waitUntil(){}});return {status:r.status,body:await r.json()};};
@@ -209,7 +210,7 @@ const base={
   const spy={async get(key){return mem.has(key)?{etag:'e',json:async()=>structuredClone(mem.get(key))}:null;},async put(key){writes.push('put:'+key);throw new Error('R2 write in a GET: '+key);},async delete(key){writes.push('delete:'+key);throw new Error('R2 delete in a GET: '+key);},async list(){return {objects:[],truncated:false};},async head(key){return mem.has(key)?{etag:'e'}:null;}};
   const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,console,setTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},
    fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
-  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),world);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),world);
+  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);vm.runInContext(scoped('src/film-person-authority.js','FilmPersonAuthority'),world);vm.runInContext(scopedReplacing('src/canonical-catalog-reader.js','CanonicalCatalogReader','const {database,failed,many,one,readAuthority,readSource}=FilmPersonAuthority;\n'),world);vm.runInContext(fs.readFileSync('src/domain/tmdb-tv-identity.js','utf8'),world);
   vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);
   vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),world);
   for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/migration-export.js','src/filter-presets.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
@@ -264,15 +265,17 @@ const base={
  const ADM='letterboxd/admissions/verified-films.json',RET='identity/tmdb-retirements.json',sha='b'.repeat(64);
  const receipt=tmdb=>({schemaVersion:1,films:{['tmdb_'+tmdb]:{tmdb:String(tmdb),sourceCode:'sc'+tmdb,archiveSha256:sha,verifiedAt:'2026-11-09T10:00:00.000Z',title:'Receipt '+tmdb,year:2001}}});
  // A D1 that answers the authority reads and the two guards; anything else is empty. `broken` names a statement that fails.
- const fake=({version=16,marker={mode:'r2',cutover:'open',generation:0},external=[],redirects=[],broken=null,tables=true}={})=>({
+ const fake=({version=16,marker={mode:'r2',cutover:'open',generation:0},external=[],redirects=[],broken=null,tables=true,retired=false,admissions=[],drift=null}={})=>({
   prepare(sql){
    const run=kind=>{
     if(broken&&broken.test(sql))throw new Error('d1 down');
     if(/FROM schema_contract/.test(sql))return kind==='first'?{version}:{results:[]};
     if(/sqlite_master/.test(sql))return {results:tables?['film_person_authority','film_person_cas','film_person_baseline','canonical_revision'].map(name=>({name})):[]};
-    if(/FROM film_person_authority/.test(sql))return marker;
+    if(/FROM film_person_authority/.test(sql)){if(drift&&(drift.n=(drift.n||0)+1)>drift.after)return drift.marker;return marker;}
     if(/FROM film_person_cas/.test(sql))return {ok:1};
     if(/FROM film_person_baseline/.test(sql))return {state:'verified',reference:null};
+    if(/FROM tmdb_retirement_decision/.test(sql))return kind==='first'?(retired?{hit:1}:null):{results:[]};
+    if(/FROM film_rated_admission/.test(sql))return {results:admissions};
     if(/FROM film_external_id/.test(sql))return {results:external};
     if(/FROM film_redirect/.test(sql))return redirects.length?{hit:1}:null;
     return kind==='first'?null:{results:[]};
@@ -284,11 +287,32 @@ const base={
  seed(base);records.set(ADM,receipt(300));
  // Allowed R2 states: legacy (a contract below 13), r2 and prepared. An admitted Film whose projection is still pending is found.
  let r=await ask(fake({version:12}));assert.equal(r.status,200,'legacy');
- r=await ask(fake());assert.equal(r.status,200,'r2: the receipt is the R2 identity decision, a pending projection is still a Film');assert.equal(r.body.film.id,'tmdb_300');
+ reads.length=0;r=await ask(fake());assert.ok(reads.includes(ADM),'r2 still reads the R2 receipt');assert.equal(r.status,200,'r2: the receipt is the R2 identity decision, a pending projection is still a Film');assert.equal(r.body.film.id,'tmdb_300');
  r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.equal(r.status,200,'prepared');
+ // AIR-374 P4: the marker is read again after the R2 and D1 reads; an answer read under one state and generation is never returned after the marker moved.
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'open',generation:2}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'prepared to open mid-read refuses the answer');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'prepared',cutover:'open',generation:2}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'a new generation of the same state refuses the answer');
+ r=await ask(fake({drift:{after:1,marker:{mode:'prepared',cutover:'open',generation:1}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'r2 to prepared mid-read refuses the answer');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'held',generation:3}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'prepared to held mid-read fails closed');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1},drift:{after:1,marker:{mode:'d1',cutover:'open',generation:1}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'a state change at the same generation refuses the answer');
+ r=await ask(fake({marker:{mode:'prepared',cutover:'open',generation:1}}));assert.equal(r.status,200,'an unchanged prepared marker still answers');
  // The authority names D1 or is unreadable: never R2.
  r=await ask(fake({marker:{mode:'d1',cutover:'held',generation:2}}));assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','film_person_held'],'held fails closed');
- r=await ask(fake({marker:{mode:'d1',cutover:'open',generation:2}}));assert.deepEqual([r.status,r.body.status,r.body.reason],[503,'unavailable','film_person_not_open_read'],'open is D1 authority: the R2 receipt is not used');
+ // AIR-374 P4: at open D1 answers (film_rated_admission, identity claims, redirects, the retirement ledger) and the R2 receipt and retirements object are never read.
+ const OPEN={mode:'d1',cutover:'open',generation:2},adm={film_id:'film:tmdb:300',tmdb:'300',source_code:'sc300',archive_sha256:sha,title:'D1 300',year:2001,receipt_key:ADM,receipt_film_key:'tmdb_300',verified_at:'2026-11-09T10:00:00.000Z'},own=[{film_id:'film:tmdb:300',trusted:1,conflicting:0}];
+ reads.length=0;
+ r=await ask(fake({marker:OPEN}));assert.deepEqual([r.status,r.body.status],[404,'absent'],'open: no D1 Film is absent, the R2 receipt does not admit it');
+ r=await ask(fake({marker:OPEN,external:own}));assert.deepEqual([r.status,r.body.status],[404,'absent'],'open: a Film without an admission row is absent');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm]}));assert.equal(r.status,200,'open: found from film_rated_admission');assert.deepEqual([r.body.film.id,r.body.film.title,r.body.film.year],['tmdb_300','D1 300',2001]);
+ r=await ask(fake({marker:OPEN,external:own,admissions:[{...adm,tmdb:'301'}]}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: an admission row whose tmdb differs from the typed id fails closed');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm],retired:true}));assert.deepEqual([r.status,r.body.status],[410,'retired'],'open: the D1 retirement ledger');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm],redirects:['film:tmdb:300']}));assert.equal(r.status,410,'open: a redirect source is retired');
+ r=await ask(fake({marker:OPEN,external:[...own,{film_id:'film:b',trusted:0,conflicting:0}],admissions:[adm]}));assert.equal(r.status,409,'open: a foreign claim is a conflict');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm],broken:/film_rated_admission/}));assert.deepEqual([r.status,r.body.reason],[503,'admission_unavailable'],'open: a failed admission read fails closed');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm],broken:/tmdb_retirement_decision/}));assert.deepEqual([r.status,r.body.reason],[503,'canonical_read_unavailable'],'open: a failed ledger read fails closed');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm],drift:{after:3,marker:{mode:'d1',cutover:'open',generation:3}}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_generation_moved'],'open: a marker that moves during the read refuses the answer');
+ r=await ask(fake({marker:OPEN,external:own,admissions:[adm],drift:{after:3,marker:{mode:'d1',cutover:'held',generation:3}}}));assert.equal(r.status,503,'open then held mid-read');
+ assert.ok(!reads.includes(ADM)&&!reads.includes(RET),'no silent R2 fallback: neither the receipt object nor the retirements object is read at open (reads: '+[...new Set(reads)].join(',')+')');
  r=await ask(fake({marker:null}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a missing marker row');
  r=await ask(fake({marker:{mode:'bogus',cutover:'open',generation:0}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a malformed marker');
  r=await ask(fake({tables:false}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a missing companion table');

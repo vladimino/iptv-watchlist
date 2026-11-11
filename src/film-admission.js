@@ -8,12 +8,12 @@
 // - verifiedAdmission validates one receipt entry; nothing else is ever admitted (no title/year match, no short code as an id, no watchlist field).
 // - admitRatedFilm / retainFilm are the fenced writers (marker generation + entity revision of schema 13, replay-safe, monotonic).
 // - compareAdmissions is the compare-only report of R2 inputs against D1 rows; readRatedAdmissions / readRetention need the marker open.
-import {assertWritable,database,failed,many,one,readAuthority,readSource} from './film-person-authority.js';
+import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
 import {archiveAdmissionsFromDocument,watchlistAdmissionsFromIndex} from './enrichment-projection.js';
 
 export const RATED_RECEIPT_KEY='letterboxd/admissions/verified-films.json';
-export const ADMISSION_READ_CHUNK=80;
+export {ADMISSION_READ_CHUNK} from './canonical-catalog-reader.js';
 export const COMPARE_LIST_CAP=200;
 const KEY=/^tmdb_([1-9]\d{0,11})$/;
 const HEX64=/^[0-9a-f]{64}$/;
@@ -141,28 +141,9 @@ export async function retainFilm(env,input){
  return {id,revision:expected+1,retained:true,written:true};
 }
 
-// Read only, no gate: the stored admission and retention rows for ids (chunked by 80, two reads per chunk).
-export async function loadAdmissionRows(env,ids){
- const db=database(env);
- if(!db)throw failed('film_person_unavailable');
- const list=[...new Set(ids||[])];
- const out=new Map(list.map(id=>[id,{ratedAdmission:null,retention:null}]));
- for(let at=0;at<list.length;at+=ADMISSION_READ_CHUNK){
-  const chunk=list.slice(at,at+ADMISSION_READ_CHUNK),marks=chunk.map(()=>'?').join(',');
-  let admissions,retention;
-  try{[admissions,retention]=await Promise.all([many(db,`SELECT film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at FROM film_rated_admission WHERE film_id IN (${marks})`,chunk),many(db,`SELECT film_id,watchlist,observed_at FROM film_retention WHERE film_id IN (${marks})`,chunk)]);}
-  catch(error){throw failed('admission_unavailable',error);}
-  for(const row of admissions)out.get(row.film_id).ratedAdmission={tmdb:row.tmdb,sourceCode:row.source_code,archiveSha256:row.archive_sha256,title:row.title,year:row.year,receiptKey:row.receipt_key,receiptFilmKey:row.receipt_film_key,verifiedAt:row.verified_at};
-  for(const row of retention)out.get(row.film_id).retention={watchlist:row.watchlist===1,observedAt:row.observed_at};
- }
- return out;
-}
-
-// The D1 reader for the bulk read model (AIR-372): D1 is the allowed source only while the marker is open; held fails closed, never R2.
-export async function readAdmissions(env,ids){
- if(readSource(await readAuthority(env))!=='d1')throw failed('admission_not_authoritative');
- return loadAdmissionRows(env,ids);
-}
+// The two D1 readers (loadAdmissionRows, readAdmissions) live in canonical-catalog-reader.js, the one import-free read module the Worker bundles (AIR-374 P4);
+// they are re-exported here so every existing caller and test keeps this path.
+export {loadAdmissionRows,readAdmissions} from './canonical-catalog-reader.js';
 
 // Compare-only (inactive): the R2 inputs (verified-films.json body, view-index body) against D1 rows keyed by the same movie id / lid. Nothing is
 // written. `receipts` entries that are not verified are listed as `unverified` and are never expected in D1. Each list is capped.
