@@ -27,8 +27,17 @@ export const rows=(file,sql)=>{const result=sqlite(file,sql,{json:true});assert.
 export const one=(file,sql)=>rows(file,sql)[0];
 // The rows of the final tables as sqlite printed them (JSON mode: one object per line), sorted. Two databases are equal row for row exactly when these are equal;
 // parsing every row and serializing it again (650 MB over the 1.25x fixtures) added nothing to that comparison.
-const rowLines=text=>{const body=text.trim();if(!body)return [];return body.slice(1,-1).split(',\n').sort();};
-export const dump=file=>Object.fromEntries(FINAL.map(table=>{const result=sqlite(file,'SELECT * FROM '+table+';',{json:true});assert.equal(result.status,0,result.stderr);return [table,rowLines(result.stdout)];}));
+// AIR-374: it is now an exact digest per table. Printing 650 MB of rows as JSON and comparing the text cost most of the time and memory of these files; sqlite's own `sha3_query` hashes every row of
+// `SELECT * ... ORDER BY 1,2,...,n` (a total order over all columns, values with their types, NULLs included) inside the engine, so two databases give the same digest exactly when they hold the same rows,
+// and a failure still names the table and shows its row count.
+export const dump=file=>Object.fromEntries(FINAL.map(table=>{
+ const columns=rows(file,"SELECT name FROM pragma_table_info('"+table+"') ORDER BY cid;");
+ assert.ok(columns.length>0,table+' has columns');
+ const order=columns.map((_,index)=>index+1).join(',');
+ const result=rows(file,"SELECT (SELECT COUNT(*) FROM "+table+") AS rows, hex(sha3_query('SELECT * FROM "+table+" ORDER BY "+order+"',256)) AS sha3;")[0];
+ assert.match(result.sha3,/^[0-9A-F]{64}$/,table+' digest');
+ return [table,result];
+}));
 export const filmIds=count=>Array.from({length:count},(_,index)=>'film:'+('f'+index+'-'.repeat(24)).slice(0,24));
 export function database(name,{films=100,staged=true}={}){
  const file=path.join(root,name+'.sqlite');

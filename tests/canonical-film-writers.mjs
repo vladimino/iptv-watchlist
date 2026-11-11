@@ -13,6 +13,9 @@ import {createCanonicalRepository} from '../src/canonical-repository.js';
 import {fenced,MUTATION_STATEMENT_CAP} from '../src/canonical-mutations.js';
 import {planFilmWrite,writerRoute,dispatch,readback,readRevisions,GAPS} from '../src/canonical-producers.js';
 
+// AIR-374: FILM_WRITERS_SECTIONS=1,4,7b runs only those numbered sections (each builds its own scenario from the shared template); unset runs all. The mutation check runs a mutant against the section that kills it first and against the whole file before it calls it a survivor.
+const ONLY=new Set((process.env.FILM_WRITERS_SECTIONS||'').split(',').filter(Boolean));
+const section=name=>ONLY.size===0||ONLY.has(name);
 const writers=await import(process.env.FILM_WRITERS_SOURCE?pathToFileURL(process.env.FILM_WRITERS_SOURCE).href:'../src/canonical-film-writers.js');
 const {planFilmFacts,readFilmSnapshot,writeFilmFacts,FILM_FACTS_SOURCE_CAP,TITLE_SOURCE_ORDER,P6_DIFFERENTIAL_EXCEPTIONS}=writers;
 
@@ -51,7 +54,7 @@ async function seed(env,id=ID,extra={}){return mutateFilm(env,{id,expectedRevisi
 const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{contractVersion:1,canonicalIdentity:'tmdb:603',originalTitle:'The Matrix',source:'tmdb'},dimensions:{identity:dim('identity'),metadata:dim('metadata',{status:'fresh',source:'tmdb',sourceVersion:null,provenance:null})},localization:{state:LOC()},metadata:META,sync:{metadataAt:T,synopsisFetchedAt:T,peopleNamesVersion:2,peopleLocalizedAt:T},watchlist:true,...over});
 
 // 1. The marker gate: at r2, prepared, held and legacy the writer reaches the database only for the marker read, at open it writes.
-{
+if(section('1')){
  for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_person_not_open'],['held','film_person_held'],['legacy','film_person_not_open']]){
   const {file,env}=fresh(stage);
   await assert.rejects(writeFilmFacts(env,facts()),error=>error.code===expected||(stage==='legacy'&&/film_person/.test(error.code)),stage);
@@ -66,7 +69,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 2. One batch writes every film-side row, the effective localization in the same batch as the source write; a replay opens no batch.
-{
+if(section('2')){
  const {file,env}=fresh();
  await seed(env);
  const before=env.DB.calls.batches;
@@ -90,7 +93,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 3. The generation fence: a marker that moves between the read and the batch rolls the whole write back.
-{
+if(section('3')){
  let file;
  const again=fresh('open');file=again.file;
  await seed(again.env);
@@ -102,7 +105,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 4. Unknown outcomes are settled by readback: applied-then-lost is content_present and the replay is a no-op; lost-before is not_applied and the replay applies.
-{
+if(section('4')){
  const {file,env}=fresh();
  await seed(env);
  const real=env.DB;
@@ -124,7 +127,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 5. The statement cap holds for the largest plan; the fenced commit refuses an oversized batch.
-{
+if(section('5')){
  const {env}=fresh();
  await seed(env);
  const sources=Array.from({length:FILM_FACTS_SOURCE_CAP},(_,i)=>({source:'s'+i,value:'v'+i,sourceVersion:'v1',provenance:{a:i},observedAt:T}));
@@ -137,7 +140,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 6. Reviewed and owner values survive an automatic write; a blank never overwrites.
-{
+if(section('6')){
  const {file,env}=fresh();
  await seed(env);
  await writeFilmFacts(env,facts({localization:{state:LOC({status:'reviewed',source:'dictionary',value:'Матрица (словарь)',provenance:{authority:'dictionary'}})},dimensions:{identity:dim('identity',{status:'reviewed',source:'dictionary',provenance:{authority:'dictionary'}})}}));
@@ -170,7 +173,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 7. Identity overwrite rules: trusted-source precedence, a trusted tmdb id for canonical_identity, evidence for a change.
-{
+if(section('7')){
  const {file,env}=fresh();
  await seed(env,ID,{originalTitle:'Seed'});
  let revision=1;
@@ -215,7 +218,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 7b. Title ranking: every adjacent pair, equal rank, the owner over everything, unknown sources, and the provenance shape.
-{
+if(section('7b')){
  assert.deepEqual([...TITLE_SOURCE_ORDER],['owner','dictionary','tmdb','letterboxd','watchlist','epg','discovery']);
  for(let i=0;i<TITLE_SOURCE_ORDER.length-1;i++){
   const hi=TITLE_SOURCE_ORDER[i],lo=TITLE_SOURCE_ORDER[i+1];
@@ -260,7 +263,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 8. Effective localization: the sources and the effective row move in one batch, the best source wins, catalog-d1's title SQL stays valid.
-{
+if(section('8')){
  const {file,env}=fresh();
  await seed(env,ID,{originalTitle:'The Matrix'});
  const batches=env.DB.calls.batches;
@@ -280,7 +283,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 9. Metadata merge, clear, sync set and release, membership set and clear; identity, credits, aliases and ids are untouched.
-{
+if(section('9')){
  const {file,env}=fresh();
  await mutatePerson(env,{id:'person:director/1',expectedRevision:0,at:T,person:{roleId:'director/1',contractVersion:1}});
  await seed(env,ID,{aliases:[{kind:'title',value:'Matrix'}],credits:{upsert:[{personId:'person:director/1',role:'director'}]}});
@@ -315,7 +318,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 10. Equivalence with the projector: the same inputs give the same rows in the projector's tables.
-{
+if(section('10')){
  const adapter=file=>{const db=d1Standin(file);return {run:async(text,params=[])=>{await db.prepare(text).bind(...params).run();},get:async(text,params=[])=>db.prepare(text).bind(...params).first(),all:async(text,params=[])=>(await db.prepare(text).bind(...params).all()).results};};
  const projected=fresh('prepared');
  const repo=createCanonicalRepository(adapter(projected.file));
@@ -335,7 +338,7 @@ const facts=(over={})=>({id:ID,expectedRevision:1,at:T,requestId:'req-1',film:{c
 }
 
 // 11. Producers: the planner, dispatch and readback registration; the route stays dormant below open; the module is imported only by the producers module.
-{
+if(section('11')){
  const plan=planFilmWrite({...facts(),revisions:{[ID]:1},epgGeneration:'g1'});
  assert.equal(plan.producer,'film_facts');assert.equal(plan.calls[0].fn,'writeFilmFacts');assert.equal(plan.calls[0].input.expectedRevision,1);assert.equal(plan.epgGeneration,'g1');
  assert.equal(planFilmWrite({id:'x'}).skipped[0].reason,'invalid_input');
