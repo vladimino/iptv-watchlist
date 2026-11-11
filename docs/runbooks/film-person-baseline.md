@@ -196,24 +196,24 @@ Each step is a separate, operation-specific owner GO with its own dated evidence
 
 - [`scripts/film-person-connector-run.mjs`](../../scripts/film-person-connector-run.mjs): the connector path as a reviewed tool, with a small CLI (`plan`, `load`, `verify`, `run`, `seal`, `sql`). **Inactive:** not bundled, no Worker or `src/` import. It never calls the connector (only the human-facing operator session can) and its only network is the read-only R2 client it is given (`R2_SNAPSHOT_*`). The D1 side is the local copy: one read-only `SELECT` at a time, plus the three projector-lease statements applied to the copy. Private files (the copy, the measurement, the ledger) must be outside the repository; the CLI refuses a path inside it.
 - [`src/film-person-cutover-accepted.js`](../../src/film-person-cutover-accepted.js): the `cutover_accepted` version 1 gate and the two pinned permissions. **Inactive:** only the recorder names it, through a dynamic import inside its own path.
-- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (64 gate mutants, 6 recorder mutants and 48 connector mutants, every one killed; a mutant that does not parse or load fails the check).
+- Tests: `tests/film-person-cutover-accepted.mjs`, `tests/film-person-connector.mjs` and the mutation check `tests/film-person-connector-mutation.mjs` (68 gate mutants, 7 recorder mutants and 48 connector mutants, every one killed; a mutant that does not parse or load fails the check).
 
 ### The `cutover_accepted` gate
 
 It is `cutover_minimum` version 1 with two differences. The gate calls the v1 gate and drops only its zero-unexplained reasons; the waiver of the owner-link values, the D1 identity, the witness, the fence, the lease and the probe rules apply unchanged. The strict gate and v1 are not modified and still refuse such a ledger.
 
-**Accepted discrepancies (`ACCEPTED_DISCREPANCIES` v1, decisions 1 and 3).** Unexplained missing or extra rows are accepted up to a cap per class, and the cap is exactly the count measured on 10 Nov 2026 (`caps` equals `measured` in the constant). There is no headroom: one unexplained row more in any class fails, and passing it needs a fresh owner approval and a new version of the constant.
+**Accepted discrepancies (`ACCEPTED_DISCREPANCIES` v2, decisions 1 and 3, amended 11 Nov 2026).** Unexplained missing or extra rows are accepted up to a cap per class, and the cap is exactly the count measured on 11 Nov 2026 (`caps` equals `measured` in the constant). Version 1 (10 Nov 2026: person 6, personAlias 147, total 1,600) is superseded: a ledger that carries it fails `acceptance_not_permitted`, and `cutover_accepted` is now gate version 2, so the recorder path is `{gate: 'cutover_accepted', version: 2}`. The owner decision of 11 Nov 2026 ("ignore these 5") accepts that measurement: personAlias +8 over v1 (155), person -3 (3, the measured value, so the cap is lowered, not kept at 6), total +5 (1,605). The measurement is [dated evidence](../evidence/d1-migration/air-373-measured-parity-2026-11-11.md); that run itself is not a pass. There is no headroom: one unexplained row more in any class fails, and passing it needs a fresh owner approval and a new version of the constant.
 
-| Class | Cap = measured | Class | Cap = measured |
+| Class | Cap = measured (v2) | Class | Cap = measured (v2) |
 | --- | ---: | --- | ---: |
 | film | 8 | personLocalization | 3 |
-| person | 6 | watchlist | 4 |
+| person | 3 | watchlist | 4 |
 | filmExternalId | 16 | redirect | 4 |
 | personExternalId | 3 | retirement | 4 |
 | filmAlias | 145 | ratedAdmission | 708 |
-| personAlias | 147 | retention | 401 |
+| personAlias | 155 | retention | 401 |
 | credit | 132 | projectionKey | 11 |
-| filmLocalization | 8 | **total** | **1,600** |
+| filmLocalization | 8 | **total** | **1,605** |
 
 A value that **differs** is never accepted: `differs` must be 0 in every class, explained or not. A class above its cap (`over_cap:<class>`), a differing value (`differs:<class>`), a class the constant does not list (`class_not_listed:<class>`) or a candidate acceptance that is not deeply equal to the constant (`acceptance_not_permitted`) fails. The acceptance, the per-class counts and the caps are in the ledger under `acceptedDigest`, and the gate result shows them (`accepted`, `notProved`, `discrepancies`).
 
@@ -228,7 +228,7 @@ A value that **differs** is never accepted: `differs` must be 0 in every class, 
 
 Missing or inconsistent evidence gives `verified:false` with its reasons, and both this gate and the recorder refuse the ledger. **This is operator attestation, not cryptographic proof.** The evidence files are plain JSON the operator saved from the connector, and the synthetic test builds such files with a fake connector. The checks stop an incomplete, mixed or moved run from being recorded; they do not authenticate one.
 
-**Recording.** `recordBaselineVerified` takes `path: RECORDING_PATHS.cutover_accepted` (`{gate: 'cutover_accepted', version: 1}`) and stores `cutover_accepted/v1:<acceptedDigest>`. There is no fallback: the strict and v1 paths refuse this ledger and this path refuses a ledger without the section.
+**Recording.** `recordBaselineVerified` takes `path: RECORDING_PATHS.cutover_accepted` (`{gate: 'cutover_accepted', version: 2}`) and stores `cutover_accepted/v2:<acceptedDigest>`. There is no fallback: the strict and v1 paths refuse this ledger and this path refuses a ledger without the section.
 
 **The derived inputs are evidence, not scratch space.** `run` verifies the D1-derived values from a pristine deep copy taken right after the capture (`run.derivedProblems`), hands `runParity` its own deep copy and the tool's class-entry read a second one, and notes in the measurement whether `runParity`'s view build changed the values it was handed (`run.derivedInputsMutatedByView`; it never affects `verified`). Reason, observed on 11 Nov 2026 on production-shaped data (offline, see [the evidence](../evidence/d1-migration/air-373-derived-inputs-pristine-offline-2026-11-11.md)): the reviewed view build (`buildExpected`, called inside `runParity`) adds fields to the published EPG snapshot **in place** (owner-reviewed localized titles on programme and watchlist entries), so `verifyDerived` was `[]` right after the capture and `derived_digest:publishedEpg` afterwards. Verifying after `runParity` therefore refused every real run, and the second view build ran on already changed data.
 
