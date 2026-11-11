@@ -49,9 +49,9 @@ Separate owner GO, immediately after the record.
 - R2 and D1 were not read as one snapshot, and the D1 side of the parity was a copy.
 - "Production unchanged" covers only the measurement window (10:17 to 10:44 UTC). The record and the transition were written later; the fence checks the marker and the baseline, not the data.
 - Owner-link values were not compared.
-- The empty `ratedAdmission`, `retention` and `retirement` tables (708 + 401 + 4 accepted gaps) stay open for [AIR-371](https://trello.com/c/gt1afd0C) and [AIR-374](https://trello.com/c/y3oT4gAK).
+- The empty `ratedAdmission`, `retention` and `retirement` tables (708 + 401 + 4 accepted gaps) stay open for [AIR-371](https://trello.com/c/gt1afd0C) and [AIR-374](https://trello.com/c/ha7ais3w).
 - The hourly projector ticks now run with the marker `prepared`; that has not been observed yet.
 
 ## Consequence
 
-`prepared` changes no behaviour: the projector stays the only writer of Film and Person and R2 stays the authority. No scheduled task, flag or cron was changed. Moving to `open` and the `d1` activation need their own owner decisions and plans ([AIR-374](https://trello.com/c/y3oT4gAK)).
+`prepared` changes no behaviour: the projector stays the only writer of Film and Person and R2 stays the authority. No scheduled task, flag or cron was changed. Moving to `open` and the `d1` activation need their own owner decisions and plans ([AIR-374](https://trello.com/c/ha7ais3w)).
