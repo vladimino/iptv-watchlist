@@ -42,7 +42,7 @@ function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:nu
 // negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
 function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&cheapRemaining===0&&!error;}
 function newDiscoveryReport(since,seen=[]){
- const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,seen,lastClosedHour:null};
+ const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,queueGeneration:null,seen,lastClosedHour:null};
  for(const name of DISCOVERY_REPORT_COUNTERS)report[name]=0;
  return report;
 }
@@ -53,13 +53,14 @@ function normalizeDiscoveryReport(value){
  for(const name of DISCOVERY_REPORT_COUNTERS)base[name]=Number.isFinite(value[name])&&value[name]>0?value[name]:0;
  base.remaining=discoveryCount(value.remaining);base.cheapRemaining=discoveryCount(value.cheapRemaining);
  base.error=typeof value.error==='string'&&value.error?value.error:null;
+ base.queueGeneration=typeof value.queueGeneration==='string'&&value.queueGeneration?value.queueGeneration:null;
  base.lastClosedHour=typeof value.lastClosedHour==='string'?value.lastClosedHour:null;
  return base;
 }
 // Pure. `summary` is one saved chunk's summary and `chunkKey` names that chunk (the instance id and the chunk's ordinal in it, both stable
 // across a replay). A key already in `seen` is a repeat of the same checkpoint and adds nothing. A counter that is missing or not a finite
 // non-negative number adds nothing.
-function addChunkToDiscoveryReport(report,summary,chunkKey){
+function addChunkToDiscoveryReport(report,summary,chunkKey,generation){
  const base=normalizeDiscoveryReport(report);
  if(chunkKey&&base.seen.includes(chunkKey))return base;
  const next={...base,chunks:base.chunks+1,seen:chunkKey?[...base.seen,chunkKey].slice(-DISCOVERY_REPORT_SEEN_LIMIT):base.seen};
@@ -67,6 +68,7 @@ function addChunkToDiscoveryReport(report,summary,chunkKey){
  if(summary&&typeof summary==='object'){
   next.remaining=discoveryCount(summary.remaining);next.cheapRemaining=discoveryCount(summary.cheapRemaining);
   next.error=typeof summary.error==='string'&&summary.error?summary.error:null;
+  next.queueGeneration=typeof generation==='string'&&generation?generation:null;
  }
  return next;
 }
@@ -83,7 +85,7 @@ function discoveryReportState(outcome,record,empty){
 // `incomplete` events carry no counters (every number is null): the reading they would come from was not available.
 function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue,incomplete}){
  const compact=String(generation||'').replace(/[^0-9A-Za-z]/g,'').slice(0,12)||'none';
- const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:incomplete?null:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:incomplete?null:report.chunks,queueEmpty:!incomplete&&queue.empty===true,remaining:incomplete?null:queue.remaining,incomplete:incomplete===true||queue?.incomplete===true,error:incomplete?null:(report.chunks>0?report.error:queue.error)||null};
+ const event={id:'discovery-hour-'+compact+'-'+hourKey,type:'discovery',kind:'hour',at,from:incomplete?null:report?.since||null,generation:compact.slice(0,8),status,reason:reason||null,chunks:incomplete?null:report.chunks,queueEmpty:!incomplete&&queue.empty===true,remaining:incomplete?null:queue.remaining,incomplete:incomplete===true||queue?.incomplete===true,error:incomplete?null:queue.error||null};
  for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=incomplete?null:report[name];
  if(queue?.reason&&!event.reason)event.reason=queue.reason;
  return event;
@@ -105,7 +107,9 @@ async function discoveryReportQueue(env,report,programmeRunId){
  const unreadable={remaining:null,cheapRemaining:null,error:null,empty:false,incomplete:true,reason:'queue_unreadable'};
  let remaining=null,cheapRemaining=null,error=null;
  try{
-  if(report.chunks>0){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;}
+  // The queue values of the accumulator belong to the generation of the chunk that wrote them. Deltas carry across a generation change, the queue
+  // reading does not: another generation's backlog or empty state is unknown for this one, never reused.
+  if(report.chunks>0&&report.queueGeneration&&report.queueGeneration===programmeRunId){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;}
   else if(programmeRunId){
    const last=await loadJSON(env,'epg/discovery-status.json');
    if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
@@ -729,7 +733,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     // AIR-410: the chunk's key is its instance and its ordinal in that instance, stable across a replay. The patch is a function of the record read
     // inside the compare-and-swap, so a cron closing the period in between cannot be overwritten, and a retried checkpoint adds nothing twice.
     const chunkKey=ownId+':'+chunks;
-    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey)});
+    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey,pinned)});
     const checkpoint=await persist('progress',()=>settleWorkflowIfOwner(env,ownId,progressPatch),settleKind);
     if(checkpoint.kind==='lost')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
     if(checkpoint.kind==='deferred')return deferredExit('checkpoint_unsaved',checkpoint.cause);

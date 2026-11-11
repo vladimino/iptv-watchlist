@@ -283,7 +283,7 @@ for(const [label,spec,expected] of [
 // 6. A replayed checkpoint counts once: the same chunk key adds nothing, a memoizing step does not run the chunk again.
 {
  const one={checked:5,added:2,reused:1,screenedOut:0,touched:0,tmdbCalls:3,remaining:9,cheapRemaining:0,error:null};
- const add=call('addChunkToDiscoveryReport');
+ const add=(r,x,k)=>call('addChunkToDiscoveryReport')(r,x,k,GENERATION);
  const a=add(null,one,'i_0:1'),b=add(a,one,'i_0:1'),c=add(b,one,'i_0:2');
  assert.equal(JSON.stringify(b),JSON.stringify(a),'the same key adds nothing');assert.equal(c.added,4);assert.equal(c.chunks,2);assert.equal(c.checked,10);
  const bad=add(null,{checked:5,added:'7',reused:-1,screenedOut:null,tmdbCalls:Infinity,remaining:null,cheapRemaining:0,error:null},'k');
@@ -314,7 +314,7 @@ resetAll();seed({count:3});elect();
  const realBucketPut=bucket.put;let raced=false;
  bucket.put=async(key,value,options)=>{
   if(!raced&&key==='epg/discovery-workflow.json'){raced=true;const state=await call('readWorkflowState')(env);
-   await call('settleWorkflowIfOwner')(env,state.record.instanceId,record=>({report:call('addChunkToDiscoveryReport')(record.report,chunk,state.record.instanceId+':1')}));}
+   await call('settleWorkflowIfOwner')(env,state.record.instanceId,record=>({report:call('addChunkToDiscoveryReport')(record.report,chunk,state.record.instanceId+':1',GENERATION)}));}
   return realBucketPut(key,value,options);
  };
  await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
@@ -361,7 +361,7 @@ resetAll();seed({count:3});const own=elect();
  const limit=call('DISCOVERY_REPORT_OUTBOX_LIMIT');assert.equal(typeof limit,'number');
  failEventPuts=true;let total=0;
  for(let hour=0;hour<limit+6;hour++){
-  await call('settleWorkflowIfOwner')(env,own,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:1,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:5,cheapRemaining:0,error:null},own+':'+hour)}));total++;
+  await call('settleWorkflowIfOwner')(env,own,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:1,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:5,cheapRemaining:0,error:null},own+':'+hour,GENERATION)}));total++;
   await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},hour);
  }
  assert.equal(outbox().length,limit,'the outbox holds exactly its limit');
@@ -380,7 +380,7 @@ resetAll();seed({count:3});const own=elect();
 // 10. Unreadable or unwritable state: an incomplete event with unknown numbers, the accumulator untouched.
 resetAll();seed({count:3});const own10=elect();
 {
- await call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10+':1')}));
+ await call('settleWorkflowIfOwner')(env,own10,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:3,added:2,reused:0,screenedOut:0,touched:0,tmdbCalls:1,remaining:5,cheapRemaining:0,error:null},own10+':1',GENERATION)}));
  const realRead=context.DiscoveryAuthority.readWorkflow,realWrite=context.DiscoveryAuthority.writeWorkflow;
  context.DiscoveryAuthority.writeWorkflow=async()=>{const error=new Error('window');error.code='discovery_window';error.window={expiresAt:Date.now()+1000};throw error;};
  const held=await closed({started:false,reason:'in_progress',programmeRunId:GENERATION},0);
@@ -413,7 +413,7 @@ resetAll();seed({count:3});elect();
 // 12. A newer generation replaces the record: the open accumulator and the outbox are carried, nothing is written at the replacement.
 resetAll();seed({count:3});const own12=elect(0);
 {
- await call('settleWorkflowIfOwner')(env,own12,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:8,added:5,reused:0,screenedOut:0,touched:0,tmdbCalls:2,remaining:5,cheapRemaining:0,error:null},own12+':1')}));
+ await call('settleWorkflowIfOwner')(env,own12,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:8,added:5,reused:0,screenedOut:0,touched:0,tmdbCalls:2,remaining:0,cheapRemaining:0,error:null},own12+':1',GENERATION)}));
  const state=await call('readWorkflowState')(env);state.record.outbox=[{...call('discoveryHourEvent')({at:new Date(BASE).toISOString(),hourKey:'20261111T10',generation:GENERATION,status:'running',reason:null,report:call('newDiscoveryReport')(null),queue:{remaining:1,empty:false},incomplete:false})}];
  set('epg/discovery-workflow.json',state.record);
  const stored=await call('readWorkflowState')(env);
@@ -421,8 +421,25 @@ resetAll();seed({count:3});const own12=elect(0);
  assert.equal(created.started,true);assert.equal(reports().length,0,'a replacement writes no event of its own');
  assert.equal(workflowRecord().programmeRunId,OTHER);assert.equal(workflowRecord().report.added,5,'the deltas of the old generation are reported by the next hourly report');
  assert.equal(workflowRecord().outbox.length,1);
- await call('closeHourlyDiscoveryReport')(env,{started:true,reason:'started',programmeRunId:OTHER},cron(1));
- assert.equal(reports().length,2);assert.equal(reports().find(event=>event.id.includes(OTHER.replace(/-/g,'').slice(0,12))).added,5);
+ // The deltas cross the change, the queue reading of the old generation does not: A's last chunk proved remaining 0 and cheapRemaining 0, and the
+ // continuation of B says complete, yet B has no reading of its own, so B's report keeps A's counters and says its queue is unknown.
+ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
+ records.delete('epg/discovery-status.json');
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(1));
+ assert.equal(reports().length,2);
+ const b=reports().find(event=>event.id.includes(OTHER.replace(/-/g,'').slice(0,12)));
+ assert.equal(b.added,5,'the committed deltas of the old generation are kept');assert.equal(b.checked,8);
+ assert.equal(b.remaining,null,'the backlog of generation A is not generation B\'s');assert.equal(b.queueEmpty,false,'and neither is its empty state');assert.notEqual(b.status,'empty');
+ // B's own chunk then speaks for B.
+ await call('settleWorkflowIfOwner')(env,`discovery_${OTHER.replace(/-/g,'')}_0`,record=>({report:call('addChunkToDiscoveryReport')(record.report,{checked:2,added:1,reused:0,screenedOut:0,touched:0,tmdbCalls:0,remaining:0,cheapRemaining:0,error:null},'b:1',OTHER)}));
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(2));
+ const c=reports().find(event=>event.at===new Date(BASE+2*HOUR).toISOString());assert.equal(c.remaining,0);assert.equal(c.queueEmpty,true);assert.equal(c.status,'empty');
+ // A status file of another generation is not B's reading either.
+ resetAll();seed({count:3});elect(0,OTHER);
+ set('epg/discovery-status.json',{schemaVersion:2,stage:'complete',programmeRunId:GENERATION,remaining:0,cheapRemaining:0,checked:0,error:null,at:iso});
+ set('epg/resolver-continuation.json',{stage:'complete',reason:null,at:iso,hopId:null,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:OTHER});
+ await call('closeHourlyDiscoveryReport')(env,{started:false,reason:'stopped',programmeRunId:OTHER},cron(1));
+ assert.equal(reports()[0].queueEmpty,false);assert.equal(reports()[0].remaining,null);
 }
 
 // 13. Legacy: a settled undelivered per-chain tick is delivered once as it was, an open legacy tick is dropped, a legacy outbox entry is delivered.
