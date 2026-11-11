@@ -1,10 +1,11 @@
 // AIR-373 (ADR 0099 and ADR 0110; owner decisions of 10 Nov 2026): the SEPARATE, VERSIONED `cutover_accepted` baseline gate. OFFLINE and INACTIVE like the rest
 // of the baseline tooling: nothing in the Worker imports this module, it reads no R2 or D1 and it records nothing. The strict `baselineGate` and the
 // `cutover_minimum` v1 gate are untouched; this gate is consulted by `recordBaselineVerified` only on its own explicit path
-// (`path: RECORDING_PATHS.cutover_accepted`, reference `cutover_accepted/v1:<acceptedDigest>`), with no fallback to or from the other paths.
+// (`path: RECORDING_PATHS.cutover_accepted`, reference `cutover_accepted/v2:<acceptedDigest>`), with no fallback to or from the other paths.
 // It is `cutover_minimum` v1 with exactly two differences, each bound to one owner decision by a constant compared by deep equality:
-//  (1) ACCEPTED_DISCREPANCIES v1, owner decisions "ignore the discrepancies and prepare the migration" and "exact measured numbers": unexplained missing / extra
-//      rows are accepted up to a per-class CAP that is EXACTLY the count measured on 10 Nov 2026, with no headroom. A class above its measured count fails and
+//  (1) ACCEPTED_DISCREPANCIES v2 (11 Nov 2026; v1 of 10 Nov 2026 is superseded and no longer accepted): owner decisions "ignore the discrepancies and prepare the
+//      migration", "exact measured numbers" and, on 11 Nov, "ignore these 5, finish this time": unexplained missing / extra
+//      rows are accepted up to a per-class CAP that is EXACTLY the count measured on 11 Nov 2026, with no headroom. A class above its measured count fails and
 //      needs a fresh owner approval (a new version of the constant). A value that DIFFERS is never accepted, in any class. A class the constant does not list fails.
 //  (2) OPERATOR_COPY_PERMISSION v1, owner decision "no token is needed, use the same path as before the pause": a source of kind `operator-copy` (the operator
 //      copies D1 through the Cloudflare API connector, the run is local) may be `verified`. The verdict is DERIVED here from the facts of the run's evidence
@@ -16,17 +17,17 @@ import {readWitness,sha256Hex,stable} from './film-person-baseline.js';
 import {OWNER_LINK_WAIVER,REQUIRED_CLASSES,acceptedOf,buildCutoverMinimumLedger,cutoverMinimumGate,notProvedOf} from './film-person-cutover-minimum.js';
 
 export const CUTOVER_ACCEPTED_GATE='cutover_accepted';
-export const CUTOVER_ACCEPTED_VERSION=1;
+export const CUTOVER_ACCEPTED_VERSION=2;
 const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(freeze);Object.freeze(value);}return value;};
-// measured: the unexplained differences per class of the production measurement of 10 Nov 2026 (docs/evidence/d1-migration/air-373-measured-parity-2026-11-10.md).
-// caps: exactly the measured counts (owner decision of 10 Nov 2026: "exact measured numbers"); one row more in any class fails. ownerLink is not listed: its
-// values are waived by OWNER_LINK_WAIVER and its keys are checked by the v1 rules.
+// measured: the unexplained differences per class of the production measurement of 11 Nov 2026 (docs/evidence/d1-migration/air-373-measured-parity-2026-11-11.md).
+// caps: exactly the measured counts (owner decisions of 10 and 11 Nov 2026); one row more in any class fails. ownerLink is not listed: its
+// values are waived by OWNER_LINK_WAIVER and its keys are checked by the v1 rules. Version 1 (10 Nov 2026: person 6, personAlias 147, total 1,600) is superseded.
 export const ACCEPTED_DISCREPANCIES=freeze({
- id:'AIR-373-accepted-discrepancies-2026-11-10',version:1,approver:'owner',
- decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers',
+ id:'AIR-373-accepted-discrepancies-2026-11-11',version:2,approver:'owner',
+ decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers. AIR-373 owner decision of 2026-11-11: ignore these 5 (accept the 11 Nov measurement, 5 rows over the 10 Nov total); finish this time',
  scope:'unexplained_missing_or_extra',differs:0,
- measured:{film:8,person:6,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},
- caps:{film:8,person:6,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},
+ measured:{film:8,person:3,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:155,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},
+ caps:{film:8,person:3,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:155,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},
 });
 export const OPERATOR_COPY_KIND='operator-copy';
 export const OPERATOR_COPY_PERMISSION=freeze({

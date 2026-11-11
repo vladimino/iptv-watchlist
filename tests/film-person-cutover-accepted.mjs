@@ -18,19 +18,21 @@ const {RECORDING_PATHS,baselineGate,keyOf,ledgerDigest,recordBaselineVerified,sh
 const {ACCEPTED_DISCREPANCIES,COPY_TABLES,OPERATOR_COPY_PERMISSION,DISCOVERY_COPY_TABLES,GATE_IDS,requiredStatementIds,acceptedDigest,buildCutoverAcceptedLedger,cutoverAcceptedGate,operatorCopyReasons,witnessIds}=A;
 
 // ---------- the pinned constants ----------
-const MEASURED={film:8,person:6,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11};
-// owner decision of 10 Nov 2026, "exact measured numbers": the caps ARE the measurement, with no headroom
+const MEASURED={film:8,person:3,filmExternalId:16,personExternalId:3,filmAlias:145,personAlias:155,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11};
+// owner decisions of 10 and 11 Nov 2026, "exact measured numbers" (11 Nov numbers): the caps ARE the measurement, with no headroom
 const CAPS={...MEASURED};
-assert.deepEqual(JSON.parse(JSON.stringify(ACCEPTED_DISCREPANCIES)),{id:'AIR-373-accepted-discrepancies-2026-11-10',version:1,approver:'owner',decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers',scope:'unexplained_missing_or_extra',differs:0,measured:MEASURED,caps:CAPS});
+assert.deepEqual(JSON.parse(JSON.stringify(ACCEPTED_DISCREPANCIES)),{id:'AIR-373-accepted-discrepancies-2026-11-11',version:2,approver:'owner',decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers. AIR-373 owner decision of 2026-11-11: ignore these 5 (accept the 11 Nov measurement, 5 rows over the 10 Nov total); finish this time',scope:'unexplained_missing_or_extra',differs:0,measured:MEASURED,caps:CAPS});
+// the SUPERSEDED version 1 (10 Nov 2026), kept only to prove it is no longer accepted
+const LEGACY_V1={id:'AIR-373-accepted-discrepancies-2026-11-10',version:1,approver:'owner',decision:'AIR-373 owner decisions of 2026-11-10: ignore the discrepancies and prepare the migration; exact measured numbers',scope:'unexplained_missing_or_extra',differs:0,measured:{...MEASURED,person:6,personAlias:147},caps:{...MEASURED,person:6,personAlias:147}};
 assert.deepEqual({...OPERATOR_COPY_PERMISSION},{id:'AIR-373-operator-copy-2026-11-10',kind:'operator-copy',version:1,approver:'owner',attestation:'operator',decision:'AIR-373 owner decision of 2026-11-10: no token is needed, use the same path as before the pause'});
 assert.ok(Object.isFrozen(ACCEPTED_DISCREPANCIES)&&Object.isFrozen(ACCEPTED_DISCREPANCIES.caps)&&Object.isFrozen(ACCEPTED_DISCREPANCIES.measured)&&Object.isFrozen(OPERATOR_COPY_PERMISSION));
-// the caps are exactly the measurement; the total is the 1,600 of the evidence file; every required class has a cap
+// the caps are exactly the measurement; the total is the 1,605 of the 11 Nov evidence file; every required class has a cap
 assert.deepEqual({...ACCEPTED_DISCREPANCIES.caps},{...ACCEPTED_DISCREPANCIES.measured});
-assert.equal(Object.values(ACCEPTED_DISCREPANCIES.caps).reduce((a,b)=>a+b,0),1600);
+assert.equal(Object.values(ACCEPTED_DISCREPANCIES.caps).reduce((a,b)=>a+b,0),1605);
 assert.deepEqual(Object.keys(CAPS).sort(),[...REQUIRED_CLASSES].sort());
 assert.deepEqual([...GATE_IDS],Object.keys(GATE_STATEMENTS),'the gate ids are the reviewed GATE_STATEMENTS');
 assert.equal((await witnessIds()).length,20);
-assert.deepEqual({...RECORDING_PATHS.cutover_accepted},{gate:'cutover_accepted',version:1});
+assert.deepEqual({...RECORDING_PATHS.cutover_accepted},{gate:'cutover_accepted',version:2});
 
 // ---------- fixtures ----------
 const H=text=>sha256Hex(text);
@@ -90,17 +92,17 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  const measured=await build({unexplained:MEASURED});
  const gate=await cutoverAcceptedGate(measured);
  assert.deepEqual(gate.reasons,[]);assert.equal(gate.pass,true);
- assert.deepEqual([gate.gate,gate.version],['cutover_accepted',1]);
- assert.equal(measured.totals.unexplained,1600);assert.equal(measured.source.verified,true);
+ assert.deepEqual([gate.gate,gate.version],['cutover_accepted',2]);
+ assert.equal(measured.totals.unexplained,1605);assert.equal(measured.source.verified,true);
  // the acceptance, the counts and the caps are in the ledger, under its digest, and in the gate result
  assert.deepEqual(measured.cutoverAccepted.acceptance,JSON.parse(JSON.stringify(ACCEPTED_DISCREPANCIES)));
  assert.deepEqual(measured.cutoverAccepted.discrepancies.ratedAdmission,{unexplained:708,differs:0,cap:708});
  assert.deepEqual(gate.discrepancies,measured.cutoverAccepted.discrepancies);
- assert.deepEqual(gate.accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-10','AIR-373-operator-copy-2026-11-10']);
+ assert.deepEqual(gate.accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-11','AIR-373-operator-copy-2026-11-10']);
  for(const item of ['r2_d1_not_atomic_snapshot','owner_link_values_not_compared','unexplained_differences_accepted_not_repaired','d1_activation_gaps_open:ratedAdmission,retention,retirement','operator_copy_is_attestation_not_proof','d1_side_is_a_copy_not_a_live_read','discovery_copy_checked_by_aggregates_only'])assert.ok(gate.notProved.includes(item),item);
  // the two older gates still refuse this ledger: nothing of theirs was relaxed
  assert.ok((await cutoverMinimumGate(measured)).reasons.includes('unexplained_total'));
- assert.ok((await baselineGate(measured)).reasons.includes('unexplained:1600'));
+ assert.ok((await baselineGate(measured)).reasons.includes('unexplained:1605'));
  // at the cap passes; one above fails, for every class
  assert.equal((await cutoverAcceptedGate(await build({unexplained:AT_CAP}))).pass,true,'every class exactly at its cap, which is the measured count');
  for(const name of REQUIRED_CLASSES){
@@ -138,16 +140,23 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  const inconsistent=clone();inconsistent.classes.film.unexplained.total=1;
  await failsWith(await redigest(inconsistent),'unexplained_inconsistent:film');
  // the acceptance: another cap, another text, another approver, an extra field, or none
- for(const change of [a=>{a.caps.film=9999;},a=>{a.decision='AIR-373 owner decision of 2026-11-10';},a=>{a.decision='the owner said it is fine';},a=>{a.approver='coordinator';},a=>{a.note='x';},a=>{a.differs=5;},a=>{delete a.caps.credit;},a=>{a.version=2;}]){
+ for(const change of [a=>{a.caps.film=9999;},a=>{a.decision='AIR-373 owner decision of 2026-11-10';},a=>{a.decision='the owner said it is fine';},a=>{a.approver='coordinator';},a=>{a.note='x';},a=>{a.differs=5;},a=>{delete a.caps.credit;},a=>{a.version=1;},a=>{a.version=3;}]){
   const ledger=clone();change(ledger.cutoverAccepted.acceptance);
   await failsWith(await redigest(ledger),'acceptance_not_permitted');
  }
+ // version 1 (10 Nov 2026) is superseded: a ledger carrying it, even with its own exact numbers, is not accepted; a v1 gate section is not this gate's
+ for(const acceptance of [LEGACY_V1,{...LEGACY_V1,version:2},{...ACCEPTED_DISCREPANCIES,id:LEGACY_V1.id},{...ACCEPTED_DISCREPANCIES,caps:{...CAPS,person:6}},{...ACCEPTED_DISCREPANCIES,caps:{...CAPS,personAlias:147}}])await failsWith(await build({unexplained:MEASURED,acceptance}),'acceptance_not_permitted');
+ await failsWith(await build({unexplained:{...MEASURED,person:6,personAlias:147},acceptance:LEGACY_V1}),'acceptance_not_permitted');
+ // the 11 Nov numbers: personAlias 155 passes and 156 fails, person 3 passes and 4 fails (the lowered cap is the measured value)
+ assert.equal((await cutoverAcceptedGate(await build({unexplained:{...MEASURED,personAlias:155}}))).pass,true);
+ await failsWith(await build({unexplained:{...MEASURED,personAlias:156}}),'over_cap:personAlias');
+ await failsWith(await build({unexplained:{...MEASURED,person:4}}),'over_cap:person');
  for(const acceptance of [null,undefined,'ignore the discrepancies',{},{...OWNER_LINK_WAIVER}])await failsWith(await build({unexplained:MEASURED,acceptance}),'acceptance_not_permitted');
  // changed without its digest
  const stale=clone();stale.cutoverAccepted.discrepancies.film.cap=9999;
  const staleGate=await failsWith(stale,'accepted_digest_mismatch');assert.ok(staleGate.reasons.includes('discrepancies_mismatch'));
  const noSection=clone();delete noSection.cutoverAccepted;await failsWith(noSection,'cutover_accepted_missing');
- const otherVersion=clone();otherVersion.cutoverAccepted.version=2;await failsWith(await redigest(otherVersion),'cutover_accepted_missing');
+ const otherVersion=clone();otherVersion.cutoverAccepted.version=1;await failsWith(await redigest(otherVersion),'cutover_accepted_missing');
  const declared=clone();declared.cutoverAccepted.accepted=[];await failsWith(await redigest(declared),'accepted_mismatch');
  const proved=clone();proved.cutoverAccepted.notProved=[];await failsWith(await redigest(proved),'not_proved_mismatch');
  // the v1 rules still apply: the pinned ownerLink waiver, the fence, the witness
@@ -252,7 +261,7 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
  // another source kind: the HTTP capture keeps its own verdict and carries no operator evidence
  const http=await buildCutoverAcceptedLedger(await base({source:{aggregateSha256:SRC,verified:true,kind:'projector-input-capture'},permission:null,operatorCopy:null}));
  assert.equal((await cutoverAcceptedGate(http.ledger)).pass,true);
- assert.deepEqual((await cutoverAcceptedGate(http.ledger)).accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-10']);
+ assert.deepEqual((await cutoverAcceptedGate(http.ledger)).accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-11']);
  const unverifiedHttp=await buildCutoverAcceptedLedger(await base({source:{aggregateSha256:SRC,verified:false,kind:'projector-input-capture'},permission:null,operatorCopy:null}));
  await failsWith(unverifiedHttp.ledger,'source_unverified');
  await failsWith((await buildCutoverAcceptedLedger(await base({source:{aggregateSha256:SRC,verified:true,kind:'projector-input-capture'}}))).ledger,'source_permission_not_permitted');
@@ -281,13 +290,13 @@ process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
  // recorded on its own path, with a reference that names gate and version
  const file=database();
  const recorded=await recordBaselineVerified({DB:d1Standin(file)},{ledger:good,expectedGeneration:0,at:WHEN,path:PATH});
- assert.deepEqual(recorded,{state:'verified',reference:'cutover_accepted/v1:'+good.acceptedDigest,already:false});
- assert.deepEqual(baselineRow(file),{state:'verified',reference:'cutover_accepted/v1:'+good.acceptedDigest});
+ assert.deepEqual(recorded,{state:'verified',reference:'cutover_accepted/v2:'+good.acceptedDigest,already:false});
+ assert.deepEqual(baselineRow(file),{state:'verified',reference:'cutover_accepted/v2:'+good.acceptedDigest});
  assert.deepEqual(rows(file,'SELECT mode, cutover, generation FROM film_person_authority')[0],{mode:'r2',cutover:'open',generation:0},'the marker is not moved');
- assert.equal((await recordBaselineVerified({DB:d1Standin(file)},{ledger:good,expectedGeneration:0,at:WHEN,path:{gate:'cutover_accepted',version:1}})).already,true,'a replay is a no-op');
+ assert.equal((await recordBaselineVerified({DB:d1Standin(file)},{ledger:good,expectedGeneration:0,at:WHEN,path:{gate:'cutover_accepted',version:2}})).already,true,'a replay is a no-op');
  // no fallback: the other paths refuse this ledger, and this path refuses what the other paths would take
- await refuses(good,undefined,gateFailed('unexplained:1600'));
- await refuses(good,RECORDING_PATHS.strict,gateFailed('unexplained:1600'));
+ await refuses(good,undefined,gateFailed('unexplained:1605'));
+ await refuses(good,RECORDING_PATHS.strict,gateFailed('unexplained:1605'));
  await refuses(good,RECORDING_PATHS.cutover_minimum,gateFailed('unexplained_total'));
  const clean=await build();
  const plain=JSON.parse(JSON.stringify(clean));delete plain.cutoverAccepted;delete plain.acceptedDigest;
@@ -298,7 +307,7 @@ process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
  await refuses(await build({differs:'person'}),PATH,gateFailed('differs:person'));
  await refuses(await build({operatorCopy:null}),PATH,gateFailed('source_unverified'));
  await refuses(good,PATH,gateFailed('ledger_generation_mismatch'),1);
- for(const bad of [{gate:'cutover_accepted',version:2},{gate:'cutover_accepted'},{gate:'cutover_accepted',version:1,caps:'any'},'cutover_accepted',{gate:'accepted',version:1}])await refuses(good,bad,error=>error.code==='baseline_path_invalid');
+ for(const bad of [{gate:'cutover_accepted',version:1},{gate:'cutover_accepted',version:3},{gate:'cutover_accepted'},{gate:'cutover_accepted',version:2,caps:'any'},'cutover_accepted',{gate:'accepted',version:2}])await refuses(good,bad,error=>error.code==='baseline_path_invalid');
 }
 
 // ---------- 5. static: inactive ----------

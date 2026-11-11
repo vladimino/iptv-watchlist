@@ -470,13 +470,13 @@ const sealed=await K.sealLedger({driver,plan,measurement:measured.measurement,fi
  assert.equal(sealed.ledger.source.verified,true);assert.equal(sealed.ledger.source.kind,'operator-copy');
  assert.deepEqual(sealed.gate.reasons,[]);assert.equal(sealed.gate.pass,true);
  assert.deepEqual(sealed.gate,await cutoverAcceptedGate(sealed.ledger));
- assert.deepEqual(sealed.gate.accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-10','AIR-373-operator-copy-2026-11-10']);
+ assert.deepEqual(sealed.gate.accepted.map(item=>item.id),['AIR-373-owner-link-values-2026-11-10','AIR-373-accepted-discrepancies-2026-11-11','AIR-373-operator-copy-2026-11-10']);
  assert.ok(sealed.ledger.totals.unexplained>0&&sealed.ledger.totals.differs===0);
  // the private ledger keeps every key; the report keeps none
  assert.equal(sealed.ledger.unexplainedList.length,sealed.ledger.totals.unexplained);assert.equal(sealed.ledger.unexplainedTruncated,false);
  assert.ok(sealed.ledger.unexplainedList.some(item=>item.class==='film'&&item.key==='film:kept'));
  const report=sealed.report;
- assert.deepEqual([report.gate,report.gateVersion,report.measurement,report.authorizes,report.sourceKind,report.verified,report.gatePass],['cutover_accepted',1,true,'nothing','operator-copy',true,true]);
+ assert.deepEqual([report.gate,report.gateVersion,report.measurement,report.authorizes,report.sourceKind,report.verified,report.gatePass],['cutover_accepted',2,true,'nothing','operator-copy',true,true]);
  assert.equal(report.acceptedDigest,sealed.ledger.acceptedDigest);assert.equal(report.parityLedgerDigest,measured.measurement.parity.ledgerDigest);
  assert.deepEqual(report.coverage.film,{expected:1,actual:1,missing:1,extra:1,differs:0,explained:0,unexplained:2,cap:ACCEPTED_DISCREPANCIES.caps.film});
  assert.doesNotMatch(JSON.stringify(report),/film:|person:|Film alpha|Dir alpha|letterboxd|connector:test/,'no id, title, name or lease id in the report');
@@ -568,8 +568,8 @@ const sealed=await K.sealLedger({driver,plan,measurement:measured.measurement,fi
 {
  const WHEN='2026-11-10T19:30:00.000Z';
  const emitted=await K.emitSql({driver,plan,ledger:sealed.ledger,expectedGeneration:0,at:WHEN});
- const reference='cutover_accepted/v1:'+sealed.ledger.acceptedDigest;
- assert.deepEqual([emitted.baselineRecord.artefact,emitted.baselineRecord.reference,emitted.baselineRecord.gate,emitted.baselineRecord.gateVersion,emitted.baselineRecord.expectedGeneration],['baseline_record',reference,'cutover_accepted',1,0]);
+ const reference='cutover_accepted/v2:'+sealed.ledger.acceptedDigest;
+ assert.deepEqual([emitted.baselineRecord.artefact,emitted.baselineRecord.reference,emitted.baselineRecord.gate,emitted.baselineRecord.gateVersion,emitted.baselineRecord.expectedGeneration],['baseline_record',reference,'cutover_accepted',2,0]);
  assert.deepEqual(rows(copyFile,'SELECT state, reference FROM film_person_baseline'),[{state:'empty',reference:null}],'emitting executes nothing, not even in the copy');
  assert.deepEqual(rows(copyFile,'SELECT mode, generation FROM film_person_authority'),[{mode:'r2',generation:0}]);
  // the reviewed functions against a migrated stand-in WITH its triggers: the batches they send are the emitted statements

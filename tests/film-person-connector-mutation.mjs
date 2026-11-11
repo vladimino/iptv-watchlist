@@ -48,6 +48,10 @@ const ACCEPTED=[
  ['unknown statement id refused',"if(!known.has(id))reasons.push('check_unknown:'+id);",''],
  ['unknown id refused in the copy comparison too',"...stages.map(stage=>checks[stage]?.digests),facts.copy?.t1?.digests]","...stages.map(stage=>checks[stage]?.digests)]"],
  ['caps are the measured counts',"caps:{film:8,","caps:{film:9,"],
+ ['person cap is the 11 Nov count',"caps:{film:8,person:3,","caps:{film:8,person:6,"],
+ ['personAlias cap is the 11 Nov count',"personAlias:155,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},\n});","personAlias:147,credit:132,filmLocalization:8,personLocalization:3,watchlist:4,redirect:4,retirement:4,ratedAdmission:708,retention:401,projectionKey:11},\n});"],
+ ['gate version is 2',"export const CUTOVER_ACCEPTED_VERSION=2;","export const CUTOVER_ACCEPTED_VERSION=1;"],
+ ['constant version is 2',"id:'AIR-373-accepted-discrepancies-2026-11-11',version:2,","id:'AIR-373-accepted-discrepancies-2026-11-11',version:1,"],
  ['moving list is Discovery only',"export const movingStatement=id=>id==='gate:discovery'||","export const movingStatement=id=>id.startsWith('gate:')||"],
  ['every statement present',"if(!values.every(hex)){reasons.push('check_missing:'+id);continue;}","if(!values.every(hex))continue;"],
  ['every read present',"reasons.push('check_missing:'+stage);continue;","continue;"],
@@ -77,8 +81,9 @@ const ACCEPTED=[
  ['evidence version',"if(!record(facts)||facts.version!==1)return ['evidence_missing'];","if(!record(facts))return ['evidence_missing'];"],
 ];
 const RECORDER=[
+ ['recording path is version 2',"cutover_accepted:Object.freeze({gate:'cutover_accepted',version:2})","cutover_accepted:Object.freeze({gate:'cutover_accepted',version:1})"],
  ['accepted path reaches its own gate',"if(pathIs(path,RECORDING_PATHS.cutover_accepted))return recordingAccepted(ledger,path,expectedGeneration);",''],
- ['accepted gate consulted',"const verdict=await cutoverAcceptedGate(ledger);","const verdict={gate:'cutover_accepted',version:1,pass:true,reasons:[]};"],
+ ['accepted gate consulted',"const verdict=await cutoverAcceptedGate(ledger);","const verdict={gate:'cutover_accepted',version:2,pass:true,reasons:[]};"],
  ['gate reasons carried',"const why=[...verdict.reasons];","const why=[];"],
  ['recorder reasons enforced',"pass:verdict.pass===true&&why.length===0","pass:verdict.pass===true"],
  ['generation binding',"if(!(measured&&measured.mode==='r2'&&measured.generation===expectedGeneration))why.push('ledger_generation_mismatch');",''],

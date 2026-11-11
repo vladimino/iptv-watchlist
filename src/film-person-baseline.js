@@ -544,7 +544,7 @@ export async function markBaselineLoading(env,{reference,expectedGeneration,at})
 // The reference names the recorder as far as the schema allows without a migration (film_person_baseline has state and reference only): the strict path stores the
 // 64-hex ledger digest, the cutover path stores `cutover_minimum/v1:<cutoverDigest>`, and the cutoverDigest itself covers the gate name, its version, the ledger
 // digest and the whole cutoverMinimum section (waiver, accepted, notProved, source evidence). The two forms cannot be confused.
-export const RECORDING_PATHS=Object.freeze({strict:Object.freeze({gate:'strict',version:1}),cutover_minimum:Object.freeze({gate:'cutover_minimum',version:1}),cutover_accepted:Object.freeze({gate:'cutover_accepted',version:1})});
+export const RECORDING_PATHS=Object.freeze({strict:Object.freeze({gate:'strict',version:1}),cutover_minimum:Object.freeze({gate:'cutover_minimum',version:1}),cutover_accepted:Object.freeze({gate:'cutover_accepted',version:2})});
 const pathIs=(path,known)=>!!path&&typeof path==='object'&&!Array.isArray(path)&&stable(path)===stable(known);
 export const recordingReference=(path,digest)=>path.gate+'/v'+path.version+':'+digest;
 async function recordingOf(ledger,path,expectedGeneration){
@@ -561,9 +561,9 @@ async function recordingOf(ledger,path,expectedGeneration){
  if(!(marker&&marker.mode==='r2'&&marker.generation===expectedGeneration))reasons.push('ledger_generation_mismatch');
  return {gate:{pass:gate.pass===true&&reasons.length===0,reasons},reference:recordingReference(path,ledger?.cutoverDigest)};
 }
-// The third path (AIR-373, ADR 0110, owner decisions of 10 Nov 2026): `cutover_accepted` version 1. Only `cutoverAcceptedGate` is consulted (the v1 rules with the
+// The third path (AIR-373, ADR 0110, owner decisions of 10 Nov 2026): `cutover_accepted` version 2 (version 1 is superseded). Only `cutoverAcceptedGate` is consulted (the v1 rules with the
 // pinned ACCEPTED_DISCREPANCIES caps instead of zero unexplained differences, and the pinned OPERATOR_COPY_PERMISSION for an operator-copy source). The reference
-// is `cutover_accepted/v1:<acceptedDigest>`. It is reached only by its own path object and falls back to nothing.
+// is `cutover_accepted/v2:<acceptedDigest>`. It is reached only by its own path object and falls back to nothing.
 async function recordingAccepted(ledger,path,expectedGeneration){
  const {cutoverAcceptedGate}=await import('./film-person-cutover-accepted.js');
  const verdict=await cutoverAcceptedGate(ledger);
