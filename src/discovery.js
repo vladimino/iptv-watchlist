@@ -914,6 +914,12 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
   streamed=false;source=await loadJSON(pinned,'epg/discovery-latest.json');
  }
  if(source?.paged)return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt);
+ // AIR-426. Under D1 authority a ledger of READ_CAP rows or fewer is read whole, which sends the chunk down the whole-ledger path below. That path
+ // saves the whole decision map, and a whole-map save fails closed (`discovery_bounded` above READ_CAP decisions, `discovery_fence` for any decision
+ // whose observation is not in the active ledger). A frozen production ledger never gets there (47,059 rows), but a bounded one has the size of
+ // one scan (20,568 rows on 10 November, 19,821 and 20,506 earlier), against 32,530 stored decisions of which 4,995 have no active observation. The D1 chunk is
+ // the paged one whatever the size; this is the same descriptor the reader gives above READ_CAP.
+ if(Array.isArray(source?.items)&&source.archive?.source==='d1')return resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,{...source,paged:true,itemCount:source.items.length,items:null},startedAt,hopId,fence,pinned,entryAt);
  if(!source?.items)return {stage:'awaiting_epg_discovery',checked:0,remaining:null};
  const last=await loadJSON(pinned,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
