@@ -28,16 +28,16 @@ The owner's Events Log of 11 Nov 2026 held four events titled «Отчёт за 
 
 ## What is not proven
 
-Which of the five reasons each of the four stored events carries. The reason is stored in the event's own `reason` field, which the card never prints, and the event journal is behind Cloudflare Access: it was not read in this investigation. Candidates that fit the logs: a lost compare-and-swap against a running chain at 05:00 (the chain writes the same record), and for 09:00 to 11:00 a persistent refusal of the record write after the chain stopped. The fix does not depend on which one: all five paths now behave the same way (nothing is written, one typed log line, the accumulator keeps its deltas). To close the question for the stored events, read their `reason` field (a read-only `GET /api/events?type=discovery` with an Access login) before [AIR-440](https://trello.com/c/cZJHgZeI) removes them.
+Which of the five reasons each of the four stored events carries. The reason is stored in the event's own `reason` field, which the card never prints, and the event journal is behind Cloudflare Access: it was not read in this investigation. Candidates that fit the logs: a lost compare-and-swap against a running chain at 05:00 (the chain writes the same record), and for 09:00 to 11:00 a persistent refusal of the record write after the chain stopped. The fix does not depend on which one: all five paths now behave the same way (one compact `report_failed` notice with a typed reason and no numbers, one typed log line, the accumulator keeps its deltas). To close the question for the stored events, read their `reason` field (a read-only `GET /api/events?type=discovery` with an Access login) before [AIR-440](https://trello.com/c/cZJHgZeI) removes them.
 
 ## Separation requested by the card
 
 - **Empty queue:** the 08:00 UTC report is a confirmed empty queue (numeric zeros and a `complete` continuation); unchanged.
 - **Unavailable queue status:** now a persisted report with real deltas and `queueUnreadable`.
-- **Failed close:** now no event and one `discovery_hour_close_failed` log line with the typed reason.
+- **Failed close:** now one compact `report_failed` notice for the hour (stable id, no numbers, Discovery named only when confirmed), delivered independently of the failed record; one `discovery_hour_close_failed` log line with the typed reason and the delivery result.
 - **No scheduled firing:** not observed in this window; a gap is for the Monitor, as before.
 - **Real Discovery degradation:** not hidden; a failed close never changes what the reconcile does, and `failed` / `blocked` / `waiting` statuses are written whenever the close succeeds.
 
 ## Verification
 
-Offline only: `tests/discovery-events.mjs` (a held projector window, an unreadable record, a lost compare-and-swap, no record, an outbox at its limit, an unread queue beside real deltas, a failed hour between two reports, no second count of a delta) and `tests/activity-ui.mjs` (the card for `queueUnreadable`, hostile fields, the legacy `incomplete` card). The safe read-only operational status and a few natural hourly events after deploy remain the owner's acceptance.
+Offline only: `tests/discovery-events.mjs` (a held projector window, an unreadable record, a lost compare-and-swap, no record, an outbox at its limit, a notice per hour with a stable identity, a replay and a duplicate, a prolonged failure, the journal refusing the notice and the ledger drained by later firings, a bounded ledger, an unread queue beside real deltas, a failed hour between two reports, no second count of a delta) and `tests/activity-ui.mjs` (the card for `queueUnreadable`, hostile fields, the legacy `incomplete` card). The safe read-only operational status and a few natural hourly events after deploy remain the owner's acceptance.

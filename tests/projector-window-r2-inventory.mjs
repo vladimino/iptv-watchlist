@@ -91,7 +91,7 @@ const FILE_SITES={
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
- 'src/discovery-workflow.js':{r2:1,wrapper:0,dynamic:0},
+ 'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0116: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
  'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
  // events): not a projector input and not on a Discovery, admin-recovery or publication path.
