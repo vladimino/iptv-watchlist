@@ -26,6 +26,12 @@ D1 holds `film`, `person`, credits, aliases, external ids and redirects, but onl
 10. **Implementation-level choices still open:** the exact marker columns and the revision's storage form belong to C1; no production operation is approved by this ADR. Atomic child cards may be created under AIR-321 following this owner's architecture approval.
 11. **Mandatory implementation invariants from independent review:** the authority must not be marked `prepared` until a complete fenced full-plus-delta baseline has passed its parity gate; partially loaded data remains under the verified `r2` authority. The projector must remain the *only canonical writer* through `r2` and `prepared`. New producers stay inactive or compare-only until the generation-fenced handoff to `open`, at which point the projector becomes compare-only/off, with no period of simultaneous writers or missing canonical writer. C1/C4/C6a/C6b acceptance tests must prove both conditions.
 
+## Amendment recorded 2026-11-11 (AIR-374)
+
+The Product Owner explicitly accepted [ADR 0116](0116-film-person-open-handoff-and-recovery.md) for the implementation of AIR-374. ADR 0099's single-writer and generation-fence invariants remain fully binding. The historical projector revision bump is not itself a readiness gate when every projector write batch proves marker/generation and the canonical post-open CAS rules are enforced. The 1,113 admission, retention and retirement facts must be loaded and verified during `prepared`, subject to a separate owner GO. Canonical R2 snapshots freeze after `open`, with independent EPG mirrors and source documents preserved. Cross-domain canonical effects use durable receipts, idempotent retries and reconciliation.
+
+**Narrow recovery amendment:** ADR 0099's requirement to have a full reverse reconciler before activation is superseded. After `open`, the approved immediate response is `open -> held` and a previously drilled fenced forward-fix with validated `held -> open` recovery. A full D1-to-R2 reverse reconciler is deferred; **no** direct `open -> r2` transition or code-only rollback is permitted once D1-only writes occur. This does not waive activation readiness, a safe recovery drill, fail-closed semantics or operation-specific owner approval.
+
 ## Alternatives considered
 
 - **Flip the marker only, projector unchanged:** two owners of the same fields and R2 sources that still win; rejected in the audit.
