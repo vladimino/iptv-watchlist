@@ -124,6 +124,13 @@ const CONNECTOR=[
  ['release read from its file',"id:Array.isArray(release.row)&&release.row.length===1?release.row[0]?.lease_id??null:undefined","id:null"],
  ['ledger bound to runParity',"if(unverified.digest!==core.parity.ledgerDigest)return {ok:false,reasons:['parity_ledger_mismatch']};",''],
  ['plan arguments',"throw stop('plan_invalid');","void 0;"],
+ // AIR-373, 11 Nov 2026: per-table page size, wall-clock guard, ignored `pad`
+ ['page size reset per table',"if(done){i++;after=0;limit=PAGE_ROWS;}else after=last;","if(done){i++;after=0;}else after=last;"],
+ ['cursor limit resumes its own table',"limit=CURSOR&&CURSOR.limit>0?CURSOR.limit:PAGE_ROWS,used=0;","limit=PAGE_ROWS,used=0;"],
+ ['wall-clock guard',"if(chunks.length&&Date.now()-START>WALL_MS)break;",""],
+ ['wall clock starts at the call',"const START=Date.now();","const START=0;"],
+ ['wall-clock budget is below the 60 s limit',"export const WALL_CLOCK_MS=40_000;","export const WALL_CLOCK_MS=400_000;"],
+ ['pad ignored',"if('pad' in value){const {pad:_pad,...rest}=value;value=rest;}",""],
 ];
 const TARGETS=[
  {source:'src/film-person-cutover-accepted.js',test:'tests/film-person-cutover-accepted.mjs',variable:'ACCEPTED_MODULE',mutants:ACCEPTED},
