@@ -6,7 +6,7 @@
 
 ## 1. What is measured, and why now
 
-The dormant EPG producer layer of P3a (a separate pull request; when it merges its ADR and code are the authority, not this page) applies one `film_facts` unit per Film that an EPG run observed and one release-only unit per departed member, through `applyFilmFacts` of [`src/canonical-producer-adapters.js`](../../src/canonical-producer-adapters.js) ([ADR 0123](../adr/0123-producer-receipt-adapter-film-facts.md)). It carries a PROVISIONAL hard ceiling of 50 units per call and a default of 25. Its own comment estimates about 10 D1 round trips per changed Film against the repository's 800-query run budget. Two things are unmeasured: how many units a real run has, and what a unit really costs. The first needs production counts; the second does not, and section 3 measures it offline.
+The dormant EPG producer layer of P3a ([`src/canonical-epg-producer.js`](../../src/canonical-epg-producer.js), [ADR 0125](../adr/0125-epg-producer-layer-film-facts.md); that ADR and code are the authority, not this page) applies one `film_facts` unit per Film that an EPG run observed and one release-only unit per departed member, through `applyFilmFacts` of [`src/canonical-producer-adapters.js`](../../src/canonical-producer-adapters.js) ([ADR 0123](../adr/0123-producer-receipt-adapter-film-facts.md)). It carries a PROVISIONAL hard ceiling of 50 units per call and a default of 25. Its own comment estimates about 10 D1 round trips per changed Film against the repository's 800-query run budget. Two things are unmeasured: how many units a real run has, and what a unit really costs. The first needs production counts; the second does not, and section 3 measures it offline.
 
 ## 2. Questions, sources and what only production can answer
 
