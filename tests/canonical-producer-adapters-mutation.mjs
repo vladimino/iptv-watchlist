@@ -66,7 +66,7 @@ const MUTANTS=[
  ["the natural path ignores a declared disposition", "canonical-receipts.js", "const declared=abandonOf(observed);\n  const action=declared?", "const declared=null;\n  const action=declared?"],
  ["an unreadable target waits forever", "canonical-receipts.js", "if(timeOf(at)-timeOf(row.createdAt)>policy.abandonAfterMs){\n    try", "if(false){\n    try"],
  ["an unreadable target is abandoned at once", "canonical-receipts.js", "if(timeOf(at)-timeOf(row.createdAt)>policy.abandonAfterMs){\n    try", "if(true){\n    try"],
- ["film_facts is not an operation kind", "canonical-receipts.js", "'film_merge','film_facts','film_metadata'", "'film_merge','film_metadata'"]
+ ["film_facts is not an operation kind", "canonical-receipts.js", "'film_merge','film_facts','film_credits','film_metadata'", "'film_merge','film_credits','film_metadata'"]
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'producer-adapters-mutants-'));
 try{

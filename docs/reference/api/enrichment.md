@@ -292,7 +292,7 @@ Urgent hot films expiring within 24 hours precede other hot films; cold backfill
 
 Run results expose batchSize, hotProcessed, coldProcessed, failed, hotRemaining, coldRemaining and a sanitized reason. Discovery readiness is reported at 100 hot EPG predictions, with target 200, independently of backlog completion.
 
-The isolated benchmark start/trial routes store shadow results only, without overwriting production predictions. The offline benchmark compares JSON payload overhead and parsing at 4/8/12/20; it does not measure model latency, billed tokens or prediction quality. Multiple fingerprints per model call remain disabled until an actual model benchmark establishes comparable outputs.
+The isolated benchmark start/trial routes (the v5-era 20-film benchmark, sizes 4, 8, 12 and 20) store shadow results only, without overwriting production predictions. The generation-size experiment for batch runner v2 does not use them: it is the writes-nothing dry run on one frozen manifest ([A/B procedure](../../runbooks/prediction-batch-v2-dry-run-ab.md)), aggregated offline by `scripts/prediction-ab-report.mjs`. The offline benchmark compares JSON payload overhead and parsing at 4/8/12/20; it does not measure model latency, billed tokens or prediction quality. Multiple fingerprints per model call remain disabled until an actual model benchmark establishes comparable outputs.
 
 ## Derived taxonomy v2
 

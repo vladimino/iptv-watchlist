@@ -33,6 +33,39 @@ Each pass ends with one JSON object shaped as `$defs.result` of the schema: iden
 5. **Quota.** Quota before and after each pass, and tokens where shown, per film and per pass. Unavailable stays unavailable.
 6. **Decision output.** A table of the ten sizes against 2–5 and a recommended `generationSize` with the evidence. The owner decides the value; the Worker's range stays 1–10.
 
+## Sample selection and ground truth
+
+The card asks for 100 films with a user rating the generator never sees, so that MAE and bias can be measured against a real rating. Two facts limit that, and the owner decides at the AIR-450 approval:
+
+- **A pinned dry run selects queued films only.** `pin` returns a film that is not eligible (not queued, current or in backoff) in `notEligible` with reason `not_queued`, and never puts it in the manifest. A film that is already rated and watched is normally not queued. Whether 100 films exist that are both queued and have a hidden rating is unknown without a production read, which AIR-450 does not do without the owner's GO.
+- **Without ground truth the report is agreement to the size-1 baseline only.** The aggregator says so explicitly (`quality.truth.basis: agreement_to_baseline_only`), and a model prediction is never called the truth. A larger decision (a separate, owner-scoped delivery that admits non-queued rated films to a dry-run manifest, or a smaller sample) is the owner's and is not made here.
+
+The truth file, if any, is a private `{filmId: rating}` JSON object kept in the same private storage as the manifest. The generator never receives it: the manifest holds no prediction, rating or personal field (`modelMetadata` is limited to `id`, `letterboxdUri`, `tmdbUri`, `title`, `original`, `year`, `genres`, `synopsis`, `directors`, `actors`, `runtime`, asserted by `tests/prediction-dry-run-isolation.mjs`), and a film with a current prediction is never in it.
+
+## Report
+
+After the ten passes, the owner runs the offline aggregator on the private result records (it reads no production, model or network):
+
+```
+node scripts/prediction-ab-report.mjs --results <private-dir> [--truth <private-truth.json>] [--model-label <label>] --out report.json --markdown report.md
+```
+
+**Privacy by construction.** Every input record is first validated against the closed `$defs.result` (strict enums, hex hashes, lowercase ids, no extra key at any level); a defect is a refusal whose message names paths and keywords only, never a value, and a JSON parse error names the file only. The report is then built field by field from numbers, enums, hex hashes and film ids: nothing is copied from a free-text field, and the model name is never read from a record (the owner passes a public `--model-label`). The finished report must equal the closed `$defs.report` or the tool refuses. The only owner-chosen strings in the report are `sampleId` and that label, both restricted to short lowercase or alphanumeric tokens. Adversarial tests put a secret into every string field of an input and show it cannot reach the JSON, the Markdown or the CLI output.
+
+**Explicit call association.** A film names the call that recorded its result by `films[].callId` (`calls[].callId` is unique, in call order); the array position of a call means nothing. A retry, a size refusal and each call of a group split into single films is a call of its own. The aggregator refuses (fail closed, never certifies a group by another group's hash) a duplicate or dangling `callId`, a film that names a call of another group, a `groupIndex` that differs from the frozen grouping (position divided by `GROUP_SIZE`), a `not_submitted` film that names a call, and a call that holds fewer items than films name it; a call named by no film (a refused attempt) is not a profile mismatch. Tests cover the reordered and split cases.
+
+**Comparable films only.** A film enters a quality metric only when its status is `would_write` or `already_current`, its `liveInput` is `same` and its call's observed profile hash equals the manifest's. A changed live input, a moved profile or a stopped pass is counted and excluded, not averaged in.
+
+**Completeness gate.** A report over fewer than the ten sizes or fewer than the 100 films of the card is a **partial diagnostic** (`completeness.final: false`, `unknown: partial_sizes`/`partial_films`, and the Markdown says so); it is never the final AIR-450 comparison. Even a complete report carries `ownerAcceptance: required`.
+
+It refuses (fails closed, exit 1) when the passes are not one experiment: another `manifestHash`, `sampleId`, profile or contract identity, another film order, a repeated group size or a call above its group size. Its output is the sanitized `$defs.report` of the schema (a test validates it): validity and status counts per size, per-size cost (MCP calls, body bytes, tool and generation time, model, tokens and quota only where the pass recorded them, otherwise `null` and named in `unknown`), the distribution (mean, median, p90, max) of the absolute differences of `predictedRating` and `probability4Plus` against the size-1 pass, agreement of the 4.0 threshold and of `confidence`, overlap of `matchSignals`, `mainRisk`, execution values and plot mechanics, the spread of each film across sizes and, with a truth file, MAE, bias and 4.0 threshold accuracy per size. The report holds numbers, enums, safe identifiers and hashes only; a guard rejects any payload key or free text. After a privacy review the report and its Markdown form may go to `docs/evidence/prediction/`; the result records and the truth file never do.
+
+**A profile that moved after the freeze.** `liveInput` compares the film inputs, not the profile. When the live profile changes after the freeze, a dry-run submit still answers `would_write`/`same` for those films and names the live profile in its `profile {version, hash}`. The dry-run prompt therefore makes the check mandatory after every submit: the pass compares the answer's `profile.hash` with `manifest.profile.hash`, records it as `calls[].observedProfileHash`, and on a difference stops, marks the remaining films `not_submitted` and returns `stoppedReason: profile_moved`. The aggregator excludes every film of a call whose observed hash differs from the manifest's (or is missing) from all quality metrics and names it (`excluded.staleProfile`, `profileMismatchCalls`, `unknown: profile_moved`); the pass is rerun after a new freeze. `tests/scheduled-task-prompt-v2.mjs` runs this stop on a moved profile.
+
+## Isolation proof (offline)
+
+`tests/prediction-dry-run-isolation.mjs` runs every dry-run RPC on the real Worker code while any R2 put or delete and any D1 write statement or batch is a fault: default and pinned start (a current film, an unknown id, a 100-film pin, a bad pin), submit of valid, invalid, failure-only and unknown-film items, repeated trials, a wrong or malformed `manifestHash`, a changed contract, a missing `runId`, `epoch` 0, a group of 11, a profile that moved after the freeze, all beside a live run that holds the lease. It counts write attempts (none are allowed) and compares the whole D1 dump and every R2 object before and after. It also asserts the production surface is unchanged: the v5 tools take no dry-run argument, the v5 `next` and `submit` refuse a v2 run, and the runner contract is pipeline 5 with model batching off.
+
 ## Not part of this procedure
 
 Any non-dry-run call, a Scheduled Task, an installed prompt, a production write, flags and the cutover (AIR-451). The [bounded-run signal](../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md#owner-activation-gate-bounded-run-signal) is a separate owner decision before activation.
