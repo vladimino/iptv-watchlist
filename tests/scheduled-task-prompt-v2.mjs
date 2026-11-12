@@ -32,7 +32,7 @@ const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
-const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_submit']);
+const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_validate','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
 for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
  for(const t of forbidden){assert.ok(tools.has(t),t+' is a real tool');assert.ok(line.includes(t),t+' is forbidden');}
@@ -45,6 +45,13 @@ assert.ok(!/prediction_batch_start\(/.test(dry),'a pass never calls start: the m
 assert.ok(/prediction_batch_start В ЛЮБОМ виде/.test(forbiddenOf(dry)));
 assert.ok(/\{\{SAMPLE_ID\}\}/.test(dry)&&/\{\{GROUP_SIZE\}\}/.test(dry)&&/FROZEN_MANIFEST=\{\{FROZEN_MANIFEST\}\}/.test(dry)&&!/\{\{FILM_IDS\}\}/.test(dry),'the pass takes the frozen manifest, not film ids to start from');
 assert.ok(/manifest_invalid/.test(dry)&&/НЕ вызывай ни разу/.test(dry));
+const at=(text,needle)=>text.indexOf(needle);
+for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
+ assert.ok(at(text,'prediction_batch_validate({items})')>=0&&at(text,'prediction_batch_validate({items})')<at(text,'prediction_batch_submit({runId'),label+': the preflight comes before the submit');
+ assert.ok(/ОДНОЙ повторной предпроверки/.test(text)&&/НИКОГДА не выдумывай refs/.test(text)&&/в том числе stakes/.test(text),label+': bounded retry, no invented refs, no metadata-only execution quality');
+ assert.ok(/failure:\{kind:'parse_error'\}/.test(text),label+': an unrepairable film is reported as a failure item');
+}
+assert.ok(/preflight \{valid,attempts/.test(dry)&&/kind 'preflight'/.test(dry),'the dry-run prompt records the preflight per film and per call');
 assert.ok(/failureReason/.test(dry)&&/insufficient_metadata/.test(dry)&&/insufficient_knowledge/.test(dry)&&/json_unparseable/.test(dry),'the dry-run prompt asks for an honest failureReason');
 assert.ok(steps(prompt).join('\n').includes('НЕ добавляй и НЕ вычисляй fingerprint.sourceBasis')&&!/Вычисляй fingerprint\.sourceBasis/.test(doc),'ADR 0129: the model no longer computes the aggregate, in both prompts');
 assert.ok(/observedProfileHash/.test(dry)&&/profile_moved/.test(dry)&&/not_submitted/.test(dry)&&/liveInput не same/.test(dry),'the dry-run prompt makes the per-submit profile check and the liveInput rule explicit');
@@ -100,16 +107,19 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
   const films=[],calls=[];let g=0;
   for(let i=0;i<m.films.length;i+=size,g++){
    const group=m.films.slice(i,i+size),items=group.map(f=>({filmId:f.filmId,...(f.plan==='fingerprint_and_prediction'?{fingerprint:w.fingerprint}:{}),prediction:w.prediction,inputHash:f.inputHash}));
+   // step 7: the preflight first (the same objects, no inputHash), read-only; every film is valid here, so no correction and one attempt each
+   const pre=await w.call('prediction_batch_validate',{items:items.map(({inputHash,...rest})=>rest)});assert.ok(!pre.isError,JSON.stringify(pre.data).slice(0,200));assert.equal(pre.data.valid,true);assert.deepEqual(pre.data.results.map(x=>x.filmId),group.map(f=>f.filmId),'bound to the films of the group, in order');
+   calls.push({callId:2*g,kind:'preflight',groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items.map(({inputHash,...rest})=>rest))).length,toolMs:null,ok:true,observedProfileHash:null});
    const missing=await w.call('prediction_batch_submit',{dryRun:true,manifestHash:m.manifestHash,items});if(g===0&&size===1)assert.equal(missing.isError,true,'a dry-run submit without runId fails the MCP schema');
    const r=await tracked('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});
    assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'dry_run');assert.equal(r.data.manifestHash,m.manifestHash,'the frozen manifest identity');
    const observed=hex(r.data.profile.hash);assert.equal(observed,hex(m.profile.hash),'step 7: the profile in the answer is the manifest profile');
-   calls.push({callId:g,groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true,observedProfileHash:observed});
-   for(const [k,x] of r.data.results.entries())films.push({filmId:x.filmId,plan:group[k].plan,groupIndex:g,callId:g,fingerprint:items[k].fingerprint??null,prediction:items[k].prediction,submitStatus:x.status,liveInput:x.liveInput,validation:x.validation||null,generationMs:null});
+   calls.push({callId:2*g+1,kind:'submit',groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true,observedProfileHash:observed});
+   for(const [k,x] of r.data.results.entries())films.push({filmId:x.filmId,plan:group[k].plan,groupIndex:g,callId:2*g+1,preflight:{valid:true,attempts:1,issues:[]},fingerprint:items[k].fingerprint??null,prediction:items[k].prediction,submitStatus:x.status,liveInput:x.liveInput,validation:x.validation||null,generationMs:null});
   }
   const result={schemaVersion:1,sampleId:sample.sampleId,groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:hex(m.profile.hash)},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:hex(m.contract.registryDigest)},films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']}};
   assert.deepEqual(validResult(result),[],'result for group size '+size);assert.equal(films.length,sample.filmIds.length);assert.ok(films.every(f=>f.liveInput==='same'&&f.submitStatus==='would_write'));
-  assert.equal(calls.length,Math.ceil(sample.filmIds.length/size));assert.ok(calls.every(c=>c.itemCount<=size));
+  assert.equal(calls.filter(c=>c.kind==='submit').length,Math.ceil(sample.filmIds.length/size));assert.equal(calls.filter(c=>c.kind==='preflight').length,Math.ceil(sample.filmIds.length/size),'one preflight per group, counted as an MCP call');assert.ok(calls.every(c=>c.itemCount<=size));
   results.push(result);
  }
  assert.equal(starts.length,1,'one start in total across all ten passes (ADR 0122 decision 10)');assert.ok(submits.length>=10);
@@ -130,14 +140,20 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[13],badContent=ids[27];
  const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
  const seen={};let groups=0;
+ let preflights=0,flagged=[];
  for(let i=0;i<ids.length;i+=10){
-  const items=ids.slice(i,i+10).map(itemFor);groups++;
+  let items=ids.slice(i,i+10).map(itemFor);groups++;
+  // step 7: the preflight before the submit. A candidate it flags that real knowledge cannot repair is reported as a failure item (bounded: at most one re-preflight of corrected films, none needed here)
+  const candidates=items.filter(it=>!it.failure);
+  if(candidates.length){const pre=await w.call('prediction_batch_validate',{items:candidates});preflights++;assert.ok(!pre.isError,JSON.stringify(pre.data).slice(0,200));
+   for(const res of pre.data.results)if(!res.valid){flagged.push([res.filmId,res.prediction.issues.concat(res.fingerprint.issues).map(x=>x.path+' '+x.code)]);items=items.map(it=>it.filmId===res.filmId?{filmId:res.filmId,failure:{kind:'parse_error'}}:it);}}
   const r=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));
   if(i===30){const again=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(again.data.results.every(x=>x.replayed===true),'replay by the same body');}
   for(const x of r.data.results)seen[x.status]=(seen[x.status]||0)+1;
   epoch=r.data.epoch||epoch;
  }
- assert.equal(groups,10);assert.equal(seen.created,98);assert.equal(seen.validation_failure,2,'two failed films did not stop the run');
+ assert.equal(groups,10);assert.equal(seen.created,98);assert.equal(seen.validation_failure,2,'two failure items did not stop the run');
+ assert.deepEqual(flagged,[[badContent,['prediction.predictedRating out_of_range']]],'the preflight caught the bad candidate before any submit, with its issue');assert.equal(preflights,10,'one preflight per group');
  const refused=await w.call('prediction_complete',{runId});assert.equal(refused.isError,true);assert.match(JSON.stringify(refused.data),/Queue not empty/,'a reasonless complete is refused while ready films remain');
  const done=await w.call('prediction_complete',{runId,reason:'time_budget'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
  // The unavoidable current behaviour the owner must decide on: the bounded stop is a partial stop with a stop Event, although every selected film was written.

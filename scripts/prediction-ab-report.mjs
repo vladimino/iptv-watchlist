@@ -73,6 +73,9 @@ const rating=f=>f.prediction&&Number.isFinite(f.prediction.predictedRating)?f.pr
 const prob=f=>f.prediction&&Number.isFinite(f.prediction.probability4Plus)?f.prediction.probability4Plus:null;
 const int=x=>Number.isInteger(x)?x:null;
 
+// Preflight outcome per film (prediction_batch_validate): counts only. A film is invalid at its first attempt when it needed a second attempt or never became valid.
+const preflightCounts=films=>{const p=films.filter(f=>f.preflight);return {checked:p.length,invalidFirst:p.filter(f=>f.preflight.attempts>1||!f.preflight.valid).length,recovered:p.filter(f=>f.preflight.attempts>1&&f.preflight.valid).length,unresolved:p.filter(f=>!f.preflight.valid).length};};
+
 export function buildReport(results,{truth=null,modelLabel=null}={}){
  const sizes=checkPasses(results),by=new Map(results.map(r=>[r.groupSize,r])),first=results[0];
  if(modelLabel!==null&&!/^[A-Za-z0-9._-]{1,40}$/.test(modelLabel))throw new AbReportError('invalid_model_label');
@@ -104,9 +107,10 @@ export function buildReport(results,{truth=null,modelLabel=null}={}){
   const t=r.telemetry,tok=t.tokens,q=t.quota;
   const row={groupSize:size,films:films.length,statuses,comparableFilms:okFilms.length,
    excluded:{liveInputChanged:d.changed,staleProfile:d.stale,notValid:films.filter(f=>!validStatus(f)).length},
+   preflight:preflightCounts(films),
    failureReasons:Object.fromEntries(FAILURE_REASONS.map(k=>[k,films.filter(f=>f.submitStatus==='validation_failure'&&(f.failureReason||'unspecified')===k).length])),
    validShare:round(okFilms.length/films.length),sizeRefusals:r.calls.filter(c=>!c.ok).length,profileMismatchCalls:d.mismatchCalls,stoppedReason:r.stoppedReason??null,
-   cost:{mcpCalls:r.calls.length,bodyBytes:{total:allOf(bodyBytes)?sum(bodyBytes):null,max:allOf(bodyBytes)?Math.max(...bodyBytes):null},toolMs:allOf(toolMs)?sum(toolMs):null,generationMs:allOf(genMs)?sum(genMs):null,wallMs:int(t.wallMs),
+   cost:{mcpCalls:r.calls.length,preflightCalls:r.calls.filter(c=>c.kind==='preflight').length,bodyBytes:{total:allOf(bodyBytes)?sum(bodyBytes):null,max:allOf(bodyBytes)?Math.max(...bodyBytes):null},toolMs:allOf(toolMs)?sum(toolMs):null,generationMs:allOf(genMs)?sum(genMs):null,wallMs:int(t.wallMs),
     tokens:tok?{input:int(tok.input),output:int(tok.output)}:null,quota:q?{remainingPercentBefore:Number.isFinite(q.remainingPercentBefore)?q.remainingPercentBefore:null,remainingPercentAfter:Number.isFinite(q.remainingPercentAfter)?q.remainingPercentAfter:null}:null,unavailable}};
   if(d.stale||d.mismatchCalls)unknown.add('profile_moved');
   for(const k of unavailable)unknown.add('telemetry_'+k);
