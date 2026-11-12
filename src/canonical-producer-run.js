@@ -19,7 +19,7 @@ import {RETRY_POLICY,backoffMs,canonicalJson,digestOf} from './canonical-receipt
 export const PRODUCER_PLAN_VERSION=1;
 export const STRIKE_LIMIT=3;
 // The order of the kinds inside one plan: the Film facts of ADR 0125, then the Person states and the credits of ADR 0126. The cursor key is (kind rank, id).
-export const KIND_RANK=Object.freeze({film_facts:1,person_state:2,film_credits:3});
+export const KIND_RANK=Object.freeze({film_facts:1,person_mutation:2,person_state:3,film_credits:4});
 export const ORIGINS=Object.freeze(['epg','dictionary']);
 export const RESULT_STATES=Object.freeze(['open','refused_permanent','refused_recoverable','settled','superseded','abandoned']);
 export const LIVE_STATES=Object.freeze(['open','refused_permanent','refused_recoverable']);

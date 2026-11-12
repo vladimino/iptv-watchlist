@@ -576,7 +576,7 @@ for(const kind of section('9g')?['person','credits']:[]){
 // 10. Static: dormant. Nothing in src imports the two modules, build.mjs and the Worker do not name them, the EPG layer imports only the adapters and the authority helpers, no network, timer, cron or R2 API, no SQL that changes a table; the
 // adapters import the existing fenced writers and write nothing themselves; readiness stays truthful (no operation registered, epg_commit unwired).
 if(section('10')){
- const selfs=['src/canonical-epg-person-producer.js','src/canonical-person-adapters.js'];
+ const selfs=['src/canonical-epg-person-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js'];
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!selfs.includes(full)){const text=fs.readFileSync(full,'utf8');if(/canonical-epg-person-producer|canonical-person-adapters/.test(text))importers.push(full);}}};
  walk('src');
@@ -585,7 +585,7 @@ if(section('10')){
  const text=name=>fs.readFileSync(path.join(SRC,name),'utf8');
  const strip=value=>value.replace(/\/\/.*$/gm,'');
  const epg=text('canonical-epg-person-producer.js'),adapters=text('canonical-person-adapters.js');
- assert.deepEqual([...epg.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-epg-producer.js','./canonical-person-adapters.js','./canonical-producer-adapters.js','./film-person-authority.js']);
+ assert.deepEqual([...epg.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-epg-producer.js','./canonical-person-adapters.js','./canonical-person-mutation-producer.js','./canonical-producer-adapters.js','./film-person-authority.js']);
  assert.deepEqual([...adapters.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-state.js','./canonical-producer-adapters.js','./canonical-producers.js','./canonical-receipts.js','./film-person-authority.js']);
  for(const body of [strip(epg),strip(adapters)]){
   assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(body),'no network, timer, cron or R2 reference');
