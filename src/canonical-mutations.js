@@ -25,8 +25,11 @@ const BUMP='INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES 
 // the receipt module's `appliedStatements` delegates to it). They read the entity revision AFTER the writer's BUMP, so they come last, and the changes()>=1 assertion rolls the whole batch back when the
 // receipt is no longer this attempt's pending row.
 export const RECEIPT_TAIL_STATEMENTS=2;
-const APPLIED="UPDATE canonical_write_receipt SET state='applied',applied_revision=COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0),error_class=NULL,next_attempt_at=NULL,updated_at=?,settled_at=? WHERE request_id=? AND state=? AND attempts=?";
-const appliedTail=({requestId,attempt,target,now})=>[[APPLIED,[target.kind,target.id,now,now,requestId,'pending',attempt]],[assertSql('changes()>=1'),[]]];
+// The UPDATE matches the STORED pending row on its whole identity, not just its id: request_id, state 'pending', attempt, the stored target (target_kind, target_id = the entity this writer bumps), the stored planned revision
+// (planned_revision + 1 must equal the entity revision AFTER the writer's BUMP, i.e. the revision this batch just proved with REVISION and produced) and the stored marker generation (it must equal the live marker generation,
+// which the batch's own FENCE statement already proved equals the generation the writer read). Any mismatch updates no row, changes()>=1 fails and the whole batch (entity data, revision and receipt) rolls back.
+const APPLIED="UPDATE canonical_write_receipt SET state='applied',applied_revision=COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0),error_class=NULL,next_attempt_at=NULL,updated_at=?,settled_at=? WHERE request_id=? AND state=? AND attempts=? AND target_kind=? AND target_id=? AND planned_revision+1=COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0) AND marker_generation=COALESCE((SELECT generation FROM film_person_authority WHERE id=1),-1)";
+const appliedTail=({requestId,attempt,target,now})=>[[APPLIED,[target.kind,target.id,now,now,requestId,'pending',attempt,target.kind,target.id,target.kind,target.id]],[assertSql('changes()>=1'),[]]];
 // What a writer appends when its caller passes `receiptMark` = {requestId,attempt,now,target:{kind,id}} (the values `receiptedWrite` hands to `run`, plus the clock reading). The mark's target must be exactly
 // the entity the writer bumps: any other shape is refused with film_person_invalid before the database is touched. Without a mark the tail is empty and the writer behaves exactly as before.
 function receiptTail(mark,entity){

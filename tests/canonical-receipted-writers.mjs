@@ -230,4 +230,57 @@ for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_p
  assert.equal((await readReceipt(envOf(file),await sourceOf(scenario,'second'))).state,'unknown');
 }
 
+// 9. The receipt row is verified INSIDE the batch against the entity the writer bumps: another entity's pending receipt (same or other kind), a stored planned revision that is not the revision this
+// batch bumps from, and a stored marker generation other than the live one all roll the whole mutation back, receipt included. The receipt's own identity columns are never trusted from the mark.
+const pendingRow=({requestId,operation,target,planned,generation=2})=>"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('"+requestId+"','"+operation+"','epg','"+target.kind+"','"+target.id+"','"+'b'.repeat(64)+"',"+planned+","+generation+",'pending',1,'"+iso(120000)+"','"+AT+"','"+AT+"')";
+const refused=error=>error.code==='film_person_precondition';
+for(const scenario of SCENARIOS){
+ const requestId=await sourceOf(scenario,'identity');
+ const sameKind=scenario.target.kind==='film'?{kind:'film',id:'film:tmdb:998'}:{kind:'person',id:'person:director/998'};
+ const otherKind=scenario.target.kind==='film'?{kind:'person',id:'person:director/997'}:{kind:'film',id:'film:tmdb:997'};
+ const cases=[
+  ['pending receipt of another entity of the same kind (valid mark for this entity, that receipt\'s request id)',{target:sameKind,planned:scenario.expected}],
+  ['pending receipt of an entity of the other kind',{target:otherKind,planned:scenario.expected}],
+  ['planned revision above the bumped-from revision',{target:scenario.target,planned:scenario.expected+1}],
+  ['planned revision far above',{target:scenario.target,planned:scenario.expected+5}],
+  ...(scenario.expected>0?[['planned revision below the bumped-from revision',{target:scenario.target,planned:scenario.expected-1}]]:[]),
+  ['marker generation of an older plan',{target:scenario.target,planned:scenario.expected,generation:2,after:"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1;UPDATE film_person_authority SET cutover='open',generation=4 WHERE id=1"}],
+ ];
+ for(const [label,spec] of cases){
+  const file=database('open');
+  await scenario.seed(envOf(file));
+  {const r=sqlite(file,pendingRow({requestId,operation:scenario.operation,target:spec.target,planned:spec.planned,generation:spec.generation}));assert.equal(r.status,0,label+': '+r.stderr);}
+  if(spec.after){const r=sqlite(file,spec.after);assert.equal(r.status,0,r.stderr);}
+  const before=dump(file);
+  const env=envOf(file);
+  await assert.rejects(()=>scenario.call(env,markOf(requestId,1,scenario.target)),refused,scenario.name+' '+label+': the batch is refused');
+  assert.equal(env.DB.calls.batches,1,scenario.name+' '+label+': it was refused by the database, not before it');
+  assert.equal(dump(file),before,scenario.name+' '+label+': entity data, revision and receipt untouched (rolled back whole)');
+  assert.equal(receipts(file).find(row=>row.request_id===requestId).state,'pending',scenario.name+' '+label+': the receipt is still the same pending row');
+ }
+}
+
+// 9b. A retry after another writer advanced the entity: the receipt is re-planned against the current revision (revalidate says proceed), the writer is run with that revision, and the receipt applies at
+// planned+1, so the planned-revision rule holds on a retry too.
+{
+ const id='film:tmdb:700',target={kind:'film',id};
+ const file=database('open'),env=envOf(file);
+ const requestId=await requestIdOf({origin:'epg',operation:'film_mutation',source:{scenario:'retry'}});
+ const digest=await digestOf({scenario:'retry'});
+ const input=(now)=>({requestId,operation:'film_mutation',origin:'epg',target,expectedRevision:0,digest,now});
+ await assert.rejects(()=>receiptedWrite(env,input(()=>AT),{atomic:true,readback:async()=>null,run:async({requestId:rid,attempt,target:t})=>{
+  await mutateFilm(env,{id,expectedRevision:0,at:AT,film:{contractVersion:1,originalTitle:'Other writer'}});
+  return mutateFilm(env,{id,expectedRevision:0,at:AT,receiptMark:markOf(rid,attempt,t),film:{contractVersion:1,originalTitle:'Mine'}});
+ }}),code('film_person_revision_conflict'));
+ assert.equal(receipts(file)[0].state,'failed');
+ assert.equal(revision(file,'film',id),1);
+ const later=iso(30*60000);
+ const retried=await receiptedWrite(env,input(()=>later),{atomic:true,readback:async()=>null,revalidate:async()=>'proceed',run:({requestId:rid,attempt,target:t,currentRevision})=>mutateFilm(env,{id,expectedRevision:currentRevision,at:later,receiptMark:markOf(rid,attempt,t,later),film:{contractVersion:1,originalTitle:'Mine'}})});
+ assert.equal(retried.state,'applied');
+ assert.equal(retried.attempt,2);
+ assert.equal(rows(file,"SELECT planned_revision FROM canonical_write_receipt")[0].planned_revision,1,'the retry re-planned against the current revision');
+ assert.equal(receipts(file)[0].applied_revision,2,'applied at planned + 1');
+ assert.equal(revision(file,'film',id),2);
+}
+
 console.log('canonical-receipted-writers: ok');
