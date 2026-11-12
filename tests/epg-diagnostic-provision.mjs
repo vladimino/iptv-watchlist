@@ -96,7 +96,11 @@ const live=await import(pathToFileURL(SCRIPT).href);
  }
  assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_API_ENDPOINT:'http://127.0.0.1:9999'})).endpoint,'http://127.0.0.1:9999','a loopback test server is allowed');
  assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_API_ENDPOINT:'https://api.cloudflare.com/client/v4/'})).endpoint,'https://api.cloudflare.com/client/v4','the canonical endpoint written out is allowed');
- assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_R2_ENDPOINT:'https://'+ACCOUNT+'.r2.cloudflarestorage.com'})).r2Endpoint,'https://'+ACCOUNT+'.r2.cloudflarestorage.com','the canonical R2 endpoint of the account is allowed');
+ const EU='https://'+ACCOUNT+'.eu.r2.cloudflarestorage.com';
+ assert.equal(live.readConfig(env()).r2Endpoint,EU,'the diagnostic bucket is reached on the EU endpoint of the account by default');
+ assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_R2_ENDPOINT:EU})).r2Endpoint,EU,'the canonical EU endpoint written out is allowed');
+ assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_R2_ENDPOINT:'http://127.0.0.1:9000'})).r2Endpoint,'http://127.0.0.1:9000','a loopback test server is allowed');
+ const notEu=await failure(()=>live.readConfig(env({EPG_DIAGNOSTIC_R2_ENDPOINT:'https://'+ACCOUNT+'.r2.cloudflarestorage.com'})));assert.equal(notEu?.exitCode,2,'the default (non-EU) endpoint of the account is refused: it cannot reach an EU bucket');
  const usage=await failure(()=>live.run({command:'drop',env:env()}));assert.equal(usage?.exitCode,2);
 }
 {

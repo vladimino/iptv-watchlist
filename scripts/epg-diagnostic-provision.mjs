@@ -51,8 +51,10 @@ export function readConfig(env=process.env){
  if(!accessKeyId||!secretAccessKey)fail('EPG_DIAGNOSTIC_R2_ACCESS_KEY_ID and EPG_DIAGNOSTIC_R2_SECRET_ACCESS_KEY are required');
  if(!/^[a-z0-9][a-z0-9-]{7,63}$/.test(resourceId))fail('EPG_DIAGNOSTIC_RESOURCE_ID must match ^[a-z0-9][a-z0-9-]{7,63}$');
  const endpoint=trustedOrigin(env.EPG_DIAGNOSTIC_API_ENDPOINT,DEFAULT_ENDPOINT,DEFAULT_ENDPOINT,'EPG_DIAGNOSTIC_API_ENDPOINT');
- const r2Canonical='https://'+accountId+'.r2.cloudflarestorage.com';
- const r2Endpoint=env.EPG_DIAGNOSTIC_R2_ENDPOINT?trustedOrigin(env.EPG_DIAGNOSTIC_R2_ENDPOINT,null,r2Canonical,'EPG_DIAGNOSTIC_R2_ENDPOINT'):undefined;
+ // The diagnostic bucket lives in the EU jurisdiction (the default placement landed it in ENAM, which would distort the latencies the canary measures), and an EU bucket is only
+ // reachable on the EU endpoint of the account.
+ const r2Canonical='https://'+accountId+'.eu.r2.cloudflarestorage.com';
+ const r2Endpoint=trustedOrigin(env.EPG_DIAGNOSTIC_R2_ENDPOINT,r2Canonical,r2Canonical,'EPG_DIAGNOSTIC_R2_ENDPOINT');
  return {accountId,databaseId,apiToken,accessKeyId,secretAccessKey,bucket,resourceId,endpoint,r2Endpoint};
 }
 // The credentials are sent to this origin, so it is not configurable to an arbitrary host: only the canonical Cloudflare endpoint (the default, or the same value written out) or a
@@ -174,7 +176,7 @@ export async function run({command,apply=false,confirm=null,env=process.env,fetc
  const Diag=diagnostic||loadDiagnostic();
  const d1=createD1Client({config,fetchImpl,sleep});
  const live=await target(d1,config);
- const bucketStore=store||createS3Store({credentials:readCredentials({R2_SNAPSHOT_ACCOUNT_ID:config.accountId,R2_SNAPSHOT_ACCESS_KEY_ID:config.accessKeyId,R2_SNAPSHOT_SECRET_ACCESS_KEY:config.secretAccessKey,R2_SNAPSHOT_BUCKET:config.bucket,...(config.r2Endpoint?{R2_SNAPSHOT_ENDPOINT:config.r2Endpoint}:{})}),fetchImpl,allowedWrites:new Set([IDENTITY_OBJECT])});
+ const bucketStore=store||createS3Store({credentials:readCredentials({R2_SNAPSHOT_ACCOUNT_ID:config.accountId,R2_SNAPSHOT_ACCESS_KEY_ID:config.accessKeyId,R2_SNAPSHOT_SECRET_ACCESS_KEY:config.secretAccessKey,R2_SNAPSHOT_BUCKET:config.bucket,R2_SNAPSHOT_ENDPOINT:config.r2Endpoint}),fetchImpl,allowedWrites:new Set([IDENTITY_OBJECT])});
  const bucket=guardedBucket(bucketStore);
  const report={command,mode:apply?'apply':'dry-run',database:{name:live.name,tables:await tableCount(d1)},bucket:{name:config.bucket,objects:((await bucket.list({limit:1})).objects||[]).length},resourceId:config.resourceId};
 
