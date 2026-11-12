@@ -61,12 +61,12 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Batch runner tools (Proposed)
 
-**Accepted design, not implemented, not in the tool list.** [ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Accepted) defines two future write tools beside the v5 prediction tools, which stay unchanged. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract).
+`prediction_batch_start` is in the tool list. `prediction_batch_submit` is the accepted design of [ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md) and is **not implemented**. Both sit beside the v5 prediction tools, which are unchanged. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract).
 
-| Tool | Writes | What it would call |
+| Tool | Writes | What it calls |
 | --- | --- | --- |
-| `prediction_batch_start` | yes (no write with `dryRun: true`) | `POST /api/enrichment/batch/start` with `scope: watchlist_all`, `mode: queued`. One call returns the manifest of up to 100 films with profile, contract and per-film `modelMetadata` |
-| `prediction_batch_submit` | yes (no write with `dryRun: true`) | `POST /api/enrichment/batch/submit` with 1 to 10 items, validated per film on the Worker. A tool call body is bound by the 64 KiB inbound limit above: the caller splits a group on `413` |
+| `prediction_batch_start` | yes (no write with `dryRun: true`) | `POST /api/enrichment/batch/start` with `scope: watchlist_all`, `mode: queued`. Arguments: `trigger` (`scheduled` or `manual`, required), `capacity` (`remainingPercent` only), `dryRun`, and `pin {filmIds}` (1–100 ids, only with `dryRun: true`). One call returns the manifest of up to 100 films with profile, contract and per-film `modelMetadata`. Refusals: `manifest_too_large`, `batch_runner_requires_d1`, `queue_stale` (dry run) and `queue_changed`. A call that starts a run takes the runner lease and never runs beside a v5 run |
+| `prediction_batch_submit` (not implemented) | yes (no write with `dryRun: true`) | would call `POST /api/enrichment/batch/submit` with 1 to 10 items, validated per film on the Worker. A tool call body is bound by the 64 KiB inbound limit above: the caller splits a group on `413` |
 
 `prediction_heartbeat` and `prediction_complete` serve both protocols. A client that caches the tool list sees the new tools only after it refreshes or reconnects. The response of `prediction_batch_start` can be far larger than any v5 answer; the Worker caps it by bytes as well as by count.
 
