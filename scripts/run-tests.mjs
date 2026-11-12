@@ -110,7 +110,7 @@ export const WEIGHTS={
  'projector-l1-budget.mjs':6,
  'canonical-producer-run-mutation.mjs':6,
  'projector-marker-fence.mjs':6,
- 'canonical-person-mutation-producer-mutation.mjs':6,
+ 'canonical-person-mutation-producer-mutation.mjs':9,
  'canonical-epg-person-producer.mjs':5,
  'canonical-film-writers-mutation.mjs':5,
  'discovery-authority.mjs':5,
