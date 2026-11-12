@@ -102,6 +102,11 @@ sequenceDiagram
                         MCP-->>Client: expiresAt and epoch
                     end
                     Client->>Client: Generate up to 10 films from the manifest
+                    Client->>MCP: prediction_batch_validate, 1 to 10 candidates, read-only preflight
+                    MCP-->>Client: Per-film issues, no storage read or write, no run or lease
+                    opt A candidate has issues
+                        Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
+                    end
                     Client->>MCP: prediction_batch_submit, 1 to 10 items, runId and epoch
                     MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
                     MCP->>MCP: Validate each film, compare profile impact
@@ -123,7 +128,7 @@ sequenceDiagram
     Note over Client,Store: A dry run with dryRun true ignores the lease, reads and validates the same way and writes nothing: no lease, run, queue or storage write
 ```
 
-The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that stops leaves its unsubmitted films in the queue; the next `batch_start` selects them again, and a hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that stops leaves its unsubmitted films in the queue; the next `batch_start` selects them again, and a hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
 
 ## Queue writes
 

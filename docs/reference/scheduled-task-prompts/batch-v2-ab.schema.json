@@ -263,6 +263,48 @@
          null
         ],
         "description": "The honest reason the pass gives for a film it could not submit as a prediction (a reported parse_error) or the Worker refused: a diagnostic of the data, never an input to a rule. null when the film has no failure."
+       },
+       "preflight": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "additionalProperties": false,
+        "required": [
+         "valid",
+         "attempts",
+         "issues"
+        ],
+        "properties": {
+         "valid": {
+          "type": "boolean"
+         },
+         "attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+         },
+         "issues": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "additionalProperties": false,
+           "required": [
+            "path",
+            "code"
+           ],
+           "properties": {
+            "path": {
+             "type": "string"
+            },
+            "code": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        },
+        "description": "The film's preflight (prediction_batch_validate) outcome: the last attempt's validity and issues, and 1 or 2 attempts. A diagnostic of the pass, never an input to a rule."
        }
       }
      }
@@ -324,6 +366,13 @@
         "type": "integer",
         "minimum": 0,
         "description": "Unique, in the order the calls were made. A retry, a refusal or one call per film of a split group is a call of its own."
+       },
+       "kind": {
+        "enum": [
+         "preflight",
+         "submit"
+        ],
+        "description": "preflight: a prediction_batch_validate call (reads and writes nothing); submit (default when absent): a prediction_batch_submit dry run."
        }
       }
      }
@@ -631,7 +680,8 @@
        "profileMismatchCalls",
        "stoppedReason",
        "cost",
-       "failureReasons"
+       "failureReasons",
+       "preflight"
       ],
       "properties": {
        "groupSize": {
@@ -739,7 +789,8 @@
          "wallMs",
          "tokens",
          "quota",
-         "unavailable"
+         "unavailable",
+         "preflightCalls"
         ],
         "properties": {
          "mcpCalls": {
@@ -860,6 +911,10 @@
             "bodyBytes"
            ]
           }
+         },
+         "preflightCalls": {
+          "type": "integer",
+          "minimum": 0
          }
         }
        },
@@ -1235,6 +1290,34 @@
           "minimum": 0
          },
          "unspecified": {
+          "type": "integer",
+          "minimum": 0
+         }
+        }
+       },
+       "preflight": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "checked",
+         "invalidFirst",
+         "recovered",
+         "unresolved"
+        ],
+        "properties": {
+         "checked": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "invalidFirst": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "recovered": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "unresolved": {
           "type": "integer",
           "minimum": 0
          }
