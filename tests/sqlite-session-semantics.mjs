@@ -5,7 +5,7 @@ import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {needsOneShot,quoteToJson,sqliteSync} from './sqlite-session.mjs';
+import {approvedMigrationChain,needsOneShot,quoteToJson,sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-sqlite-session-'));
 const db=name=>path.join(root,name+'.sqlite');
@@ -97,6 +97,14 @@ const same=(file,input,json=false)=>{
  // The per-connection counters of a fresh process start at zero, so a script that reads them runs in one.
  for(const script of ['SELECT last_insert_rowid();','SELECT changes();','SELECT total_changes();'])assert.equal(needsOneShot(['-bail',file],script),true,script);
  assert.equal(session(file,'INSERT INTO parent VALUES (50);').status,0);assert.equal(session(file,'SELECT last_insert_rowid() AS id;',true).stdout.trim(),'[{"id":0}]','a later call does not see the rowid of an earlier one');
+ // AIR-374: `changes()` after a complete write statement of the same script is answered by the shared connection, and gives what a fresh process gives; read before any write of its own, it stays one-shot.
+ assert.equal(needsOneShot(['-bail',file],'UPDATE parent SET id=id WHERE id=-1;SELECT changes();'),false);
+ assert.equal(needsOneShot(['-bail',file],'BEGIN;UPDATE parent SET id=id WHERE id=-1;UPDATE parent SET id=id WHERE id=-2 AND changes()=1;COMMIT;'),false);
+ assert.equal(needsOneShot(['-bail',file],'UPDATE parent SET id=id WHERE changes()=0;'),true,'the same statement reads the counter before its own write');
+ assert.equal(needsOneShot(['-bail',file],"SELECT 'x;UPDATE y;' AS t, changes();"),true,'a write that is only text inside a literal is no write');
+ assert.equal(session(file,'INSERT INTO parent VALUES (51);INSERT INTO parent VALUES (52);').status,0);
+ assert.equal(session(file,'UPDATE parent SET id=id WHERE id=-1;SELECT changes() AS n;',true).stdout.trim(),'[{"n":0}]','the count of the script own write, not of the earlier call that changed two rows');
+ assert.equal(session(file,'UPDATE parent SET id=id WHERE id IN (51,52);SELECT changes() AS n;',true).stdout.trim(),'[{"n":2}]');
 }
 
 // 4. A database file that is deleted or replaced is a new database for the next call, not the old one kept open.
@@ -162,6 +170,65 @@ const same=(file,input,json=false)=>{
  // one-shot scripts (here: a PRAGMA) take the same conversion
  const shot=()=>JSON.parse(session(file,"PRAGMA cache_size=100; SELECT printf('%.*c',120000,'z') AS chunk;",true).stdout);
  assert.equal(shot()[0].chunk.length,120000);assert.equal(shot()[0].chunk.length,120000);
+}
+
+// AIR-374: the schema copy is for the repository's own migration files only. A script with the same prefix and more than 2000 characters that seeds data, or reads random(), CURRENT_TIMESTAMP or strftime('now'),
+// is executed on every new database; the approved chain is still recognised (and copied).
+{
+ const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const chain='PRAGMA foreign_keys=ON;\n'+names.map(name=>fs.readFileSync(path.join('migrations',name),'utf8')).join('\n');
+ assert.equal(approvedMigrationChain(chain),true,'the whole migration chain is approved');
+ assert.equal(approvedMigrationChain('PRAGMA foreign_keys=ON;\n'+fs.readFileSync(path.join('migrations',names[0]),'utf8')),true,'a single migration is approved');
+ assert.equal(approvedMigrationChain(chain+'\nINSERT INTO schema_contract VALUES (999);'),false,'a chain with an extra statement is not approved');
+ assert.equal(approvedMigrationChain(chain.replace('PRAGMA foreign_keys=ON;','PRAGMA foreign_keys=OFF;')),false);
+ const first=db('chain-a'),second=db('chain-b');
+ assert.equal(session(first,chain).status,0);assert.equal(session(second,chain).status,0);
+ for(const file of [first,second])assert.equal(session(file,'SELECT version FROM schema_contract WHERE id=1;',true).stdout.trim(),session(first,'SELECT version FROM schema_contract WHERE id=1;',true).stdout.trim());
+ assert.equal(session(second,'SELECT count(*) AS n FROM sqlite_master;',true).stdout,session(first,'SELECT count(*) AS n FROM sqlite_master;',true).stdout,'the copy has the same schema');
+ const pad='-- '+'x'.repeat(2100)+'\n';
+ for(const [label,body] of [['random','INSERT INTO t VALUES (random(), randomblob(8));'],['timestamp',"INSERT INTO t VALUES (strftime('%f','now'), hex(randomblob(8)) || CURRENT_TIMESTAMP);"],['seed','INSERT INTO t VALUES (1, hex(randomblob(8)));']]){
+  const script='PRAGMA foreign_keys=ON;\n'+pad+'CREATE TABLE t(a,b);\n'+body+'\n';
+  assert.ok(script.length>2000);assert.equal(approvedMigrationChain(script),false,label);
+  const a=db('long-'+label+'-a'),b=db('long-'+label+'-b');
+  assert.equal(session(a,script).status,0);assert.equal(session(b,script).status,0);
+  // the rows hold values that differ per execution: a copied database would hold the first run's rows
+  const rowsA=session(a,'SELECT a,b FROM t;',true).stdout,rowsB=session(b,'SELECT a,b FROM t;',true).stdout;
+  assert.ok(rowsA&&rowsB&&rowsA!==rowsB,label+': a new database runs the script itself');
+ }
+}
+
+// AIR-374: `changes()` is classified from code only: comments, string literals and quoted identifiers hold no write. Each script runs after a call that changed two rows and must answer what a fresh process answers.
+{
+ const file=db('changes-classify'),fresh=db('changes-fresh');
+ assert.equal(session(file,'CREATE TABLE parent(id INTEGER PRIMARY KEY);INSERT INTO parent VALUES (1);INSERT INTO parent VALUES (2);').status,0);
+ assert.equal(session(fresh,'CREATE TABLE parent(id INTEGER PRIMARY KEY);INSERT INTO parent VALUES (1);INSERT INTO parent VALUES (2);').status,0);
+ const cases=[
+  '-- UPDATE parent SET id=id;\nSELECT changes() AS n;',
+  '/* UPDATE parent SET id=id; */ SELECT changes() AS n;',
+  '/* UPDATE parent SET id=id;\n*/\nSELECT changes() AS n;',
+  "SELECT 'x; UPDATE parent SET id=id;' AS t, changes() AS n;",
+  "SELECT 'it''s; UPDATE parent SET id=id;' AS t, changes() AS n;",
+  'SELECT "UPDATE parent SET id=id;" AS t, changes() AS n;',
+  'SELECT 1 AS "a;UPDATE parent SET id=id;", changes() AS n;',
+  "SELECT replace('a','a','b') AS r, changes() AS n;",
+  '-- note\nUPDATE parent SET id=id WHERE id=-1; -- done\nSELECT changes() AS n;',
+  '/* a */ UPDATE parent SET id=id WHERE id IN (1,2); /* b */ SELECT changes() AS n;',
+  "UPDATE parent SET id=id WHERE id=-1; SELECT ';' AS s, changes() AS n;",
+  '/* unterminated UPDATE parent SET id=id; SELECT changes() AS n;',
+ ];
+ for(const script of cases){
+  const shared=session(file,script,true),alone=spawnSync('sqlite3',['-json','-bail',fresh],{input:script,encoding:'utf8'});
+  assert.equal(shared.status,alone.status,'status: '+script);
+  assert.equal(shared.stdout.replace(/"t":"[^"]*",?/,'').replace(/"a;UPDATE[^"]*"/,'').replace(/"r":"b",?/,'').replace(/"s":";",?/,'').replace(/\{,/,'{'),alone.stdout.replace(/"t":"[^"]*",?/,'').replace(/"a;UPDATE[^"]*"/,'').replace(/"r":"b",?/,'').replace(/"s":";",?/,'').replace(/\{,/,'{'),'answer: '+script);
+ }
+ assert.equal(session(file,'-- UPDATE ignored;\nSELECT changes() AS n;',true).stdout.trim(),'[{"n":0}]');
+ assert.equal(needsOneShot(['-bail',file],'-- UPDATE ignored;\nSELECT changes() AS n;'),true);
+ assert.equal(needsOneShot(['-bail',file],'/* UPDATE parent SET id=id; */ SELECT changes();'),true);
+ assert.equal(needsOneShot(['-bail',file],"SELECT 'UPDATE parent SET id=id;', changes();"),true);
+ assert.equal(needsOneShot(['-bail',file],"SELECT replace('a','a','b'), changes();"),true);
+ assert.equal(needsOneShot(['-bail',file],'/* open UPDATE parent SET id=id; SELECT changes();'),true);
+ assert.equal(needsOneShot(['-bail',file],'CREATE TRIGGER g AFTER INSERT ON parent BEGIN UPDATE parent SET id=id; END; SELECT changes();'),true);
+ assert.equal(needsOneShot(['-bail',file],'-- c\nUPDATE parent SET id=id WHERE id=-1; /* c */ SELECT changes();'),false,'a real write before the read, comments around it, is shared');
 }
 
 console.log('sqlite session: same results and failures as a process per call, no state between calls, replaced files, shared files, large answers, many databases and the quote-mode answer of large values passed');

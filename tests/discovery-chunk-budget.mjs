@@ -15,10 +15,14 @@ import {sqliteSync} from './sqlite-session.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-chunk-budget-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
 let databases=0;
+// AIR-374: the schema chain is applied once; every later database is a copy of that file (it holds no data), which skips 11 migration reads and a sqlite round trip per fixture.
+let template=null;
 const migrated=()=>{
  const file=path.join(root,'chunk-'+(databases++)+'.sqlite');
+ if(template){fs.copyFileSync(template,file);return file;}
  const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
  if(result.status!==0)throw new Error(result.stderr||'migration failed');
+ template=path.join(root,'template.sqlite');fs.copyFileSync(file,template);
  return file;
 };
 const sql=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=result.stdout.trim();return out?JSON.parse(out):[];};
@@ -49,9 +53,10 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
  for(let index=0;index<mix;index++){const key='mix'+String(index).padStart(2,'0');hot.push({...hotItem({key,year:2000,lastAiring:hotStart+100000-index}),title:'Film '+key,normalizedTitle:'film '+key});}
  for(let index=0;index<extraHot;index++)hot.push(hotItem({key:'x-'+String(index).padStart(3,'0'),year:1980+index%10,lastAiring:hotStart+1000+index}));
  await Authority.ingestLedger(setup,{programmeRunId:RUN,handoff:true,lease:lease.lease,items:(async function*(){for(const item of hot)yield item;})()});
- const rows=[];
- for(let index=0;index<WIDE-hot.length;index++)rows.push(`('active','w${String(index).padStart(5,'0')}','active','${RUN}','t','T',1990,'',0,1,NULL,NULL,'{"seenInLatestSnapshot":false,"lastSeenAt":1,"title":"T","normalizedTitle":"t","year":1990,"durations":[90]}')`);
- for(let index=0;index<rows.length;index+=400)sql(file,'INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) VALUES '+rows.slice(index,index+400).join(','));
+ // AIR-374: the filler observations are generated inside sqlite by a recursive CTE (the same rows as the 400-row INSERT texts built here before, 3 MB of SQL per fixture, 25 fixtures);
+ // the key, the zero-padded counter and every other column are the same values.
+ const filler=WIDE-hot.length;
+ if(filler>0)sql(file,`WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i+1 FROM n WHERE i<${filler-1}) INSERT INTO discovery_observation (source_key, observation_key, residence, programme_run_id, normalized_title, title, year, evidence_key, seen_in_latest, last_seen_at, last_airing, confirmed_tmdb_id, payload_json) SELECT 'active','w'||printf('%05d',i),'active','${RUN}','t','T',1990,'',0,1,NULL,NULL,'{"seenInLatestSnapshot":false,"lastSeenAt":1,"title":"T","normalizedTitle":"t","year":1990,"durations":[90]}' FROM n`);
  if(Object.keys(decisions).length)await Authority.routeWrite(setup,'epg/discovery-resolution.json',decisions);
  if(Object.keys(catalog).length)await Authority.upsertAdmissions(setup,catalog,{lease:lease.lease});
  await Authority.releaseLease(setup,lease.lease);
@@ -110,7 +115,8 @@ const leaseRow=file=>sql(file,'SELECT lease_id, expires_at FROM discovery_lease 
 // 2. The concurrent walk is faster than the sequential one under D1 round-trip latency, with the same result.
 {
  const {env,file}=await fixture();
- const latency=Number(process.env.CHUNK_BUDGET_LATENCY)||20;
+ // AIR-374: 5 ms per query (was 20 ms): each page costs several queries, so the sequential walk idled 5.3 s at 20 ms; at 5 ms it takes 1.5 s and the concurrent walk is still about 0.17 of it, against the unchanged 0.7 bound.
+ const latency=Number(process.env.CHUNK_BUDGET_LATENCY)||5;
  const slow=d1Standin(file,{latencyMs:latency});
  const slowEnv={...env,DB:slow};
  let t=Date.now();
