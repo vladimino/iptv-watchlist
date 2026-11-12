@@ -266,6 +266,9 @@ fs.unlinkSync(me);`;
     const load = halves.map(half => [...half.parallel, ...half.serial].reduce((sum, file) => sum + weightOf(file), 0));
     assert.ok(Math.abs(load[0] - load[1]) <= Math.min(...Object.values(WEIGHTS)), `the shards carry the same weight: ${load.join(' vs ')}`);
     assert.ok(Math.abs(halves[0].total - halves[1].total) <= 30, 'neither shard is nearly empty');
+    // The serial-only files run after the parallel phase and add their whole duration to a shard's wall time, so their weight is their solo time (times the six files that share a wall second), not their contended time: the shard that carries one is not also dealt a full parallel share.
+    for (const file of ['local-dev-smoke.mjs', 'sqlite-session-semantics.mjs']) assert.ok(weightOf(file) >= 30, `${file} is weighted for the serial tail it adds`);
+    assert.notEqual(halves[0].serial.includes('local-dev-smoke.mjs'), halves[0].serial.includes('sqlite-session-semantics.mjs'), 'the two serial-only files are in different shards');
     // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
     const isMutation = file => /-mutation\.mjs$/.test(file);
     const mutationLoad = halves.map(half => [...half.parallel, ...half.serial].filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
