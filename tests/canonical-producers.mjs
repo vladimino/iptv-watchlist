@@ -371,12 +371,12 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  assert.equal((await handoffReadiness({},{now:AT})).blockers[0].startsWith('marker_unreadable')||true,true);
 }
 
-// 11. Static: dormant. No source file imports the module, it is not bundled, it has no R2/fetch reference, and the projector is unchanged.
+// 11. Static: dormant. No source file imports the module except the dormant receipt adapter (AIR-374 P3-0b: it needs `writerRoute`; it is itself imported by nothing and not bundled), it is not bundled, it has no R2/fetch reference, and the projector is unchanged.
 {
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-producers'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'no source file imports canonical-producers');
+ assert.deepEqual(importers,['src/canonical-producer-adapters.js'],'only the dormant receipt adapter imports canonical-producers');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producers'),file+' does not bundle it');
  const text=fs.readFileSync('src/canonical-producers.js','utf8');
  assert.ok(!/\bR2\b|fetch\(|env\.[A-Z_]+_BUCKET|\.get\(['"]/.test(text.replace(/\/\/.*$/gm,'')),'the module reads no R2 and calls no network');

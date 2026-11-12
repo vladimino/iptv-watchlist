@@ -100,7 +100,9 @@ const FILE_SITES={
  // events): not a projector input and not on a Discovery, admin-recovery or publication path.
  // Batch runner v2: +2 wrapper sites and +2 dynamic keys in batch_start, both the same object and key shape the v5 start writes: the create of `enrichment/sources/<runId>.json` (the metadata
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:11,wrapper:46,dynamic:32},
+ // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
+ // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
+ 'src/enrichment.js':{r2:12,wrapper:47,dynamic:33},
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},

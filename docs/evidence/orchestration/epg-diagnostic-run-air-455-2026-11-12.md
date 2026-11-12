@@ -1,6 +1,6 @@
 # EPG diagnostic canary: owner-only Workflow, receipts and reporting, offline evidence (AIR-455, 12 November 2026)
 
-Scope: [ADR 0121](../../adr/0121-epg-diagnostic-rehearsal-design.md) and [ADR 0123](../../adr/0123-epg-diagnostic-canary-run-contract.md), offline code only. No Cloudflare resource, no live Workflow instance, no production read or write. All results come from `tests/epg-diagnostic-run.mjs` (about 8 s): sqlite stand-ins of the diagnostic and the production-like D1, in-memory buckets and a scripted Workflow binding; the real `stageSealedGeneration` and what it calls, the real step lease and the real replay module run.
+Scope: [ADR 0121](../../adr/0121-epg-diagnostic-rehearsal-design.md) and [ADR 0124](../../adr/0124-epg-diagnostic-canary-run-contract.md), offline code only. No Cloudflare resource, no live Workflow instance, no production read or write. All results come from `tests/epg-diagnostic-run.mjs` (about 8 s): sqlite stand-ins of the diagnostic and the production-like D1, in-memory buckets and a scripted Workflow binding; the real `stageSealedGeneration` and what it calls, the real step lease and the real replay module run.
 
 | Claim | Result |
 |---|---|

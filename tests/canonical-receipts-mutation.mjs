@@ -76,7 +76,7 @@ const MUTANTS=[
  ['the plan hides an abandoned receipt','js',"plan.attention.push({requestId:receipt.requestId,reason:receipt.errorClass||'abandoned'});continue;","continue;",'8'],
  ['the plan never asks for a re-plan','js',"replan:receipt.markerGeneration!==marker.generation","replan:false",'8'],
  ['the pass acts while the marker is not open','js',"if(gate.state!=='open'){result.waiting=","if(false){result.waiting=",'7.7'],
- ['the pass reads receipts that are not due','js',"await listReceipts(env,{dueBefore:at,limit})","await listReceipts(env,{limit})",'10.1'],
+ ['the pass reads receipts that are not due','js',"await listReceipts(env,{dueBefore:at,limit,origin})","await listReceipts(env,{limit,origin})",'10.1'],
  ['the receipt read is not capped','js',"const cap=Math.min(Math.max(Number(limit)||1,1),RECONCILE_LIMIT_MAX);","const cap=Number(limit)||1;",'10.2'],
  ['an unregistered operation is guessed','js',"if(!operation){missing.add(row.requestId);result.waiting.push({requestId:row.requestId,reason:'operation_unregistered'});continue;}","",'10.1'],
  ["an unproven content match is marked applied",'js',"if(action.action==='needs_review'){await transition(env,gate,row,{kind:'abandoned',errorClass:action.reason},now);","if(action.action==='needs_review'){await transition(env,gate,row,{kind:'applied',revision:0},now);",'13'],

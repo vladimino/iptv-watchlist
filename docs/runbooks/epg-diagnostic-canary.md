@@ -1,6 +1,6 @@
 # EPG diagnostic canary: operating, retention, cleanup and rollback
 
-Contract: [orchestration reliability](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0123). Decisions: [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0123](../adr/0123-epg-diagnostic-canary-run-contract.md). This page authorizes nothing: provisioning, applying the diagnostic migrations, copying a dataset, activating the diagnostic markers and every launch, stop and cleanup each need an operation-specific owner GO. A passing canary is not AIR-444 acceptance and is not permission to set `DISCOVERY_LEDGER_MODE=bounded`.
+Contract: [orchestration reliability](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0124). Decisions: [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md). This page authorizes nothing: provisioning, applying the diagnostic migrations, copying a dataset, activating the diagnostic markers and every launch, stop and cleanup each need an operation-specific owner GO. A passing canary is not AIR-444 acceptance and is not permission to set `DISCOVERY_LEDGER_MODE=bounded`.
 
 ## State machine of a run
 

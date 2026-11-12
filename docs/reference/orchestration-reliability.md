@@ -240,7 +240,7 @@ Inert, offline code (`src/epg-replay.js`, `EpgReplay`): nothing calls it at runt
 
 Parity with production code: committed through the real `stageSealedGeneration`, the replay scan archives exactly the planned departures (`upsertedKeys`) into exactly the planned segments, and returned keys are active again (`tests/epg-replay-dataset.mjs`).
 
-## EPG diagnostic canary: the run and its receipt (AIR-455, ADR 0123)
+## EPG diagnostic canary: the run and its receipt (AIR-455, ADR 0124)
 
 Owner-only, inert until the diagnostic resources are provisioned (AIR-456). Every route first verifies the owner in the Worker (signed Access assertion with the audience `EPG_DIAGNOSTIC_ACCESS_AUD` and the e-mail `EPG_DIAGNOSTIC_OWNER_EMAIL`; `403 forbidden`, `503 access_not_configured`, `503 access_unavailable`); without the diagnostic bindings every route then answers `503 diagnostic_bindings_absent`, no Workflow instance is created and nothing is written.
 

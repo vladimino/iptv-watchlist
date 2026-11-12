@@ -104,6 +104,21 @@ const forbidden=[
  ['prediction_batch_start',{trigger:'scheduled',dryRun:true,pin:{filmIds:[]}}],
  ['prediction_batch_start',{trigger:'scheduled',dryRun:true,pin:{filmIds:['../secret']}}],
  ['prediction_batch_start',{trigger:'scheduled',dryRun:true,pin:{filmIds:['film-1'],prefix:'enrichment/'}}],
+ ['prediction_batch_submit',{runId:'run-1',items:[{filmId:'film-1'}]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:0,items:[{filmId:'film-1'}]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:Array.from({length:11},(_,i)=>({filmId:'film-'+i}))}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1',key:'enrichment/x'}]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'../secret'}]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'},{filmId:'film-1'}]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'}],dryRun:'yes'}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'}],manifestHash:'0'.repeat(64)}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1',inputHash:'0'.repeat(24)}]}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'}],dryRun:true,manifestHash:'nothex'}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'}],dryRun:true,contract:{path:'x'}}],
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:[{filmId:'film-1'}],path:'/api/enrichment/batch/submit'}],
+ // a group over the byte limit of one call (56 KiB, below the 64 KiB transport limit) is refused whole, with nothing submitted
+ ['prediction_batch_submit',{runId:'run-1',epoch:1,items:Array.from({length:10},(_,i)=>({filmId:'film-'+i,fingerprint:{strengths:Array.from({length:8},()=>'s'.repeat(380)),risks:Array.from({length:8},()=>'r'.repeat(380))},prediction:{}}))}],
  ['prediction_next',{runId:'run-1',batchSize:20}],
  ['prediction_submit',{runId:'run-1',items:[{filmId:'film-1',fingerprint:{},key:'enrichment/x'}]}],
  ['prediction_submit',{runId:'run-1',items:[{filmId:'../secret'},{filmId:'film-2'}]}],
@@ -128,6 +143,12 @@ for(const [name,args] of forbidden){
  assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[],name);
 }
 
+{
+ const big=Array.from({length:10},(_,i)=>({filmId:'film-'+i,fingerprint:{strengths:Array.from({length:8},()=>'s'.repeat(380)),risks:Array.from({length:8},()=>'r'.repeat(380))},prediction:{}}));
+ const environment=env(),refused=await tool(environment,'prediction_batch_submit',{runId:'run-1',epoch:1,items:big});
+ assert.equal(refused.body.result.isError,true);assert.match(refused.body.result.content[0].text,/over the 57344 byte limit of one call/);assert.match(refused.body.result.content[0].text,/Nothing was submitted: split the group/);assert.equal(environment.BUCKET.objects.size,0,'nothing was read or written');
+ const fits=await tool(env(),'prediction_batch_submit',{runId:'run-1',epoch:1,items:big.slice(0,3)});assert.ok(!/byte limit of one call/.test(JSON.stringify(fits.body.result.content)),'a smaller group passes the size check and reaches the Worker');
+}
 const mismatch=await tool(env(),'epg_sync_step',{runId:'missing-run'});
 assert.deepEqual(domain(mismatch.body.result),{status:409,body:{error:'Run id mismatch'}});
 assert.equal(mismatch.body.result.isError,true);

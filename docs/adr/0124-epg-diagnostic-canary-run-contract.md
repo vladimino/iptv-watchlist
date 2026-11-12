@@ -1,4 +1,4 @@
-# ADR 0123: EPG diagnostic canary run contract (implementation decisions of ADR 0121)
+# ADR 0124: EPG diagnostic canary run contract (implementation decisions of ADR 0121)
 
 **Status:** Proposed (implementation decisions inside the accepted architecture of ADR 0121; nothing is provisioned, activated or run by this ADR)  
 **Original decision date:** not decided  

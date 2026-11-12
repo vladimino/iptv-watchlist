@@ -88,6 +88,18 @@ Accepting this ADR fixes the design and the **default** in the third column. D7 
 - **Dated verification:** [AIR-446 limits analysis](../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md): code reading of `main` at `dfd1a51` and the Cloudflare documentation read on 12 November 2026. No production read, run or write was made.
 - **Uncertainty:** model quality of multi-film answers; manifest bytes and tokens; production CPU, wall and D1 cost of a 100-film start and a 10-item submit; the live Task prompt text (not readable by the session); whether the connector truncates large tool results.
 
+## Addendum 2026-11-12: corrections found while implementing batch_submit
+
+This addendum records implementation-time corrections to the decision text above. It does not rewrite the historical decision and it is not a new Product Owner decision: it follows the intent of decisions 6 to 8 and 10, and its source is the independent review of [PR #549](https://github.com/vladimino/iptv-watchlist/pull/549) (delivery of [AIR-448](https://trello.com/c/0Huo5rW6)).
+
+- **Gate ownership (decision 7c).** The submit gate is `{token, requestId, bodyHash, startedAt, expiresAt}`. Ownership, renewal, clearing and the D1 commit guard use `token`, which the Worker generates for each call. The caller-supplied X-Request-Id is a log field only: it cannot identify an owner, because a superseded handler and its replacement can carry the same id. While any gate is live, no second acquisition succeeds, whatever its id or body. The text above says `requestId` for these four roles.
+- **Gate before the writer lease (decision 7c).** The gate is taken before the global prediction writer lease, so an overlapping call is answered `submit_in_flight`; global writer exclusion is unchanged and the writer lease is taken under the gate.
+- **Fenced writes (decision 8).** The commit guard covers every authoritative write of a call, not only the per-film D1 batch: the run record, a failed film's retry record, the queue settlement and the progress checkpoint. Loss of the gate or the epoch is terminal for all of them. A progress Event is written only after a guarded checkpoint that stores it as an intent; a handler that loses its gate before the Event write leaves the intent for the next holder.
+- **No shared step recorder (decision 8).** A v2 submit is not passed through the v5 step recorder: that recorder appends diagnostics steps and, for a lost lease or a storage failure, writes a stop for the run without the gate or the epoch. An unexpected error after processing began is a recoverable `502` with the results of the films already processed, not a stop of the run.
+- **Receipt identity (decision 6).** For every recorded outcome, a failure included, a changed digest is `conflict` and only the identical payload is a replay. A failed film is still not retried in the run.
+- **Result names (decision 5).** The delivery scope fixed `needs_regeneration` (this ADR's `stale_profile`) and `validation_failure` (this ADR's `validation_error`); the semantics are those described above.
+- **Epoch mismatch (decision 7a).** A request whose `epoch` is not the run's is `409 epoch_mismatch`, a caller error that never stops the run, rather than `lease_lost` (which would record a stop for the real owner).
+
 ## Follow-ups
 
 Next card: [AIR-447](https://trello.com/c/3jrJcvWH). Current state and later cards belong to the Trello roadmap and GitHub.

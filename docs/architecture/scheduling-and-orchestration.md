@@ -293,7 +293,7 @@ An instance whose step fails after the platform's retries, with a recognised tra
 
 The hourly cron also calls `Monitor.run`, which does nothing unless `MONITOR` is `on` (`off` is a permanent emergency gate that also stops the dead-man heartbeat). It reads status records the domains keep, never calls `ensure`, `reconcile` or a resolver, and writes only `monitor/state.json`. Recovery stays with the domain executors ([ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md)). See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md).
 
-## EPG diagnostic canary ([ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0123](../adr/0123-epg-diagnostic-canary-run-contract.md), AIR-455)
+## EPG diagnostic canary ([ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md), AIR-455)
 
 An owner-only, on-demand Workflow, not a schedule: no Cron, no Scheduled Task, no change to the daily EPG publication. The routes read the production env only to refuse a launch while the production EPG is active; every diagnostic mutation goes through the allowlisted context to the diagnostic D1 and bucket. Inert until the owner provisions those resources (AIR-456): without them no instance is ever created.
 
