@@ -266,8 +266,12 @@ fs.unlinkSync(me);`;
     const load = halves.map(half => [...half.parallel, ...half.serial].reduce((sum, file) => sum + weightOf(file), 0));
     assert.ok(Math.abs(load[0] - load[1]) <= Math.min(...Object.values(WEIGHTS)), `the shards carry the same weight: ${load.join(' vs ')}`);
     assert.ok(Math.abs(halves[0].total - halves[1].total) <= 30, 'neither shard is nearly empty');
-    const heaviest = Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
-    assert.notEqual(halves[0].parallel.includes(heaviest[0]), halves[0].parallel.includes(heaviest[1]), 'the two heaviest files are in different shards');
+    // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
+    const isMutation = file => /-mutation\.mjs$/.test(file);
+    const mutationLoad = halves.map(half => [...half.parallel, ...half.serial].filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
+    assert.ok(Math.abs(mutationLoad[0] - mutationLoad[1]) <= Math.min(...Object.values(WEIGHTS)) * 2, `the mutation files are shared evenly: ${mutationLoad.join(' vs ')}`);
+    const heaviestMutation = Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
+    assert.notEqual(halves[0].parallel.includes(heaviestMutation[0]), halves[0].parallel.includes(heaviestMutation[1]), 'the two heaviest mutation files are in different shards');
     assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');
     assert.deepEqual(planTests({directory: 'tests', shard: {index: 2, count: 2}}), halves[1], 'the split does not depend on who asks');
     assert.deepEqual(parseShard('2/3'), {index: 2, count: 3});
