@@ -2,7 +2,7 @@
  "$schema": "https://json-schema.org/draft/2020-12/schema",
  "$id": "batch-v2-ab.schema.json",
  "title": "Batch runner v2 dry-run A/B sample and result (AIR-449)",
- "description": "Machine-readable contract of the owner-approved dry-run experiment of AIR-450. Nothing here is written to production state. A metric the platform does not show is null and named in telemetry.unavailable; it is never estimated.",
+ "description": "Machine-readable contract of the owner-approved dry-run experiment of AIR-450. Nothing here is written to production state. A metric the platform does not show is null and named in telemetry.unavailable; it is never estimated. A result record contains the raw model outputs (films[].fingerprint and films[].prediction): it is private and stays in the owner-controlled trial storage; only sanitized aggregates may be published.",
  "$defs": {
   "sample": {
    "type": "object",

@@ -49,6 +49,11 @@ for(const reason of ['profile_changed','runner_aborted','quota','model_unavailab
 const live=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-only.md','utf8').match(/---BEGIN PROMPT---\n([\s\S]*)\n---END PROMPT---/)[1];
 assert.equal(sha(live),'fc0b4c1772f33398b4cb4e2eafda6e71b89c260befbee363e299acae4a388d44','the live hourly prompt text is unchanged');
 assert.ok(!/trello\.com\/c\/[\s;)]/.test(doc),'no empty Trello link');
+const header=doc.match(/\*\*Dry run text\*\*[^\n]*/)[0];
+assert.ok(header.includes('{{FROZEN_MANIFEST}}')&&!header.includes('FILM_IDS'),'the header names the real placeholders');
+const runbook=fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8');
+assert.ok(!/100 films fits one start/.test(runbook)&&/manifest_too_large/.test(runbook)&&/largestFilmBytes/.test(runbook),'the freeze step handles a size refusal');
+assert.ok(/Report boundary/.test(runbook)&&/never to the repository/.test(runbook)&&!/may contain only[^.]*per-pass result records/.test(runbook),'raw per-pass outputs are private');
 
 // 4. A small JSON Schema checker (the subset the contract uses) validates the sample and result records.
 const schema=JSON.parse(fs.readFileSync('docs/reference/scheduled-task-prompts/batch-v2-ab.schema.json','utf8'));

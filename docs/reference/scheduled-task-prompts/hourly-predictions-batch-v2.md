@@ -4,7 +4,7 @@
 
 **Text below:** 10944 characters, SHA-256 `def5cf16aebbd4d133ded0421ca3761305aac14e925e20cfde930b7d2c3bb1c0` (the text between the markers, without the final newline). `tests/scheduled-task-prompt-v2.mjs` fails when this header, the tool names or the forbidden list drift from the text and from the Worker's MCP tool list.
 
-**Dry run text** (with the unfilled `{{SAMPLE_ID}}`, `{{FILM_IDS}}`, `{{GROUP_SIZE}}` placeholders): 7664 characters, SHA-256 `8ce900b35d1bc062ed2ac1df0995be60dd27f2d0f22af0a17897e7aae21a0642`.
+**Dry run text** (with the unfilled `{{SAMPLE_ID}}`, `{{GROUP_SIZE}}`, `{{FROZEN_MANIFEST}}` placeholders): 7664 characters, SHA-256 `8ce900b35d1bc062ed2ac1df0995be60dd27f2d0f22af0a17897e7aae21a0642`.
 
 **Relation to the live prompt.** Every quality rule is carried over from [`hourly-predictions-only.md`](hourly-predictions-only.md) (Taste Profile use, `fingerprint.evidence` map, scale and reference films, `unknown` instead of invention, no `confidenceAssessment`, no version changes). What changes is the protocol: one `prediction_batch_start` replaces `prediction_start` plus `prediction_next` and the profile/schema/metadata reads, groups of up to 10 films go through `prediction_batch_submit`, and the separate `prediction_validate` call is removed because the Worker validates each film once at submit. The Task makes no `prediction_validate`, `prediction_next`, `prediction_submit` or `prediction_start` call.
 
@@ -89,7 +89,7 @@ A run that stops at the 100-film manifest cap with ready films left can only end
 
 ## Dry run prompt
 
-Paste only for the owner-approved AIR-450 experiment, with the three parameters filled from the frozen sample. Steps 4–6 are the scheduled prompt's text verbatim.
+Paste only for the owner-approved AIR-450 experiment, with the three parameters filled from the frozen sample and the one frozen manifest. Steps 4–6 are the scheduled prompt's text verbatim.
 
 ---BEGIN DRY RUN PROMPT---
 DRY RUN эксперимента batch runner v2 для prediction batch (ручной запуск по явному решению владельца, НЕ расписание). Используй ТОЛЬКО подключённый IPTV Watchlist MCP и ровно один его инструмент: prediction_batch_submit с dryRun:true. НИЧЕГО не записывай: ни прогнозов, ни fingerprint, ни lease, ни run, ни очереди. НИКОГДА не изменяй собственный prompt, расписание или статус и не создавай Scheduled Task.
