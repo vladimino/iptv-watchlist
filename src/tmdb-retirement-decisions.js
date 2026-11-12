@@ -137,6 +137,7 @@ function decisionFailure(error){
 export async function recordRetirementDecision(env,input){
  const decision=normalizeDecision(input);
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at);
+ const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id:decision.filmId});
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
  const read=async(sql,params)=>{try{return await one(db,sql,params);}catch(error){throw failed('retirement_unavailable',error);}};
@@ -170,7 +171,7 @@ export async function recordRetirementDecision(env,input){
  }
  statements.push(['INSERT INTO tmdb_retirement_decision (request_id,film_id,kind,lid,movie_id,tv_id,evidence_json,confirmation_json,origin,input_sha256,supersedes_seq,payload_json,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',[decision.requestId,decision.filmId,decision.kind,decision.lid,decision.movieId,decision.tvId,stable(decision.evidence),stable(decision.confirmation),decision.origin,decision.inputSha256,decision.supersedesSeq,decision.payload,at]]);
  statements.push([fenced.BUMP,['film',decision.filmId,at]]);
- try{await fenced.commit(env,gate,statements,entities);}
+ try{await fenced.commit(env,gate,statements,entities,tail);}
  catch(error){
   // A concurrent writer with the same request id: the same content is a replay, other content is a mismatch (checked before the trigger codes,
   // since the racing row itself can be what the trigger refused).

@@ -88,6 +88,7 @@ export async function admitRatedFilm(env,input){
   if(prior.archive_sha256===admission.archiveSha256&&prior.receipt_key===RATED_RECEIPT_KEY)return {id:target.id,revision:target.revision,admitted:false,replay:true};
  }
  const id=target.id;
+ const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
@@ -100,7 +101,7 @@ export async function admitRatedFilm(env,input){
  statements.push(["INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,'letterboxd_short_code',?,?) ON CONFLICT(film_id,kind,value) DO NOTHING",[id,admission.sourceCode,stable({source:'letterboxd_rated_admission',archiveSha256:admission.archiveSha256})]]);
  statements.push(["INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET archive_sha256=excluded.archive_sha256,title=COALESCE(excluded.title,film_rated_admission.title),year=COALESCE(excluded.year,film_rated_admission.year),request_id=excluded.request_id,updated_at=excluded.updated_at WHERE film_rated_admission.tmdb=excluded.tmdb AND film_rated_admission.source_code=excluded.source_code",[id,admission.tmdb,admission.sourceCode,admission.archiveSha256,admission.title,admission.year,RATED_RECEIPT_KEY,admission.receiptFilmKey,admission.verifiedAt,requestId,at]]);
  statements.push([fenced.BUMP,['film',id,at]]);
- try{await fenced.commit(env,gate,statements,entities);}
+ try{await fenced.commit(env,gate,statements,entities,tail);}
  catch(error){
   const message=String(error?.cause?.message||'');
   if(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_rated_admission/i.test(message))throw failed('admission_conflict',error);
@@ -117,6 +118,7 @@ export async function retainFilm(env,input){
  const id=fenced.filmId(input?.id);
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
  const observed=instant(input.observedAt);
+ const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
  if(typeof input.watchlist!=='boolean'||!observed||(input.evidence!==undefined&&!plain(input.evidence)))throw failed('retention_invalid');
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
@@ -137,7 +139,7 @@ export async function retainFilm(env,input){
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push(["INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES (?,'watchlist_fact',?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET watchlist=excluded.watchlist,evidence_json=excluded.evidence_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_retention.observed_at",[id,input.watchlist?1:0,evidence,requestId,observed,at]]);
  statements.push([fenced.BUMP,['film',id,at]]);
- await fenced.commit(env,gate,statements,entities);
+ await fenced.commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1,retained:true,written:true};
 }
 
