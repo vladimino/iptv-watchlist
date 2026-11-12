@@ -26,7 +26,7 @@ const MUTANTS=[
  ["an already applied unit is counted applied", "canonical-epg-person-producer.js", "else if(outcome.already===true)counts.already++;", "else if(outcome.already===true)counts.applied++;"],
  ["an unknown outcome is counted failed", "canonical-epg-person-producer.js", "else if(outcome.state==='unknown')counts.unknown++;", "else if(outcome.state==='unknown')counts.failed++;"],
  ["every unit runs as a Person state", "canonical-epg-person-producer.js", "const apply=APPLY_UNIT[unit.kind];", "const apply=APPLY_UNIT.person_state;"],
- ["credits come before Persons", "canonical-epg-person-producer.js", "const units=[...[...people.values()].sort(byId),...[...films.values()].sort(byId)];", "const units=[...[...films.values()].sort(byId),...[...people.values()].sort(byId)];"],
+ ["credits come before Persons", "canonical-epg-person-producer.js", "const units=[...[...rows.values()].sort(byId),...[...people.values()].sort(byId),...[...films.values()].sort(byId)];", "const units=[...[...rows.values()].sort(byId),...[...films.values()].sort(byId),...[...people.values()].sort(byId)];"],
  ["Persons are not sorted", "canonical-epg-person-producer.js", "[...people.values()].sort(byId)", "[...people.values()]"],
  ["Films are not sorted", "canonical-epg-person-producer.js", "[...films.values()].sort(byId)", "[...films.values()]"],
  ["a duplicate Person is accepted", "canonical-epg-person-producer.js", "||people.has(item.id))throw", ")throw"],
