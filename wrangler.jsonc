@@ -39,7 +39,8 @@
     },
     {
       "binding": "EPG_DIAGNOSTIC_BUCKET",
-      "bucket_name": "iptv-epg-diagnostic"
+      "bucket_name": "iptv-epg-diagnostic",
+      "jurisdiction": "eu"
     }
   ],
   "workflows": [

@@ -211,7 +211,7 @@ async function bootstrapRaw(state){await bootstrap(state,0);}
  assert.doesNotMatch(wrangler,/diagnostic-migrations|migrations_dir/i,'no migration directory in wrangler.jsonc: a deploy never applies the diagnostic schema');
  {const config=JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm,''));
   assert.deepEqual(config.d1_databases.map(entry=>[entry.binding,entry.database_name]),[['DB','iptv'],['EPG_DIAGNOSTIC_DB','iptv-epg-diagnostic']],'production DB unchanged; the diagnostic database is its own, named binding');
-  assert.deepEqual(config.r2_buckets.map(entry=>[entry.binding,entry.bucket_name]),[['BUCKET','iptv'],['EPG_DIAGNOSTIC_BUCKET','iptv-epg-diagnostic']],'production BUCKET unchanged; the diagnostic bucket is its own, named binding');
+  assert.deepEqual(config.r2_buckets.map(entry=>[entry.binding,entry.bucket_name,entry.jurisdiction??null]),[['BUCKET','iptv',null],['EPG_DIAGNOSTIC_BUCKET','iptv-epg-diagnostic','eu']],'production BUCKET unchanged (default jurisdiction); the diagnostic bucket is its own, named binding in the EU jurisdiction');
   assert.equal(config.d1_databases[1].database_id===config.d1_databases[0].database_id,false,'the diagnostic database id is not the production one');
   assert.equal(config.vars.EPG_DIAGNOSTIC_RESOURCE_ID,'epg-diag-20261112');
   assert.deepEqual(config.triggers.crons,['0 * * * *'],'still the single hourly cron');}
