@@ -97,6 +97,14 @@ const same=(file,input,json=false)=>{
  // The per-connection counters of a fresh process start at zero, so a script that reads them runs in one.
  for(const script of ['SELECT last_insert_rowid();','SELECT changes();','SELECT total_changes();'])assert.equal(needsOneShot(['-bail',file],script),true,script);
  assert.equal(session(file,'INSERT INTO parent VALUES (50);').status,0);assert.equal(session(file,'SELECT last_insert_rowid() AS id;',true).stdout.trim(),'[{"id":0}]','a later call does not see the rowid of an earlier one');
+ // AIR-374: `changes()` after a complete write statement of the same script is answered by the shared connection, and gives what a fresh process gives; read before any write of its own, it stays one-shot.
+ assert.equal(needsOneShot(['-bail',file],'UPDATE parent SET id=id WHERE id=-1;SELECT changes();'),false);
+ assert.equal(needsOneShot(['-bail',file],'BEGIN;UPDATE parent SET id=id WHERE id=-1;UPDATE parent SET id=id WHERE id=-2 AND changes()=1;COMMIT;'),false);
+ assert.equal(needsOneShot(['-bail',file],'UPDATE parent SET id=id WHERE changes()=0;'),true,'the same statement reads the counter before its own write');
+ assert.equal(needsOneShot(['-bail',file],"SELECT 'x;UPDATE y;' AS t, changes();"),true,'a write that is only text inside a literal is no write');
+ assert.equal(session(file,'INSERT INTO parent VALUES (51);INSERT INTO parent VALUES (52);').status,0);
+ assert.equal(session(file,'UPDATE parent SET id=id WHERE id=-1;SELECT changes() AS n;',true).stdout.trim(),'[{"n":0}]','the count of the script own write, not of the earlier call that changed two rows');
+ assert.equal(session(file,'UPDATE parent SET id=id WHERE id IN (51,52);SELECT changes() AS n;',true).stdout.trim(),'[{"n":2}]');
 }
 
 // 4. A database file that is deleted or replaced is a new database for the next call, not the old one kept open.
