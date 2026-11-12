@@ -131,9 +131,9 @@ export async function mutateFilm(env,input){
 
 // One Person: its row, external ids and aliases. A Person has no localization write here (a reviewed or owner name is never touched).
 // input: {id, expectedRevision, at, person:{roleId, contractVersion, externalIds?, removeExternalIds?, aliases?}, presence?:'existing'|'absent'}
-// `presence` (AIR-374 P3a, ADR 0129) adds ONE assertion INSIDE the same fenced batch, before the row upsert: 'existing' requires the Person row to exist when the batch runs (it never creates one), 'absent' requires that it does not (it never
+// `presence` (AIR-374 P3a, ADR 0130) adds ONE assertion INSIDE the same fenced batch, before the row upsert: 'existing' requires the Person row to exist when the batch runs (it never creates one), 'absent' requires that it does not (it never
 // overwrites one). A Person that appeared or vanished after the caller's last read then fails the whole batch (receipt tail included) with `film_person_precondition`. Without the option nothing changes (the upsert creates or updates, as every other caller relies on).
-// `uniqueTrusted: true` (ADR 0129) adds ONE more assertion in the same batch: no OTHER Person owns any of the trusted, non-conflicting external ids this call upserts (schema v1 has no unique index for person_external_id, unlike film_external_id), so a trusted
+// `uniqueTrusted: true` (ADR 0130) adds ONE more assertion in the same batch: no OTHER Person owns any of the trusted, non-conflicting external ids this call upserts (schema v1 has no unique index for person_external_id, unlike film_external_id), so a trusted
 // owner that appears after the caller's read rolls the whole batch back with `film_person_precondition`. At most 40 external ids (100 binds per D1 statement). Without it nothing changes.
 export async function mutatePerson(env,input){
  const id=personId(input?.id),expected=revisionOf(input?.expectedRevision),at=text(input?.at),person=input?.person||{};

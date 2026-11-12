@@ -2,7 +2,7 @@
 
 **Captured:** 2026-11-12, local runs of `node tests/canonical-person-mutation-producer.mjs`, `node tests/canonical-person-mutation-producer-mutation.mjs`, the affected existing tests, then the full `npm test -- --jobs 3` and `npm run build`. **Method:** a sqlite file plays D1 (all migrations), the same stand-in as the P3-0a, P3-0b and EPG-layer tests. No R2, D1, Cloudflare, connector or production call of any kind.
 
-**Result:** the Person-row unit exists and is DORMANT: nothing calls it, `build.mjs` is unchanged, `epgSync` is unchanged, no operation is registered, no marker moves and the projector stays the only canonical writer. `handoffReadiness` is unchanged: `producer_not_wired:epg_commit` stays a blocker. The unit writes only through `mutatePerson` with the receipt tail, so the Person mutation and its applied receipt are one fenced batch ([ADR 0129](../../adr/0129-person-mutation-producer-unit.md)).
+**Result:** the Person-row unit exists and is DORMANT: nothing calls it, `build.mjs` is unchanged, `epgSync` is unchanged, no operation is registered, no marker moves and the projector stays the only canonical writer. `handoffReadiness` is unchanged: `producer_not_wired:epg_commit` stays a blocker. The unit writes only through `mutatePerson` with the receipt tail, so the Person mutation and its applied receipt are one fenced batch ([ADR 0130](../../adr/0130-person-mutation-producer-unit.md)).
 
 | Check | Result |
 | --- | --- |

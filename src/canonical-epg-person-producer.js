@@ -1,4 +1,4 @@
-// ADR 0129 (additive): the plan also carries `person_mutation` units (the Person rows, planned first, order: person_mutation, person_state, film_credits) and the bounded reconcile covers that kind in the same pass. A credit unit whose Person is
+// ADR 0130 (additive): the plan also carries `person_mutation` units (the Person rows, planned first, order: person_mutation, person_state, film_credits) and the bounded reconcile covers that kind in the same pass. A credit unit whose Person is
 // still missing stays the recoverable refusal `film_person_reference` (ADR 0126, ADR 0128), not changed here.
 // AIR-374 P3a, PLANNING AND APPLY LAYER of the EPG producer for Person and credit units (ADR 0126; owner decision of 12 Nov 2026, step 3, delivered separately from the Film layer of ADR 0125). DORMANT: nothing in the Worker imports this
 // module, it is not bundled (build.mjs is unchanged), `epgSync` does not call it and no route, job or cron does. The projector stays the only canonical writer while the marker is `legacy`, `r2` or `prepared`: `applyEpgPersonUnits` and
@@ -19,7 +19,7 @@ import {PERSON_MUTATION_OPERATION,applyPersonMutation,personMutationContent,pers
 import {APPLY_UNIT as ADAPTER_APPLY,CREDITS_PER_UNIT_MAX,FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,filmCreditsContent,personStateContent,unitOperation} from './canonical-person-adapters.js';
 
 export {EPG_UNIT_HARD_CAP,EPG_UNIT_LIMIT_DEFAULT};
-// `person_mutation` (ADR 0129) is the Person-row unit: the only one that may create a Person. Its apply function joins the two adapter kinds.
+// `person_mutation` (ADR 0130) is the Person-row unit: the only one that may create a Person. Its apply function joins the two adapter kinds.
 const APPLY_UNIT={...ADAPTER_APPLY,[PERSON_MUTATION_OPERATION]:applyPersonMutation};
 // The `person_mutation` unit input of one `personRows` item.
 const rowInput=(item,at)=>({id:item.id,at,...(item.mode!==undefined?{mode:item.mode}:{}),person:{roleId:item.roleId,contractVersion:item.contractVersion,...(item.externalIds!==undefined?{externalIds:item.externalIds}:{}),...(item.aliases!==undefined?{aliases:item.aliases}:{})}});
@@ -35,7 +35,7 @@ export function planEpgPersonUnits({runId,at,persons=[],credits=[],personRows=[]
  const event=epgEvent(runId);
  if(typeof at!=='string'||!at||!Array.isArray(persons)||!Array.isArray(credits)||!Array.isArray(personRows))throw failed('film_person_invalid');
  const people=new Map(),films=new Map(),rows=new Map();
- // personRows (ADR 0129): [{id, roleId, contractVersion, externalIds?, aliases?, mode?}], the Person rows the run observed. They are planned FIRST, so a `person_state` or `film_credits` unit of the same run finds the Person the row unit created.
+ // personRows (ADR 0130): [{id, roleId, contractVersion, externalIds?, aliases?, mode?}], the Person rows the run observed. They are planned FIRST, so a `person_state` or `film_credits` unit of the same run finds the Person the row unit created.
  for(const item of personRows){
   if(!plain(item)||typeof item.id!=='string'||rows.has(item.id))throw failed('film_person_invalid');
   const input=rowInput(item,at);
@@ -143,7 +143,7 @@ export function planEpgPersonUnitsWithRefusals({runId,at,persons=[],credits=[],p
   }
   keepPersons.push(item);
  }
- // ADR 0129: a `person_mutation` row of the same Person is a different KIND (different key), so its id may repeat in `persons`; a repeat within `personRows` refuses the plan. A malformed row (`film_person_invalid`) or an oversized one
+ // ADR 0130: a `person_mutation` row of the same Person is a different KIND (different key), so its id may repeat in `persons`; a repeat within `personRows` refuses the plan. A malformed row (`film_person_invalid`) or an oversized one
  // (`film_person_bounded`, more than PERSON_ITEMS_PER_UNIT_MAX external ids plus aliases) is a per-unit refusal.
  for(const item of personRows){
   if(plain(item)&&typeof item.id==='string'&&item.id.startsWith('person:')){

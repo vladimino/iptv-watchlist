@@ -1,4 +1,4 @@
-// AIR-374 P3a `person_mutation` (ADR 0129): mutation check of the dormant Person-row unit (src/canonical-person-mutation-producer.js), the additive `presence` option of mutatePerson, its EPG Person layer integration and the operation kind, in the pattern of
+// AIR-374 P3a `person_mutation` (ADR 0130): mutation check of the dormant Person-row unit (src/canonical-person-mutation-producer.js), the additive `presence` option of mutatePerson, its EPG Person layer integration and the operation kind, in the pattern of
 // tests/canonical-epg-person-producer-mutation.mjs. Each mutant is a copy of the whole src/ tree with ONE safety rule removed or inverted in ONE file; tests/canonical-person-mutation-producer.mjs, pointed at the copy through EPG_SRC, must FAIL on it.
 // A surviving mutant is a rule no test depends on; a mutant that does not load is BROKEN. The copies live OUTSIDE the repository tree (a temporary directory, removed afterwards).
 import assert from 'node:assert/strict';

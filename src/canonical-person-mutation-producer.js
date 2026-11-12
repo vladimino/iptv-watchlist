@@ -1,4 +1,4 @@
-// AIR-374 P3a, `person_mutation` unit (ADR 0129; S5-0 of ADR 0128, guardrail G9). The producer-side receipt adapter for the PERSON ROW: identity (role id, contract version), typed external ids and aliases. DORMANT: nothing in the Worker imports this
+// AIR-374 P3a, `person_mutation` unit (ADR 0130; S5-0 of ADR 0128, guardrail G9). The producer-side receipt adapter for the PERSON ROW: identity (role id, contract version), typed external ids and aliases. DORMANT: nothing in the Worker imports this
 // module, it is not bundled (build.mjs is unchanged) and no route, job or cron calls it. The projector stays the only canonical writer while the marker is `legacy`, `r2` or `prepared`: `applyPersonMutation` reads the marker ONCE through
 // `writerRoute` and, unless it is `open`, returns `skipped` before any other statement. `held` and an unreadable marker throw (a producer defers, it never falls back to R2).
 // ONE source of truth for ownership: this module writes NOTHING itself. The only canonical write is the existing fenced writer `mutatePerson` (src/canonical-mutations.js) with the P3-0a `receiptMark` tail, so the mutation and its applied receipt are
