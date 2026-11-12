@@ -31,4 +31,4 @@ A repair that joins orphans with no watchlist boolean needs its own card, its ow
 
 ## Safe check
 
-After the separately approved deploy, confirm both GitHub Actions jobs and one read-only MCP `probe_read`. Do not call `GET /api/enrichment/view`, `GET /api/events`, `GET /api/enrichment/status` or `GET /api/enrichment/runs` as a smoke test. Do not start the projector by hand.
+After the separately approved deploy, confirm `Test and build`, `Test shard 2 of 3`, `Test shard 3 of 3` and `Deploy to Cloudflare` completed with success on the exact merge SHA, and one read-only MCP `probe_read`. Do not call `GET /api/enrichment/view`, `GET /api/events`, `GET /api/enrichment/status` or `GET /api/enrichment/runs` as a smoke test. Do not start the projector by hand.
