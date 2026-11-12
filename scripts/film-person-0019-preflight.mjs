@@ -7,8 +7,10 @@
 //   node scripts/film-person-0019-preflight.mjs identity [file]
 //   node scripts/film-person-0019-preflight.mjs preflight-sql          the SELECT statements to run BEFORE the apply
 //   node scripts/film-person-0019-preflight.mjs readback-sql           the SELECT statements to run AFTER the apply
-//   node scripts/film-person-0019-preflight.mjs verify-preflight <results.json> [--now ISO]
-//   node scripts/film-person-0019-preflight.mjs verify-readback <results.json> [--reference <exact baseline reference>]
+//   node scripts/film-person-0019-preflight.mjs verify-preflight <results.json> --reference <GO baseline reference> [--now ISO]
+//   node scripts/film-person-0019-preflight.mjs verify-readback <readback.json> --preflight <preflight.json> --reference <GO baseline reference>
+//   either verify command with --diagnostic: shape only, never a GO pass (ok is always false, diagnosticOnly true)
+// The GO-specific verification FAILS CLOSED: without the exact accepted baseline reference named in the GO (and, for the readback, the preflight results bundle) it refuses.
 // A results file is {"<statement id>": <rows array | D1 response envelope [{success,results}]>}. Exit status 1 on a refusal.
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
@@ -58,6 +60,7 @@ export function expectedFromFile(text){
 
 const NAMES=/^[a-z][a-z0-9_]*$/;
 function names(list){for(const name of list)if(!NAMES.test(name))throw new Error('unexpected object name '+name);return list.map(quote).join(', ');}
+export const COMPARED=Object.freeze(['projector_lease','projector_window','discovery_lease']);
 export const step=(id,purpose,sql,expect)=>({id,purpose,sql:assertReadOnly(sql),expect});
 
 export function preflightSteps(text=readMigration()){
@@ -96,7 +99,9 @@ export function readbackSteps(text=readMigration()){
   step('unchanged_rows','row counts that must not move','SELECT '+H1_TABLES.map(count).join(', '),'0 each (H1 has not run)'),
   step('marker','marker','SELECT mode, cutover, generation FROM film_person_authority WHERE id = 1','prepared / open / 1'),
   step('fence','fence','SELECT ok FROM film_person_cas WHERE id = 1','ok 1'),
-  step('baseline','baseline','SELECT state, reference FROM film_person_baseline WHERE id = 1','verified'),
+  step('baseline','baseline','SELECT state, reference FROM film_person_baseline WHERE id = 1','verified, the same reference as the preflight'),
+  // the same statements as the preflight (rows 8 to 10): their rows are compared with the preflight bundle, not judged on their own
+  ...preflightSteps(text).filter(item=>COMPARED.includes(item.id)),
  ];
 }
 
@@ -142,15 +147,24 @@ function commonState(results,refusals,{expectVersion,expectReference}){
   else{
    if(baseline[0].state!=='verified')refusals.push('baseline_not_verified:'+baseline[0].state);
    else if(typeof baseline[0].reference!=='string'||!REFERENCE.test(baseline[0].reference))refusals.push('baseline_reference_shape');
-   else if(expectReference&&baseline[0].reference!==expectReference)refusals.push('baseline_reference_mismatch');
+   else if(typeof expectReference==='string'&&expectReference&&baseline[0].reference!==expectReference)refusals.push('baseline_reference_mismatch');
   }
  }
 }
 const verdict=(refusals,notes=[])=>({ok:refusals.length===0,refusals,notes});
+// A shape-only diagnostic can never be mistaken for a GO pass: ok is always false.
+const diagnosticVerdict=(refusals,notes)=>({ok:false,diagnosticOnly:true,shapeOk:refusals.length===0,refusals,notes:[...notes,'diagnostic only: no pinned reference, never a GO pass']});
+// The GO names one exact accepted reference: without it the verification refuses.
+function pinRefusals(expectReference){
+ if(typeof expectReference!=='string'||expectReference==='')return ['expected_reference_missing'];
+ if(!REFERENCE.test(expectReference))return ['expected_reference_invalid'];
+ return [];
+}
 
 // Runbook section 4. ok is never a permission.
-export function verifyPreflight(results,{text=readMigration(),now=new Date().toISOString(),expectReference=null}={}){
+export function verifyPreflight(results,{text=readMigration(),now=new Date().toISOString(),expectReference=null,diagnostic=false}={}){
  const refusals=[],notes=[];
+ if(!diagnostic)refusals.push(...pinRefusals(expectReference));
  commonState(results,refusals,{expectVersion:FROM_VERSION,expectReference});
  const prereq=rowsOf(results,'prerequisites',refusals);
  if(prereq){
@@ -186,12 +200,13 @@ export function verifyPreflight(results,{text=readMigration(),now=new Date().toI
   }
  }
  notes.push('manual rows still to record: 1, 11, 12, 13');
- return verdict(refusals,notes);
+ return diagnostic?diagnosticVerdict(refusals,notes):verdict(refusals,notes);
 }
 
 // Runbook section 6.
-export function verifyReadback(results,{text=readMigration(),expectReference=null,expectedCounts={}}={}){
+export function verifyReadback(results,{text=readMigration(),expectReference=null,expectedCounts={},preflight=null,diagnostic=false}={}){
  const refusals=[];
+ if(!diagnostic)refusals.push(...pinRefusals(expectReference));
  commonState(results,refusals,{expectVersion:TO_VERSION,expectReference});
  const rec=expectedFromFile(text);
  const objects=rowsOf(results,'objects',refusals);
@@ -217,7 +232,32 @@ export function verifyReadback(results,{text=readMigration(),expectReference=nul
    else if(n!==want)refusals.push('count_not_expected:'+table+':'+n);
   }
  }
- return verdict(refusals);
+ for(const id of COMPARED)rowsOf(results,id,refusals);
+ compareWithPreflight(results,preflight,{expectReference,diagnostic,refusals});
+ return diagnostic?diagnosticVerdict(refusals,[]):verdict(refusals,['not judged here: handoffReadiness (separate read); manual rows of the preflight']);
+}
+
+// The "unchanged" facts of runbook section 6 are compared with what the preflight observed: the readback bundle against the preflight bundle.
+const canon=value=>JSON.stringify(value,(key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.keys(item).sort().map(name=>[name,item[name]])):item);
+function compareWithPreflight(results,preflight,{expectReference,diagnostic,refusals}){
+ if(preflight===null||preflight===undefined||typeof preflight!=='object'||Array.isArray(preflight)){if(!diagnostic)refusals.push('preflight_bundle_missing');return;}
+ const own=[],changed=[];
+ const schema=rowsOf(preflight,'schema',own);
+ if(schema&&!(schema.length===1&&int(schema[0].version)===FROM_VERSION))own.push('preflight_not_version_18');
+ const baseline=rowsOf(preflight,'baseline',own);
+ const preRef=baseline&&baseline.length===1?baseline[0].reference:null;
+ if(baseline&&!(typeof preRef==='string'&&REFERENCE.test(preRef)))own.push('baseline_reference_shape');
+ else if(preRef){
+  const post=rowsOf(results,'baseline',[]);
+  if(post&&post.length===1&&post[0].reference!==preRef)changed.push('baseline_reference_changed');
+  if(!diagnostic&&typeof expectReference==='string'&&expectReference&&preRef!==expectReference)changed.push('preflight_reference_mismatch');
+ }
+ // marker and fence are fixed values judged in both phases (prepared/open/1, ok 1), so they need no comparison; the lease and window rows are free-form and are compared
+ for(const id of COMPARED){
+  const a=rowsOf(preflight,id,own),b=rowsOf(results,id,[]);
+  if(a&&b&&canon(a)!==canon(b))changed.push(id+'_changed');
+ }
+ refusals.push(...own.map(item=>'preflight:'+item),...changed);
 }
 
 // ---------- CLI ----------
@@ -231,9 +271,9 @@ function main(argv){
   out=identityOf(text);
  }else if(command==='preflight-sql')out={steps:preflightSteps(),manual:MANUAL_STEPS};
  else if(command==='readback-sql')out={steps:readbackSteps()};
- else if(command==='verify-preflight'&&arg)out=verifyPreflight(read(arg),{now:flag('--now')||undefined,expectReference:flag('--reference')});
- else if(command==='verify-readback'&&arg)out=verifyReadback(read(arg),{expectReference:flag('--reference')});
- else{console.error('usage: identity [file] | preflight-sql | readback-sql | verify-preflight <results.json> [--now ISO] [--reference R] | verify-readback <results.json> [--reference R]');return 2;}
+ else if(command==='verify-preflight'&&arg)out=verifyPreflight(read(arg),{now:flag('--now')||undefined,expectReference:flag('--reference'),diagnostic:argv.includes('--diagnostic')});
+ else if(command==='verify-readback'&&arg){const pre=flag('--preflight');out=verifyReadback(read(arg),{expectReference:flag('--reference'),preflight:pre?read(pre):null,diagnostic:argv.includes('--diagnostic')});}
+ else{console.error('usage: identity [file] | preflight-sql | readback-sql | verify-preflight <results.json> --reference R [--now ISO] | verify-readback <readback.json> --preflight <preflight.json> --reference R (either with --diagnostic)');return 2;}
  console.log(JSON.stringify(out,null,1));
  return out.ok===false?1:0;
 }
