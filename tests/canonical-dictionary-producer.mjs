@@ -14,7 +14,9 @@ const SRC=process.env.DICT_SRC?path.resolve(process.env.DICT_SRC):path.resolve('
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const {readAuthority}=await load('film-person-authority.js');
 const {PRODUCER_WIRING,PRODUCER_OPERATIONS}=await load('canonical-producers.js');
-const {producerRequestId,filmFactsDigest,digestOf}=await load('canonical-producer-adapters.js');
+const {producerRequestId,filmFactsDigest,digestOf,applyFilmFacts}=await load('canonical-producer-adapters.js');
+const {writeFilmFacts}=await load('canonical-film-writers.js');
+const {mutateFilm}=await load('canonical-mutations.js');
 const D=await load('canonical-dictionary-producer.js');
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-dict-producer-'));
@@ -144,7 +146,7 @@ for(const stage of ['r2','prepared']){
  assert.deepEqual(fill.input.film,{contractVersion:3,canonicalIdentity:'tmdb:1',originalTitle:'Orig 1',source:'dictionary'},'the stored contract version is carried, never a constant');
  assert.equal(fill.input.updatedAt,T,'the Film row changes: the clock moves');assert.equal(fill.input.id,ID(1));assert.equal(fill.input.at,T);
  assert.deepEqual(fill.input.localization.state,{dimension:'localization',status:'reviewed',source:'dictionary',sourceVersion:'verified',provenance:{authority:'dictionary',sources:['https://example.test/1']},value:'Рус 1',updatedAt:T,attempts:0,nextAction:'keep_reviewed'});
- assert.equal(Object.keys(fill.input).sort().join(),'at,film,id,localization,updatedAt','membership, metadata and sync are never part of a dictionary unit');
+ assert.equal(Object.keys(fill.input).sort().join(),'at,film,id,localization,requireExisting,updatedAt','membership, metadata and sync are never part of a dictionary unit');
  // identity not provable: no trusted id of that Film
  let r=build(snap({trustedTmdb:[]}));assert.equal(r.outcome,'proceed');assert.equal(r.input.film.canonicalIdentity,undefined);assert.deepEqual(reasons(r),['canonicalIdentity:needs_trusted_tmdb_id:kept']);
  assert.equal(r.input.film.originalTitle,'Orig 1');
@@ -155,6 +157,11 @@ for(const stage of ['r2','prepared']){
  const withTitle=(title,source,identity={})=>snap({film:film({original_title:title,canonical_identity:'tmdb:1'}),dimensions:{identity:{status:'provisional',authority:null,provenance_json:source?ts(source):null,...identity}}});
  r=build(withTitle('Orig 1','tmdb'));assert.equal(r.input.film.originalTitle,'Orig 1');assert.equal(r.input.updatedAt,U,'a restated title leaves the Film row (and its clock) alone');assert.deepEqual(reasons(r),[]);
  assert.equal(build(snap({film:film({original_title:'Orig 1'}),dimensions:{}})).input.film.originalTitle,undefined,'the same title with no identity row: nothing to restate');
+ // An EQUAL title is adopted only from an explicitly lower-ranked source: an unranked, owner, reviewed or already-dictionary row is left alone (equality proves no ownership).
+ for(const [label,title,source,identity] of [['unranked','Orig 1',null,{}],['unranked owner authority','Orig 1',null,{authority:'owner'}],['owner source','Orig 1','owner',{}],['reviewed row','Orig 1','tmdb',{status:'reviewed'}],['owner authority with a source','Orig 1','tmdb',{authority:'owner'}],['already dictionary','Orig 1','dictionary',{}]]){
+  r=build(withTitle(title,source,identity));assert.equal(r.input.film.originalTitle,undefined,label+': not restated');assert.equal(r.input.film.source,undefined,label);assert.deepEqual(reasons(r),[],label+': equality is no conflict');
+ }
+ for(const source of ['tmdb','letterboxd','watchlist','epg','discovery','mystery']){r=build(withTitle('Orig 1',source));assert.deepEqual([r.input.film.originalTitle,r.input.film.source,r.input.updatedAt],['Orig 1','dictionary',U],source+': an explicitly lower-ranked equal title is upgraded');}
  r=build(snap({dimensions:{}}));assert.deepEqual(reasons(r),['originalTitle:no_identity_row:kept']);assert.equal(r.input.film.originalTitle,undefined);assert.equal(r.input.film.canonicalIdentity,'tmdb:1');
  r=build(withTitle('Old','tmdb'));assert.deepEqual(reasons(r),['originalTitle:replaced_lower:replaced']);assert.equal(r.conflicts[0].from,'tmdb');assert.equal(r.input.film.originalTitle,'Orig 1');
  for(const source of ['letterboxd','watchlist','epg','discovery','dictionary']){r=build(withTitle('Old',source));assert.deepEqual(reasons(r),['originalTitle:replaced_lower:replaced'],source);}
@@ -286,7 +293,7 @@ for(const stage of ['r2','prepared']){
  assert.notEqual(A1.event,A2.event);
  // The same request after another actor moved the Film: counted `already`, not rewritten.
  const file2=database('open');seed(file2,1);
- const P=await plan([entry(1,{tmdbId:null})]);
+ const P=await plan([entry(1,{tmdbId:null,original:null})]);
  assert.equal((await D.applyDictionaryUnits(envOf(file2),{plan:P,now:()=>iso(0)})).counts.applied,1);
  assert.equal(sqlite(file2,"UPDATE film_dimension SET value='Другое' WHERE film_id='"+ID(1)+"' AND dimension='localization'").status,0);
  const replayed=envOf(file2),again=await D.applyDictionaryUnits(replayed,{plan:P,now:()=>iso(0)});
@@ -409,6 +416,110 @@ for(const stage of ['r2','prepared']){
  const replan=D.dictionaryReplan(A,envOf(file));
  const own=async k=>({target:{kind:'film',id:ID(k)},contentDigest:'a'.repeat(64),requestId:'x'});
  assert.equal(await replan(await own(1)),null,'a receipt that is not this snapshot\'s');assert.equal(await replan({}),null);assert.equal(await D.dictionaryReplan(null,envOf(file))({target:{id:ID(1)}}),null);assert.equal(await D.dictionaryReplan(A)({target:{id:ID(1)}}),null);
+}
+
+// 10b. Review findings of PR #560. (1) A Film deleted AFTER the builder's and the writer's reads and BEFORE the writer batch is never recreated: `requireExisting` is asserted inside the fenced batch (the writer option, byte-identical
+// without it). (2) An equal unranked or owner title is not claimed by equality, and a later different dictionary title keeps it. (3) A transient D1 failure in the dictionary re-plan never abandons a due receipt. (4) The same
+// snapshot version with another digest is another event, never a replay of the old request ids.
+{
+ const file=database('open');
+ seed(file,1);
+ const p=await plan([entry(1)]);
+ const vanishing=envOf(file,{onBatch:async statements=>{if(statements.some(item=>/^INSERT INTO film \(id,contract_version/.test(item.text))){for(const t of ['film_dimension','film_external_id'])assert.equal(sqlite(file,'DELETE FROM '+t+" WHERE film_id='"+ID(1)+"'").status,0);assert.equal(sqlite(file,"DELETE FROM film WHERE id='"+ID(1)+"'").status,0);}}});
+ const out=await D.applyDictionaryUnits(vanishing,{plan:p,now:()=>T});
+ assert.deepEqual([out.counts.failed,out.counts.applied,out.failures],[1,0,[{id:ID(1),code:'film_person_precondition'}]]);
+ assert.equal(filmCount(file,ID(1)),0,'the deleted Film is not recreated');assert.equal(one(file,'SELECT COUNT(*) FROM film_dimension'),0);assert.equal(revision(file,ID(1)),0);
+ assert.notEqual(receipts(file)[0].state,'applied');assert.ok(receipts(file)[0].applied_revision==null);
+ await D.reconcileDictionary(envOf(file),{plan:p,now:()=>iso(3600000)});
+ assert.equal(filmCount(file,ID(1)),0,'nor by a later reconcile');
+ // the writer option: validated everywhere, pre-checked before any batch, unchanged without it
+ const f2=database('open');
+ const base={id:ID(9),requestId:'r1',expectedRevision:0,at:T,film:{contractVersion:1,originalTitle:'N',source:'tmdb'}};
+ const e2=envOf(f2);
+ await assert.rejects(()=>writeFilmFacts(e2,{...base,requireExisting:true}),code('film_person_precondition'));
+ assert.equal(e2.DB.calls.batches,0,'refused by the pre-check, before any batch');assert.equal(filmCount(f2,ID(9)),0);assert.equal(revision(f2,ID(9)),0);
+ for(const bad of ['yes',1,false,null])await assert.rejects(()=>writeFilmFacts(envOf(f2),{...base,requireExisting:bad}),code('film_person_invalid'),String(bad));
+ await assert.rejects(()=>applyFilmFacts(envOf(f2),{origin:'dictionary',event:'e',input:{...base,requireExisting:true,id:ID(9)}}),code('film_person_precondition'));
+ assert.equal(receipts(f2).length,0,'the adapter refuses before any receipt exists');
+ await assert.rejects(()=>applyFilmFacts(envOf(f2),{origin:'dictionary',event:'e',input:{...base,requireExisting:'yes'}}),code('film_person_invalid'));
+ await writeFilmFacts(envOf(f2),base);
+ assert.equal(filmCount(f2,ID(9)),1,'without the option the writer still creates the Film');
+ const f3=database('open');seed(f3,9);
+ await writeFilmFacts(envOf(f3),{...base,requireExisting:true});
+ assert.equal(revision(f3,ID(9)),1,'with the option an existing Film is written');
+ // the same race at the writer itself
+ const f4=database('open');seed(f4,9);
+ const vanish4=envOf(f4,{onBatch:async statements=>{if(statements.some(item=>/^INSERT INTO film \(id,contract_version/.test(item.text))){for(const t of ['film_dimension','film_external_id'])sqlite(f4,'DELETE FROM '+t+" WHERE film_id='"+ID(9)+"'");sqlite(f4,"DELETE FROM film WHERE id='"+ID(9)+"'");}}});
+ await assert.rejects(()=>writeFilmFacts(vanish4,{...base,requireExisting:true,film:{contractVersion:1,originalTitle:'N',source:'tmdb'}}),code('film_person_precondition'));
+ assert.equal(filmCount(f4,ID(9)),0);
+ // without the option the same race recreates (the EPG Film producer relies on the create path)
+ const f5=database('open');seed(f5,9);
+ const vanish5=envOf(f5,{onBatch:async statements=>{if(statements.some(item=>/^INSERT INTO film \(id,contract_version/.test(item.text))){for(const t of ['film_dimension','film_external_id'])sqlite(f5,'DELETE FROM '+t+" WHERE film_id='"+ID(9)+"'");sqlite(f5,"DELETE FROM film WHERE id='"+ID(9)+"'");}}});
+ await writeFilmFacts(vanish5,{...base,film:{contractVersion:1,originalTitle:'N',source:'tmdb'}});
+ assert.equal(filmCount(f5,ID(9)),1);
+}
+{
+ // (2) equal titles: nothing written, no receipt, provenance unchanged; a later different dictionary title is still preserved.
+ for(const [label,k,opts,wantSource] of [['unranked',1,{},null],['unranked owner authority',2,{authority:'owner'},null],['owner source',3,{source:'owner'},'owner'],['already dictionary',4,{source:'dictionary'},'dictionary']]){
+  const file=database('open');
+  seed(file,k,{title:'Orig '+k,identity:'tmdb:'+k,...opts});
+  const before=dump(file);
+  const env=envOf(file);
+  const out=await D.applyDictionaryUnits(env,{plan:await plan([entry(k,{title:null})]),now:()=>T});
+  assert.deepEqual([out.counts.kept,out.counts.applied,env.DB.calls.batches],[1,0,0],label);
+  assert.equal(dump(file),before,label+': nothing written');assert.equal(receipts(file).length,0,label+': no receipt');assert.equal(titleSource(file,k),wantSource,label);
+  const later=await D.applyDictionaryUnits(envOf(file),{plan:await plan([entry(k,{title:null,original:'Changed'})],{version:'v2'}),now:()=>T});
+  if(wantSource==='dictionary'){assert.deepEqual([filmRow(file,k).original_title,titleSource(file,k)],['Changed','dictionary'],'a title the dictionary already owns follows the dictionary');continue;}
+  assert.equal(filmRow(file,k).original_title,'Orig '+k,label+': a later different title is preserved');assert.equal(titleSource(file,k),wantSource);assert.equal(receipts(file).length,0);
+  assert.deepEqual(later.conflicts.map(item=>item.reason),[wantSource==='owner'||opts.authority==='owner'?'owner_kept':'unranked_kept']);
+ }
+ // an explicitly lower-ranked equal title is upgraded (provenance only; the Film row keeps its clock)
+ const file=database('open');
+ seed(file,1,{title:'Orig 1',identity:'tmdb:1',source:'tmdb'});
+ const out=await D.applyDictionaryUnits(envOf(file),{plan:await plan([entry(1,{title:null})]),now:()=>T});
+ assert.deepEqual([out.counts.applied,titleSource(file,1),filmRow(file,1).updated_at],[1,'dictionary',U]);
+}
+{
+ // (3) a transient D1 read failure in the re-plan or the re-validation never abandons a due receipt; a later pass settles it.
+ const reads=/SELECT id,contract_version,canonical_identity,original_title,updated_at FROM film WHERE id=/;
+ for(const failOn of [1,2,3]){
+  const file=database('open');
+  seed(file,1);
+  const p=await plan([entry(1,{title:null})]);
+  let step=0;
+  const racing=envOf(file,{onBatch:async()=>{step++;if(step===2)await mutateFilm(envOf(file),{id:ID(1),expectedRevision:0,at:T,film:{contractVersion:1}});}});
+  await D.applyDictionaryUnits(racing,{plan:p,now:()=>T});
+  assert.equal(receipts(file)[0].state,'failed','the writer lost the revision race');
+  let seen=0;
+  const flaky=envOf(file,{onQuery:async text=>{if(reads.test(text)&&++seen===failOn)throw new Error('D1_ERROR: network connection lost');}});
+  const bad=await D.reconcileDictionary(flaky,{plan:p,now:()=>iso(61000)});
+  assert.equal(seen>=failOn,true,'the injected failure was reached');
+  assert.equal(bad.abandoned.length,0,failOn+': never abandoned: '+JSON.stringify(bad));
+  assert.notEqual(receipts(file)[0].state,'abandoned');assert.equal(receipts(file)[0].attempts,1,'the receipt is untouched');
+  const good=await D.reconcileDictionary(envOf(file),{plan:p,now:()=>iso(121000)});
+  assert.equal(good.considered,1);
+  assert.equal(receipts(file)[0].state,'applied',failOn+': a later pass settles it: '+JSON.stringify(good));
+  assert.equal(titleSource(file,1),'dictionary');
+ }
+ // the shared spec: a read failure propagates out of the re-plan, a content refusal or any other re-plan error is still 'no re-plan'
+ const {filmFactsOperation}=await load('canonical-producer-adapters.js');
+ const file=database('open');seed(file,1);
+ const receipt={requestId:'x',contentDigest:'0'.repeat(64),target:{kind:'film',id:ID(1)},operation:'film_facts'};
+ const failing=code=>filmFactsOperation({replan:async()=>{throw Object.assign(new Error('x'),{code});}});
+ for(const c of ['film_person_unavailable','film_person_held','film_person_not_open'])await assert.rejects(()=>failing(c).revalidate(envOf(file),receipt),code2=>code2.code===c);
+ for(const c of ['film_person_invalid','film_person_redirect','something_else',undefined])assert.equal(await failing(c).revalidate(envOf(file),receipt),'stale',String(c));
+}
+{
+ // (4) the same version with another digest is another event: distinct request ids, never the old receipt replayed.
+ const file=database('open');seed(file,1);
+ const A=await plan([entry(1,{title:'Один'})],{version:'v1'}),B=await plan([entry(1,{title:'Два'})],{version:'v1'});
+ assert.equal(A.snapshot.version,B.snapshot.version);assert.notEqual(A.snapshot.digest,B.snapshot.digest);assert.notEqual(A.event,B.event);
+ await D.applyDictionaryUnits(envOf(file),{plan:A,now:()=>T});await D.applyDictionaryUnits(envOf(file),{plan:B,now:()=>T});
+ const list=receipts(file);
+ assert.equal(list.length,2);assert.equal(new Set(list.map(item=>item.request_id)).size,2,'two requests, not a replay');assert.equal(locRow(file,1).value,'Два');
+ const first=rows(file,"SELECT request_id,content_digest FROM canonical_write_receipt ORDER BY created_at")[0];
+ const receipt={requestId:first.request_id,contentDigest:first.content_digest,target:{kind:'film',id:ID(1)}};
+ assert.equal(await D.dictionaryReplan(B,envOf(file))(receipt),null,'the other digest never re-plans the first receipt');
 }
 
 // 11. Static: dormant. Nothing in src imports it, build.mjs and the Worker do not name it, it imports exactly the adapter (with its digest and Film snapshot) and the authority helpers, names no network, timer, cron or R2 API and holds

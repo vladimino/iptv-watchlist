@@ -103,7 +103,8 @@ export function buildDictionaryInput(snapshot,unit,{at}={}){
   const storedSource=titleSourceOf(identity);
   const strong=!!identity&&(identity.status==='reviewed'||identity.authority==='owner');
   const send=()=>{film.originalTitle=entry.original;film.source=DICTIONARY_SOURCE;};
-  if(storedTitle===entry.original){if(identity)send();}
+  // An EQUAL title is adopted only where its stored source is explicitly lower-ranked (provenance upgrade). An owner, reviewed, unranked (no titleSource) or already-dictionary row is left alone: equality is no proof of who owns the value.
+  if(storedTitle===entry.original){if(identity&&!strong&&storedSource!==null&&storedSource!=='owner'&&storedSource!==DICTIONARY_SOURCE)send();}
   else if(!identity)conflicts.push({field:'originalTitle',reason:'no_identity_row',kind:'kept'});
   else if(storedTitle===null){send();filmChanges=true;}
   else if(strong||storedSource==='owner')conflicts.push({field:'originalTitle',reason:identity.authority==='owner'||storedSource==='owner'?'owner_kept':'reviewed_kept',kind:'kept'});
@@ -111,7 +112,8 @@ export function buildDictionaryInput(snapshot,unit,{at}={}){
   else{send();filmChanges=true;conflicts.push({field:'originalTitle',reason:'replaced_lower',kind:'replaced',from:storedSource});}
  }
  // (3) the reviewed Russian localization. An owner row is kept; a reviewed or automatic row with another value is replaced and named.
- const input={id:unit.id,at,updatedAt:filmChanges?at:(stored.updated_at||at),film};
+ // `requireExisting`: the writer asserts the Film inside its fenced batch, so a Film deleted after this read is never recreated (ADR 0127).
+ const input={id:unit.id,at,updatedAt:filmChanges?at:(stored.updated_at||at),film,requireExisting:true};
  const localization=snapshot.dimensions?.localization||null;
  if(entry.title){
   if(localization&&localization.authority==='owner')conflicts.push({field:'localization',reason:'owner_kept',kind:'kept'});

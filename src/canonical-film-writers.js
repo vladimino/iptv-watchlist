@@ -133,6 +133,8 @@ export function planFilmFacts(snapshot,input){
  if(!Number.isInteger(filmIn.contractVersion))throw failed('film_person_invalid');
  if(input.localization!==undefined&&(!plain(input.localization)||(input.localization.state!==undefined&&input.localization.sources!==undefined)))throw failed('film_person_invalid');
  if(snapshot.redirect)throw failed('film_person_redirect');
+ // `requireExisting` (AIR-374 P3a, ADR 0127) is an opt-in precondition of the WRITER (see writeFilmFacts); here it is only validated, so every entry point refuses a non-true value the same way.
+ if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
  const updatedAt=input.updatedAt??at;
  const statements=[],changes=[],skipped=[];
  const stored=snapshot.film;
@@ -256,10 +258,14 @@ export async function writeFilmFacts(env,input){
  const gate=assertWritable(await readAuthority(env));
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
+ // `requireExisting: true` (AIR-374 P3a, ADR 0127): a producer that must NEVER create a Film. Checked here against the read AND again inside the fenced batch below, so a Film deleted after this read fails the whole batch (receipt tail
+ // included) with `film_person_precondition`. Without the option nothing changes: the upsert creates the Film, as the EPG Film producer relies on.
+ if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');
  if(plan.noop)return {id,revision:snapshot.revision,written:false,reason:'unchanged',skipped:plan.skipped};
  const entities=[{kind:'film',id,expected}];
  const statements=fenced.head(gate,entities);
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
+ if(input.requireExisting===true)statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
  statements.push(...plan.statements);
  statements.push([fenced.BUMP,['film',id,at]]);
  await fenced.commit(env,gate,statements,entities,tail);

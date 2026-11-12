@@ -35,6 +35,9 @@ const DIGEST=/^[0-9a-f]{64}$/;
 // The facts of one Film that make up its content. The id (the target), the request id, the revision and the clocks are not content.
 const CONTENT_KEYS=Object.freeze(['film','evidence','dimensions','localization','metadata','sync','watchlist']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
+// The typed failures of READING the store (the database is missing, held or not open, or a D1 transport or SQL exception wrapped by the snapshot read). A re-plan that fails like this is NOT 'cannot reconstruct': it propagates, so the
+// receipts module records an unsettled or waiting observation and leaves the receipt due. Anything else a re-plan throws (a typed content refusal, a producer that cannot reconstruct its source) stays 'no re-plan' (null, bounded retry).
+export const READ_FAILURES=new Set(['film_person_unavailable','film_person_held','film_person_not_open']);
 
 // Drops the write-time clocks (`at`, `updatedAt`) at every depth, so the same facts observed twice digest the same. Observation times that are part of the source (`observedAt`, `metadataAt`, ...) stay: they are content.
 function withoutClocks(value){
@@ -69,6 +72,8 @@ export async function producerRequestId({origin,operation=FILM_FACTS_OPERATION,e
 export async function prePlanFilmFacts(env,{input,requestId}){
  const snapshot=await readFilmSnapshot(env,input?.id);
  const plan=planFilmFacts(snapshot,{...input,requestId});
+ // A producer that never creates a Film (`requireExisting:true`, ADR 0127) refuses a missing one before any receipt exists; the writer asserts it again inside its batch.
+ if(input.requireExisting===true&&!snapshot.film)throw failed('film_person_precondition');
  return {noop:plan.noop,expectedRevision:snapshot.revision,changes:plan.changes,skipped:plan.skipped,redirect:snapshot.redirect};
 }
 
@@ -80,7 +85,7 @@ export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={})
  if(typeof replan!=='function')throw failed('film_person_invalid');
  const planned=async receipt=>{
   let input=null;
-  try{input=await replan(receipt);}catch{input=null;}
+  try{input=await replan(receipt);}catch(error){if(READ_FAILURES.has(error?.code))throw error;input=null;}
   if(!input)return null;
   return {input,ok:matches(input,receipt,await filmFactsDigest(input))};
  };
