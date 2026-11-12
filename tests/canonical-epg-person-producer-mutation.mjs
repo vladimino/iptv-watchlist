@@ -79,6 +79,15 @@ const MUTANTS=[
  ["the pre-plan never finds a no-op", "canonical-person-state.js", "noop:await personStateSatisfied(db,id,plan,stored),revision}", "noop:false,revision}"],
  ["the pre-plan always finds a no-op", "canonical-person-state.js", "noop:await personStateSatisfied(db,id,plan,stored),revision}", "noop:true,revision}"],
  ["the pre-plan reports revision 0", "canonical-person-state.js", "const revision=await currentRevision(db,'person',id);\n if(!(await", "const revision=0;\n if(!(await"],
+ ["the writer does not assert the Film exists", "canonical-mutations.js", "if(input.requireExisting===true)statements.push(", "if(false)statements.push("],
+ ["the writer always asserts the Film exists", "canonical-mutations.js", "if(input.requireExisting===true)statements.push(", "if(true)statements.push("],
+ ["the writer option accepts any value", "canonical-mutations.js", "if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');", ""],
+ ["the credit write does not require the Film", "canonical-person-adapters.js", "credits:{upsert:snapshot.missing},requireExisting:true,receiptMark", "credits:{upsert:snapshot.missing},receiptMark"],
+ ["plans of two runs are accepted", "canonical-epg-person-producer.js", "if(personEvent!==null&&filmEvent!==null&&personEvent!==filmEvent)throw failed('film_person_run_mismatch');", ""],
+ ["plan metadata is not validated", "canonical-epg-person-producer.js", "if(!plain(value)||typeof value.event!=='string'||!value.event)throw failed('film_person_invalid');", ""],
+ ["every planner error is a missing plan", "canonical-person-adapters.js", "catch(error){if(CONTENT_REFUSALS.has(error?.code))return null;throw error;}", "catch(error){return null;}"],
+ ["no planner error is a missing plan", "canonical-person-adapters.js", "catch(error){if(CONTENT_REFUSALS.has(error?.code))return null;throw error;}", "catch(error){throw error;}"],
+ ["a redirect is not a content refusal", "canonical-person-adapters.js", "'film_person_redirect','film_person_reference'", "'film_person_reference'"],
  ["the film_credits kind is not registered", "canonical-receipts.js", "'film_facts','film_credits',", "'film_facts',"],
  ["the event helper is another namespace", "canonical-epg-producer.js", "export const epgEvent=eventOf;", "export const epgEvent=runId=>eventOf(runId)+'x';"]
 ];

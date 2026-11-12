@@ -8,7 +8,7 @@
 //   - `applyEpgPersonUnits`  bounded, resumable by cursor, the same ceiling and semantics as `applyEpgUnits`: at most `limit` units per call (hard ceiling EPG_UNIT_HARD_CAP, provisional until the E6 measurement). A refusal of one unit never blocks
 //                            the others; `film_person_held` / `film_person_unavailable` stop the pass and keep the cursor on that unit. An absent Person or Film is skipped and counted `absent`: it is never created.
 //   - `epgPersonReplan`      the producer's re-plan for the receipts replay: the unit of the run for a receipt's kind and target, or null; the receipt's request id is recomputed from THIS run's event, the kind, the target and the digest.
-//   - `reconcileEpgRun`      E2: ONE bounded inline reconcile of the origin `epg` for ALL its kinds (`film_facts` of ADR 0125, `person_state`, `film_credits`), so no kind starves another's due receipts. No cron, no tick, no global pass.
+//   - `reconcileEpgRun`      E2: ONE bounded inline reconcile of the origin `epg` for ALL its kinds (`film_facts` of ADR 0125, `person_state`, `film_credits`), in ONE bounded pass: the adapter's inline limit is shared by all kinds, the earliest due receipts first, with NO per-kind fairness (a backlog of one kind can use the whole pass; it is drained across passes). No cron, no tick, no global pass.
 // Stored: operation kind, origin, target, digests, revisions, state; no payload, title, name or personal data.
 import {failed} from './film-person-authority.js';
 import {EPG_ORIGIN,EPG_UNIT_HARD_CAP,EPG_UNIT_LIMIT_DEFAULT,epgEvent,epgReplan,epgUnitCap} from './canonical-epg-producer.js';
@@ -92,6 +92,15 @@ export async function applyEpgPersonUnits(env,{plan,cursor=0,limit=EPG_UNIT_LIMI
 // E2: the origin's own receipts only, ALL its kinds in one bounded pass (the adapter's inline limit). `plan` supplies the re-plan of THIS run's Person and credit units, `filmPlan` (optional) that of the Film units of ADR 0125; a receipt of
 // an earlier run, or of a kind with no plan, is abandoned `producer_source_changed`, backs off or waits: never replayed.
 export async function reconcileEpgRun(env,{plan,filmPlan,limit,now,policy}={}){
+ // ONE run: the Person/credit plan and the Film plan, when both are supplied, must carry the same source event. Malformed plan metadata or two different runs are refused BEFORE any operation is built or any receipt is read, so an old run's
+ // `film_facts` receipt can never be replayed beside another run's Person units.
+ const eventOfPlan=value=>{
+  if(value===undefined||value===null)return null;
+  if(!plain(value)||typeof value.event!=='string'||!value.event)throw failed('film_person_invalid');
+  return value.event;
+ };
+ const personEvent=eventOfPlan(plan),filmEvent=eventOfPlan(filmPlan);
+ if(personEvent!==null&&filmEvent!==null&&personEvent!==filmEvent)throw failed('film_person_run_mismatch');
  const clock=now?{now}:{};
  const personReplan=epgPersonReplan(plan);
  const operations=new Map([

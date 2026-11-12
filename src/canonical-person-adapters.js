@@ -21,9 +21,11 @@ import {SOURCE_CHANGED,producerRequestId} from './canonical-producer-adapters.js
 
 export const PERSON_STATE_OPERATION='person_state';
 export const FILM_CREDITS_OPERATION='film_credits';
-// mutateFilm is capped at 60 statements and a credit upsert costs one each, beside five fixed ones: a unit carries at most this many credits.
+// mutateFilm is capped at 60 statements and a credit upsert costs one each, beside six fixed ones (fence, revision, redirect, existence, Film upsert, bump): a unit carries at most this many credits.
 export const CREDITS_PER_UNIT_MAX=50;
 const ROLES=new Set(['director','actor']);
+// The typed refusals the planners throw about the CONTENT or the state of the target (not about reading it): a malformed unit, a redirected Film, a missing credit Person, an oversized list.
+export const CONTENT_REFUSALS=new Set(['film_person_invalid','film_person_redirect','film_person_reference','film_person_bounded']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 
 // ---- content (what the digest binds) ----
@@ -85,12 +87,13 @@ const KINDS={
  [FILM_CREDITS_OPERATION]:{
   entity:'film',
   plan:planCredits,
-  // The credits still missing NOW, from a fresh read. Nothing missing means nothing to write: no batch, so no receipt mark (the receipt then ends `unknown`, E5). A Film that vanished is refused, never created.
+  // The credits still missing NOW, from a fresh read. Nothing missing means nothing to write: no batch, so no receipt mark (the receipt then ends `unknown`, E5). A Film that vanished is refused, never created: before the batch by this read, and
+  // INSIDE the batch (the writer's `requireExisting` assertion) for a Film that disappears after this read, so the whole batch, receipt included, rolls back instead of the upsert recreating it.
   write:async(env,input,requestId,ctx,clock)=>{
    const snapshot=await planCredits(env,input);
    if(snapshot.absent)throw failed('film_person_reference');
    if(snapshot.noop)return {id:input.id,revision:snapshot.revision,already:true};
-   return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,film:{contractVersion:snapshot.contractVersion},credits:{upsert:snapshot.missing},receiptMark:mark(ctx,clock)});
+   return mutateFilm(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,film:{contractVersion:snapshot.contractVersion},credits:{upsert:snapshot.missing},requireExisting:true,receiptMark:mark(ctx,clock)});
   },
  },
 };
@@ -107,7 +110,9 @@ export function unitOperation(operation,{replan,now=()=>new Date().toISOString()
   try{ok=(await unitDigest(operation,input))===receipt.contentDigest;}catch{ok=false;}
   return {input,ok};
  };
- const planOf=async(env,input)=>{try{return await spec.plan(env,input);}catch{return null;}};
+ // Only a genuine content or precondition refusal of the planner (CONTENT_REFUSALS) means 'no plan'. A read failure (film_person_unavailable, a D1 transport or SQL exception) PROPAGATES: the reconciler then records an unsettled
+ // observation or a waiting readback and leaves the receipt due, instead of abandoning it as stale on a transient error.
+ const planOf=async(env,input)=>{try{return await spec.plan(env,input);}catch(error){if(CONTENT_REFUSALS.has(error?.code))return null;throw error;}};
  return defineOperation({
   operation,
   atomic:true,

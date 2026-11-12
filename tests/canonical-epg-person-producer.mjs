@@ -446,7 +446,7 @@ for(const kind of ['person','credits']){
  assert.equal(receipts(file)[0].state,'abandoned');
  await assert.rejects(()=>unitDigest(FILM_CREDITS_OPERATION,{id:FID(1),credits:Array.from({length:CREDITS_PER_UNIT_MAX+1},(_,i)=>({personId:PID(i),role:'actor'}))}),code('film_person_invalid'));
 }
-// 9e. The reconcile of the origin also settles `film_facts` receipts of the Film layer (ADR 0125) from the Film plan, so no kind starves another's due receipts.
+// 9e. The reconcile of the origin also settles `film_facts` receipts of the Film layer (ADR 0125) from the Film plan, and one pass covers every kind.
 {
  const file=database('open');
  const films=[{id:FID(1),facts:{film:{contractVersion:1,originalTitle:'A',source:'tmdb'},watchlist:true}}];
@@ -469,6 +469,101 @@ for(const kind of ['person','credits']){
  assert.deepEqual([b.cursor,c.cursor],[1,25]);
  const rest=await applyEpgPersonUnits(envOf(file),{plan:big,cursor:a.cursor,limit:1000});
  assert.deepEqual([rest.cursor,rest.done],[60,true]);
+}
+
+// 9g. Three review findings. (a) A Film that disappears AFTER the writer's last read and BEFORE its batch is never recreated: the batch itself asserts the Film exists (`requireExisting`), the whole batch (receipt included) rolls back. (b) The
+// combined reconcile refuses plans of two different runs (and malformed plan metadata) before any read or write. (c) A transient read failure while re-validating after a revision change never abandons the receipt; a later pass settles it.
+{
+ // (a) the last interleaving: the hook fires at the writer batch itself, after every planner read.
+ const file=database('open');
+ seedPersons(file,[2]);seedFilm(file,1);
+ const p=planEpgPersonUnits({runId:'run-g',at:T,credits:[{filmId:FID(1),credits:[{personId:PID(2),role:'actor'}]}]});
+ const vanishing=envOf(file,{onBatch:async statements=>{if(statements.some(item=>/^INSERT INTO film \(id,contract_version/.test(item.text)))assert.equal(sqlite(file,"DELETE FROM film WHERE id='"+FID(1)+"'").status,0);}});
+ const out=await applyEpgPersonUnits(vanishing,{plan:p,now:()=>T});
+ assert.deepEqual([out.counts.failed,out.counts.applied,out.failures],[1,0,[{id:FID(1),code:'film_person_precondition'}]],'the in-batch assertion refuses');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='"+FID(1)+"'"),0,'the vanished Film is not recreated by the credit producer');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_person_credit"),0,'no credit written');
+ assert.equal(revision(file,'film',FID(1)),0,'no revision bump');
+ assert.notEqual(receipts(file)[0].state,'applied','the receipt is not falsely applied');
+ assert.ok(receipts(file)[0].applied_revision==null);
+ await reconcileEpgRun(envOf(file),{plan:p,now:()=>iso(3600000)});
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='"+FID(1)+"'"),0,'nor by a later reconcile');
+ // The shared writer option itself: with it a missing Film fails atomically, without it behaviour is unchanged (the upsert creates), anything but true is refused.
+ const f2=database('open');
+ const base={id:FID(9),expectedRevision:0,at:T,film:{contractVersion:1,originalTitle:'N'}};
+ await assert.rejects(()=>mutateFilm(envOf(f2),{...base,requireExisting:true}),code('film_person_precondition'));
+ assert.equal(one(f2,"SELECT COUNT(*) FROM film"),0);assert.equal(revision(f2,'film',FID(9)),0);
+ await assert.rejects(()=>mutateFilm(envOf(f2),{...base,requireExisting:'yes'}),code('film_person_invalid'));
+ await mutateFilm(envOf(f2),base);
+ assert.equal(one(f2,"SELECT COUNT(*) FROM film"),1,'without the option the writer still creates the Film');
+ const f3=database('open');seedFilm(f3,9);
+ await mutateFilm(envOf(f3),{...base,requireExisting:true});
+ assert.equal(revision(f3,'film',FID(9)),1,'with the option an existing Film is written');
+}
+{
+ // (b) same run works; a different run is refused with no batch, no receipt change, whatever is due.
+ const file=database('open');
+ const fp=planEpgUnits({runId:'run-old',at:T,films:[{id:FID(1),facts:{film:{contractVersion:1,originalTitle:'A',source:'tmdb'},watchlist:true}}]});
+ let seen=0;
+ const racing=envOf(file,{onBatch:async()=>{seen++;if(seen===2)await writeFilmFacts(envOf(file),{id:FID(1),at:T,requestId:'interloper',expectedRevision:0,film:{contractVersion:1,originalTitle:'Z',source:'tmdb'},watchlist:false});}});
+ assert.equal((await applyEpgUnits(racing,{plan:fp,now:()=>T})).counts.failed,1);
+ const before=dump(file);
+ const probe=envOf(file);
+ const newer=planEpgPersonUnits({runId:'run-new',at:T});
+ await assert.rejects(()=>reconcileEpgRun(probe,{plan:newer,filmPlan:fp,now:()=>iso(61000)}),code('film_person_run_mismatch'));
+ assert.deepEqual([probe.DB.calls.batches,probe.DB.calls.queries],[0,0],'refused before any read or write');
+ assert.equal(dump(file),before);assert.equal(receipts(file)[0].state,'failed');
+ for(const bad of [{event:5,units:[]},{units:[]},{event:'',units:[]},'epg:x',[]]){
+  await assert.rejects(()=>reconcileEpgRun(probe,{plan:bad,now:()=>iso(61000)}),code('film_person_invalid'));
+  await assert.rejects(()=>reconcileEpgRun(probe,{filmPlan:bad,now:()=>iso(61000)}),code('film_person_invalid'));
+ }
+ assert.equal(probe.DB.calls.queries,0);
+ const same=await reconcileEpgRun(envOf(file),{plan:planEpgPersonUnits({runId:'run-old',at:T}),filmPlan:fp,now:()=>iso(61000)});
+ assert.equal(same.considered,1);assert.equal(receipts(file)[0].state,'applied','the same run still settles its own receipt');
+}
+for(const kind of ['person','credits']){
+ // (c) a transient read failure is not a terminal stale verdict.
+ const build=()=>{
+  const file=database('open');
+  seedPersons(file,[1,2]);seedFilm(file,1);
+  const p=kind==='person'?planEpgPersonUnits({runId:'run-t',at:T,persons:[{id:PID(1),state:state('A')}]}):planEpgPersonUnits({runId:'run-t',at:T,credits:[{filmId:FID(1),credits:[{personId:PID(2),role:'actor'}]}]});
+  const move=()=>kind==='person'
+   ?recordPersonState(envOf(file),{id:PID(1),expectedRevision:0,at:T,requestId:'interloper',person:state('Z')})
+   :mutateFilm(envOf(file),{id:FID(1),expectedRevision:0,at:T,film:{contractVersion:2},credits:{upsert:[{personId:PID(1),role:'director'}]}});
+  return {file,p,move};
+ };
+ const reads=kind==='person'?/SELECT 1 AS x FROM person WHERE id=/:/SELECT contract_version FROM film WHERE id=/;
+ for(const failOn of [1,2]){
+  // failOn 1: the readback read fails (the receipt waits); 2: the re-validation read fails (the receipt is unsettled). Neither abandons it.
+  const {file,p,move}=build();
+  let step=0;
+  const racing=envOf(file,{onBatch:async()=>{step++;if(step===2)await move();}});
+  await applyEpgPersonUnits(racing,{plan:p,now:()=>T});
+  assert.equal(receipts(file)[0].state,'failed');
+  let seen=0;
+  const flaky=envOf(file,{onQuery:async text=>{if(reads.test(text)&&++seen===failOn)throw new Error('D1_ERROR: network connection lost');}});
+  const bad=await reconcileEpgRun(flaky,{plan:p,now:()=>iso(61000)});
+  assert.equal(bad.abandoned.length,0,kind+' '+failOn+': a transient failure never abandons: '+JSON.stringify(bad));
+  assert.equal(receipts(file)[0].state,'failed');assert.equal(receipts(file)[0].attempts,1,'the receipt is untouched');
+  assert.equal(bad.waiting.length+bad.failed.length,1,'recorded as waiting or unsettled');
+  const good=await reconcileEpgRun(envOf(file),{plan:p,now:()=>iso(121000)});
+  assert.equal(good.considered,1);
+  assert.deepEqual([receipts(file)[0].state,receipts(file)[0].attempts],['applied',2],kind+' '+failOn+': a later pass settles it: '+JSON.stringify(good));
+ }
+ // A genuine refusal is still a stale verdict, and a read failure through the spec itself propagates.
+ const {file,p}=build();
+ const unit=p.units[0];
+ const digest=await unitDigest(unit.kind,unit.input);
+ const receipt={requestId:'epg:'+unit.kind+':'+digest,contentDigest:digest,target:{kind:kind==='person'?'person':'film',id:unit.id},operation:unit.kind};
+ const spec=A.unitOperation(unit.kind,{replan:async()=>unit.input});
+ assert.equal(await spec.revalidate(envOf(file),receipt),'proceed');
+ await assert.rejects(()=>spec.revalidate(envOf(file,{onQuery:async()=>{throw new Error('D1_ERROR: boom');}}),receipt),/boom/);
+ if(kind==='credits'){
+  assert.equal(sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('"+FID(1)+"','"+FID(2)+"','"+U+"')").status,1,'redirect target must exist');
+  seedFilm(file,2);
+  assert.equal(sqlite(file,"INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('"+FID(1)+"','"+FID(2)+"','"+U+"')").status,0);
+  assert.equal(await spec.revalidate(envOf(file),receipt),'stale','a redirected Film is a content refusal: stale');
+ }
 }
 
 // 10. Static: dormant. Nothing in src imports the two modules, build.mjs and the Worker do not name them, the EPG layer imports only the adapters and the authority helpers, no network, timer, cron or R2 API, no SQL that changes a table; the
