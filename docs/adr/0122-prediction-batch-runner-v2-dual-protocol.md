@@ -1,9 +1,9 @@
 # ADR 0122: Prediction batch runner v2 runs beside the v5 runner on one queue, one lease and one persistence path
 
-**Status:** Proposed
-**Original decision date:** not decided (Proposed; the Product Owner decision is a separate gate)
+**Status:** Accepted
+**Original decision date:** 2026-11-12 (Product Owner acceptance of ADR 0122 including D7-A; design only)
 **Recorded at:** 2026-11-12
-**Approval source:** not documented (no Product Owner decision yet)
+**Approval source:** [AIR-446](https://trello.com/c/ZRX7Mil7); [D7-A owner decision](https://github.com/vladimino/iptv-watchlist/pull/541#issuecomment-6819498541); final owner approval to accept the ADR on 2026-11-12. No production operation authorized.
 **Related work:** [AIR-446](https://trello.com/c/ZRX7Mil7) (this ADR and the contract); input: [AIR-438](https://trello.com/c/vs2H6LQK) ([evidence](../evidence/prediction/air-438-step-latency-and-batch-sizing-2026-11-11.md)), [AIR-441](https://trello.com/c/fiOKmCHJ), [AIR-442](https://trello.com/c/j564oeLD); next card: [AIR-447](https://trello.com/c/3jrJcvWH); [limits analysis](../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md)
 **Supersedes:** None. [ADR 0113](0113-prediction-runner-advances-persisted-queue.md), [ADR 0064](0064-prediction-queue-conditional-writes.md) and [ADR 0078](0078-d1-authoritative-prediction-domain.md) stay in force; v2 reuses their queue, lease and D1/R2 persistence.
 **Superseded by:** None
@@ -83,7 +83,7 @@ Accepting this ADR fixes the design and the **default** in the third column. D7 
 
 ## Evidence
 
-- **Original decision:** not recorded (Proposed).
+- **Original decision:** Product Owner accepted the documented v2 architecture and D7-A on 2026-11-12 ([AIR-446](https://trello.com/c/ZRX7Mil7); [D7-A](https://github.com/vladimino/iptv-watchlist/pull/541#issuecomment-6819498541)). Staged defaults D1-D6 are design choices pending later measured gates, not permission to operate production.
 - **Implementation:** none. The contract is in [prediction runner reference](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract), [MCP tools](../reference/api/mcp.md#batch-runner-tools-proposed), [Scheduled Tasks](../reference/scheduled-tasks.md#batch-runner-task-proposed) and the [prediction pipeline diagram](../architecture/prediction-pipeline.md#batch-runner-v2-proposed).
 - **Dated verification:** [AIR-446 limits analysis](../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md): code reading of `main` at `dfd1a51` and the Cloudflare documentation read on 12 November 2026. No production read, run or write was made.
 - **Uncertainty:** model quality of multi-film answers; manifest bytes and tokens; production CPU, wall and D1 cost of a 100-film start and a 10-item submit; the live Task prompt text (not readable by the session); whether the connector truncates large tool results.

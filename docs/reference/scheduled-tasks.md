@@ -34,7 +34,7 @@ The bullets below are the contract of the retired Task as it ran before the cuto
 
 ### Batch runner Task (Proposed)
 
-**Proposed, not live.** [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Proposed) describes a second hourly Predictions Task that would use the [batch runner v2 contract](api/prediction-runner.md#batch-runner-v2-proposed-contract). No such Task exists, this page edits no prompt and a documentation merge never creates, enables or changes a Task.
+**Accepted design, Task not live.** [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Accepted) describes a future second hourly Predictions Task that would use the [batch runner v2 contract](api/prediction-runner.md#batch-runner-v2-proposed-contract). No such Task exists, this page edits no prompt and a documentation merge never creates, enables or changes a Task.
 
 - **One active Predictions Task.** The legacy Task above and a v2 Task never run together: the owner enables exactly one. If both ran, the second `start`/`batch_start` answers `already_running` and stops without adopting the `runId`. There is no feature flag.
 - **Shape of one execution (v2).** Read `enrichment_runner` (the `batchRunner` block) → `prediction_batch_start` once → repeat { generate up to `generationSize` films (initial 10, 1–10 by A/B), `prediction_batch_submit` 1–10 items } → `prediction_complete` only for an owned run and an allowed stop. At most 100 films. Do not call `prediction_next`. Heartbeat before a model call that can last long and at least every 10 minutes; keep the `epoch` the heartbeat and each submit return. Each execution starts from a clean context and keeps nothing between executions.

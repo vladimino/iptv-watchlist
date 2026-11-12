@@ -61,7 +61,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Batch runner tools (Proposed)
 
-**Proposed, not implemented, not in the tool list.** [ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Proposed) would add two write tools beside the v5 prediction tools, which stay unchanged. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract).
+**Accepted design, not implemented, not in the tool list.** [ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Accepted) defines two future write tools beside the v5 prediction tools, which stay unchanged. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract).
 
 | Tool | Writes | What it would call |
 | --- | --- | --- |
