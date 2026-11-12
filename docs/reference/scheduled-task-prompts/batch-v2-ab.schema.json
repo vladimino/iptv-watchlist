@@ -1,0 +1,388 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "batch-v2-ab.schema.json",
+ "title": "Batch runner v2 dry-run A/B sample and result (AIR-449)",
+ "description": "Machine-readable contract of the owner-approved dry-run experiment of AIR-450. Nothing here is written to production state. A metric the platform does not show is null and named in telemetry.unavailable; it is never estimated. A result record contains the raw model outputs (films[].fingerprint and films[].prediction): it is private and stays in the owner-controlled trial storage; only sanitized aggregates may be published.",
+ "$defs": {
+  "sample": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "schemaVersion",
+    "sampleId",
+    "filmIds",
+    "frozenAt",
+    "source"
+   ],
+   "properties": {
+    "schemaVersion": {
+     "const": 1
+    },
+    "sampleId": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 80
+    },
+    "filmIds": {
+     "type": "array",
+     "minItems": 1,
+     "maxItems": 100,
+     "uniqueItems": true,
+     "items": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9_-]{1,100}$"
+     }
+    },
+    "frozenAt": {
+     "type": "string",
+     "minLength": 10
+    },
+    "source": {
+     "type": "string",
+     "minLength": 1
+    },
+    "approvedBy": {
+     "type": "string"
+    },
+    "manifestHash": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "pattern": "^[0-9a-f]{64}$"
+    }
+   }
+  },
+  "result": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "schemaVersion",
+    "sampleId",
+    "groupSize",
+    "manifestHash",
+    "profile",
+    "contract",
+    "films",
+    "calls",
+    "telemetry"
+   ],
+   "properties": {
+    "schemaVersion": {
+     "const": 1
+    },
+    "sampleId": {
+     "type": "string",
+     "minLength": 1
+    },
+    "groupSize": {
+     "type": "integer",
+     "minimum": 1,
+     "maximum": 10
+    },
+    "promptSha256": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "pattern": "^[0-9a-f]{64}$"
+    },
+    "manifestHash": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{64}$"
+    },
+    "profile": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "version",
+      "hash"
+     ],
+     "properties": {
+      "version": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "hash": {
+       "type": "string",
+       "minLength": 1
+      }
+     }
+    },
+    "contract": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "fingerprintSchemaVersion",
+      "fingerprintPromptVersion",
+      "predictionPromptVersion",
+      "registryDigest"
+     ],
+     "properties": {
+      "fingerprintSchemaVersion": {
+       "type": "integer"
+      },
+      "fingerprintPromptVersion": {
+       "type": "integer"
+      },
+      "predictionPromptVersion": {
+       "type": "integer"
+      },
+      "registryDigest": {
+       "type": "string"
+      }
+     }
+    },
+    "films": {
+     "type": "array",
+     "minItems": 1,
+     "maxItems": 100,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "filmId",
+       "plan",
+       "groupIndex",
+       "prediction",
+       "submitStatus",
+       "liveInput",
+       "validation"
+      ],
+      "properties": {
+       "filmId": {
+        "type": "string"
+       },
+       "plan": {
+        "enum": [
+         "fingerprint_and_prediction",
+         "prediction_only"
+        ]
+       },
+       "groupIndex": {
+        "type": "integer",
+        "minimum": 0
+       },
+       "fingerprint": {
+        "type": [
+         "object",
+         "null"
+        ]
+       },
+       "prediction": {
+        "type": [
+         "object",
+         "null"
+        ]
+       },
+       "submitStatus": {
+        "enum": [
+         "would_write",
+         "already_current",
+         "not_eligible",
+         "validation_failure",
+         "not_submitted"
+        ]
+       },
+       "liveInput": {
+        "enum": [
+         "same",
+         "changed",
+         "not_eligible",
+         "unknown"
+        ]
+       },
+       "validation": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "additionalProperties": false,
+        "required": [
+         "stage",
+         "issues"
+        ],
+        "properties": {
+         "stage": {
+          "type": "string"
+         },
+         "issues": {
+          "type": "array",
+          "items": {
+           "type": "object",
+           "additionalProperties": false,
+           "required": [
+            "path",
+            "code"
+           ],
+           "properties": {
+            "path": {
+             "type": "string"
+            },
+            "code": {
+             "type": "string"
+            }
+           }
+          }
+         }
+        }
+       },
+       "generationMs": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0
+       }
+      }
+     }
+    },
+    "calls": {
+     "type": "array",
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "groupIndex",
+       "itemCount",
+       "ok"
+      ],
+      "properties": {
+       "groupIndex": {
+        "type": "integer",
+        "minimum": 0
+       },
+       "itemCount": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+       },
+       "bodyBytes": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0
+       },
+       "toolMs": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0
+       },
+       "ok": {
+        "type": "boolean"
+       },
+       "error": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      }
+     }
+    },
+    "telemetry": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "model",
+      "tokens",
+      "quota",
+      "wallMs",
+      "unavailable"
+     ],
+     "properties": {
+      "model": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "tokens": {
+       "type": [
+        "object",
+        "null"
+       ],
+       "additionalProperties": false,
+       "required": [
+        "input",
+        "output"
+       ],
+       "properties": {
+        "input": {
+         "type": [
+          "integer",
+          "null"
+         ],
+         "minimum": 0
+        },
+        "output": {
+         "type": [
+          "integer",
+          "null"
+         ],
+         "minimum": 0
+        }
+       }
+      },
+      "quota": {
+       "type": [
+        "object",
+        "null"
+       ],
+       "additionalProperties": false,
+       "required": [
+        "remainingPercentBefore",
+        "remainingPercentAfter"
+       ],
+       "properties": {
+        "remainingPercentBefore": {
+         "type": [
+          "number",
+          "null"
+         ],
+         "minimum": 0,
+         "maximum": 100
+        },
+        "remainingPercentAfter": {
+         "type": [
+          "number",
+          "null"
+         ],
+         "minimum": 0,
+         "maximum": 100
+        }
+       }
+      },
+      "wallMs": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "minimum": 0
+      },
+      "unavailable": {
+       "type": "array",
+       "items": {
+        "enum": [
+         "model",
+         "tokens",
+         "quota",
+         "wallMs",
+         "generationMs",
+         "toolMs",
+         "bodyBytes"
+        ]
+       }
+      }
+     }
+    },
+    "notes": {
+     "type": "string"
+    }
+   }
+  }
+ }
+}

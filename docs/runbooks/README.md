@@ -13,6 +13,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Recovery procedures](recovery/README.md)
 - [MCP connection and read-only smoke](mcp-connectivity.md)
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
+- [Batch runner v2 dry-run A/B procedure](prediction-batch-v2-dry-run-ab.md) (proposed, owner-gated)
 - [Scheduled Task drift monitor: triage and owner gates](scheduled-task-drift.md)
 - [Taste-profile publication procedure (owner approval required)](taste-profile-publication.md)
 - [Production R2 snapshot export, read-only (owner approval required)](r2-snapshot-export.md)
@@ -24,6 +25,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [D1 backfill execution and recovery (owner approval required)](d1-backfill.md)
 - [TMDB credits for watchlist Films in D1 (owner approval required)](tmdb-watchlist-credits.md)
 - [TMDB TV identity correction for four retired movie ids: offline plan and production steps (owner approval required)](tmdb-tv-identity-correction.md)
+- [EPG diagnostic canary: operating, retention, cleanup and rollback (owner GO per operation)](epg-diagnostic-canary.md)
 - [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md); also [one stuck observation](discovery-ledger.md#one-stuck-observation): the owner page read and the guarded reconsideration
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
 - [Film/Person `open` handoff, `held` and forward fix: design only, authorizes nothing](film-person-open-handoff.md) (AIR-374, not executed)

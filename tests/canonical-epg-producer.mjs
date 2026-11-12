@@ -1,4 +1,4 @@
-// AIR-374 P3a (ADR 0124): the dormant EPG producer layer for canonical Film facts, on the sqlite3-CLI D1 stand-in. No Worker, R2, D1 or Cloudflare access. Covered: the pure unit plan (order, duplicates, release units, run id as event), the route gate
+// AIR-374 P3a (ADR 0125): the dormant EPG producer layer for canonical Film facts, on the sqlite3-CLI D1 stand-in. No Worker, R2, D1 or Cloudflare access. Covered: the pure unit plan (order, duplicates, release units, run id as event), the route gate
 // (one marker read at r2 and prepared, nothing else; held throws), a bounded resumable pass (cursor, per-call cap, one atomic receipted batch per changed Film, no-op without a receipt, a release never creates a Film, one refusal never blocks
 // the others, a held marker stops the pass on its unit), the A to B change under a new run, a stale revision settled by the own-origin inline reconcile (replayed, or backed off without a re-plan) and the static dormancy and truthful readiness.
 // EPG_SRC points the file at a mutant copy of src/ (tests/canonical-epg-producer-mutation.mjs); EPG_TEMPLATE a prebuilt template database.

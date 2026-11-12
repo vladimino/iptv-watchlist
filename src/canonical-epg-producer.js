@@ -1,4 +1,4 @@
-// AIR-374 P3a, PLANNING AND APPLY LAYER of the EPG producer for canonical Film facts (ADR 0124; owner decisions E2 and E5 of 12 Nov 2026). DORMANT: nothing in the Worker imports this module, it is not bundled (build.mjs is unchanged),
+// AIR-374 P3a, PLANNING AND APPLY LAYER of the EPG producer for canonical Film facts (ADR 0125; owner decisions E2 and E5 of 12 Nov 2026). DORMANT: nothing in the Worker imports this module, it is not bundled (build.mjs is unchanged),
 // `epgSync` does not call it and no route, job or cron does. The projector stays the only canonical writer while the marker is `legacy`, `r2` or `prepared`: `applyEpgUnits` and `reconcileEpg` read the marker ONCE through the
 // adapter's route gate and, unless it is `open`, return `skipped` before any other statement. `held` and an unreadable marker throw (the producer defers, it never falls back to R2).
 // Scope (the smallest unambiguous subset of P3a): the operation kind `film_facts` only, with every input INJECTED. What this layer does NOT do: read R2, the EPG or the dictionary store, change `epgSync`, register operations in

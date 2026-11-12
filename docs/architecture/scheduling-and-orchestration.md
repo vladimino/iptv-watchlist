@@ -292,3 +292,18 @@ An instance whose step fails after the platform's retries, with a recognised tra
 ## Monitor tick (AIR-349)
 
 The hourly cron also calls `Monitor.run`, which does nothing unless `MONITOR` is `on` (`off` is a permanent emergency gate that also stops the dead-man heartbeat). It reads status records the domains keep, never calls `ensure`, `reconcile` or a resolver, and writes only `monitor/state.json`. Recovery stays with the domain executors ([ADR 0089](../adr/0089-shared-orchestration-reliability-contract.md)). See [ADR 0095](../adr/0095-cloudflare-native-production-monitor.md).
+
+## EPG diagnostic canary ([ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md), AIR-455)
+
+An owner-only, on-demand Workflow, not a schedule: no Cron, no Scheduled Task, no change to the daily EPG publication. The routes read the production env only to refuse a launch while the production EPG is active; every diagnostic mutation goes through the allowlisted context to the diagnostic D1 and bucket. Inert until the owner provisions those resources (AIR-456): without them no instance is ever created.
+
+```mermaid
+flowchart LR
+  owner["Owner (Cloudflare Access)"] --> routes["/api/epg/diagnostic/*<br/>GET preflight, status, result<br/>POST launch, stop, cleanup"]
+  routes -->|"reads only"| prod[("Production D1 and R2<br/>EPG lease, mode, control, sync.json")]
+  routes --> ctx["Allowlisted diagnostic context<br/>(EpgDiagnostic)"]
+  routes -->|"create, deterministic instance id"| wf["EPG_DIAGNOSTIC_WORKFLOW<br/>begin, seal, finish"]
+  wf --> ctx
+  ctx --> dd[("Diagnostic D1<br/>receipts, step lease, markers")]
+  ctx --> dr[("Diagnostic R2<br/>replay dataset, baseline, archive")]
+```

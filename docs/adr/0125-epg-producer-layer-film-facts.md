@@ -1,4 +1,4 @@
-# ADR 0124: EPG producer layer for canonical Film facts (P3a, planning and apply, dormant)
+# ADR 0125: EPG producer layer for canonical Film facts (P3a, planning and apply, dormant)
 
 **Status:** Accepted as DESIGN for offline, dormant code only, within the owner decisions E2, E4, E5 and E6 of 12 Nov 2026 (source: [AIR-374](https://trello.com/c/ha7ais3w), [decision pack](../runbooks/film-person-holdpoint-decision-pack.md)). This is not merge approval and not a production GO. Nothing here is wired: `epgSync` is unchanged, the module is not bundled, no marker moves and no production operation is authorized.  
 **Original decision date:** 2026-11-12  
