@@ -33,6 +33,14 @@ Each pass ends with one JSON object shaped as `$defs.result` of the schema: iden
 5. **Quota.** Quota before and after each pass, and tokens where shown, per film and per pass. Unavailable stays unavailable.
 6. **Decision output.** A table of the ten sizes against 2–5 and a recommended `generationSize` with the evidence. The owner decides the value; the Worker's range stays 1–10.
 
+## Source fields and failure reasons (AIR-450 checkpoint C3 follow-up)
+
+The C3 checkpoint (size 10, first ten films of the frozen manifest) failed because the generator computed `sourceBasis`/`sourceRefs` by hand and put an empty `sourceRefs` beside correct evidence. Since [ADR 0129](../adr/0129-fingerprint-source-fields-derived-from-evidence.md) the Worker derives both fields from a valid evidence map when they are omitted, and the dry-run prompt tells the pass not to send them. A manifest frozen **before** this change carries the previous `contract.schema` text, which still lists the two fields among the required ones: the prompt overrides it explicitly, and the frozen manifest is not re-frozen for this. An invalid evidence map is still rejected with its own issues, a supplied aggregate must still equal the derived one, and no evidence rule was softened.
+
+The five `caller_reported parse_error` of C3 are a different question (missing metadata or knowledge against worse completeness when ten films are generated at once). The private result therefore carries an honest `films[].failureReason` per failed film (`insufficient_metadata`, `insufficient_knowledge`, `json_unparseable`, `other`; `null` otherwise) and the report counts them per size (`failureReasons`, `unspecified` for a missing value). The reason is a diagnostic of the data: it never feeds a rule and the pass must not choose it to improve a result.
+
+**Next owner-approved checkpoint (C4).** A short diagnostic on the **same frozen manifest**: exactly the first group of ten films, generation size 10, `prediction_batch_submit(dryRun)` only, no production writes, compared with C2 (size 1) and C3. It runs only on the owner's separate GO; the ChatGPT side starts it and reads the result. A successful C4 means the derivation works inside the real Task; only then may the owner separately allow the 100-film C5. No Scheduled Task is created or edited by the delivery of this change.
+
 ## Sample selection and ground truth
 
 The card asks for 100 films with a user rating the generator never sees, so that MAE and bias can be measured against a real rating. Two facts limit that, and the owner decides at the AIR-450 approval:

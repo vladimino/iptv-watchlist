@@ -12,6 +12,7 @@ import {check} from './json-schema-lite.mjs';
 
 const SCHEMA=JSON.parse(fs.readFileSync(new URL('../docs/reference/scheduled-task-prompts/batch-v2-ab.schema.json',import.meta.url),'utf8'));
 const BASELINE=1,THRESHOLD=4,SIZES=[1,2,3,4,5,6,7,8,9,10],EXPECTED_FILMS=100;
+const FAILURE_REASONS=['insufficient_metadata','insufficient_knowledge','json_unparseable','other','unspecified'];
 const STATUSES=['would_write','already_current','not_eligible','validation_failure','not_submitted'];
 const sum=a=>a.reduce((x,y)=>x+y,0),mean=a=>a.length?sum(a)/a.length:null;
 const round=(x,d=4)=>x===null||x===undefined||!Number.isFinite(x)?null:Math.round(x*10**d)/10**d;
@@ -103,6 +104,7 @@ export function buildReport(results,{truth=null,modelLabel=null}={}){
   const t=r.telemetry,tok=t.tokens,q=t.quota;
   const row={groupSize:size,films:films.length,statuses,comparableFilms:okFilms.length,
    excluded:{liveInputChanged:d.changed,staleProfile:d.stale,notValid:films.filter(f=>!validStatus(f)).length},
+   failureReasons:Object.fromEntries(FAILURE_REASONS.map(k=>[k,films.filter(f=>f.submitStatus==='validation_failure'&&(f.failureReason||'unspecified')===k).length])),
    validShare:round(okFilms.length/films.length),sizeRefusals:r.calls.filter(c=>!c.ok).length,profileMismatchCalls:d.mismatchCalls,stoppedReason:r.stoppedReason??null,
    cost:{mcpCalls:r.calls.length,bodyBytes:{total:allOf(bodyBytes)?sum(bodyBytes):null,max:allOf(bodyBytes)?Math.max(...bodyBytes):null},toolMs:allOf(toolMs)?sum(toolMs):null,generationMs:allOf(genMs)?sum(genMs):null,wallMs:int(t.wallMs),
     tokens:tok?{input:int(tok.input),output:int(tok.output)}:null,quota:q?{remainingPercentBefore:Number.isFinite(q.remainingPercentBefore)?q.remainingPercentBefore:null,remainingPercentAfter:Number.isFinite(q.remainingPercentAfter)?q.remainingPercentAfter:null}:null,unavailable}};

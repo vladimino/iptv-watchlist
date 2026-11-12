@@ -11,11 +11,16 @@ import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-decisions-read-'));
 const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
-let n=0;
+let n=0,template=null;
 function fresh(rows,{payload=null,onQuery=null}={}){
  const file=path.join(root,'d-'+(n++)+'.sqlite');
- const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
- if(r.status!==0)throw new Error(r.stderr);
+ // AIR-374: the schema chain is applied once; every later database is a copy of that data-free file.
+ if(template)fs.copyFileSync(template,file);
+ else{
+  const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
+  if(r.status!==0)throw new Error(r.stderr);
+  template=path.join(root,'template.sqlite');fs.copyFileSync(file,template);
+ }
  const db=d1Standin(file,{onQuery});
  db.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-d', published_programme_run_id='run-d' WHERE id=1");
  return {file,db,fill:async(count,start=0)=>{
@@ -31,23 +36,26 @@ const env=db=>({DB:db,BUCKET:new MemoryBucket(),discoveryLease:null});
 const read=db=>Authority.routeRead(env(db),'epg/discovery-resolution.json');
 
 // 0, 20000, 20001 (the production size), 25000 and 45000 decisions: every row comes back, none twice, none dropped.
-for(const size of [0,1,999,1000,1001,20000,20001,25000,45000]){
- const {db,fill}=fresh();await fill(size);
- const routed=await read(db);
- assert.equal(routed.handled,true,String(size));
- const keys=Object.keys(routed.value);
- assert.equal(keys.length,size,'rows read at '+size);
- assert.equal(keys[0]??null,size?'k000000':null);
- assert.equal(keys[keys.length-1]??null,size?'k'+String(size-1).padStart(6,'0'):null);
-}
-
-// Memory and query budget: pages of DECISION_PAGE rows, queries ceil(rows/page)+1 at most, never one SELECT of the table.
+// AIR-374: one database grows through the sizes in ascending order (the keys are k000000.. in sequence, so each size holds exactly the rows a database built for that size alone holds) instead of nine databases
+// built and filled from scratch; the 25000 read also carries the query budget below, which used to fill and read a database of that size a second time.
+// Memory and query budget at 25000: pages of DECISION_PAGE rows, queries ceil(rows/page)+1 at most, never one SELECT of the table.
 {
- const seen=[];const {db,fill}=fresh(0,{onQuery:text=>{if(/FROM discovery_decision/.test(text))seen.push(text);}});
- await fill(25000);seen.length=0;
- await Authority.routeRead(env(db),'epg/discovery-resolution.json');
- assert.equal(seen.length,Math.floor(25000/Authority.DECISION_PAGE)+1,'one query per page, plus the empty page that ends an exact multiple');
- assert.ok(seen.every(text=>/LIMIT 1000$/.test(text)),'every page statement is limited');
+ const seen=[];
+ const {db,fill}=fresh(0,{onQuery:text=>{if(/FROM discovery_decision/.test(text))seen.push(text);}});
+ let have=0;
+ for(const size of [0,1,999,1000,1001,20000,20001,25000,45000]){
+  await fill(size-have,have);have=size;seen.length=0;
+  const routed=await read(db);
+  assert.equal(routed.handled,true,String(size));
+  const keys=Object.keys(routed.value);
+  assert.equal(keys.length,size,'rows read at '+size);
+  assert.equal(keys[0]??null,size?'k000000':null);
+  assert.equal(keys[keys.length-1]??null,size?'k'+String(size-1).padStart(6,'0'):null);
+  if(size===25000){
+   assert.equal(seen.length,Math.floor(25000/Authority.DECISION_PAGE)+1,'one query per page, plus the empty page that ends an exact multiple');
+   assert.ok(seen.every(text=>/LIMIT 1000$/.test(text)),'every page statement is limited');
+  }
+ }
 }
 
 // Over the explicit row/byte budget the read fails closed with discovery_bounded and returns nothing partial.

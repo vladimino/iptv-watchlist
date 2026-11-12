@@ -118,7 +118,9 @@ const context = vm.createContext({Date, Intl, URL, URLSearchParams, Set, Map, JS
     let finished = false;
     const done = () => {if (!finished) {finished = true; inFlight--;}};
     if (options.signal) options.signal.addEventListener('abort', () => {entry.aborted = true; done(); reject(Object.assign(new Error('aborted'), {name: 'AbortError'}));});
+    entry.held = gates.has(cursor);
     Promise.resolve(gates.get(cursor)).then(() => {
+      entry.held = false;
       if (entry.aborted) return;
       done();
       if (failures.has(cursor)) return resolve({ok: false, status: 500, json: async () => ({})});
@@ -135,7 +137,9 @@ const at = minutes => new Date(Date.UTC(2026, 10, 8, 12, 0) - minutes * 60000).t
 let tick = 0;
 const ev = (id, type) => ({id, type, at: at(++tick)});
 const pressed = () => typeButtons.map(button => button.getAttribute('aria-pressed'));
-const settle = async () => {for (let i = 0; i < 600 && (run('eventSearch.state') === 'searching' || run('eventLoading')); i++) await sleep(4);};
+// AIR-374: a request held by a gate can never finish by itself, so waiting for the search to end only burned the whole 2.4 s bound (four times); the wait now also ends once the request in flight is the one a gate holds, which is the state those cases go on to assert.
+const heldByGate = () => requests.some(request => request.held && !request.aborted);
+const settle = async () => {await sleep(0); for (let i = 0; i < 600 && (run('eventSearch.state') === 'searching' || run('eventLoading')) && !heldByGate(); i++) await sleep(4);};
 const reset = async (pages, first = 'first') => {
   run('cancelEventSearch()');
   archive = pages; requests = []; inFlight = 0; maxInFlight = 0; failures = new Set(); gates = new Map(); tick = 0;
