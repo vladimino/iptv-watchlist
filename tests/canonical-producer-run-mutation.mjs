@@ -165,7 +165,7 @@ const MUTANTS=[
  ["a malformed credit list is not refused per unit", "if(ok)try{filmCreditsContent({id:item.filmId,credits:item.credits});}", "if(false)try{filmCreditsContent({id:item.filmId,credits:item.credits});}", "canonical-epg-person-producer.js"],
  ["a malformed Person is not refused per unit", "try{personStateContent({id:item.id,at,person:item.state});}", "try{}", "canonical-epg-person-producer.js"],
  ["the refused source is truncated", "source:source(item.credits)", "source:Array.isArray(item.credits)?item.credits.slice(0,CREDITS_PER_UNIT_MAX):source(item.credits)", "canonical-epg-person-producer.js"],
- ["the refused entries are dropped from the result", "return {...plan,refused:[...refused.sort(byId),...refusedFilms.sort(byId)]};", "return {...plan,refused:[]};", "canonical-epg-person-producer.js"],
+ ["the refused entries are dropped from the result", "return {...plan,refused:[...refused,...refusedFilms].sort((a,b)=>rank(a)-rank(b)||byId(a,b))};", "return {...plan,refused:[]};", "canonical-epg-person-producer.js"],
  ["the Film wrapper accepts a repeated id", "if(seen.has(item.id))throw failed('film_person_invalid');\n   seen.add(item.id);\n   if(!plain(item.facts))", "seen.add(item.id);\n   if(!plain(item.facts))", "canonical-epg-producer.js"],
  ["a refused Film is released", "departed:departed.filter(id=>!refusedIds.has(id))", "departed", "canonical-epg-producer.js"],
  ["a Film without facts is not refused", "if(!plain(item.facts)){refused.push", "if(false){refused.push", "canonical-epg-producer.js"],
