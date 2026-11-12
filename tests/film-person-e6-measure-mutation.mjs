@@ -6,6 +6,7 @@ import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {sqliteSync} from './sqlite-session.mjs';
 
 const FILE='film-person-e6-measure.mjs';
 // [name, exact text that occurs once in the script, replacement]
@@ -93,24 +94,22 @@ const MUTANTS=[
  ['the statements digest is not compared',"else if(results._statementsDigest!==statementsDigest())refusals.push('statements_digest_mismatch');","else if(false)refusals.push('statements_digest_mismatch');"],
  ['the capture time is not checked',"if(typeof results._capturedAt!=='string'||!ISO.test(results._capturedAt))","if(false)"],
  ['a non-object bundle is accepted',"if(!results||typeof results!=='object'||Array.isArray(results))return","if(false)return"],
- ['the schema stop rule is dropped',"if(schema&&schema.version!==19)","if(false)"],
- ['the schema stop rule accepts 18',"if(schema&&schema.version!==19)","if(schema&&schema.version<18)"],
- ['a held marker is not a stop',"if(marker&&marker.cutover==='held')","if(false)"],
- ['the EPG authority may be r2',"if(epg&&!(epg.mode==='d1'&&epg.cutover==='open'))","if(epg&&!(epg.cutover==='open'))"],
- ['the EPG authority may be held',"if(epg&&!(epg.mode==='d1'&&epg.cutover==='open'))","if(epg&&!(epg.mode==='d1'))"],
- ['receipts present are not noted',"if(counts&&counts.receipt_rows!==0)notes.push","if(false)notes.push"],
- ['receipt states present are not noted',"if(rows.receipt_states?.length)notes.push","if(false)notes.push"],
+ ['the schema stop rule is dropped',"if(id==='schema'&&one&&one.version!==19)","if(false)"],
+ ['the schema stop rule accepts 18',"if(id==='schema'&&one&&one.version!==19)","if(id==='schema'&&one&&one.version<18)"],
+ ['a held marker is not a stop',"if(id==='film_person_marker'&&one&&one.cutover==='held')","if(false)"],
+ ['the EPG authority may be r2',"if(id==='epg_authority'&&one&&!(one.mode==='d1'&&one.cutover==='open'))","if(id==='epg_authority'&&one&&!(one.cutover==='open'))"],
+ ['the EPG authority may be held',"if(id==='epg_authority'&&one&&!(one.mode==='d1'&&one.cutover==='open'))","if(id==='epg_authority'&&one&&!(one.mode==='d1'))"],
+ ['receipts present are not a stop',"if(id==='table_counts'&&one&&one.receipt_rows!==0)stops.push","if(false)stops.push"],
+ ['receipt states present are not a stop',"if(id==='receipt_states'&&rowsOfId.length)stops.push","if(false)stops.push"],
  ['the delta size stop is off by one',"if(rows[id]&&biggest>CAPS.membersForDelta)","if(rows[id]&&biggest>=CAPS.membersForDelta)"],
  ['the delta size ignores the union',"Math.max(row.programme_members,row.watchlist_members,row.distinct_films)","Math.max(row.programme_members,row.watchlist_members)"],
  ['the delta size ignores the watchlist',"Math.max(row.programme_members,row.watchlist_members,row.distinct_films)","Math.max(row.programme_members,row.distinct_films)"],
  ['the delta size ignores the programme',"Math.max(row.programme_members,row.watchlist_members,row.distinct_films)","Math.max(row.watchlist_members,row.distinct_films)"],
- ['the delta size is read from the newest only',"const biggest=Math.max(...members.map(row=>","const biggest=Math.max(...members.slice(0,1).map(row=>"],
+ ['the delta size is read from the newest only',"const biggestOf=members=>Math.max(...members.map(row=>","const biggestOf=members=>Math.max(...members.slice(0,1).map(row=>"],
  ['the delta size stop is not applied',"stops.push('delta_ran_over_size_cap:'+id+':'+biggest)","void 0"],
  ['a moved generation between summary and members is accepted',"if(summary.newest!==members[0].published_at)","if(false)"],
- ['a moved generation in the delta is accepted',"if(row.anchor!==members[rank].published_at){","if(false){"],
+ ['a moved generation in the delta is accepted',"if(row.anchor===null||row.anchor!==current.published_at){","if(false){"],
  ['the second delta is anchored to the newest',"[['membership_delta_1',0],['membership_delta_2',1]]","[['membership_delta_1',0],['membership_delta_2',0]]"],
- ['the delta member count is not cross-checked',"if(any&&any.members!==members[rank].distinct_films)","if(false)"],
- ['a short history is not noted',"if(members.length<3)notes.push","if(false)notes.push"],
  ['a plain-rows diagnostic passes',"return allowPlainRows?{ok:false,diagnosticOnly:true,","return allowPlainRows?{ok:ok,diagnosticOnly:true,"],
  ['a plain-rows diagnostic loses its flag',"return allowPlainRows?{ok:false,diagnosticOnly:true,","return allowPlainRows?{ok:false,diagnosticOnly:false,"],
  ['a stop does not fail the verdict',"const ok=refusals.length===0&&stops.length===0;","const ok=refusals.length===0;"],
@@ -156,8 +155,8 @@ const MUTANTS=[
  ['the upper bound is dropped',"upperBoundWithoutUnknowns:complete?null:best","upperBoundWithoutUnknowns:null"],
  ['the steps round down',"out.stepsPerRun=ceiling===0?null:Math.ceil(unitsPerRun/ceiling)","out.stepsPerRun=ceiling===0?null:Math.floor(unitsPerRun/ceiling)"],
  ['a zero ceiling divides',"out.stepsPerRun=ceiling===0?null:","out.stepsPerRun="],
- ['the safety range is open',"if(!(safety>=0&&safety<1))","if(!(safety>=0&&safety<=1))"],
- ['a negative safety is accepted',"if(!(safety>=0&&safety<1))","if(!(safety<1))"],
+ ['the safety range is open',"if(!(typeof safety==='number'&&safety>=0&&safety<1))","if(!(typeof safety==='number'&&safety>=0&&safety<=1))"],
+ ['a negative safety is accepted',"if(!(typeof safety==='number'&&safety>=0&&safety<1))","if(!(typeof safety==='number'&&safety<1))"],
  ['the changed share default is zero',"if(share===null||share===undefined){share=1;","if(share===null||share===undefined){share=0;"],
  ['the missing share is not reported',"{share=1;unknown.push('changedShare');}","{share=1;}"],
  ['the changed share range is open',"if(!(typeof share==='number'&&share>=0&&share<=1))","if(!(typeof share==='number'&&share>=0))"],
@@ -180,6 +179,98 @@ const MUTANTS=[
  ['emit-sql claims to be a GO',"readOnly:true,notAGo:true,","readOnly:true,notAGo:false,"],
  ['emit-sql drops the classification',"classification:STATEMENTS[id].classification}))","classification:''}))"],
  ['emit-sql drops the row cap',"rowCap:STATEMENTS[id].rowCap,columns","columns"],
+ ['a safety given as a string is accepted',"if(!(typeof safety==='number'&&safety>=0&&safety<1))","if(!(safety>=0&&safety<1))"],
+ ['the minimum of generations is two',"export const MIN_GENERATIONS=3;","export const MIN_GENERATIONS=2;"],
+ ['a short generation summary is not a stop',"if(id==='generation_summary'&&one&&one.published_generations<MIN_GENERATIONS)stops.push","if(false)stops.push"],
+ ['the summary generation count is off by one',"one.published_generations<MIN_GENERATIONS)","one.published_generations<MIN_GENERATIONS-1)"],
+ ['the generation count is not cross-checked',"if(members.length!==Math.min(8,summary.published_generations))","if(false)"],
+ ['the sample is not capped at eight in the cross-check',"Math.min(8,summary.published_generations)","summary.published_generations"],
+ ['the generation ranks are not checked',"if(members.some((row,index)=>row.rank!==index+1))","if(false)"],
+ ['a null generation anchor is accepted',"if(members.some(row=>row.published_at===null))","if(false)"],
+ ['the generation order is not checked',"&&row.published_at>members[index-1].published_at))","&&false))"],
+ ['the generation order is inverted',"&&row.published_at>members[index-1].published_at))","&&row.published_at<members[index-1].published_at))"],
+ ['a delta without its previous generation is accepted',"if(!current||!previous){refusals.push('delta_pair_missing:'+id);return;}","if(!current||!previous){return;}"],
+ ['the delta kinds are not checked',"if(deltaRows.map(row=>row.kind).sort().join(',')!==KINDS.join(',')){","if(false){"],
+ ['a null delta anchor is accepted',"if(row.anchor===null||row.anchor!==current.published_at){","if(row.anchor!==null&&row.anchor!==current.published_at){"],
+ ['the delta member counts are not cross-checked',"if(row.members!==currentCount[row.kind])","if(false)"],
+ ['the delta kinds share the union count',"programme:row.programme_members,watchlist:row.watchlist_members","programme:row.distinct_films,watchlist:row.distinct_films"],
+ ['joined may exceed the members',"if(row.joined>row.members||row.departed>previousCount[row.kind])","if(row.departed>previousCount[row.kind])"],
+ ['departed may exceed the previous generation',"if(row.joined>row.members||row.departed>previousCount[row.kind])","if(row.joined>row.members)"],
+ ['departed is compared with the current generation',"row.departed>previousCount[row.kind]","row.departed>currentCount[row.kind]"],
+ ['the delta pair is not checked in the bundle',"for(const [id,rank] of [['membership_delta_1',0],['membership_delta_2',1]])if(rows[id])deltaRules(","for(const [id,rank] of [['membership_delta_1',0],['membership_delta_2',1]])if(false)deltaRules("],
+ ['the previous generation is the current one',"const current=members[rank],previous=members[rank+1];","const current=members[rank],previous=members[rank];"],
+ ['the step state starts with a wrong digest',"export function newStepState(){return {version:1,statementsDigest:statementsDigest(),","export function newStepState(){return {version:1,statementsDigest:'0'.repeat(64),"],
+ ['the state digest is not compared in next-step',"if(state.statementsDigest!==statementsDigest())return {allowed:false,next:null,reasons:['statements_digest_mismatch']};","if(false)return {allowed:false,next:null,reasons:['statements_digest_mismatch']};"],
+ ['the state digest is not compared in a step',"if(state.statementsDigest!==statementsDigest())return stopWith(","if(false)return stopWith("],
+ ['a bad state is accepted in next-step',"const bad=stateProblem(state);\n if(bad)return {allowed:false,","const bad=null;\n if(bad)return {allowed:false,"],
+ ['a bad state is accepted in a step',"if(bad)return stopWith([bad],newStepState());","if(false)return stopWith([bad],newStepState());"],
+ ['a stopped state is not final in next-step',"if(state.stopped)return {allowed:false,next:null,reasons:['already_stopped',...state.stopped]};","if(false)return {allowed:false,next:null,reasons:['already_stopped',...state.stopped]};"],
+ ['a stopped state is not final in a step',"if(state.stopped)return stopWith(['already_stopped',...state.stopped],state);","if(false)return stopWith(['already_stopped',...state.stopped],state);"],
+ ['an unknown statement is accepted',"if(!ORDER.includes(id))return stopWith(","if(false)return stopWith("],
+ ['an out-of-order statement is accepted',"if(gate.next!==id)return stopWith(","if(false)return stopWith("],
+ ['a closed gate is not enforced in a step',"if(!gate.allowed)return stopWith(gate.reasons,state);","if(false)return stopWith(gate.reasons,state);"],
+ ['the delta gate is not enforced in next-step',"if(next.startsWith('membership_delta_')&&state.deltaGate!=='open')","if(false)"],
+ ['the gate applies to every statement',"if(next.startsWith('membership_delta_')&&state.deltaGate!=='open')","if(state.deltaGate!=='open')"],
+ ['the finished state has a next statement',"if(next===null)return {allowed:false,next:null,complete:true,","if(next===null)return {allowed:true,next:null,complete:true,"],
+ ['the step rows read are not summed',"if(got){after.rowsRead+=got.rowsRead;after.ms+=got.duration;}","if(got){after.ms+=got.duration;}"],
+ ['the step time is not summed',"if(got){after.rowsRead+=got.rowsRead;after.ms+=got.duration;}","if(got){after.rowsRead+=got.rowsRead;}"],
+ ['the running rows read are not capped',"if(after.rowsRead>CAPS.rowsReadTotal)","if(false)"],
+ ['the running rows read cap is off by one',"if(after.rowsRead>CAPS.rowsReadTotal)","if(after.rowsRead>=CAPS.rowsReadTotal)"],
+ ['the running time is not capped',"if(after.ms>CAPS.msTotal)","if(false)"],
+ ['the running time cap is off by one',"if(after.ms>CAPS.msTotal)","if(after.ms>=CAPS.msTotal)"],
+ ['the single-statement stop rules are not applied in a step',"if(verified){\n  singleRules(id,verified,stops);","if(verified){\n  void stops;"],
+ ['the step does not carry the summary',"after.summary={newest:verified[0].newest,published_generations:verified[0].published_generations};","after.summary=state.summary;"],
+ ['the step does not carry the sample',"after.members=verified;","after.members=null;"],
+ ['the sample is not checked in a step',"generationRules(state.summary,verified,refusals,stops);","void 0;"],
+ ['the gate size is not checked in a step',"if(biggestOf(verified)>CAPS.membersForDelta)stops.push","if(false)stops.push"],
+ ['the gate size is off by one in a step',"biggestOf(verified)>CAPS.membersForDelta)stops.push","biggestOf(verified)>=CAPS.membersForDelta)stops.push"],
+ ['the gate opens on a stop',"if(refusals.length===0&&stops.length===0)after.deltaGate='open';","after.deltaGate='open';"],
+ ['the gate never opens',"if(refusals.length===0&&stops.length===0)after.deltaGate='open';","void 0;"],
+ ['the first delta is checked against the second pair',"deltaRules(id,verified,state.members,0,refusals);","deltaRules(id,verified,state.members,1,refusals);"],
+ ['the second delta is checked against the first pair',"deltaRules(id,verified,state.members,1,refusals);","deltaRules(id,verified,state.members,0,refusals);"],
+ ['a STOP step still advances the position',"if(reasons.length)return stopWith(reasons,after);\n after.done.push(id);","after.done.push(id);\n if(reasons.length)return stopWith(reasons,after);"],
+ ['a step does not advance the position',"after.done.push(id);\n const following","const following"],
+ ['a STOP is not recorded in the state',"state:{...after,stopped:reasons}}","state:{...after}}"],
+ ['the last step is not marked complete',"complete:following.complete===true,","complete:false,"],
+ ['the state key set is not checked',"if(Object.keys(state).sort().join(',')!==[...STATE_KEYS].sort().join(','))return 'state_invalid';","void 0;"],
+ ['the state version is not checked',"if(state.version!==1||","if("],
+ ['the state digest type is not checked',"typeof state.statementsDigest!=='string'||",""],
+ ['the state position is not checked',"||state.done.some((id,index)=>id!==ORDER[index]))","||false)"],
+ ['the state rows read may be negative',"state.rowsRead<0||","false||"],
+ ['the state rows read may be fractional',"!Number.isSafeInteger(state.rowsRead)||","false||"],
+ ['the state time may be a string',"typeof state.ms!=='number'||!Number.isFinite(state.ms)||state.ms<0","state.ms<0"],
+ ['the state time may be infinite',"||!Number.isFinite(state.ms)||","||"],
+ ['the state time may be negative',"||state.ms<0)return 'state_invalid';","||false)return 'state_invalid';"],
+ ['the state stop list is not checked',"if(state.stopped!==null&&!(Array.isArray(state.stopped)&&state.stopped.every(item=>typeof item==='string')))return 'state_invalid';","void 0;"],
+ ['the state stop items are not checked',"&&state.stopped.every(item=>typeof item==='string')","&&true"],
+ ['the state gate value is not checked',"if(state.deltaGate!==null&&state.deltaGate!=='open')return 'state_invalid';","void 0;"],
+ ['the state sample size is not checked',"state.members.length>=1&&state.members.length<=8","true"],
+ ['the state sample may be empty',"state.members.length>=1&&","true&&"],
+ ['the state sample may be longer than eight',"&&state.members.length<=8","&&true"],
+ ['the state sample rows are not checked',"if(state.members!==null&&!state.members.every(sampleOk))return 'state_invalid';","void 0;"],
+ ['the state sample rank may be a string',"['rank','programme_members','watchlist_members','distinct_films'].every(key=>Number.isSafeInteger(row[key])&&row[key]>=0)","['rank','programme_members','watchlist_members','distinct_films'].every(key=>true)"],
+ ['the state sample anchor may be a number',"&&(row.published_at===null||typeof row.published_at==='string')","&&true"],
+ ['the state summary is not checked',"if(state.summary!==null&&!(state.summary&&typeof state.summary==='object'&&Number.isSafeInteger(state.summary.published_generations)))return 'state_invalid';","void 0;"],
+ ['the state summary count may be a string',"&&Number.isSafeInteger(state.summary.published_generations)))","&&true))"],
+ ['the state summary is not tied to the position',"if(!state.stopped&&state.done.includes('generation_summary')!==(state.summary!==null))return 'state_invalid';","void 0;"],
+ ['the state sample is not tied to the position',"if(!state.stopped&&state.done.includes('generation_members')!==(state.members!==null))return 'state_invalid';","void 0;"],
+ ['the state gate is not tied to the sample',"if(state.deltaGate==='open'&&state.members===null)return 'state_invalid';","void 0;"],
+ ['a non-object state is accepted',"if(!state||typeof state!=='object'||Array.isArray(state))return 'state_invalid';","void 0;"],
+ ['the CLI next-step ignores completion',"out.ok=out.allowed||out.complete===true;","out.ok=out.allowed;"],
+ ['the CLI next-step ignores permission',"out.ok=out.allowed||out.complete===true;","out.ok=true;"],
+ ['the CLI next-step ignores the state file',"out=nextStep(state&&fs.existsSync(state)?read(state):newStepState());","out=nextStep(newStepState());"],
+ ['the CLI verify-step does not write the state',"if(stateFile)fs.writeFileSync(stateFile,JSON.stringify(result.state,null,1));","void 0;"],
+ ['the CLI verify-step ignores the state file',"const state=stateFile&&fs.existsSync(stateFile)?read(stateFile):newStepState();\n  const result","const state=newStepState();\n  const result"],
+ ['the CLI verify-step echoes the state',"const {state:_state,...rest}=result;","const rest=result;"],
+ ['the CLI verify-step exits zero on a stop',"out={...rest,ok:result.decision==='CONTINUE'};","out={...rest,ok:true};"],
+ ['the CLI verify-step needs no response file',"command==='verify-step'&&arg&&arg2","command==='verify-step'&&arg"],
+ ['an explicit unit count that is not a count is accepted',"if(unitsPerRun!==null&&!(Number.isSafeInteger(unitsPerRun)&&unitsPerRun>=0))","if(false)"],
+ ['a negative unit count is accepted',"Number.isSafeInteger(unitsPerRun)&&unitsPerRun>=0","Number.isSafeInteger(unitsPerRun)"],
+ ['an unknown fixed query count is zero',"fixedQueriesIn=num('fixedQueries')","fixedQueriesIn=limits.fixedQueries??0"],
+ ['an unknown fixed time is zero',"fixedMsIn=num('fixedMs')","fixedMsIn=limits.fixedMs??0"],
+ ['an unknown fixed CPU is zero',"fixedCpuMsIn=num('fixedCpuMs')","fixedCpuMsIn=limits.fixedCpuMs??0"],
+ ['a fixed part may be negative',"fixedQueriesIn=num('fixedQueries')","fixedQueriesIn=num('fixedQueries',{min:-1e9})"],
+ ['an unknown fixed part is not an upper-bound caveat',"const fixedQueries=fixedQueriesIn??0,fixedMs=fixedMsIn??0,fixedCpuMs=fixedCpuMsIn??0;","const fixedQueries=fixedQueriesIn??1e9,fixedMs=fixedMsIn??1e9,fixedCpuMs=fixedCpuMsIn??1e9;"],
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'e6-measure-mutants-'));
 try{
@@ -191,13 +282,19 @@ try{
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
   child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
  });
- assert.equal(await run({}),0,'the unmutated test passes');
+ // the migration chain is applied once; each mutant run copies the migrated file (E6_TEMPLATE) instead of rebuilding it
+ const template=path.join(dir,'template.sqlite');
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const built=sqliteSync(['-bail',template],{input:chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26});
+ assert.equal(built.status,0,'the template database is built');
+ assert.equal(await run({}),0,'the unmutated test passes (it builds its own template)');
+ assert.equal(await run({E6_TEMPLATE:template}),0,'the unmutated test passes on the shared template');
  const queue=MUTANTS.map(([name,from,to],index)=>{
   const folder=path.join(dir,'m'+index);
   fs.mkdirSync(folder);
   fs.copyFileSync(path.join('scripts','schema-preflight.mjs'),path.join(folder,'schema-preflight.mjs'));
   fs.writeFileSync(path.join(folder,FILE),original.replace(from,()=>to));
-  return {name,folder,env:{E6_SCRIPT:path.join(folder,FILE)}};
+  return {name,folder,env:{E6_SCRIPT:path.join(folder,FILE),E6_TEMPLATE:template}};
  });
  const survivors=[];
  await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.env);fs.rmSync(item.folder,{recursive:true,force:true});if(code===0)survivors.push(item.name);}}));
