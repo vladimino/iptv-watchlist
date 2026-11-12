@@ -6,10 +6,12 @@ This file holds counts, timestamps and enums only: no id, title, name or payload
 
 ## Owner GO and parameters
 
+**Nature of this record:** an operator attestation, consistent with the Trello log (comment of 12 Nov 2026 15:35 UTC). It is NOT an independent replay of the raw D1 envelopes: the raw bundle stays local and uncommitted, and no reviewer re-ran the statements or `verify` over it.
+
 - After the E6 kit merged ([PR #557](https://github.com/vladimino/iptv-watchlist/pull/557)) and after the owner was shown the runbook GO text with its caps, the owner wrote in chat on 12 Nov 2026: `даю GO на read-only production-измерение`.
 - Parameters used: operator is the assistant (Claude Executor) through the Cloudflare D1 read path; 14 statements from `emit-sql` on main `f624825`; statements digest `38d50e82d454633ec9370f2981e05b88498a2a00809fdc2fb83b87bf2fe54543`; one statement per request in printed order; window about 15:32-15:35 UTC, outside the hourly `:00` tick and the daily EPG run (next due 16:00 UTC).
 - Caps as in the runbook: 300,000 `rows_read` and 5,000 ms per statement, 1,500,000 and 60,000 ms in total; the two delta statements only when every generation member count is at most 20,000.
-- Limitation: the owner did not fill the parameters explicitly. The assistant chose the window and the operator within the runbook defaults, and the GO text was not re-signed with filled brackets.
+- Limitation (deviation from the runbook): the owner did not sign the templated GO text with all bracketed parameters filled. The operator (the assistant) chose the window and itself as operator within the runbook defaults; the owner's chat message above is the only GO.
 - **This GO covered that one run. It is not a standing authorization;** a repeat measurement needs its own GO.
 
 ## Results
@@ -23,25 +25,26 @@ This file holds counts, timestamps and enums only: no id, title, name or payload
 | Published generations | 9 retained (oldest 2026-11-02T16:13Z, newest 2026-11-11T17:05Z); newest 8 sampled |
 | Members per generation (sampled 8) | 394-395, median 395; watchlist members 394-395; shows 971-1,951 |
 | Membership deltas | newest pair: joined 3, departed 2; previous pair: joined 0, departed 1 |
-| Units per run (observed plus departed) | about 397 and 395 |
+| Film-facts units per run (EPG Film membership: observed plus departed; the tool derives this only from membership) | about 397 and 395. Person and credits (`person_state`, `film_credits`) unit volume per run is NOT established by this query set |
 | Table counts | films 10,044; persons 53,623; credit rows 107,064; watchlist films 391; metadata rows 399; sync rows 399; dimension rows 34,936 |
 | Credits per watchlist Film | min 11, p50 22, p90 22, p95 24, p99 24, max 26, mean 21.99; at the cap: 0 |
 | Films per Person | p50 1, p90 4, p95 6, p99 16, max 50 (6 Persons in the 50 bucket) |
 | Persons credited from the watchlist | 6,452, with 8,600 credit rows |
 | Film updates per day (14 days, n = 12 days) | median 254, max 5,884 |
 | Person updates per day (n = 13 days) | median 1,550, max 18,692 |
-| Unit cost on the sqlite stand-in (offline) | 14 round trips unchanged (no-op); 38 applied (36 queries, 2 batches) |
+| Film-facts unit cost on the sqlite stand-in (offline, `applyFilmFacts` only) | 14 round trips unchanged (no-op); 38 applied (36 queries, 2 batches). Not a bound for Person or credits producer kinds |
 
 ## Ceiling status
 
-Status `incomplete`. Unknown, and not measured here: `changedShare`, the per-step query budget, wall time and CPU of an EPG Workflow step, the round-trip time on the EPG path, CPU per unit and the fixed overheads. **No per-run ceiling is chosen; the provisional 50-unit ceiling of P3a stays provisional.** The only arithmetic this record states: at about 397 units per run a 50-unit pass needs about 8 steps, and 50 applied units cost up to about 1,900 round trips (38 x 50).
+Status `incomplete`. Unknown, and not measured here: `changedShare`, the per-step query budget, wall time and CPU of an EPG Workflow step, the round-trip time on the EPG path, CPU per unit and the fixed overheads. **No per-run ceiling is chosen; the provisional 50-unit ceiling of P3a stays provisional.** The only arithmetic this record states: at about 397 Film-facts units per run a 50-unit pass needs about 8 steps, and 50 changed Film-facts units alone cost about 1,900 round trips (38 x 50), before loop and step overhead (including the outer producer route read), Person and credits work, reconciliation and retries. This is neither an upper bound nor a whole-producer budget; the Person/credits per-run unit volume is not established here.
 
 ## Limits
 
 - A single point-in-time measurement.
 - Membership change is not content change: `changedShare` stays unknown without a producer dry run.
 - The statements read production only; nothing was written. No flag, Task, cron, marker, R2 or producer operation occurred.
-- The raw file stays local and uncommitted; this record was reproduced offline with `summarize`.
+- The raw file stays local and uncommitted; the numbers were reproduced offline with `summarize` by the same operator. No independent party replayed them.
+- Film-facts units only: the query set does not size Person or credits units per run, nor `changedShare`.
 - The Trello comment was posted on 12 Nov 2026 (16:32-16:35 Madrid time).
 
 ## Next steps
