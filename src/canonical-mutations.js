@@ -21,6 +21,25 @@ const FENCE=assertSql("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AN
 const REVISION=assertSql('COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0)=?');
 const BUMP='INSERT INTO canonical_revision (kind,id,revision,updated_at) VALUES (?,?,1,?) ON CONFLICT(kind,id) DO UPDATE SET revision=revision+1, updated_at=excluded.updated_at';
 
+// AIR-374 P3-0a. The two statements that mark a receipt applied INSIDE a writer's own fenced batch (the SQL is owned here so the writers need no import of the receipt module, which imports this one;
+// the receipt module's `appliedStatements` delegates to it). They read the entity revision AFTER the writer's BUMP, so they come last, and the changes()>=1 assertion rolls the whole batch back when the
+// receipt is no longer this attempt's pending row.
+export const RECEIPT_TAIL_STATEMENTS=2;
+// The UPDATE matches the STORED pending row on its whole identity, not just its id: request_id, state 'pending', attempt, the stored target (target_kind, target_id = the entity this writer bumps), the stored planned revision
+// (planned_revision + 1 must equal the entity revision AFTER the writer's BUMP, i.e. the revision this batch just proved with REVISION and produced) and the stored marker generation (it must equal the live marker generation,
+// which the batch's own FENCE statement already proved equals the generation the writer read). Any mismatch updates no row, changes()>=1 fails and the whole batch (entity data, revision and receipt) rolls back.
+const APPLIED="UPDATE canonical_write_receipt SET state='applied',applied_revision=COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0),error_class=NULL,next_attempt_at=NULL,updated_at=?,settled_at=? WHERE request_id=? AND state=? AND attempts=? AND target_kind=? AND target_id=? AND planned_revision+1=COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0) AND marker_generation=COALESCE((SELECT generation FROM film_person_authority WHERE id=1),-1)";
+const appliedTail=({requestId,attempt,target,now})=>[[APPLIED,[target.kind,target.id,now,now,requestId,'pending',attempt,target.kind,target.id,target.kind,target.id]],[assertSql('changes()>=1'),[]]];
+// What a writer appends when its caller passes `receiptMark` = {requestId,attempt,now,target:{kind,id}} (the values `receiptedWrite` hands to `run`, plus the clock reading). The mark's target must be exactly
+// the entity the writer bumps: any other shape is refused with film_person_invalid before the database is touched. Without a mark the tail is empty and the writer behaves exactly as before.
+function receiptTail(mark,entity){
+ if(mark===undefined||mark===null)return [];
+ const ok=typeof mark==='object'&&typeof mark.requestId==='string'&&mark.requestId&&Number.isInteger(mark.attempt)&&mark.attempt>=1&&typeof mark.now==='string'&&mark.now
+  &&mark.target&&mark.target.kind===entity.kind&&mark.target.id===entity.id;
+ if(!ok)throw failed('film_person_invalid');
+ return appliedTail({requestId:mark.requestId,attempt:mark.attempt,target:entity,now:mark.now});
+}
+
 function filmId(value){if(typeof value!=='string'||!FILM_ID.test(value))throw failed('film_person_invalid');return value;}
 function personId(value){if(typeof value!=='string'||!PERSON_ID.test(value))throw failed('film_person_invalid');return value;}
 function revisionOf(value){if(!Number.isInteger(value)||value<0)throw failed('film_person_invalid');return value;}
@@ -38,11 +57,12 @@ async function current(db,kind,id){return Number((await one(db,'SELECT revision 
 
 // Runs the statements as one batch and names the failure. After a failed batch the marker and the revisions are read again, so the
 // error says whether the authority moved, an entity moved, or the data itself refused (a trusted id, an ordinal, a missing person).
-async function commit(env,gate,statements,entities){
+async function commit(env,gate,statements,entities,tail=[]){
  const db=database(env);
  if(!db||typeof db.batch!=='function')throw failed('film_person_unavailable');
- if(statements.length>MUTATION_STATEMENT_CAP)throw failed('film_person_bounded');
- try{await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
+ // The writer's own statements are capped; the receipt tail (AIR-374 P3-0a, at most two statements, after the revision bump) rides on top of the cap.
+ if(statements.length>MUTATION_STATEMENT_CAP||tail.length>2)throw failed('film_person_bounded');
+ try{await db.batch([...statements,...tail].map(([sql,params])=>db.prepare(sql).bind(...params)));}
  catch(error){
   const message=String(error?.message||error);
   if(/CHECK constraint failed/i.test(message)){
@@ -63,7 +83,7 @@ async function commit(env,gate,statements,entities){
 }
 
 // The pieces the other fenced writers of the canonical domain reuse (the localization source writer); not a second API.
-export const fenced={assertSql,FENCE,REVISION,BUMP,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities)=>commit(env,gate,statements,entities),filmId,personId,revisionOf,text,json};
+export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
 
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
@@ -77,6 +97,7 @@ function head(gate,entities){
 export async function mutateFilm(env,input){
  const id=filmId(input?.id),expected=revisionOf(input?.expectedRevision),at=text(input?.at),film=input?.film||{};
  if(!Number.isInteger(film.contractVersion))throw failed('film_person_invalid');
+ const tail=receiptTail(input.receiptMark,{kind:'film',id});
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
  const redirect=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]);
@@ -100,7 +121,7 @@ export async function mutateFilm(env,input){
   statements.push(['INSERT INTO film_person_credit (film_id,person_id,role,ordinal) SELECT ?,?,?,COALESCE(?,(SELECT COALESCE(MAX(ordinal),-1)+1 FROM film_person_credit WHERE film_id=? AND role=?)) WHERE NOT EXISTS (SELECT 1 FROM film_person_credit WHERE film_id=? AND person_id=? AND role=?)',[id,person,item.role,item.ordinal??null,id,item.role,id,person,item.role]]);
  }
  statements.push([BUMP,['film',id,at]]);
- await commit(env,gate,statements,entities);
+ await commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1};
 }
 
@@ -110,6 +131,7 @@ export async function mutatePerson(env,input){
  const id=personId(input?.id),expected=revisionOf(input?.expectedRevision),at=text(input?.at),person=input?.person||{};
  if(!Number.isInteger(person.contractVersion))throw failed('film_person_invalid');
  const roleId=text(person.roleId);
+ const tail=receiptTail(input.receiptMark,{kind:'person',id});
  const gate=assertWritable(await readAuthority(env));
  const entities=[{kind:'person',id,expected}];
  const statements=head(gate,entities);
@@ -118,7 +140,7 @@ export async function mutatePerson(env,input){
  for(const item of person.externalIds||[])statements.push(['INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?) ON CONFLICT(person_id,scheme,value) DO UPDATE SET trusted=excluded.trusted,conflicting=excluded.conflicting,provenance_json=excluded.provenance_json',[id,text(item.scheme),String(item.value),trustedFlag(item),item.conflicting?1:0,json(item.provenance)]]);
  for(const item of person.aliases||[])statements.push(['INSERT INTO person_alias (person_id,kind,value,provenance_json) VALUES (?,?,?,?) ON CONFLICT(person_id,kind,value) DO NOTHING',[id,item.kind||'name',text(item.value),json(item.provenance)]]);
  statements.push([BUMP,['person',id,at]]);
- await commit(env,gate,statements,entities);
+ await commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1};
 }
 

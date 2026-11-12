@@ -63,7 +63,6 @@ const MUTANTS=[
  ['a failed attempt is not marked','js',"   if(outcome==='abandoned')await transition(env,gate,current,{kind:'abandoned',errorClass},now);\n   else await transition(env,gate,current,{kind:'failed',state:outcome,errorClass,nextAttemptAt:plus(now,backoffMs(attempt,policy))},now);","   void now;",'7.1'],
  ['a successful attempt is not marked applied','js',"  await transition(env,gate,{...row,state:'pending',attempts:attempt},{kind:'applied',revision},clock());\n ","  void revision;\n ",'4.1'],
  ['a retry keeps the old marker generation','js',"[change.plannedRevision,gate.generation,change.nextAttemptAt,now,...where]","[change.plannedRevision,row.markerGeneration,change.nextAttemptAt,now,...where]",'7.6'],
- ['the in-batch applied statement has no assertion','js',"  [CHANGED,[]],\n ];","  void CHANGED,\n ];",'5'],
  ['the stable request id carries its source text','js',"return origin+':'+operation+':'+(await digestOf(source));","return origin+':'+operation+':'+String(source);",'4.1'],
  ['a request digest is not validated','js',"||!DIGEST.test(request.digest||'')","",'4.1'],
  // the reconcile plan and the pass

@@ -252,6 +252,7 @@ export function planFilmFacts(snapshot,input){
 export async function writeFilmFacts(env,input){
  const id=fenced.filmId(input?.id),expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at);
  fenced.text(input.requestId);
+ const tail=fenced.receiptTail(input.receiptMark,{kind:'film',id});
  const gate=assertWritable(await readAuthority(env));
  const snapshot=await readFilmSnapshot(env,id);
  const plan=planFilmFacts(snapshot,input);
@@ -261,7 +262,7 @@ export async function writeFilmFacts(env,input){
  statements.push([fenced.assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
  statements.push(...plan.statements);
  statements.push([fenced.BUMP,['film',id,at]]);
- await fenced.commit(env,gate,statements,entities);
+ await fenced.commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1,written:true,changes:plan.changes,skipped:plan.skipped};
 }
 

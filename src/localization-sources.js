@@ -139,6 +139,7 @@ export async function recordLocalizationSources(env,input){
  if(!spec)throw failed('localization_invalid');
  const id=spec.entity==='film'?fenced.filmId(input.id):fenced.personId(input.id);
  const expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
+ const tail=fenced.receiptTail(input.receiptMark,{kind:spec.entity,id});
  const list=Array.isArray(input.sources)?input.sources:[];
  if(!list.length||list.length>LOCALIZATION_SOURCE_CAP)throw failed('localization_invalid');
  const seen=new Set();
@@ -171,6 +172,6 @@ export async function recordLocalizationSources(env,input){
   statements.push([`INSERT INTO ${spec.table} (${spec.column},source,value,source_version,provenance_json,request_id,observed_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(${spec.column},source) DO UPDATE SET value=excluded.value,source_version=excluded.source_version,provenance_json=excluded.provenance_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>${spec.table}.observed_at`,[id,item.source,item.value,item.sourceVersion,item.provenance,requestId,item.observedAt,at]]);
  }
  statements.push([fenced.BUMP,[spec.entity,id,at]]);
- await fenced.commit(env,gate,statements,entities);
+ await fenced.commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1,written:write.map(item=>item.source),skipped};
 }
