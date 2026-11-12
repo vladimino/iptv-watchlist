@@ -37,6 +37,7 @@ const SERIAL_ONLY=new Set([
 // Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
 // the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
 // every file still runs exactly once, in exactly one shard.
+// AIR-374 (12 Nov 2026): the entries of the seven mutation checks that now run one section per mutant (docs/evidence/ci/test-suite-air-374-mutation-sections-2026-11-12.md) are scaled by their measured CPU ratio, not below 4.
 export const WEIGHTS={
  'generation-stage.mjs':104,
  'epg-r2-known-length.mjs':92,
