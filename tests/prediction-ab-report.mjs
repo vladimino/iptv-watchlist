@@ -145,6 +145,18 @@ function round(x){return Math.round(x*1e4)/1e4;}
  bad(r=>{r.films[0].callId=undefined;delete r.films[0].callId;},'invalid_input','a film without callId');
 }
 
+// 4d. failureReason: counted per size over the failed films with fixed keys; a missing value is `unspecified`; anything outside the closed list is refused (the value never reaches the report).
+{
+ const ids=['a','b','c','d','e'],p1=pass(1,ids,()=>pred(3,.5)),p2=pass(2,ids,()=>pred(3,.5));
+ const fail=(f,reason)=>{f.submitStatus='validation_failure';f.prediction=null;f.validation={stage:'caller_reported',issues:[]};if(reason!==undefined)f.failureReason=reason;};
+ fail(p2.films[0],'insufficient_metadata');fail(p2.films[1],'insufficient_knowledge');fail(p2.films[2],'insufficient_metadata');fail(p2.films[3]);
+ const r=buildReport([p1,p2]);assert.deepEqual(r.perSize[1].failureReasons,{insufficient_metadata:2,insufficient_knowledge:1,json_unparseable:0,other:0,unspecified:1});
+ assert.deepEqual(r.perSize[0].failureReasons,{insufficient_metadata:0,insufficient_knowledge:0,json_unparseable:0,other:0,unspecified:0});assert.deepEqual(check(schema.$defs.report,r),[]);
+ const bad=pass(2,ids,()=>pred(3,.5));fail(bad.films[0],'SECRETREASON');
+ try{buildReport([p1,bad]);assert.fail('expected a refusal');}catch(e){assert.ok(e instanceof AbReportError);assert.equal(e.code,'invalid_input');assert.ok(!e.message.includes('SECRETREASON'));}
+ const ok=pass(2,ids,()=>pred(3,.5));ok.films[0].failureReason=null;assert.doesNotThrow(()=>buildReport([p1,ok]));
+}
+
 // 5. A full shape: 100 films, ten passes, with a deterministic generator whose noise grows with the group size, and the CLI end to end on private temp files.
 {
  const ids=Array.from({length:100},(_,i)=>'tmdb_'+(1000+i));let seed=7;const rnd=()=>(seed=(seed*1103515245+12345)%2147483648)/2147483648;
