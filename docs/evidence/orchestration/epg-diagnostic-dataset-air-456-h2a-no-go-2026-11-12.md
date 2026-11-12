@@ -13,9 +13,8 @@ Scope: [ADR 0121](../../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124]
 | Current archive manifest `7833ba26-5835-4a18-8e53-613b871ea02b` | 64 segments, 40 213 archived items, about 50.15 MiB |
 | Baseline total | about 100 MiB, 82 369 items |
 | Dataset hard limits | 96 MiB and 120 000 items: the item count fits, the size does not |
-| Archive prefix in total | 197 objects, 203.20 MiB (older manifests' segments included; a dataset takes only the current manifest's) |
 
-Why the limit is not raised: `EpgReplay.loadDataset` reads the whole object into Worker memory (`text()`, `JSON.parse`), and `verifyDataset`, canonicalisation, planning and `replayScan` add further copies, against a 128 MB Worker limit. Peak memory was **not measured**; this is a reasoned risk from the code and the sizes, not a benchmark. The production seal avoids it by streaming the document.
+Why the limit is not raised: `loadDataset` in `src/epg-diagnostic-run.js` (inside the `EpgDiagnosticRun` closure) reads the whole stored object into Worker memory (`text()`, `JSON.parse`) and then calls `EpgReplay.verifyDataset`; canonicalisation, planning and `replayScan` add further copies, against a 128 MB Worker limit. No memory failure was observed. Peak memory was **not measured**; this is a reasoned risk from the code and the sizes, not a benchmark. The production seal avoids it by streaming the document.
 
 ## Owner decision (12 November 2026, in chat, recorded on the card)
 
