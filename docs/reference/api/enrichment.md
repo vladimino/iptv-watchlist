@@ -89,6 +89,8 @@ Reading cost: besides the objects it always read, the route reads `watchlist.jso
 
 One declarative contract drives both the `POST /api/enrichment/submit` validator and `GET /api/enrichment/schema`, so a caller can run the same checks before `prediction_submit` and, when the Worker still rejects an item, learn which field failed. The rule tables (`FINGERPRINT_RULES`, `PREDICTION_RULES` in `src/enrichment.js`) are the only source of field names, enum lists, list sizes and lengths; the validator interprets them, and the schema route serialises them. Among the rules: `payoff` and `ending_quality` take `weak | mixed | strong | unknown`, `hero_vulnerability` takes `low | mixed | high | unknown`, `moodLabels` holds 2–4 labels of at most 45 characters, the thirteen general `execution` dimensions are required and the genre dimensions are optional. A fingerprint or prediction that the rules accept is stored unchanged; the rules do not alter the stored payload.
 
+The batch runner's `POST /api/enrichment/batch/submit` runs these same validators and issue codes once, per film, and answers a rejected film as `validation_failure` with the same `validation {stage, reportedBy, issues[{path, code}]}` body ([batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract)); it needs no `prediction_validate` call before it.
+
 `GET /api/enrichment/schema` returns its descriptive fields and `contract`:
 
 | Field | Meaning |
