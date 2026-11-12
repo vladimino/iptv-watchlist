@@ -13,6 +13,8 @@ function counted(w){const counts={put:0,delete:0},put=w.env.BUCKET.put.bind(w.en
 const state=async w=>({d1:await sha(dump(w.file)),keys:[...w.records.keys()].sort().join('|')+'#'+await sha(JSON.stringify([...w.records.entries()].sort()))});
 // What a refused step must not change: runs, the runner lease, the queue, films, fingerprints, predictions and history (the wrapper's own short writer lease is not a run effect).
 const domain=file=>JSON.stringify(['prediction_run','prediction_queue','prediction_pointer','prediction_current','prediction_fingerprint','prediction_history','prediction_lineage'].map(t=>sql(file,'SELECT * FROM '+t)).concat([sql(file,"SELECT * FROM prediction_lease WHERE name='runner'")]));
+// The owner-approved ceiling of the whole serialized `batch_start` answer (AIR-450, 12 Nov 2026): 256 KiB, raised from the initial 160 KiB. It is the only value changed; the 100 films, the format and every other limit stay.
+const LIMIT=256*1024,INITIAL_LIMIT=160*1024;
 const batch=(w,body={})=>w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...body});
 const ready=async(films,opts={})=>{const w=await flowWorld({films,...opts});return w;};
 const reconcile=async w=>{const r=await w.api('queue/reconcile',{});assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));return r;};
@@ -27,7 +29,7 @@ const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=j
  assert.equal(m.status,'running');assert.equal(m.protocol,'batch_v2');assert.ok(typeof m.runId==='string'&&m.runId.length>10);
  assert.equal(m.films.length,37,'37 eligible films, all delivered');
  assert.equal(m.dryRun,false);assert.equal(m.manifestFormat,'compact-1');
- assert.deepEqual(m.limits,{maxManifestFilms:100,maxManifestBytes:160*1024,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000});
+ assert.deepEqual(m.limits,{maxManifestFilms:100,maxManifestBytes:LIMIT,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000});
  assert.equal(m.lease.ttlMs,15*60000);assert.equal(m.lease.epoch,1);assert.ok(m.lease.expiresAt>Date.now());
  // profile: body, hash, version, lineage
  assert.equal(m.profile.version,1);assert.equal(m.profile.hash,'p');assert.deepEqual(m.profile.body,{ratingScale:'Half stars'});assert.ok(Array.isArray(m.profile.lineage));
@@ -127,13 +129,13 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  const counts=counted(w),before=await state(w),puts=counts.put;
  const r=await batch(w);
  assert.equal(r.status,409);assert.equal(r.data.code,'manifest_too_large');assert.equal(r.data.status,'blocked');
- assert.equal(r.data.films,100);assert.ok(r.data.bytes>r.data.limit&&r.data.limit===160*1024);assert.ok(r.data.largestFilmBytes>4000);assert.match(r.data.largestFilmId,/^tmdb_\d+$/);
+ assert.equal(r.data.films,100);assert.ok(r.data.bytes>r.data.limit&&r.data.limit===262144);assert.ok(r.data.largestFilmBytes>4000);assert.match(r.data.largestFilmId,/^tmdb_\d+$/);
  assert.deepEqual(await state(w),before,'zero writes: no lease, run, queue, Event, diagnostics or film write');assert.equal(counts.put,puts);assert.equal(counts.delete,0);
  // the dry run reports the same refusal and writes nothing
  const dry=await batch(w,{dryRun:true});assert.equal(dry.status,409);assert.equal(dry.data.code,'manifest_too_large');assert.equal(dry.data.dryRun,true);assert.deepEqual(await state(w),before);
  // a single film that alone exceeds the limit gives the same refusal
- const one=await ready(1);sql(one.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'y'.repeat(170*1024)+"')");await reconcile(one);
- const b1=await state(one),o=await batch(one);assert.equal(o.status,409);assert.equal(o.data.code,'manifest_too_large');assert.equal(o.data.films,1);assert.ok(o.data.largestFilmBytes>160*1024);assert.equal(o.data.largestFilmId,'tmdb_1');assert.deepEqual(await state(one),b1);
+ const one=await ready(1);sql(one.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'y'.repeat(270*1024)+"')");await reconcile(one);
+ const b1=await state(one),o=await batch(one);assert.equal(o.status,409);assert.equal(o.data.code,'manifest_too_large');assert.equal(o.data.films,1);assert.ok(o.data.largestFilmBytes>LIMIT);assert.equal(o.data.largestFilmId,'tmdb_1');assert.deepEqual(await state(one),b1);
 }
 // 5b. The worst case that fits: 100 films with real-sized synopses and credits.
 {
@@ -143,9 +145,33 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  await reconcile(w);
  const r=await batch(w);assert.equal(r.status,200,JSON.stringify(r.data).slice(0,200));
  const bytes=new TextEncoder().encode(JSON.stringify(r.data)).length;
- assert.equal(r.data.films.length,100);assert.ok(bytes<160*1024,'a realistic 100-film manifest fits: '+bytes);
+ assert.equal(r.data.films.length,100);assert.ok(bytes<INITIAL_LIMIT,'a realistic 100-film manifest fits even the initial limit: '+bytes);
  console.log('worst-case-like manifest: 100 films, '+bytes+' bytes ('+Math.round(bytes/100)+' bytes per film incl. the fixed profile and schema)');
  for(const f of r.data.films){assert.equal(f.modelMetadata.synopsis,synopsis,'metadata is never shortened');assert.equal(f.modelMetadata.actors.length,6);assert.equal(f.modelMetadata.runtime,112);}
+}
+
+// 5c. AIR-450: an answer between the initial 160 KiB and the new 256 KiB is delivered whole. This is the shape of the measured production refusal (100 films, about 240 KB, the largest film about 3.3 KB):
+// nothing is truncated, shortened, skipped or replaced, and the dry run stays write-free. One byte over the new ceiling is the same refusal as before, with the new limit and the exact byte count.
+{
+ const mid=await ready(100);
+ const text=n=>'A detective returns to a small "quoted" town. '.repeat(Math.ceil(n/46)).slice(0,n);
+ sql(mid.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+text(1900)+"')");await reconcile(mid);
+ const before=await state(mid),counts=counted(mid),puts=counts.put;
+ const dry=await batch(mid,{dryRun:true});assert.equal(dry.status,200,JSON.stringify(dry.data).slice(0,200));
+ const bytes=new TextEncoder().encode(JSON.stringify(dry.data)).length;
+ assert.ok(bytes>INITIAL_LIMIT&&bytes<=LIMIT,'between the old and the new ceiling: '+bytes);
+ assert.equal(dry.data.films.length,100);assert.equal(dry.data.limits.maxManifestBytes,262144);assert.equal(dry.data.limits.maxManifestFilms,100);
+ for(const f of dry.data.films){assert.equal(f.modelMetadata.synopsis,text(1900),'metadata is whole: nothing is cut to fit');}
+ assert.ok(dry.data.profile.body&&dry.data.contract.schema&&dry.data.manifestHash,'the profile, the contract with its schema and the hash are all present');
+ assert.deepEqual(await state(mid),before,'the dry run wrote nothing');assert.equal(counts.put,puts);assert.equal(counts.delete,0);
+ const real=await batch(mid);assert.equal(real.status,200,JSON.stringify(real.data).slice(0,200));assert.equal(real.data.films.length,100);assert.equal(real.data.dryRun,false);
+ assert.deepEqual(real.data.films.map(f=>f.filmId),dry.data.films.map(f=>f.filmId),'the real start selects the same 100 films in the same order');
+ assert.ok(new TextEncoder().encode(JSON.stringify(real.data)).length<=LIMIT);
+ // above the new ceiling the refusal is unchanged: same code, the new limit, the exact bytes, the same selection, no write
+ const over=await ready(100);sql(over.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+text(2700)+"')");await reconcile(over);
+ const b2=await state(over),c2=counted(over),p2=c2.put,ref=await batch(over);
+ assert.equal(ref.status,409);assert.equal(ref.data.code,'manifest_too_large');assert.equal(ref.data.limit,262144);assert.equal(ref.data.films,100);assert.ok(ref.data.bytes>262144);assert.ok(ref.data.largestFilmBytes>2700);assert.deepEqual(await state(over),b2);assert.equal(c2.put,p2);
+ const dryRef=await batch(over,{dryRun:true,pin:{filmIds:Array.from({length:100},(_,i)=>'tmdb_'+(i+1))}});assert.equal(dryRef.status,409);assert.equal(dryRef.data.limit,262144);assert.deepEqual(await state(over),b2,'a refused dry run with a pin of 100 writes nothing either');
 }
 
 // 6. One lease: a v2 run and a v5 run never run together, in either order, and neither adopts the other.
@@ -301,7 +327,7 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
 // 14. The limit is on the whole answer, not on the manifest alone.
 {
  const BASE=['status','runId','protocol','dryRun','lease','limits','manifestFormat','manifestHash','profile','contract','films'];
- const size=data=>new TextEncoder().encode(JSON.stringify(data)).length,LIMIT=160*1024;
+ const size=data=>new TextEncoder().encode(JSON.stringify(data)).length;
  const world=async L=>{const w=await ready(1);sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'x'.repeat(L)+"')");await reconcile(w);return w;};
  const probe=await world(1000),measured=await batch(probe,{dryRun:true}),S0=size(measured.data);assert.equal(measured.status,200);
  // synopsis characters are one byte each and appear once: the answer grows one byte per character
@@ -322,6 +348,9 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const crowded=await batch(small,{dryRun:true,pin:{filmIds:['tmdb_1',...ghosts]}});
  assert.equal(crowded.status,409,'the notEligible list pushed the answer over the limit');assert.equal(crowded.data.code,'manifest_too_large');
  assert.ok(baseOnly.status===200||baseOnly.status===409);
+ // the exact boundary of the new ceiling: an answer of exactly 262144 bytes is delivered, one byte more is refused with that exact count
+ const exact=await batch(await world(1000+LIMIT-S0),{dryRun:true});assert.equal(exact.status,200,JSON.stringify(exact.data).slice(0,160));assert.equal(size(exact.data),LIMIT);
+ const plus=await batch(await world(1000+LIMIT+1-S0),{dryRun:true});assert.equal(plus.status,409);assert.equal(plus.data.code,'manifest_too_large');assert.equal(plus.data.bytes,LIMIT+1);assert.equal(plus.data.limit,LIMIT);
 }
 
 // 15. A renewal that loses the compare-and-swap to another write of the lease is read again; it is `lease_lost` only when the lease read afterwards is another holder's, or has expired.
@@ -416,5 +445,12 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const w=await ready(5);const contract=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/runner'),w.env)).json();
  assert.equal(contract.pipelineVersion,5);assert.deepEqual(contract.modelBatching,{enabled:false,readyFingerprintsPerCall:1});assert.equal(contract.maxBatchFilms,20);
  assert.equal(contract.batchRunner.version,2);assert.equal(contract.batchRunner.protocol,'batch_v2');assert.equal(contract.batchRunner.start,'/api/enrichment/batch/start');assert.equal(contract.batchRunner.maxManifestFilms,100);assert.deepEqual(contract.batchRunner.requires,{predictionAuthority:'d1'});
+}
+// 5d. The v5 protocol and the runner contract are unchanged by the new ceiling: only batchRunner.maxManifestBytes moved.
+{
+ const w=await ready(5);const contract=JSON.parse(JSON.stringify(w.ctx.predictionRunnerContract?w.ctx.predictionRunnerContract():(await import('node:vm')).runInContext('predictionRunnerContract()',w.ctx)));
+ assert.equal(contract.pipelineVersion,5);assert.equal(contract.maxBatchFilms,20);assert.equal(contract.maxRunFilms,null);assert.equal(contract.leaseTtlMs,15*60000);assert.deepEqual(contract.modelBatching,{enabled:false,readyFingerprintsPerCall:1});
+ assert.deepEqual(contract.batchRunner,{version:2,protocol:'batch_v2',start:'/api/enrichment/batch/start',manifestFormat:'compact-1',maxManifestFilms:100,maxManifestBytes:262144,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:57344,callBudgetMs:25000,requires:{predictionAuthority:'d1'}});
+ await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200,JSON.stringify(v5.data).slice(0,160));assert.ok(!('protocol' in v5.data)||v5.data.protocol!=='batch_v2','a v5 start is not a v2 run');
 }
 console.log('prediction-batch-start: ok');
