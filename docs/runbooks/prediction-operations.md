@@ -102,6 +102,21 @@ Since AIR-442 a `next` or `submit` reads the run record, its diagnostics row, th
 
 A missing line for a step means the Worker that served it predates the instrument or the step failed before answering. Telemetry is not a stored record: its retention is the platform's (the Observability tool reported a seven-day queryable range on 11 November 2026; confirm it before relying on older runs). The query shape above is the one used for the `epg_phase` events on that date; the first read of a `prediction_step_timing` line is the check that `source` carries the fields described here. No production write or run is needed to read it, and none is authorized by this page.
 
+## Batch runner v2 operation (Proposed)
+
+**Accepted design; nothing here is live or authorized.** It applies only after [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) is implemented, the code is deployed and the owner has approved the operation. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract); Task: [Batch runner Task](../reference/scheduled-tasks.md#batch-runner-task-proposed).
+
+- **Which Task is active.** Read the live Task registry: exactly one hourly Predictions Task is enabled. Two enabled Tasks show as `already_running` stops of the later one, not as an error of the Worker.
+- **Reading a v2 run.** Status, run diagnostics and the Events footer show it as a run with `protocol: batch_v2`. Read the `prediction_step_timing` lines with `step` of `batch_start` and `batch_submit` as described [above](#reading-the-step-timing-line-air-438): `manifestBytes`, `manifestFilms`, `items`, `deferredBudget`, `staleProfile`.
+- **`manifest_too_large`.** The preflight refusal wrote nothing; a refusal that follows a queue refresh invoked by the start, or found at revalidation (lease acquire and release only), is not write-free. No run record or Event was created. It repeats while the same films lead the queue. Do not shorten anything by hand: record the reported `bytes`, `limit` and `largestFilmBytes` and take the decision to the owner.
+- **A lost response or `502` on a submit.** Replay the same body with the same `runId` and `epoch`: committed films come back `replayed`. A heartbeat in between does not change the `epoch`.
+- **`submit_in_flight`.** An earlier call of the same run still holds the submit gate (a replay that overlapped it, or an overlapping batch). Wait `retryAfterMs` and replay the same body; do not send a different batch meanwhile. The gate expires by itself if the handler died.
+- **`submit_in_flight` that does not clear.** If the gate does not clear within the caller's bounded retries, stop heartbeating and leave the run for lease expiry; do not reset the lease. A superseded handler commits nothing (`gate_lost`).
+- **A stuck v2 run.** Wait for lease expiry (15 minutes). Do not reset the lease. Its unsubmitted films are still in the queue.
+- **`wrong_protocol`.** A client called the other protocol's tool on this run: stop it, do not retry with the other tool.
+- **Rollback.** Disable the v2 Task and re-enable the v5 Task (owner action). No data repair is needed.
+- **Dry run.** Writes nothing to prediction state, but it spends model quota and reads production: run it only with the owner's approval and record the result in [evidence](../evidence/prediction/README.md).
+
 ## One film without a current prediction
 
 Open `/admin/limb`, find the film among the prediction or fingerprint items and press «Разобрать прогноз» (or read `GET /api/admin/prediction-recovery?film=<storedId>`, [contract](../reference/api/admin.md#prediction-recovery-get-apiadminprediction-recovery)). The read writes nothing and starts nothing. There is no targeted retry or requeue of one film ([why](../reference/api/admin-actions.md#prediction-recovery)); act on the verdict instead:

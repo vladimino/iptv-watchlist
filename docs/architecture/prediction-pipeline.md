@@ -61,6 +61,55 @@ The "Read schema" step and the "Isolated invalid output" branch share [one valid
 
 **Run events.** The start and the systemic stop of a run each write a durable record and then the Events Log item. A delivery that failed or was interrupted is completed by the next authorized start, inside the writer lease, from the latest run's records and a small index of earlier failures; after eight failed attempts an entry is quarantined and shown in the status read. No read delivers an event ([events](../reference/domain/events.md#delivery-of-prediction-run-events), [AIR-416](https://trello.com/c/f7FX4Elk)). The diagram's start step is unchanged: the delivery is part of it.
 
+## Batch runner v2 (Proposed)
+
+**Accepted design, not implemented.** [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Accepted) defines a second protocol beside the one above. It shares the queue, the runner lease, the retry records and the D1/R2 persistence; the diagram above is unchanged and stays the live protocol. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract).
+
+```mermaid
+sequenceDiagram
+    actor Client as ChatGPT runner v2
+    participant MCP as Worker MCP tools
+    participant Queue as Prediction queue and lease
+    participant Store as D1 pointers and R2 bodies
+    Client->>MCP: prediction_batch_start
+    MCP->>Queue: Read-only preflight: select once, hot first (up to 100 films), measure the manifest
+    alt Whole answer over the byte limit
+        MCP-->>Client: manifest_too_large (zero writes: no lease, run or Event, nothing shortened)
+    else Fits
+        MCP->>Queue: Acquire the one runner lease, revalidate the snapshot
+        alt Lease held by any run
+            MCP-->>Client: already_running (stop, do not adopt)
+        else New run
+            MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch
+            loop Until the manifest is spent (at most 100 films)
+                opt Model call may be long
+                    Client->>MCP: prediction_heartbeat (before the call, at least every 10 minutes)
+                    MCP->>Queue: Renew lease, same ownership epoch
+                    MCP-->>Client: expiresAt and epoch
+                end
+                Client->>Client: Generate up to 10 films from the manifest
+                Client->>MCP: prediction_batch_submit (1 to 10 items, runId and epoch)
+                MCP->>Queue: Set the submit gate (an overlapping call gets submit_in_flight)
+                MCP->>MCP: Validate each film, compare profile impact
+                loop Each valid film in order
+                    MCP->>Store: Immutable body, then one D1 batch guarded by lease epoch and gate, then view index
+                    MCP->>MCP: Save the film result in the run record
+                end
+                MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
+                MCP-->>Client: Per-film results (partial success, a replay of the same body recovers a crash)
+                opt Profile changed
+                    MCP-->>Client: compatible films kept, impacted or unknown films stale_profile
+                end
+            end
+            Client->>MCP: prediction_complete
+            MCP->>Queue: Record completion, release lease
+        end
+    end
+    Note over Client,Store: A dry run (dryRun true) reads and validates the same way and writes nothing: no lease, run, queue or storage write
+```
+
+The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that stops leaves its unsubmitted films in the queue; the next `batch_start` selects them again, and a hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+
 ## Queue writes
 
 The prediction runner is one of several writers of the queue object `enrichment/prediction-queue.json`. Every writer, with or without a lease, goes through the same conditional write ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31).
