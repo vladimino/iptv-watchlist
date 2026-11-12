@@ -27,17 +27,10 @@ const EpgDiagnosticRun=(()=>{
  const noteWrites=ctx=>{const s=ctx.stats();return s.d1.writes+s.d1.batches+s.r2.writes+s.r2.deletes;};
  const sha256=text=>EpgReplay.sha256(text);
 
- // ---- the owner, verified in the Worker on EVERY route (reads and writes) ---------------------------------------------------------
- // The signed Cloudflare Access assertion is checked here, independently of the edge policy: signature, issuer, audience of the Access application that fronts these routes
- // (`EPG_DIAGNOSTIC_ACCESS_AUD`), expiry, identity and the owner's e-mail (`EPG_DIAGNOSTIC_OWNER_EMAIL`). Until the owner sets both, every route refuses `access_not_configured`.
- async function verifyOwner(request,env){
-  const audience=typeof env?.EPG_DIAGNOSTIC_ACCESS_AUD==='string'?env.EPG_DIAGNOSTIC_ACCESS_AUD.trim():'';
-  const ownerEmail=typeof env?.EPG_DIAGNOSTIC_OWNER_EMAIL==='string'?env.EPG_DIAGNOSTIC_OWNER_EMAIL.trim().toLowerCase():'';
-  const teamDomain=mcpTeamDomain(env?.MCP_ACCESS_TEAM_DOMAIN);
-  if(!teamDomain||!/^[A-Za-z0-9_-]{16,256}$/.test(audience)||!/^[^@\s]+@[^@\s]+$/.test(ownerEmail))return {ok:false,status:503,code:'access_not_configured'};
-  const checked=await mcpVerifyAccessWith(request,{teamDomain,audience,ownerEmail});
-  return checked.ok?{ok:true}:{ok:false,status:checked.status,code:checked.status===403?'forbidden':'access_unavailable'};
- }
+ // ---- authorization ---------------------------------------------------------------------------------------------------------------
+ // Owner-only access is Cloudflare Access at the edge (owner decision of 12 Nov 2026, ADR 0124): there is no second JWT validator, audience or e-mail check in the Worker. The
+ // confirmation strings and the same-origin rule for POST are guards against accident, not authorization. While the diagnostic bindings are absent every route fails closed
+ // (`diagnostic_bindings_absent`); that the real edge policy protects these routes is an AIR-456 provisioning acceptance check.
  // The production env as the gates see it: reads pass, every write is refused and counted, so `productionWrites` of a report is a measurement.
  function readOnlyEnv(env,counter){
   const refuseWrite=()=>{counter.attempts++;throw Object.assign(new Error('production_write_refused'),{code:'production_write_refused'});};
@@ -498,9 +491,6 @@ const EpgDiagnosticRun=(()=>{
   const name=url.pathname.slice('/api/epg/diagnostic/'.length);
   const respond=result=>new Response(JSON.stringify(result.body),{status:result.status,headers:{'content-type':'application/json'}});
   const read=async()=>{try{return await request.json();}catch{return undefined;}};
-  // The owner is verified inside the Worker before anything is read or written, on reads and writes alike.
-  const access=await verifyOwner(request,env);
-  if(!access.ok)return respond(refuse(access.status,access.code));
   if(request.method==='GET'){
    if(name==='preflight')return respond(await preflight(env,{datasetDigest:url.searchParams.get('dataset')}));
    if(name==='status')return respond(await status(env,url.searchParams.get('key')));

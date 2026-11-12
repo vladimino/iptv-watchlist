@@ -4,7 +4,7 @@ Contract: [orchestration reliability](../reference/orchestration-reliability.md#
 
 ## State machine of a run
 
-`preflight` (read) -> `launch` (reservation, instance created, receipt `created`) -> the Workflow: `begin` (receipt `running`), `seal` (baseline written, step lease, the real seal, report), `finish` (receipt `complete` only when the report's `outcome.ok`, otherwise `failed`) -> `result` (read). `stop` marks the receipt `stopping`, terminates the instance and releases the lease; repeat it until it answers `200 stopped` (`202` until the instance ended and the lease was quiet for 60 s). The slot (one active canary) is held through `stopping` and free in every end state. Every route needs the owner's signed Access assertion for the diagnostic Access application (`EPG_DIAGNOSTIC_ACCESS_AUD`, `EPG_DIAGNOSTIC_OWNER_EMAIL`).
+`preflight` (read) -> `launch` (reservation, instance created, receipt `created`) -> the Workflow: `begin` (receipt `running`), `seal` (baseline written, step lease, the real seal, report), `finish` (receipt `complete` only when the report's `outcome.ok`, otherwise `failed`) -> `result` (read). `stop` marks the receipt `stopping`, terminates the instance and releases the lease; repeat it until it answers `200 stopped` (`202` until the instance ended and the lease was quiet for 60 s). The slot (one active canary) is held through `stopping` and free in every end state. Authorization is Cloudflare Access at the edge; before the first launch the owner confirms that the edge policy really protects `/api/epg/diagnostic/*` (AIR-456 preflight).
 
 ## Reading a result
 

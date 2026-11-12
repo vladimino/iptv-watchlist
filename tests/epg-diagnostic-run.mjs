@@ -25,23 +25,10 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-diag-run-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 const SOURCES={
  diagnostic:fs.readFileSync('src/epg-diagnostic.js','utf8'),replay:fs.readFileSync('src/epg-replay.js','utf8'),run:fs.readFileSync('src/epg-diagnostic-run.js','utf8'),
- orchestration:fs.readFileSync('src/epg-orchestration.js','utf8'),mcp:fs.readFileSync('src/mcp.js','utf8'),policy:scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),
+ orchestration:fs.readFileSync('src/epg-orchestration.js','utf8'),policy:scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),
 };
 const ALL=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const DIAG=fs.readdirSync('diagnostic-migrations').filter(name=>/\.sql$/.test(name)).sort();
-// Real signed Cloudflare Access assertions: the Worker verifies them itself (signature, issuer, audience of THIS application, expiry, identity and the owner e-mail).
-const TEAM='https://diag-team.cloudflareaccess.com',AUD='d1'.repeat(32),MCP_AUD='a1'.repeat(32),OWNER='owner@example.test';
-const RSA={name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'};
-const signing=await webcrypto.subtle.generateKey(RSA,true,['sign','verify']),rogue=await webcrypto.subtle.generateKey(RSA,true,['sign','verify']);
-const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),kid:'kid-1',alg:'RS256',use:'sig'};
-const b64=value=>Buffer.from(typeof value==='string'?value:JSON.stringify(value)).toString('base64url');
-async function accessJwt({claims={},key=signing.privateKey}={}){
- const now=Math.floor(Date.now()/1000);
- const input=b64({alg:'RS256',kid:'kid-1',typ:'JWT'})+'.'+b64({aud:[AUD],email:OWNER,exp:now+300,iat:now,nbf:now,iss:TEAM,sub:'owner-identity',type:'app',...claims});
- return input+'.'+Buffer.from(await webcrypto.subtle.sign('RSASSA-PKCS1-v1_5',key,new TextEncoder().encode(input))).toString('base64url');
-}
-const VALID=await accessJwt();
-const certFetch=async url=>String(url)===TEAM+'/cdn-cgi/access/certs'?Response.json({keys:[publicJwk]}):new Response('unavailable',{status:599});
 const RESOURCE='diag-test-0001',BUILT='2026-11-12T12:00:00.000Z';
 const plain=value=>JSON.parse(JSON.stringify(value));
 let copies=0;
@@ -62,7 +49,7 @@ await bootstrap(source,0);
 for(const day of [1,2,3,4,5,6])await commit(source,day,'bounded');
 const sourceId=source.published.programmeRunId;
 const readerOver=bkt=>({get:key=>bkt.get(key)});
-const loaders=(src,context)=>{vm.runInContext(src.policy,context);vm.runInContext(src.orchestration,context);vm.runInContext(src.diagnostic,context);vm.runInContext(src.replay,context);vm.runInContext(src.mcp,context);vm.runInContext(src.run,context);};
+const loaders=(src,context)=>{vm.runInContext(src.policy,context);vm.runInContext(src.orchestration,context);vm.runInContext(src.diagnostic,context);vm.runInContext(src.replay,context);vm.runInContext(src.run,context);};
 const builderContext=loadWorker();builderContext.DiscoveryAuthority=Authority;loaders(SOURCES,builderContext);
 const Replay=vm.runInContext('EpgReplay',builderContext),Diag=vm.runInContext('EpgDiagnostic',builderContext);
 const dataset=await Replay.buildDataset(readerOver(source.bkt),{programmeRunId:sourceId,builtAt:BUILT});
@@ -73,7 +60,7 @@ const KEY1='canary-key-0000000001',KEY2='canary-key-0000000002';
 
 // ---- a domain: production-like resources, a diagnostic domain, a scripted Workflow binding, and a Worker context with all the modules ------------------------------------------------
 async function domain({provision=true,dataset:put=datasetText,sourcesOverride=null,authority='d1',published='match',diagnosticBindings=true,workflow={}}={}){
- const context=loadWorker();context.DiscoveryAuthority=Authority;context.fetch=certFetch;context.atob=atob;loaders(sourcesOverride||SOURCES,context);
+ const context=loadWorker();context.DiscoveryAuthority=Authority;loaders(sourcesOverride||SOURCES,context);
  const DiagnosticModule=vm.runInContext('EpgDiagnostic',context);
  const prodFile=database(false),prodBkt=bucket();
  await prodBkt.put('epg/generation.json',JSON.stringify({sentinel:true}));
@@ -93,14 +80,14 @@ async function domain({provision=true,dataset:put=datasetText,sourcesOverride=nu
   async readAuthority(){return {cutover:'open',mode:'d1'};},
   async currentGeneration(){return published==='none'?null:{programmeRunId:published==='match'?programmeRunId:'11111111-1111-4111-8111-111111111111',phase:'published',fence:'g-diag'};},
  };
- const env={DB:d1Standin(prodFile,{maxBinds:100}),BUCKET:prodBkt,...(diagnosticBindings?{EPG_DIAGNOSTIC_DB:diagRaw,EPG_DIAGNOSTIC_BUCKET:diagBkt,EPG_DIAGNOSTIC_RESOURCE_ID:RESOURCE,EPG_DIAGNOSTIC_WORKFLOW:binding}:{}),MCP_ACCESS_TEAM_DOMAIN:TEAM,EPG_DIAGNOSTIC_ACCESS_AUD:AUD,EPG_DIAGNOSTIC_OWNER_EMAIL:OWNER};
+ const env={DB:d1Standin(prodFile,{maxBinds:100}),BUCKET:prodBkt,...(diagnosticBindings?{EPG_DIAGNOSTIC_DB:diagRaw,EPG_DIAGNOSTIC_BUCKET:diagBkt,EPG_DIAGNOSTIC_RESOURCE_ID:RESOURCE,EPG_DIAGNOSTIC_WORKFLOW:binding}:{})};
  const Run=vm.runInContext('EpgDiagnosticRun',context);
  const state={context,env,Run,prodFile,prodBkt,diagFile,diagBkt,diagRaw,binding,instances,calls,
   prod:()=>fingerprint(prodFile,prodBkt),diag:()=>fingerprint(diagFile,diagBkt),
   receipt:key=>sql(diagFile,"SELECT * FROM epg_diagnostic_receipt WHERE idempotency_key='"+key+"'")[0]||null,
   receipts:()=>sql(diagFile,'SELECT idempotency_key, status, slot FROM epg_diagnostic_receipt ORDER BY idempotency_key'),
   async call(method,pathname,body,extraHeaders){
-   const init={method,headers:{'content-type':'application/json','Cf-Access-Jwt-Assertion':VALID,...(extraHeaders||{})}};if(extraHeaders&&extraHeaders['Cf-Access-Jwt-Assertion']===null)delete init.headers['Cf-Access-Jwt-Assertion'];if(body!==undefined)init.body=JSON.stringify(body);
+   const init={method,headers:{'content-type':'application/json',...(extraHeaders||{})}};if(extraHeaders&&extraHeaders['Cf-Access-Jwt-Assertion']===null)delete init.headers['Cf-Access-Jwt-Assertion'];if(body!==undefined)init.body=JSON.stringify(body);
    const response=await context.worker.fetch(new Request('http://worker.test'+pathname,init),env);
    return {status:response.status,body:await response.json()};
   },
@@ -126,32 +113,10 @@ const sealDiag=SOURCES;void sealDiag;
  // bindings without a resource id (the owner has not set the identity) is the same refusal
  const partial=await domain({diagnosticBindings:true});delete partial.env.EPG_DIAGNOSTIC_RESOURCE_ID;
  assert.equal((await partial.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1))).body.refused,'diagnostic_bindings_absent');
- // The Worker verifies the owner itself on EVERY route, reads included, before anything is read or reserved: no assertion, a forged signature, another Access application's audience (the
- // MCP application), another identity, an expired or not-yet-valid assertion, and an unconfigured Worker are all refused without touching a resource.
- {
-  const full=await domain();const before={prod:full.prod(),diag:full.diag()};
-  const bad={
-   'no assertion':null,'garbage':'not.a.jwt','signed by another key':await accessJwt({key:rogue.privateKey}),
-   'the MCP application audience':await accessJwt({claims:{aud:[MCP_AUD]}}),'another identity':await accessJwt({claims:{email:'someone@example.test'}}),
-   'no e-mail claim':await accessJwt({claims:{email:undefined}}),'a service token (empty sub)':await accessJwt({claims:{sub:''}}),
-   'expired':await accessJwt({claims:{exp:Math.floor(Date.now()/1000)-600}}),'wrong issuer':await accessJwt({claims:{iss:'https://other-team.cloudflareaccess.com'}}),
-  };
-  for(const [label,token] of Object.entries(bad))for(const [method,route,body] of [['GET','/api/epg/diagnostic/preflight'],['GET','/api/epg/diagnostic/status?key='+KEY1],['GET','/api/epg/diagnostic/result?key='+KEY1],['POST','/api/epg/diagnostic/launch',launchBody(KEY1)],['POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'}],['POST','/api/epg/diagnostic/cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'}]]){
-   const denied=await full.call(method,route,body,{'Cf-Access-Jwt-Assertion':token});
-   assert.equal(denied.status,403,label+' '+method+' '+route);assert.equal(denied.body.refused,'forbidden',label);
-  }
-  assert.deepEqual(full.receipts(),[]);assert.equal(full.calls.create.length,0,'no assertion, no reservation, no instance');
-  assert.equal(full.prod(),before.prod);assert.equal(full.diag(),before.diag,'a refused request reads and writes nothing');
-  // an unconfigured owner identity or audience closes the routes (503), it never opens them
-  for(const key of ['EPG_DIAGNOSTIC_ACCESS_AUD','EPG_DIAGNOSTIC_OWNER_EMAIL','MCP_ACCESS_TEAM_DOMAIN']){
-   const open=await domain();delete open.env[key];
-   const closed=await open.call('GET','/api/epg/diagnostic/preflight');assert.equal(closed.status,503,key);assert.equal(closed.body.refused,'access_not_configured');
-   assert.equal((await open.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1))).status,503,key);assert.deepEqual(open.receipts(),[]);
-  }
-  // the keys being unreachable fails closed as well (503, not an open route)
-  const offline=await domain();offline.context.fetch=async()=>new Response('x',{status:500});
-  const down=await offline.call('GET','/api/epg/diagnostic/preflight');assert.equal(down.status,503);assert.equal(down.body.refused,'access_unavailable');
- }
+ // Authorization is Cloudflare Access at the edge (owner decision, ADR 0124): the Worker holds no second validator, audience or owner e-mail. What stays in the code are accident guards
+ // (confirmation strings, same-origin for POST) and fail-closed behaviour while the diagnostic bindings are absent. Validating the real edge policy is an AIR-456 provisioning acceptance.
+ assert.doesNotMatch(SOURCES.run,/mcpVerifyAccess|EPG_DIAGNOSTIC_ACCESS_AUD|EPG_DIAGNOSTIC_OWNER_EMAIL|Cf-Access-Jwt-Assertion/,'no in-Worker Access validator or second audience');
+ assert.doesNotMatch(fs.readFileSync('src/mcp.js','utf8'),/mcpVerifyAccessWith|ownerEmail/,'the MCP verifier is unchanged');
  // routing: methods and unknown paths
  assert.equal((await d.call('GET','/api/epg/diagnostic/launch')).status,405);assert.equal((await d.call('POST','/api/epg/diagnostic/preflight',{})).status,405);assert.equal((await d.call('GET','/api/epg/diagnostic/nothing')).status,404);
  const crossOrigin=await d.context.worker.fetch(new Request('http://worker.test/api/epg/diagnostic/launch',{method:'POST',headers:{Origin:'http://elsewhere.test','content-type':'application/json'},body:JSON.stringify(launchBody(KEY1))}),d.env);
@@ -373,8 +338,6 @@ async function quick(sourcesOverride,only=null){
  await check('an unbound Workflow refuses',async()=>{const w=await make();delete w.env.EPG_DIAGNOSTIC_WORKFLOW;const r=await w.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return r.status===503&&w.receipts().length===0;});
  await check('a tampered dataset does not start',async()=>{const t=await make({dataset:tamperedText});const r=await t.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return r.status===409&&t.calls.create.length===0&&t.receipts().length===0;});
  const n=launched();
- await check('the owner is verified on every route',async()=>{const d=await make();const r=await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1),{'Cf-Access-Jwt-Assertion':null});const g=await d.call('GET','/api/epg/diagnostic/preflight',undefined,{'Cf-Access-Jwt-Assertion':null});return r.status===403&&g.status===403&&d.receipts().length===0&&d.calls.create.length===0;});
- await check('only the owner e-mail passes',async()=>{const d=await make();const other=await accessJwt({claims:{email:'someone@example.test'}});const r=await d.call('GET','/api/epg/diagnostic/preflight',undefined,{'Cf-Access-Jwt-Assertion':other});return r.status===403;});
  await check('a repeat creates no second instance',async()=>{const x=await n();await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));x.instances.clear();const again=await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return x.calls.create.length===1&&again.body.note==='already_created';});
  await check('other parameters conflict',async()=>(await (await n()).call('POST','/api/epg/diagnostic/launch',launchBody(KEY1,{seed:'other-seed'}))).body.refused==='idempotency_conflict');
  await check('one canary at a time',async()=>{const x=await n();return (await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY2))).body.refused==='canary_active'&&x.receipts().length===1;});
@@ -404,8 +367,6 @@ async function quick(sourcesOverride,only=null){
   ['seal does not gate production',"   if(busy)return {failure:{code:busy}};\n",""],
   ['the deadline is not enforced',"   ctx.env.epgDeadline=started+config.budgetMs;",""],
   ['complete ignores the outcome',"const ok=sealed.report?.outcome?.ok===true;","const ok=!!sealed.report;"],
-  ['the owner is not verified in the Worker',"if(!access.ok)return respond(refuse(access.status,access.code));",""],
-  ['the owner e-mail is not compared',"checked=await mcpVerifyAccessWith(request,{teamDomain,audience,ownerEmail});","checked=await mcpVerifyAccessWith(request,{teamDomain,audience});"],
   ['launch needs no confirmation',"if(body.confirm!==CONFIRM.launch)return refuse(400,'confirmation_required');",""],
   ['the production gate is skipped',"if(production)return refuse(409,production);",""],
   ['an unbound Workflow is accepted',"if(typeof env.EPG_DIAGNOSTIC_WORKFLOW?.create!=='function')return refuse(503,'workflow_unbound');",""],
@@ -425,7 +386,7 @@ async function quick(sourcesOverride,only=null){
   ['the report is labelled production-measured',"schemaVersion:1,label:'canary-measured',published:publishedAfter!==publishedBefore,productionWrites:measure.attempts,\n    dataset:","schemaVersion:1,label:'production-measured',published:false,productionWrites:0,\n    dataset:"],
   ['status writes',"return reply(200,{receipt:publicReceipt(row),instance:live,reconcile:hint,sideEffects:'none',writes:noteWrites(ctx)});","await transition(ctx.env,row.idempotency_key,Number(row.revision),ACTIVE,row.status);return reply(200,{receipt:publicReceipt(row),instance:live,reconcile:hint,sideEffects:'none',writes:noteWrites(ctx)});"],
  ];
- const concerns={"the owner is not verified in the Worker":["the owner is verified on every route"],"the owner e-mail is not compared":["only the owner e-mail passes"],"a stop completes without quiescence":["a stop holds the slot until quiescent"],"begin does not gate production":["production busy at begin fails the run"],"seal does not gate production":["production busy at seal fails the run"],"the deadline is not enforced":["an exceeded deadline is enforced by the guard"],"complete ignores the outcome":["a violated postcondition is not complete"],"launch needs no confirmation": ["launch needs the confirmation"], "the production gate is skipped": ["the production gate refuses"], "an unbound Workflow is accepted": ["an unbound Workflow refuses"], "the dataset is not verified": ["a tampered dataset does not start"], "the idempotency conflict is ignored": ["other parameters conflict"], "the active slot is ignored": ["one canary at a time"], "an unknown create is retried": ["an unknown create is not retried blind"], "an unknown status is retried": ["an unknown create is not retried blind"], "a repeat creates again": ["a repeat creates no second instance"], "stop does not terminate": ["stop terminates the instance"], "a stopped receipt runs on": ["a stopped receipt does not run"], "cleanup ignores an active canary": ["cleanup refuses while active"], "the published generation is not compared": ["an unprepared domain fails closed"], "a dirty domain is overwritten": ["a dirty domain is refused"], "the dataset digest of a materialized baseline is not compared": ["a consumed baseline is refused"], "the report claims a publication": ["a run completes with exact departures"], "the report is labelled production-measured": ["a run completes with exact departures"], "status writes": ["status writes nothing"]};
+ const concerns={"a stop completes without quiescence":["a stop holds the slot until quiescent"],"begin does not gate production":["production busy at begin fails the run"],"seal does not gate production":["production busy at seal fails the run"],"the deadline is not enforced":["an exceeded deadline is enforced by the guard"],"complete ignores the outcome":["a violated postcondition is not complete"],"launch needs no confirmation": ["launch needs the confirmation"], "the production gate is skipped": ["the production gate refuses"], "an unbound Workflow is accepted": ["an unbound Workflow refuses"], "the dataset is not verified": ["a tampered dataset does not start"], "the idempotency conflict is ignored": ["other parameters conflict"], "the active slot is ignored": ["one canary at a time"], "an unknown create is retried": ["an unknown create is not retried blind"], "an unknown status is retried": ["an unknown create is not retried blind"], "a repeat creates again": ["a repeat creates no second instance"], "stop does not terminate": ["stop terminates the instance"], "a stopped receipt runs on": ["a stopped receipt does not run"], "cleanup ignores an active canary": ["cleanup refuses while active"], "the published generation is not compared": ["an unprepared domain fails closed"], "a dirty domain is overwritten": ["a dirty domain is refused"], "the dataset digest of a materialized baseline is not compared": ["a consumed baseline is refused"], "the report claims a publication": ["a run completes with exact departures"], "the report is labelled production-measured": ["a run completes with exact departures"], "status writes": ["status writes nothing"]};
  for(const [name,from,to] of mutants){
   assert.equal(SOURCES.run.split(from).length-1,1,'the mutant pattern exists once: '+name);
   assert.ok(concerns[name],'the mutant names the checks it concerns: '+name);

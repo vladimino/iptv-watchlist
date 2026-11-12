@@ -90,14 +90,9 @@ async function mcpAccessKey(teamDomain,kid){
 // Trust only the signed Cf-Access-Jwt-Assertion header. Identity headers, the
 // CF_Authorization cookie and the client's opaque OAuth bearer token are ignored.
 async function mcpVerifyAccess(request,env){
+ const forbidden={ok:false,status:403,message:'Forbidden'};
  const teamDomain=mcpTeamDomain(env.MCP_ACCESS_TEAM_DOMAIN),audience=typeof env.MCP_ACCESS_AUD==='string'?env.MCP_ACCESS_AUD.trim():'';
  if(!teamDomain||!/^[A-Za-z0-9_-]{16,256}$/.test(audience))return {ok:false,status:503,message:'MCP authorization is not configured'};
- return mcpVerifyAccessWith(request,{teamDomain,audience});
-}
-// The signed-assertion check itself, for any Access application: signature (RS256, the team's keys), issuer, audience, expiry, not-before, issued-at and a user identity.
-// `ownerEmail`, when given, must equal the assertion's `email` claim (case-insensitive). AIR-455 uses it for the owner-only diagnostic routes with their own audience.
-async function mcpVerifyAccessWith(request,{teamDomain,audience,ownerEmail=null}){
- const forbidden={ok:false,status:403,message:'Forbidden'};
  const token=request.headers.get('Cf-Access-Jwt-Assertion');
  if(!token||token.length>MCP_MAX_JWT_LENGTH)return forbidden;
  const parts=token.split('.');if(parts.length!==3)return forbidden;
@@ -117,7 +112,6 @@ async function mcpVerifyAccessWith(request,{teamDomain,audience,ownerEmail=null}
  if(claims.iat!==undefined&&(typeof claims.iat!=='number'||claims.iat>now+MCP_CLOCK_SKEW_SECONDS))return forbidden;
  // Managed OAuth forwards a user identity. Service-token assertions have an empty sub.
  if(typeof claims.sub!=='string'||!claims.sub)return forbidden;
- if(ownerEmail!==null&&(typeof claims.email!=='string'||claims.email.trim().toLowerCase()!==ownerEmail))return forbidden;
  return {ok:true};
 }
 

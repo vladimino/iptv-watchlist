@@ -242,7 +242,7 @@ Parity with production code: committed through the real `stageSealedGeneration`,
 
 ## EPG diagnostic canary: the run and its receipt (AIR-455, ADR 0124)
 
-Owner-only, inert until the diagnostic resources are provisioned (AIR-456). Every route first verifies the owner in the Worker (signed Access assertion with the audience `EPG_DIAGNOSTIC_ACCESS_AUD` and the e-mail `EPG_DIAGNOSTIC_OWNER_EMAIL`; `403 forbidden`, `503 access_not_configured`, `503 access_unavailable`); without the diagnostic bindings every route then answers `503 diagnostic_bindings_absent`, no Workflow instance is created and nothing is written.
+Owner-only, inert until the diagnostic resources are provisioned (AIR-456). Authorization is Cloudflare Access at the edge (no in-Worker JWT validator or second audience; the edge policy is verified at AIR-456 provisioning); without the diagnostic bindings every route then answers `503 diagnostic_bindings_absent`, no Workflow instance is created and nothing is written.
 
 | Route | Kind | Contract |
 |---|---|---|
