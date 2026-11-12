@@ -9,11 +9,11 @@ import {buildReport,checkPasses,assertSanitized,renderMarkdown,AbReportError} fr
 import {check} from './json-schema-lite.mjs';
 
 const schema=JSON.parse(fs.readFileSync('docs/reference/scheduled-task-prompts/batch-v2-ab.schema.json','utf8'));
-const HASH='a'.repeat(64);
+const HASH='a'.repeat(64),PH='abcdef12';
 const pred=(rating,p,signals=['Investigation','Causal puzzle'],risk='Mixed payoff',conf='medium')=>({predictedRating:rating,probability4Plus:p,confidence:conf,matchSignals:signals,mainRisk:risk,moodLabels:['мрачный','напряжённый']});
-const pass=(size,ids,make,extra={})=>({schemaVersion:1,sampleId:'S1',groupSize:size,manifestHash:HASH,profile:{version:1,hash:'p'},contract:{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,registryDigest:'d'},
+const pass=(size,ids,make,extra={})=>({schemaVersion:1,sampleId:'s1',groupSize:size,manifestHash:HASH,profile:{version:1,hash:PH},contract:{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,registryDigest:'abcdef12'},
  films:ids.map((id,i)=>({filmId:id,plan:'prediction_only',groupIndex:Math.floor(i/size),fingerprint:null,prediction:make(id,i),submitStatus:'would_write',liveInput:'same',validation:null,generationMs:null})),
- calls:Array.from({length:Math.ceil(ids.length/size)},(_,g)=>({groupIndex:g,itemCount:Math.min(size,ids.length-g*size),bodyBytes:1000,toolMs:null,ok:true})),
+ calls:Array.from({length:Math.ceil(ids.length/size)},(_,g)=>({groupIndex:g,itemCount:Math.min(size,ids.length-g*size),bodyBytes:1000,toolMs:null,ok:true,observedProfileHash:PH})),
  telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']},...extra});
 
 // 1. Hand-checked arithmetic: three films, sizes 1 and 2.
@@ -47,28 +47,76 @@ function round(x){return Math.round(x*1e4)/1e4;}
  const ids=['a','b','c'],mk=(s,extra)=>pass(s,ids,()=>pred(3,.5),extra);
  const code=(fn)=>{try{fn();}catch(e){assert.ok(e instanceof AbReportError);return e.code;}throw new Error('expected a refusal');};
  assert.equal(code(()=>buildReport([mk(1),mk(2,{manifestHash:'b'.repeat(64)})])),'manifest_mismatch');
- assert.equal(code(()=>buildReport([mk(1),mk(2,{sampleId:'S2'})])),'sample_mismatch');
- assert.equal(code(()=>buildReport([mk(1),mk(2,{profile:{version:2,hash:'q'}})])),'identity_mismatch');
+ assert.equal(code(()=>buildReport([mk(1),mk(2,{sampleId:'s2'})])),'sample_mismatch');
+ assert.equal(code(()=>buildReport([mk(1),mk(2,{profile:{version:2,hash:'abcdef99'}})])),'identity_mismatch');
  assert.equal(code(()=>buildReport([mk(1),{...mk(2),films:[...mk(2).films].reverse()}])),'film_set_mismatch');
  assert.equal(code(()=>buildReport([mk(1),mk(1)])),'duplicate_size');
- assert.equal(code(()=>buildReport([mk(3,{calls:[{groupIndex:0,itemCount:4,bodyBytes:1,toolMs:null,ok:true}]})])),'group_size_exceeded');
- assert.equal(code(()=>buildReport([pass(1,['a/../b'],()=>pred(3,.5))])),'unsafe_film_id');
+ assert.equal(code(()=>buildReport([mk(3,{calls:[{groupIndex:0,itemCount:4,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:PH}]})])),'group_size_exceeded');
+ assert.equal(code(()=>buildReport([pass(1,['A/../b'],()=>pred(3,.5))])),'invalid_input','an unsafe film id is refused by the input schema');
  assert.equal(code(()=>buildReport([])),'no_results');
 }
 
-// 4. Sanitization: whatever the inputs hold, the report carries no payload or free text; the guard rejects what would leak.
+// 4. Sanitization and adversarial inputs. Every alphanumeric secret an input can carry must either be refused by the strict input schema (with an error that never echoes it) or stay out of the report, the Markdown and the CLI output.
 {
- const ids=Array.from({length:12},(_,i)=>'tmdb_'+(i+1));
- const secret='SECRET private taste payload "quoted" {json}';
- const results=[1,2,3].map(s=>pass(s,ids,(id,i)=>pred(2+(i%7)/2,.3+(i%5)/10,[secret,'x'],secret),{}));
- for(const r of results)r.films.forEach(f=>{f.fingerprint={plotMechanics:['heist'],execution:{pace:'strong'},note:secret};});
- const report=buildReport(results);const text=JSON.stringify(report);
- assert.ok(!text.includes('SECRET')&&!/"(matchSignals|mainRisk|moodLabels|fingerprint|prediction|synopsis)"/.test(text),'no payload in the report');
- assert.throws(()=>assertSanitized({a:{fingerprint:{}}}),e=>e.code==='forbidden_key');
- assert.throws(()=>assertSanitized({a:'free text with "quotes"'}),e=>e.code==='unsanitized_string');
- assert.throws(()=>assertSanitized({a:'x'.repeat(200)}),e=>e.code==='unsanitized_string');
- assert.doesNotThrow(()=>assertSanitized({a:'tmdb_12',b:1,c:null,d:[true]}));
- const md=renderMarkdown(report);assert.ok(!md.includes('SECRET')&&/\| size \|/.test(md));
+ const SECRET='SECRETPRIVATETASTE',ids=Array.from({length:12},(_,i)=>'tmdb_'+(i+1));
+ const base=()=>[1,2,3].map(s=>pass(s,ids,(id,i)=>pred(2+(i%7)/2,.3+(i%5)/10,[SECRET,'x'],SECRET)));
+ // free-text fields that the schema allows are used for numbers only and never copied
+ const results=base();
+ for(const r of results){r.films.forEach(f=>{f.fingerprint={plotMechanics:['heist'],execution:{pace:'strong'},note:SECRET};f.validation=null;});r.telemetry.model=SECRET;r.notes=SECRET;r.calls.forEach(c=>{c.error=SECRET;});}
+ results[0].films[0]={...results[0].films[0],submitStatus:'validation_failure',prediction:null,validation:{stage:'prediction_schema',issues:[{path:SECRET,code:SECRET}]}};
+ const report=buildReport(results,{modelLabel:'gpt-test.1'});
+ const out=JSON.stringify(report)+renderMarkdown(report);assert.ok(!out.includes(SECRET),'no private string reaches the report or the Markdown');assert.equal(report.model,'gpt-test.1','the model is an owner label, never read from a record');
+ assert.equal(buildReport(results).model,null);assert.deepEqual(check(schema.$defs.report,report),[]);
+ // the invalid inputs of the review: an unknown status, an extra profile key, extra keys at any level, a bad hash, a secret in an id, in the sample id, a bad model label
+ const refuse=(mutate,label)=>{const rs=base();mutate(rs);let message='';try{buildReport(rs);}catch(e){assert.ok(e instanceof AbReportError,label);assert.equal(e.code,'invalid_input',label);message=e.message;}assert.ok(message,'refused: '+label);assert.ok(!message.includes(SECRET),'the error does not echo the value: '+label);};
+ refuse(rs=>{rs[0].films[0].submitStatus=SECRET;},'unknown submitStatus');
+ refuse(rs=>{rs[0].profile.privateNote=SECRET;},'extra profile key');
+ refuse(rs=>{rs[0][SECRET]=1;},'extra top-level key');
+ refuse(rs=>{rs[0].films[0][SECRET]=1;},'extra film key');
+ refuse(rs=>{rs[0].calls[0][SECRET]=1;},'extra call key');
+ refuse(rs=>{rs[0].telemetry[SECRET]=1;},'extra telemetry key');
+ refuse(rs=>{rs[0].contract.registryDigest=SECRET;},'non-hex registry digest');
+ refuse(rs=>{rs[0].profile.hash=SECRET;},'non-hex profile hash');
+ refuse(rs=>{rs[0].films[0].filmId=SECRET;},'film id with uppercase');
+ refuse(rs=>{rs[0].sampleId=SECRET;},'sample id with uppercase');
+ refuse(rs=>{rs[0].films[0].validation={stage:SECRET,issues:[]};},'validation stage');
+ refuse(rs=>{rs[0].telemetry.unavailable=[SECRET];},'unavailable entry');
+ refuse(rs=>{rs[0].stoppedReason=SECRET;},'stoppedReason');
+ refuse(rs=>{rs[0].films[0].prediction.predictedRating=9;},'rating out of range');
+ refuse(rs=>{rs[0].films[0].prediction.probability4Plus=2;},'probability out of range');
+ assert.throws(()=>buildReport(base(),{modelLabel:SECRET+'!'}),e=>e.code==='invalid_model_label');
+ // the closed report gate rejects what the builder did not whitelist
+ assert.throws(()=>assertSanitized({...report,extra:1}),e=>e.code==='unsanitized_report');
+ assert.throws(()=>assertSanitized({...report,identity:{...report.identity,sampleId:SECRET}}),e=>e.code==='unsanitized_report');
+ assert.throws(()=>assertSanitized({...report,perSize:[{...report.perSize[0],statuses:{...report.perSize[0].statuses,[SECRET]:1}}]}),e=>e.code==='unsanitized_report');
+ // the CLI: parse errors and refusals print a code, never a payload
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ab-adv-'));const bad=path.join(dir,'bad.json');fs.writeFileSync(bad,'{"x": '+SECRET+'}');
+ const r1=spawnSync(process.execPath,['scripts/prediction-ab-report.mjs','--results',bad],{encoding:'utf8'});assert.equal(r1.status,1);assert.ok(!(r1.stdout+r1.stderr).includes(SECRET)&&/invalid_json/.test(r1.stderr),'a JSON parse error never quotes the source');
+ const leaky=base()[0];leaky.profile.privateNote=SECRET;const lk=path.join(dir,'leaky.json');fs.writeFileSync(lk,JSON.stringify(leaky));
+ const r2=spawnSync(process.execPath,['scripts/prediction-ab-report.mjs','--results',lk],{encoding:'utf8'});assert.equal(r2.status,1);assert.ok(!(r2.stdout+r2.stderr).includes(SECRET)&&/invalid_input/.test(r2.stderr));
+ const good=path.join(dir,'good.json');fs.writeFileSync(good,JSON.stringify(results[0]));
+ const r3=spawnSync(process.execPath,['scripts/prediction-ab-report.mjs','--results',good,'--model-label','x1'],{encoding:'utf8'});assert.equal(r3.status,0,r3.stderr);assert.ok(!r3.stdout.includes(SECRET));
+ fs.rmSync(dir,{recursive:true});
+}
+
+// 4b. Comparability: a changed live input, a moved profile and a stopped pass are excluded from every quality metric and named; a partial report is a diagnostic, not final.
+{
+ const ids=['a','b','c','d'];const truth={a:4,b:3,c:5,d:2};
+ const p1=pass(1,ids,(id)=>pred(truth[id],.5));
+ const p2=pass(2,ids,(id)=>pred(truth[id]===4?1:truth[id],.5)); // film a would be wildly wrong, but its live input changed
+ p2.films[0].liveInput='changed';
+ const r=buildReport([p1,p2],{truth});const s2=r.perSize[1];
+ assert.equal(s2.comparableFilms,3);assert.equal(s2.excluded.liveInputChanged,1);assert.equal(s2.validShare,.75);assert.equal(s2.truth.n,3);assert.equal(s2.truth.mae,0,'the changed film does not contaminate MAE');assert.equal(s2.agreementToBaseline.pairs,3);
+ assert.equal(r.completeness.final,false);assert.deepEqual(r.completeness.missingSizes,[3,4,5,6,7,8,9,10]);assert.ok(r.unknown.includes('partial_sizes')&&r.unknown.includes('partial_films'));assert.match(renderMarkdown(r),/PARTIAL DIAGNOSTIC/);assert.equal(r.completeness.ownerAcceptance,'required');
+ // a call whose observed profile hash differs: its films are stale, the pass stopped, the rest not submitted
+ const q2=pass(2,ids,(id)=>pred(truth[id],.5));q2.calls[0].observedProfileHash='abcdef99';q2.calls[1].observedProfileHash='abcdef99';
+ const rq=buildReport([p1,q2],{truth});assert.equal(rq.perSize[1].comparableFilms,0);assert.equal(rq.perSize[1].excluded.staleProfile,4);assert.equal(rq.perSize[1].profileMismatchCalls,2);assert.ok(rq.unknown.includes('profile_moved'));
+ const q3=pass(2,ids,(id)=>pred(truth[id],.5));q3.calls=[{...q3.calls[0]},{...q3.calls[1],observedProfileHash:null}];q3.films[2].submitStatus='not_submitted';q3.films[3].submitStatus='not_submitted';q3.films[2].prediction=null;q3.films[3].prediction=null;q3.stoppedReason='profile_moved';q3.calls=[q3.calls[0]];
+ const rs=buildReport([p1,q3],{truth});assert.equal(rs.perSize[1].comparableFilms,2);assert.equal(rs.perSize[1].statuses.not_submitted,2);assert.equal(rs.perSize[1].stoppedReason,'profile_moved');
+ // an unobserved profile hash on a submitted film is stale too (the check is required)
+ const q4=pass(1,ids,(id)=>pred(truth[id],.5));q4.calls.forEach(c=>{c.observedProfileHash=null;});assert.equal(buildReport([q4]).perSize[0].comparableFilms,0);
+ // a complete 100-film, ten-size set is final
+ const many=Array.from({length:100},(_,i)=>'tmdb_'+(2000+i));const full=buildReport(Array.from({length:10},(_,k)=>pass(k+1,many,()=>pred(3,.5))));assert.equal(full.completeness.final,true);assert.ok(!full.unknown.includes('partial_sizes'));
 }
 
 // 5. A full shape: 100 films, ten passes, with a deterministic generator whose noise grows with the group size, and the CLI end to end on private temp files.

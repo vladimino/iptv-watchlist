@@ -8,6 +8,8 @@ import {createHash} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {check} from './json-schema-lite.mjs';
+import * as PredictionD1 from '../src/prediction-d1.js';
+import {buildReport} from '../scripts/prediction-ab-report.mjs';
 
 const file='docs/reference/scheduled-task-prompts/hourly-predictions-batch-v2.md';
 const doc=fs.readFileSync(file,'utf8');
@@ -43,6 +45,7 @@ assert.ok(!/prediction_batch_start\(/.test(dry),'a pass never calls start: the m
 assert.ok(/prediction_batch_start В ЛЮБОМ виде/.test(forbiddenOf(dry)));
 assert.ok(/\{\{SAMPLE_ID\}\}/.test(dry)&&/\{\{GROUP_SIZE\}\}/.test(dry)&&/FROZEN_MANIFEST=\{\{FROZEN_MANIFEST\}\}/.test(dry)&&!/\{\{FILM_IDS\}\}/.test(dry),'the pass takes the frozen manifest, not film ids to start from');
 assert.ok(/manifest_invalid/.test(dry)&&/НЕ вызывай ни разу/.test(dry));
+assert.ok(/observedProfileHash/.test(dry)&&/profile_moved/.test(dry)&&/not_submitted/.test(dry)&&/liveInput не same/.test(dry),'the dry-run prompt makes the per-submit profile check and the liveInput rule explicit');
 assert.ok(!/trello\.com\/c\/XDyt4qIH\)\s*'s scope/.test(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8')),'AIR-450 is not linked to the AIR-449 card');
 assert.ok(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8').includes('[AIR-450](https://trello.com/c/VPd21Y9d)'));
 const enrich=fs.readFileSync('src/enrichment.js','utf8');
@@ -67,6 +70,7 @@ async function world(films){
  w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
  return w;
 }
+const hex=h=>/^[0-9a-f]{8,64}$/.test(String(h))?String(h):sha(String(h)).slice(0,16); // the flow world's stand-in profile hash is 'p'; production hashes are hex
 const dump=f=>{const r=sqliteSync([f,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
 
@@ -97,10 +101,11 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
    const missing=await w.call('prediction_batch_submit',{dryRun:true,manifestHash:m.manifestHash,items});if(g===0&&size===1)assert.equal(missing.isError,true,'a dry-run submit without runId fails the MCP schema');
    const r=await tracked('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});
    assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'dry_run');assert.equal(r.data.manifestHash,m.manifestHash,'the frozen manifest identity');
-   calls.push({groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true});
+   const observed=hex(r.data.profile.hash);assert.equal(observed,hex(m.profile.hash),'step 7: the profile in the answer is the manifest profile');
+   calls.push({groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true,observedProfileHash:observed});
    for(const [k,x] of r.data.results.entries())films.push({filmId:x.filmId,plan:group[k].plan,groupIndex:g,fingerprint:items[k].fingerprint??null,prediction:items[k].prediction,submitStatus:x.status,liveInput:x.liveInput,validation:x.validation||null,generationMs:null});
   }
-  const result={schemaVersion:1,sampleId:sample.sampleId,groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:m.profile.hash},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:m.contract.registryDigest},films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']}};
+  const result={schemaVersion:1,sampleId:sample.sampleId,groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:hex(m.profile.hash)},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:hex(m.contract.registryDigest)},films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']}};
   assert.deepEqual(validResult(result),[],'result for group size '+size);assert.equal(films.length,sample.filmIds.length);assert.ok(films.every(f=>f.liveInput==='same'&&f.submitStatus==='would_write'));
   assert.equal(calls.length,Math.ceil(sample.filmIds.length/size));assert.ok(calls.every(c=>c.itemCount<=size));
   results.push(result);
@@ -137,5 +142,30 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  assert.equal(done.data.status,'partial');assert.equal(done.data.stopReason,'time_budget');assert.equal(done.data.title,'Прогнозы приостановлены');
  const event=w.records.get('enrichment/stop-events/'+runId+'.json')?.event;assert.ok(event,'a stop Event is recorded');assert.equal(event.stage,'partial');assert.equal(event.title,'Прогнозы приостановлены');assert.equal(event.stopReason,'time_budget');
  assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,98,'all valid films were written');
+}
+
+// 5c. A profile that moves between passes: following the dry-run prompt (step 7) a pass compares the answer's profile hash with the manifest's, stops with profile_moved and marks the rest not_submitted;
+// the aggregator excludes the stale films from every metric. Writes are allowed here: the profile move itself is the test's setup, outside the dry run.
+{
+ const w=await world(20);const fz=(await w.call('prediction_batch_start',{trigger:'manual',dryRun:true})).data,ids=fz.films.map(f=>f.filmId).slice(0,6);
+ const pinned=(await w.call('prediction_batch_start',{trigger:'manual',dryRun:true,pin:{filmIds:ids}})).data,m=pinned;
+ const runPass=async size=>{
+  const films=[],calls=[];let g=0,stopped=null;
+  for(let i=0;i<m.films.length;i+=size,g++){
+   const group=m.films.slice(i,i+size);
+   if(stopped){for(const f of group)films.push({filmId:f.filmId,plan:f.plan,groupIndex:g,fingerprint:null,prediction:null,submitStatus:'not_submitted',liveInput:'unknown',validation:null,generationMs:null});continue;}
+   const items=group.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction,inputHash:f.inputHash}));
+   const r=await w.call('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});assert.ok(!r.isError);
+   const observed=hex(r.data.profile.hash);calls.push({groupIndex:g,itemCount:items.length,bodyBytes:null,toolMs:null,ok:true,observedProfileHash:observed});
+   for(const [k,res] of r.data.results.entries())films.push({filmId:res.filmId,plan:group[k].plan,groupIndex:g,fingerprint:items[k].fingerprint,prediction:items[k].prediction,submitStatus:res.status,liveInput:res.liveInput,validation:null,generationMs:null});
+   if(observed!==hex(m.profile.hash))stopped='profile_moved';
+  }
+  return {schemaVersion:1,sampleId:'fixture-sample-2',groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:hex(m.profile.hash)},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:hex(m.contract.registryDigest)},stoppedReason:stopped,films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs','bodyBytes']}};
+ };
+ const p1=await runPass(1);assert.equal(p1.stoppedReason,null);
+ const next={version:2,profileHash:'p2',profile:{ratingScale:'Half stars',changed:true}};w.records.set('enrichment/profile/versions/2.json',next);await PredictionD1.saveMutable(w.env,'enrichment/profile/current.json',next);
+ const p2=await runPass(2);assert.equal(p2.stoppedReason,'profile_moved','the pass stops at the first answer that names another profile');
+ assert.equal(p2.calls.length,1);assert.ok(p2.films.filter(f=>f.submitStatus==='not_submitted').length===m.films.length-2);assert.deepEqual(check(schema.$defs.result,p2),[]);
+ const rep=buildReport([p1,p2]);assert.equal(rep.perSize[0].comparableFilms,m.films.length);assert.equal(rep.perSize[1].comparableFilms,0,'nothing of the stale pass is compared');assert.equal(rep.perSize[1].excluded.staleProfile,2);assert.equal(rep.perSize[1].stoppedReason,'profile_moved');assert.ok(rep.unknown.includes('profile_moved'));
 }
 console.log('scheduled-task-prompt-v2 ok');
