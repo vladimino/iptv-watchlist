@@ -28,7 +28,7 @@ const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:
 
 // A fake D1 REST endpoint over a sqlite file: GET database -> its metadata; POST query {sql}: a single SELECT answers its rows, anything else is executed as a script (all or nothing for
 // the failing statement, as `-bail` does) and answers one success. Every request is logged; a write whose text matches `throwOn` fails in transit.
-function fakeD1({name='iptv-epg-diagnostic',uuid=DBID,throwOn=null}={}){
+function fakeD1({name='iptv-epg-diagnostic',uuid=DBID,throwOn=null,readBody=null}={}){
  const file=path.join(root,'d-'+(counter++)+'.sqlite'),log=[];
  const fetchImpl=async(url,init={})=>{
   const target=String(url),method=init.method||'GET',body=init.body?JSON.parse(init.body):null;
@@ -39,6 +39,7 @@ function fakeD1({name='iptv-epg-diagnostic',uuid=DBID,throwOn=null}={}){
    const sql=body.sql;
    if(throwOn&&throwOn(sql))throw new Error('connection reset');
    const read=/^\s*SELECT\b/i.test(sql)&&!/;\s*\S/.test(sql.trim());
+   if(read&&readBody)return json(readBody);
    const result=sqliteSync([...(read?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+sql,encoding:'utf8'});
    if(result.status!==0)return json({success:false,errors:[{message:String(result.stderr).trim()}]},400);
    if(read){const out=String(result.stdout).trim();return json({success:true,result:[{success:true,results:out?JSON.parse(out):[],meta:{rows_written:0}}]});}
@@ -62,6 +63,19 @@ async function scenarios(api){
   'the database uuid read back must match':async()=>{const d=fakeD1({uuid:'99999999-2222-4333-8444-555555555555'});const e=await failure(()=>api.run({command:'check',env:env(),fetchImpl:d.fetchImpl,store:bucket()}));return e?.exitCode===3&&d.log.length===1;},
   'apply needs its confirmation':async()=>{const d=fakeD1();const a=await failure(()=>api.run({command:'schema',apply:true,confirm:null,env:env(),fetchImpl:d.fetchImpl,store:bucket()}));const b=await failure(()=>api.run({command:'identity',apply:true,confirm:api.CONFIRM.schema,env:env(),fetchImpl:d.fetchImpl,store:bucket()}));const c=await failure(()=>api.run({command:'check',apply:true,confirm:'x',env:env(),fetchImpl:d.fetchImpl,store:bucket()}));return a?.exitCode===2&&b?.exitCode===2&&c?.exitCode===2&&d.log.length===0&&d.writes()===0;},
   'schema refuses a database with tables':async()=>{const d=fakeD1();sqliteSync([d.file,'CREATE TABLE stray (x)'],{encoding:'utf8'});const e=await failure(()=>api.run({...apply('schema'),env:env(),fetchImpl:d.fetchImpl,store:bucket()}));return e?.exitCode===3&&d.writes()===0;},
+  'a malformed read does not prove an empty database':async()=>{
+   for(const body of [{success:true,result:[]},{success:true,result:[{}]},{success:true,result:[{success:true}]},{success:true,result:[{success:true,results:'none'}]},{success:true,result:{}},{success:true},{success:true,result:[{success:true,results:[]},{success:true,results:[]}]},{success:true,result:[{success:false,results:[]}]}]){
+    const d=fakeD1({readBody:body});const e=await failure(()=>api.run({...apply('schema'),env:env(),fetchImpl:d.fetchImpl,store:bucket()}));
+    if(e?.exitCode!==3||d.writes()!==0)return false;
+   }
+   return true;},
+  'an arbitrary endpoint is refused before any request':async()=>{
+   let calls=0;const fetchImpl=async()=>{calls++;throw new Error('no request may be sent');};
+   for(const extra of [{EPG_DIAGNOSTIC_API_ENDPOINT:'https://arbitrary-host.example'},{EPG_DIAGNOSTIC_API_ENDPOINT:'https://api.cloudflare.com.evil.example/client/v4'},{EPG_DIAGNOSTIC_API_ENDPOINT:'https://user:pass@api.cloudflare.com/client/v4'},{EPG_DIAGNOSTIC_API_ENDPOINT:'https://api.cloudflare.com/client/v4?x=1'},{EPG_DIAGNOSTIC_API_ENDPOINT:'https://api.cloudflare.com/other'},{EPG_DIAGNOSTIC_R2_ENDPOINT:'https://other.r2.cloudflarestorage.com'},{EPG_DIAGNOSTIC_R2_ENDPOINT:'https://arbitrary-host.example'}]){
+    const e=await failure(()=>api.run({command:'check',env:env(extra),fetchImpl,store:bucket()}));
+    if(e?.exitCode!==2)return false;
+   }
+   return calls===0;},
   'the bucket handle writes only the identity object':async()=>{const store=bucket();const guarded=api.guardedBucket(store);const a=await failure(()=>guarded.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>guarded.delete('diagnostic/identity.json'));return !!a&&!!b&&store.objects.size===0;},
  };
  for(const [name,run] of Object.entries(checks)){try{results[name]=(await run())===true;}catch{results[name]=false;}}
@@ -81,6 +95,8 @@ const live=await import(pathToFileURL(SCRIPT).href);
   const e=await failure(()=>live.readConfig(env(extra)));assert.equal(e?.exitCode,2,label);
  }
  assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_API_ENDPOINT:'http://127.0.0.1:9999'})).endpoint,'http://127.0.0.1:9999','a loopback test server is allowed');
+ assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_API_ENDPOINT:'https://api.cloudflare.com/client/v4/'})).endpoint,'https://api.cloudflare.com/client/v4','the canonical endpoint written out is allowed');
+ assert.equal(live.readConfig(env({EPG_DIAGNOSTIC_R2_ENDPOINT:'https://'+ACCOUNT+'.r2.cloudflarestorage.com'})).r2Endpoint,'https://'+ACCOUNT+'.r2.cloudflarestorage.com','the canonical R2 endpoint of the account is allowed');
  const usage=await failure(()=>live.run({command:'drop',env:env()}));assert.equal(usage?.exitCode,2);
 }
 {
@@ -130,6 +146,18 @@ const live=await import(pathToFileURL(SCRIPT).href);
  assert.equal(lost?.exitCode,3);assert.equal(lost.details.report.kind,'write_uncertain');assert.equal(u.writes(),1,'not retried');
 }
 {
+ // the identity write is two writes (R2 object, then D1 row): an interruption between them is reported with both sides, never retried, and a later attempt is refused by design
+ const d=fakeD1(),store=bucket();
+ await live.run({command:'schema',apply:true,confirm:live.CONFIRM.schema,env:env(),fetchImpl:d.fetchImpl,store});
+ const lost=fakeD1();void lost;
+ const cutting=async(url,init={})=>{const body=init.body?JSON.parse(init.body):null;if(body?.sql&&/INSERT INTO epg_diagnostic_identity/.test(body.sql))throw new Error('connection reset');return d.fetchImpl(url,init);};
+ const split=await failure(()=>live.run({command:'identity',apply:true,confirm:live.CONFIRM.identity,env:env(),fetchImpl:cutting,store}));
+ assert.equal(split?.exitCode,3);assert.equal(split.details.report.identity,'interrupted');assert.deepEqual(split.details.report.sides,{r2:'present',d1:'absent'});assert.match(split.message,/do not retry/);
+ const inserts=d.log.filter(entry=>/INSERT INTO epg_diagnostic_identity/.test(entry.sql||'')).length;assert.equal(inserts,0,'the interrupted insert never reached the database and was not repeated');
+ const retry=await failure(()=>live.run({command:'identity',apply:true,confirm:live.CONFIRM.identity,env:env(),fetchImpl:d.fetchImpl,store}));
+ assert.equal(retry?.exitCode,3);assert.match(retry.message,/domain_not_empty/,'a retry is refused: the bucket is no longer empty');assert.equal(sqlRows(d.file,'SELECT count(*) AS n FROM epg_diagnostic_identity')[0].n,0,'and nothing was inserted by hand');
+}
+{
  // identity refuses a used bucket and a used database, and writes nothing
  const d=fakeD1(),store=bucket();
  await live.run({command:'schema',apply:true,confirm:live.CONFIRM.schema,env:env(),fetchImpl:d.fetchImpl,store});
@@ -158,6 +186,8 @@ const live=await import(pathToFileURL(SCRIPT).href);
   ['apply needs no confirmation'," if(apply&&confirm!==CONFIRM[command])throw new ProvisionError('--apply needs --confirm '+CONFIRM[command],2);\n",'','apply needs its confirmation'],
   ['schema ignores a used database',"if(report.database.tables!==0)throw new ProvisionError('The diagnostic database already has tables; the schema is applied only to an empty one',3,{report});\n",'','schema refuses a database with tables'],
   ['the bucket handle writes any key',"if(key!==IDENTITY_OBJECT)throw new ProvisionError('Write refused: only '+IDENTITY_OBJECT+' may be written',3);\n",'','the bucket handle writes only the identity object'],
+ ['a malformed read is taken as empty',"if(!only||only.success!==true||!Array.isArray(only.results))throw new ProvisionError('A read response did not prove its result; the state is unknown, not empty',3,{kind:'malformed_read'});\n  return only.results;","return only?.results||[];",'a malformed read does not prove an empty database'],
+  ['an arbitrary endpoint is trusted'," if(url.protocol==='https:'&&value===canonical)return value;\n throw new ProvisionError(label+' must be the canonical Cloudflare endpoint or a loopback test server',2);\n"," return value;\n",'an arbitrary endpoint is refused before any request'],
  ];
  for(const [name,from,to,concern] of mutants){
   assert.equal(SOURCE.split(from).length-1,1,'the mutant pattern exists once: '+name);

@@ -50,18 +50,23 @@ export function readConfig(env=process.env){
  if(!apiToken)fail('EPG_DIAGNOSTIC_D1_API_TOKEN is required');
  if(!accessKeyId||!secretAccessKey)fail('EPG_DIAGNOSTIC_R2_ACCESS_KEY_ID and EPG_DIAGNOSTIC_R2_SECRET_ACCESS_KEY are required');
  if(!/^[a-z0-9][a-z0-9-]{7,63}$/.test(resourceId))fail('EPG_DIAGNOSTIC_RESOURCE_ID must match ^[a-z0-9][a-z0-9-]{7,63}$');
- const endpoint=origin(env.EPG_DIAGNOSTIC_API_ENDPOINT,DEFAULT_ENDPOINT,'EPG_DIAGNOSTIC_API_ENDPOINT');
- const r2Endpoint=env.EPG_DIAGNOSTIC_R2_ENDPOINT?origin(env.EPG_DIAGNOSTIC_R2_ENDPOINT,null,'EPG_DIAGNOSTIC_R2_ENDPOINT'):undefined;
+ const endpoint=trustedOrigin(env.EPG_DIAGNOSTIC_API_ENDPOINT,DEFAULT_ENDPOINT,DEFAULT_ENDPOINT,'EPG_DIAGNOSTIC_API_ENDPOINT');
+ const r2Canonical='https://'+accountId+'.r2.cloudflarestorage.com';
+ const r2Endpoint=env.EPG_DIAGNOSTIC_R2_ENDPOINT?trustedOrigin(env.EPG_DIAGNOSTIC_R2_ENDPOINT,null,r2Canonical,'EPG_DIAGNOSTIC_R2_ENDPOINT'):undefined;
  return {accountId,databaseId,apiToken,accessKeyId,secretAccessKey,bucket,resourceId,endpoint,r2Endpoint};
 }
-// Overrides exist for a local test server only: https, or http on loopback.
-function origin(raw,fallback,label){
+// The credentials are sent to this origin, so it is not configurable to an arbitrary host: only the canonical Cloudflare endpoint (the default, or the same value written out) or a
+// loopback test server (http or https on 127.0.0.1, localhost or [::1]) is accepted. No credentials, query or fragment in the URL.
+function trustedOrigin(raw,fallback,canonical,label){
  const text=String(raw||'').trim();
  if(!text)return fallback;
  let url;try{url=new URL(text);}catch{throw new ProvisionError(label+' is not a URL',2);}
- const loopback=['127.0.0.1','localhost','[::1]'].includes(url.hostname);
- if(url.protocol!=='https:'&&!(url.protocol==='http:'&&loopback))throw new ProvisionError(label+' must be https, or http on loopback',2);
- return url.origin+url.pathname.replace(/\/$/,'');
+ if(url.username||url.password||url.search||url.hash)throw new ProvisionError(label+' must not carry credentials, a query or a fragment',2);
+ const loopback=['127.0.0.1','localhost','[::1]'].includes(url.hostname)&&(url.protocol==='http:'||url.protocol==='https:');
+ const value=url.origin+url.pathname.replace(/\/$/,'');
+ if(loopback)return value;
+ if(url.protocol==='https:'&&value===canonical)return value;
+ throw new ProvisionError(label+' must be the canonical Cloudflare endpoint or a loopback test server',2);
 }
 
 // A minimal D1 REST client. Reads retry on transient failures; a write is sent once and never retried (its outcome would be unknown).
@@ -93,9 +98,11 @@ export function createD1Client({config,fetchImpl=fetch,retries=3,sleep=ms=>new P
  async function rows(sql,params=[]){
   stats.reads++;
   const payload=await call('POST',base+'/query',{sql:render(sql,params)+';'},false);
-  const first=(Array.isArray(payload?.result)?payload.result:[])[0];
-  if(first&&first.success===false)throw new ProvisionError('A read statement failed',3);
-  return first?.results||[];
+  // Positive proof only: exactly one successful statement result that carries a `results` array. Anything else is an unknown state, never an empty one.
+  const list=payload?.result;
+  const only=Array.isArray(list)&&list.length===1?list[0]:null;
+  if(!only||only.success!==true||!Array.isArray(only.results))throw new ProvisionError('A read response did not prove its result; the state is unknown, not empty',3,{kind:'malformed_read'});
+  return only.results;
  }
  async function write(sql,params=[]){
   stats.writes++;
@@ -194,7 +201,15 @@ export async function run({command,apply=false,confirm=null,env=process.env,fetc
  report.assess=await Diag.assess({DB:d1.binding,BUCKET:bucket,resourceId:config.resourceId});
  if(!report.assess.ok)throw new ProvisionError('NO-GO: '+report.assess.reason,3,{report});
  if(!apply){report.writes={d1:0,r2:0};return report;}
- const done=await Diag.provision({DB:d1.binding,BUCKET:bucket,resourceId:config.resourceId});
+ let done;
+ try{done=await Diag.provision({DB:d1.binding,BUCKET:bucket,resourceId:config.resourceId});}
+ catch(error){
+  // `provision` writes the R2 identity object first, then the D1 row. An interruption between them leaves the bucket non-empty, so a retry is refused by design: report both sides, do not retry.
+  const sides={r2:null,d1:null};
+  try{sides.r2=(await bucket.head(IDENTITY_OBJECT))?'present':'absent';}catch{sides.r2='unreadable';}
+  try{sides.d1=(await d1.rows('SELECT count(*) AS n FROM '+Diag.IDENTITY_TABLE))[0]?.n>0?'present':'absent';}catch{sides.d1='unreadable';}
+  throw new ProvisionError('The identity write was interrupted; verify both sides, do not retry and do not insert by hand: '+String(error?.message||'').slice(0,200),3,{report:{...report,identity:'interrupted',sides,writes:{d1:d1.stats.writes,r2:bucket.writes.length}}});
+ }
  if(!done.ok)throw new ProvisionError('provision refused: '+done.reason,3,{report:{...report,provision:done}});
  const row=await d1.rows('SELECT domain, resource_id FROM '+Diag.IDENTITY_TABLE+' WHERE id=1');
  const object=await bucket.get(IDENTITY_OBJECT);const stored=object?await object.json():null;

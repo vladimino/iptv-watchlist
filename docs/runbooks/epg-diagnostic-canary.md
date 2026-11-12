@@ -34,6 +34,13 @@ An unknown create outcome (`202`, receipt `reserved`) is resolved by repeating t
 
 The confirmation strings are guards against accident; every `--apply` needs the owner's operation-specific GO. The script never deletes, and the bucket handle it gives `provision` can write only the identity object.
 
+Safety properties and recovery:
+
+- The credentials are sent only to the canonical Cloudflare API endpoint (or a loopback test server): an arbitrary host in `EPG_DIAGNOSTIC_API_ENDPOINT` or `EPG_DIAGNOSTIC_R2_ENDPOINT` is refused before any request, as is a URL with credentials, a query or a fragment.
+- Unknown is never empty: a read answer that is not exactly one successful statement result with a `results` array stops the run (`malformed_read`) before any write, so `schema --apply` cannot proceed on a database whose contents were not proven empty.
+- A failed or uncertain migration write stops the run at that file; nothing is retried. A half-applied diagnostic database is deleted and created again by the owner (it holds nothing else).
+- The identity is two writes: `diagnostic/identity.json` in R2 first, then the D1 row. If the run is interrupted between them (`identity: interrupted` with `sides`), the bucket is no longer empty and `assess` refuses a retry by design. Do not retry and do not insert by hand: verify both sides with `check`, then either the owner deletes and recreates the diagnostic bucket and database (nothing else lives there before H2) or a separately reviewed repair plan is approved.
+
 ## Retention and cleanup
 
 Receipts are kept (they are the record of what was run); the report is inside the receipt. The baseline objects a run materializes (`epg/…`, `sync.json`, `diagnostic/runs/materialized.json`) are removed by `cleanup`, which refuses while a canary is active and never touches `diagnostic/identity.json`, `diagnostic/replay/*` or the receipts. Rows of the diagnostic D1 other than the receipts (the Discovery ledger the run loaded, the step lease document, the published markers) are reset by the provisioning procedure of AIR-456, not by `cleanup`. A dataset holds ledger payloads: keep it out of the repository and out of logs.
