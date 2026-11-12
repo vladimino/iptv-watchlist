@@ -1982,6 +1982,27 @@ async function batchRefreshQueue(env,body,pre){
  }
  return {queue,settled};
 }
+// A live runner lease turns a real start away; it is recorded as a start attempt and nothing else is written.
+async function batchTurnedAway(env,body){
+ const live=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(!(live?.runId&&live.expiresAt>Date.now()))return null;
+ const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
+ turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
+ await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
+ return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
+}
+// Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
+// through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
+async function batchIdle(env,body,pre){
+ const plan=adaptivePredictionBatch(pre.queue,body.capacity);
+ if(!(plan.reason==='quota'||!pre.selection.items.length))return null;
+ const idle={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};idle.diagnosticStartedAt=idle.createdAt;
+ const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false}));
+ const data=await result.clone().json();
+ idle.status=data.status==='noop'?'idle':data.status==='busy'?'completed':'blocked';idle.completedAt=new Date().toISOString();idle.stopReason=data.status==='blocked'?data.reason||null:null;
+ await diagnosticCheckpoint(env,idle,{startResult:['blocked','noop'].includes(data.status)?data.status:'error'});
+ return result;
+}
 // What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
 async function batchStartRoute(env,body,requestId){
  const bad=validateBatchStartBody(body);if(bad)return bad;
@@ -1995,18 +2016,15 @@ async function batchStartRoute(env,body,requestId){
   noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:batchBytes(answer)}));
   return json(answer);
  }
+ // Precedence of a real start: an overlapping run first, then an idle outcome, then the size refusal. A live runner lease (a v5 run, or an earlier v2 run) turns the attempt away with
+ // `already_running` before anything else, naming the holder: an overlapping trigger never reports an independent start result, and it writes nothing to the queue, the run, the lease or
+ // the films. It is recorded as a start attempt, like every start attempt.
+ const turned=await batchTurnedAway(env,body);if(turned)return turned;
+ // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
+ if(!pre.stale){const idle=await batchIdle(env,body,pre);if(idle)return idle;}
  // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a v5 start runs before it takes the lease: the previous run's retries, and a held catalog.
- // A live runner lease is another run's (a v5 run, or an earlier v2 run): this attempt is turned away before it writes anything to the queue, so a start that will answer
- // `already_running` never refreshes or settles the queue under a running run. It is recorded as a start attempt, like every start attempt.
- const live=await loadJSON(env,RUNNER_LEASE_KEY);
- if(live?.runId&&live.expiresAt>Date.now()){
-  const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
-  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
-  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
-  return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
- }
  const unsettled=await atStage('settle_previous',()=>settlePreviousRun(env));if(unsettled)return unsettled;
  const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
  let queueRefreshed=false,queueSettled=0;
@@ -2018,19 +2036,8 @@ async function batchStartRoute(env,body,requestId){
   if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true});
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
- // Nothing to deliver, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
- // through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
- {
-  const plan=adaptivePredictionBatch(pre.queue,body.capacity);
-  if(plan.reason==='quota'||!pre.selection.items.length){
-   const idle={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};idle.diagnosticStartedAt=idle.createdAt;
-   const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false}));
-   const data=await result.clone().json();
-   idle.status=data.status==='noop'?'idle':data.status==='busy'?'completed':'blocked';idle.completedAt=new Date().toISOString();idle.stopReason=data.status==='blocked'?data.reason||null:null;
-   await diagnosticCheckpoint(env,idle,{startResult:['blocked','noop'].includes(data.status)?data.status:'error'});
-   return result;
-  }
- }
+ // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
+ {const idle=await batchIdle(env,body,pre);if(idle)return idle;}
  const runId=crypto.randomUUID(),attemptAt=new Date().toISOString();
  const attempt={runId,createdAt:attemptAt,diagnosticStartedAt:attemptAt,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
  const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));

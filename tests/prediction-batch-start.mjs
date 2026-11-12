@@ -376,6 +376,34 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const hb=await w.api('heartbeat',{runId:v5.data.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data));
 }
 
+// 18. Precedence of a real start: a live runner lease first (already_running), then an idle outcome (quota), then the size refusal. A dry run stays read-only and usable beside a live run.
+{
+ const w=await ready(100);
+ sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'x'.repeat(4000)+"')");
+ await reconcile(w);
+ const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'running');
+ // the queue is current and the oversized selection would be refused, but a v5 run holds the lease: the answer is the holder's, with no manifest and no write
+ const queue0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),lease0=leaseRow(w),films0=filmTables(w),r2a=r2Snapshot(w);
+ const turned=await batch(w);
+ assert.equal(turned.status,200);assert.equal(turned.data.status,'already_running','an overlapping trigger is turned away, not refused on size');assert.equal(turned.data.runId,v5.data.runId);assert.ok(!turned.data.films&&!turned.data.code);
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0);assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(leaseRow(w),lease0);assert.equal(filmTables(w),films0);
+ const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')),[],'only the start-attempt row: '+[...d.added,...d.changed]);
+ // zero capacity beside a live run is the same: the holder answers first
+ assert.equal((await batch(w,{capacity:{remainingPercent:0}})).data.status,'already_running');
+ // a dry run does not look at the lease: it is the read-only manifest path and reports the size
+ const dry=await batch(w,{dryRun:true});assert.equal(dry.status,409);assert.equal(dry.data.code,'manifest_too_large');assert.equal(dry.data.dryRun,true);
+ // the holder is gone: the same oversized selection is now refused write-free
+ const stop=await w.api('complete',{runId:v5.data.runId,reason:'external_termination'});assert.equal(stop.status,200);
+ const before=await state(w),counts=counted(w),puts=counts.put;
+ const refused=await batch(w);assert.equal(refused.status,409);assert.equal(refused.data.code,'manifest_too_large');
+ assert.deepEqual(await state(w),before,'with no holder the size refusal wrote nothing');assert.equal(counts.put,puts);
+ // zero capacity beats the size refusal: the documented idle outcome, with no run, lease or stop Event
+ const runsBefore=runs(w),leaseBefore=leaseRow(w),snap=r2Snapshot(w),quota=await batch(w,{capacity:{remainingPercent:0}});
+ assert.equal(quota.status,200);assert.equal(quota.data.status,'blocked');assert.equal(quota.data.reason,'quota');assert.ok(!quota.data.code);
+ assert.equal(runs(w),runsBefore);assert.equal(leaseRow(w),leaseBefore);
+ const dq=r2Diff(snap,r2Snapshot(w));assert.deepEqual([...dq.added,...dq.changed].filter(k=>/^(enrichment\/runs\/|enrichment\/latest-run|enrichment\/sources\/|events\/)/.test(k)),[]);
+}
+
 // 10. The object mode does not run v2.
 {
  const w=await ready(5);await reconcile(w);
