@@ -57,7 +57,10 @@ const rich=w=>{ // a fingerprint with evidence on every asserted mechanic and ex
  const queue=JSON.parse(sql(w.file,'SELECT chunk_text FROM prediction_queue ORDER BY seq').map(r=>r.chunk_text).join(''));
  assert.ok(queue.retries[pick[1]]&&queue.retries[pick[3]],'both failures are in the queue as retry records at once');assert.ok(queue.retries[pick[1]].retryAt>Date.now(),'with the existing backoff');
  // the failed film is not resubmitted in the run: the stored failure answers, whatever the payload
- const again=await submit(w,m,[item(w,pick[1])]);assert.equal(again.data.results[0].status,'validation_failure');assert.equal(again.data.results[0].replayed,true);assert.equal(pointers(w).length,4);
+ const same=await submit(w,m,[{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad}]);assert.equal(same.data.results[0].status,'validation_failure');assert.equal(same.data.results[0].replayed,true,'the identical payload is a replay of the stored failure');assert.equal(same.data.results[0].retryAt,by[pick[1]].retryAt);
+ const retried=await submit(w,m,[item(w,pick[1])]);assert.equal(retried.data.results[0].status,'conflict','a failed film is not retried in the run: a different payload is a conflict, not a replay');assert.equal(pointers(w).length,4);
+ const failed2=await submit(w,m,[{filmId:pick[3],failure:{kind:'parse_error'}}]);assert.equal(failed2.data.results[0].replayed,true,'an identical reported failure is a replay');
+ assert.equal((await submit(w,m,[{filmId:pick[3],failure:{kind:'validation_error'}}])).data.results[0].status,'conflict','a different failure kind is a conflict');
 }
 
 // 3. Replay: the same body again is idempotent per film: nothing is written twice, no version object, history row or view-index entry is added.
@@ -184,13 +187,13 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
 // 7. The submit gate: one call of a run at a time. An unexpired gate of another request is answered `submit_in_flight` and nothing is written; an expired one is taken over.
 {
  const w=await ready(10);const m=await start(w),pick=ids(m);
- setLease(w,d=>{d.submitGate={requestId:'another-request',bodyHash:'x',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});
+ setLease(w,d=>{d.submitGate={token:'another-token',requestId:'another-request',bodyHash:'x',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});
  const d0=domain(w.file),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),busy=await submit(w,m,[item(w,pick[0])]);
  assert.equal(busy.status,409);assert.equal(busy.data.code,'submit_in_flight');assert.equal(busy.data.status,'busy');assert.ok(busy.data.retryAfterMs>=1000);
  assert.equal(domain(w.file),d0);assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);
- const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.submitGate.requestId,'another-request','the other request keeps its gate');
+ const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.submitGate.token,'another-token','the other request keeps its gate');
  // a heartbeat does not touch the gate and does not lose the epoch
- const hb=await w.api('heartbeat',{runId:m.runId});assert.equal(hb.status,200);assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d).submitGate.requestId,'another-request');
+ const hb=await w.api('heartbeat',{runId:m.runId});assert.equal(hb.status,200);assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d).submitGate.token,'another-token');
  setLease(w,d=>{d.submitGate.expiresAt=Date.now()-1;});
  const taken=await submit(w,m,[item(w,pick[0])]);assert.equal(taken.status,200);assert.equal(taken.data.results[0].status,'created');
 }
@@ -199,14 +202,14 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  // commits nothing (the D1 batch itself refuses it).
  const w=await ready(10);const m=await start(w),pick=ids(m);
  const original=w.env.BUCKET.put.bind(w.env.BUCKET);let fired=false;
- w.env.BUCKET.put=async(key,...rest)=>{if(!fired&&/\/fingerprints\//.test(key)){fired=true;setLease(w,d=>{d.submitGate={requestId:'the-replacement',bodyHash:'y',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});}return original(key,...rest);};
+ w.env.BUCKET.put=async(key,...rest)=>{if(!fired&&/\/fingerprints\//.test(key)){fired=true;setLease(w,d=>{d.submitGate={token:'the-replacement',requestId:'x',bodyHash:'y',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});}return original(key,...rest);};
  const run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run WHERE run_id=\''+m.runId+'\''));
  const r=await submit(w,m,pick.slice(0,3).map(id=>item(w,id)));
  assert.equal(r.status,409,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'gate_lost');
  assert.deepEqual(r.data.results.map(x=>x.status),['blocked','blocked','blocked']);assert.equal(r.data.results[0].reason,'gate_lost');
  assert.equal(pointers(w).length,0,'the superseded handler committed no pointer');assert.equal(sql(w.file,'SELECT count(*) AS n FROM prediction_fingerprint')[0].n,0);
  assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run WHERE run_id=\''+m.runId+'\'')),run0,'and could not overwrite the run record either');
- const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.submitGate.requestId,'the-replacement','the replacement keeps its gate');
+ const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.submitGate.token,'the-replacement','the replacement keeps its gate');
 }
 
 // 8. A renewal that loses the compare-and-swap during a submit is retried; the run is not lost.
@@ -299,5 +302,84 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  assert.ok(w.records.has(cur.r2Key),'the immutable version object exists in R2');assert.ok([...w.records.keys()].some(k=>k.includes('/fingerprints/')),'and the fingerprint body and its generation record');
  // an Event and the run status are the v5 ones: the run is a run
  const status=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/status'),w.env)).json();assert.equal(status.run?.runId??m.runId,m.runId);
+}
+
+// 14. Two requests of one run. The gate comes before the global writer lease, so a genuinely overlapping call is answered `submit_in_flight` with the gate's remaining time, whatever its body
+// and whatever X-Request-Id it carries, writes nothing, and can be replayed after the first call completes.
+const raw=(w,body,requestId)=>w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/batch/submit',{method:'POST',headers:{'Content-Type':'application/json',...(requestId?{'X-Request-Id':requestId}:{})},body:JSON.stringify(body)}),w.env).then(async r=>({status:r.status,data:await r.json()}));
+// holds the first call inside a film operation (the first fingerprint body put) until `release()`
+function hold(w){let release,reached;const blocked=new Promise(r=>{release=r;}),at=new Promise(r=>{reached=r;}),original=w.env.BUCKET.put.bind(w.env.BUCKET);let first=true;w.env.BUCKET.put=async(key,...rest)=>{if(first&&/\/fingerprints\//.test(key)){first=false;reached();await blocked;}return original(key,...rest);};return {release,at};}
+{
+ const w=await ready(12);const m=await start(w),pick=ids(m);
+ const held=hold(w),body1={runId:m.runId,epoch:m.lease.epoch,items:pick.slice(0,2).map(id=>item(w,id))};
+ const first=raw(w,body1,'same-request-id');await held.at;
+ const d0=domain(w.file),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),q0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),r2a=r2Snapshot(w);
+ const identical=await raw(w,body1,'same-request-id');
+ assert.equal(identical.status,409);assert.equal(identical.data.code,'submit_in_flight','an identical replay while the first call runs reaches the gate, not the writer lease');assert.equal(identical.data.status,'busy');assert.ok(identical.data.retryAfterMs>=1000);
+ const other=await raw(w,{...body1,items:pick.slice(2,4).map(id=>item(w,id))},'same-request-id');
+ assert.equal(other.data.code,'submit_in_flight','the same X-Request-Id with another body does not overwrite the live gate');
+ const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.ok(lease.submitGate&&lease.submitGate.token&&lease.submitGate.requestId==='same-request-id','the gate has a Worker-generated token; the id is only a log field');assert.notEqual(lease.submitGate.token,'same-request-id');
+ assert.equal(domain(w.file),d0,'the refused calls wrote no film');assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),q0);
+ const dr=r2Diff2(r2a,r2Snapshot(w));assert.deepEqual(dr,[],'and no R2 object: '+dr);
+ held.release();const done=await first;assert.equal(done.status,200,JSON.stringify(done.data).slice(0,200));assert.deepEqual(done.data.results.map(x=>x.status),['created','created']);
+ const after=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.ok(!after.submitGate,'the first call cleared its own gate');
+ const replay=await raw(w,body1,'same-request-id');assert.equal(replay.status,200);assert.deepEqual(replay.data.results.map(x=>[x.status,x.replayed]),[['created',true],['created',true]],'after the first call the replay is idempotent');
+}
+function r2Diff2(a,b){return [...b.keys()].filter(k=>!a.has(k)||a.get(k)!==b.get(k)).concat([...a.keys()].filter(k=>!b.has(k)));}
+
+// 15. A caller-supplied request id never identifies an owner: a superseded handler and its replacement may carry the same id, and the old handler can neither commit nor clear the new gate.
+{
+ const w=await ready(10);const m=await start(w),pick=ids(m);
+ const held=hold(w),body={runId:m.runId,epoch:m.lease.epoch,items:pick.slice(0,3).map(id=>item(w,id))};
+ const first=raw(w,body,'reused-id');await held.at;
+ // the first call's gate expired and was reassigned to a replacement that carries the very same request id
+ setLease(w,d=>{d.submitGate={token:'replacement-token',requestId:'reused-id',bodyHash:'z',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});
+ held.release();const r=await first;
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'gate_lost');assert.deepEqual(r.data.results.map(x=>x.status),['blocked','blocked','blocked']);
+ assert.equal(pointers(w).length,0,'the superseded handler committed nothing');assert.equal(sql(w.file,'SELECT count(*) AS n FROM prediction_fingerprint')[0].n,0);
+ const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.submitGate.token,'replacement-token','and did not clear the replacement\'s gate, although the request ids are equal');
+}
+
+// 16. Loss of the gate is terminal for every mutable operation, not only for the film commits: no retry record, no queue settlement, no progress write and no run-record save by a superseded handler.
+{
+ // (a) the gate is reassigned right before the renewal that follows a validation failure
+ const w=await ready(8);const m=await start(w),pick=ids(m);
+ const original=w.ctx.PredictionD1;let reads=0;
+ w.ctx.PredictionD1={...original,openLease:async(env,key)=>{if(/runner-lease/.test(key)){reads++;if(reads===2)setLease(w,d=>{d.submitGate={token:'replacement',requestId:'x',bodyHash:'y',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});}return original.openLease(env,key);}};
+ const bad={...w.prediction,predictedRating:99};
+ const q0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),d0=domain(w.file),r2a=r2Snapshot(w);
+ const r=await submit(w,m,[{filmId:pick[0],fingerprint:w.fingerprint,prediction:bad},item(w,pick[1])]);
+ w.ctx.PredictionD1=original;
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'gate_lost');assert.deepEqual(r.data.results.map(x=>[x.status,x.reason]),[['blocked','gate_lost'],['blocked','gate_lost']],'a failure that was not persisted is not reported as an outcome');
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),q0,'no retry record and no settlement by the superseded handler');assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0,'no run-record save');assert.equal(pointers(w).length,0,'no prediction was written');assert.equal(sql(w.file,'SELECT count(*) AS n FROM prediction_fingerprint')[0].n,1,'the valid fingerprint of the failed item was committed while the gate was still held, as a v5 submit keeps it');
+ const dr=r2Diff2(r2a,r2Snapshot(w)).filter(k=>NO_RUN_KEYS.test(k)||/prediction-queue/.test(k)||/runs\//.test(k));assert.deepEqual(dr,[],'no run, queue or Event write: '+dr);
+}
+{
+ // (b) the gate is reassigned right before the queue settlement: the committed films stay committed, nothing else is written, and the next holder settles them
+ const w=await ready(10);const m=await start(w),pick=ids(m),items=pick.slice(0,3).map(id=>item(w,id));
+ const original=w.ctx.mutatePredictionQueue;
+ w.ctx.mutatePredictionQueue=async(...a)=>{if(a[2]==='batch_progress'){setLease(w,d=>{d.submitGate={token:'replacement',requestId:'x',bodyHash:'y',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});}return original(...a);};
+ const q0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));const events0=[...w.records.keys()].filter(k=>/events\//.test(k)).length;
+ const r=await submit(w,m,items);w.ctx.mutatePredictionQueue=original;
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'gate_lost');assert.equal(r.data.committed,true,'the films were committed before the gate was lost');assert.deepEqual(r.data.results.map(x=>x.status),['created','created','created']);assert.equal(r.data.queueSettlement,'pending');
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),q0,'the superseded handler did not touch the queue');assert.equal(pointers(w).length,3);assert.equal([...w.records.keys()].filter(k=>/events\//.test(k)).length,events0,'and wrote no progress Event');
+ // the new holder (here: the replacement ends, the same body is submitted) completes the work
+ setLease(w,d=>{delete d.submitGate;});
+ const next=await submit(w,m,items);assert.equal(next.status,200);assert.deepEqual(next.data.results.map(x=>[x.status,x.replayed]),pick.slice(0,3).map(()=>['created',true]));assert.equal(next.data.queueSettlement,'settled');assert.equal(queueOf(w).pending.length,7,'the committed films were settled by the new holder');
+}
+
+// 17. An unexpected error after item 3 of 7 inside one call is a non-200 answer that carries the results and `committed`, not a bare error; the same body then recovers the run.
+{
+ const w=await ready(12);const m=await start(w),pick=ids(m).slice(0,7),items=pick.map(id=>item(w,id));
+ const original=w.ctx.PredictionD1;let runSaves=0;
+ w.ctx.PredictionD1={...original,saveMutable:async(env,key,value)=>{if(/\/runs\//.test(key)&&++runSaves===4)throw new Error('storage down');return original.saveMutable(env,key,value);}};
+ const r=await submit(w,m,items);
+ assert.equal(r.status,502,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.error,'storage_error');assert.equal(r.data.committed,true);
+ assert.deepEqual(r.data.results.map(x=>x.status),['created','created','created','created','blocked','blocked','blocked'],'the answer carries every film: four committed, three not processed');assert.equal(r.data.results[4].reason,'storage_error');
+ assert.ok(!JSON.stringify(r.data).includes('storage down'),'no error text is copied out');
+ w.ctx.PredictionD1=original;assert.equal(pointers(w).length,4,'four films are committed');
+ const again=await submit(w,m,items);assert.equal(again.status,200,JSON.stringify(again.data).slice(0,300));
+ assert.deepEqual(again.data.results.map(x=>x.status),pick.map(()=>'created'));assert.deepEqual(again.data.results.slice(0,4).map(x=>x.replayed),[true,true,true,true],'the committed films, the fourth from the crash window, are recognized');
+ assert.equal(pointers(w).length,7);assert.equal(versions(w).length,7,'exactly one version object per film');
 }
 console.log('prediction-batch-submit: ok');

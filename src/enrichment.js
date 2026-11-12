@@ -1282,7 +1282,7 @@ async function observedPrediction(env,body,work,stage,requestId){
  }
  const normal=['queue_empty','eligible_queue_empty','retry_backoff'];
  // A start that cannot write the previous run's retries took no lease and created no run: it is not a stop of anything.
- const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
+ const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'||data.recoverable===true?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
  const errorClass=stop==='lease_lost'||stop==='storage_error'||stop==='format_error_storm'?stop:null;
  const produced=predictionStep({step:stage,requestId:correlation,attemptedAt,completedAt:new Date().toISOString(),outcome:'produced',httpStatus:response.status,elapsedMs:Date.now()-started,errorClass});
  if(stop){const id=stopId();const final=await recordRunStop(env,id,stop,{...data,start:stage==='start',trigger:body?.trigger});await safeAppendStep(env,traceId||id,produced);return withPredictionCorrelation(json({...data,...final,stage:stage==='start'?'blocked':final.stage,status:stage==='start'?'blocked':data.status||'partial'},response.status),correlation);}
@@ -2135,19 +2135,21 @@ async function runnerLeaseEdit(env,runId,epoch,edit){
   return {status:'owned',value:decided.value};
  }
 }
-const batchGateSet=(env,runId,epoch,requestId,bodyHash)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
+// The gate is owned by a **token the Worker generates for each call**, never by the caller-supplied X-Request-Id: the id is kept only for the logs. While any gate is live, no
+// second acquisition succeeds, whatever its id or body; renew, clear and the D1 commit guard all compare the token, so a superseded handler can neither commit nor clear the
+// gate of its replacement.
+const batchGateSet=(env,runId,epoch,token,requestId,bodyHash)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
  const gate=old.submitGate;
- // An unexpired gate of another request, identical body or not: this call does nothing and the caller replays after retryAfterMs.
- if(gate&&gate.expiresAt>now&&gate.requestId!==requestId)return {refuse:{status:'in_flight',retryAfterMs:Math.max(1000,gate.expiresAt-now)}};
+ if(gate&&gate.expiresAt>now)return {refuse:{status:'in_flight',retryAfterMs:Math.max(1000,gate.expiresAt-now)}};
  const at=new Date(now).toISOString();
- return {value:{...old,heartbeatAt:at,expiresAt:now+RUNNER_LEASE_TTL,submitGate:{requestId,bodyHash,startedAt:at,expiresAt:now+BATCH_GATE_TTL_MS}}};
+ return {value:{...old,heartbeatAt:at,expiresAt:now+RUNNER_LEASE_TTL,submitGate:{token,requestId:String(requestId||'').slice(0,100),bodyHash,startedAt:at,expiresAt:now+BATCH_GATE_TTL_MS}}};
 });
-const batchGateRenew=(env,runId,epoch,requestId)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
- if(old.submitGate?.requestId!==requestId||old.submitGate.expiresAt<=now)return {refuse:{status:'gate_lost',runId}};
+const batchGateRenew=(env,runId,epoch,token)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
+ if(old.submitGate?.token!==token||old.submitGate.expiresAt<=now)return {refuse:{status:'gate_lost',runId}};
  return {value:{...old,heartbeatAt:new Date(now).toISOString(),expiresAt:now+RUNNER_LEASE_TTL,submitGate:{...old.submitGate,expiresAt:now+BATCH_GATE_TTL_MS}}};
 });
-const batchGateClear=(env,runId,epoch,requestId)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
- if(old.submitGate?.requestId!==requestId)return {refuse:{status:'owned'}};
+const batchGateClear=(env,runId,epoch,token)=>runnerLeaseEdit(env,runId,epoch,(old,now)=>{
+ if(old.submitGate?.token!==token)return {refuse:{status:'owned'}};
  const {submitGate,...rest}=old;
  return {value:{...rest,heartbeatAt:new Date(now).toISOString(),expiresAt:now+RUNNER_LEASE_TTL}};
 });
@@ -2163,15 +2165,20 @@ function batchCompatibilityOf(verdict){
  if(verdict?.outcome==='current'||verdict?.outcome==='compatible')return 'compatible';
  return ['profile_impacted','profile_global_change','profile_changed'].includes(verdict?.reason)?'impacted':'unknown';
 }
+// Does this call still hold the lease, its epoch and its gate token? `busy` (a lost compare-and-swap) still means the run owns the lease.
+async function batchGateHeld(env,ctx){
+ const held=await runnerLeaseEdit(env,ctx.run.runId,ctx.epoch,old=>old.submitGate?.token===ctx.token&&old.submitGate.expiresAt>Date.now()?{refuse:{status:'held'}}:{refuse:{status:'gate_lost'}});
+ return held.status==='held'||held.status==='busy'?'held':held.status==='lease_lost'?'lease_lost':'gate_lost';
+}
 // A commit made with the guard: a lost compare-and-swap of the domain generation is retried while this call still holds the lease and its gate, otherwise the handler stops.
 class BatchGateLost extends Error{constructor(status){super('batch gate lost');this.status=status;}}
 async function batchGuardedCommit(env,ctx,work){
  for(let attempt=1;;attempt++){
   try{return await work();}
   catch(error){
-   if(error?.code!=='prediction_domain_cas')throw error;
-   const gate=await runnerLeaseEdit(env,ctx.run.runId,ctx.epoch,old=>old.submitGate?.requestId===ctx.requestId&&old.submitGate.expiresAt>Date.now()?{refuse:{status:'held'}}:{refuse:{status:'gate_lost'}});
-   if(gate.status!=='held')throw new BatchGateLost(gate.status==='gate_lost'?'gate_lost':'lease_lost');
+   if(error?.code!=='prediction_domain_cas'&&error?.code!=='prediction_queue_conflict')throw error;
+   const held=await batchGateHeld(env,ctx);
+   if(held!=='held')throw new BatchGateLost(held);
    if(attempt>=3)throw error;
   }
  }
@@ -2183,8 +2190,9 @@ async function batchSubmitItem(env,ctx,item){
  run.submitted||={};
  const digest=await batchItemDigest(id,item),recorded=run.submitted[id];
  if(recorded){
-  if(recorded.outcome==='validation_failure'){const failure=run.failures[id]||{};return {result:{filmId:id,status:'validation_failure',error:failure.kind||'parse_error',retryable:true,retryAt:failure.retryAt,...(failure.validation?{validation:failure.validation}:{}),replayed:true}};}
+  // A different payload for a film this run already settled is a conflict, a failed film included: a failure is not retried in the same run, and only the identical payload is a replay.
   if(recorded.inputDigest!==digest)return {result:{filmId:id,status:'conflict'}};
+  if(recorded.outcome==='validation_failure'){const failure=run.failures[id]||{};return {result:{filmId:id,status:'validation_failure',error:failure.kind||'parse_error',retryable:true,retryAt:failure.retryAt,...(failure.validation?{validation:failure.validation}:{}),replayed:true}};}
   return {result:{filmId:id,status:recorded.outcome,replayed:true,...(recorded.compatibility?{compatibility:recorded.compatibility}:{})}};
  }
  let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null,deferredIndex=null,result=null;
@@ -2260,56 +2268,85 @@ async function batchSubmit(env,body,requestId){
  if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);
  // A caller's wrong epoch is the caller's error, not a loss of ownership: it must not stop the real owner's run, so it is not answered `lease_lost` (which records a stop).
  if(Number.isInteger(run.epoch)&&run.epoch!==body.epoch)return json({error:'Epoch does not match this run',code:'epoch_mismatch',runId:run.runId},409);
- // The gate: one submit of this run at a time. The same call renews the lease and checks its owner, epoch and expiry.
- const gate=await batchGateSet(env,run.runId,body.epoch,requestId,await contentHash(body.items));
+ // The gate comes first, before the global writer lease: an overlapping call of the run is answered `submit_in_flight` with the gate's remaining time, not as a busy writer. The same
+ // call renews the lease and checks its owner, epoch and expiry. The gate's token is generated here; the X-Request-Id never identifies an owner.
+ const token=crypto.randomUUID();
+ const gate=await batchGateSet(env,run.runId,body.epoch,token,requestId,await contentHash(body.items));
  if(gate.status==='in_flight')return json({status:'busy',code:'submit_in_flight',reason:'submit_in_flight',retryAfterMs:gate.retryAfterMs,runId:run.runId,epoch:body.epoch,...scheduledRunFields()},409);
  if(gate.status!=='owned')return json(gate,409);
- // The run is read again under the gate: another call of this run may have finished (or the run completed) between the first read and the gate.
- try{const fresh=await checkedRun(env,body.runId);if(!fresh)return json({error:'Unknown run'},404);if(fresh.status!=='running')return json({error:'Run already complete',stopReason:fresh.stopReason||null,mustComplete:!!fresh.reason},409);return await batchSubmitLocked(env,body,fresh,requestId);}
- finally{try{await batchGateClear(env,run.runId,body.epoch,requestId);}catch{/* the gate expires by itself */}}
+ try{
+  // The run is read again under the gate: another call of this run may have finished (or the run completed) between the first read and the gate.
+  const fresh=await checkedRun(env,body.runId);if(!fresh)return json({error:'Unknown run'},404);
+  if(fresh.status!=='running')return json({error:'Run already complete',stopReason:fresh.stopReason||null,mustComplete:!!fresh.reason},409);
+  // Global writer exclusion is unchanged: every prediction mutation still goes through the one writer lease, taken under the gate.
+  // The step recorder wraps only the work under the gate: a refusal before it (an unknown run, another protocol, a live gate) writes nothing, not even a diagnostics step.
+  return await observedPrediction(env,body,()=>predictionWriter(env,()=>batchSubmitLocked(env,body,fresh,requestId,token)),'submit',requestId);
+ }finally{try{await batchGateClear(env,run.runId,body.epoch,token);}catch{/* the gate expires by itself */}}
 }
-async function batchSubmitLocked(env,body,run,requestId){
+async function batchSubmitLocked(env,body,run,requestId,token){
  const startedAt=Date.now();
  if(run.systemicStopReason)return json({...runSummary(run),epoch:body.epoch,mustComplete:true,stopReason:run.systemicStopReason});
  const current=await loadJSON(env,profileKey);if(!current)return json({error:'Taste profile is not configured'},409);
  if(await runContractChanged(run))return contractChangedResponse();
  const change=current.profileHash!==run.tasteProfileHash?batchProfileChange(run,current):null;
  const freshness=await predictionFreshness(env,current),source=await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{};
- const ctx={run,freshness,change,source,epoch:body.epoch,requestId,guarded:{...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:body.epoch,requestId}}};
- // The run record is saved with the same guard, so a handler whose gate was reassigned cannot overwrite the replacement's record.
+ // Every authoritative write this call makes (film commits, the run record, retry records, the queue settlement, the progress record) goes through `guarded`: its D1 batch carries the guard.
+ const ctx={run,freshness,change,source,epoch:body.epoch,token,requestId,guarded:{...env,[BATCH_COMMIT_GUARD]:{runId:run.runId,epoch:body.epoch,token}}};
  const saveRun=()=>batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
  const results=[],regenerate=[];let stop=null;
+ const lost=()=>stop==='gate_lost'||stop==='lease_lost';
+ const fail=(error,id,pushed)=>{
+  if(error instanceof BatchGateLost)stop=error.status;else{stop='storage_error';try{console.log(JSON.stringify({event:'batch_submit_item_failed',requestId:SAFE_LOG_ID.test(String(requestId))?requestId:null,runId:SAFE_LOG_ID.test(run.runId)?run.runId:null,code:SAFE_LOG_ID.test(String(error?.code))?error.code:'unknown'}));}catch{/* a log never changes the outcome */}}
+  if(!pushed)results.push({filmId:id,status:'blocked',reason:stop});
+ };
  for(const item of body.items){
   const id=String(item.filmId);
   if(stop){results.push({filmId:id,status:'blocked',reason:stop});continue;}
   if(Date.now()-startedAt>BATCH_RUNNER.callBudgetMs){results.push({filmId:id,status:'deferred_budget'});continue;}
-  const outcome=await batchSubmitItem(env,ctx,item);results.push(outcome.result);
-  if(outcome.regenerate)regenerate.push(outcome.regenerate);
-  if(outcome.stop){stop=outcome.stop;if(outcome.stop==='storage_error')run.systemicStopReason='storage_error';}
+  let outcome=null;
   try{
-   run.lastActivityAt=new Date().toISOString();
-   const renewed=await batchGateRenew(env,run.runId,body.epoch,requestId);
-   if(renewed.status==='owned')run.lastHeartbeatAt=renewed.value.heartbeatAt;else if(!stop)stop=renewed.status==='gate_lost'?'gate_lost':renewed.status==='busy'?null:'lease_lost';
-   await saveRun();
-  }catch(error){if(error instanceof BatchGateLost){stop=error.status;}else throw error;}
-  if(outcome.failure)await batchRecordRetry(env,run,outcome.failure,outcome.result);
-  if(run.systemicStopReason)stop||=run.systemicStopReason;
+   outcome=await batchSubmitItem(env,ctx,item);results.push(outcome.result);
+   if(outcome.regenerate)regenerate.push(outcome.regenerate);
+   if(outcome.stop)stop=outcome.stop;
+   // Loss of the gate or the epoch is terminal for every mutable operation that follows: no checkpoint, no retry record, no settlement, no progress.
+   if(!lost()){
+    run.lastActivityAt=new Date().toISOString();
+    const renewed=await batchGateRenew(env,run.runId,body.epoch,token);
+    if(renewed.status==='owned')run.lastHeartbeatAt=renewed.value.heartbeatAt;else if(renewed.status==='gate_lost'||renewed.status==='lease_lost')stop=renewed.status;
+   }
+   // A result that was only in memory (a failure, a regeneration) when the gate was lost is not reported as an outcome: nothing of it was persisted, and the new holder decides it again.
+   if(lost()&&outcome.result&&['validation_failure','needs_regeneration'].includes(outcome.result.status)){const at=results.indexOf(outcome.result);if(at>=0)results[at]={filmId:id,status:'blocked',reason:stop};if(outcome.regenerate)regenerate.pop();}
+   if(!lost())await saveRun();
+   // The retry record of a failed film goes to the queue at once, under the same guard.
+   if(!lost()&&outcome.failure)await batchGuardedCommit(env,ctx,()=>batchRecordRetry(ctx.guarded,run,outcome.failure,outcome.result));
+   if(!lost()&&run.systemicStopReason)stop||=run.systemicStopReason;
+  }catch(error){
+   // A retry write that kept losing its swap while the gate is still ours leaves the run's own `retryHeal: pending` mark, which the stop or the next start writes; it is not a stop.
+   if(outcome&&error?.code==='prediction_queue_conflict'&&await batchGateHeld(env,ctx)==='held'){run.retryHeal='pending';continue;}
+   fail(error,id,!!outcome);
+  }
  }
  const committed=results.some(r=>['created','recalculated','already_current'].includes(r.status));
- let queue=null,settlement='settled';
- if(run.mode==='queued'){
+ let queue=null,settlement=lost()?'pending':'settled';
+ if(!lost()&&run.mode==='queued'){
   // Every film of the run that was written leaves the queue, not only this call's: a settlement that was lost earlier (`queueSettlement: "pending"`) is repeated by the next call from the run record, and a film already gone is not touched.
   const settled=Object.keys(run.results).filter(id=>SETTLED_STATUSES.includes(run.results[id]));
-  try{queue=await atStage('queue_refresh',async()=>{const report=await loadJSON(env,'programme.json'),stored=await currentPredictionQueue(env,report,current,'batch_progress');if(!stored||!settled.length)return stored;return await mutatePredictionQueue(env,guardedSettle(await advanceContext(env,report,current),settled,'batch_progress'),'batch_progress',stored)||stored;});}
-  catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('submit',held,requestId,run.runId,{results,committed,epoch:body.epoch,queueSettlement:'pending'});if(error?.code==='prediction_queue_conflict'){settlement='pending';}else throw error;}
+  try{
+   queue=await atStage('queue_refresh',async()=>{const report=await loadJSON(env,'programme.json'),stored=await currentPredictionQueue(env,report,current,'batch_progress');if(!stored||!settled.length)return stored;return await batchGuardedCommit(env,ctx,async()=>await mutatePredictionQueue(ctx.guarded,guardedSettle(await advanceContext(env,report,current),settled,'batch_progress'),'batch_progress',stored))||stored;});
+  }catch(error){
+   const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('submit',held,requestId,run.runId,{results,committed,epoch:body.epoch,queueSettlement:'pending'});
+   settlement='pending';
+   if(error instanceof BatchGateLost)stop=error.status;else if(error?.code==='prediction_queue_conflict'){if(await batchGateHeld(env,ctx)!=='held')stop='gate_lost';}else{stop='storage_error';}
+  }
  }
- noteQueueCounts(env,queue);if(queue)await runnerProgress(env,run,queue);
+ if(queue&&!lost()){try{noteQueueCounts(env,queue);await batchGuardedCommit(env,ctx,()=>runnerProgress(ctx.guarded,run,queue));}catch(error){if(error instanceof BatchGateLost)stop=error.status;else stop||='storage_error';}}
  noteStep(env,()=>({bodyItems:body.items.length,created:results.filter(r=>r.status==='created').length,recalculated:results.filter(r=>r.status==='recalculated').length,alreadyCurrent:results.filter(r=>r.status==='already_current').length,failures:results.filter(r=>r.status==='validation_failure').length,deferredBudget:results.filter(r=>r.status==='deferred_budget').length,needsRegeneration:results.filter(r=>r.status==='needs_regeneration').length}));
  const answer={...runSummary(run),epoch:body.epoch,results,committed,queueSettlement:settlement,mustComplete:!!run.systemicStopReason,stopReason:run.systemicStopReason||null,remaining:queue?.pending.length??null,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields()};
  if(change){answer.profile={...change,body:current.profile,lineage:Array.isArray(current.lineage)?current.lineage:[]};answer.regenerate=regenerate;answer.action=change.scope==='global'?'complete':'continue';}
  else answer.profile={changed:false};
  if(stop&&['gate_lost','lease_lost'].includes(stop))return json({...answer,status:stop},409);
- if(stop==='storage_error')return json({...answer,error:'storage_error'},502);
+ // A storage failure after processing began carries the results and is recoverable by replaying the same body: it is not a stop of the run (a persistent failure is ended by `complete`).
+ if(stop==='storage_error')return json({...answer,error:'storage_error',recoverable:true},502);
  return json(answer);
 }
 // A dry run reads and writes nothing: no lease, gate, run, queue or storage write. It validates each item with the same validators against the current contract and profile, and reports
@@ -2816,8 +2853,8 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
  if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>runnerHeartbeat(env,body)),'heartbeat',requestId);
  if(path==='/api/enrichment/start'&&request.method==='POST')return diagnosedStart(env,body,requestId);
- // A dry run takes neither the writer lease nor the step recorder: it writes nothing at all.
- if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,timed=>body?.dryRun===true?batchSubmit(timed,body,requestId):observedPrediction(timed,body,()=>predictionWriter(timed,()=>batchSubmit(timed,body,requestId)),'submit',requestId));
+ // batchSubmit takes the gate, then the step recorder and the writer lease, for a real call; a dry run takes none of them and writes nothing at all.
+ if(path==='/api/enrichment/batch/submit'&&request.method==='POST')return timedBatchStep(env,'batch_submit',body,requestId,timed=>batchSubmit(timed,body,requestId));
  if(path==='/api/enrichment/batch/start'&&request.method==='POST')return timedBatchStep(env,'batch_start',body,requestId,timed=>batchStartRoute(timed,body,requestId));
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
