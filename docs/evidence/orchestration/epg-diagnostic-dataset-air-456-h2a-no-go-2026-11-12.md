@@ -31,6 +31,6 @@ The diagnostic bindings are deployed ([PR #558](https://github.com/vladimino/ipt
 
 ## Open items for the owner (not decided here)
 
-- **Retention and cleanup** of the diagnostic D1 and R2: keep unchanged until a separate retention decision; deletion is its own authorized operation.
-- **Credentials**: the short-lived D1 token (account-scoped D1 Write) and the diagnostic R2 key used in H1, and the read-only production key used in H2a, are revoked by the owner in the Cloudflare dashboard; a session cannot do it.
+- **Retention and cleanup** of the diagnostic D1 and R2 (**decision pending**): keep unchanged until a separate retention decision; deletion is its own authorized operation.
+- **Credentials**: the short-lived D1 token (account-scoped D1 Write) and the diagnostic R2 key used in H1, and the read-only production key used in H2a, are to be revoked by the owner in the Cloudflare dashboard; a session cannot do it. **Revocation is pending owner confirmation**; none is recorded as done.
 - **Acceptance of AIR-456** against the alternative Done criterion (documented NO-GO with evidence and safe recovery), by the owner.
