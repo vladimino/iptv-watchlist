@@ -309,7 +309,7 @@ function evidenceCore(fingerprint,metadata,out){
  return issues;
 }
 function evidenceIssues(fingerprint,metadata){return evidenceCore(fingerprint,metadata,null);}
-// ADR 0128: when evidence is present and the caller omitted BOTH sourceBasis and sourceRefs, the Worker sets them from the aggregate it already
+// ADR 0129: when evidence is present and the caller omitted BOTH sourceBasis and sourceRefs, the Worker sets them from the aggregate it already
 // computes and checks (the same walk order, de-duplication and cap of 8). A value the caller supplied is never rewritten: a disagreeing aggregate stays a
 // rejection. An invalid evidence map derives nothing, so the caller sees the evidence issues. The result is a new object; the input is not changed.
 function deriveFingerprintSource(fingerprint,metadata){
@@ -326,7 +326,7 @@ function fingerprintIssues(f,metadata){
   if(isObject(f.evidence)){const kept=issues.filter(issue=>!(issue.path==='fingerprint.sourceRefs'&&issue.code==='invalid_ref'));issues.length=0;issues.push(...kept);}
   const found=evidenceIssues(f,metadata);
   // an invalid map derives nothing; its own issues are the cause, so the two omitted aggregate fields are not reported as missing on top of them
-  if(found.length&&isObject(f.evidence)){for(let i=issues.length-1;i>=0;i--)if(issues[i].code==='required'&&(issues[i].path==='fingerprint.sourceBasis'||issues[i].path==='fingerprint.sourceRefs')&&!Object.hasOwn(f,issues[i].path.slice('fingerprint.'.length)))issues.splice(i,1);}
+  if(found.length){for(let i=issues.length-1;i>=0;i--)if(issues[i].code==='required'&&(issues[i].path==='fingerprint.sourceBasis'||issues[i].path==='fingerprint.sourceRefs')&&!Object.hasOwn(f,issues[i].path.slice('fingerprint.'.length)))issues.splice(i,1);}
   for(const issue of found){if(issues.length>=MAX_ISSUES)break;if(!issues.some(have=>have.path===issue.path&&have.code===issue.code))issues.push(issue);}
  }
  if(isObject(f)&&!issues.length&&JSON.stringify(f).length>FINGERPRINT_MAX_CHARS)issues.push({path:'fingerprint',code:'too_large'});

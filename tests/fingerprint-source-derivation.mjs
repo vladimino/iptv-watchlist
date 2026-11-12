@@ -1,4 +1,4 @@
-// ADR 0128: the Worker derives fingerprint.sourceBasis and fingerprint.sourceRefs from a valid evidence map when the caller omitted BOTH, and never rewrites a value the caller supplied.
+// ADR 0129: the Worker derives fingerprint.sourceBasis and fingerprint.sourceRefs from a valid evidence map when the caller omitted BOTH, and never rewrites a value the caller supplied.
 // The derivation is checked against an independent reference written from the documented rule (walk order, first-seen unique, cap 8, one basis or mixed), over fixed cases (the C3 failure
 // of AIR-450 among them) and a seeded random sweep, against the real validator of the Worker (no model, no network, no production).
 import fs from 'node:fs';
@@ -182,6 +182,34 @@ function reference(f){
   const next2=await w.api('next',{runId:start.data.runId,batchSize:1});const id2=next2.data.items?.[0]?.filmId||id;
   const ok=await w.api('submit',{runId:start.data.runId,items:[{filmId:id2,fingerprint:fp({evidence}),prediction}]});
   assert.ok(['created','recalculated'].includes(ok.data.results[0].status),JSON.stringify(ok.data.results[0]).slice(0,300));
+ }
+}
+// 8. Evidence that is not a map at all (null, a list, a string, a number, a boolean) is an invalid map like any other: only its own issue is reported, the omitted fields are not reported as missing on top
+// of it, and a genuinely supplied wrong field is still reported. Through fingerprintIssues, prediction_validate and a submit path.
+{
+ const {flowWorld}=await import('./prediction-d1-flow-lib.mjs');
+ const prediction={predictedRating:3.5,probability4Plus:.45,confidence:'medium',matchSignals:['Investigation'],mainRisk:'Mixed payoff',moodLabels:['мрачный','напряжённый']};
+ const nonMaps=[null,[],['x'],'text',5,true];
+ for(const bad of nonMaps){
+  const label=JSON.stringify(bad);
+  assert.deepEqual(issues(fp({evidence:bad}),metadata),['fingerprint.evidence invalid_type'],'omitted fields, evidence '+label);
+  assert.equal(Object.hasOwn(derive(fp({evidence:bad}),metadata),'sourceBasis'),false,'nothing derived from '+label);
+  assert.deepEqual(issues(fp({evidence:bad,sourceBasis:'model_knowledge',sourceRefs:['model_knowledge']}),metadata),['fingerprint.evidence invalid_type'],'supplied fields, evidence '+label);
+  // a supplied wrong field is a genuine error and stays; the field that was omitted is still not reported as missing
+  const wrongBasis=issues(fp({evidence:bad,sourceBasis:'bogus'}),metadata);
+  assert.ok(wrongBasis.includes('fingerprint.sourceBasis invalid_enum')&&wrongBasis.includes('fingerprint.evidence invalid_type'),'a supplied wrong field is not hidden: '+wrongBasis);
+  assert.ok(!wrongBasis.includes('fingerprint.sourceRefs required'),'the omitted field is not reported as missing: '+wrongBasis);
+ }
+ // through prediction_validate and the dry-run submit on the real handlers
+ const w=await flowWorld({films:4});assert.equal((await w.api('queue/reconcile',{})).status,200);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ const call2=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);return JSON.parse(r.result.content[0].text);};
+ const m=(await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',dryRun:true})).data,id=m.films[0].filmId;
+ for(const bad of nonMaps){
+  const v=await call2('prediction_validate',{fingerprint:fp({evidence:bad}),prediction});
+  assert.equal(v.valid,false);assert.deepEqual(v.fingerprint.issues,[{path:'fingerprint.evidence',code:'invalid_type'}],'prediction_validate, evidence '+JSON.stringify(bad));
+  const r=(await w.api('batch/submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items:[{filmId:id,fingerprint:fp({evidence:bad}),prediction,inputHash:m.films[0].inputHash}]})).data.results[0];
+  assert.equal(r.status,'validation_failure');assert.deepEqual(r.validation.issues,[{path:'fingerprint.evidence',code:'invalid_type'}],'dry-run submit, evidence '+JSON.stringify(bad));
  }
 }
 console.log('fingerprint-source-derivation ok');
