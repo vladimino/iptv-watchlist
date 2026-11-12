@@ -922,20 +922,40 @@ function safePredictionReason(value){
 }
 const RUNNER_LEASE_KEY=ENRICHMENT_KEY+'runner-lease.json';
 const RUNNER_LEASE_TTL=15*60000;
+// The lease value carries `epoch`, the ownership epoch of batch runner v2 (ADR 0122): set once when a run acquires or takes over the lease and kept by every
+// renewal, heartbeat, checkpoint and release, so the next acquire increments it. It is never the CAS revision (the D1 row token or the object etag), which
+// changes on every write and stays inside the Worker. A renewal that loses the compare-and-swap to another write of the same lease is read again and retried a
+// bounded number of times; it becomes `lease_lost` only when the lease read afterwards names another holder, or has expired.
+const RUNNER_LEASE_ATTEMPTS=3;
+const previousEpochOf=lease=>Number.isInteger(lease?.epoch)&&lease.epoch>=0?lease.epoch:null;
 async function runnerLease(env,runId,operation='renew'){
- const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
- if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
- if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
- const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+RUNNER_LEASE_TTL};
- const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
- if(saved===null){const current=await loadJSON(env,RUNNER_LEASE_KEY);return {status:operation==='acquire'?'already_running':'lease_lost',runId:current?.runId||null};}
- const scope=requestScopeOf(env);if(scope)scope.lease={runId:value.runId,expiresAt:value.expiresAt};
- return {status:'owned',...value,...(operation==='acquire'&&old?.runId&&old.expiresAt<=now?{recoveredRunId:old.runId}:{})};
+ let epochSeen=null;
+ for(let attempt=1;;attempt++){
+  const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
+  if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
+  if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
+  const previousEpoch=previousEpochOf(old),epoch=operation==='acquire'?(previousEpoch??0)+1:previousEpoch;epochSeen=previousEpoch;
+  const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+RUNNER_LEASE_TTL,...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{})};
+  const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
+  if(saved===null){
+   if(operation!=='acquire'&&attempt<RUNNER_LEASE_ATTEMPTS)continue;
+   const current=await loadJSON(env,RUNNER_LEASE_KEY);
+   if(operation==='acquire')return {status:'already_running',runId:current?.runId||null};
+   // The lease is still this run's and alive: the compare-and-swap lost to another write of it (a heartbeat or a checkpoint of the same owner), which is not a loss of ownership.
+   // The caller gets an explicit retryable answer, never `lease_lost`.
+   if(current?.runId===runId&&current.expiresAt>Date.now()&&(previousEpochOf(current)===null||previousEpochOf(current)===epochSeen))return {status:'busy',reason:'lease_contention',runId};
+   return {status:'lease_lost',runId:current?.runId||null};
+  }
+  const scope=requestScopeOf(env);if(scope)scope.lease={runId:value.runId,expiresAt:value.expiresAt};
+  return {status:'owned',...value,...(operation==='acquire'&&old?.runId&&old.expiresAt<=now?{recoveredRunId:old.runId}:{})};
+ }
 }
 async function runnerHeartbeat(env,body){
  const run=await checkedRun(env,body?.runId);if(!run||run.status!=='running')return json({error:'Unknown or completed run'},409);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);
- run.lastHeartbeatAt=lease.heartbeatAt;await savePredictionRun(env,run);await runnerProgress(env,run,await loadJSON(env,predictionQueueKey));return json({...runSummary(run),expiresAt:lease.expiresAt});
+ // A batch v2 run belongs to one ownership epoch; a lease of another epoch is not this run's (ADR 0122).
+ if(run.protocol===BATCH_PROTOCOL&&Number.isInteger(run.epoch)&&lease.epoch!==run.epoch)return json({status:'lease_lost',runId:run.runId},409);
+ run.lastHeartbeatAt=lease.heartbeatAt;await savePredictionRun(env,run);await runnerProgress(env,run,await loadJSON(env,predictionQueueKey));return json({...runSummary(run),expiresAt:lease.expiresAt,...(run.protocol===BATCH_PROTOCOL?{epoch:lease.epoch}:{})});
 }
 async function runnerProgress(env,run,queue,final=false){
  const summary=runSummary(run),success=summary.added+summary.updated,now=Date.now();
@@ -1139,7 +1159,7 @@ function requestScopeUnchanged(env,key,value){
 }
 const noteQueueCounts=(env,queue)=>{const scope=requestScopeOf(env);if(scope&&queue&&Number.isInteger(queue.priorityCount))scope.queueCounts={priorityCount:queue.priorityCount,coldRemaining:Number.isInteger(queue.coldRemaining)?queue.coldRemaining:null};};
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes'];
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
 function stepKeyClass(key){
@@ -1853,6 +1873,233 @@ function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
  logPredictionFailure(boundary,error,requestId,runId);
  return catalogHeldResponse(error.code,{runId,leaseTtlMs:RUNNER_LEASE_TTL,...extra});
 }
+// The start finds nothing eligible: it releases the lease and records the idle check (a quota or retry-backoff stop is blocked, an empty queue is a noop).
+async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true}){
+ if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
+}
+// ---- Batch runner v2: batch_start (ADR 0122). One request returns one self-sufficient manifest of at most BATCH_RUNNER.maxManifestFilms films. ----
+// It runs beside the v5 runner on the same queue, runner lease, retry records and persistence. `batch_submit` is a separate delivery.
+const BATCH_PROTOCOL='batch_v2';
+const BATCH_MANIFEST_FORMAT='compact-1';
+const BATCH_RUNNER={version:2,maxManifestFilms:100,maxManifestBytes:160*1024,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000};
+// Films read to fill one manifest when some queued films are already current or have lost their admission: bounded so a start never walks the whole queue.
+const BATCH_SCAN_LIMIT=300;
+const BATCH_PLACEHOLDER_RUN='00000000-0000-4000-8000-000000000000';
+const wrongProtocolResponse=()=>json({error:'This run belongs to another protocol',code:'wrong_protocol'},409);
+const batchBlocked=(code,extra={})=>json({status:'blocked',reason:code,code,...extra,...scheduledRunFields()},409);
+const batchLimits=()=>({maxManifestFilms:BATCH_RUNNER.maxManifestFilms,maxManifestBytes:BATCH_RUNNER.maxManifestBytes,generationSizeDefault:BATCH_RUNNER.generationSizeDefault,generationSizeRange:BATCH_RUNNER.generationSizeRange,submitMaxItems:BATCH_RUNNER.submitMaxItems,submitMaxBodyBytes:BATCH_RUNNER.submitMaxBodyBytes,callBudgetMs:BATCH_RUNNER.callBudgetMs});
+// Lossless: an absent key reads as null. Nothing else of a film's metadata or stored fingerprint is shortened.
+const batchCompact=value=>Array.isArray(value)?value.map(batchCompact):isObject(value)?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==null&&v!==undefined).map(([k,v])=>[k,batchCompact(v)])):value;
+function validateBatchStartBody(body){
+ if(!isObject(body)||body.scope!=='watchlist_all'||(body.mode!==undefined&&body.mode!=='queued'))return json({error:'Invalid scope or mode'},400);
+ if(body.trigger!==undefined&&body.trigger!=='scheduled'&&body.trigger!=='manual')return json({error:'Invalid trigger'},400);
+ if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
+ if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
+ if(body.pin!==undefined){
+  if(body.dryRun!==true)return json({error:'pin is accepted only with dryRun'},400);
+  if(!isObject(body.pin)||!Array.isArray(body.pin.filmIds)||!body.pin.filmIds.length||body.pin.filmIds.length>BATCH_RUNNER.maxManifestFilms||body.pin.filmIds.some(id=>!isText(id,100)))return json({error:'Invalid pin'},400);
+ }
+ return null;
+}
+// The prediction authority marker must be d1: the per-film commit of batch_submit is one guarded D1 batch (ADR 0122), so v2 does not run on the object mode.
+async function batchRequiresD1(env){
+ const authority=typeof PredictionD1==='undefined'?null:await PredictionD1.readPredictionAuthority(env?.DB,env);
+ return authority?.mode==='d1'?null:batchBlocked('batch_runner_requires_d1');
+}
+// Films for one manifest, read-only: the stored queue's ready ids in queue order, each with its admission and stored state. A film whose admission is gone or whose
+// prediction is already current is not delivered (no stored usable work is regenerated); it is reported so that the real start can settle it out of the queue.
+async function batchSelection(env,{profile,report,queue,pin=null}){
+ const freshness=await predictionFreshness(env,profile),items=[],skipped={missingAdmission:[],alreadyCurrent:[]},notEligible=[];
+ const queued=new Set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])]),ready=queueReadyIds(queue),readySet=new Set(ready);
+ let rest;
+ if(pin){rest=[];for(const id of [...new Set(pin.filmIds.map(String))]){if(!queued.has(id))notEligible.push({filmId:id,reason:'not_queued'});else if(!readySet.has(id))notEligible.push({filmId:id,reason:'retry_backoff'});else rest.push(id);}}
+ else rest=[...ready];
+ let scanned=0;
+ while(items.length<BATCH_RUNNER.maxManifestFilms&&rest.length&&scanned<BATCH_SCAN_LIMIT){
+  const slots=BATCH_RUNNER.maxManifestFilms-items.length;
+  let chunk;
+  if(pin)chunk=rest.splice(0,slots);
+  else{chunk=queueBatchIds(queue,rest,slots);if(!chunk.length)break;const taken=new Set(chunk);rest=rest.filter(id=>!taken.has(id));}
+  scanned+=chunk.length;
+  const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmState(env,id):null));
+  chunk.forEach((id,i)=>{
+   const film=found.get(id);if(!film){skipped.missingAdmission.push(id);return;}
+   const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres)){skipped.alreadyCurrent.push(id);return;}
+   const plan=freshness.fingerprintUsable(state.fingerprint,film.genres)?'prediction_only':'fingerprint_and_prediction';
+   items.push({filmId:id,lane:queue.priority?.[id]?.hot?'hot':'cold',plan,film,state});
+  });
+ }
+ return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length}};
+}
+// The manifest body, serialized once for its size and its hash. `runId` and `lease` are placeholders in a preflight (same width as the real values).
+async function buildBatchManifest(env,{profile,items,runId,lease,dryRun=false,extra={}}){
+ const registryDigest=(await fingerprintRegistryDigests()).registry,schema=enrichmentSchemaDocument();
+ const films=items.map(item=>({filmId:item.filmId,lane:item.lane,plan:item.plan,modelMetadata:batchCompact(modelMetadata(item.film)),...(item.plan==='prediction_only'?{fingerprint:batchCompact(item.state.fingerprint)}:{})}));
+ const contract={fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,registryDigest,schema};
+ const profileBlock={version:profile.version,hash:profile.profileHash,lineage:Array.isArray(profile.lineage)?profile.lineage:[],body:profile.profile};
+ const manifestHash=await contentHash({manifestFormat:BATCH_MANIFEST_FORMAT,profileHash:profile.profileHash,contract:{...contract,schema:await contentHash(schema)},films:films.map(f=>({filmId:f.filmId,lane:f.lane,plan:f.plan,modelMetadata:f.modelMetadata,fingerprintHash:f.fingerprint?.fingerprintHash||null}))});
+ const body={status:'running',runId,protocol:BATCH_PROTOCOL,dryRun,lease:{expiresAt:lease.expiresAt,ttlMs:RUNNER_LEASE_TTL,epoch:lease.epoch},limits:batchLimits(),manifestFormat:BATCH_MANIFEST_FORMAT,manifestHash,profile:profileBlock,contract,films,...extra};
+ const bytes=new TextEncoder().encode(JSON.stringify(body)).length;
+ const sizes=films.map(f=>new TextEncoder().encode(JSON.stringify(f)).length),largest=sizes.reduce((best,n,i)=>n>sizes[best]?i:best,0);
+ return {body,hash:manifestHash,bytes,films:films.length,largestFilmBytes:sizes.length?sizes[largest]:0,largestFilmId:films[largest]?.filmId??null};
+}
+const batchOverflow=(manifest,extra={})=>batchBlocked('manifest_too_large',{bytes:manifest.bytes,limit:BATCH_RUNNER.maxManifestBytes,films:manifest.films,largestFilmBytes:manifest.largestFilmBytes,largestFilmId:manifest.largestFilmId,...extra});
+const batchBytes=value=>new TextEncoder().encode(JSON.stringify(value)).length;
+// The fields that follow the manifest in the answer. A preflight measures the answer with the widest values these can take, so a manifest that passes it cannot grow past the
+// limit when the real values are added; the exact answer is measured again before anything is persisted and before it is sent.
+const batchPlaceholderExtras=(selection,dryRun)=>({queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+// Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
+// A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
+async function batchPreflight(env,body){
+ const dryRun=body.dryRun===true,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
+ if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
+ if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return {response:json({error:'No completed programme snapshot'},409)};
+ const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry);
+ if(why)return {profile,report,stale:why,revision};
+ try{
+  const selection=await batchSelection(env,{profile,report,queue:stored,pin:body.pin||null});
+  const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
+  return {profile,report,queue:stored,revision,selection,manifest,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
+ }catch(error){
+  if(CATALOG_HELD_CODES.includes(error?.code))return {response:catalogHeldResponse(error.code)};
+  throw error;
+ }
+}
+const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.bytes},extra);
+// The queue refresh and the settlement that D7-A names as effects of batch_start: a queue that fails the advance gate is refreshed (not rebuilt on every start), and the films the
+// preflight found already current or without an admission leave the queue in one guarded settlement. The caller reads the result again as a fresh preflight, its new baseline.
+async function batchRefreshQueue(env,body,pre){
+ let queue=pre.queue,settled=0;
+ if(pre.stale)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:false,fallback:true});
+ const context=await advanceContext(env,pre.report,pre.profile);
+ for(let round=0;round<3;round++){
+  const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
+  if(!settle.length)break;
+  const next=await mutatePredictionQueue(env,guardedSettle(context,settle,'batch_start_settle'),'batch_start_settle',queue)||queue;
+  if(next===queue)break;
+  settled+=settle.length;queue=next;
+ }
+ return {queue,settled};
+}
+// A live runner lease turns a real start away; it is recorded as a start attempt and nothing else is written.
+async function batchTurnedAway(env,body){
+ const live=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(!(live?.runId&&live.expiresAt>Date.now()))return null;
+ const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
+ turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
+ await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
+ return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
+}
+// Nothing eligible, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
+// through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
+async function batchIdle(env,body,pre){
+ const plan=adaptivePredictionBatch(pre.queue,body.capacity);
+ if(!(plan.reason==='quota'||!pre.selection.items.length))return null;
+ const idle={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};idle.diagnosticStartedAt=idle.createdAt;
+ const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false}));
+ const data=await result.clone().json();
+ idle.status=data.status==='noop'?'idle':data.status==='busy'?'completed':'blocked';idle.completedAt=new Date().toISOString();idle.stopReason=data.status==='blocked'?data.reason||null:null;
+ await diagnosticCheckpoint(env,idle,{startResult:['blocked','noop'].includes(data.status)?data.status:'error'});
+ return result;
+}
+// What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
+async function batchStartRoute(env,body,requestId){
+ const bad=validateBatchStartBody(body);if(bad)return bad;
+ const notD1=await batchRequiresD1(env);if(notD1)return notD1;
+ const dryRun=body.dryRun===true;let pre=await batchPreflight(env,body);if(pre.response)return pre.response;
+ if(dryRun){
+  // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
+  if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
+  const answer={...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true};
+  if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf({...pre,bytes:batchBytes(answer)},{dryRun:true});
+  noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:batchBytes(answer)}));
+  return json(answer);
+ }
+ // Precedence of a real start: an overlapping run first, then an idle outcome, then the size refusal. A live runner lease (a v5 run, or an earlier v2 run) turns the attempt away with
+ // `already_running` before anything else, naming the holder: an overlapping trigger never reports an independent start result, and it writes nothing to the queue, the run, the lease or
+ // the films. It is recorded as a start attempt, like every start attempt.
+ const turned=await batchTurnedAway(env,body);if(turned)return turned;
+ // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
+ if(!pre.stale){const idle=await batchIdle(env,body,pre);if(idle)return idle;}
+ // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
+ if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
+ // The guards a v5 start runs before it takes the lease: the previous run's retries, and a held catalog.
+ const unsettled=await atStage('settle_previous',()=>settlePreviousRun(env));if(unsettled)return unsettled;
+ const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
+ let queueRefreshed=false,queueSettled=0;
+ if(pre.stale||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
+  try{const refreshed=await atStage('queue_refresh',()=>batchRefreshQueue(env,body,pre));queueRefreshed=true;queueSettled=refreshed.settled;}
+  catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
+  // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
+  pre=await batchPreflight(env,body);if(pre.response)return pre.response;
+  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true});
+  if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
+ }
+ // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
+ {const idle=await batchIdle(env,body,pre);if(idle)return idle;}
+ const runId=crypto.randomUUID(),attemptAt=new Date().toISOString();
+ const attempt={runId,createdAt:attemptAt,diagnosticStartedAt:attemptAt,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
+ const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));
+ if(lease.status!=='owned'){
+  // Not a refusal of the manifest: the attempt is recorded as every start attempt is.
+  attempt.status='completed';attempt.completedAt=new Date().toISOString();attempt.stopReason=lease.status==='already_running'?null:lease.status;
+  await diagnosticCheckpoint(env,attempt,{startResult:'already_running'});
+  return json(lease);
+ }
+ // Revalidation, before a run, an Event or a diagnostics row exists: the queue's own generation must be the baseline's, and the selection and the manifest the same. Only the lease
+ // acquire and release may have happened if it does not hold.
+ let answer;
+ try{
+  const again=await batchPreflight(env,body);
+  if(again.response){await runnerLease(env,runId,'release');return again.response;}
+  if(again.stale||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{...(queueRefreshed?{queueRefreshed:true}:{})});}
+  const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
+  answer={...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})};
+  if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
+  pre={...again,manifest:exact,answer};
+ }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
+ return batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt});
+}
+// After the lease is held and the snapshot revalidated: the ordinary start bookkeeping (the diagnostics row, the expired diagnostics and the pending Events, a recovered run) and the run itself.
+async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}){
+ const {profile,report,queue,selection}=pre,plan=adaptivePredictionBatch(queue,body.capacity);
+ const response=await observedPrediction(env,{...body,diagnosticRunId:runId},async()=>{
+  attempt.leaseAcquiredAt=lease.heartbeatAt;attempt.lastHeartbeatAt=lease.heartbeatAt;
+  const previousRun=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;
+  attempt.startResult=previousRun&&['running','interrupted'].includes(previousRun.status)?'recovered_stale_lease':'running';
+  await diagnosticCheckpoint(env,attempt,{state:'running',startResult:attempt.startResult});
+  try{
+   const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{
+    await settleExpiredDiagnostics(env);await deliverPendingEvents(env);
+    const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
+    if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
+    const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();
+    const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(item=>item.filmId),batchIds:selected.map(item=>item.filmId),selectionKind:Object.fromEntries(selected.map(item=>[item.filmId,item.lane])),baseline:Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null])),failures:{},results:{}};
+    await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)])));
+    await atStage('run_save',()=>savePredictionRun(env,run));
+    await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,null));
+    noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:batchBytes(answer)}));
+    return json(answer);
+   }));
+   if(result.status>=400)await runnerLease(env,runId,'release');
+   return result;
+  }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code)&&error?.stage==='queue_refresh'){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+ },'start',requestId);
+ const data=await response.clone().json();
+ if(data.status!=='running'){attempt.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';attempt.completedAt=new Date().toISOString();attempt.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,attempt,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:attempt.leaseAcquiredAt||null,lastHeartbeatAt:attempt.lastHeartbeatAt||null});}
+ return response;
+}
+// batch_start is observed like next and submit (one `prediction_step_timing` line) but runs without the per-request authority and object scope those two use: a start
+// writes a run, a lease and a queue, and the scope's reuse of identical reads assumes a step that already holds the lease.
+async function timedBatchStart(env,body,requestId){
+ let timer=null,timed=env;
+ try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
+ let status=null;
+ try{const response=await batchStartRoute(timed,body,requestId);status=response&&typeof response.status==='number'?response.status:null;return response;}
+ catch(error){status=0;throw error;}
+ finally{try{if(timer){const id=typeof requestId==='string'&&SAFE_LOG_ID.test(requestId)?requestId:null;console.log(JSON.stringify(timer.summary('batch_start',{requestId:id,runId:null,status})));}}catch{/* logging never changes the outcome */}}
+}
 async function diagnosedStart(env,body,requestId){
  const runId=crypto.randomUUID(),at=new Date().toISOString(),shell={runId,createdAt:at,diagnosticStartedAt:at,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
  await diagnosticCheckpoint(env,shell,{startResult:'error'});
@@ -1889,13 +2136,15 @@ async function enrichmentStart(env,body,acquired=null){
  if(picked)queue=picked.queue;
  if(picked?.refused){await runnerLease(env,runId,'release');return queueChangedResponse();}
  const selected=mode==='queued'?picked.ids.map(id=>picked.films.get(id)).filter(Boolean):body.limit===undefined?legacyFilms:legacyFilms.slice(0,body.limit);
- if(mode==='queued'&&!selected.length){await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});}
+ if(mode==='queued'&&!selected.length)return startIdle(env,{runId,body,profile,queue,plan});
  const states=await atStage('film_state',()=>Promise.all(selected.map(f=>readFilmState(env,f.id)))),baseline=Object.fromEntries(selected.map((f,i)=>[String(f.id),states[i].predictions?.current?.generatedAt||null])),freshness=await predictionFreshness(env,profile),pendingCount=mode==='queued'?queue.pending.length:states.filter((s,i)=>!freshness.state(s.predictions?.current,s.fingerprint,selected[i].genres)).length;
 
  const createdAt=new Date().toISOString(),run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,status:'running',mode,trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:acquired?.diagnosticStartedAt||createdAt,leaseAcquiredAt:acquired?.heartbeatAt||createdAt,startResult:acquired?.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:freshness.registryDigest??(await fingerprintRegistryDigests()).registry,eligibleCount,batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(f=>String(f.id)),selectionKind:Object.fromEntries(selected.map(f=>[String(f.id),mode==='queued'&&queue.priority[f.id]?.hot?'hot':'cold'])),baseline,failures:{},results:{}};
  await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(f=>[String(f.id),modelMetadata(f)])));await atStage('run_save',()=>savePredictionRun(env,run));await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,reused?inputs:null));return json({...runSummary(run),pendingCount,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...(queueStale?{queueStale}:{}),...scheduledRunFields(),runner:predictionRunnerContract()});
 }
-function predictionRunnerContract(){return {pipelineVersion:5,continuous:true,itemFailures:{reportVia:'submit items[].failure.kind',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,stopAfterConsecutive:5,validation:{preflight:'GET /api/enrichment/schema contract',reportedVia:'submit results[].validation {stage, reportedBy, issues[{path, code}]}',stages:['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema'],issueCodes:ISSUE_CODES}},maxBatchFilms:20,maxRunFilms:null,maxRunMinutes:null,leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',read:'/api/enrichment/runner',modelBatching:{enabled:false,readyFingerprintsPerCall:1},instructions:['Start returns already_running: exit immediately, do not adopt its runId.','Repeat next/submit continuously across adaptive batches until queue empty or real quota/API/storage failure. No time or total-film cap.','Keep profile and scoring rules unchanged; reuse valid fingerprints and predictions. Submit each film immediately.','Lease TTL is 15 minutes. Heartbeat before model calls and after checkpoints; renew concurrently every 10 minutes during long calls. Expired ownership is replaced atomically and start returns running in the same trigger.','Malformed/invalid per-film outputs: submit {filmId,failure:{kind:parse_error}} as valid JSON, then continue next/submit. Never complete for one item parse_error.','Before submit, check the fingerprint and prediction against the schema contract (required execution dimensions, enum values, moodLabels 2–4). A Worker schema rejection is still a retryable parse_error for that film and returns results[].validation.issues [{path, code}] naming the field; fix that field for the following films, do not resubmit the deferred one in this run.','Stop only on mustComplete/systemic quota/API/storage/lease failure; complete with stopReason. Five consecutive distinct item format failures trigger format_error_storm.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on queue_empty or another normal completion is rejected.']};}
+// The document GET /api/enrichment/schema serves; the batch manifest carries the same one, so a model needs no further read.
+function enrichmentSchemaDocument(){return {profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']};}
+function predictionRunnerContract(){return {pipelineVersion:5,continuous:true,itemFailures:{reportVia:'submit items[].failure.kind',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,stopAfterConsecutive:5,validation:{preflight:'GET /api/enrichment/schema contract',reportedVia:'submit results[].validation {stage, reportedBy, issues[{path, code}]}',stages:['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema'],issueCodes:ISSUE_CODES}},maxBatchFilms:20,maxRunFilms:null,maxRunMinutes:null,leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',read:'/api/enrichment/runner',modelBatching:{enabled:false,readyFingerprintsPerCall:1},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Start returns already_running: exit immediately, do not adopt its runId.','Repeat next/submit continuously across adaptive batches until queue empty or real quota/API/storage failure. No time or total-film cap.','Keep profile and scoring rules unchanged; reuse valid fingerprints and predictions. Submit each film immediately.','Lease TTL is 15 minutes. Heartbeat before model calls and after checkpoints; renew concurrently every 10 minutes during long calls. Expired ownership is replaced atomically and start returns running in the same trigger.','Malformed/invalid per-film outputs: submit {filmId,failure:{kind:parse_error}} as valid JSON, then continue next/submit. Never complete for one item parse_error.','Before submit, check the fingerprint and prediction against the schema contract (required execution dimensions, enum values, moodLabels 2–4). A Worker schema rejection is still a retryable parse_error for that film and returns results[].validation.issues [{path, code}] naming the field; fix that field for the following films, do not resubmit the deferred one in this run.','Stop only on mustComplete/systemic quota/API/storage/lease failure; complete with stopReason. Five consecutive distinct item format failures trigger format_error_storm.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on queue_empty or another normal completion is rejected.']};}
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}
 async function checkedRun(env,id){if(!isText(id,100))return null;return loadJSON(env,runKey(id));}
 // A run is bound to the fingerprint schema, both prompt versions and the registry it started with (ADR-0035 section 6);
@@ -1907,7 +2156,7 @@ async function runContractChanged(run){
 }
 const contractChangedResponse=()=>json({error:'Contract changed; start a new run',code:'contract_changed'},409);
 async function enrichmentNext(env,body,requestId){
- const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);run.firstNextAt||=new Date().toISOString();await savePredictionRun(env,run);const requestSize=body.batchSize??run.batchSize??MAX_PREDICTION_BATCH;if(!Number.isInteger(requestSize)||requestSize<1||requestSize>20)return json({error:'Invalid batchSize'},400);
+ const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.protocol===BATCH_PROTOCOL)return wrongProtocolResponse();if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);run.firstNextAt||=new Date().toISOString();await savePredictionRun(env,run);const requestSize=body.batchSize??run.batchSize??MAX_PREDICTION_BATCH;if(!Number.isInteger(requestSize)||requestSize<1||requestSize>20)return json({error:'Invalid batchSize'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({runId:run.runId,items:[],mustComplete:true,stopReason:run.systemicStopReason});
  if(body.capacity?.remainingPercent===0||body.capacity?.quotaAvailable===false)return json({runId:run.runId,items:[],mustComplete:true,stopReason:'quota'});
@@ -1950,7 +2199,7 @@ async function enrichmentNext(env,body,requestId){
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
 async function enrichmentSubmit(env,body,requestId){
- const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
+ const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.protocol===BATCH_PROTOCOL)return wrongProtocolResponse();if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({...runSummary(run),mustComplete:true,stopReason:run.systemicStopReason});
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash)return json({error:'Profile changed; start a new run'},409);
@@ -2319,6 +2568,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/runner'&&request.method==='GET')return json(predictionRunnerContract());
  if(path==='/api/enrichment/heartbeat'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>runnerHeartbeat(env,body)),'heartbeat',requestId);
  if(path==='/api/enrichment/start'&&request.method==='POST')return diagnosedStart(env,body,requestId);
+ if(path==='/api/enrichment/batch/start'&&request.method==='POST')return timedBatchStart(env,body,requestId);
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
@@ -2329,7 +2579,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/status'&&request.method==='GET')return json(await enrichmentStatus(env));
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
- if(path==='/api/enrichment/schema'&&request.method==='GET')return json({profile:{schemaVersion:1,required:['ratingScale','positiveSignals','negativeSignals','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','anchorFilms','hardSkips','calibration'],textFields:['ratingScale','characterLogic','pace','payoffEnding','genrePreferences','comedyPreferences','horrorPreferences','scifiAdventurePreferences','actionPreferences','calibration'],listFields:['positiveSignals','negativeSignals','hardSkips'],anchorFilms:{title:'string',rating:'0.5…5.0 in 0.5 steps',reason:'string'}},fingerprint:{fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,plotMechanics:MECHANICS,execution:EXECUTION,requiredExecution:GENERAL_EXECUTION,moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS},strengths:'short string array',risks:'short string array',confidence:CONFIDENCE,sourceBasis:SOURCE_BASIS,sourceRefs:'URL or model_knowledge',evidence:'optional; see contract.fingerprint.evidence. Omitting the key keeps a legacy fingerprint'},prediction:{predictedRating:'0.5…5.0 in 0.5 steps',probability4Plus:'number 0…1',confidence:CONFIDENCE,matchSignals:'0–3 short strings',mainRisk:'one short string or null',moodLabels:'2–4 short labels, preferably canonical vocabulary labels; raw input preserved and mapped at write',moodVocabulary:MOOD_LABELS,moodMapping:{version:MOOD_MAPPING_VERSION,groups:MOOD_GROUPS}},contract:schemaContract(),rules:['Do not infer execution quality from premise alone; use unknown if evidence is insufficient','Do not use or request actual user rating for the target film','Check the fingerprint and prediction against contract before prediction_submit: every required execution dimension present, every enum value from its list (payoff and ending_quality use weak, mixed, strong, unknown, not medium; hero_vulnerability uses low, mixed, high, unknown), moodLabels 2–4 labels. A rejected item returns results[].validation.issues with the field path and code.']});
+ if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());
  if(path==='/api/enrichment/view'&&request.method==='GET')return json(await enrichmentView(env));
  if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return backfillFingerprintView(env,body);
  if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveActualMirror(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});}return json({results});}
