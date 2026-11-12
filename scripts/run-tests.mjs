@@ -32,49 +32,49 @@ const SERIAL_ONLY=new Set([
  // run 43186573244 (12 Nov 2026), twice, at the same line. Alone it takes about 7 s. Run alone after the parallel phase; no timeout or assertion changed.
  'sqlite-session-semantics.mjs',
 ]);
-// AIR-374: approximate cost of the heavier files, in weight units of one shard's share (about 660 per shard): the mean over 27 shard jobs (nine CI runs of 12 Nov 2026 on the three-shard plan, docs/evidence/ci/test-suite-air-374-ci-weights-recalibration-2026-11-12.md) of each file's share of its job's summed file time, scaled to 630, so a fast or a slow runner does not skew a file; every file that costs 2 or more has its own entry; DEFAULT_WEIGHT 0.8 covers the rest, whose mean is 0.5.
+// AIR-374: approximate cost of the heavier files, in weight units of one shard's share (about 660 per shard): the mean over 30 shard jobs (ten CI runs of 12 Nov 2026 on the three-shard plan, docs/evidence/ci/test-suite-air-374-ci-weights-recalibration-2026-11-12.md) of each file's share of its job's summed file time, scaled to 630, so a fast or a slow runner does not skew a file; every file that costs 2 or more has its own entry; DEFAULT_WEIGHT 0.8 covers the rest, whose mean is 0.5.
 // The two serial-only files are weighted by their solo time (mean 9.9 s and 7.2 s) divided by the 0.233 s of wall one unit holds, because they run after the parallel phase and add their whole duration to a shard's wall time.
 // Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
 // the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
 // every file still runs exactly once, in exactly one shard.
 export const WEIGHTS={
- 'epg-r2-known-length.mjs':73,
+ 'epg-r2-known-length.mjs':72,
  'generation-stage.mjs':71,
- 'film-person-connector-mutation.mjs':65,
+ 'film-person-connector-mutation.mjs':66,
  'film-person-e6-measure-mutation.mjs':61,
  'discovery-decisions-read.mjs':57,
+ 'prediction-batch-start.mjs':51,
  'film-person-prepared-loader-mutation.mjs':49,
- 'generation-stage-withheld.mjs':49,
- 'prediction-batch-start.mjs':49,
- 'film-person-capture-mutation.mjs':47,
- 'prediction-batch-submit.mjs':47,
+ 'generation-stage-withheld.mjs':48,
+ 'prediction-batch-submit.mjs':48,
+ 'film-person-capture-mutation.mjs':45,
  'discovery-bounded-drain.mjs':43,
- 'discovery-seal-publish.mjs':43,
- 'film-person-cutover-record-mutation.mjs':43,
+ 'discovery-seal-publish.mjs':42,
+ 'film-person-cutover-record-mutation.mjs':42,
+ 'scheduled-task-prompt-v2.mjs':42,
  'sqlite-session-semantics.mjs':42,
- 'projector-bulk.mjs':40,
- 'canonical-epg-person-producer-mutation.mjs':39,
- 'scheduled-task-prompt-v2.mjs':39,
+ 'canonical-epg-person-producer-mutation.mjs':41,
+ 'projector-bulk.mjs':39,
+ 'canonical-dictionary-producer-mutation.mjs':32,
  'discovery-chunk-budget.mjs':32,
- 'run-tests-runner.mjs':32,
+ 'projector-view-parity.mjs':32,
+ 'canonical-receipted-writers-mutation.mjs':31,
  'local-dev-smoke.mjs':31,
- 'projector-view-parity.mjs':30,
- 'canonical-dictionary-producer-mutation.mjs':29,
- 'canonical-receipted-writers-mutation.mjs':29,
+ 'run-tests-runner.mjs':31,
  'projector-marker-fence-mutation.mjs':29,
+ 'canonical-producer-adapters-mutation.mjs':26,
  'd1-enrichment-buckets.mjs':26,
- 'canonical-producer-adapters-mutation.mjs':25,
  'projector-bulk-spike.mjs':24,
- 'd1-enrichment-bucket-unicode.mjs':23,
  'canonical-differential-mutation.mjs':22,
+ 'd1-enrichment-bucket-unicode.mjs':22,
+ 'd1-backfill.mjs':21,
  'prediction-queue-budget.mjs':21,
- 'd1-backfill.mjs':20,
+ 'epg-diagnostic-run.mjs':20,
  'prediction-authority-scope.mjs':20,
- 'canonical-receipts-mutation.mjs':19,
  'd1-enrichment-stored-pages.mjs':19,
- 'epg-diagnostic-run.mjs':19,
- 'canonical-catalog-titles-mutation.mjs':17,
- 'canonical-epg-producer-mutation.mjs':17,
+ 'canonical-catalog-titles-mutation.mjs':18,
+ 'canonical-receipts-mutation.mjs':18,
+ 'canonical-epg-producer-mutation.mjs':16,
  'prediction-queue-cas.mjs':16,
  'd1-enrichment-fairness.mjs':15,
  'discovery-production.mjs':15,
@@ -86,11 +86,11 @@ export const WEIGHTS={
  'd1-enrichment.mjs':12,
  'film-person-capture.mjs':11,
  'get-write-audit.mjs':11,
- 'epg-replay-dataset.mjs':10,
  'events-type-filter.mjs':10,
  'film-person-0019-preflight-mutation.mjs':10,
- 'film-person-cutover-minimum-mutation.mjs':10,
  'discovery-archive-import.mjs':9,
+ 'epg-replay-dataset.mjs':9,
+ 'film-person-cutover-minimum-mutation.mjs':9,
  'migration-export.mjs':9,
  'canonical-receipted-writers.mjs':8,
  'epg-orchestration.mjs':8,
@@ -101,33 +101,33 @@ export const WEIGHTS={
  'discovery-operational-status.mjs':7,
  'discovery-status-memory.mjs':7,
  'epg-status-ledger-mode.mjs':7,
- 'film-person-connector.mjs':7,
- 'prediction-dry-run-isolation.mjs':7,
  'prediction-queue-discovery-independence.mjs':7,
  'canonical-read-model.mjs':6,
  'canonical-receipts.mjs':6,
  'discovery-admission-packed.mjs':6,
- 'film-person-baseline.mjs':6,
+ 'film-person-connector.mjs':6,
+ 'prediction-dry-run-isolation.mjs':6,
  'projector-l1-budget.mjs':6,
  'projector-marker-fence.mjs':6,
- 'projector-window.mjs':6,
  'canonical-epg-person-producer.mjs':5,
  'canonical-film-writers-mutation.mjs':5,
- 'deferred-completion-status.mjs':5,
  'discovery-authority.mjs':5,
  'discovery-ledger-install.mjs':5,
  'discovery-pipeline-d1-status.mjs':5,
  'film-person-authority.mjs':5,
- 'film-person-cutover-run.mjs':5,
- 'film-person-e6-measure.mjs':5,
+ 'film-person-baseline.mjs':5,
  'generation-stage-faults.mjs':5,
+ 'projector-window.mjs':5,
  'published-epg-production.mjs':5,
  'r2-snapshot-export.mjs':5,
  'admin-letterboxd-archive-api.mjs':4,
  'canonical-dictionary-producer.mjs':4,
  'canonical-producers.mjs':4,
+ 'deferred-completion-status.mjs':4,
  'discovery-seal-resume.mjs':4,
  'epg-diagnostic-provision.mjs':4,
+ 'film-person-cutover-run.mjs':4,
+ 'film-person-e6-measure.mjs':4,
  'metadata-cache.mjs':4,
  'canonical-catalog-reader.mjs':3,
  'canonical-catalog-titles.mjs':3,
@@ -138,11 +138,10 @@ export const WEIGHTS={
  'discovery-chunk-memory.mjs':3,
  'discovery-ledger-split.mjs':3,
  'film-admission.mjs':3,
- 'film-person-cutover-accepted.mjs':3,
- 'metadata-cache-production.mjs':3,
  'owner-review-d1.mjs':3,
  'prediction-domain.mjs':3,
  'published-epg.mjs':3,
+ 'admin-letterboxd-apply.mjs':2,
  'admin-shell.mjs':2,
  'canonical-film-writers.mjs':2,
  'canonical-handoff-readiness.mjs':2,
@@ -151,18 +150,33 @@ export const WEIGHTS={
  'catalog-watched-d1.mjs':2,
  'cron-schedule-simulation.mjs':2,
  'd1-enrichment-duplicate-retained.mjs':2,
+ 'd1-projection-seed.mjs':2,
+ 'discovery-events.mjs':2,
+ 'discovery-ledger-archive.mjs':2,
+ 'discovery-seal-reads.mjs':2,
  'epg-commit-durable-enqueue.mjs':2,
+ 'epg-mirror-reconciliation.mjs':2,
+ 'film-person-0019-preflight.mjs':2,
+ 'film-person-cutover-accepted.mjs':2,
+ 'film-sync-state.mjs':2,
+ 'item-failures.mjs':2,
  'letterboxd-baseline-chunks.mjs':2,
  'letterboxd-rated-candidates.mjs':2,
  'lifecycle-diagnostics.mjs':2,
  'localization-sources.mjs':2,
+ 'metadata-cache-production.mjs':2,
+ 'prediction-batch-profile.mjs':2,
  'ratings-cursor-merge.mjs':2,
  'ratings-orchestration.mjs':2,
+ 'ratings-run.mjs':2,
+ 'tmdb-retirement-decisions.mjs':2,
  'tmdb-tv-runtime.mjs':2,
 };
 export const DEFAULT_WEIGHT=0.5;
 // Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`, about 9 s more of job wall time than a plain shard job (about 5% of a shard's roughly 195 s); 33 units are 7 s of wall at 0.233 s a unit. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
 export const FIRST_SHARD_OFFSET=33;
+// How many of the heaviest files each shard is dealt first (see `planTests`): 3 per shard is 9 files of 48 to 72 units for three shards, about 40% of the suite's weight.
+export const HEAVY_PER_SHARD=3;
 const MUTATION=/-mutation\.mjs$/;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
@@ -228,8 +242,17 @@ export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,
    if(serialOnly.has(file))serialHolders.add(best);
   };
   // The mutation files (every one re-runs a production module against many mutants, spawning child processes) are CPU-bound and starve each other: on the 4 vCPU runner their per-file time grew five to ten times when several of them ran in one shard (CI runs 43179499163 and 43180054837: 205 s against 103 s for the same estimated weight). They are dealt first, as a class of their own, so every shard carries about the same share of them; the rest then fills up to the same total.
-  for(const file of ordered)if(MUTATION.test(file))deal(file);
-  for(const file of ordered)if(!MUTATION.test(file))deal(file);
+  // The heaviest files (HEAVY_PER_SHARD per shard) are spread by count: after the mutation class, each remaining heavy file goes to the shard that holds the fewest heavy files so far (ties: the least loaded), so no shard collects them. Run 43272848716 had `generation-stage` (124 s), `film-person-connector-mutation` (119 s) and `prediction-batch-start` (108 s) in shard 2, each 1.2 to 2 times its mean, and that shard took 177 s of `Run tests` for a plan of 155 s while shards 1 and 3 took 124 s and 132 s: the plain greedy deal had put `generation-stage` on the shard the mutation class had left lightest.
+  const heavy=new Set(ordered.slice(0,shard.count*HEAVY_PER_SHARD));
+  const heavyCount=Array(shard.count).fill(0);
+  const dealHeavy=file=>{
+   let best=-1;
+   for(let i=0;i<load.length;i++)if(best<0||heavyCount[i]<heavyCount[best]||(heavyCount[i]===heavyCount[best]&&load[i]<load[best]))best=i;
+   owner.set(file,best);load[best]+=weight(file);heavyCount[best]++;
+  };
+  for(const file of ordered)if(MUTATION.test(file)){deal(file);if(heavy.has(file))heavyCount[owner.get(file)]++;}
+  for(const file of ordered)if(heavy.has(file)&&!MUTATION.test(file)&&!serialOnly.has(file))dealHeavy(file);
+  for(const file of ordered)if(!owner.has(file))deal(file);
  }
  const mine=list=>shard?list.filter(file=>owner.get(file)===shard.index-1):list;
  const plan={parallel:mine(ordered.filter(file=>!serialOnly.has(file))),serial:mine(ordered.filter(file=>serialOnly.has(file)).sort())};

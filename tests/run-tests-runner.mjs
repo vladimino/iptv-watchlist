@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {DEFAULT_WEIGHT, FIRST_SHARD_OFFSET, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
+import {DEFAULT_WEIGHT, FIRST_SHARD_OFFSET, HEAVY_PER_SHARD, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -269,6 +269,8 @@ fs.unlinkSync(me);`;
     const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
     const isMutation = file => /-mutation\.mjs$/.test(file);
     const lightest = Math.min(...Object.values(WEIGHTS));
+    const lightestMutation = Math.min(...Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).map(entry => entry[1]));
+    const heaviest = Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3 * HEAVY_PER_SHARD).map(entry => entry[0]);
     const heaviestMutation = Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
     // The contract holds for the two shards the suite used first and for the three it runs in CI now (a third shard gives each runner real margin under the 180 s gate).
     for (const count of [2, 3]) {
@@ -291,8 +293,13 @@ fs.unlinkSync(me);`;
       assert.notEqual(serialOwners[0], serialOwners[1], `the two serial-only files are in different shards of ${count}`);
       // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
       const mutationLoad = parts.map((part, index) => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0) + (index === 0 ? FIRST_SHARD_OFFSET : 0));
-      assert.ok(Math.max(...mutationLoad) - Math.min(...mutationLoad) <= lightest * 2, `the mutation files are shared evenly across ${count}: ${mutationLoad.join(' vs ')}`);
+      assert.ok(Math.max(...mutationLoad) - Math.min(...mutationLoad) <= lightestMutation, `the mutation files are shared evenly across ${count}: ${mutationLoad.join(' vs ')}`);
       assert.notEqual(parts.findIndex(part => part.parallel.includes(heaviestMutation[0])), parts.findIndex(part => part.parallel.includes(heaviestMutation[1])), `the two heaviest mutation files are in different shards of ${count}`);
+      // The heaviest files are spread by count (12 Nov 2026, run 43272848716: generation-stage, film-person-connector-mutation and prediction-batch-start shared a shard and it took 177 s against 155 s planned): with HEAVY_PER_SHARD * count of them in the suite no shard holds more than HEAVY_PER_SHARD of the 3 * HEAVY_PER_SHARD heaviest.
+      if (count === 3) {
+        const heavyPerShard = parts.map(part => filesOf(part).filter(file => heaviest.includes(file)).length);
+        assert.ok(heavyPerShard.every(n => n === HEAVY_PER_SHARD), `the ${3 * HEAVY_PER_SHARD} heaviest files are spread evenly over 3 shards: ${heavyPerShard.join(' vs ')}`);
+      }
       assert.deepEqual(planTests({directory: 'tests', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
     }
     assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');

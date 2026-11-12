@@ -44,3 +44,54 @@ Runs: 43249279288, 43250532001, 43265966887, 43266516442, 43266698088, 432683689
 ## Predicted, not measured
 
 At 0.233 s of wall per unit (mean of the 27 jobs) the plan predicts `Run tests` of about 147 s (shard 1), 155 s (shard 2) and 155 s (shard 3), a margin of about 25 to 33 s to the 180 s gate; the job wall of shard 1 is then about 9 s above its step. On the slowest shard 2 or 3 job seen (923 s summed for 699 units) the same plan would take about 155 s. Runner speed varied up to 2 times on the same code, and the pre-change skew of shard 1 (1.4 to 1.7 times its share) came partly from heavy files running together, which a new table reduces but does not prove away: CI on the new HEAD decides, and it is not yet seen.
+
+## Second data point: the first run of the new plan (run 43272848716, head fa34e13)
+
+Parsed like the nine runs above (the `ok <file> (<s>s)` lines and the `Wall` line of the three job logs). **No production read or write.**
+
+| Shard | Planned weight | `Run tests` wall | Summed file time | Wall per planned unit |
+| --- | --- | --- | --- | --- |
+| 1 | 631 | 123.5 s | 704 s | 0.196 s |
+| 2 | 664 | 177.3 s | 1018 s | 0.267 s |
+| 3 | 664 | 131.7 s | 787 s | 0.198 s |
+
+The plan predicted about 147 / 155 / 155 s, so shards 1 and 3 came out 23 and 23 s lighter and shard 2 came out 22 s heavier, at the 180 s gate minus 3 s. Summed file time per planned unit was 1.12, 1.53 and 1.19 s.
+
+### Finding
+
+The weights were not the cause: the ten-run mean of every file moved by 1 to 3 units against the list (below). The cause was co-location of CPU-bound files in shard 2. Measured time against the weight-implied time (weight times 1.281 s, the run's summed time over its planned weight) for the files that explain the excess:
+
+| File (shard 2) | Weight | Measured | Implied | Excess |
+| --- | --- | --- | --- | --- |
+| `prediction-batch-start` | 49 | 107.7 s | 62.8 s | +42 s |
+| `film-person-connector-mutation` | 65 | 118.8 s | 83.3 s | +34 s |
+| `generation-stage` | 71 | 124.1 s | 90.9 s | +33 s |
+| `canonical-dictionary-producer-mutation` | 29 | 73.8 s | 37.1 s | +33 s |
+| `projector-view-parity` | 30 | 70.3 s | 38.4 s | +29 s |
+| `discovery-chunk-budget` | 32 | 56.3 s | 41.0 s | +15 s |
+
+Their six excesses add up to 186 s of summed time, about 32 s of wall at 0.174 s of wall per summed second, and shard 2 was 22 s above its plan and 46 s above shard 1. The same files cost their weight when they ran apart: in shards 1 and 3 only `canonical-receipted-writers-mutation` (+31 s, with `film-person-e6-measure-mutation` and `generation-stage-withheld` beside it), `scheduled-task-prompt-v2` (+19 s) and `canonical-epg-person-producer-mutation` (+14 s) were far above their weight, and every other file there was within 6 s. Cause of the co-location: the deal put the mutation class first, then the other files by least load, so `generation-stage` (not a mutation file) landed on the shard the mutation class had left lightest, next to `film-person-connector-mutation` and `prediction-batch-start`. Shard 2 held three files that each cost 1.2 to 2 times their mean at the same time.
+
+### Change
+
+- `planTests` spreads the heaviest files by count. After the mutation class and before the remaining files, each of the `HEAVY_PER_SHARD` (3) times shard-count heaviest files that is not a mutation file goes to the shard that holds the fewest of those heaviest files so far (ties: the least loaded), where the mutation files among them were already counted. For three shards the nine heaviest files (`epg-r2-known-length`, `generation-stage`, `film-person-connector-mutation`, `film-person-e6-measure-mutation`, `discovery-decisions-read`, `prediction-batch-start`, `film-person-prepared-loader-mutation`, `generation-stage-withheld`, `prediction-batch-submit`) are three per shard, and which they are follows `WEIGHTS`, so the rule has no file list to rot. The serial-only rule, the mutation class and the shard 1 offset are unchanged.
+- `WEIGHTS` is recomputed with the tenth run in the same way (each file's share of its own job's summed time, scaled to 630, mean over 30 jobs; entries of 1.5 or more, 133 entries, was 121; the two serial-only weights unchanged at 42 and 31). The ten-run weights differ from the nine-run ones by at most 3 units (`scheduled-task-prompt-v2` 39 to 42, `prediction-batch-start` 49 to 51, `canonical-dictionary-producer-mutation` 29 to 32, `projector-view-parity` 30 to 32) and about a dozen files of 1.5 to 2 units gain an entry of 2. They are shares, so the co-located shard's inflated times lower the weights of the other files a little and raise those of the files in it, which is the averaging working as intended; the fix for co-location is the rule, not the weights.
+- `tests/run-tests-runner.mjs`: a new assertion that the nine heaviest files are spread three per shard over three shards. The mutation evenness bound changes from twice the lightest listed weight (4) to the lightest mutation file's weight (5): the same greedy deal of the same mutation class gave 194 / 189 / 189 (shard 1 with the offset added back) for the recomputed weights, a spread of 5, and the class has no file lighter than 5, so this is the bound that greedy deal of that class guarantees; it is the only assertion that was loosened, by one unit. Nothing else changed: every file runs once, no test, check, timeout, mutation file or the 180 s gate was changed, and the workflow is untouched.
+
+### Planned load, before and after (this change)
+
+| | Shard 1 | Shard 2 | Shard 3 |
+| --- | --- | --- | --- |
+| Before: planned weight | 631 | 664 | 664 |
+| After: planned weight (files) | 636.5 (124) | 669.5 (123) | 669 (124) |
+| After: with the 33-unit offset added back | 669.5 | 669.5 | 669 |
+| Before: mutation weight | 155 | 189 | 191 |
+| After: mutation weight | 161 | 189 | 189 |
+| After: the nine heaviest files | `discovery-decisions-read`, `prediction-batch-start`, `film-person-prepared-loader-mutation` | `epg-r2-known-length`, `film-person-connector-mutation`, `prediction-batch-submit` | `generation-stage`, `film-person-e6-measure-mutation`, `generation-stage-withheld` |
+| After: serial-only tail | `sqlite-session-semantics` 42 | none | `local-dev-smoke` 31 |
+
+Before, shard 2 held `generation-stage`, `film-person-connector-mutation` and `prediction-batch-start`; now no shard holds more than three of the nine and `generation-stage` is apart from the other two.
+
+### Predicted, not measured
+
+The three shards now carry the same weight after the offset (669.5 / 669.5 / 669), so the plan predicts the same `Run tests` for all three: at the mean of 0.233 s per unit about 156 s, at the 0.196 to 0.198 s per unit that shards 1 and 3 showed when no heavy files met about 131 to 133 s. That is a margin of about 24 s (pessimistic) to 48 s (uncontended) to the 180 s gate; the weight cannot be spread thinner than the total (1979 units over three shards), so about 150 s predicted or less holds only if a unit costs 0.224 s or less. These are predictions: the 0.233 s mean was measured on runs whose shards were skewed, runner speed varied up to 2 times on the same code, and the heavy files still meet beside files of a similar weight (for example `prediction-batch-start` with `discovery-decisions-read` in shard 1). CI on the new head decides and is not yet seen.
