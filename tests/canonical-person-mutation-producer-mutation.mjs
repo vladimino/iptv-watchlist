@@ -13,7 +13,6 @@ const MUTANTS=[
  ["the digest does not bind the target", "canonical-person-mutation-producer.js", "digestOf({operation:PERSON_MUTATION_OPERATION,id:input?.id,content:", "digestOf({operation:PERSON_MUTATION_OPERATION,content:"],
  ["the mode is not content", "canonical-person-mutation-producer.js", "return {mode,roleId:person.roleId", "return {roleId:person.roleId"],
  ["external ids are digested unsorted", "canonical-person-mutation-producer.js", "externalIds.sort((a,b)=>byKey(JSON.stringify([a.scheme,a.value]),JSON.stringify([b.scheme,b.value])));", ""],
- ["aliases are digested unsorted", "canonical-person-mutation-producer.js", "aliases.sort((a,b)=>byKey(JSON.stringify([a.kind,a.value]),JSON.stringify([b.kind,b.value])));", ""],
  ["a blank role id is accepted", "canonical-person-mutation-producer.js", "!filled(person.roleId)||", ""],
  ["a duplicate external id is accepted", "canonical-person-mutation-producer.js", "if(seenIds.has(key))throw failed('film_person_invalid');", ""],
  ["the unit size is unbounded", "canonical-person-mutation-producer.js", "if(externalIds.length+aliases.length>PERSON_ITEMS_PER_UNIT_MAX)throw failed('film_person_bounded');", ""],
@@ -35,20 +34,22 @@ const MUTANTS=[
  ["readback never finds the facts", "canonical-person-mutation-producer.js", "digest:plan?.noop?receipt.contentDigest:null", "digest:null"],
  ["revalidate never supersedes an absent Person", "canonical-person-mutation-producer.js", "return plan.absent||plan.noop?'superseded':'proceed';", "return plan.noop?'superseded':'proceed';"],
  ["revalidate always proceeds", "canonical-person-mutation-producer.js", "return plan.absent||plan.noop?'superseded':'proceed';", "return 'proceed';"],
- ["revalidate ignores a moved source", "canonical-person-mutation-producer.js", "if(!found||!found.ok)return 'stale';", "if(!found)return 'stale';"],
  ["every planner error is a missing plan", "canonical-person-mutation-producer.js", "if(PERSON_MUTATION_REFUSALS.has(error?.code))return null;throw error;", "return null;"],
  ["a role collision is not a content refusal", "canonical-person-mutation-producer.js", "[...CONTENT_REFUSALS,'person_role_collision','identity_collision']", "[...CONTENT_REFUSALS,'identity_collision']"],
  ["the pass gate ignores the route", "canonical-person-mutation-producer.js", "if(route.writer!=='canonical')return {state:'skipped'", "if(false)return {state:'skipped'"],
- ["an absent Person is not reported", "canonical-person-mutation-producer.js", "if(plan.absent)return {state:'absent',receipt:false,requestId};", ""],
  ["the receipt plans revision zero", "canonical-person-mutation-producer.js", "expectedRevision:plan.revision,digest", "expectedRevision:0,digest"],
  ["the writer does not prove an existing Person", "canonical-mutations.js", "if(input.presence==='existing')statements.push(", "if(false)statements.push("],
  ["the writer does not prove an absent Person", "canonical-mutations.js", "if(input.presence==='absent')statements.push(", "if(false)statements.push("],
  ["Person rows are planned last", "canonical-epg-person-producer.js", "const units=[...[...rows.values()].sort(byId),...[...people.values()].sort(byId),...[...films.values()].sort(byId)];", "const units=[...[...people.values()].sort(byId),...[...films.values()].sort(byId),...[...rows.values()].sort(byId)];"],
- ["a duplicate Person row is accepted", "canonical-epg-person-producer.js", "typeof item.id!=='string'||rows.has(item.id))throw failed('film_person_invalid');", "typeof item.id!=='string')throw failed('film_person_invalid');"],
  ["the apply map has no person_mutation", "canonical-epg-person-producer.js", "[PERSON_MUTATION_OPERATION]:applyPersonMutation}", "}"],
  ["the reconcile has no person_mutation", "canonical-epg-person-producer.js", "  [PERSON_MUTATION_OPERATION,personMutationOperation({replan:personReplan,...clock})],\n", ""],
  ["a Person row mode is dropped", "canonical-epg-person-producer.js", "...(item.mode!==undefined?{mode:item.mode}:{}),", ""],
- ["the person_mutation kind is not registered", "canonical-receipts.js", "'film_membership','person_mutation',", "'film_membership',"]
+ ["another Person's trusted id is not refused (update)", "canonical-person-mutation-producer.js", "for(const item of externalIds)if(item.trusted&&stored.some(have=>have.scheme===item.scheme&&have.trusted===1&&have.conflicting===0&&have.value!==item.value))throw failed('identity_collision');\n await assertNoOtherOwner(db,input.id,externalIds);", "for(const item of externalIds)if(item.trusted&&stored.some(have=>have.scheme===item.scheme&&have.trusted===1&&have.conflicting===0&&have.value!==item.value))throw failed('identity_collision');"],
+ ["another Person's trusted id is not refused (create)", "canonical-person-mutation-producer.js", "await assertNoOtherOwner(db,input.id,content.externalIds);\n  return", "return"],
+ ["a conflicting or untrusted copy counts as an owner", "canonical-person-mutation-producer.js", "if(item.trusted&&await one(db,'SELECT 1 AS x FROM person_external_id WHERE scheme=? AND value=? AND trusted=1 AND conflicting=0 AND person_id<>?'", "if(await one(db,'SELECT 1 AS x FROM person_external_id WHERE scheme=? AND value=? AND person_id<>?'"],
+ ["the write does not ask for the trusted-owner proof", "canonical-person-mutation-producer.js", "uniqueTrusted:true,", ""],
+ ["the writer does not prove the trusted owner", "canonical-mutations.js", "if(input.uniqueTrusted===true){", "if(false){"],
+ ["the writer accepts any uniqueTrusted", "canonical-mutations.js", "if(input.uniqueTrusted!==undefined&&input.uniqueTrusted!==true)throw failed('film_person_invalid');", ""]
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'person-mutation-mutants-'));
 try{

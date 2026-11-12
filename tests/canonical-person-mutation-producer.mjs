@@ -203,6 +203,38 @@ for(const stage of ['legacy','r2','prepared']){
  assert.equal(one(file,"SELECT COUNT(*) FROM person_external_id WHERE person_id='"+PID(1)+"' AND scheme='tmdb'"),2);
 }
 
+// 6b. A trusted external id is owned by ONE Person (schema v1 has no unique index): another Person's trusted (scheme, value) is refused before any receipt, also for a created Person; untrusted or conflicting copies are fine;
+// an owner that appears after the fresh read rolls the whole batch back (retryable), and the same request id then ends refused, never admitted.
+{
+ const file=database('open'),env=envOf(file);
+ seedPersons(file,[1,2]);
+ assert.equal(sqlite(file,"INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting) VALUES ('"+PID(2)+"','tmdb','11',1,0)").status,0);
+ for(const id of [PID(1),PID(3)])await assert.rejects(()=>applyPersonMutation(env,{...OPEN,input:unit({id},{roleId:id===PID(1)?'director/1':'director/3'})}),code('identity_collision'),id);
+ assert.equal(env.DB.calls.batches,0);assert.equal(one(file,'SELECT COUNT(*) FROM canonical_write_receipt'),0);assert.equal(one(file,'SELECT COUNT(*) FROM person'),2);
+ const copy=await applyPersonMutation(env,{...OPEN,input:unit({},{externalIds:[{scheme:'tmdb',value:'11'},{scheme:'tmdb',value:'12',trusted:true,conflicting:true}],aliases:[]})});
+ assert.equal(copy.state,'applied','an untrusted or conflicting copy is not a second owner');
+ // the writer's own assertion (the race window): a call that opts in is refused in the batch, one that does not is not.
+ const mine={id:PID(1),expectedRevision:revision(file,'person',PID(1)),at:T,presence:'existing',person:{roleId:'director/1',contractVersion:1,externalIds:[{scheme:'tmdb',value:'11',trusted:true}]}};
+ await assert.rejects(()=>mutatePerson(env,{...mine,uniqueTrusted:true}),code('film_person_precondition'));
+ await assert.rejects(()=>mutatePerson(env,{...mine,uniqueTrusted:1}),code('film_person_invalid'));
+ await assert.rejects(()=>mutatePerson(env,{...mine,uniqueTrusted:true,person:{...mine.person,externalIds:Array.from({length:41},(_,i)=>({scheme:'x',value:String(i),trusted:true}))}}),code('film_person_bounded'));
+ const before=revision(file,'person',PID(1));
+ assert.equal((await mutatePerson(env,{...mine,uniqueTrusted:true,person:{...mine.person,externalIds:[{scheme:'tmdb',value:'77',trusted:true},{scheme:'x',value:'1'}]}})).revision,before+1,'no clash: written');
+}
+{
+ const file=database('open');seedPersons(file,[1,2]);
+ let seen=0;
+ const racing=envOf(file,{onBatch:async()=>{seen++;if(seen===2)assert.equal(sqlite(file,"INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting) VALUES ('"+PID(2)+"','tmdb','11',1,0)").status,0);}});
+ await assert.rejects(()=>applyPersonMutation(racing,{...OPEN,input:unit()}),code('film_person_precondition'));
+ assert.equal(one(file,"SELECT COUNT(*) FROM person_external_id WHERE scheme='tmdb' AND value='11'"),1,'only the other Person owns it');
+ assert.equal(one(file,'SELECT COUNT(*) FROM person_alias'),0,'the whole batch rolled back');assert.equal(revision(file,'person',PID(1)),0);
+ const [receipt]=receipts(file);assert.deepEqual([receipt.state,receipt.attempts],['failed',1]);
+ const plan=planEpgPersonUnits({runId:'run-1',at:T,personRows:[{id:PID(1),roleId:'director/1',contractVersion:1,externalIds:unit().person.externalIds,aliases:unit().person.aliases}]});
+ await reconcileEpgRun(envOf(file),{plan,now:()=>iso(61000)});
+ assert.equal(receipts(file)[0].state,'abandoned','the same request id is refused, not admitted');
+ assert.equal(one(file,"SELECT COUNT(*) FROM person_external_id WHERE scheme='tmdb' AND value='11'"),1);
+}
+
 // 7. Interleavings in the SAME fenced batch: a Person that APPEARS between the fresh read and the batch is not overwritten (presence:'absent'), a revisionless raw insert included; one that VANISHES is not recreated by an update.
 {
  const file=database('open');

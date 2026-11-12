@@ -133,17 +133,25 @@ export async function mutateFilm(env,input){
 // input: {id, expectedRevision, at, person:{roleId, contractVersion, externalIds?, removeExternalIds?, aliases?}, presence?:'existing'|'absent'}
 // `presence` (AIR-374 P3a, ADR 0129) adds ONE assertion INSIDE the same fenced batch, before the row upsert: 'existing' requires the Person row to exist when the batch runs (it never creates one), 'absent' requires that it does not (it never
 // overwrites one). A Person that appeared or vanished after the caller's last read then fails the whole batch (receipt tail included) with `film_person_precondition`. Without the option nothing changes (the upsert creates or updates, as every other caller relies on).
+// `uniqueTrusted: true` (ADR 0129) adds ONE more assertion in the same batch: no OTHER Person owns any of the trusted, non-conflicting external ids this call upserts (schema v1 has no unique index for person_external_id, unlike film_external_id), so a trusted
+// owner that appears after the caller's read rolls the whole batch back with `film_person_precondition`. At most 40 external ids (100 binds per D1 statement). Without it nothing changes.
 export async function mutatePerson(env,input){
  const id=personId(input?.id),expected=revisionOf(input?.expectedRevision),at=text(input?.at),person=input?.person||{};
  if(!Number.isInteger(person.contractVersion))throw failed('film_person_invalid');
  const roleId=text(person.roleId);
  if(input.presence!==undefined&&input.presence!=='existing'&&input.presence!=='absent')throw failed('film_person_invalid');
+ if(input.uniqueTrusted!==undefined&&input.uniqueTrusted!==true)throw failed('film_person_invalid');
  const tail=receiptTail(input.receiptMark,{kind:'person',id});
  const gate=assertWritable(await readAuthority(env));
  const entities=[{kind:'person',id,expected}];
  const statements=head(gate,entities);
  if(input.presence==='existing')statements.push([assertSql('EXISTS (SELECT 1 FROM person WHERE id=?)'),[id]]);
  if(input.presence==='absent')statements.push([assertSql('NOT EXISTS (SELECT 1 FROM person WHERE id=?)'),[id]]);
+ if(input.uniqueTrusted===true){
+  const trusted=(person.externalIds||[]).filter(item=>trustedFlag(item)===1);
+  if(trusted.length>40)throw failed('film_person_bounded');
+  if(trusted.length)statements.push([assertSql('NOT EXISTS (SELECT 1 FROM person_external_id WHERE trusted=1 AND conflicting=0 AND person_id<>? AND (scheme,value) IN (VALUES '+trusted.map(()=>'(?,?)').join(',')+'))'),[id,...trusted.flatMap(item=>[text(item.scheme),String(item.value)])]]);
+ }
  statements.push(['INSERT INTO person (id,role_id,contract_version,updated_at) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET role_id=excluded.role_id,contract_version=excluded.contract_version,updated_at=excluded.updated_at',[id,roleId,person.contractVersion,at]]);
  for(const item of person.removeExternalIds||[])statements.push(['DELETE FROM person_external_id WHERE person_id=? AND scheme=? AND value=?',[id,text(item.scheme),String(item.value)]]);
  for(const item of person.externalIds||[])statements.push(['INSERT INTO person_external_id (person_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?) ON CONFLICT(person_id,scheme,value) DO UPDATE SET trusted=excluded.trusted,conflicting=excluded.conflicting,provenance_json=excluded.provenance_json',[id,text(item.scheme),String(item.value),trustedFlag(item),item.conflicting?1:0,json(item.provenance)]]);

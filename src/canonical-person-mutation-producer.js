@@ -11,7 +11,7 @@
 //   - the row: created with the unit's role id and contract version. An EXISTING row keeps its stored role id (a different one is refused `person_role_collision`, before any receipt) and its stored contract version (never overwritten);
 //     like every mutatePerson call it sets `person.updated_at` and the revision to the write clock, and only on a real write: a no-op writes nothing and has no receipt (E5).
 //   - external ids: upsert-only and insert-if-absent. A stored (scheme, value) is never touched (its trust, conflict flag and provenance are kept); nothing is removed or pruned (the exceptions registry's
-//     `external_ids_not_pruned_by_the_planner` is only referenced, not edited). A trusted id whose scheme already holds a DIFFERENT trusted value for this Person is refused `identity_collision`.
+//     `external_ids_not_pruned_by_the_planner` is only referenced, not edited). A trusted id whose scheme already holds a DIFFERENT trusted value for this Person, or whose trusted (scheme, value) another Person owns, is refused `identity_collision`; the write batch proves the latter again (`uniqueTrusted`).
 //   - aliases: insert-if-absent (the writer's DO NOTHING); none is removed. A blank id, value, scheme or alias is refused `film_person_invalid`: a blank never overwrites and is never written.
 // Per unit, as for `film_facts`: the stable request id comes from the SOURCE EVENT, the TARGET and the content digest; the pre-plan reads the stored rows and a NO-OP ends there with no receipt; one atomic receipted batch otherwise; an uncertain
 // race (nothing left to write) ends `unknown`/`atomic_mark_missing`, never a second marking batch; a replay re-plans from the producer's own source and is refused when the digest moved. Reconciliation is the origin's own bounded inline pass (E2).
@@ -24,8 +24,8 @@ import {SOURCE_CHANGED,producerRequestId} from './canonical-producer-adapters.js
 import {CONTENT_REFUSALS} from './canonical-person-adapters.js';
 
 export const PERSON_MUTATION_OPERATION='person_mutation';
-// mutatePerson is capped at 60 statements: five are fixed (fence, revision, presence, row upsert, bump), the rest is one per external id and alias.
-export const PERSON_ITEMS_PER_UNIT_MAX=50;
+// mutatePerson is capped at 60 statements and one D1 statement binds at most 100 values: six are fixed (fence, revision, presence, trusted-owner assertion, row upsert, bump), the rest is one per external id and alias, and the trusted-owner assertion binds two values per trusted id.
+export const PERSON_ITEMS_PER_UNIT_MAX=40;
 export const PERSON_MODES=Object.freeze(['ensure','existing']);
 // The typed refusals the planner throws about the CONTENT or the state of the target: the shared ones plus a role id that disagrees with the stored row and a trusted-id clash. Anything else (a read failure) propagates.
 export const PERSON_MUTATION_REFUSALS=new Set([...CONTENT_REFUSALS,'person_role_collision','identity_collision']);
@@ -67,6 +67,12 @@ export async function personMutationDigest(input){
 
 // ---- read-only plan: {absent, noop, action, revision, ...} ----
 const revisionOf=async(db,id)=>Number((await one(db,"SELECT revision FROM canonical_revision WHERE kind='person' AND id=?",[id]))?.revision??0);
+// A trusted, non-conflicting (scheme, value) owned by ANOTHER Person is refused `identity_collision` (schema v1 has no unique index for person_external_id; the same check runs in the write batch as `uniqueTrusted`).
+async function assertNoOtherOwner(db,id,items){
+ for(const item of items){
+  if(item.trusted&&await one(db,'SELECT 1 AS x FROM person_external_id WHERE scheme=? AND value=? AND trusted=1 AND conflicting=0 AND person_id<>?',[item.scheme,item.value,id]))throw failed('identity_collision');
+ }
+}
 // Throws before any receipt: person_role_collision (the role id belongs to another Person, or differs from the stored row), identity_collision (a trusted id against a different stored trusted value of its scheme).
 // action: 'create' (absent, mode ensure), 'update' (the row exists and something is missing) or 'none'; `absent` is true only for an absent Person of a mode `existing` unit (nothing to create).
 export async function planPersonMutation(env,input){
@@ -77,6 +83,7 @@ export async function planPersonMutation(env,input){
  if(!row){
   if(content.mode==='existing')return {absent:true,noop:false,action:'none',revision,externalIds:[],aliases:[]};
   if(await one(db,'SELECT 1 AS x FROM person WHERE role_id=?',[content.roleId]))throw failed('person_role_collision');
+  await assertNoOtherOwner(db,input.id,content.externalIds);
   return {absent:false,noop:false,action:'create',revision,roleId:content.roleId,contractVersion:content.contractVersion,externalIds:content.externalIds,aliases:content.aliases};
  }
  if(row.role_id!==content.roleId)throw failed('person_role_collision');
@@ -84,6 +91,7 @@ export async function planPersonMutation(env,input){
  const haveIds=new Set(stored.map(item=>JSON.stringify([item.scheme,item.value])));
  const externalIds=content.externalIds.filter(item=>!haveIds.has(JSON.stringify([item.scheme,item.value])));
  for(const item of externalIds)if(item.trusted&&stored.some(have=>have.scheme===item.scheme&&have.trusted===1&&have.conflicting===0&&have.value!==item.value))throw failed('identity_collision');
+ await assertNoOtherOwner(db,input.id,externalIds);
  const haveAliases=new Set((await many(db,'SELECT kind,value FROM person_alias WHERE person_id=?',[input.id])).map(item=>JSON.stringify([item.kind,item.value])));
  const aliases=content.aliases.filter(item=>!haveAliases.has(JSON.stringify([item.kind,item.value])));
  const noop=externalIds.length===0&&aliases.length===0;
@@ -97,7 +105,7 @@ async function writeUnit(env,input,requestId,ctx,clock){
  const plan=await planPersonMutation(env,input);
  if(plan.absent)throw failed('film_person_reference');
  if(plan.noop)return {id:input.id,revision:plan.revision,already:true};
- return mutatePerson(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,presence:plan.action==='create'?'absent':'existing',
+ return mutatePerson(env,{id:input.id,expectedRevision:ctx.currentRevision,at:input.at,presence:plan.action==='create'?'absent':'existing',uniqueTrusted:true,
   person:{roleId:plan.roleId,contractVersion:plan.contractVersion,externalIds:plan.externalIds.map(({scheme,value,trusted,conflicting,provenance})=>({scheme,value,trusted,conflicting,provenance})),aliases:plan.aliases},receiptMark:mark(ctx,clock)});
 }
 
