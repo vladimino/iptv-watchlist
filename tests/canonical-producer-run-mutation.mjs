@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const FILE='canonical-producer-run.js';
-// [name, exact text that occurs once, replacement]
+// [name, exact text that occurs once, replacement, file in src/ (default: the producer-run module)]
 const MUTANTS=[
  // classification
  ["film_person_unavailable becomes a unit failure", "'film_person_unavailable','film_person_held',", "'film_person_held',"],
@@ -67,11 +67,11 @@ const MUTANTS=[
  ["the trigger accepts a reset by a failure", "return cause==='unit_done'||cause==='third_strike'||cause==='plan_changed'?null:'a reset outside the three allowed causes';", "return null;"],
  ["the trigger accepts a systemic change", "if(cause==='systemic')return same?null:'a systemic stop touched a strike column';", "if(cause==='systemic')return null;"],
  // plan identity and cursor order
- ["the fingerprint ignores the unit digests", "const list=units.map(unit=>{if(!DIGEST.test(unit.unitDigest||''))throw invalid();return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest};});", "const list=units.map(unit=>({kind:unit.kind,id:unit.id}));"],
+ ["the fingerprint ignores the unit digests", "return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest,...(", "return {kind:unit.kind,id:unit.id,...("],
  ["the fingerprint ignores the event", "return digestOf({planVersion,origin,event,units:list});", "return digestOf({planVersion,origin,units:list});"],
  ["the fingerprint ignores the origin", "return digestOf({planVersion,origin,event,units:list});", "return digestOf({planVersion,event,units:list});"],
  ["the fingerprint ignores the plan version", "return digestOf({planVersion,origin,event,units:list});", "return digestOf({origin,event,units:list});"],
- ["the fingerprint ignores the kind", "return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest};});", "return {id:unit.id,unitDigest:unit.unitDigest};});"],
+ ["the fingerprint ignores the kind", "return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest,...(", "return {id:unit.id,unitDigest:unit.unitDigest,...("],
  ["an unordered plan is accepted", "if(i>0&&compareKeys(units[i-1],units[i])>=0)throw invalid();", ""],
  ["a duplicate unit is accepted", "if(i>0&&compareKeys(units[i-1],units[i])>=0)throw invalid();", "if(i>0&&compareKeys(units[i-1],units[i])>0)throw invalid();"],
  ["the kind rank is ignored", "return ra!==rb?(ra<rb?-1:1):a.id<b.id?-1:a.id>b.id?1:0;", "return a.id<b.id?-1:a.id>b.id?1:0;"],
@@ -84,7 +84,6 @@ const MUTANTS=[
  ["a replay keeps the cursor", "startIndex:0,cursor_kind:null,cursor_id:null,strike:{...NO_STRIKE}", "startIndex:resumeIndex(units,{kind:stored.cursor_kind,id:stored.cursor_id}),cursor_kind:stored.cursor_kind,cursor_id:stored.cursor_id,strike:{...NO_STRIKE}"],
  ["the dictionary unit digest binds the stored state", "return digestOf({operation:'dictionary_unit',id:unit.id,entry:unit.entry});", "return digestOf({operation:'dictionary_unit',id:unit.id});"],
  ["the dictionary unit digest binds nothing of the Film", "return digestOf({operation:'dictionary_unit',id:unit.id,entry:unit.entry});", "return digestOf({operation:'dictionary_unit',entry:unit.entry});"],
- ["the refused digest ignores the list", "return digestOf({operation:'refused_unit',kind,id,source:source===undefined?null:source});", "return digestOf({operation:'refused_unit',kind,id});"],
  // result rows and retry
  ["a terminal state can reopen", "export const canTransition=(from,to)=>LIVE_STATES.includes(from)&&RESULT_STATES.includes(to);", "export const canTransition=(from,to)=>RESULT_STATES.includes(from)&&RESULT_STATES.includes(to);"],
  ["a live row cannot move", "export const canTransition=(from,to)=>LIVE_STATES.includes(from)&&RESULT_STATES.includes(to);", "export const canTransition=(from,to)=>LIVE_STATES.includes(from)&&TERMINAL_STATES.includes(to);"],
@@ -101,7 +100,6 @@ const MUTANTS=[
  ["an equal digest is superseded", "if(live.unit_digest!==row.unit_digest)return {supersede:", "if(true)return {supersede:"],
  ["a supersede has the wrong reason", "{key:keyOfRow(live),...supersede(live,'source_changed',row.created_at)}", "{key:keyOfRow(live),...supersede(live,'left_plan',row.created_at)}"],
  ["the pass_no is not part of the row key", "pass_no:row.pass_no,kind:row.kind,unit_id:row.unit_id});", "kind:row.kind,unit_id:row.unit_id});"],
- ["a terminal row can be written over", "if(!LIVE_STATES.includes(live.state)||live.kind!==row.kind", "if(live.kind!==row.kind"],
  ["a same-digest failure adds no attempt", "const bump=row.state==='open'?live.attempts+1:live.attempts;", "const bump=live.attempts;"],
  ["a refusal adds an attempt", "const bump=row.state==='open'?live.attempts+1:live.attempts;", "const bump=live.attempts+1;"],
  ["a terminal row is retried", "if(TERMINAL_STATES.includes(row.state))return {action:'none',reason:'terminal'};", ""],
@@ -142,6 +140,35 @@ const MUTANTS=[
  ["an unmaterialised entry proceeds", "if(input.entry==='present'&&input.materialised==='yes')return {decision:'proceed',case:'materialised'};", "if(input.entry==='present')return {decision:'proceed',case:'materialised'};"],
  ["an unreadable entry proceeds", "||input.entry==='unreadable')return {decision:'refuse'", ")return {decision:'refuse'"],
  ["an inconsistent entry stops the pass", "return {decision:'refuse',class:CLASS.RECOVERABLE,code:'owner_review_inconsistent'};", "return {decision:'stop',class:CLASS.SYSTEMIC,code:'owner_review_check_failed'};"],
+ // ordered plan, per-unit refusals, row classes
+ ["the refused entries are dropped", "entries.push({kind:item.kind,id:item.id,unitDigest:await refusedUnitDigest(item),refusal:item.code});", ""],
+ ["the refusal code is not in the entry", "unitDigest:await refusedUnitDigest(item),refusal:item.code});", "unitDigest:await refusedUnitDigest(item)});"],
+ ["the refused entries are not merged in order", "entries.sort(compareKeys);\n return assertOrdered(entries);", "return entries;"],
+ ["a key in both lists is accepted", "entries.sort(compareKeys);\n return assertOrdered(entries);", "entries.sort(compareKeys);\n return entries;"],
+ ["any code is a planner refusal", "if(![CLASS.PERMANENT,CLASS.RECOVERABLE].includes(classOfCode(item.code)))throw invalid();", ""],
+ ["the fingerprint ignores the refusal", "...(unit.refusal!==undefined?{refusal:unit.refusal}:{})", ""],
+ ["the fingerprint accepts any refusal code", "if(unit.refusal!==undefined&&![CLASS.PERMANENT,CLASS.RECOVERABLE].includes(classOfCode(unit.refusal)))throw invalid();", ""],
+ ["a refused digest ignores the incoming list", "digest=await digestOf({operation:'refused_unit',kind,id,source:source===undefined?null:source});", "digest=await digestOf({operation:'refused_unit',kind,id});"],
+ ["an unserialisable source throws", "catch{digest=await digestOf({operation:'refused_unit',kind,id,unserialisable:true});}", "catch(error){throw error;}"],
+ ["a systemic code makes an open unit row", "if(row.state==='open'&&!(cls===CLASS.UNIT||(row.retry_owner==='receipt'&&cls===CLASS.UNCLASSIFIED&&row.code!=='unclassified')))throw invalid();", ""],
+ ["an unknown code makes an open unit row", "(row.retry_owner==='receipt'&&cls===CLASS.UNCLASSIFIED&&row.code!=='unclassified')", "(cls===CLASS.UNCLASSIFIED)"],
+ ["a permanent row takes any code", "if(row.state==='refused_permanent'&&cls!==CLASS.PERMANENT)throw invalid();", ""],
+ ["a recoverable row takes any code", "if(row.state==='refused_recoverable'&&cls!==CLASS.RECOVERABLE)throw invalid();", ""],
+ ["a receipt-owned row is reclassified", "if(live.retry_owner==='receipt')return {none:'receipt_owned'};", ""],
+ ["the owner of a row can change", "if(row.retry_owner!==live.retry_owner)throw invalid();", ""],
+ ["the live row is not checked", " assertResultRow(live);\n if(!LIVE_STATES.includes(live.state)", " if(!LIVE_STATES.includes(live.state)"],
+ ["a receipt-owned row is retried by the unit", "||row.retry_owner!=='unit')throw invalid();", ")throw invalid();"],
+ ["the Person wrapper accepts a repeated id", "if(seen.has(item.id))throw failed('film_person_invalid');", "", "canonical-epg-person-producer.js"],
+ ["the credits wrapper accepts a repeated id", "if(seen.has(item.filmId))throw failed('film_person_invalid');", "", "canonical-epg-person-producer.js"],
+ ["an oversized list is not refused", "const over=Array.isArray(item.credits)&&item.credits.length>CREDITS_PER_UNIT_MAX;", "const over=false;", "canonical-epg-person-producer.js"],
+ ["an oversized list is invalid, not bounded", "code:over?'film_person_bounded':'film_person_invalid'", "code:'film_person_invalid'", "canonical-epg-person-producer.js"],
+ ["a malformed credit list is not refused per unit", "if(ok)try{filmCreditsContent({id:item.filmId,credits:item.credits});}", "if(false)try{filmCreditsContent({id:item.filmId,credits:item.credits});}", "canonical-epg-person-producer.js"],
+ ["a malformed Person is not refused per unit", "try{personStateContent({id:item.id,at,person:item.state});}", "try{}", "canonical-epg-person-producer.js"],
+ ["the refused source is truncated", "source:source(item.credits)", "source:Array.isArray(item.credits)?item.credits.slice(0,CREDITS_PER_UNIT_MAX):source(item.credits)", "canonical-epg-person-producer.js"],
+ ["the refused entries are dropped from the result", "return {...plan,refused:[...refused.sort(byId),...refusedFilms.sort(byId)]};", "return {...plan,refused:[]};", "canonical-epg-person-producer.js"],
+ ["the Film wrapper accepts a repeated id", "if(seen.has(item.id))throw failed('film_person_invalid');\n   seen.add(item.id);\n   if(!plain(item.facts))", "seen.add(item.id);\n   if(!plain(item.facts))", "canonical-epg-producer.js"],
+ ["a refused Film is released", "departed:departed.filter(id=>!refusedIds.has(id))", "departed", "canonical-epg-producer.js"],
+ ["a Film without facts is not refused", "if(!plain(item.facts)){refused.push", "if(false){refused.push", "canonical-epg-producer.js"],
  // freshness
  ["a lagging pass is current", "if(applied!==publishedGeneration)return 'lagging';", ""],
  ["a backwards generation is current", "if(applied!==publishedGeneration)return 'lagging';", "if(applied>publishedGeneration)return 'lagging';"],
@@ -168,19 +195,20 @@ const MUTANTS=[
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'producer-run-mutants-'));
 try{
- const original=fs.readFileSync(path.join('src',FILE),'utf8');
- for(const [name,from] of MUTANTS)assert.equal(original.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in src/'+FILE);
+ const textOf=file=>fs.readFileSync(path.join('src',file||FILE),'utf8');
+ for(const [name,from,,file] of MUTANTS)assert.equal(textOf(file).split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in its file');
  const run=env=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-producer-run.mjs'],{env:{...process.env,...env},stdio:['ignore','ignore','pipe'],timeout:30000});
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
   child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
  });
  assert.equal(await run({}),0,'the unmutated test passes');
- const queue=MUTANTS.map(([name,from,to],index)=>{
+ const queue=MUTANTS.map(([name,from,to,file=FILE],index)=>{
   const copy=path.join(dir,'src'+index);
   fs.mkdirSync(copy);
-  for(const entry of fs.readdirSync('src'))if(entry!==FILE)fs.symlinkSync(path.resolve('src',entry),path.join(copy,entry));
-  fs.writeFileSync(path.join(copy,FILE),original.replace(from,()=>to));
+  for(const entry of fs.readdirSync('src'))if(entry!==FILE&&entry!==file)fs.symlinkSync(path.resolve('src',entry),path.join(copy,entry));
+  if(file!==FILE)fs.copyFileSync(path.join('src',FILE),path.join(copy,FILE));
+  fs.writeFileSync(path.join(copy,file),textOf(file).replace(from,()=>to));
   return {name,env:{RUN_SRC:copy}};
  });
  const survivors=[];

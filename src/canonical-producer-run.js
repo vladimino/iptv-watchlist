@@ -107,12 +107,32 @@ export function resumeIndex(units,cursor){
  while(index<units.length&&compareKeys(units[index],cursor)<=0)index++;
  return index;
 }
-// sha256(canonicalJson({planVersion, origin, event, units:[{kind,id,unitDigest}]})) over the units in plan order. The ceiling, the slice size, the retry caps and the marker generation are NOT part of it.
+// THE ORDERED PLAN: one list of ENTRIES in (kind rank, id) order covering the units to apply AND the units the planner refused. An entry is {kind, id, unitDigest} and, for a refused unit, `refusal`: the code of the planner's refusal (a permanent or a recoverable
+// code of the table). A refused unit is visited by the pass like any other (its durable result is written at first observation and the cursor then passes it), so the cursor never passes an unrecorded unit, a change of its source moves the fingerprint (and supersedes its
+// live result), and a replay is reproducible. For a plan with no refusal the entries carry no `refusal` key and the fingerprint is exactly the ADR 0128 formula.
+// sha256(canonicalJson({planVersion, origin, event, entries:[{kind,id,unitDigest[,refusal]}]})) under the key `units`. The ceiling, the slice size, the retry caps and the marker generation are NOT part of it.
 export async function planFingerprint({planVersion=PRODUCER_PLAN_VERSION,origin,event,units}={}){
  if(!Number.isInteger(planVersion)||planVersion<1||!ORIGINS.includes(origin)||typeof event!=='string'||!event||event.length>300)throw invalid();
  assertOrdered(units);
- const list=units.map(unit=>{if(!DIGEST.test(unit.unitDigest||''))throw invalid();return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest};});
+ const list=units.map(unit=>{
+  if(!DIGEST.test(unit.unitDigest||''))throw invalid();
+  if(unit.refusal!==undefined&&![CLASS.PERMANENT,CLASS.RECOVERABLE].includes(classOfCode(unit.refusal)))throw invalid();
+  return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest,...(unit.refusal!==undefined?{refusal:unit.refusal}:{})};
+ });
  return digestOf({planVersion,origin,event,units:list});
+}
+// Builds the ordered entries from the units to apply ([{kind,id,unitDigest}], already digested by the adapters) and the planner's `refused` list ([{kind,id,code,source}]): the refused units get their source digest and a `refusal` code, the two lists are merged in
+// (kind rank, id) order, and a key present in both (or twice) refuses the plan. Nothing is dropped: the result has exactly units + refused entries.
+export async function buildPlanEntries({units=[],refused=[]}={}){
+ if(!Array.isArray(units)||!Array.isArray(refused))throw invalid();
+ const entries=units.map(unit=>{checkUnit(unit);if(unit.refusal!==undefined)throw invalid();return {kind:unit.kind,id:unit.id,unitDigest:unit.unitDigest};});
+ for(const item of refused){
+  checkUnit(item);
+  if(![CLASS.PERMANENT,CLASS.RECOVERABLE].includes(classOfCode(item.code)))throw invalid();
+  entries.push({kind:item.kind,id:item.id,unitDigest:await refusedUnitDigest(item),refusal:item.code});
+ }
+ entries.sort(compareKeys);
+ return assertOrdered(entries);
 }
 // The SOURCE-ONLY digest of a dictionary unit: the normalised curated entry (aliases and sources included) and nothing read from the canonical store. The writer input of the dictionary layer depends on the stored Film (contract version,
 // kept outcomes), so its adapter digest cannot be the unit digest; the S4-1 test shows it moves with stored state while this one does not.
@@ -123,7 +143,10 @@ export async function dictionaryUnitDigest(unit){
 // The digest of a refused unit's incoming source (decision 12 d: "the digest of the incoming list"), for a planner that reports `refused:[{kind,id,code,source}]`.
 export async function refusedUnitDigest({kind,id,source}){
  checkUnit({kind,id});
- return digestOf({operation:'refused_unit',kind,id,source:source===undefined?null:source});
+ let digest;
+ try{digest=await digestOf({operation:'refused_unit',kind,id,source:source===undefined?null:source});}
+ catch{digest=await digestOf({operation:'refused_unit',kind,id,unserialisable:true});}
+ return digest;
 }
 // Same stored fingerprint: resume after the stored cursor. Anything else: replay from the start in ONE compare-and-set (pass_no + 1, the new fingerprint, cursor reset, strikes cleared); open results are revalidated lazily, never rewritten here.
 export function resumeDecision({stored,fingerprint,units}={}){
@@ -231,6 +254,12 @@ export function assertResultRow(row){
  if(!Number.isInteger(row.attempts)||row.attempts<1||row.attempts>16)throw invalid();
  const has=value=>value!==null&&value!==undefined;
  if(has(row.prereq_stamp)&&!DIGEST.test(row.prereq_stamp))throw invalid();
+ // The code's CLASS must fit the state: a systemic, kept or unknown code never makes a unit row (it stops the pass or is only counted); an execution failure (`open`) carries a unit-specific code (a receipt-owned row may also carry a receipt error
+ // class the table does not know); a permanent refusal a permanent code; a recoverable refusal a recoverable one. A terminal row keeps the code it was settled with.
+ const cls=classOfCode(row.code);
+ if(row.state==='open'&&!(cls===CLASS.UNIT||(row.retry_owner==='receipt'&&cls===CLASS.UNCLASSIFIED&&row.code!=='unclassified')))throw invalid();
+ if(row.state==='refused_permanent'&&cls!==CLASS.PERMANENT)throw invalid();
+ if(row.state==='refused_recoverable'&&cls!==CLASS.RECOVERABLE)throw invalid();
  if((row.retry_owner==='receipt')!==has(row.request_id))throw invalid();
  if(row.retry_owner!=='unit'&&has(row.next_attempt_at))throw invalid();
  if(row.state==='open'&&row.retry_owner!=='receipt'&&!has(row.next_attempt_at))throw invalid();
@@ -255,11 +284,17 @@ const supersede=(row,reason,at)=>({action:'supersede',patch:{state:'superseded',
 export function failureWrite(live,incoming){
  const row=resultRow(incoming);
  if(live===null||live===undefined)return {insert:row};
+ assertResultRow(live);
  if(!LIVE_STATES.includes(live.state)||live.kind!==row.kind||live.unit_id!==row.unit_id||live.origin!==row.origin||live.run_key!==row.run_key)throw invalid();
  if(live.unit_digest!==row.unit_digest)return {supersede:{key:keyOfRow(live),...supersede(live,'source_changed',row.created_at)},insert:row};
+ // The SAME digest: the live row keeps its key and its ONE retry owner. A receipt-owned row is never reclassified here (the receipt owns its schedule and its settlement: this write is refused until the receipt owner settles it), and the owner of a row never changes.
+ if(live.retry_owner==='receipt')return {none:'receipt_owned'};
+ if(row.retry_owner!==live.retry_owner)throw invalid();
  const bump=row.state==='open'?live.attempts+1:live.attempts;
- const schedule=row.state==='open'&&live.retry_owner==='unit'?nextAttemptAt(timeOf(row.created_at),Math.min(bump,16)):row.state==='refused_recoverable'?row.next_attempt_at:null;
- return {update:{key:keyOfRow(live),patch:{state:row.state,code:row.code,attempts:Math.min(bump,16),prereq_stamp:row.prereq_stamp,next_attempt_at:live.retry_owner==='receipt'?null:schedule,updated_at:row.created_at}}};
+ const schedule=row.state==='open'?nextAttemptAt(timeOf(row.created_at),Math.min(bump,16)):row.state==='refused_recoverable'?row.next_attempt_at:null;
+ const patch={state:row.state,code:row.code,attempts:Math.min(bump,16),prereq_stamp:row.prereq_stamp,next_attempt_at:schedule,updated_at:row.created_at};
+ assertResultRow({...live,...patch});
+ return {update:{key:keyOfRow(live),patch}};
 }
 export const keyOfRow=row=>({origin:row.origin,run_key:row.run_key,pass_no:row.pass_no,kind:row.kind,unit_id:row.unit_id});
 
@@ -293,9 +328,15 @@ export function retryDecision(row,ctx){
 //   {kind:'refused', error, stamp?}                           the planner refused (stamp: the new prerequisite stamp for a recoverable refusal);
 //   {kind:'failed', error}                                    the step raised an error.
 // Returns {action:'settle'|'update'|'stop'|'none', patch?}. Reclassification (state, code, stamp, schedule) is ONE patch, meant for one compare-and-set.
-export function afterRetry(row,outcome,{nowMs}={}){
+export function afterRetry(row,outcome,context){
+ // Every patch is checked as the row it produces: a state, a code class, an owner, a schedule and a stamp that the schema CHECKs would refuse cannot leave this function.
+ const result=settleOutcome(row,outcome,context);
+ if(result.patch)assertResultRow({...row,...result.patch});
+ return result;
+}
+function settleOutcome(row,outcome,{nowMs}={}){
  assertResultRow(row);
- if(!plain(outcome)||!Number.isFinite(nowMs)||!LIVE_STATES.includes(row.state))throw invalid();
+ if(!plain(outcome)||!Number.isFinite(nowMs)||!LIVE_STATES.includes(row.state)||row.retry_owner!=='unit')throw invalid();
  const at=iso(nowMs);
  if(outcome.kind==='proof'){
   if(outcome.proof!=='applied_receipt'&&outcome.proof!=='verified_noop')throw invalid();

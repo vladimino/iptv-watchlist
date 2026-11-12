@@ -2,7 +2,7 @@
 // (exhaustive over the codes the producer path can raise, so a new code without a class fails here), the strike identity state machine (scripted and property-style), the plan fingerprint and the source-only unit digests of every existing
 // planner kind (asserted, not assumed), the prerequisite stamp, the result-row state machine with the retry and revalidation decisions, generation-aware freshness (truth table and the no-false-freshness property), the cursor order and
 // the durable-outcome rule, the dictionary version minting decision, the owner-review three-case guard, the three scenarios of the ADR S4-1 list as pure decisions, and dormancy.
-// RUN_SRC points the module under test at a mutant copy of src/ (tests/canonical-producer-run-mutation.mjs); the existing planners and adapters are always the real ones.
+// RUN_SRC points the module under test and the two planner files that hold the per-unit-refusal wrappers at a mutant copy of src/ (tests/canonical-producer-run-mutation.mjs); the adapters are always the real ones.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,10 +13,11 @@ const R=await import(pathToFileURL(path.join(SRC,'canonical-producer-run.js')).h
 const real=name=>import(pathToFileURL(path.resolve('src',name)).href);
 const {filmFactsDigest}=await real('canonical-producer-adapters.js');
 const {unitDigest,CREDITS_PER_UNIT_MAX}=await real('canonical-person-adapters.js');
-const {planEpgUnits}=await real('canonical-epg-producer.js');
-const {planEpgPersonUnits}=await real('canonical-epg-person-producer.js');
+const planners=name=>import(pathToFileURL(path.join(SRC,name)).href);
+const {planEpgUnits,planEpgUnitsWithRefusals}=await planners('canonical-epg-producer.js');
+const {planEpgPersonUnits,planEpgPersonUnitsWithRefusals}=await planners('canonical-epg-person-producer.js');
 const {planDictionaryUnits,buildDictionaryInput}=await real('canonical-dictionary-producer.js');
-const {RETRY_POLICY}=await real('canonical-receipts.js');
+const {RETRY_POLICY,digestOf}=await real('canonical-receipts.js');
 const {CLASS}=R;
 
 const H=char=>char.repeat(64);
@@ -611,18 +612,21 @@ const rowOf=(extra={})=>R.resultRow({...PASS,state:'open',attempts:3,...extra});
  // (c) a list over 50 stays refused_permanent and visible, never truncated; the rest of the plan survives
  const big=creditsOf(CREDITS_PER_UNIT_MAX+1);
  assert.equal(codeOf(()=>planEpgPersonUnits({runId:'r1',at:AT,persons:[],credits:[{filmId:'film:1',credits:big}]})),'film_person_bounded','the default planner still refuses the whole plan');
- const plan=planEpgPersonUnits({runId:'r1',at:AT,persons:people,credits:[{filmId:'film:1',credits:big},{filmId:'film:2',credits:creditsOf(2)}],unitRefusals:true});
+ const plan=planEpgPersonUnitsWithRefusals({runId:'r1',at:AT,persons:people,credits:[{filmId:'film:1',credits:big},{filmId:'film:2',credits:creditsOf(2)}]});
  assert.deepEqual(plan.units.map(unit=>unit.kind+':'+unit.id),['person_state:person:1','person_state:person:2','film_credits:film:2'],'the rest of the plan survives');
  assert.equal(plan.refused.length,1);assert.deepEqual([plan.refused[0].kind,plan.refused[0].id,plan.refused[0].code],['film_credits','film:1','film_person_bounded']);
  assert.equal(plan.refused[0].source.length,CREDITS_PER_UNIT_MAX+1,'the incoming list is carried whole: never truncated');
- assert.deepEqual(planEpgPersonUnits({runId:'r1',at:AT,persons:people,credits:[{filmId:'film:2',credits:creditsOf(2)}],unitRefusals:true}).refused,[],'no refusal when nothing is oversized');
+ assert.deepEqual(planEpgPersonUnitsWithRefusals({runId:'r1',at:AT,persons:people,credits:[{filmId:'film:2',credits:creditsOf(2)}]}).refused,[],'no refusal when nothing is oversized');
  assert.equal(planEpgPersonUnits({runId:'r1',at:AT,persons:[],credits:[{filmId:'film:2',credits:creditsOf(2)}]}).refused,undefined,'the default result shape is unchanged');
- assert.equal(codeOf(()=>planEpgPersonUnits({runId:'r1',at:AT,persons:[],credits:[{filmId:'film:1',credits:big},{filmId:'film:1',credits:big}],unitRefusals:true})),'film_person_invalid','a duplicate refused Film is refused');
  const bigDigest=await R.refusedUnitDigest(plan.refused[0]);
  assert.equal(bigDigest,await R.refusedUnitDigest({...plan.refused[0]}));assert.notEqual(bigDigest,await R.refusedUnitDigest({...plan.refused[0],source:big.slice(0,CREDITS_PER_UNIT_MAX)}),'the digest is the digest of the incoming list');
  const refusedStep=fail(fresh(),{kind:'film_credits',id:'film:1',digest:bigDigest},plan.refused[0].code);
  assert.deepEqual([refusedStep.action,refusedStep.result.state,refusedStep.run.cursor_id,refusedStep.run.strike_count],['refuse_permanent','refused_permanent','film:1',0],'durable at first observation, no strike');
- const brow=R.resultRow({origin:'epg',runKey:'epg:r1',passNo:1,fingerprint:H('3'),unit:{kind:'film_credits',id:'film:1',digest:bigDigest},state:'refused_permanent',code:'film_person_bounded',at:AT});
+ // ONE ordered plan covers the units AND the refused unit: its fingerprint is the real one of that plan
+ const planUnits=await Promise.all(plan.units.map(async unit=>({kind:unit.kind,id:unit.id,unitDigest:await unitDigest(unit.kind,unit.input)})));
+ const entries=await R.buildPlanEntries({units:planUnits,refused:plan.refused});
+ const planFp=await R.planFingerprint({origin:'epg',event:plan.event,units:entries});
+ const brow=R.resultRow({origin:'epg',runKey:'epg:r1',passNo:1,fingerprint:planFp,unit:{kind:'film_credits',id:'film:1',digest:bigDigest},state:'refused_permanent',code:'film_person_bounded',at:AT});
  for(const nowMs of [NOW+1,NOW+RETRY_POLICY.abandonAfterMs*3])assert.deepEqual(R.retryDecision(brow,{nowMs,currentUnitDigest:bigDigest,trigger:'due'}),{action:'none',reason:'permanent_never_retried'},'never retried, never abandoned, still live (visible)');
  assert.ok(R.LIVE_STATES.includes(brow.state),'it stays a live row: visible and blocking');
  const shrunk=R.retryDecision(brow,{nowMs:NOW,currentUnitDigest:await R.refusedUnitDigest({...plan.refused[0],source:big.slice(0,CREDITS_PER_UNIT_MAX)}),trigger:'reobserved'});
@@ -634,6 +638,127 @@ const rowOf=(extra={})=>R.resultRow({...PASS,state:'open',attempts:3,...extra});
  const equal=buildDictionaryInput({film:{contract_version:1,original_title:'Heat',canonical_identity:null,updated_at:AT},dimensions:{identity:{status:'automatic',authority:'automatic',provenance_json:null},localization:null},trustedTmdb:[]},{id:'film:1',entry:{...entry,title:null}},{at:AT});
  assert.equal(equal.outcome,'kept','an equal incoming title with no titleSource adopts no ownership');
  assert.ok(R.KIND_RANK.film_credits>R.KIND_RANK.person_state);
+}
+
+// ---- 10b. The planner wrappers: per-unit refusals, in both orders, and the ONE ordered plan ----
+{
+ const W=input=>planEpgPersonUnitsWithRefusals({runId:'r1',at:AT,persons:[],...input});
+ const big=creditsOf(CREDITS_PER_UNIT_MAX+1),small=creditsOf(2);
+ // an id already used by ANY other entry, refused or not, in either order, refuses the plan
+ assert.equal(codeOf(()=>W({credits:[{filmId:'film:1',credits:big},{filmId:'film:1',credits:small}]})),'film_person_invalid','oversized then valid');
+ assert.equal(codeOf(()=>W({credits:[{filmId:'film:1',credits:small},{filmId:'film:1',credits:big}]})),'film_person_invalid','valid then oversized');
+ assert.equal(codeOf(()=>W({credits:[{filmId:'film:1',credits:big},{filmId:'film:1',credits:big}]})),'film_person_invalid','two oversized');
+ assert.equal(codeOf(()=>W({credits:[{filmId:'film:1',credits:[]},{filmId:'film:1',credits:small}]})),'film_person_invalid','invalid then valid');
+ assert.equal(codeOf(()=>W({credits:[{filmId:'film:1',credits:small},{filmId:'film:1',credits:'x'}]})),'film_person_invalid','valid then malformed');
+ assert.equal(codeOf(()=>W({persons:[{id:'person:1',state:{}},{id:'person:1',state:people[0].state}]})),'film_person_invalid','an invalid Person then a valid one');
+ assert.equal(codeOf(()=>W({persons:[{id:'person:1',state:people[1].state},{id:'person:1',state:{}}]})),'film_person_invalid','a valid Person then an invalid one');
+ const survive=W({credits:[{filmId:'film:1',credits:big},{filmId:'film:2',credits:small}]});
+ assert.deepEqual([survive.units.map(unit=>unit.id),survive.refused.map(unit=>unit.id)],[['film:2'],['film:1']],'an unrelated valid Film survives, never both lists for one id');
+ // per-unit invalid units: a malformed state, an empty list, a non-array, a duplicated credit, an unknown role
+ const bad=W({persons:[{id:'person:3',state:{}},{id:'person:1',state:people[1].state}],credits:[{filmId:'film:5',credits:[]},{filmId:'film:6',credits:'x'},{filmId:'film:7',credits:[{personId:'person:1',role:'actor'},{personId:'person:1',role:'actor'}]},{filmId:'film:8',credits:[{personId:'person:1',role:'cook'}]},{filmId:'film:9',credits:small}]});
+ assert.deepEqual(bad.units.map(unit=>unit.kind+':'+unit.id),['person_state:person:1','film_credits:film:9']);
+ assert.deepEqual(bad.refused.map(unit=>unit.kind+':'+unit.id+':'+unit.code),['person_state:person:3:film_person_invalid','film_credits:film:5:film_person_invalid','film_credits:film:6:film_person_invalid','film_credits:film:7:film_person_invalid','film_credits:film:8:film_person_invalid']);
+ assert.equal(bad.refused[0].source.constructor,Object,'the incoming value is carried');
+ // no usable id: the whole plan is refused (no key to record a result under); the default planners are unchanged
+ assert.equal(codeOf(()=>W({credits:[{filmId:'x',credits:small}]})),'film_person_invalid');assert.equal(codeOf(()=>W({credits:[null]})),'film_person_invalid');assert.equal(codeOf(()=>W({persons:[{id:'x',state:{}}]})),'film_person_invalid');
+ assert.equal(codeOf(()=>planEpgPersonUnits({runId:'r1',at:AT,persons:[],credits:[{filmId:'film:1',credits:[]}]})),'film_person_invalid','the default planner still refuses the whole plan');
+ // Film facts
+ const F=input=>planEpgUnitsWithRefusals({runId:'r1',at:AT,...input});
+ const okFilm={id:'film:2',facts:factsOf()};
+ const films=F({films:[{id:'film:1',facts:'nope'},okFilm,{id:'film:4'}],departed:['film:1','film:3']});
+ assert.deepEqual(films.units.map(unit=>unit.id),['film:2','film:3']);assert.deepEqual(films.refused.map(unit=>unit.id+':'+unit.code),['film:1:film_person_invalid','film:4:film_person_invalid']);
+ assert.equal(films.units.some(unit=>unit.id==='film:1'),false,'a refused observed Film is not released');
+ assert.equal(codeOf(()=>F({films:[{id:'film:1',facts:'x'},{id:'film:1',facts:factsOf()}]})),'film_person_invalid');assert.equal(codeOf(()=>F({films:[okFilm,{id:'film:2',facts:'x'}]})),'film_person_invalid');
+ assert.equal(codeOf(()=>F({films:[{id:'x',facts:{}}]})),'film_person_invalid');
+ // the dictionary snapshot still refuses a malformed entry as a whole: per-unit refusal of the dictionary is a LATER delivery (S4-4, with the resolver), pinned here so it is changed knowingly
+ assert.equal(await codeOfAsync(()=>planDictionaryUnits({version:'d1',entries:[{id:'x'}],at:AT})),'film_person_invalid');
+ // THE ONE ORDERED PLAN. (a) only refused units: a non-empty plan whose fingerprint is not the empty plan's
+ const only=W({credits:[{filmId:'film:1',credits:big}]});
+ assert.equal(only.units.length,0);
+ const e51=await R.buildPlanEntries({units:[],refused:only.refused});
+ assert.deepEqual(e51.map(entry=>[entry.kind,entry.id,entry.refusal]),[['film_credits','film:1','film_person_bounded']]);
+ const fp=entries=>R.planFingerprint({origin:'epg',event:only.event,units:entries});
+ const empty=await fp([]),fp51=await fp(e51);
+ assert.notEqual(fp51,empty,'a plan with only a refused unit is not the empty plan');
+ // (c) 51 -> 52 credits under the same event: the unit digest and the fingerprint move
+ const only52=W({credits:[{filmId:'film:1',credits:creditsOf(CREDITS_PER_UNIT_MAX+2)}]});
+ const e52=await R.buildPlanEntries({units:[],refused:only52.refused});
+ assert.equal(only52.event,only.event);assert.notEqual(e52[0].unitDigest,e51[0].unitDigest);assert.notEqual(await fp(e52),fp51,'a changed refused list moves the fingerprint');
+ assert.equal(await fp(await R.buildPlanEntries({units:[],refused:W({credits:[{filmId:'film:1',credits:big}]}).refused})),fp51,'reproducible');
+ // (b) mixed valid and refused entries come in cursor order, and resume is the first entry strictly after the cursor
+ const mixedPlan=W({persons:[{id:'person:2',state:{}},...people.slice(1)],credits:[{filmId:'film:3',credits:big},{filmId:'film:1',credits:small}]});
+ const digested=await Promise.all(mixedPlan.units.map(async unit=>({kind:unit.kind,id:unit.id,unitDigest:await unitDigest(unit.kind,unit.input)})));
+ const mixed=await R.buildPlanEntries({units:digested,refused:mixedPlan.refused});
+ assert.deepEqual(mixed.map(entry=>entry.kind+':'+entry.id+':'+(entry.refusal??'')),['person_state:person:1:','person_state:person:2:film_person_invalid','film_credits:film:1:','film_credits:film:3:film_person_bounded']);
+ assert.equal(R.resumeIndex(mixed,{kind:'person_state',id:'person:1'}),1,'the refused entry is visited');
+ assert.equal(R.resumeIndex(mixed,{kind:'person_state',id:'person:2'}),2);
+ assert.equal(R.resumeIndex(mixed,{kind:'film_credits',id:'film:1'}),3,'the cursor reaches the refused entry before the end');
+ assert.equal(R.sliceCursor(mixed,null,mixed.map(entry=>({kind:entry.kind,id:entry.id,outcome:entry.refusal?'result_written':'applied'}))).id,'film:3','the cursor passes a refused entry only once its result is written');
+ assert.deepEqual(R.sliceCursor(mixed,null,mixed.map(entry=>({kind:entry.kind,id:entry.id,outcome:entry.refusal?'pending':'applied'}))),{kind:'person_state',id:'person:1'},'a refused entry whose result is not written stops the cursor');
+ const fpMixed=await R.planFingerprint({origin:'epg',event:mixedPlan.event,units:mixed});
+ assert.notEqual(fpMixed,await R.planFingerprint({origin:'epg',event:mixedPlan.event,units:mixed.map(entry=>({kind:entry.kind,id:entry.id,unitDigest:entry.unitDigest}))}),'the refusal code is part of the identity');
+ assert.equal(await R.planFingerprint({origin:'epg',event:'e',units:planUnitsOnly()}),await R.planFingerprint({origin:'epg',event:'e',units:planUnitsOnly().map(entry=>({...entry}))}),'a plan with no refusal carries no refusal key (the ADR formula)');
+ function planUnitsOnly(){return [{kind:'film_facts',id:'film:1',unitDigest:H('a')}];}
+ assert.equal(await R.planFingerprint({origin:'epg',event:'e',units:planUnitsOnly()}),await digestOf({planVersion:R.PRODUCER_PLAN_VERSION,origin:'epg',event:'e',units:[{kind:'film_facts',id:'film:1',unitDigest:H('a')}]}));
+ // (d) the refusal disappears when the list becomes valid: the entry is a normal one with another digest, and the live row is superseded
+ const valid=W({credits:[{filmId:'film:1',credits:creditsOf(CREDITS_PER_UNIT_MAX)}]});
+ assert.deepEqual([valid.refused.length,valid.units.length],[0,1]);
+ const validEntries=await R.buildPlanEntries({units:[{kind:'film_credits',id:'film:1',unitDigest:await unitDigest('film_credits',valid.units[0].input)}],refused:[]});
+ assert.equal(validEntries[0].refusal,undefined);assert.notEqual(await fp(validEntries),fp51);
+ const liveRow=R.resultRow({origin:'epg',runKey:'epg:r1',passNo:1,fingerprint:fp51,unit:{kind:'film_credits',id:'film:1',digest:e51[0].unitDigest},state:'refused_permanent',code:'film_person_bounded',at:AT});
+ const cleared=R.retryDecision(liveRow,{nowMs:NOW,currentUnitDigest:validEntries[0].unitDigest,trigger:'reobserved'});
+ assert.deepEqual([cleared.action,cleared.patch.settled_by],['supersede','source_changed']);
+ assert.equal(R.retryDecision(liveRow,{nowMs:NOW,currentUnitDigest:null,trigger:'reobserved'}).patch.settled_by,'left_plan');
+ // building entries: nothing is dropped, a key in both lists or a non-refusal code refuses
+ assert.equal(await codeOfAsync(()=>R.buildPlanEntries({units:[{kind:'film_credits',id:'film:1',unitDigest:H('a')}],refused:only.refused})),'film_person_invalid');
+ assert.equal(await codeOfAsync(()=>R.buildPlanEntries({units:[],refused:[{kind:'film_credits',id:'film:1',code:'identity_collision',source:1}]})),'film_person_invalid');
+ assert.equal(await codeOfAsync(()=>R.buildPlanEntries({units:[],refused:[{kind:'film_credits',id:'film:1',code:'film_person_unavailable',source:1}]})),'film_person_invalid');
+ assert.equal(await codeOfAsync(()=>R.buildPlanEntries({units:[],refused:[...only.refused,...only.refused]})),'film_person_invalid');
+ assert.equal(await codeOfAsync(()=>R.planFingerprint({origin:'epg',event:'e',units:[{kind:'film_credits',id:'film:1',unitDigest:H('a'),refusal:'owner_kept'}]})),'film_person_invalid');
+ assert.equal((await R.buildPlanEntries({units:[],refused:[{kind:'film_credits',id:'film:1',code:'film_person_invalid',source:{n:1n}}]})).length,1,'an unserialisable source still gets a digest');
+}
+
+// ---- 10c. Result rows: the code class must fit the state; one retry owner ----
+{
+ const base={...PASS,attempts:1};
+ const bad=(extra,message)=>assert.equal(codeOf(()=>R.resultRow({...base,...extra})),'film_person_invalid',message);
+ bad({state:'open',code:'film_person_unavailable'},'a systemic code is never a unit result');
+ bad({state:'open',code:'producer_cas_lost'},'a store error is never a unit result');
+ bad({state:'open',code:'no_identity_row'},'a refusal code is not an execution failure');
+ bad({state:'open',code:'owner_kept'},'a kept outcome has no row');
+ bad({state:'open',code:'unclassified'},'unclassified stops the pass');
+ bad({state:'open',code:'brand_new_code'},'an unknown code on a unit-owned row');
+ bad({state:'refused_permanent',code:'no_identity_row'},'a permanent refusal cannot carry a recoverable code');
+ bad({state:'refused_permanent',code:'identity_collision'},'nor an execution code');
+ bad({state:'refused_recoverable',code:'film_person_bounded',prereqStamp:H('5')},'a recoverable refusal cannot carry a permanent code');
+ bad({state:'refused_recoverable',code:'film_person_unavailable',prereqStamp:H('5')},'nor a systemic one');
+ bad({state:'open',code:'film_person_unavailable',retryOwner:'receipt',requestId:'epg:x'},'a systemic code is not a receipt-owned unit result either');
+ bad({state:'open',code:'film_person_bounded',retryOwner:'receipt',requestId:'epg:x'},'a permanent code is not an execution failure');
+ // valid: execution code, a receipt error class the table does not know, refusals with their own class
+ assert.equal(R.resultRow({...base,state:'open',code:'identity_collision'}).state,'open');
+ assert.equal(R.resultRow({...base,state:'open',code:'atomic_mark_missing',retryOwner:'receipt',requestId:'epg:x'}).retry_owner,'receipt');
+ // a patch that would produce a forbidden row cannot leave afterRetry
+ const unitOpen=R.resultRow({...base,state:'open',code:'identity_collision'});
+ const stop=R.afterRetry(unitOpen,{kind:'failed',error:{code:'film_person_unavailable'}},{nowMs:NOW});assert.deepEqual(stop,{action:'stop',code:'film_person_unavailable'});
+ assert.equal(codeOf(()=>R.afterRetry(R.resultRow({...base,state:'open',code:'atomic_mark_missing',retryOwner:'receipt',requestId:'epg:x'}),{kind:'failed',error:{code:'identity_collision'}},{nowMs:NOW})),'film_person_invalid','a receipt-owned row is not retried by the unit');
+ assert.equal(codeOf(()=>R.afterRetry(R.resultRow({...base,state:'open',code:'atomic_mark_missing',retryOwner:'receipt',requestId:'epg:x'}),{kind:'proof',proof:'applied_receipt'},{nowMs:NOW})),'film_person_invalid','the unit retry path never settles a receipt-owned row');
+ // THE receipt-owned reclassification: a same-digest open receipt row is never turned into a recoverable refusal by a failure write
+ const receiptRow=R.resultRow({...base,state:'open',code:'atomic_mark_missing',retryOwner:'receipt',requestId:'epg:x'});
+ const toRecoverable={...base,state:'refused_recoverable',code:'no_identity_row',prereqStamp:H('5')};
+ assert.deepEqual(R.failureWrite(receiptRow,toRecoverable),{none:'receipt_owned'},'refused until the receipt owner settles');
+ assert.deepEqual(R.failureWrite(receiptRow,{...base,state:'open',code:'identity_collision'}),{none:'receipt_owned'});
+ assert.deepEqual(R.failureWrite(receiptRow,{...base,state:'refused_permanent',code:'film_person_bounded'}),{none:'receipt_owned'});
+ // a changed digest still supersedes a receipt-owned row (the source moved on)
+ const moved=R.failureWrite(receiptRow,{...toRecoverable,unit:{...PASS.unit,digest:H('b')}});assert.equal(moved.supersede.patch.settled_by,'source_changed');assert.equal(moved.insert.retry_owner,'unit');
+ // a valid unit-owned reclassification: open -> refused_recoverable keeps the owner, takes a schedule and a stamp
+ const reclass=R.failureWrite(unitOpen,toRecoverable);
+ const merged={...unitOpen,...reclass.update.patch};
+ assert.deepEqual([merged.state,merged.retry_owner,merged.prereq_stamp,merged.next_attempt_at!==null,merged.request_id],['refused_recoverable','unit',H('5'),true,null]);
+ assert.equal(R.assertResultRow(merged).code,'no_identity_row');
+ // the owner of a row never changes
+ assert.equal(codeOf(()=>R.failureWrite(unitOpen,{...base,state:'open',code:'identity_collision',retryOwner:'receipt',requestId:'epg:x'})),'film_person_invalid');
+ // a live row that is itself malformed is refused
+ assert.equal(codeOf(()=>R.failureWrite({...unitOpen,code:'film_person_unavailable'},{...base,state:'open',code:'identity_collision'})),'film_person_invalid');
 }
 
 // ---- 11. Dormancy ----

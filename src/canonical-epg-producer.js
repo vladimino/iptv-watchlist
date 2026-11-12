@@ -107,3 +107,21 @@ export async function reconcileEpg(env,{plan,limit,now,policy}={}){
  const operations=new Map([[FILM_FACTS_OPERATION,filmFactsOperation({replan:epgReplan(plan,env),...(now?{now}:{})})]]);
  return reconcileOwnOrigin(env,{origin:EPG_ORIGIN,operations,...(limit!==undefined?{limit}:{}),...(now?{now}:{}),...(policy?{policy}:{})});
 }
+
+// ADR 0128 decision 9 (S4-1): the Film plan with PER-UNIT refusals. `planEpgUnits` is unchanged (whole-plan refusal). An observed Film with a usable id whose `facts` are not an object is reported in `refused:[{kind,id,code,source}]` (`film_person_invalid`, the incoming
+// value as `source`) and the rest survives; an id used twice refuses the whole plan (an ambiguous input), as does an item with no usable id (no key to record a result under); a refused Film that is also departed is not released (an observed Film wins).
+export function planEpgUnitsWithRefusals({runId,at,films=[],departed=[]}={}){
+ if(!Array.isArray(films)||!Array.isArray(departed))throw failed('film_person_invalid');
+ const keep=[],refused=[],seen=new Set();
+ for(const item of films){
+  if(plain(item)&&typeof item.id==='string'&&item.id.startsWith('film:')){
+   if(seen.has(item.id))throw failed('film_person_invalid');
+   seen.add(item.id);
+   if(!plain(item.facts)){refused.push({kind:'film_facts',id:item.id,code:'film_person_invalid',source:item.facts===undefined?null:item.facts});continue;}
+  }
+  keep.push(item);
+ }
+ const refusedIds=new Set(refused.map(entry=>entry.id));
+ const plan=planEpgUnits({runId,at,films:keep,departed:departed.filter(id=>!refusedIds.has(id))});
+ return {...plan,refused:refused.sort((a,b)=>Number(a.id>b.id)-Number(a.id<b.id))};
+}
