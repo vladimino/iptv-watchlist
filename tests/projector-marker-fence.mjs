@@ -14,13 +14,26 @@ import {d1Standin} from './d1-standin.mjs';
 import {projectorContext} from './d1-enrichment-context.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
+// AIR-374: FENCE_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
+// A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
+const ONLY=process.env.FENCE_ONLY?new Set(process.env.FENCE_ONLY.split(',')):null;
+let currentSection='-';
+const section=id=>{if(ONLY&&!ONLY.has(id))return false;currentSection=id;return true;};
+process.on('exit',code=>{if(code!==0)console.error('LEAN_SECTION '+currentSection);});
+
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-marker-fence-'));
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 let databases=0;
+// The migrated schema is built once per process and every database is a file copy of it (a copy is the same database the chain makes; the chain was replayed for each one before).
+let template=null;
 const migrated=(opts={})=>{
  const file=path.join(root,'m-'+(databases++)+'.sqlite');
- const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
- if(result.status!==0)throw new Error(result.stderr||'migration failed');
+ if(!template){
+  template=path.join(root,'template.sqlite');
+  const result=sqliteSync(['-bail',template],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+  if(result.status!==0)throw new Error(result.stderr||'migration failed');
+ }
+ fs.copyFileSync(template,file);
  return {file,db:d1Standin(file,opts)};
 };
 const dropTriggers='DROP TRIGGER IF EXISTS film_person_authority_transition;DROP TRIGGER IF EXISTS film_person_authority_needs_baseline;';
@@ -49,7 +62,7 @@ const MARKER_READ='SELECT mode,cutover,generation FROM film_person_authority WHE
 const isFilmWrite=statements=>statements.some(item=>/INSERT INTO (film|person)\b/.test(item.text));
 
 // 1. A marker that is not the projector's writes nothing, bulk off and on.
-for(const bulk of [false,true]){
+for(const bulk of section('1')?[false,true]:[]){
  const label=bulk?'bulk on':'bulk off';
  for(const [name,mutate] of [['d1 generation 2',db=>setMarker(db,'d1','open',2)],['d1 held',db=>setMarker(db,'d1','held',3)]]){
   const {db}=migrated();mutate(db);
@@ -79,6 +92,7 @@ const capture=async(prepare,bulk=false)=>{
  return {summary,batches,db:fixture.db};
 };
 const without=batches=>batches.map(list=>list.filter(text=>!isGuard(text)).map(normalize));
+if(section('2')){
 const legacy=await capture(db=>db.sql('DROP TABLE film_person_authority'));
 assert.equal(legacy.summary.outcome,'complete');assert.equal(count(legacy.db,'film'),4);
 assert.ok(legacy.batches.every(list=>list.filter(isGuard).length===1&&/sqlite_master/.test(list.find(isGuard))),'legacy: every batch carries the legacy guard');
@@ -93,9 +107,10 @@ for(const [name,prepare] of [['r2 generation 0',()=>{}],['r2 generation 5',db=>s
 }
 // The grouped path writes the same rows under the same marker.
 const grouped=await capture(db=>setMarker(db,'prepared','open',1),true);assert.equal(grouped.summary.outcome,'complete');assert.equal(count(grouped.db,'film'),4);
+}
 
 // 3. Cost: the guard adds one statement per batch and no round trip; the marker read is ONE query, inside the unchanged budget.
-{
+if(section('3')){
  const guarded=await capture(db=>setMarker(db,'prepared','open',1));
  const stripped=migrated({rewrite:sql=>isGuard(sql)?'INSERT INTO projection_fence (held) SELECT 1 WHERE ? IS NOT NULL AND ? IS NOT NULL':sql});
  setMarker(stripped.db,'prepared','open',1);
@@ -110,7 +125,7 @@ const grouped=await capture(db=>setMarker(db,'prepared','open',1),true);assert.e
 }
 
 // 4. A marker flip or generation change between the read and the write fails the whole batch (bulk off and on): nothing is written, the run is deferred.
-for(const bulk of [false,true]){
+for(const bulk of section('4')?[false,true]:[]){
  const label=bulk?'bulk on':'bulk off';
  for(const [name,mutate] of [
   ['the generation moves',db=>setMarker(db,'prepared','open',2)],
@@ -128,7 +143,7 @@ for(const bulk of [false,true]){
  }
 }
 // A move AFTER some batches committed stops every further write.
-{
+if(section('4')){
  let writes=0;let fixture;
  fixture=migrated({onBatch:async statements=>{if(isFilmWrite(statements)&&++writes===3)setMarker(fixture.db,'d1','open',2);}});
  setMarker(fixture.db,'prepared','open',1);
@@ -139,7 +154,7 @@ for(const bulk of [false,true]){
 }
 
 // 5. Legacy: a marker table that appears between the read and the write fails the batch whole.
-{
+if(section('5')){
  let fired=0;let fixture;
  fixture=migrated({onBatch:async statements=>{if(isFilmWrite(statements)&&!fired++)fixture.db.sql('CREATE TABLE film_person_authority (id INTEGER PRIMARY KEY, mode TEXT NOT NULL, cutover TEXT NOT NULL, generation INTEGER NOT NULL)');}});
  fixture.db.sql('DROP TABLE film_person_authority');
@@ -148,7 +163,7 @@ for(const bulk of [false,true]){
  assert.equal(count(fixture.db,'film')+count(fixture.db,'person'),0);
 }
 // Legacy with the grouped path stays as ADR 0106 had it: no marker, nothing written.
-{
+if(section('5')){
  const {db}=migrated();db.sql('DROP TABLE film_person_authority');
  const summary=await run(db,true);
  assert.deepEqual([summary.outcome,summary.reason],['deferred','authority_unavailable']);assert.equal(rows(db),0);
@@ -156,7 +171,7 @@ for(const bulk of [false,true]){
 }
 
 // 6. Static: one source of the guard, the producers' dormant fence consumes it, and the projector carries no marker SQL of its own.
-{
+if(section('6')){
  const authority=fs.readFileSync('src/film-person-authority.js','utf8'),projectorSource=fs.readFileSync('src/d1-enrichment.js','utf8'),producers=fs.readFileSync('src/canonical-producers.js','utf8');
  assert.ok(authority.includes("EXISTS (SELECT 1 FROM film_person_authority WHERE id=1 AND mode=? AND cutover='open' AND generation=?)"));
  assert.doesNotMatch(projectorSource,/FROM film_person_authority/,'the projector carries no marker SQL of its own');
