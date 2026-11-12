@@ -30,6 +30,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
 - [Film/Person `open` handoff, `held` and forward fix: design only, authorizes nothing](film-person-open-handoff.md) (AIR-374, not executed)
 - [Film/Person migration 0019: owner GO and apply procedure](film-person-0019-apply.md) (AIR-374 H0, prepared future GO, not executed)
+- [Film/Person E6: read-only budget measurement for the EPG producer](film-person-e6-budget-measurement.md) (AIR-374, prepared GO package, offline tool, not executed; a production read needs its own owner GO)
 - [Film/Person activation: owner decision pack for the production holdpoints](film-person-holdpoint-decision-pack.md) (AIR-374 H0 to H4: H0/H1 prepared future GOs, H2 to H4 blocked; design, not executed)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 
