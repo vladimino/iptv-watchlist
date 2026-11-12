@@ -108,6 +108,8 @@ A missing line for a step means the Worker that served it predates the instrumen
 
 - **Which Task is active.** Read the live Task registry: exactly one hourly Predictions Task is enabled. Two enabled Tasks show as `already_running` stops of the later one, not as an error of the Worker.
 - **Reading a v2 run.** Status, run diagnostics and the Events footer show it as a run with `protocol: batch_v2`. Read the `prediction_step_timing` lines with `step` of `batch_start` and `batch_submit` as described [above](#reading-the-step-timing-line-air-438): `manifestBytes`, `manifestFilms`, `items`, `deferredBudget`, `staleProfile`.
+- **`manifest_too_large`.** The start created no run and wrote nothing; it repeats while the same films lead the queue. Do not shorten anything by hand: record the reported `bytes`, `limit` and `largestFilmBytes` and take the decision to the owner.
+- **A lost response or `502` on a submit.** Replay the same body with the same `runId` and `epoch`: committed films come back `replayed`. A heartbeat in between does not change the `epoch`.
 - **A stuck v2 run.** Wait for lease expiry (15 minutes). Do not reset the lease. Its unsubmitted films are still in the queue.
 - **`wrong_protocol`.** A client called the other protocol's tool on this run: stop it, do not retry with the other tool.
 - **Rollback.** Disable the v2 Task and re-enable the v5 Task (owner action). No data repair is needed.

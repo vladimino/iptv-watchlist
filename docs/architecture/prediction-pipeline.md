@@ -77,25 +77,37 @@ sequenceDiagram
         MCP-->>Client: already_running (stop, do not adopt)
     else New run
         MCP->>Queue: Select once, hot first (up to 100 films)
-        MCP-->>Client: Manifest: profile, contract, films with metadata and plan
-        loop Until the manifest is spent (at most 100 films)
-            Client->>Client: Generate up to 10 films from the manifest
-            Client->>MCP: prediction_batch_submit (1 to 10 items, lease fence)
-            MCP->>MCP: Validate each film, compare profile impact
-            MCP->>Store: Write the valid films (immutable body, then pointer)
-            MCP->>Queue: One queue write for the call, renew lease
-            MCP-->>Client: Per-film results (partial success)
-            opt Profile changed
-                MCP-->>Client: compatible films kept; impacted or unknown films stale_profile
+        alt Whole answer over the byte limit
+            MCP-->>Client: manifest_too_large (no run, no lease, no write, nothing shortened)
+        else Fits
+            MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch
+            loop Until the manifest is spent (at most 100 films)
+                opt Model call may be long
+                    Client->>MCP: prediction_heartbeat (before the call, at least every 10 minutes)
+                    MCP->>Queue: Renew lease, same ownership epoch
+                    MCP-->>Client: expiresAt and epoch
+                end
+                Client->>Client: Generate up to 10 films from the manifest
+                Client->>MCP: prediction_batch_submit (1 to 10 items, runId and epoch)
+                MCP->>MCP: Validate each film, compare profile impact
+                loop Each valid film in order
+                    MCP->>Store: Immutable body, then pointer and view index
+                    MCP->>MCP: Save the film result in the run record
+                end
+                MCP->>Queue: One queue settlement for the call, renew lease
+                MCP-->>Client: Per-film results (partial success; a replay of the same body recovers a crash)
+                opt Profile changed
+                    MCP-->>Client: compatible films kept; impacted or unknown films stale_profile
+                end
             end
+            Client->>MCP: prediction_complete
+            MCP->>Queue: Record completion, release lease
         end
-        Client->>MCP: prediction_complete
-        MCP->>Queue: Record completion, release lease
     end
     Note over Client,Store: A dry run (dryRun true) reads and validates the same way and writes nothing: no lease, run, queue or storage write
 ```
 
-The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A v2 run that stops leaves its unsubmitted films in the queue; the next execution selects them again. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that stops leaves its unsubmitted films in the queue; the next `batch_start` selects them again, and a hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
 
 ## Queue writes
 

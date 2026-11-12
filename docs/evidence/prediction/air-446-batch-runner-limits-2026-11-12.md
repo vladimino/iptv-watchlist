@@ -20,7 +20,7 @@ Fixed parts: the taste profile (about 12.5 KB of text, AIR-438) and the contract
 | Real synopsis (400 to 1,000 characters) and credits | 1.2 to 2 KB | 120 to 200 KB |
 | Real metadata plus a stored fingerprint (`prediction_only`, 2 to 4 KB each) | 3.5 to 6 KB | 350 to 600 KB |
 
-At roughly 3.5 to 4 characters per token, 150 KB is about 40,000 tokens and 450 KB about 115,000 to 130,000. The last row is probably unusable as one tool result. This is why the contract caps the manifest by bytes as well as by count (D1) and drops null fields and shares genre text. Whether the ChatGPT connector truncates or rejects a large tool result is **not known**.
+At roughly 3.5 to 4 characters per token, 150 KB is about 40,000 tokens and 450 KB about 115,000 to 130,000. The last row is probably unusable as one tool result. This is why the contract bounds the whole serialized response by `maxManifestBytes` and, when 100 selected films do not fit, refuses (`manifest_too_large`) instead of shortening the manifest or any film (D1); it drops null fields. An initial 160 KiB is an unverified refusal guard, not proof that 100 films fit. Whether the ChatGPT connector truncates or rejects a large tool result is **not known**.
 
 ## 3. Worker work of one `batch_start`
 
