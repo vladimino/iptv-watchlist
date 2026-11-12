@@ -159,6 +159,7 @@ const EVIDENCE_CONTRACT={
  basis:EVIDENCE_BASIS,confidence:CONFIDENCE,metadataRefs:METADATA_REFS,maxItems:EVIDENCE_MAX_ITEMS,maxRefs:EVIDENCE_MAX_REFS,sourceRefCap:EVIDENCE_SOURCE_REF_CAP,
  metadataSupports:['plotMechanics'],executionQuality:EXECUTION_QUALITY,
  claimCoverage:{plotMechanics:'every asserted mechanic has 1–4 items; no extra mechanic keys',generalExecution:'a value other than unknown or not_applicable requires items; unknown, not_applicable and an absent dimension must not have items',genreExecution:'optional; the same item rules when a genre dimension is present'},
+ sourceFields:{whenOmitted:'when evidence is present and valid and BOTH sourceBasis and sourceRefs are omitted, the Worker sets them from the aggregate (ADR 0129)',whenSupplied:'a supplied value is never rewritten and must equal the aggregate',invalidEvidence:'an invalid map derives nothing; its own issues are reported'},
  aggregate:{order:['plotMechanics','generalExecution','genreExecution'],basis:'first-seen unique bases in that order; one basis keeps its name and more than one is mixed',refs:'first-seen unique refs in that order, capped at sourceRefCap'},
  metadataPreflight:'prediction_validate accepts optional metadata, the film modelMetadata, only when evidence cites a metadata token. The tool reads no storage. Submit uses the modelMetadata stored for the run. A metadata token whose fact is absent is invalid_ref.'
 };
@@ -233,7 +234,7 @@ function metadataFactPresent(metadata,ref){
 }
 // Walk order for the aggregate is the asserted mechanic list, then general execution, then genre execution.
 // Within a claim, item order is the submitted order. Unique bases and refs keep that first-seen order.
-function evidenceIssues(fingerprint,metadata){
+function evidenceCore(fingerprint,metadata,out){
  const issues=[],add=(path,code)=>{if(issues.length<MAX_ISSUES)issues.push({path,code});};
  const evidence=fingerprint.evidence;
  if(!isObject(evidence)){add('fingerprint.evidence','invalid_type');return issues;}
@@ -301,18 +302,32 @@ function evidenceIssues(fingerprint,metadata){
  if(!claims.some(claim=>claim.items.length)){add('fingerprint.evidence','too_few');return issues;}
  const bases=[],refs=[];
  for(const claim of claims)for(const item of claim.items){if(!bases.includes(item.basis))bases.push(item.basis);for(const ref of item.refs)if(!refs.includes(ref)&&refs.length<EVIDENCE_SOURCE_REF_CAP)refs.push(ref);}
+ if(out){out.basis=bases.length===1?bases[0]:'mixed';out.refs=refs;}
  if(fingerprint.sourceBasis!==(bases.length===1?bases[0]:'mixed'))add('fingerprint.sourceBasis','invalid_enum');
  const got=fingerprint.sourceRefs;
  if(!Array.isArray(got)||got.length!==refs.length||got.some((ref,index)=>ref!==refs[index]))add('fingerprint.sourceRefs','invalid_ref');
  return issues;
 }
+function evidenceIssues(fingerprint,metadata){return evidenceCore(fingerprint,metadata,null);}
+// ADR 0128: when evidence is present and the caller omitted BOTH sourceBasis and sourceRefs, the Worker sets them from the aggregate it already
+// computes and checks (the same walk order, de-duplication and cap of 8). A value the caller supplied is never rewritten: a disagreeing aggregate stays a
+// rejection. An invalid evidence map derives nothing, so the caller sees the evidence issues. The result is a new object; the input is not changed.
+function deriveFingerprintSource(fingerprint,metadata){
+ if(!isObject(fingerprint)||!isObject(fingerprint.evidence)||Object.hasOwn(fingerprint,'sourceBasis')||Object.hasOwn(fingerprint,'sourceRefs'))return fingerprint;
+ const out={};evidenceCore(fingerprint,metadata,out);
+ return out.basis===undefined?fingerprint:{...fingerprint,sourceBasis:out.basis,sourceRefs:out.refs};
+}
+function withDerivedSource(item,metadata){return isObject(item)&&isObject(item.fingerprint)?{...item,fingerprint:deriveFingerprintSource(item.fingerprint,metadata)}:item;}
 function fingerprintIssues(f,metadata){
  const issues=ruleIssues('fingerprint',FINGERPRINT_RULES,f);
  if(isObject(f)&&Object.hasOwn(f,'evidence')){
   // The rule table only knows https and model_knowledge. An evidence object may also cite the four metadata tokens,
   // so that one code is decided by the aggregate below instead of the table.
   if(isObject(f.evidence)){const kept=issues.filter(issue=>!(issue.path==='fingerprint.sourceRefs'&&issue.code==='invalid_ref'));issues.length=0;issues.push(...kept);}
-  for(const issue of evidenceIssues(f,metadata)){if(issues.length>=MAX_ISSUES)break;if(!issues.some(have=>have.path===issue.path&&have.code===issue.code))issues.push(issue);}
+  const found=evidenceIssues(f,metadata);
+  // an invalid map derives nothing; its own issues are the cause, so the two omitted aggregate fields are not reported as missing on top of them
+  if(found.length&&isObject(f.evidence)){for(let i=issues.length-1;i>=0;i--)if(issues[i].code==='required'&&(issues[i].path==='fingerprint.sourceBasis'||issues[i].path==='fingerprint.sourceRefs')&&!Object.hasOwn(f,issues[i].path.slice('fingerprint.'.length)))issues.splice(i,1);}
+  for(const issue of found){if(issues.length>=MAX_ISSUES)break;if(!issues.some(have=>have.path===issue.path&&have.code===issue.code))issues.push(issue);}
  }
  if(isObject(f)&&!issues.length&&JSON.stringify(f).length>FINGERPRINT_MAX_CHARS)issues.push({path:'fingerprint',code:'too_large'});
  return issues;
@@ -2193,6 +2208,7 @@ async function batchGuardedCommit(env,ctx,work){
 async function batchSubmitItem(env,ctx,item){
  const {run,freshness,change,source,guarded}=ctx,id=String(item.filmId);
  if(!run.selectedIds.includes(id))return {result:{filmId:id,status:'not_in_manifest'}};
+ item=withDerivedSource(item,source[id]);
  run.submitted||={};
  const digest=await batchItemDigest(id,item),recorded=run.submitted[id];
  if(recorded){
@@ -2394,10 +2410,11 @@ async function batchSubmitDryRun(env,body){
  if(body.contract&&(body.contract.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||(body.contract.fingerprintPromptVersion??1)!==FINGERPRINT_PROMPT_VERSION||body.contract.predictionPromptVersion!==PREDICTION_PROMPT_VERSION||body.contract.registryDigest!==registry))return json({error:'Contract changed; take a new dry-run manifest',code:'contract_changed',dryRun:true},409);
  const freshness=await predictionFreshness(env,current),report=await loadJSON(env,'programme.json'),ids=body.items.map(item=>String(item.filmId));
  const films=report?await readFilmsById(env,report,ids):new Map(),queue=await loadJSON(env,predictionQueueKey),results=[];
- for(const item of body.items){
-  const id=String(item.filmId),film=films.get(id),state=film?await readFilmState(env,id):null,genres=film?.genres;
+ for(const rawItem of body.items){
+  const id=String(rawItem.filmId),film=films.get(id),state=film?await readFilmState(env,id):null,genres=film?.genres;
   let status='would_write',issues=null,stage=null;
   if(!film||!state){results.push({filmId:id,status:'not_eligible',liveInput:'not_eligible',dryRun:true});continue;}
+  const item=withDerivedSource(rawItem,modelMetadata(film));
   let liveInput='same';
   if(item.inputHash){const plan=freshness.fingerprintUsable(state.fingerprint,genres)?'prediction_only':'fingerprint_and_prediction',entry={filmId:id,lane:queue?.priority?.[id]?.hot?'hot':'cold',plan,modelMetadata:batchCompact(modelMetadata(film)),...(plan==='prediction_only'?{fingerprint:batchCompact(state.fingerprint)}:{})};liveInput=(await batchFilmInputHash(entry))===item.inputHash?'same':'changed';}
   const current_=state.predictions?.current;
@@ -2528,7 +2545,8 @@ async function enrichmentSubmit(env,body,requestId){
  if(await runContractChanged(run))return contractChangedResponse();
  const freshness=await predictionFreshness(env,profile),source=freshness.needsGenres?await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{}:{};
  const results=[];
- for(const item of body.items){const id=String(item?.filmId||'');if(!run.selectedIds.includes(id)){results.push({filmId:id,error:'Film not selected',failureScope:'request'});continue;}
+ for(const rawItem of body.items){const id=String(rawItem?.filmId||'');if(!run.selectedIds.includes(id)){results.push({filmId:id,error:'Film not selected',failureScope:'request'});continue;}
+  const item=withDerivedSource(rawItem,source[id]);
   // Re-delivering the same failed outcome is idempotent and cannot manufacture an error storm.
   if(run.failures[id]?.scope==='item'){const stored=run.failures[id];results.push({filmId:id,status:'retryable_failure',error:stored.kind,failureScope:'item',retryable:true,retryAt:stored.retryAt,...(stored.validation?{validation:stored.validation}:{})});continue;}
   // AIR-152: a schema rejection names the field and the violation from the closed contract vocabulary
