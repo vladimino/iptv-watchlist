@@ -49,7 +49,14 @@ const MUTANTS=[
  ["a conflicting or untrusted copy counts as an owner", "canonical-person-mutation-producer.js", "if(item.trusted&&await one(db,'SELECT 1 AS x FROM person_external_id WHERE scheme=? AND value=? AND trusted=1 AND conflicting=0 AND person_id<>?'", "if(await one(db,'SELECT 1 AS x FROM person_external_id WHERE scheme=? AND value=? AND person_id<>?'"],
  ["the write does not ask for the trusted-owner proof", "canonical-person-mutation-producer.js", "uniqueTrusted:true,", ""],
  ["the writer does not prove the trusted owner", "canonical-mutations.js", "if(input.uniqueTrusted===true){", "if(false){"],
- ["the writer accepts any uniqueTrusted", "canonical-mutations.js", "if(input.uniqueTrusted!==undefined&&input.uniqueTrusted!==true)throw failed('film_person_invalid');", ""]
+ ["the writer accepts any uniqueTrusted", "canonical-mutations.js", "if(input.uniqueTrusted!==undefined&&input.uniqueTrusted!==true)throw failed('film_person_invalid');", ""],
+ ["a duplicate Person row is accepted by the wrapper", "canonical-epg-person-producer.js", "if(seenRows.has(item.id))throw failed('film_person_invalid');", ""],
+ ["a Person row shares the Person id set", "canonical-epg-person-producer.js", "if(seenRows.has(item.id))throw failed('film_person_invalid');\n   seenRows.add(item.id);", "if(seen.has(item.id))throw failed('film_person_invalid');\n   seen.add(item.id);"],
+ ["a bounded Person row is not a per-unit refusal", "canonical-epg-person-producer.js", "if(error?.code!=='film_person_invalid'&&error?.code!=='film_person_bounded')throw error;code=error.code;", "if(error?.code!=='film_person_invalid')throw error;code=error.code;"],
+ ["the wrapper drops the Person rows", "canonical-epg-person-producer.js", "personRows:keepRows});", "});"],
+ ["a refused Person row is kept in the plan", "canonical-epg-person-producer.js", "if(code){refused.push({kind:PERSON_MUTATION_OPERATION,id:item.id,code,source:source(item)});continue;}", "if(code){refused.push({kind:PERSON_MUTATION_OPERATION,id:item.id,code,source:source(item)});}"],
+ ["person_mutation is not a cursor kind", "canonical-producer-run.js", "person_mutation:2,person_state:3,film_credits:4}", "person_state:3,film_credits:4}"],
+ ["person_mutation ranks after person_state", "canonical-producer-run.js", "person_mutation:2,person_state:3,film_credits:4}", "person_mutation:3.5,person_state:3,film_credits:4}"]
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'person-mutation-mutants-'));
 try{

@@ -17,6 +17,9 @@ const P=await load('canonical-epg-person-producer.js');
 const {mutatePerson,mutateFilm}=await load('canonical-mutations.js');
 const {PRODUCER_WIRING,PRODUCER_OPERATIONS,handoffReadiness}=await load('canonical-producers.js');
 const {OPERATION_KINDS}=await load('canonical-receipts.js');
+const R=await load('canonical-producer-run.js');
+const {planEpgPersonUnitsWithRefusals}=P;
+const {unitDigest}=await load('canonical-person-adapters.js');
 const {planEpgPersonUnits,applyEpgPersonUnits,reconcileEpgRun,epgPersonReplan}=P;
 const {applyPersonMutation,personMutationDigest,personMutationContent,personMutationOperation,planPersonMutation,PERSON_MUTATION_OPERATION,PERSON_ITEMS_PER_UNIT_MAX}=M;
 
@@ -410,6 +413,46 @@ for(const stage of ['legacy','r2','prepared']){
  assert.equal(rec.considered,2,'the inline limit bounds the pass: '+JSON.stringify(rec));
  assert.equal(rec.origin,'epg');
  await assert.rejects(()=>reconcileEpgRun(envOf(file),{plan:p,filmPlan:{event:'epg:other'}}),code('film_person_run_mismatch'));
+}
+
+// 13b. The producer-run module (ADR 0128, S4-1) handles the new kind: the cursor key order (person_mutation, person_state, film_credits), the per-unit refusals of the wrapper, the ordered plan entries and the fingerprint; every code the unit raises is classed.
+{
+ const row=(id,over={})=>({id:PID(id),roleId:'director/'+id,contractVersion:1,aliases:[{value:'A'+id}],...over});
+ const st=id=>({id:PID(id),state:{identity:dim('identity')}});
+ const credits=[{filmId:FID(1),credits:[{personId:PID(1),role:'director'}]}];
+ const W=input=>planEpgPersonUnitsWithRefusals({runId:'run-1',at:T,...input});
+ const many=count=>Array.from({length:count},(_,i)=>({value:'a'+i}));
+ const plan=W({persons:[st(1),st(2)],credits,personRows:[row(2),row(1),row(3,{roleId:''}),row(4,{aliases:many(PERSON_ITEMS_PER_UNIT_MAX+1)}),row(5,{externalIds:[{scheme:'tmdb',value:''}]})]});
+ assert.deepEqual(plan.units.map(item=>item.kind+':'+item.id),['person_mutation:'+PID(1),'person_mutation:'+PID(2),'person_state:'+PID(1),'person_state:'+PID(2),'film_credits:'+FID(1)]);
+ assert.deepEqual(plan.refused.map(item=>item.kind+':'+item.id+':'+item.code),['person_mutation:'+PID(3)+':film_person_invalid','person_mutation:'+PID(4)+':film_person_bounded','person_mutation:'+PID(5)+':film_person_invalid'],'the 40 bound is a per-unit refusal; the rest of the plan survives');
+ assert.equal(plan.refused[1].source.aliases.length,PERSON_ITEMS_PER_UNIT_MAX+1,'the incoming row is carried whole');
+ assert.equal(W({persons:[],credits:[],personRows:[row(1)]}).refused.length,0);
+ assert.equal(W({persons:[st(1)],credits:[],personRows:[row(1)]}).units.length,2,'the same Person in persons and personRows is two kinds, not a duplicate');
+ for(const bad of [{personRows:[row(1),row(1)]},{personRows:[row(1),row(1,{roleId:''})]},{personRows:[row(1,{roleId:''}),row(1)]},{personRows:'x'},{personRows:[{roleId:'a',contractVersion:1}]}])assert.throws(()=>W(bad),code('film_person_invalid'),JSON.stringify(bad));
+ assert.throws(()=>planEpgPersonUnits({runId:'r',at:T,personRows:[row(1,{aliases:many(PERSON_ITEMS_PER_UNIT_MAX+1)})]}),code('film_person_bounded'),'the default planner still refuses the whole plan');
+ // cursor order: the keys sort person_mutation < person_state < film_credits, film_facts first; a cursor on a row unit resumes at the next unit
+ const keys=plan.units.map(item=>({kind:item.kind,id:item.id}));
+ assert.ok(R.KIND_RANK.film_facts<R.KIND_RANK.person_mutation&&R.KIND_RANK.person_mutation<R.KIND_RANK.person_state);
+ assert.deepEqual(R.assertOrdered(keys).length,5);
+ assert.equal(R.resumeIndex(keys,keys[0]),1);assert.equal(R.resumeIndex(keys,keys[1]),2);assert.equal(R.resumeIndex(keys,keys[4]),5);
+ assert.throws(()=>R.assertOrdered([keys[2],keys[0]]),code('film_person_invalid'));
+ // entries and fingerprint: units (digested by the unit's own adapter) and refused entries in one ordered plan
+ const digests=async()=>Promise.all(plan.units.map(async item=>({kind:item.kind,id:item.id,unitDigest:item.kind==='person_mutation'?await personMutationDigest(item.input):await unitDigest(item.kind,item.input)})));
+ const entries=await R.buildPlanEntries({units:await digests(),refused:plan.refused});
+ assert.deepEqual(entries.map(item=>item.kind+':'+item.id+(item.refusal?':'+item.refusal:'')),['person_mutation:'+PID(1),'person_mutation:'+PID(2),'person_mutation:'+PID(3)+':film_person_invalid','person_mutation:'+PID(4)+':film_person_bounded','person_mutation:'+PID(5)+':film_person_invalid','person_state:'+PID(1),'person_state:'+PID(2),'film_credits:'+FID(1)]);
+ const fp=await R.planFingerprint({origin:'epg',event:plan.event,units:entries});
+ assert.equal(fp,await R.planFingerprint({origin:'epg',event:plan.event,units:await R.buildPlanEntries({units:(await digests()).reverse(),refused:[...plan.refused].reverse()})}),'input order does not move the fingerprint');
+ const moved=W({persons:[st(1),st(2)],credits,personRows:[row(2),row(1,{aliases:[{value:'Other'}]}),row(3,{roleId:''}),row(4,{aliases:many(PERSON_ITEMS_PER_UNIT_MAX+1)}),row(5,{externalIds:[{scheme:'tmdb',value:''}]})]});
+ const movedFp=await R.planFingerprint({origin:'epg',event:moved.event,units:await R.buildPlanEntries({units:await Promise.all(moved.units.map(async item=>({kind:item.kind,id:item.id,unitDigest:item.kind==='person_mutation'?await personMutationDigest(item.input):await unitDigest(item.kind,item.input)}))),refused:moved.refused})});
+ assert.notEqual(movedFp,fp,'a changed Person row moves the fingerprint');
+ const without=await R.planFingerprint({origin:'epg',event:plan.event,units:entries.filter(item=>item.kind!=='person_mutation'||item.refusal)});
+ assert.notEqual(without,fp,'an added row unit moves it');
+ await assert.rejects(()=>R.buildPlanEntries({units:[{kind:'person_mutation',id:PID(1),unitDigest:'a'.repeat(64)}],refused:[{kind:'person_mutation',id:PID(1),code:'film_person_invalid',source:null}]}),code('film_person_invalid'),'a key in both lists refuses the plan');
+ // every code the unit can raise has a class (the S4-1 scan reads this module too)
+ const classes=Object.fromEntries(['film_person_invalid','film_person_bounded','film_person_reference','identity_collision','person_role_collision','film_person_precondition','film_person_revision_conflict','film_person_unavailable','film_person_held','producer_replan_unavailable'].map(item=>[item,R.classOfCode(item)]));
+ assert.equal(Object.values(classes).includes(R.CLASS.UNCLASSIFIED),false,JSON.stringify(classes));
+ assert.deepEqual([classes.film_person_invalid,classes.film_person_bounded],[R.CLASS.PERMANENT,R.CLASS.PERMANENT]);
+ assert.deepEqual([classes.identity_collision,classes.person_role_collision,classes.film_person_precondition],[R.CLASS.UNIT,R.CLASS.UNIT,R.CLASS.UNIT]);
 }
 
 // 14. Static: dormant. Only the EPG Person layer imports the module, nothing in src, build.mjs or the Worker names it, no network, timer, cron or R2 API, no write SQL of its own (the writer is mutatePerson with the receipt tail), the writer

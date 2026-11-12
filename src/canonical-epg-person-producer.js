@@ -21,6 +21,8 @@ import {APPLY_UNIT as ADAPTER_APPLY,CREDITS_PER_UNIT_MAX,FILM_CREDITS_OPERATION,
 export {EPG_UNIT_HARD_CAP,EPG_UNIT_LIMIT_DEFAULT};
 // `person_mutation` (ADR 0129) is the Person-row unit: the only one that may create a Person. Its apply function joins the two adapter kinds.
 const APPLY_UNIT={...ADAPTER_APPLY,[PERSON_MUTATION_OPERATION]:applyPersonMutation};
+// The `person_mutation` unit input of one `personRows` item.
+const rowInput=(item,at)=>({id:item.id,at,...(item.mode!==undefined?{mode:item.mode}:{}),person:{roleId:item.roleId,contractVersion:item.contractVersion,...(item.externalIds!==undefined?{externalIds:item.externalIds}:{}),...(item.aliases!==undefined?{aliases:item.aliases}:{})}});
 const HELD=new Set(['film_person_held','film_person_unavailable']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const emptyCounts=()=>({applied:0,noop:0,already:0,unknown:0,failed:0,absent:0,pending:0});
@@ -36,7 +38,7 @@ export function planEpgPersonUnits({runId,at,persons=[],credits=[],personRows=[]
  // personRows (ADR 0129): [{id, roleId, contractVersion, externalIds?, aliases?, mode?}], the Person rows the run observed. They are planned FIRST, so a `person_state` or `film_credits` unit of the same run finds the Person the row unit created.
  for(const item of personRows){
   if(!plain(item)||typeof item.id!=='string'||rows.has(item.id))throw failed('film_person_invalid');
-  const input={id:item.id,at,...(item.mode!==undefined?{mode:item.mode}:{}),person:{roleId:item.roleId,contractVersion:item.contractVersion,...(item.externalIds!==undefined?{externalIds:item.externalIds}:{}),...(item.aliases!==undefined?{aliases:item.aliases}:{})}};
+  const input=rowInput(item,at);
   personMutationContent(input);
   rows.set(item.id,{kind:PERSON_MUTATION_OPERATION,id:item.id,input});
  }
@@ -127,9 +129,9 @@ export async function reconcileEpgRun(env,{plan,filmPlan,limit,now,policy}={}){
 // ADR 0128 decision 9 (S4-1): the same plan with PER-UNIT refusals instead of a whole-plan refusal. `planEpgPersonUnits` is unchanged (an accepted, tested whole-plan behaviour). A Person or a Film whose id is usable but whose content is refused
 // (`film_person_invalid`: a malformed state, an empty or malformed credit list, a duplicated credit; `film_person_bounded`: more than CREDITS_PER_UNIT_MAX credits) is reported in `refused:[{kind,id,code,source}]` (`source` is the incoming value, never truncated; the
 // run module digests it) and the rest of the plan survives. An id that is already used by ANY other entry, refused or not, in either order, is a malformed input and refuses the whole plan; so does an item with no usable id (it has no key to record a result under).
-export function planEpgPersonUnitsWithRefusals({runId,at,persons=[],credits=[]}={}){
- if(!Array.isArray(persons)||!Array.isArray(credits))throw failed('film_person_invalid');
- const keepPersons=[],keepCredits=[],refused=[],seen=new Set();
+export function planEpgPersonUnitsWithRefusals({runId,at,persons=[],credits=[],personRows=[]}={}){
+ if(!Array.isArray(persons)||!Array.isArray(credits)||!Array.isArray(personRows))throw failed('film_person_invalid');
+ const keepPersons=[],keepCredits=[],keepRows=[],refused=[],seen=new Set(),seenRows=new Set();
  const source=value=>value===undefined?null:value;
  for(const item of persons){
   if(plain(item)&&typeof item.id==='string'&&item.id.startsWith('person:')){
@@ -140,6 +142,18 @@ export function planEpgPersonUnitsWithRefusals({runId,at,persons=[],credits=[]}=
    if(!ok){refused.push({kind:PERSON_STATE_OPERATION,id:item.id,code:'film_person_invalid',source:source(item.state)});continue;}
   }
   keepPersons.push(item);
+ }
+ // ADR 0129: a `person_mutation` row of the same Person is a different KIND (different key), so its id may repeat in `persons`; a repeat within `personRows` refuses the plan. A malformed row (`film_person_invalid`) or an oversized one
+ // (`film_person_bounded`, more than PERSON_ITEMS_PER_UNIT_MAX external ids plus aliases) is a per-unit refusal.
+ for(const item of personRows){
+  if(plain(item)&&typeof item.id==='string'&&item.id.startsWith('person:')){
+   if(seenRows.has(item.id))throw failed('film_person_invalid');
+   seenRows.add(item.id);
+   let code=null;
+   try{personMutationContent(rowInput(item,at));}catch(error){if(error?.code!=='film_person_invalid'&&error?.code!=='film_person_bounded')throw error;code=error.code;}
+   if(code){refused.push({kind:PERSON_MUTATION_OPERATION,id:item.id,code,source:source(item)});continue;}
+  }
+  keepRows.push(item);
  }
  const refusedFilms=[];
  for(const item of credits){
@@ -153,6 +167,7 @@ export function planEpgPersonUnitsWithRefusals({runId,at,persons=[],credits=[]}=
   }
   keepCredits.push(item);
  }
- const plan=planEpgPersonUnits({runId,at,persons:keepPersons,credits:keepCredits});
- return {...plan,refused:[...refused.sort(byId),...refusedFilms.sort(byId)]};
+ const plan=planEpgPersonUnits({runId,at,persons:keepPersons,credits:keepCredits,personRows:keepRows});
+ const rank=item=>item.kind===PERSON_MUTATION_OPERATION?0:item.kind===PERSON_STATE_OPERATION?1:2;
+ return {...plan,refused:[...refused,...refusedFilms].sort((a,b)=>rank(a)-rank(b)||byId(a,b))};
 }

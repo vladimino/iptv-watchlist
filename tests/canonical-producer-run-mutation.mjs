@@ -75,7 +75,7 @@ const MUTANTS=[
  ["an unordered plan is accepted", "if(i>0&&compareKeys(units[i-1],units[i])>=0)throw invalid();", ""],
  ["a duplicate unit is accepted", "if(i>0&&compareKeys(units[i-1],units[i])>=0)throw invalid();", "if(i>0&&compareKeys(units[i-1],units[i])>0)throw invalid();"],
  ["the kind rank is ignored", "return ra!==rb?(ra<rb?-1:1):a.id<b.id?-1:a.id>b.id?1:0;", "return a.id<b.id?-1:a.id>b.id?1:0;"],
- ["person states come before Film facts", "export const KIND_RANK=Object.freeze({film_facts:1,person_state:2,film_credits:3});", "export const KIND_RANK=Object.freeze({film_facts:2,person_state:1,film_credits:3});"],
+ ["person states come before Film facts", "export const KIND_RANK=Object.freeze({film_facts:1,person_mutation:2,person_state:3,film_credits:4});", "export const KIND_RANK=Object.freeze({film_facts:2,person_mutation:3,person_state:1,film_credits:4});"],
  ["the resume revisits the cursor unit", "while(index<units.length&&compareKeys(units[index],cursor)<=0)index++;", "while(index<units.length&&compareKeys(units[index],cursor)<0)index++;"],
  ["the resume skips the next unit", "while(index<units.length&&compareKeys(units[index],cursor)<=0)index++;", "while(index<units.length&&compareKeys(units[index],cursor)<=0)index++;index++;"],
  ["a changed plan resumes", "if(stored.fingerprint===fingerprint)return {action:'resume'", "if(true)return {action:'resume'"],
