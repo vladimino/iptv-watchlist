@@ -19,7 +19,7 @@
 //    same statement shape returned large values before; then it runs as `.mode quote` with headers and the output is turned into the same JSON text here. Quote
 //    mode keeps what JSON mode keeps: column names, NULL, numbers as the CLI prints them (copied verbatim) and text. The choice changes the time of a call only.
 import {spawn,spawnSync} from 'node:child_process';
-import {copyFileSync,existsSync,mkdtempSync,rmSync,statSync} from 'node:fs';
+import {copyFileSync,existsSync,mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
@@ -150,6 +150,36 @@ function ensure(){
  worker.unref();port.unref();
 }
 
+// The statements of a script with comments removed and literals and quoted identifiers emptied; null when a comment or literal does not end (classification is then uncertain).
+function codeStatements(text){
+ let out='',at=0;
+ while(at<text.length){
+  const c=text[at];
+  if(c==='-'&&text[at+1]==='-'){const end=text.indexOf('\n',at);at=end<0?text.length:end+1;out+=' ';continue;}
+  if(c==='/'&&text[at+1]==='*'){const end=text.indexOf('*/',at+2);if(end<0)return null;at=end+2;out+=' ';continue;}
+  if(c==="'"||c==='"'||c==='`'||c==='['){
+   const close=c==='['?']':c;let end=at+1;
+   for(;;){
+    end=text.indexOf(close,end);
+    if(end<0)return null;
+    if(close!==']'&&text[end+1]===close){end+=2;continue;}
+    break;
+   }
+   at=end+1;out+=c==="'"?"''":'x';continue;
+  }
+  out+=c;at++;
+ }
+ return out.split(';');
+}
+function changesAfterOwnWrite(text){
+ const statements=codeStatements(String(text??''));
+ if(!statements)return false;
+ const code=statements.join(';');
+ if(/\bTRIGGER\b/i.test(code))return false;
+ const reads=statements.findIndex(statement=>/\bchanges\s*\(/i.test(statement));
+ if(reads<0)return true;
+ return statements.slice(0,reads).some(statement=>/^\s*(INSERT\s+(?:OR\s+\w+\s+)?INTO\b|REPLACE\s+INTO\b|UPDATE\s+(?:OR\s+\w+\s+)?\S|DELETE\s+FROM\b)/i.test(statement));
+}
 // A script that may only be run in a process of its own (it could change the state of a connection that is reused).
 export function needsOneShot(args,input){
  const rest=args.filter(argument=>argument!=='-json'&&argument!=='-bail');
@@ -162,27 +192,43 @@ export function needsOneShot(args,input){
  // `last_insert_rowid()`, `changes()` and `total_changes()` read per-connection counters that a fresh process starts at zero.
  if(/\b(last_insert_rowid|total_changes)\s*\(/i.test(body))return true;
  // AIR-374: `changes()` is the row count of the last INSERT, UPDATE or DELETE that finished on the connection. A script whose own earlier, complete statement wrote something already sets it
- // (a guarded batch such as `UPDATE ...; UPDATE ... AND changes()=1;`), so the shared connection answers exactly what a fresh process answers (about 15 ms for each of those batches
- // as a process of its own, hundreds per file). A script that reads it before any write of its own would see the previous call's count: that one stays one-shot.
- const used=body.replace(/'(?:[^']|'')*'/g,"''").search(/\bchanges\s*\(/i);
- if(used>=0&&!/\b(INSERT|UPDATE|DELETE|REPLACE)\b[^;]*;/i.test(body.replace(/'(?:[^']|'')*'/g,"''").slice(0,used)))return true;
+ // (a guarded batch such as `UPDATE ...; UPDATE ... AND changes()=1;`), so the shared connection answers exactly what a fresh process answers. The script is read token by token (comments, string literals
+ // and quoted identifiers are skipped); anything uncertain (an unterminated comment or literal, a trigger, a statement that does not start with its write keyword) stays one-shot, as does a script that
+ // reads the counter before a complete write statement of its own.
+ if(/\bchanges\s*\(/i.test(body)&&!changesAfterOwnWrite(text))return true;
  if(/\bSAVEPOINT\b/i.test(body)&&!/\b(RELEASE|ROLLBACK)\b/i.test(body))return true;
  return false;
 }
 const fileKeyOf=file=>{try{const stat=statSync(file);return stat.dev+':'+stat.ino;}catch{return 'none';}};
 
 // Same shape as `spawnSync('sqlite3', args, {input, encoding: 'utf8'})`: `{status, stdout, stderr, signal}`.
-// AIR-374: a schema script (`-bail <file>` with an input of at least 2000 characters that starts `PRAGMA foreign_keys=ON;`) run on a database file that does not exist yet builds the same
-// database every time. The first run of a given script leaves a copy of its result in a private temporary directory; every later run of the identical script on a new file copies that file instead
-// of running the whole migration chain again (dozens of tests build a migrated database per case). Only a script that succeeded without any output is remembered, so the call returns the answer
-// the script gave. The directory is removed when the process ends.
-const SCHEMA_MIN=2000;
+// AIR-374: a script that is exactly the repository's own migration files (byte for byte, in any order or subset, joined by a newline, after `PRAGMA foreign_keys=ON;`) and runs on a database file that does
+// not exist yet builds the same database every time. The first run of such a script leaves a copy of its result in a private temporary directory; later runs of the identical script on a new file copy it
+// instead of running the chain again. Nothing else is cached: a script of any length or prefix that is not made of whole migration files (data seeding, random(), CURRENT_TIMESTAMP, strftime('now'),
+// anything file or connection dependent) runs on every database as before. Only a run that succeeded without output is remembered. The directory is removed when the process ends.
 const schemaTemplates=new Map();
-let templateDirectory=null;
+let templateDirectory=null,migrationTexts=null;
 const forgetTemplates=()=>{if(templateDirectory){try{rmSync(templateDirectory,{recursive:true,force:true});}catch{}}};
+const PRAGMA_ON='PRAGMA foreign_keys=ON;\n';
+export function approvedMigrationChain(input){
+ if(typeof input!=='string'||!input.startsWith(PRAGMA_ON))return false;
+ if(!migrationTexts){
+  try{migrationTexts=readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).map(name=>readFileSync(path.join('migrations',name),'utf8')).filter(text=>text.length>0);}catch{migrationTexts=[];}
+ }
+ let at=PRAGMA_ON.length;
+ if(at>=input.length)return false;
+ for(;;){
+  const text=migrationTexts.find(item=>input.startsWith(item,at)&&(at+item.length===input.length||input[at+item.length]==='\n'));
+  if(!text)return false;
+  at+=text.length;
+  if(at===input.length)return true;
+  at+=1;
+  if(at===input.length)return false;
+ }
+}
 export function sqliteSync(args,options={}){
  const input=options.input;
- const schema=args.length===2&&args[0]==='-bail'&&typeof input==='string'&&input.length>=SCHEMA_MIN&&input.startsWith('PRAGMA foreign_keys=ON;')&&!args[1].startsWith(':')&&!args[1].startsWith('file:')&&!existsSync(args[1]);
+ const schema=args.length===2&&args[0]==='-bail'&&!args[1].startsWith(':')&&!args[1].startsWith('file:')&&approvedMigrationChain(input)&&!existsSync(args[1]);
  if(!schema)return sqliteSync1(args,options);
  const key=createHash('sha256').update(input).digest('hex'),template=schemaTemplates.get(key);
  if(template){copyFileSync(template,args[1]);return {status:0,stdout:'',stderr:'',signal:null};}
