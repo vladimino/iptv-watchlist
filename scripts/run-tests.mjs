@@ -38,6 +38,7 @@ const SERIAL_ONLY=new Set([
 // Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
 // the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
 // every file still runs exactly once, in exactly one shard.
+// AIR-374 S4-2 (migration 0020): the four new entries (the two schema tests and the two preflight tests) are LOCAL estimates, not CI means: wall time of one `npm test -- --jobs 3` run on a shared machine (7.4 s, 36.8 s, 1.2 s and 9.2 s) scaled by the ratio of the entries of the existing files of the same kind; a CI recalibration replaces them.
 export const WEIGHTS={
  'epg-r2-known-length.mjs':72,
  'generation-stage.mjs':71,
@@ -55,6 +56,8 @@ export const WEIGHTS={
  'scheduled-task-prompt-v2.mjs':13,
  'sqlite-session-semantics.mjs':42,
  'canonical-epg-person-producer-mutation.mjs':16,
+ 'canonical-producer-schema-mutation.mjs':18,
+ 'film-person-0020-preflight-mutation.mjs':14,
  'projector-bulk.mjs':26,
  'canonical-dictionary-producer-mutation.mjs':14,
  'discovery-chunk-budget.mjs':14,
@@ -105,6 +108,7 @@ export const WEIGHTS={
  'prediction-queue-discovery-independence.mjs':7,
  'canonical-read-model.mjs':6,
  'canonical-receipts.mjs':6,
+ 'canonical-producer-schema.mjs':3,
  'discovery-admission-packed.mjs':6,
  'film-person-connector.mjs':6,
  'prediction-dry-run-isolation.mjs':6,
@@ -160,6 +164,7 @@ export const WEIGHTS={
  'epg-commit-durable-enqueue.mjs':2,
  'epg-mirror-reconciliation.mjs':2,
  'film-person-0019-preflight.mjs':2,
+ 'film-person-0020-preflight.mjs':2,
  'film-person-cutover-accepted.mjs':2,
  'film-sync-state.mjs':2,
  'item-failures.mjs':2,
