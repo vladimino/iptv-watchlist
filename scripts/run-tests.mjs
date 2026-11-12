@@ -9,7 +9,7 @@ import path from 'node:path';
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
-//   npm test -- --shard 1/2           this part of the suite only (also TEST_SHARD); CI runs the two shards as two jobs (AIR-418)
+//   npm test -- --shard 1/3           this part of the suite only (also TEST_SHARD); CI runs the three shards as three jobs (AIR-418)
 //
 // A failing, timed-out or signalled file is never lost: it is named with its exit code or signal and its full stdout and stderr, the runner
 // stops starting new files, lets the running ones finish and exits non-zero. Files in SERIAL_ONLY run alone, after the parallel phase.

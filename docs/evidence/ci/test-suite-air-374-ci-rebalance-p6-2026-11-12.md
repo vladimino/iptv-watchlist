@@ -49,4 +49,15 @@ Source: the job logs of runs 43185880919, 43186573244 (post-merge, attempt 2) an
 
 ### Predicted, not measured
 
-At 945 per shard and 0.172 s of wall per summed file second the plan predicts about 105 to 160 s per shard on the runners seen today (summed 600 to 930 s); the slow runner seen in 43188491322 (1.6 times) puts a balanced shard near 175 to 185 s, inside the 180 s gate only at its edge. Balance cannot remove the runner variance; a third shard (about 630 per shard, 70 to 125 s) would, but it changes the CI workflow and the required check names, so it needs the owner's decision. CI on the new HEAD is not yet seen.
+At 945 per shard and 0.172 s of wall per summed file second the plan predicts about 105 to 160 s per shard on the runners seen today (summed 600 to 930 s); the slow runner seen in 43188491322 (1.6 times) puts a balanced shard near 175 to 185 s, inside the 180 s gate only at its edge. Balance cannot remove the runner variance; a third shard (about 630 per shard, 70 to 125 s) would; the owner decided on 12 Nov 2026 to take it (next section). CI on the new HEAD is not yet seen.
+
+## Three shards (owner decision, 12 Nov 2026)
+
+Reason: two shards of about 945 predict 175 to 185 s on a slow runner (runner speed varied up to about 2 times on the same code), which leaves no margin under the 180 s gate. Balance cannot remove runner variance; less work per runner can.
+
+- CI now runs `--shard 1/3` in `Test and build` (still also the build and the artifact), `--shard 2/3` in `Test shard 2 of 3` and `--shard 3/3` in the new `Test shard 3 of 3`; the deploy job needs all three. No test, check, timeout or mutation file was removed or changed; `scripts/run-tests.mjs` already took any `index/count`, so only the weights were dealt again.
+- Planned load from the same `WEIGHTS` (parallel plus serial): shard 1 629.8 (115 files, `local-dev-smoke` serial), shard 2 629.8 (115 files, `sqlite-session-semantics` serial), shard 3 630.4 (117 files, no serial file). Mutation files: 4 per shard, weight 141, 141 and 139.
+- Measured on the two-shard plan (same code, shard 1 `Run tests`): 128, 147, 189, 204 and 180.8 s against the 180 s gate, so the spread between runners is larger than the margin of a 945 shard.
+- Predicted, not measured: at 0.167 to 0.178 s of wall per summed file second a 630 shard takes about 70 to 110 s on the runners seen today, and about 115 to 125 s on the slow runner of run 43188491322 (1.6 times); the 180 s gate then holds with margin even at 2 times. A third runner adds one more job per run. CI on the new HEAD is not yet seen.
+- `tests/run-tests-runner.mjs` now checks the real-suite properties (cover once, balance, mutation spread, serial files weighted and in different shards, the two heaviest mutation files apart) for both 2 and 3 shards.
+- Check names: `Test shard 2 of 2` is renamed `Test shard 2 of 3` and `Test shard 3 of 3` is added; `Test and build` and `Deploy to Cloudflare` keep their names. A required status check that lists the old name must be updated by the repository owner.
