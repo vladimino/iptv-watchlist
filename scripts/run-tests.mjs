@@ -59,6 +59,7 @@ export const WEIGHTS={
  'epg-diagnostic-context.mjs':8,
  'epg-replay-dataset.mjs':4,
  'epg-diagnostic-run.mjs':12,
+ 'epg-diagnostic-provision.mjs':15,
  'd1-enrichment-buckets.mjs':28,
  'canonical-differential-mutation.mjs':26,
  'd1-enrichment-stored-pages.mjs':26,
