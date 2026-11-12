@@ -317,7 +317,7 @@ const failedWith=async(label,{prepare,expect,statusExpect='failed'})=>{
 {
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8'),build=fs.readFileSync('build.mjs','utf8'),workerSource=fs.readFileSync('src/worker.js','utf8');
  assert.match(wrangler,/"binding": "EPG_DIAGNOSTIC_WORKFLOW"[\s\S]*"class_name": "EpgDiagnosticWorkflow"/);
- assert.doesNotMatch(wrangler,/EPG_DIAGNOSTIC_(DB|BUCKET|RESOURCE_ID)|"crons": \[[^\]]*,/,'no diagnostic storage binding, and still the single hourly cron');
+ assert.doesNotMatch(wrangler,/"crons": \[[^\]]*,/,'still the single hourly cron (the diagnostic storage bindings are asserted in epg-diagnostic-context.mjs)');
  assert.match(wrangler,/"crons": \["0 \* \* \* \*"\]/);
  assert.match(build,/EpgDiagnosticWorkflow extends WorkflowEntrypoint/);assert.match(build,/runEpgDiagnosticWorkflow/);
  assert.doesNotMatch(workerSource,/EPG_DIAGNOSTIC_WORKFLOW|\.create\(\{id/,'the Worker entry creates no diagnostic instance itself; only the owner-only launch does');

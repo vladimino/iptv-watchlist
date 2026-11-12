@@ -61,7 +61,7 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 
 ### Batch runner tools (Proposed)
 
-`prediction_batch_start` and `prediction_batch_submit` are in the tool list ([ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md)). They sit beside the v5 prediction tools, which are unchanged. Nothing in the repository calls them: a run, a dry run and a Scheduled Task that would use them each need the owner's explicit approval. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract).
+`prediction_batch_start` and `prediction_batch_submit` are in the tool list ([ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md)). They sit beside the v5 prediction tools, which are unchanged. Nothing in the repository calls them: a run, a dry run and a Scheduled Task that would use them each need the owner's explicit approval. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract). **Result size.** A `prediction_batch_start` answer is bounded by 256 KiB (262,144 bytes). Like every tool result, `mcpPayload` sends it twice, as the `text` content and as `structuredContent`, so the `tools/call` result is about 2.1 times larger (measured 524,712 bytes for a 250,622-byte answer). The 64 KiB limit is the *inbound request* limit and does not apply to a result; Cloudflare enforces no response body limit, and the client and model side is unmeasured ([evidence](../../evidence/prediction/air-450-manifest-limit-256kib-2026-11-12.md)).
 
 | Tool | Writes | What it calls |
 | --- | --- | --- |
