@@ -38,6 +38,15 @@ Against the decision pack: its 30-blocker text (11 Nov 2026, schema 18) listed o
 | `operational_state` | none in the modelled state | 0 |
 | `unclassified` | none | 0 |
 
+Classes are assigned by the kind of work that clears a blocker, not by the word in its name. Kinds that do not occur in the modelled state are classified too:
+
+| Blocker kind | Class | Why |
+| --- | --- | --- |
+| `empty_class_unreadable:<class>` | `operational_state` | `handoffReadiness` raises it when the expected class table is missing or its `COUNT(*)` read throws, not when the class is known empty. The H1 load cannot fix it and is unsafe to run until the schema or read failure is understood. |
+| `empty_class_not_loaded:<name>:<found>/<expected>` | `data_load` | The class was read and holds a count other than expected. A count of 0 is the H1 load. A count above expected, or any nonzero mismatch, needs diagnosis first, never blind insertion. |
+| `reader_class_invalid:<name>` | `registry_code` | A malformed `CANONICAL_READER_REGISTRY` entry (a class that is neither `freeze` nor `exception`); it needs a registry correction, not a reader migration. |
+| `reader_exception_marked_moved:<name>` | `registry_code` | An `exception` entry must stay `moved:false`; `moved:true` is contradictory registry flags to correct in code, confirming the exception semantics. |
+
 ### 1. Registry/code (5)
 
 | Blocker | What clears it | Stage (ADR 0128 plan, S4 to S5; AIR-374 task plan P3) |

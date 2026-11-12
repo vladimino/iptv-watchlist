@@ -2,12 +2,14 @@
 // imports this module (it is not bundled). It reads no database and no registry, never changes the readiness verdict, and adds no blocker: it only sorts strings it is given.
 // A blocker whose prefix is not listed lands in `unclassified`, so a new blocker kind cannot be silently dropped from a report.
 export const BLOCKER_CLASSES=Object.freeze(['registry_code','data_load','owner_exception','read_move','operational_state']);
+// empty_class_unreadable is a missing table or a failed COUNT(*) read: running the H1 load cannot fix it, so it is operational state, not data_load. empty_class_not_loaded is the only data_load
+// kind, and a count above the expected one or a nonzero mismatch needs diagnosis, never blind insertion. reader_class_invalid and reader_exception_marked_moved are registry entries that need a code correction.
 // prefix (the text before the first colon, or the whole string) -> class
 const RULES=Object.freeze({
  producer_not_wired:'registry_code',receipts_protocol_unregistered:'registry_code',gap:'registry_code',
- empty_class_not_loaded:'data_load',empty_class_unreadable:'data_load',
+ empty_class_not_loaded:'data_load',empty_class_unreadable:'operational_state',
  exception_not_accepted:'owner_exception',
- reader_not_moved:'read_move',reader_exception_marked_moved:'read_move',reader_class_invalid:'read_move',
+ reader_not_moved:'read_move',reader_exception_marked_moved:'registry_code',reader_class_invalid:'registry_code',
  marker_unreadable:'operational_state',marker_not_prepared:'operational_state',baseline_not_verified:'operational_state',schema_below_16:'operational_state',schema_unreadable:'operational_state',
  no_database:'operational_state',now_invalid:'operational_state',projector_lease_live:'operational_state',projector_lease_unreadable:'operational_state',
  projector_window_not_idle:'operational_state',projector_window_unreadable:'operational_state',receipts_schema_missing:'operational_state',receipts_baseline_missing:'operational_state',

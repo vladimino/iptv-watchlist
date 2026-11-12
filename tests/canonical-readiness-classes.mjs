@@ -35,6 +35,14 @@ function check(mod){
  assert.deepEqual(mod.classifyBlockers(list).byClass,out.byClass);
  // Every other blocker kind of handoffReadiness is operational state, and an unknown kind is never dropped.
  for(const item of ['marker_not_prepared:open','baseline_not_verified:null','receipts_baseline_missing','receipts_schema_missing','projector_lease_live','projector_window_not_idle:held','unreceipted_changes','schema_below_16:15','no_database'])assert.equal(mod.classOfBlocker(item),'operational_state',item);
+ // The blocker strings below are the ones tests/canonical-handoff-readiness.mjs asserts handoffReadiness emits for its error and invalid-reader fixtures.
+ for(const item of ['empty_class_unreadable:retirement','empty_class_unreadable:retention'])assert.equal(mod.classOfBlocker(item),'operational_state',item);
+ for(const item of ['reader_class_invalid:x','reader_exception_marked_moved:some_reader'])assert.equal(mod.classOfBlocker(item),'registry_code',item);
+ assert.equal(mod.classOfBlocker('empty_class_not_loaded:retention:0/401'),'data_load');
+ assert.equal(mod.classOfBlocker('empty_class_not_loaded:retention:500/401'),'data_load');
+ assert.equal(mod.classOfBlocker('reader_not_moved:x'),'read_move');
+ {const mixed=mod.classifyBlockers(['empty_class_unreadable:a','empty_class_not_loaded:b:0/1','reader_class_invalid:c','reader_exception_marked_moved:d','reader_not_moved:e']);
+  assert.deepEqual(mixed.byClass,{registry_code:['reader_class_invalid:c','reader_exception_marked_moved:d'],data_load:['empty_class_not_loaded:b:0/1'],owner_exception:[],read_move:['reader_not_moved:e'],operational_state:['empty_class_unreadable:a'],unclassified:[]});}
  assert.equal(mod.classOfBlocker('gap:film_sync_state clocks'),'registry_code');
  assert.equal(mod.classOfBlocker('brand_new_blocker:x'),'unclassified');
  assert.equal(mod.classOfBlocker('toString'),'unclassified');
@@ -53,6 +61,9 @@ if(process.env.READINESS_CLASSES_MUTANT){
   ['receipts_protocol_unregistered:\'registry_code\'','receipts_protocol_unregistered:\'operational_state\''],
   ['empty_class_not_loaded:\'data_load\'','empty_class_not_loaded:\'registry_code\''],
   ['exception_not_accepted:\'owner_exception\'','exception_not_accepted:\'data_load\''],
+  ['empty_class_unreadable:\'operational_state\'','empty_class_unreadable:\'data_load\''],
+  ['reader_class_invalid:\'registry_code\'','reader_class_invalid:\'read_move\''],
+  ['reader_exception_marked_moved:\'registry_code\'','reader_exception_marked_moved:\'read_move\''],
   ['reader_not_moved:\'read_move\'','reader_not_moved:\'owner_exception\''],
   ['receipts_baseline_missing:\'operational_state\'','receipts_baseline_missing:\'registry_code\''],
   ['Object.prototype.hasOwnProperty.call(RULES,prefix)?RULES[prefix]:\'unclassified\'','RULES[prefix]||\'registry_code\''],
