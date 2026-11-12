@@ -957,12 +957,18 @@ async function runnerHeartbeat(env,body){
  if(run.protocol===BATCH_PROTOCOL&&Number.isInteger(run.epoch)&&lease.epoch!==run.epoch)return json({status:'lease_lost',runId:run.runId},409);
  run.lastHeartbeatAt=lease.heartbeatAt;await savePredictionRun(env,run);await runnerProgress(env,run,await loadJSON(env,predictionQueueKey));return json({...runSummary(run),expiresAt:lease.expiresAt,...(run.protocol===BATCH_PROTOCOL?{epoch:lease.epoch}:{})});
 }
-async function runnerProgress(env,run,queue,final=false){
+// The progress Event of a run and the counters that say it was emitted, or null when it is not due. v5 writes the Event and then saves the run; batch runner v2 saves the run first,
+// with the Event as an intent, and writes the Event after that authoritative checkpoint (batchProgress).
+async function predictionProgressEvent(env,run,queue,final=false){
  const summary=runSummary(run),success=summary.added+summary.updated,now=Date.now();
  run.hotRemaining=queue?.priorityCount??0;run.coldRemaining=queue?.coldRemaining??0;
- if(!final&&success-(run.progressSavedCount||0)<50&&now-Date.parse(run.lastProgressAt||run.createdAt)<30*60000)return;
+ if(!final&&success-(run.progressSavedCount||0)<50&&now-Date.parse(run.lastProgressAt||run.createdAt)<30*60000)return null;
  const at=new Date(now).toISOString(),snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot);run.progressSavedCount=success;run.lastProgressAt=at;
- await writeEvent(env,{id:'enrichment-'+run.runId+(final?'':'-progress-'+success),type:'enrichment',at,stage:final?run.status:'running',runId:run.runId,trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),remaining:run.hotRemaining+run.coldRemaining,hotRemaining:run.hotRemaining,coldRemaining:run.coldRemaining,queueSchemaVersion:6,delta,snapshot,reason:run.stopReason||null,...scheduledRunFields()});
+ return {id:'enrichment-'+run.runId+(final?'':'-progress-'+success),type:'enrichment',at,stage:final?run.status:'running',runId:run.runId,trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),remaining:run.hotRemaining+run.coldRemaining,hotRemaining:run.hotRemaining,coldRemaining:run.coldRemaining,queueSchemaVersion:6,delta,snapshot,reason:run.stopReason||null,...scheduledRunFields()};
+}
+async function runnerProgress(env,run,queue,final=false){
+ const event=await predictionProgressEvent(env,run,queue,final);if(!event)return;
+ await writeEvent(env,event);
  await savePredictionRun(env,run);
 }
 const START_EVENT_PREFIX=ENRICHMENT_KEY+'start-events/';
@@ -2259,6 +2265,35 @@ async function batchRecordRetry(env,run,id,result){
  await mutatePredictionQueue(env,queue=>{queue.retries||={};const merged=mergeRetryRecord(queue.retries[id],failure,run.runId);if(merged===queue.retries[id])return null;queue.retries[id]=record=merged;return queue;},'submit_failure');
  if(record&&(record.attempts!==failure.attempts||record.retryAt!==failure.retryAt)){failure.attempts=record.attempts;failure.retryAt=record.retryAt;result.retryAt=record.retryAt;}
 }
+// Progress of a v2 run is ordered behind an authoritative checkpoint. The run record is saved first (guarded: gate token, epoch, lease) with the Event as `progressIntent` and the counters
+// that say it is due; only then is the Event written (its id is fixed and the write is idempotent), and the intent is cleared by a second guarded save. A handler that lost its gate before
+// the Event write leaves the intent for the next holder, which publishes it first, so a progress Event is never written by an unowned handler and never lost or duplicated.
+async function batchPublishIntent(env,ctx){
+ const run=ctx.run,intent=run.progressIntent;if(!intent)return;
+ const held=await batchGateHeld(env,ctx);if(held!=='held')throw new BatchGateLost(held);
+ await writeEvent(env,intent);
+ delete run.progressIntent;
+ await batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
+}
+async function batchProgress(env,ctx,queue){
+ const run=ctx.run;
+ await batchPublishIntent(env,ctx);
+ const event=await predictionProgressEvent(env,run,queue,false);if(!event)return;
+ run.progressIntent=event;
+ await batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
+ await batchPublishIntent(env,ctx);
+}
+// A v2 submit is not passed through the shared step recorder: that recorder appends diagnostics steps and, for a lost lease or a storage failure, calls the unfenced stop recorder, which writes
+// the run, a stop Event, the queue's retries and `latest-run` without the gate and the epoch, on behalf of a handler that may no longer own the run. A v2 call keeps only the request correlation;
+// an unexpected error is a recoverable `502` (the run is not stopped: the caller replays, and a persistent failure is ended by `complete`).
+async function batchObserved(env,body,work,requestId){
+ const correlation=safeRequestId(requestId)||crypto.randomUUID();
+ try{return await withPredictionCorrelation(await work(),correlation);}
+ catch(error){
+  logPredictionFailure('submit',error,correlation,typeof body?.runId==='string'&&SAFE_LOG_ID.test(body.runId)?body.runId:null);
+  return withPredictionCorrelation(json({error:'storage_error',recoverable:true,runId:SAFE_LOG_ID.test(String(body?.runId))?body.runId:null,...scheduledRunFields()},502),correlation);
+ }
+}
 async function batchSubmit(env,body,requestId){
  const bad=validateBatchSubmitBody(body);if(bad)return bad;
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
@@ -2279,8 +2314,8 @@ async function batchSubmit(env,body,requestId){
   const fresh=await checkedRun(env,body.runId);if(!fresh)return json({error:'Unknown run'},404);
   if(fresh.status!=='running')return json({error:'Run already complete',stopReason:fresh.stopReason||null,mustComplete:!!fresh.reason},409);
   // Global writer exclusion is unchanged: every prediction mutation still goes through the one writer lease, taken under the gate.
-  // The step recorder wraps only the work under the gate: a refusal before it (an unknown run, another protocol, a live gate) writes nothing, not even a diagnostics step.
-  return await observedPrediction(env,body,()=>predictionWriter(env,()=>batchSubmitLocked(env,body,fresh,requestId,token)),'submit',requestId);
+  // Nothing here goes through the shared step recorder (see batchObserved): a refusal writes nothing, not even a diagnostics step, and a lost lease or an error never reaches the unfenced stop recorder.
+  return await batchObserved(env,body,()=>predictionWriter(env,()=>batchSubmitLocked(env,body,fresh,requestId,token)),requestId);
  }finally{try{await batchGateClear(env,run.runId,body.epoch,token);}catch{/* the gate expires by itself */}}
 }
 async function batchSubmitLocked(env,body,run,requestId,token){
@@ -2295,6 +2330,8 @@ async function batchSubmitLocked(env,body,run,requestId,token){
  const saveRun=()=>batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
  const results=[],regenerate=[];let stop=null;
  const lost=()=>stop==='gate_lost'||stop==='lease_lost';
+ // A progress Event that an earlier holder checkpointed but did not publish is published first.
+ try{await batchPublishIntent(env,ctx);}catch(error){if(error instanceof BatchGateLost)stop=error.status;else throw error;}
  const fail=(error,id,pushed)=>{
   if(error instanceof BatchGateLost)stop=error.status;else{stop='storage_error';try{console.log(JSON.stringify({event:'batch_submit_item_failed',requestId:SAFE_LOG_ID.test(String(requestId))?requestId:null,runId:SAFE_LOG_ID.test(run.runId)?run.runId:null,code:SAFE_LOG_ID.test(String(error?.code))?error.code:'unknown'}));}catch{/* a log never changes the outcome */}}
   if(!pushed)results.push({filmId:id,status:'blocked',reason:stop});
@@ -2339,7 +2376,7 @@ async function batchSubmitLocked(env,body,run,requestId,token){
    if(error instanceof BatchGateLost)stop=error.status;else if(error?.code==='prediction_queue_conflict'){if(await batchGateHeld(env,ctx)!=='held')stop='gate_lost';}else{stop='storage_error';}
   }
  }
- if(queue&&!lost()){try{noteQueueCounts(env,queue);await batchGuardedCommit(env,ctx,()=>runnerProgress(ctx.guarded,run,queue));}catch(error){if(error instanceof BatchGateLost)stop=error.status;else stop||='storage_error';}}
+ if(queue&&!lost()){try{noteQueueCounts(env,queue);await batchProgress(env,ctx,queue);}catch(error){if(error instanceof BatchGateLost)stop=error.status;else stop||='storage_error';}}
  noteStep(env,()=>({bodyItems:body.items.length,created:results.filter(r=>r.status==='created').length,recalculated:results.filter(r=>r.status==='recalculated').length,alreadyCurrent:results.filter(r=>r.status==='already_current').length,failures:results.filter(r=>r.status==='validation_failure').length,deferredBudget:results.filter(r=>r.status==='deferred_budget').length,needsRegeneration:results.filter(r=>r.status==='needs_regeneration').length}));
  const answer={...runSummary(run),epoch:body.epoch,results,committed,queueSettlement:settlement,mustComplete:!!run.systemicStopReason,stopReason:run.systemicStopReason||null,remaining:queue?.pending.length??null,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,...scheduledRunFields()};
  if(change){answer.profile={...change,body:current.profile,lineage:Array.isArray(current.lineage)?current.lineage:[]};answer.regenerate=regenerate;answer.action=change.scope==='global'?'complete':'continue';}

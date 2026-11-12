@@ -382,4 +382,45 @@ function r2Diff2(a,b){return [...b.keys()].filter(k=>!a.has(k)||a.get(k)!==b.get
  assert.deepEqual(again.data.results.map(x=>x.status),pick.map(()=>'created'));assert.deepEqual(again.data.results.slice(0,4).map(x=>x.replayed),[true,true,true,true],'the committed films, the fourth from the crash window, are recognized');
  assert.equal(pointers(w).length,7);assert.equal(versions(w).length,7,'exactly one version object per film');
 }
+
+// 18. Losing the runner lease itself (another run took it over) during an in-flight submit: the old caller answers `lease_lost` with its partial results, and nothing it did not own is written: not the old
+// run, not the replacement, not the queue, not `latest-run`, not a stop Event, not a diagnostics step. The shared step recorder is not on this path.
+{
+ const w=await ready(10);const m=await start(w),pick=ids(m);
+ const held=hold(w),body={runId:m.runId,epoch:m.lease.epoch,items:pick.slice(0,3).map(id=>item(w,id))};
+ const first=raw(w,body,'takeover-request');await held.at;
+ const replacement={owner:'replacement-run',runId:'replacement-run',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+900000,epoch:m.lease.epoch+1};
+ setLease(w,d=>{for(const k of Object.keys(d))delete d[k];Object.assign(d,replacement);});
+ const runs0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),q0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),lease0=JSON.stringify(sql(w.file,"SELECT * FROM prediction_lease WHERE name='runner'")),r2a=r2Snapshot(w),films0=domain(w.file);
+ held.release();const r=await first;
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.status,'lease_lost');assert.deepEqual(r.data.results.map(x=>x.status),['blocked','blocked','blocked']);assert.equal(r.data.results[0].reason,'lease_lost');
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),runs0,'neither the old run nor any other run record changed, and no `latest` election');
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),q0,'no queue write');assert.equal(JSON.stringify(sql(w.file,"SELECT * FROM prediction_lease WHERE name='runner'")),lease0,'the replacement\'s lease is untouched, and nothing was cleared');
+ assert.equal(films0,domain(w.file),'no film');
+ const changed=r2Diff2(r2a,r2Snapshot(w)).filter(k=>!/\/fingerprints\/|\/fingerprint-generations\/|writer-lease/.test(k));assert.deepEqual(changed,[],'no R2 object but the content-addressed bodies written before the commit and the route\'s own short writer lease: '+changed);
+ assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0].d).status,'running','the old run was not marked stopped on its former holder\'s behalf');
+}
+
+// 19. A progress Event is written only behind a guarded checkpoint of the run record. The record is saved first with the Event as an intent; a handler that loses its gate before the Event write
+// leaves the intent for the next holder, which publishes it exactly once.
+{
+ const w=await ready(12);const m=await start(w),pick=ids(m);
+ // make a progress record due: the last one is an hour old
+ const doc=run(w,m);doc.lastProgressAt=new Date(Date.now()-3600000).toISOString();sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+m.runId+"'");
+ const progressKeys=()=>[...w.records.keys()].filter(k=>/progress/.test(k));
+ const original=w.ctx.PredictionD1;let replaced=false;
+ w.ctx.PredictionD1={...original,saveMutable:async(env,key,value)=>{const done=await original.saveMutable(env,key,value);if(!replaced&&/\/runs\//.test(key)&&value?.progressIntent){replaced=true;setLease(w,d=>{d.submitGate={token:'replacement',requestId:'x',bodyHash:'y',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});}return done;}};
+ const first=await submit(w,m,pick.slice(0,3).map(id=>item(w,id)));w.ctx.PredictionD1=original;
+ assert.equal(first.status,409,JSON.stringify(first.data).slice(0,300));assert.equal(first.data.status,'gate_lost');assert.equal(first.data.committed,true);
+ assert.equal(progressKeys().length,0,'the superseded handler wrote no progress Event');
+ const stored=run(w,m);assert.ok(stored.progressIntent&&stored.progressIntent.id.includes('-progress-'),'the intent is in the authoritative record');
+ // the current holder publishes it first, once
+ setLease(w,d=>{delete d.submitGate;});
+ const next=await submit(w,m,pick.slice(3,5).map(id=>item(w,id)));assert.equal(next.status,200,JSON.stringify(next.data).slice(0,300));
+ assert.equal(progressKeys().length,1,'exactly one progress Event');const after=run(w,m);assert.ok(!after.progressIntent,'and the intent is cleared');
+ const eventKey=progressKeys()[0],body0=JSON.stringify(w.records.get(eventKey));
+ const again=await submit(w,m,pick.slice(5,7).map(id=>item(w,id)));assert.equal(again.status,200);assert.equal(progressKeys().length,1,'no duplicate');assert.equal(JSON.stringify(w.records.get(eventKey)),body0,'and the published Event is unchanged');
+ // a rejected call writes no diagnostics step and no stop Event either
+ assert.ok(![...w.records.keys()].some(k=>/stop-events\//.test(k)),'no stop Event of this v2 run');
+}
 console.log('prediction-batch-submit: ok');
