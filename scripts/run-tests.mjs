@@ -94,6 +94,7 @@ export const WEIGHTS={
  'film-person-connector.mjs':7,
  'canonical-film-writers-mutation.mjs':6,
  'canonical-person-state-mutation.mjs':6,
+ 'canonical-producer-adapters-mutation.mjs':6,
  'discovery-pipeline-d1-status.mjs':6,
  'epg-status-ledger-mode.mjs':6,
  'prediction-overlay-index.mjs':6,
@@ -168,7 +169,15 @@ export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,
  const owner=new Map();
  if(shard){
   const load=Array(shard.count).fill(0);
-  const deal=file=>{let best=0;for(let i=1;i<load.length;i++)if(load[i]<load[best])best=i;owner.set(file,best);load[best]+=weight(file);};
+  // A serial-only file adds its whole solo time after the parallel phase, so two of them never share a shard (while there is a free shard): the least loaded shard that holds no serial-only file yet. That keeps the rule true whatever a later WEIGHTS entry does to the rest of the deal.
+  const serialHolders=new Set();
+  const deal=file=>{
+   const serial=serialOnly.has(file)&&serialHolders.size<load.length;
+   let best=-1;
+   for(let i=0;i<load.length;i++)if(!(serial&&serialHolders.has(i))&&(best<0||load[i]<load[best]))best=i;
+   owner.set(file,best);load[best]+=weight(file);
+   if(serialOnly.has(file))serialHolders.add(best);
+  };
   // The mutation files (every one re-runs a production module against many mutants, spawning child processes) are CPU-bound and starve each other: on the 4 vCPU runner their per-file time grew five to ten times when several of them ran in one shard (CI runs 43179499163 and 43180054837: 205 s against 103 s for the same estimated weight). They are dealt first, as a class of their own, so every shard carries about the same share of them; the rest then fills up to the same total.
   for(const file of ordered)if(MUTATION.test(file))deal(file);
   for(const file of ordered)if(!MUTATION.test(file))deal(file);

@@ -55,7 +55,7 @@ export const BASELINE_CAP=5000;
 // the list is empty, and adding an entry needs an independent review, a safety proof and an owner acceptance id recorded in the exception record. It is a legacy mechanism, never a default.
 export const APPROVED_EXCEPTIONS=Object.freeze([]);
 // The closed set of operation kinds the P2a/P2b writers and the P3 producers register under. The SQL column accepts any lowercase identifier; this list is the code-reviewed set.
-export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement']);
+export const OPERATION_KINDS=Object.freeze(['film_mutation','film_merge','film_facts','film_metadata','film_dimension','film_sync_state','film_membership','person_mutation','person_state','localization_conflict','localization_source','film_admission','film_retention','tmdb_retirement']);
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
 const REQUEST_ID=/^[A-Za-z0-9:._/=+@-]{1,200}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
@@ -250,13 +250,15 @@ export async function readReceipt(env,requestId){
  const db=database(env);
  return view(await one(db,'SELECT '+COLUMNS+' FROM canonical_write_receipt WHERE request_id=?',[requestId]));
 }
-export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit=RECONCILE_LIMIT_MAX}={}){
+// `origin` (P3-0b) limits the list to the receipts one producer created, in SQL, so another origin's rows never use up the limit. It must be a lowercase identifier or null (everything).
+export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit=RECONCILE_LIMIT_MAX,origin=null}={}){
  const db=database(env);
+ if(origin!==null&&!IDENT.test(origin||''))throw failed('film_person_invalid');
  const cap=Math.min(Math.max(Number(limit)||1,1),RECONCILE_LIMIT_MAX);
  const list=states.filter(state=>RECEIPT_STATES.includes(state));
  if(!list.length)return [];
- const where='state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'');
- return (await many(db,'SELECT '+COLUMNS+' FROM canonical_write_receipt WHERE '+where+' ORDER BY next_attempt_at,request_id LIMIT ?',[...list,...(dueBefore?[dueBefore]:[]),cap])).map(view);
+ const where='state IN ('+list.map(()=>'?').join(',')+')'+(dueBefore?' AND next_attempt_at<=?':'')+(origin!==null?' AND origin=?':'');
+ return (await many(db,'SELECT '+COLUMNS+' FROM canonical_write_receipt WHERE '+where+' ORDER BY next_attempt_at,request_id LIMIT ?',[...list,...(dueBefore?[dueBefore]:[]),...(origin!==null?[origin]:[]),cap])).map(view);
 }
 
 async function currentRevisionOf(env,target){
@@ -501,13 +503,15 @@ export async function receiptedWrite(env,input,hooks){
 // The reconciler's one pass (a later P3 reconciler calls this; nothing calls it today and nothing schedules it): reads at most `limit` DUE non-terminal receipts, reads each target through its
 // registered operation, applies the pure plan (mark applied on proof, needs review, abandon, replay with the same request id after the stale-revision check) and returns what it did. `now` is
 // passed in; there is no timer.
-export async function reconcileReceipts(env,{operations,now=()=>new Date().toISOString(),limit=20,policy=RETRY_POLICY}={}){
+// `origin` (P3-0b) restricts the pass to the receipts of ONE producer (a producer reconciles only what it created, inline, after its own run); without it the pass covers every origin.
+export async function reconcileReceipts(env,{operations,now=()=>new Date().toISOString(),limit=20,policy=RETRY_POLICY,origin=null}={}){
+ if(origin!==null&&!IDENT.test(origin||''))throw failed('film_person_invalid');
  await assertReceiptsAvailable(env);
  const clock=typeof now==='function'?now:()=>now;
  const at=clock();
  const gate=await readAuthority(env);
- const due=await listReceipts(env,{dueBefore:at,limit});
- const result={marker:gate.state,considered:due.length,applied:[],replayed:[],abandoned:[],needsReview:[],waiting:[],failed:[]};
+ const due=await listReceipts(env,{dueBefore:at,limit,origin});
+ const result={marker:gate.state,origin,considered:due.length,applied:[],replayed:[],abandoned:[],needsReview:[],waiting:[],failed:[]};
  if(gate.state!=='open'){result.waiting=due.map(row=>({requestId:row.requestId,reason:'marker_not_open'}));return result;}
  const observed={},missing=new Set();
  for(const row of due){

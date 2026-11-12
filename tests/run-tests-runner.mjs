@@ -258,6 +258,13 @@ fs.unlinkSync(me);`;
       }
       assert.deepEqual(seen.sort(), names, `shards of ${count}: every file exactly once`);
     }
+    // Two serial-only files never share a shard, whatever else is dealt before them (the 12 Nov 2026 failure: a new mutation file's weight made the greedy deal put both on one shard).
+    {
+      const trap = suite(Object.fromEntries(['m1-mutation.mjs', 'm2-mutation.mjs', 's1.mjs', 's2.mjs'].map(name => [name, "console.log('x');"])));
+      const weights = {'m1-mutation.mjs': 100, 'm2-mutation.mjs': 10, 's1.mjs': 50, 's2.mjs': 49};
+      const holders = [1, 2].map(index => planTests({directory: trap, serialOnly: new Set(['s1.mjs', 's2.mjs']), weights, shard: {index, count: 2}}).serial);
+      assert.ok(holders.every(list => list.length === 1), `each shard of 2 carries exactly one serial-only file: ${JSON.stringify(holders)}`);
+    }
     const whole = planTests({directory: 'tests'});
     const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
     const isMutation = file => /-mutation\.mjs$/.test(file);
