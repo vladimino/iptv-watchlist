@@ -196,6 +196,7 @@ async function currentRevision(db,kind,id){return Number((await one(db,'SELECT r
 export async function recordPersonState(env,input){
  const id=fenced.personId(input?.id),expected=fenced.revisionOf(input?.expectedRevision),at=fenced.text(input?.at),requestId=fenced.text(input?.requestId);
  if(!plain(input?.person))throw failed('film_person_invalid');
+ const tail=fenced.receiptTail(input.receiptMark,{kind:'person',id});
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
  if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))throw failed('film_person_reference');
@@ -206,7 +207,7 @@ export async function recordPersonState(env,input){
  const statements=fenced.head(gate,entities);
  for(const item of plan.statements)statements.push(item);
  statements.push([fenced.BUMP,['person',id,at]]);
- await fenced.commit(env,gate,statements,entities);
+ await fenced.commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1,already:false,requestId};
 }
 
@@ -216,6 +217,7 @@ export async function recordLocalizationConflicts(env,input){
  const kind=input?.kind;
  const rows=planConflicts(kind,input?.id,input?.conflicts);
  const id=input.id,expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
+ const tail=fenced.receiptTail(input.receiptMark,{kind,id});
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
  if(kind==='film'&&await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]))throw failed('film_person_redirect');
@@ -227,7 +229,7 @@ export async function recordLocalizationConflicts(env,input){
  statements.push(kind==='film'?[fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]:[fenced.assertSql('EXISTS (SELECT 1 FROM person WHERE id=?)'),[id]]);
  for(const row of rows)statements.push([CONFLICT_INSERT,row]);
  statements.push([fenced.BUMP,[kind,id,at]]);
- await fenced.commit(env,gate,statements,entities);
+ await fenced.commit(env,gate,statements,entities,tail);
  return {id,revision:expected+1,already:false,written:rows.filter(row=>!have.has(row[0])).length,requestId};
 }
 

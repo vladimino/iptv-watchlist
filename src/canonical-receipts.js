@@ -323,10 +323,7 @@ const FROM='WHERE request_id=? AND state=? AND attempts=?';
 // The statements that mark this attempt's receipt applied INSIDE a writer's own fenced batch: they read the entity revision AFTER the writer's BUMP, so they must come after it. If the receipt is no
 // longer this attempt's pending row the assertion fails and the writer's whole batch rolls back (the content never commits without its receipt being the current attempt).
 export function appliedStatements({requestId,attempt,target,now}){
- return [
-  ["UPDATE canonical_write_receipt SET state='applied',applied_revision=COALESCE((SELECT revision FROM canonical_revision WHERE kind=? AND id=?),0),error_class=NULL,next_attempt_at=NULL,updated_at=?,settled_at=? "+FROM,[target.kind,target.id,now,now,requestId,'pending',attempt]],
-  [CHANGED,[]],
- ];
+ return fenced.appliedTail({requestId,attempt,target,now});
 }
 
 async function writeBatch(env,gate,statements){
