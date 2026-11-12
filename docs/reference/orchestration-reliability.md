@@ -224,6 +224,21 @@ Inert foundation, no route, Workflow binding, flag or schedule. `src/epg-diagnos
 
 **Residual risk.** This is an application-enforced boundary. The same Worker is also bound to the production resources, so a routing defect in other code could still address them; the module bounds what the diagnostic path is given and makes a misrouting loud, it is not platform privilege isolation. A passing canary is not AIR-444 acceptance. Tests: `tests/epg-diagnostic-context.mjs` (parity of the real seal on the context with a plain environment, lease renewal, expiry, loss, pointer conflict, stale generation, production-like resources byte for byte unchanged, inert wiring, mutation checks).
 
+## EPG diagnostic canary: replay datasets (AIR-454, ADR 0121)
+
+Inert, offline code (`src/epg-replay.js`, `EpgReplay`): nothing calls it at runtime, it reads through a caller-supplied read-only reader (`get(key)` returning an object with `text()`), writes nothing, fetches nothing and holds no binding. Copying a dataset into the diagnostic bucket and every live read of the production generation are separate owner-approved operations (AIR-456).
+
+| Item | Contract |
+|---|---|
+| Source | One published generation: `epg/generations/<programmeRunId>/discovery-latest.json` (the ledger of that generation) and the archive it names (manifest and segments under `epg/discovery-archive/v1/`). No provider feed, no TMDB, no Discovery run |
+| Dataset | Canonical JSON (sorted keys, items sorted by `key`) under a sha256 `digest`; `schemaVersion` 1, `builtAt` injected, `source`, `counts`, `fidelity`, `baseline` (generation document without items, items, archive manifest and the exact segment texts) |
+| Verification | The builder refuses (typed `epg_replay_*` reasons) a missing, malformed or other-generation document, duplicate or keyless items, a missing manifest or segment, a segment whose sha256 differs from the manifest's (the Worker's own `textSha256`), a segment outside the archive prefix, item or total counts that disagree, and a dataset above the byte or item budget (96 MiB, 120,000 items). `verifyDataset` re-checks all of it on a stored dataset plus the dataset digest, the expected digest and the expected generation |
+| Fidelity | Always `reduced`: the stored ledger is the merged canonical result of the last scan, not the raw provider feed (`scan_is_canonical_ledger_not_raw_feed`); also `ledger_holds_unseen_backlog` when items were not seen in the latest scan and `archive_absent` without an archive. A dataset cannot claim `full` |
+| Plan | `planMutation(dataset,{seed,departures,returns},{segmentOf})`: a seeded integer PRNG over the sorted keys picks N departures (cap 8,000, never above the ledger) and R returns from keys held only by the archive (cap 2,000); the same dataset and seed give the same plan on every platform, another seed another plan. The plan is small (keys, per-segment counts, `upsertedKeysDigest`, digest) and bound to the dataset digest. The segment arithmetic is the Worker's `ledgerArchiveSegment`, passed in, never reimplemented |
+| Scan | `replayScan` returns the baseline items without the departures plus the returned payloads, after re-verifying the dataset and the plan digest |
+
+Parity with production code: committed through the real `stageSealedGeneration`, the replay scan archives exactly the planned departures (`upsertedKeys`) into exactly the planned segments, and returned keys are active again (`tests/epg-replay-dataset.mjs`).
+
 ## Ratings implementation status (AIR-347)
 
 Implemented and **inert**: `src/domain/orchestration-policy.js` (pure policy), `src/ratings-orchestration.js` (`RATINGS_WORKFLOW`, `RatingsOrchestration.ensure`, owner route `POST /api/letterboxd/ratings/executor`), the D1 epoch fence in `src/ratings-d1.js`, the external-writer gate in `src/letterboxd-ratings.js` and the `orchestration` object of `ratings_sync_status`. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md). Nothing runs until the owner switches the mode.

@@ -57,6 +57,7 @@ export const WEIGHTS={
  'projector-bulk-spike.mjs':36,
  'run-tests-runner.mjs':31,
  'epg-diagnostic-context.mjs':8,
+ 'epg-replay-dataset.mjs':4,
  'd1-enrichment-buckets.mjs':28,
  'canonical-differential-mutation.mjs':26,
  'd1-enrichment-stored-pages.mjs':26,
