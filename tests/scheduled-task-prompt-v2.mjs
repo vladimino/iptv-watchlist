@@ -51,6 +51,8 @@ for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.ok(/ОДНОЙ повторной предпроверки/.test(text)&&/НИКОГДА не выдумывай refs/.test(text)&&/в том числе stakes/.test(text),label+': bounded retry, no invented refs, no metadata-only execution quality');
  assert.ok(/failure:\{kind:'parse_error'\}/.test(text),label+': an unrepairable film is reported as a failure item');
 }
+assert.ok(/ОДНОЙ сквозной последовательности 0, 1, 2/.test(dry)&&/предпроверка 0, submit 1, следующая предпроверка 2, следующий submit 3/.test(dry)&&/ИМЕННО вызова prediction_batch_submit/.test(dry)&&/никогда вызова предпроверки/.test(dry),'one global callId sequence for every MCP call; a film names its submit call only');
+assert.ok(!/присвой callId \(0, 1, 2… в порядке вызовов/.test(doc),'the old per-submit numbering is gone');
 assert.ok(/preflight \{valid,attempts/.test(dry)&&/kind 'preflight'/.test(dry),'the dry-run prompt records the preflight per film and per call');
 assert.ok(/failureReason/.test(dry)&&/insufficient_metadata/.test(dry)&&/insufficient_knowledge/.test(dry)&&/json_unparseable/.test(dry),'the dry-run prompt asks for an honest failureReason');
 assert.ok(steps(prompt).join('\n').includes('НЕ добавляй и НЕ вычисляй fingerprint.sourceBasis')&&!/Вычисляй fingerprint\.sourceBasis/.test(doc),'ADR 0129: the model no longer computes the aggregate, in both prompts');
@@ -119,6 +121,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
   }
   const result={schemaVersion:1,sampleId:sample.sampleId,groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:hex(m.profile.hash)},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:hex(m.contract.registryDigest)},films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']}};
   assert.deepEqual(validResult(result),[],'result for group size '+size);assert.equal(films.length,sample.filmIds.length);assert.ok(films.every(f=>f.liveInput==='same'&&f.submitStatus==='would_write'));
+  assert.deepEqual(calls.map(c=>c.callId),calls.map((c,i)=>i),'one global callId sequence in call order');assert.ok(films.every(f=>calls.find(c=>c.callId===f.callId).kind==='submit'),'every film names its submit call');
   assert.equal(calls.filter(c=>c.kind==='submit').length,Math.ceil(sample.filmIds.length/size));assert.equal(calls.filter(c=>c.kind==='preflight').length,Math.ceil(sample.filmIds.length/size),'one preflight per group, counted as an MCP call');assert.ok(calls.every(c=>c.itemCount<=size));
   results.push(result);
  }

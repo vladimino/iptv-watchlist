@@ -60,6 +60,7 @@ export function checkPasses(results){
    if(f.submitStatus==='not_submitted'){if(f.callId!==null)throw new AbReportError('call_mapping','a not_submitted film names a call');return;}
    const c=callById.get(f.callId);
    if(!c||c.groupIndex!==f.groupIndex)throw new AbReportError('call_mapping','a film names a missing call or a call of another group');
+   if((c.kind??'submit')!=='submit')throw new AbReportError('call_mapping','a film names a preflight call: its result is recorded by a submit call');
    refs.set(f.callId,(refs.get(f.callId)||0)+1);
   });
   for(const [id,n] of refs)if(n>callById.get(id).itemCount)throw new AbReportError('call_mapping','a call holds fewer items than films name it');
