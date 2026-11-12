@@ -1,0 +1,60 @@
+# ADR 0126: EPG producer layer for Person state and credit membership (P3a, planning and apply, dormant)
+
+**Status:** Accepted as DESIGN for offline, dormant code only, within the owner decisions E2, E4, E5 and E6 of 12 Nov 2026 and the owner's step 3 of the same day (complete the offline EPG producer in SEPARATE deliveries; this one is Person and credits) (source: [AIR-374](https://trello.com/c/ha7ais3w), [decision pack](../runbooks/film-person-holdpoint-decision-pack.md)). This is not merge approval and not a production GO. Nothing here is wired: `epgSync` is unchanged, the modules are not bundled, no marker moves and no production operation is authorized.  
+**Original decision date:** 2026-11-12  
+**Recorded at:** 2026-11-12  
+**Approval source:** Owner decisions of 12 Nov 2026 on the [AIR-374 card](https://trello.com/c/ha7ais3w); the unit shapes are the reviewer-level decisions the P3 plan assigns to P3a  
+**Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [ADR 0125](0125-epg-producer-layer-film-facts.md), [ADR 0123](0123-producer-receipt-adapter-film-facts.md), [ADR 0119](0119-durable-canonical-write-receipts.md), [ADR 0120](0120-canonical-film-writers-identity-metadata-membership.md), [ADR 0117](0117-film-person-d1-handoff-owner-decisions.md), [offline evidence](../evidence/d1-migration/air-374-p3a-epg-person-credits-offline-2026-11-12.md)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+[ADR 0125](0125-epg-producer-layer-film-facts.md) built the planning and apply layer for the Film facts of an EPG run and left the Person and credit kinds for a later delivery. The EPG run also observes the people of a film: their identity and effective localization state, and which Person holds which credit on which Film. After `open` the projector no longer writes them, so a producer must, through the same fenced writers that already own the ownership rules, and with the same receipt discipline. The dictionary store semantics (what the EPG run loads and saves as the source of these facts) is a separate later delivery and is not touched here.
+
+## Decision
+
+1. **One source of truth for ownership: no second write path.** The new modules write nothing themselves. Person facts go through `recordPersonState` (`src/canonical-person-state.js`) and credits through `mutateFilm` (`src/canonical-mutations.js`), each with the P3-0a `receiptMark` tail, so the canonical mutation and its applied receipt are ONE fenced batch. The ownership rules therefore stay where they are: a reviewed or owner localization is never downgraded (the writer's guard keeps the stored value and records the incoming one as a conflict and an alias), a credit is added and never removed or renumbered (D1-only credits survive), the Film row keeps its stored contract version, identity and title. A static test refuses SQL that changes a table in the new modules.
+2. **Two operation kinds.** `person_state` (target: one Person; one `recordPersonState` call) and the new `film_credits` (target: one Film; the credits of that Film that are missing, in one `mutateFilm` call). `film_credits` is added to the closed `OPERATION_KINDS` list (no migration: the SQL column accepts any lowercase identifier, ADR 0119 decision 8). The existing kind `film_mutation` is NOT reused: it is also the kind of the Discovery admission, and one registry spec per kind would then have to serve two content shapes.
+3. **The adapter pattern of ADR 0123 and 0125, per unit.** The request id is derived from the source event (`epg:<run id>`, the same for every unit of a run), the operation kind, the target and the content digest, never from the content alone, so an A to B to A flip is three requests. The pre-plan runs first and a no-op ends there with NO receipt (E5): for a Person state it is the writer's own satisfied test, exposed read-only as `readPersonStatePlan` (a test proves it equals the writer's `already`); for credits, every wanted credit already stored. One atomic fenced batch otherwise. A race that leaves nothing to write ends the receipt `unknown` (`atomic_mark_missing`), never a second marking batch. A replay re-plans from the producer's own source and is refused when the digest moved (`producer_source_changed`).
+4. **Absent and refusal semantics never create a row.** A Person or Film the store does not hold is skipped with no receipt and counted `absent` (it is never created: `person_state` of a missing Person, `film_credits` of a missing Film). Refused BEFORE any receipt, with the writer's code: a credit whose Person does not exist yet (`film_person_reference`; the whole unit is refused, no partial credit set), a redirected Film (`film_person_redirect`). Creating the Person row (`person_mutation`) is not in this delivery, so a credit unit for a Person the projector has not created is refused until it is.
+5. **Content.** A Person state's content is the state as the source observed it, including its own observation times (`updatedAt`, a conflict's `at`): the source's, not the run clock, or an unchanged Person would be rewritten every run. A credit list is ORDERED (a new credit is appended after the highest stored ordinal of its role in the producer's order, which is how the projector appends), has no duplicates, carries a Person and a role only (no caller ordinal, so a stored credit keeps its ordinal) and has at most 50 credits per Film (the 60-statement cap of `mutateFilm`); a longer list is refused with `film_person_bounded` at plan time (splitting it is a later decision). `film.updated_at` and the revision clock move to the unit's write clock, as with every `mutateFilm` call.
+6. **Units, order and bounds.** `planEpgPersonUnits` is pure: Person state units by id, then credit units by Film id, duplicates refused, the run id as the event. `applyEpgPersonUnits` has the semantics of ADR 0125 decision 4 (hard ceiling of 50 units per call, provisional until the E6 measurement; cursor; a refusal never blocks the others; `film_person_held` and `film_person_unavailable` stop the pass on the unit that met them). The ceiling is shared with the Film layer, not added to it: the caller decides how the units of one run are split across calls.
+7. **Dormancy and reconcile (E2, E4).** Both entry points read the marker once and below `open` return `skipped` (the projector stays the only canonical writer, no flag is touched); `held` and an unreadable marker throw. `reconcileEpgRun` is ONE bounded inline reconcile of the origin `epg` for all its kinds (`film_facts`, `person_state`, `film_credits`), so a kind never starves another's due receipts under the adapter's inline limit; each receipt is re-planned only for the run that wrote it (the request id is recomputed from this plan's event, kind, target and digest and must equal the receipt's). No cron, no tick, no global pass.
+8. **Readiness stays truthful.** No operation is registered in `PRODUCER_OPERATIONS` and `PRODUCER_WIRING` is unchanged: `epg_commit` still requires kinds that are not registered (`film_mutation`, `person_mutation`, `film_metadata`, ...), so `producer_not_wired:epg_commit` remains a blocker. Re-deriving `requires` from the kinds the EPG producer really uses (`film_facts`, `film_credits`, `person_state`, and `person_mutation` once it exists) belongs to the wiring PR. The 10 draft differential exceptions are neither accepted nor edited.
+
+Not decided: the `epgSync` wiring and its durable attempt marker, the dictionary store, the Person row producer (`person_mutation`), the credit removal policy, splitting a credit list over 50, the per-run ceiling (E6), any exception acceptance, any production step.
+
+## What a later durable cursor and per-unit failure result must keep possible
+
+ADR 0125 names two later items: a durable per-unit failure result and a durable cursor with a plan fingerprint. This design does not preclude them: a unit is identified by `(kind, id)` inside a plan whose `event` is the run; the unit order is a pure function of the plan input (sorted, so a fingerprint over the ordered `(kind, id, digest)` triples is reproducible: `unitDigest` is exported for it); the pass returns `{cursor, done, counts, failures:[{id, code}], stoppedBy}` where a failure already carries the stable code a durable result would store and the request id of a unit is recomputable from the plan (so a durable result needs no new identifier); and nothing in the apply keeps state outside the return value. Persisting them, and the retry policy for failed units, add a column or a marker to the caller's run state and change no signature here.
+
+## Alternatives considered
+
+- **Extend `planEpgUnits` and `applyEpgUnits` with unit kinds:** rejected: it would reopen the module and the 52 mutants of ADR 0125 for a different content shape; the Person layer imports its ceiling, event and replan helpers instead.
+- **Reuse `film_mutation` for credits:** rejected (decision 2).
+- **A Person writer in the new module:** rejected: a second write path would compete with the single owner of the localization guard.
+- **Create a missing Person or Film for a credit:** rejected: the unit would invent a row the canonical store never held.
+- **Sort the credits for the digest:** rejected: without an ordinal the order is the billing order and is content.
+
+## Consequences
+
+- A pass at `prepared` costs one marker read. At `open` a changed unit costs two batches (the pending receipt, then the writer's own batch with the applied receipt) plus the planner reads; an unchanged unit costs the reads only and no receipt. The per-unit read count is not measured here (E6).
+- `canonical-person-state.js` gains one exported read-only function and `canonical-epg-producer.js` one exported helper (`epgEvent`); neither writer's behaviour changes. `canonical-receipts.js` gains the kind `film_credits`.
+- The Person row, its external ids and aliases (`mutatePerson`) are still produced by nothing after `open`; credit units refuse until the Person exists.
+- The layer proves nothing about the draft exceptions and adds no differential scenario (`epg_commit_natural` needs the call site).
+
+## Recovery and migration boundary
+
+Code only; nothing calls it and it writes nothing. No migration, flag, Task, cron, marker move or production read is involved. Reverting the change removes the modules, their tests and the kind; no data depends on it.
+
+## Evidence
+
+- **Original decision:** [AIR-374](https://trello.com/c/ha7ais3w), owner decisions of 12 Nov 2026.
+- **Implementation:** the P3a Person and credits pull request of the same card.
+- **Dated verification:** [offline evidence](../evidence/d1-migration/air-374-p3a-epg-person-credits-offline-2026-11-12.md), counts only.
+- **Uncertainty:** E6 not measured; the `epgSync` wiring, the Person row kind, the dictionary store and the differential scenario are not built.
+
+## Follow-ups
+
+The dictionary store semantics (a separate delivery), `person_mutation`, the durable cursor and per-unit failure result, the `epgSync` wiring with a durable attempt marker, the `epg_commit_natural` differential scenario and the `requires` re-derivation, after the E6 measurement is authorized.

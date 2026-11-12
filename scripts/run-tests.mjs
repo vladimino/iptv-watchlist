@@ -100,6 +100,7 @@ export const WEIGHTS={
  'canonical-person-state-mutation.mjs':6,
  'canonical-producer-adapters-mutation.mjs':6,
  'canonical-epg-producer-mutation.mjs':6,
+ 'canonical-epg-person-producer-mutation.mjs':8,
  'discovery-pipeline-d1-status.mjs':6,
  'epg-status-ledger-mode.mjs':6,
  'prediction-overlay-index.mjs':6,

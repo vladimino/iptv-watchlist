@@ -348,7 +348,7 @@ function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film W
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&fs.readFileSync(full,'utf8').includes('canonical-epg-producer'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'nothing in src imports it');
+ assert.deepEqual(importers,['src/canonical-epg-person-producer.js'],'only the dormant EPG Person layer (ADR 0126) imports it, for the event and the ceiling');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-epg-producer'),file+' does not bundle it');
  const text=fs.readFileSync(path.join(SRC,'canonical-epg-producer.js'),'utf8');
  const code_=text.replace(/\/\/.*$/gm,'');

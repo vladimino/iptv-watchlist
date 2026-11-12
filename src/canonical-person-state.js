@@ -190,6 +190,20 @@ async function personStateSatisfied(db,id,plan,stored){
 
 async function currentRevision(db,kind,id){return Number((await one(db,'SELECT revision FROM canonical_revision WHERE kind=? AND id=?',[kind,id]))?.revision??0);}
 
+// Read-only (AIR-374 P3a Person units, ADR 0126). What a producer needs BEFORE it creates a receipt: does the Person exist, would recordPersonState open no batch (the stored rows already hold the planned state, the writer's own
+// `already` test), and the entity revision to plan against. It runs the same pure planner and the same satisfied test as the writer over the same stored rows and writes nothing, so a pre-planned no-op is exactly a call the writer
+// would answer with `already:true`. It throws what the planner throws (invalid input): a refusal that exists before a receipt does. A missing Person is `absent` (the writer would refuse it with film_person_reference).
+export async function readPersonStatePlan(env,input){
+ const id=fenced.personId(input?.id);
+ if(!plain(input?.person))throw failed('film_person_invalid');
+ const db=database(env);
+ const revision=await currentRevision(db,'person',id);
+ if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))return {absent:true,noop:false,revision};
+ const stored=await one(db,`SELECT ${COLUMNS} FROM person_dimension WHERE person_id=? AND dimension='localization'`,[id]);
+ const plan=planPersonState({id,person:input.person},stored);
+ return {absent:false,noop:await personStateSatisfied(db,id,plan,stored),revision};
+}
+
 // Fenced write of one Person's dimension state. One batch; a replay of an applied write (same content) returns without a batch.
 // input: {id, expectedRevision, at, requestId, person:{identity?:{status,source,sourceVersion,provenance,lastError,failureReason,retryAt,attempts,nextAction,updatedAt},
 //         localization?:{...same, value}, localizationConflicts?:[{value,source,provenance,at,reason}]}}

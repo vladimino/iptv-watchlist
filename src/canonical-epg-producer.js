@@ -24,6 +24,8 @@ const eventOf=runId=>{
  if(typeof runId!=='string'||!runId.trim()||runId.length>280)throw failed('film_person_invalid');
  return 'epg:'+runId;
 };
+// The source event of a run (shared by the Person and credit units of ADR 0126, so every unit of one run has the same event).
+export const epgEvent=eventOf;
 
 // runId: the EPG run (the source event). at: the write clock. films: [{id, facts}], `facts` being the film-facts input without id, at, requestId, expectedRevision and receiptMark (film, dimensions, localization, metadata, sync, watchlist).
 // departed: [filmId] members of the previous generation that this run released. Returns {event, units:[{id, release, input}]}; a Film both observed and departed is observed (membership wins) and the duplicate is refused.
