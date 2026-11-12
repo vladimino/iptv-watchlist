@@ -50,6 +50,18 @@ export function checkPasses(results){
   sizes.add(r.groupSize);
   if(JSON.stringify(r.films.map(f=>f.filmId))!==JSON.stringify(first.films.map(f=>f.filmId)))throw new AbReportError('film_set_mismatch','the same films in the same order are required in every pass');
   if(r.calls.some(c=>c.itemCount>r.groupSize))throw new AbReportError('group_size_exceeded');
+  // Explicit association: films point to the call that recorded them by callId, never by array position. Anything ambiguous is refused.
+  const callById=new Map(r.calls.map(c=>[c.callId,c]));
+  if(callById.size!==r.calls.length)throw new AbReportError('call_mapping','duplicate callId');
+  const refs=new Map();
+  r.films.forEach((f,i)=>{
+   if(f.groupIndex!==Math.floor(i/r.groupSize))throw new AbReportError('group_mapping','groupIndex differs from the frozen grouping');
+   if(f.submitStatus==='not_submitted'){if(f.callId!==null)throw new AbReportError('call_mapping','a not_submitted film names a call');return;}
+   const c=callById.get(f.callId);
+   if(!c||c.groupIndex!==f.groupIndex)throw new AbReportError('call_mapping','a film names a missing call or a call of another group');
+   refs.set(f.callId,(refs.get(f.callId)||0)+1);
+  });
+  for(const [id,n] of refs)if(n>callById.get(id).itemCount)throw new AbReportError('call_mapping','a call holds fewer items than films name it');
  }
  return [...sizes].sort((a,b)=>a-b);
 }
@@ -69,12 +81,11 @@ export function buildReport(results,{truth=null,modelLabel=null}={}){
  // per pass: which films are comparable. A call whose observed profile hash differs from the manifest's makes all its films stale; a pass that stopped for profile_moved leaves the rest not submitted.
  const comparable=new Map(),detail=new Map();
  for(const r of results){
-  const stale=new Set(),callOf=new Map();
-  r.films.forEach(f=>callOf.set(f.filmId,r.calls[f.groupIndex]));
-  for(const f of r.films){const c=callOf.get(f.filmId);if(f.submitStatus!=='not_submitted'&&(!c||c.observedProfileHash===null||c.observedProfileHash!==manifestProfile))stale.add(f.filmId);}
+  const stale=new Set(),callOf=new Map(r.calls.map(c=>[c.callId,c])),used=new Set();
+  for(const f of r.films){if(f.submitStatus==='not_submitted')continue;const c=callOf.get(f.callId);used.add(f.callId);if(!c||c.observedProfileHash===null||c.observedProfileHash!==manifestProfile)stale.add(f.filmId);}
   const changed=r.films.filter(f=>validStatus(f)&&f.liveInput!=='same'&&!stale.has(f.filmId)).length;
   const set=new Set(r.films.filter(f=>validStatus(f)&&f.liveInput==='same'&&!stale.has(f.filmId)).map(f=>f.filmId));
-  comparable.set(r.groupSize,set);detail.set(r.groupSize,{stale:stale.size,changed,mismatchCalls:r.calls.filter(c=>c.observedProfileHash!==null&&c.observedProfileHash!==manifestProfile||c.observedProfileHash===null&&r.films.some(f=>f.groupIndex===c.groupIndex&&f.submitStatus!=='not_submitted')).length});
+  comparable.set(r.groupSize,set);detail.set(r.groupSize,{stale:stale.size,changed,mismatchCalls:r.calls.filter(c=>used.has(c.callId)&&(c.observedProfileHash===null||c.observedProfileHash!==manifestProfile)).length});
  }
  const baseline=by.get(BASELINE)||null,missing=SIZES.filter(s=>!by.has(s));
  const report={schemaVersion:1,kind:'prediction_batch_v2_ab_report',

@@ -148,7 +148,8 @@
        "prediction",
        "submitStatus",
        "liveInput",
-       "validation"
+       "validation",
+       "callId"
       ],
       "properties": {
        "filmId": {
@@ -240,6 +241,14 @@
          "null"
         ],
         "minimum": 0
+       },
+       "callId": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0,
+        "description": "Index of the call (calls[].callId) whose answer recorded this film's result; null for a not_submitted film. A group split over several calls gives each film its own call."
        }
       }
      }
@@ -253,7 +262,8 @@
        "groupIndex",
        "itemCount",
        "ok",
-       "observedProfileHash"
+       "observedProfileHash",
+       "callId"
       ],
       "properties": {
        "groupIndex": {
@@ -295,6 +305,11 @@
         ],
         "pattern": "^[0-9a-f]{8,64}$",
         "description": "profile.hash of the dry-run submit answer; the pass compares it with the manifest profile hash and stops with profile_moved on a difference."
+       },
+       "callId": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Unique, in the order the calls were made. A retry, a refusal or one call per film of a split group is a call of its own."
        }
       }
      }

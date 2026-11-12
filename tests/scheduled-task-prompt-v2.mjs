@@ -102,8 +102,8 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
    const r=await tracked('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});
    assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'dry_run');assert.equal(r.data.manifestHash,m.manifestHash,'the frozen manifest identity');
    const observed=hex(r.data.profile.hash);assert.equal(observed,hex(m.profile.hash),'step 7: the profile in the answer is the manifest profile');
-   calls.push({groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true,observedProfileHash:observed});
-   for(const [k,x] of r.data.results.entries())films.push({filmId:x.filmId,plan:group[k].plan,groupIndex:g,fingerprint:items[k].fingerprint??null,prediction:items[k].prediction,submitStatus:x.status,liveInput:x.liveInput,validation:x.validation||null,generationMs:null});
+   calls.push({callId:g,groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true,observedProfileHash:observed});
+   for(const [k,x] of r.data.results.entries())films.push({filmId:x.filmId,plan:group[k].plan,groupIndex:g,callId:g,fingerprint:items[k].fingerprint??null,prediction:items[k].prediction,submitStatus:x.status,liveInput:x.liveInput,validation:x.validation||null,generationMs:null});
   }
   const result={schemaVersion:1,sampleId:sample.sampleId,groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:hex(m.profile.hash)},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:hex(m.contract.registryDigest)},films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']}};
   assert.deepEqual(validResult(result),[],'result for group size '+size);assert.equal(films.length,sample.filmIds.length);assert.ok(films.every(f=>f.liveInput==='same'&&f.submitStatus==='would_write'));
@@ -153,11 +153,11 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
   const films=[],calls=[];let g=0,stopped=null;
   for(let i=0;i<m.films.length;i+=size,g++){
    const group=m.films.slice(i,i+size);
-   if(stopped){for(const f of group)films.push({filmId:f.filmId,plan:f.plan,groupIndex:g,fingerprint:null,prediction:null,submitStatus:'not_submitted',liveInput:'unknown',validation:null,generationMs:null});continue;}
+   if(stopped){for(const f of group)films.push({filmId:f.filmId,plan:f.plan,groupIndex:g,callId:null,fingerprint:null,prediction:null,submitStatus:'not_submitted',liveInput:'unknown',validation:null,generationMs:null});continue;}
    const items=group.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction,inputHash:f.inputHash}));
    const r=await w.call('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});assert.ok(!r.isError);
-   const observed=hex(r.data.profile.hash);calls.push({groupIndex:g,itemCount:items.length,bodyBytes:null,toolMs:null,ok:true,observedProfileHash:observed});
-   for(const [k,res] of r.data.results.entries())films.push({filmId:res.filmId,plan:group[k].plan,groupIndex:g,fingerprint:items[k].fingerprint,prediction:items[k].prediction,submitStatus:res.status,liveInput:res.liveInput,validation:null,generationMs:null});
+   const observed=hex(r.data.profile.hash);calls.push({callId:g,groupIndex:g,itemCount:items.length,bodyBytes:null,toolMs:null,ok:true,observedProfileHash:observed});
+   for(const [k,res] of r.data.results.entries())films.push({filmId:res.filmId,plan:group[k].plan,groupIndex:g,callId:g,fingerprint:items[k].fingerprint,prediction:items[k].prediction,submitStatus:res.status,liveInput:res.liveInput,validation:null,generationMs:null});
    if(observed!==hex(m.profile.hash))stopped='profile_moved';
   }
   return {schemaVersion:1,sampleId:'fixture-sample-2',groupSize:size,promptSha256:sha(dry),manifestHash:m.manifestHash,profile:{version:m.profile.version,hash:hex(m.profile.hash)},contract:{fingerprintSchemaVersion:m.contract.fingerprintSchemaVersion,fingerprintPromptVersion:m.contract.fingerprintPromptVersion,predictionPromptVersion:m.contract.predictionPromptVersion,registryDigest:hex(m.contract.registryDigest)},stoppedReason:stopped,films,calls,telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs','bodyBytes']}};

@@ -12,8 +12,8 @@ const schema=JSON.parse(fs.readFileSync('docs/reference/scheduled-task-prompts/b
 const HASH='a'.repeat(64),PH='abcdef12';
 const pred=(rating,p,signals=['Investigation','Causal puzzle'],risk='Mixed payoff',conf='medium')=>({predictedRating:rating,probability4Plus:p,confidence:conf,matchSignals:signals,mainRisk:risk,moodLabels:['мрачный','напряжённый']});
 const pass=(size,ids,make,extra={})=>({schemaVersion:1,sampleId:'s1',groupSize:size,manifestHash:HASH,profile:{version:1,hash:PH},contract:{fingerprintSchemaVersion:1,fingerprintPromptVersion:1,predictionPromptVersion:1,registryDigest:'abcdef12'},
- films:ids.map((id,i)=>({filmId:id,plan:'prediction_only',groupIndex:Math.floor(i/size),fingerprint:null,prediction:make(id,i),submitStatus:'would_write',liveInput:'same',validation:null,generationMs:null})),
- calls:Array.from({length:Math.ceil(ids.length/size)},(_,g)=>({groupIndex:g,itemCount:Math.min(size,ids.length-g*size),bodyBytes:1000,toolMs:null,ok:true,observedProfileHash:PH})),
+ films:ids.map((id,i)=>({filmId:id,plan:'prediction_only',groupIndex:Math.floor(i/size),callId:Math.floor(i/size),fingerprint:null,prediction:make(id,i),submitStatus:'would_write',liveInput:'same',validation:null,generationMs:null})),
+ calls:Array.from({length:Math.ceil(ids.length/size)},(_,g)=>({callId:g,groupIndex:g,itemCount:Math.min(size,ids.length-g*size),bodyBytes:1000,toolMs:null,ok:true,observedProfileHash:PH})),
  telemetry:{model:null,tokens:null,quota:null,wallMs:null,unavailable:['model','tokens','quota','wallMs','generationMs','toolMs']},...extra});
 
 // 1. Hand-checked arithmetic: three films, sizes 1 and 2.
@@ -51,7 +51,7 @@ function round(x){return Math.round(x*1e4)/1e4;}
  assert.equal(code(()=>buildReport([mk(1),mk(2,{profile:{version:2,hash:'abcdef99'}})])),'identity_mismatch');
  assert.equal(code(()=>buildReport([mk(1),{...mk(2),films:[...mk(2).films].reverse()}])),'film_set_mismatch');
  assert.equal(code(()=>buildReport([mk(1),mk(1)])),'duplicate_size');
- assert.equal(code(()=>buildReport([mk(3,{calls:[{groupIndex:0,itemCount:4,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:PH}]})])),'group_size_exceeded');
+ assert.equal(code(()=>buildReport([mk(3,{calls:[{callId:0,groupIndex:0,itemCount:4,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:PH}]})])),'group_size_exceeded');
  assert.equal(code(()=>buildReport([pass(1,['A/../b'],()=>pred(3,.5))])),'invalid_input','an unsafe film id is refused by the input schema');
  assert.equal(code(()=>buildReport([])),'no_results');
 }
@@ -111,12 +111,38 @@ function round(x){return Math.round(x*1e4)/1e4;}
  // a call whose observed profile hash differs: its films are stale, the pass stopped, the rest not submitted
  const q2=pass(2,ids,(id)=>pred(truth[id],.5));q2.calls[0].observedProfileHash='abcdef99';q2.calls[1].observedProfileHash='abcdef99';
  const rq=buildReport([p1,q2],{truth});assert.equal(rq.perSize[1].comparableFilms,0);assert.equal(rq.perSize[1].excluded.staleProfile,4);assert.equal(rq.perSize[1].profileMismatchCalls,2);assert.ok(rq.unknown.includes('profile_moved'));
- const q3=pass(2,ids,(id)=>pred(truth[id],.5));q3.calls=[{...q3.calls[0]},{...q3.calls[1],observedProfileHash:null}];q3.films[2].submitStatus='not_submitted';q3.films[3].submitStatus='not_submitted';q3.films[2].prediction=null;q3.films[3].prediction=null;q3.stoppedReason='profile_moved';q3.calls=[q3.calls[0]];
+ const q3=pass(2,ids,(id)=>pred(truth[id],.5));q3.calls=[{...q3.calls[0]},{...q3.calls[1],observedProfileHash:null}];q3.films[2].submitStatus='not_submitted';q3.films[3].submitStatus='not_submitted';q3.films[2].callId=null;q3.films[3].callId=null;q3.films[2].prediction=null;q3.films[3].prediction=null;q3.stoppedReason='profile_moved';q3.calls=[q3.calls[0]];
  const rs=buildReport([p1,q3],{truth});assert.equal(rs.perSize[1].comparableFilms,2);assert.equal(rs.perSize[1].statuses.not_submitted,2);assert.equal(rs.perSize[1].stoppedReason,'profile_moved');
  // an unobserved profile hash on a submitted film is stale too (the check is required)
  const q4=pass(1,ids,(id)=>pred(truth[id],.5));q4.calls.forEach(c=>{c.observedProfileHash=null;});assert.equal(buildReport([q4]).perSize[0].comparableFilms,0);
  // a complete 100-film, ten-size set is final
  const many=Array.from({length:100},(_,i)=>'tmdb_'+(2000+i));const full=buildReport(Array.from({length:10},(_,k)=>pass(k+1,many,()=>pred(3,.5))));assert.equal(full.completeness.final,true);assert.ok(!full.unknown.includes('partial_sizes'));
+}
+
+// 4c. Association by explicit callId, never by array position (the review's counterexample), and fail-closed on anything ambiguous.
+{
+ const ids=['a','b','c','d'],MOVED='abcdef99',mk=()=>pass(2,ids,()=>pred(3,.5)),code=fn=>{try{fn();}catch(e){assert.ok(e instanceof AbReportError);return e.code;}throw new Error('expected a refusal');};
+ const base1=()=>pass(1,ids,()=>pred(3,.5)),compare=(r)=>buildReport([base1(),r]).perSize[1];
+ // reordered calls: group 0 moved, group 1 fine; the array order is reversed
+ const re=mk();re.calls=[{...re.calls[1],observedProfileHash:PH},{...re.calls[0],observedProfileHash:MOVED}];
+ let row=compare(re);assert.equal(row.comparableFilms,2);assert.equal(row.excluded.staleProfile,2,'group 0 (callId 0) is stale and group 1 is not, whatever the array order');assert.equal(row.profileMismatchCalls,1);
+ // the review's exact counterexample: calls=[{groupIndex:1,matching},{groupIndex:0,moved}] must not certify group 0 with the first entry
+ const ce=mk();ce.calls=[{callId:1,groupIndex:1,itemCount:2,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:PH},{callId:0,groupIndex:0,itemCount:2,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:MOVED}];
+ row=compare(ce);assert.deepEqual([row.comparableFilms,row.excluded.staleProfile],[2,2]);
+ const group0=ce.films.filter(f=>f.groupIndex===0).map(f=>f.filmId);assert.deepEqual(group0,['a','b']);
+ // a group split over several calls: a and b in two calls of group 0, only b's call moved; plus a refused attempt and a retry that no film names
+ const sp=mk();sp.films[0].callId=0;sp.films[1].callId=1;sp.films[2].callId=3;sp.films[3].callId=3;
+ sp.calls=[{callId:0,groupIndex:0,itemCount:1,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:PH},{callId:1,groupIndex:0,itemCount:1,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:MOVED},{callId:2,groupIndex:0,itemCount:2,bodyBytes:99999,toolMs:null,ok:false,observedProfileHash:null},{callId:3,groupIndex:1,itemCount:2,bodyBytes:1,toolMs:null,ok:true,observedProfileHash:PH}];
+ row=compare(sp);assert.equal(row.comparableFilms,3);assert.equal(row.excluded.staleProfile,1,'only the film of the moved call is stale');assert.equal(row.sizeRefusals,1);assert.equal(row.profileMismatchCalls,1,'the refused attempt names no film and is not a profile mismatch');
+ // ambiguity is refused: dangling callId, duplicate callId, a film naming a call of another group, a grouping that differs from the frozen one, a not_submitted film naming a call, more films than a call holds
+ const bad=(edit,expected,label)=>{const r=mk();edit(r);assert.equal(code(()=>buildReport([base1(),r])),expected,label);};
+ bad(r=>{r.films[0].callId=9;},'call_mapping','dangling callId');
+ bad(r=>{r.calls[1].callId=0;},'call_mapping','duplicate callId');
+ bad(r=>{r.films[0].callId=1;},'call_mapping','a film naming a call of another group');
+ bad(r=>{r.films[1].groupIndex=1;},'group_mapping','groupIndex differs from the frozen grouping');
+ bad(r=>{r.films[3].submitStatus='not_submitted';},'call_mapping','a not_submitted film must name no call');
+ bad(r=>{r.calls[0].itemCount=1;},'call_mapping','a call that holds fewer items than films naming it');
+ bad(r=>{r.films[0].callId=undefined;delete r.films[0].callId;},'invalid_input','a film without callId');
 }
 
 // 5. A full shape: 100 films, ten passes, with a deterministic generator whose noise grows with the group size, and the CLI end to end on private temp files.
