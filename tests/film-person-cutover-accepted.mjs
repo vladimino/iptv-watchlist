@@ -12,6 +12,13 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {OWNER_LINK_WAIVER,REQUIRED_CLASSES,cutoverDigest,cutoverMinimumGate} from '../src/film-person-cutover-minimum.js';
 import {GATE_STATEMENTS} from '../scripts/film-person-capture.mjs';
+
+// AIR-374: ACCEPTED_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
+// A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
+const ONLY=process.env.ACCEPTED_ONLY?new Set(process.env.ACCEPTED_ONLY.split(',')):null;
+let currentSection='-';
+const section=id=>{if(ONLY&&!ONLY.has(id))return false;currentSection=id;return true;};
+process.on('exit',code=>{if(code!==0)console.error('LEAN_SECTION '+currentSection);});
 const B=await import(process.env.BASELINE_RECORD_MODULE?pathToFileURL(path.resolve(process.env.BASELINE_RECORD_MODULE)).href:'../src/film-person-baseline.js');
 const A=await import(process.env.ACCEPTED_MODULE?pathToFileURL(path.resolve(process.env.ACCEPTED_MODULE)).href:'../src/film-person-cutover-accepted.js');
 const {RECORDING_PATHS,baselineGate,keyOf,ledgerDigest,recordBaselineVerified,sha256Hex}=B;
@@ -88,7 +95,7 @@ const failsWith=async(ledger,reason)=>{
 const AT_CAP=Object.fromEntries(Object.entries(CAPS));
 
 // ---------- 1. the measured counts and the caps ----------
-{
+if(section('1')){
  const measured=await build({unexplained:MEASURED});
  const gate=await cutoverAcceptedGate(measured);
  assert.deepEqual(gate.reasons,[]);assert.equal(gate.pass,true);
@@ -128,7 +135,7 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
 }
 
 // ---------- 2. tampering ----------
-{
+if(section('2')){
  const good=await build({unexplained:MEASURED});
  const clone=()=>JSON.parse(JSON.stringify(good));
  // a count lowered by hand: the class digest no longer matches the ledger digest
@@ -167,7 +174,7 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
 }
 
 // ---------- 3. the operator-copy source: verified only with complete evidence ----------
-{
+if(section('3')){
  assert.deepEqual(await operatorCopyReasons(await factsOf(),CONTEXT),[]);
  const verdict=async(change,context=CONTEXT)=>{const facts=await factsOf();change(facts);return operatorCopyReasons(facts,context);};
  const has=async(change,reason,context)=>{const reasons=await verdict(change,context);assert.ok(reasons.includes(reason),reason+': '+reasons.join());};
@@ -272,7 +279,7 @@ const AT_CAP=Object.fromEntries(Object.entries(CAPS));
 // ---------- 4. the recording path ----------
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-cutover-accepted-'));
 process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
-{
+if(section('4')){
  const sql=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text});if(r.status!==0)throw new Error(r.stderr);};
  const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+';'});if(r.status!==0)throw new Error(r.stderr);const out=r.stdout.trim();return out?JSON.parse(out):[];};
  const template=path.join(root,'template.sqlite');
@@ -311,7 +318,7 @@ process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
 }
 
 // ---------- 5. static: inactive ----------
-{
+if(section('5')){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-person-cutover-accepted'))importers.push(full);}};
  walk('src');
