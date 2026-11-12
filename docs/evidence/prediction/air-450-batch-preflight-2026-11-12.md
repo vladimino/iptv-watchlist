@@ -1,6 +1,6 @@
 # AIR-450 batch preflight tool: measured offline cost and parity (12 Nov 2026)
 
-**Status: offline measurement on the real MCP handler and the real Worker validators; no production read or write, no model call, no Scheduled Task.** It accompanies [ADR 0131](../../adr/0131-batch-candidate-preflight-tool.md). The fixtures are synthetic; no film id, manifest, profile, fingerprint or prediction of the experiment appears here.
+**Status: offline measurement on the real MCP handler and the real Worker validators; no production read or write, no model call, no Scheduled Task.** It accompanies [ADR 0131 (Proposed)](../../adr/0131-batch-candidate-preflight-tool.md). The fixtures are synthetic; no film id, manifest, profile, fingerprint or prediction of the experiment appears here.
 
 ## Why
 
