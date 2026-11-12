@@ -37,6 +37,7 @@ export function bucket(chunk=4096){
   },
   async head(key){const o=objects.get(key);return o?{etag:o.etag,size:o.bytes.length}:null;},
   async delete(key){objects.delete(key);},
+  async list({prefix='',limit=1000}={}){return {objects:[...objects.keys()].filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key}))};},
   async get(key,options={}){
    const o=objects.get(key);if(!o)return null;
    const offset=options.range?.offset??0,bytes=o.bytes.subarray(offset);
@@ -91,7 +92,7 @@ export async function bootstrap(state,day,latest=scan(day)){
 // One EPG commit and its ledger seal, by the Worker's own functions. `mode` is the flag (undefined: unset).
 export async function commit(state,day,mode,{latest=scan(day),sealSteps=Infinity,expectThrow=false}={}){
  const id=runId(day),at=new Date(BASE+day*DAY).toISOString();
- const env=envOf(state,mode);
+ const env=(state.envFactory||envOf)(state,mode);
  await state.bkt.put('sync.json',JSON.stringify({runId:id,stage:'epg',startedAt:at,updatedAt:at}));
  const run={runId:id,stage:'epg',startedAt:at,watchlist:[],events:[]};
  // The lease of the previous step is left to expire, as between two requests.
@@ -106,7 +107,7 @@ export async function commit(state,day,mode,{latest=scan(day),sealSteps=Infinity
  let steps=0,done=false;const calls=env.DB.calls,trips=()=>calls.queries+calls.batches,from=trips();
  while(!done&&steps<sealSteps){
   steps++;
-  const stepEnv=envOf(state,mode),lease=await takeLease(stepEnv,state.file);
+  const stepEnv=(state.envFactory||envOf)(state,mode),lease=await takeLease(stepEnv,state.file);
   const result=await call('sealLedgerStep')(stepEnv,run,lease,Date.now()+60000);
   done=result.done;staging.sealTrips=(staging.sealTrips||0)+stepEnv.DB.calls.queries+stepEnv.DB.calls.batches;staging.sealBatches=(staging.sealBatches||0)+stepEnv.DB.calls.batches;
  }

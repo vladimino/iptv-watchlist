@@ -60,6 +60,10 @@ Runtime mode and configured Cloudflare Access policies must be rechecked for liv
 
 See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract](../reference/api/mcp.md) and [D1 schema boundary](../reference/data/d1-schema.md).
 
+## EPG diagnostic canary (ADR 0121, foundation only)
+
+Accepted design, not part of the topology above: an isolated diagnostic Workflow, bucket and D1 in the same `iptv` Worker. AIR-453 delivers only the inert execution context ([reference](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-isolated-execution-context-air-453-adr-0121)); no binding, resource or flow exists yet, so the diagrams are unchanged. The topology and scheduling diagrams are updated with the Workflow and receipts (AIR-455) and the provisioned resources (AIR-456).
+
 ## Ratings Workflow binding (AIR-347)
 
 `wrangler.jsonc` declares Workflow `iptv-ratings` (`RATINGS_WORKFLOW`, class `RatingsWorkflow`). Deployment creates the resource only; no instance exists until `ensure` runs in `cloudflare` mode. It also declares Workflow `iptv-epg` (`EPG_WORKFLOW`, class `EpgWorkflow`, [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md), Proposed): inert, its mode is `external` until the owner's switch and its D1 table (migration `0017`) is not applied by a deploy.

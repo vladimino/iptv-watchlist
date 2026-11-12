@@ -110,6 +110,10 @@ This is the operator sequence of the shared reliability contract ([ADR 0089](../
 
 **Quarantine.** `quarantined` with reason `budget_exhausted` ends only the current run key; the next run key retries by itself. Any other quarantine reason is `unsafe` and stays until an explicitly approved, reason-specific recovery action; L0 diagnosis alone is not permission to clear. Read the `failure` fingerprint and the domain's checkpoint first; clearing never resets a lease or forces a step.
 
+## EPG diagnostic canary foundation (AIR-453, inert)
+
+`src/epg-diagnostic.js` is bundled (so the Worker deploys with it) and referenced by nothing at runtime; `wrangler.jsonc` has no diagnostic binding, resource or migration directory, so a deploy needs, creates and applies nothing for it. Production routes are unaffected whether or not the diagnostic resources exist. Provisioning (a separate R2 bucket, a separate D1 with the production chain plus `diagnostic-migrations/0001`, the identity via `EpgDiagnostic.provision`, the Workflow binding) is the operation of AIR-456 and needs its own owner GO; so does every diagnostic invocation. Code rollback is a revert and removes nothing from a provisioned diagnostic bucket or database.
+
 ## Troubleshooting and recovery
 
 - [Cloudflare deployment metadata HTTP 403](recovery/deploy-metadata-403.md) — token policy diagnostics; do not widen permissions without a specific failed check.
