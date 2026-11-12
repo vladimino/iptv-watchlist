@@ -77,6 +77,7 @@ export const WEIGHTS={
  'film-person-prepared-loader.mjs':18,
  'offline-importer.mjs':18,
  'canonical-catalog-reader-mutation.mjs':17,
+ 'film-person-e6-measure-mutation.mjs':29,
  'd1-enrichment-fairness.mjs':17,
  'd1-enrichment.mjs':16,
  'discovery-admission-packed.mjs':14,
