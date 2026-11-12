@@ -62,6 +62,7 @@ export const WEIGHTS={
  'canonical-differential-mutation.mjs':26,
  'd1-enrichment-stored-pages.mjs':26,
  'prediction-batch-start.mjs':25,
+ 'prediction-batch-submit.mjs':28,
  'canonical-receipts-mutation.mjs':24,
  'd1-enrichment-bucket-unicode.mjs':24,
  'd1-backfill.mjs':22,
