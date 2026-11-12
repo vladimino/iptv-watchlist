@@ -32,7 +32,8 @@ const onAny=number=>!only||[...only].some(item=>item===String(number)||item.star
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-receipts-'));
 // The scenario databases are removed when the process ends (the mutation check starts it dozens of times: nothing may pile up in the temporary directory).
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort().map(name=>name.replace(/\.sql$/,''));
+// This file tests the schema-19 receipt table: the chain stops at 0019 (migration 0020 follows it and has its own tests, tests/canonical-producer-schema.mjs).
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort().map(name=>name.replace(/\.sql$/,''));
 const MIGRATION=process.env.CANON_RECEIPTS_MIGRATION||'migrations/0019_canonical_write_receipt.sql';
 const sql=name=>name==='0019_canonical_write_receipt'?fs.readFileSync(MIGRATION,'utf8'):fs.readFileSync('migrations/'+name+'.sql','utf8');
 const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});

@@ -157,6 +157,36 @@ function round(x){return Math.round(x*1e4)/1e4;}
  const ok=pass(2,ids,()=>pred(3,.5));ok.films[0].failureReason=null;assert.doesNotThrow(()=>buildReport([p1,ok]));
 }
 
+// 4e. Preflight: calls of kind preflight are counted apart and are never a profile mismatch; per-film outcomes are counted (first-attempt invalid, recovered, unresolved).
+{
+ const ids=['a','b','c','d'],p1=pass(1,ids,()=>pred(3,.5)),p2=pass(2,ids,()=>pred(3,.5));
+ p2.calls=[{callId:5,kind:'preflight',groupIndex:0,itemCount:2,bodyBytes:10,toolMs:3,ok:true,observedProfileHash:null},{callId:6,kind:'preflight',groupIndex:0,itemCount:1,bodyBytes:5,toolMs:2,ok:true,observedProfileHash:null},...p2.calls];
+ p2.films[0].preflight={valid:true,attempts:1,issues:[]};p2.films[1].preflight={valid:true,attempts:2,issues:[]};p2.films[2].preflight={valid:false,attempts:2,issues:[{path:'fingerprint.evidence.execution.stakes',code:'invalid_ref'}]};
+ const r=buildReport([p1,p2]);const row=r.perSize[1];
+ assert.deepEqual(row.preflight,{checked:3,invalidFirst:2,recovered:1,unresolved:1});assert.equal(row.cost.preflightCalls,2);assert.equal(row.cost.mcpCalls,4,'every MCP call counts, preflight included');assert.equal(row.profileMismatchCalls,0,'a preflight call has no profile to observe');assert.equal(row.comparableFilms,4);
+ assert.deepEqual(r.perSize[0].preflight,{checked:0,invalidFirst:0,recovered:0,unresolved:0});assert.equal(r.perSize[0].cost.preflightCalls,0);assert.deepEqual(check(schema.$defs.report,r),[]);
+ const bad=pass(2,ids,()=>pred(3,.5));bad.films[0].preflight={valid:true,attempts:3,issues:[]};
+ try{buildReport([p1,bad]);assert.fail('expected a refusal');}catch(e){assert.ok(e instanceof AbReportError);assert.equal(e.code,'invalid_input');}
+ const bad2=pass(2,ids,()=>pred(3,.5));bad2.calls[0].kind='SECRETKIND';
+ try{buildReport([p1,bad2]);assert.fail('expected a refusal');}catch(e){assert.equal(e.code,'invalid_input');assert.ok(!e.message.includes('SECRETKIND'));}
+}
+
+// 4f. A film's receipt is a submit call, never a preflight call, even when both are in the same group with distinct callIds; one global callId sequence is accepted.
+{
+ const ids=['a','b','c','d'],base1=()=>pass(1,ids,()=>pred(3,.5));
+ const mk=()=>{const p=pass(2,ids,()=>pred(3,.5));
+  // preflight 0, submit 1, preflight 2, submit 3 (one global sequence), films name their submit call
+  p.calls=[{callId:0,kind:'preflight',groupIndex:0,itemCount:2,bodyBytes:10,toolMs:1,ok:true,observedProfileHash:null},{callId:1,kind:'submit',groupIndex:0,itemCount:2,bodyBytes:10,toolMs:1,ok:true,observedProfileHash:PH},{callId:2,kind:'preflight',groupIndex:1,itemCount:2,bodyBytes:10,toolMs:1,ok:true,observedProfileHash:null},{callId:3,kind:'submit',groupIndex:1,itemCount:2,bodyBytes:10,toolMs:1,ok:true,observedProfileHash:PH}];
+  p.films.forEach((f,i)=>{f.callId=i<2?1:3;});return p;};
+ const ok=buildReport([base1(),mk()]);assert.equal(ok.perSize[1].comparableFilms,4);assert.equal(ok.perSize[1].excluded.staleProfile,0);assert.equal(ok.perSize[1].cost.preflightCalls,2);assert.equal(ok.perSize[1].cost.mcpCalls,4);
+ const code=fn=>{try{fn();}catch(e){assert.ok(e instanceof AbReportError);return e.code;}throw new Error('expected a refusal');};
+ const mis=mk();mis.films[0].callId=0; // the preflight call of the same group
+ assert.equal(code(()=>buildReport([base1(),mis])),'call_mapping','a receipt naming a preflight call is refused, not silently marked stale');
+ const mis2=mk();mis2.films[2].callId=2;assert.equal(code(()=>buildReport([base1(),mis2])),'call_mapping');
+ // legacy records without kind are submit calls and still map
+ const legacy=mk();legacy.calls.forEach(c=>{if(c.kind==='submit')delete c.kind;});assert.equal(buildReport([base1(),legacy]).perSize[1].comparableFilms,4);
+}
+
 // 5. A full shape: 100 films, ten passes, with a deterministic generator whose noise grows with the group size, and the CLI end to end on private temp files.
 {
  const ids=Array.from({length:100},(_,i)=>'tmdb_'+(1000+i));let seed=7;const rnd=()=>(seed=(seed*1103515245+12345)%2147483648)/2147483648;

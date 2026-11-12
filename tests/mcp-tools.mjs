@@ -133,6 +133,12 @@ const forbidden=[
  ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
  ['prediction_validate',{fingerprint:'text'}],
  ['prediction_validate',{prediction:[]}],
+ ['prediction_batch_validate',{}],
+ ['prediction_batch_validate',{items:[]}],
+ ['prediction_batch_validate',{items:'text'}],
+ ['prediction_batch_validate',{items:[{filmId:'f',prediction:{}}],key:'enrichment/x'}],
+ ['prediction_batch_validate',{items:Array.from({length:11},(_,i)=>({filmId:'f'+i,prediction:{}}))}],
+ ['prediction_batch_validate',{items:[{filmId:'f',prediction:{}},{filmId:'f',prediction:{}}]}],
 ];
 for(const [name,args] of forbidden){
  fetches.length=0;
@@ -173,7 +179,7 @@ for(const tool of tools){
  assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_pending']){
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
@@ -308,6 +314,17 @@ assert.deepEqual(preflightOne.body.result.structuredContent.fingerprint,{checked
 assert.deepEqual(validateDenied,[]);
 assert.deepEqual(fetches.filter(url=>url!==TEAM+'/cdn-cgi/access/certs'),[]);
 assert.equal((await tool(validateSealed,'prediction_validate',{fingerprint},{assertion:null})).response.status,403,'preflight stays behind the Access JWT');
+assert.deepEqual(validateDenied,[]);
+// prediction_batch_validate over the real HTTP/Access path: the same verdicts for a group, bound to filmId and index, no storage, behind the Access JWT, answers without a bucket.
+const batchGood=await tool(validateSealed,'prediction_batch_validate',{items:[{filmId:'f1',fingerprint,prediction},{filmId:'f2',prediction},{filmId:'f3',fingerprint:evidenced,metadata:{synopsis:'A crew plans a robbery.'}},{filmId:'f4',fingerprint:evidenced}]});
+assert.equal(batchGood.body.result.isError,undefined,JSON.stringify(batchGood.body));
+const batchOut=batchGood.body.result.structuredContent;
+assert.equal(batchOut.success,false);assert.equal(batchOut.contractVersion,1);assert.deepEqual(batchOut.counts,{items:4,valid:3,invalid:1});assert.equal(batchOut.storage,'not_accessed');assert.equal(batchOut.sideEffects,'none');
+assert.deepEqual(batchOut.results.map(r=>[r.index,r.filmId,r.valid]),[[0,'f1',true],[1,'f2',true],[2,'f3',true],[3,'f4',false]]);
+assert.deepEqual(batchOut.results[3].fingerprint.issues,[{path:'fingerprint.evidence.plotMechanics.heist',code:'invalid_ref'}],'the same issue prediction_validate gives for the same payload');
+assert.deepEqual(batchOut.results[0].fingerprint,preflightGood.body.result.structuredContent.fingerprint);
+assert.equal((await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD},'prediction_batch_validate',{items:[{filmId:'f1',prediction}]})).body.result.structuredContent.valid,true,'answers without a bucket binding');
+assert.equal((await tool(validateSealed,'prediction_batch_validate',{items:[{filmId:'f1',prediction}]},{assertion:null})).response.status,403,'stays behind the Access JWT');
 assert.deepEqual(validateDenied,[]);
 // The preflight verdict and the submit verdict agree on the same payload.
 assert.deepEqual(preflightBad.body.result.structuredContent.fingerprint.issues,rejectedItem.validation.issues);

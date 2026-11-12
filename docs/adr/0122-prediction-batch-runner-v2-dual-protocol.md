@@ -104,6 +104,10 @@ This addendum records implementation-time corrections to the decision text above
 
 Decision D1 reserved the byte limit of `batch_start` for the owner after a measurement, and the accepted text above is not rewritten. The owner approved raising `maxManifestBytes` from the initial 160 KiB to **256 KiB (262,144 bytes)** after a bounded production canary was refused with `manifest_too_large` (`bytes` 239,968 for 100 films, `largestFilmBytes` 3,265) at 163,840. The fail-closed behaviour of decision 2 is unchanged: nothing is shortened, skipped or replaced, and an answer over the new ceiling is the same `409`. Only the constant changed; the 100 films, the compact format, `pin` and snapshot rules, the queue, the lease, D1/R2 authority and the submit limits did not. The measurement, the MCP result size (about twice the answer) and the unproven client side are in the [AIR-450 evidence](../evidence/prediction/air-450-manifest-limit-256kib-2026-11-12.md). No architecture diagram changes: no flow, authority or trust boundary moved.
 
+## Addendum 2026-11-13: accepted read-only group preflight before submit (AIR-450)
+
+[ADR 0131](0131-batch-candidate-preflight-tool.md) (**Accepted** after [explicit owner approval](https://github.com/vladimino/iptv-watchlist/pull/576#issuecomment-6838792033)) refines ADR 0122 in part: optional MCP tool `prediction_batch_validate` checks 1–10 candidates against shared validators with no storage I/O, before `prediction_batch_submit`. The submit validation remains mandatory and authoritative, including manifest, `inputHash`, run epoch and live profile checks. This addendum supersedes only the former assumption that validation happens solely at submit; the original accepted ADR text is retained for history, and the queue/lease/persistence decisions remain unchanged. This approval does not authorize any Scheduled Task mutation or prediction run.
+
 ## Follow-ups
 
 Next card: [AIR-447](https://trello.com/c/3jrJcvWH). Current state and later cards belong to the Trello roadmap and GitHub.
