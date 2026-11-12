@@ -83,6 +83,7 @@ export const WEIGHTS={
  'offline-importer.mjs':14,
  'epg-diagnostic-context.mjs':11,
  'film-person-prepared-loader.mjs':13,
+ 'film-person-h1-rehearsal.mjs':12,
  'canonical-catalog-reader-mutation.mjs':12,
  'd1-enrichment.mjs':12,
  'film-person-capture.mjs':11,
