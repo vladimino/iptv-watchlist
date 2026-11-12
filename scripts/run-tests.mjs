@@ -56,6 +56,7 @@ export const WEIGHTS={
  'projector-marker-fence-mutation.mjs':38,
  'projector-bulk-spike.mjs':36,
  'run-tests-runner.mjs':31,
+ 'epg-diagnostic-context.mjs':8,
  'd1-enrichment-buckets.mjs':28,
  'canonical-differential-mutation.mjs':26,
  'd1-enrichment-stored-pages.mjs':26,
