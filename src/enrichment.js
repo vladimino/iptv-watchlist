@@ -1874,8 +1874,8 @@ function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
  return catalogHeldResponse(error.code,{runId,leaseTtlMs:RUNNER_LEASE_TTL,...extra});
 }
 // The start finds nothing eligible: it releases the lease and records the idle check (a quota or retry-backoff stop is blocked, an empty queue is a noop).
-async function startIdle(env,{runId,body,profile,queue,plan}){
- await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
+async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true}){
+ if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
 }
 // ---- Batch runner v2: batch_start (ADR 0122). One request returns one self-sufficient manifest of at most BATCH_RUNNER.maxManifestFilms films. ----
 // It runs beside the v5 runner on the same queue, runner lease, retry records and persistence. `batch_submit` is a separate delivery.
@@ -1998,6 +1998,15 @@ async function batchStartRoute(env,body,requestId){
  // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a v5 start runs before it takes the lease: the previous run's retries, and a held catalog.
+ // A live runner lease is another run's (a v5 run, or an earlier v2 run): this attempt is turned away before it writes anything to the queue, so a start that will answer
+ // `already_running` never refreshes or settles the queue under a running run. It is recorded as a start attempt, like every start attempt.
+ const live=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(live?.runId&&live.expiresAt>Date.now()){
+  const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
+  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
+  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
+  return json({status:'already_running',runId:live.runId,expiresAt:live.expiresAt});
+ }
  const unsettled=await atStage('settle_previous',()=>settlePreviousRun(env));if(unsettled)return unsettled;
  const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
  let queueRefreshed=false,queueSettled=0;
@@ -2008,6 +2017,19 @@ async function batchStartRoute(env,body,requestId){
   pre=await batchPreflight(env,body);if(pre.response)return pre.response;
   if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true});
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
+ }
+ // Nothing to deliver, or no capacity: the ordinary idle outcome of a start (`noop`, or `blocked` for `quota` and `retry_backoff`). No lease is taken and no run exists, so it is not passed
+ // through the stop recorder, which would manufacture a stopped run, a stop Event and a `latest-run` for it. The attempt is recorded and the queue's `lastBatch` is kept, as a v5 start does.
+ {
+  const plan=adaptivePredictionBatch(pre.queue,body.capacity);
+  if(plan.reason==='quota'||!pre.selection.items.length){
+   const idle={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};idle.diagnosticStartedAt=idle.createdAt;
+   const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false}));
+   const data=await result.clone().json();
+   idle.status=data.status==='noop'?'idle':data.status==='busy'?'completed':'blocked';idle.completedAt=new Date().toISOString();idle.stopReason=data.status==='blocked'?data.reason||null:null;
+   await diagnosticCheckpoint(env,idle,{startResult:['blocked','noop'].includes(data.status)?data.status:'error'});
+   return result;
+  }
  }
  const runId=crypto.randomUUID(),attemptAt=new Date().toISOString();
  const attempt={runId,createdAt:attemptAt,diagnosticStartedAt:attemptAt,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
@@ -2043,8 +2065,6 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
   try{
    const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{
     await settleExpiredDiagnostics(env);await deliverPendingEvents(env);
-    // Reported capacity of zero stops the start as it stops a v5 start; any other value does not shorten a manifest.
-    if(plan.reason==='quota'||!selection.items.length)return startIdle(env,{runId,body,profile,queue,plan});
     const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
     if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
     const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();

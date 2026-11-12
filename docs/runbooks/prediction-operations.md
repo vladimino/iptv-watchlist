@@ -116,6 +116,7 @@ The start step exists in the Worker; there is no submit step yet, so nothing bel
 - **`submit_in_flight`.** An earlier call of the same run still holds the submit gate (a replay that overlapped it, or an overlapping batch). Wait `retryAfterMs` and replay the same body; do not send a different batch meanwhile. The gate expires by itself if the handler died.
 - **`submit_in_flight` that does not clear.** If the gate does not clear within the caller's bounded retries, stop heartbeating and leave the run for lease expiry; do not reset the lease. A superseded handler commits nothing (`gate_lost`).
 - **A stuck v2 run.** Wait for lease expiry (15 minutes). Do not reset the lease. Its unsubmitted films are still in the queue.
+- **Idle starts.** A `batch_start` that answers `noop`, or `blocked` with reason `quota` or `retry_backoff`, took no lease and created no run, stop Event or `latest-run`; only the start-attempt row and the queue's `lastBatch` record it. `already_running` is the holder's run: the attempt wrote nothing to the queue, run or lease.
 - **`wrong_protocol`.** A client called the other protocol's tool on this run: stop it, do not retry with the other tool.
 - **Rollback.** Disable the v2 Task and re-enable the v5 Task (owner action). No data repair is needed.
 - **Dry run.** Writes nothing to prediction state, but it spends model quota and reads production: run it only with the owner's approval and record the result in [evidence](../evidence/prediction/README.md).

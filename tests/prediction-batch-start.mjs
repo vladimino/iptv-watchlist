@@ -338,6 +338,44 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  lose(10);const lost=await w.api('heartbeat',{runId:first.data.runId});assert.equal(lost.status,409);assert.equal(lost.data.status,'lease_lost');
 }
 
+// 16. A quota stop or an empty queue is an idle outcome of a start, not an owned run: no lease, no synthetic stopped run, no stop Event, no `latest-run`; the attempt row and the queue's `lastBatch` are kept.
+{
+ const RUN_HISTORY=/^(enrichment\/runs\/|enrichment\/latest-run|enrichment\/sources\/|events\/|enrichment\/event)/;
+ const w=await ready(6);await reconcile(w);
+ const r2a=r2Snapshot(w),runs0=runs(w),lease0=leaseRow(w),films0=filmTables(w);
+ const q=await batch(w,{capacity:{remainingPercent:0}});
+ assert.equal(q.status,200);assert.equal(q.data.status,'blocked');assert.equal(q.data.reason,'quota');assert.ok(!q.data.films&&!q.data.runId);
+ const d=r2Diff(r2a,r2Snapshot(w));
+ assert.deepEqual([...d.added,...d.changed].filter(k=>RUN_HISTORY.test(k)),[],'no synthetic blocked-<trigger>-<hour> run, source, stop Event or latest-run: '+[...d.added,...d.changed]);
+ assert.equal(runs(w),runs0,'no prediction_run row');assert.equal(leaseRow(w),lease0,'no lease was taken or released');assert.equal(filmTables(w),films0);
+ const queue=JSON.parse(sql(w.file,'SELECT chunk_text FROM prediction_queue ORDER BY seq').map(r=>r.chunk_text).join(''));assert.equal(queue.lastBatch.reason,'quota','the queue keeps its lastBatch bookkeeping');assert.equal(queue.lastBatch.runId,null);
+ assert.ok([...d.added,...d.changed].some(k=>k.startsWith('enrichment/run-diagnostics')),'the attempt is recorded as a start attempt');
+ // an empty queue is a noop with the same absence of run history
+ const one=await ready(1);await reconcile(one);const first=await batch(one);await one.api('complete',{runId:first.data.runId,reason:'external_termination'});
+ const v5=await one.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});const step=await one.api('next',{runId:v5.data.runId,batchSize:1});
+ await one.api('submit',{runId:v5.data.runId,items:[{filmId:step.data.items[0].filmId,fingerprint:one.fingerprint,prediction:one.prediction}]});await one.api('complete',{runId:v5.data.runId});
+ const b=r2Snapshot(one),n0=runs(one),leaseN=leaseRow(one),noop=await batch(one);
+ assert.equal(noop.data.status,'noop');assert.equal(runs(one),n0);assert.equal(leaseRow(one),leaseN);
+ const dn=r2Diff(b,r2Snapshot(one));assert.deepEqual([...dn.added,...dn.changed].filter(k=>RUN_HISTORY.test(k)),[]);
+}
+
+// 17. Coexistence with a running v5 run: a v2 attempt that is turned away writes nothing to the queue, the run, the lease or the films, even when the stored queue is stale; it is recorded as a start attempt.
+{
+ const w=await ready(20);await reconcile(w);
+ const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.data.status,'running');
+ const pair=await w.pair(v5.data.runId);assert.equal(pair.submit.status,200);
+ // the programme moves: the stored queue now fails the advance gate (a v2 start that went on would refresh it under the running v5 run)
+ w.records.set('programme.json',{runId:'p2',films:[]});w.records.set('sync.json',{runId:'p2',stage:'complete'});
+ const queue0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),run0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),lease0=leaseRow(w),films0=filmTables(w),r2a=r2Snapshot(w);
+ const turned=await batch(w);
+ assert.equal(turned.data.status,'already_running');assert.equal(turned.data.runId,v5.data.runId);assert.ok(!turned.data.films);
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0,'the stale queue was not refreshed or settled by a turned-away attempt');
+ assert.equal(JSON.stringify(sql(w.file,'SELECT * FROM prediction_run')),run0);assert.equal(leaseRow(w),lease0);assert.equal(filmTables(w),films0);
+ const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>!k.startsWith('enrichment/run-diagnostics')),[],'only the start-attempt row was written: '+[...d.added,...d.changed]);
+ // the v5 run is unaffected
+ const hb=await w.api('heartbeat',{runId:v5.data.runId});assert.equal(hb.status,200);assert.ok(!('epoch' in hb.data));
+}
+
 // 10. The object mode does not run v2.
 {
  const w=await ready(5);await reconcile(w);
