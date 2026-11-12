@@ -18,7 +18,7 @@ const R=await load('canonical-receipts.js');
 const {writeFilmFacts}=await load('canonical-film-writers.js');
 const {applyFilmFacts,reconcileOwnOrigin,filmFactsDigest,filmFactsOperation,producerRequestId,prePlanFilmFacts,INLINE_RECONCILE_LIMIT}=A;
 const {readAuthority}=await load('film-person-authority.js');
-const {listReceipts,reconcileReceipts,listAttention,operationRegistry,requestIdOf,normalizeRequest,OPERATION_KINDS,readReceipt}=R;
+const {listReceipts,reconcileReceipts,listAttention,operationRegistry,defineOperation,requestIdOf,normalizeRequest,OPERATION_KINDS,readReceipt}=R;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-producer-adapters-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -286,13 +286,15 @@ let raced;
  const ctx={requestId:receipt.requestId,attempt:2,target,currentRevision:0};
  const moved=filmFactsOperation({replan:async()=>facts({film:{contractVersion:1,originalTitle:'Other'}})});
  await assert.rejects(()=>moved.replay(env,receipt,ctx),code('film_person_invalid'),'a re-plan with other content is never replayed');
- await assert.rejects(()=>moved.readback(env,target,receipt),code('producer_replan_unavailable'));
+ assert.deepEqual(await moved.readback(env,target,receipt),{disposition:'abandon',errorClass:'producer_source_changed'},'a changed re-plan is a typed terminal disposition, not an exception');
  assert.equal(await moved.revalidate(env,receipt,{currentRevision:1}),'stale');
  const other=filmFactsOperation({replan:async()=>facts({id:'film:tmdb:604'})});
  await assert.rejects(()=>other.replay(env,receipt,ctx),code('film_person_invalid'),'another target is never replayed');
  const none=filmFactsOperation({replan:async()=>null});
  await assert.rejects(()=>none.replay(env,receipt,ctx),code('producer_replan_unavailable'));
- await assert.rejects(()=>none.readback(env,target,receipt),code('producer_replan_unavailable'));
+ assert.deepEqual(await none.readback(env,target,receipt),{digest:null,revision:0},'no re-plan reads as an absent effect (bounded retry), never as a terminal disposition');
+ const throwing=filmFactsOperation({replan:async()=>{throw new Error('producer down');}});
+ assert.deepEqual(await throwing.readback(env,target,receipt),{digest:null,revision:0},'a throwing re-plan is unavailable, not a crash');
  assert.equal(await none.revalidate(env,receipt,{currentRevision:1}),'stale');
  const plan=await prePlanFilmFacts(env,{input:facts(),requestId:receipt.requestId});
  assert.deepEqual([plan.noop,plan.expectedRevision],[false,0]);
@@ -322,7 +324,7 @@ let raced;
  await assert.rejects(()=>reconcileReceipts(untouched,{operations:new Map(),origin:'Bad'}),code('film_person_invalid'));
  assert.equal(untouched.DB.calls.queries,0,'an invalid origin is refused before any statement');
  // the registry cannot re-plan anything: every readback is refused, nothing is written, and only the own origin is considered, at most INLINE_RECONCILE_LIMIT of it
- const none=operationRegistry([filmFactsOperation({replan:async()=>null})]);
+ const none=operationRegistry([defineOperation({operation:'film_facts',atomic:true,readback:async()=>{throw new Error('database unreadable');},replay:async()=>{throw new Error('never');}})]);
  const inline=await reconcileOwnOrigin(env,{origin:'epg',operations:none,limit:50,now:()=>due});
  assert.equal(INLINE_RECONCILE_LIMIT,10);
  assert.equal(inline.considered,10,'bounded by the inline limit');
@@ -339,6 +341,99 @@ let raced;
  assert.equal(clamp.considered,1,'a limit of 0 is raised to 1');
  assert.equal(Number(one(file,"SELECT COUNT(*) FROM canonical_write_receipt WHERE state='pending'")),14,'nothing was settled');
  void readReceipt;void raced;
+}
+
+// A due receipt of the unchanged source whose revision has not moved (pending since T, due after the 120 s attempt window).
+const seeded=async()=>{
+ const file=database('open');
+ const digest=await filmFactsDigest(facts());
+ const requestId=await producerRequestId({origin:'epg',event:'run-1',target:{kind:'film',id:FILM},digest});
+ assert.equal(sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('"+requestId+"','film_facts','epg','film','"+FILM+"','"+digest+"',0,2,'pending',1,'"+iso(120000)+"','"+T+"','"+T+"')").status,0);
+ return {file,row:{request_id:requestId}};
+};
+// 12. A CHANGED SOURCE end to end (ADR 0123 decision 5). A due failed receipt whose re-plan digests differently is abandoned `producer_source_changed` by the inline reconcile: same request id, attempts untouched, no replay, no
+// canonical write, no second receipt, visible in listAttention.
+const dueFailed=async()=>{
+ const file=database('open');
+ const env=raceAt(file,2,async()=>{await interlope(file,{id:FILM,at:T,film:{contractVersion:1},sync:{metadataAt:iso(500)}},0);});
+ await assert.rejects(()=>apply(env),code('film_person_revision_conflict'));
+ const row=receipts(file)[0];
+ assert.deepEqual([row.state,row.attempts],['failed',1]);
+ return {file,row,before:dump(file).replace(/"updated_at":"[^"]*"/g,'')};
+};
+{
+ const {file,row}=await dueFailed();
+ const writes=dump(file);
+ const moved=operationRegistry([filmFactsOperation({replan:async()=>facts({film:{contractVersion:1,originalTitle:'Other'}}),now:()=>T})]);
+ const own=envOf(file);
+ const result=await reconcileOwnOrigin(own,{origin:'epg',operations:moved,now:()=>iso(61000)});
+ assert.deepEqual(result.abandoned,[{requestId:row.request_id,reason:'producer_source_changed'}]);
+ assert.deepEqual([result.replayed.length,result.waiting.length,result.failed.length,result.applied.length,result.needsReview.length],[0,0,0,0,0]);
+ const after=receipts(file);
+ assert.equal(after.length,1,'no second receipt');
+ assert.deepEqual([after[0].request_id,after[0].state,after[0].attempts,after[0].error_class,after[0].applied_revision],[row.request_id,'abandoned',1,'producer_source_changed',null]);
+ assert.notEqual(one(file,'SELECT settled_at FROM canonical_write_receipt'),null,'abandoned is settled');
+ assert.equal(title(file),null,'the old facts were never written');
+ assert.equal(revision(file),1,'no canonical write');
+ assert.equal(own.DB.calls.batches,1,'the one abandon transition and nothing else');
+ assert.ok(JSON.stringify(await listAttention(own)).includes('producer_source_changed'),'reviewable');
+ const again=await reconcileOwnOrigin(envOf(file),{origin:'epg',operations:moved,now:()=>iso(10*60*60*1000)});
+ assert.equal(again.considered,0,'terminal: never reconsidered');
+ void writes;
+}
+// the same source change met on the natural path (applyFilmFacts of the same event after the failure) settles the receipt without a write too
+{
+ const {file,row}=await dueFailed();
+ const done=await applyFilmFacts(envOf(file),{origin:'epg',event:'run-1',input:facts(),replan:async()=>facts({film:{contractVersion:1,originalTitle:'Other'}}),now:()=>iso(61000)});
+ assert.deepEqual([done.state,done.reason,done.requestId],['abandoned','producer_source_changed',row.request_id]);
+ assert.equal(title(file),null);assert.equal(revision(file),1);
+ assert.equal(receipts(file)[0].error_class,'producer_source_changed');
+}
+// A transient or absent re-plan stays retryable but BOUNDED: each inline pass counts an attempt (backoff applies), and after maxAttempts the receipt is abandoned `attempts_exhausted`; never a write.
+{
+ const {file,row}=await seeded();
+ const gone=operationRegistry([filmFactsOperation({replan:async()=>null,now:()=>T})]);
+ let at=121000,seen=[];
+ for(let pass=0;pass<8;pass++){
+  const env=envOf(file);
+  const result=await reconcileOwnOrigin(env,{origin:'epg',operations:gone,now:()=>iso(at)});
+  const state=receipts(file)[0];
+  seen.push([state.state,state.attempts,state.error_class]);
+  if(state.state==='abandoned')break;
+  at+=3*60*60*1000;
+  void result;
+ }
+ assert.deepEqual(seen[0],['unknown',2,'producer_replan_unavailable'],'the first unavailable pass counts an attempt and backs off');
+ assert.deepEqual(seen.at(-1),['abandoned',5,'attempts_exhausted'],JSON.stringify(seen));
+ assert.ok(seen.length<=5);
+ assert.equal(title(file),undefined);assert.equal(revision(file),0,'no write');
+ assert.equal(receipts(file).length,1);
+ void row;
+}
+// A producer whose re-plan throws behaves like an absent one (counted), and an unreadable database waits only until the receipt's age bound, then abandons `readback_expired`.
+{
+ const {file,row}=await seeded();
+ const boom=operationRegistry([filmFactsOperation({replan:async()=>{throw new Error('producer down');},now:()=>T})]);
+ await reconcileOwnOrigin(envOf(file),{origin:'epg',operations:boom,now:()=>iso(121000)});
+ assert.deepEqual([receipts(file)[0].state,receipts(file)[0].attempts],['unknown',2]);
+ const bad=operationRegistry([defineOperation({operation:'film_facts',atomic:true,readback:async()=>{throw new Error('database unreadable');},replay:async()=>{throw new Error('never');}})]);
+ const week=8*24*60*60*1000;
+ const fresh=await reconcileOwnOrigin(envOf(file),{origin:'epg',operations:bad,now:()=>iso(3*60*60*1000)});
+ assert.deepEqual(fresh.waiting.map(item=>item.reason),['readback_failed']);
+ assert.equal(receipts(file)[0].state,'unknown','a young receipt keeps waiting');
+ const old=await reconcileOwnOrigin(envOf(file),{origin:'epg',operations:bad,now:()=>iso(week)});
+ assert.deepEqual(old.abandoned,[{requestId:row.request_id,reason:'readback_expired'}],JSON.stringify(old));
+ assert.equal(receipts(file)[0].error_class,'readback_expired');
+ assert.equal(revision(file),0);
+}
+
+// A malformed disposition is not a disposition: it is an ordinary observation of an absent effect (bounded retry), never an abandon with an arbitrary class.
+{
+ const {file}=await seeded();
+ let replays=0;
+ const odd=operationRegistry([defineOperation({operation:'film_facts',atomic:true,readback:async()=>({disposition:'abandon',errorClass:'Bad Class!'}),replay:async()=>{replays++;throw new Error('replayed');}})]);
+ const result=await reconcileOwnOrigin(envOf(file),{origin:'epg',operations:odd,now:()=>iso(121000)});
+ assert.equal(result.abandoned.length,0);assert.equal(replays,1,'treated as an absent effect');
 }
 
 // 11. Static: dormant. No source file imports the adapter, build.mjs does not bundle it, it names no network, storage, timer or cron API, and it imports exactly the modules it is allowed to.

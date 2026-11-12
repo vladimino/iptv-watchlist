@@ -43,7 +43,6 @@ const MUTANTS=[
  ["the re-plan digest is not compared", "canonical-producer-adapters.js", "ok:matches(input,receipt,await filmFactsDigest(input))", "ok:matches(input,receipt,receipt.contentDigest)"],
  ["the readback treats absent content as present", "canonical-producer-adapters.js", "digest:present?receipt.contentDigest:null", "digest:receipt.contentDigest"],
  ["the readback treats present content as absent", "canonical-producer-adapters.js", "digest:present?receipt.contentDigest:null", "digest:null"],
- ["the readback trusts a changed re-plan", "canonical-producer-adapters.js", "if(!found||!found.ok)throw failed('producer_replan_unavailable');\n   const snapshot", "if(!found)throw failed('producer_replan_unavailable');\n   const snapshot"],
  ["the revalidation always proceeds", "canonical-producer-adapters.js", ".noop?'superseded':'proceed';\n  },", "?'proceed':'proceed';\n  },"],
  ["the revalidation never proceeds", "canonical-producer-adapters.js", ".noop?'superseded':'proceed';\n  },", ".noop?'superseded':'stale';\n  },"],
  ["the revalidation proceeds without a re-plan", "canonical-producer-adapters.js", "if(!found||!found.ok)return 'stale';", "if(!found)return 'stale';"],
@@ -54,6 +53,19 @@ const MUTANTS=[
  ["the listing origin is not validated", "canonical-receipts.js", "export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit=RECONCILE_LIMIT_MAX,origin=null}={}){\n const db=database(env);\n if(origin!==null&&!IDENT.test(origin||''))throw failed('film_person_invalid');", "export async function listReceipts(env,{states=NON_TERMINAL,dueBefore=null,limit=RECONCILE_LIMIT_MAX,origin=null}={}){\n const db=database(env);"],
  ["the reconcile does not pass the origin on", "canonical-receipts.js", "listReceipts(env,{dueBefore:at,limit,origin})", "listReceipts(env,{dueBefore:at,limit})"],
  ["the reconcile origin is not validated", "canonical-receipts.js", "limit=20,policy=RETRY_POLICY,origin=null}={}){\n if(origin!==null&&!IDENT.test(origin||''))throw failed('film_person_invalid');", "limit=20,policy=RETRY_POLICY,origin=null}={}){"],
+ ["a changed re-plan throws instead of declaring a disposition", "canonical-producer-adapters.js", "if(found&&!found.ok)return {disposition:'abandon',errorClass:SOURCE_CHANGED};", "if(found&&!found.ok)throw failed('producer_replan_unavailable');"],
+ ["a changed re-plan reads as present or absent content", "canonical-producer-adapters.js", "if(found&&!found.ok)return {disposition:'abandon',errorClass:SOURCE_CHANGED};", ""],
+ ["the source-changed class is another one", "canonical-producer-adapters.js", "export const SOURCE_CHANGED='producer_source_changed';", "export const SOURCE_CHANGED='producer_replan_unavailable';"],
+ ["a missing re-plan is terminal", "canonical-producer-adapters.js", "if(!found)return {digest:null,revision:snapshot.revision};", "if(!found)return {disposition:'abandon',errorClass:SOURCE_CHANGED};"],
+ ["a missing re-plan throws out of the readback", "canonical-producer-adapters.js", "if(!found)return {digest:null,revision:snapshot.revision};", "if(!found)throw failed('producer_replan_unavailable');"],
+ ["a throwing re-plan escapes", "canonical-producer-adapters.js", "try{input=await replan(receipt);}catch{input=null;}", "input=await replan(receipt);"],
+ ["a declared disposition is not recognised", "canonical-receipts.js", "observed.disposition==='abandon'&&IDENT.test", "false&&IDENT.test"],
+ ["a declared class is not validated", "canonical-receipts.js", "observed.disposition==='abandon'&&IDENT.test(observed.errorClass||'')?", "observed.disposition==='abandon'?"],
+ ["the reconcile does not act on a declared disposition", "canonical-receipts.js", "const declared=abandonOf(seen);\n  if(declared){", "const declared=null;\n  if(declared){"],
+ ["the reconcile abandons with another class", "canonical-receipts.js", "{kind:'abandoned',errorClass:declared},clock());result.abandoned.push({requestId:row.requestId,reason:declared})", "{kind:'abandoned',errorClass:'other_class'},clock());result.abandoned.push({requestId:row.requestId,reason:declared})"],
+ ["the natural path ignores a declared disposition", "canonical-receipts.js", "const declared=abandonOf(observed);\n  const action=declared?", "const declared=null;\n  const action=declared?"],
+ ["an unreadable target waits forever", "canonical-receipts.js", "if(timeOf(at)-timeOf(row.createdAt)>policy.abandonAfterMs){\n    try", "if(false){\n    try"],
+ ["an unreadable target is abandoned at once", "canonical-receipts.js", "if(timeOf(at)-timeOf(row.createdAt)>policy.abandonAfterMs){\n    try", "if(true){\n    try"],
  ["film_facts is not an operation kind", "canonical-receipts.js", "'film_merge','film_facts','film_metadata'", "'film_merge','film_metadata'"]
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'producer-adapters-mutants-'));

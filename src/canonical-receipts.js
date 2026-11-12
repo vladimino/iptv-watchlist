@@ -133,6 +133,11 @@ export function validEvidence(evidence,receipt){
 }
 // What a readback proves about a receipt. `applied`: its evidence validates against THIS receipt. `evidence_invalid`: evidence was supplied and does not validate (forged, another request, target, revision or
 // digest): for review, never applied whatever the content is. `content_unproven`: the planned content is there but there is no evidence (another actor may have reached it): never applied. `absent`: not there.
+// A readback may DECLARE a permanent refusal instead of observing the target: `{disposition:'abandon',errorClass}` (a producer whose source moved on, ADR 0123). It is not an observation: the receipt is abandoned
+// with that error class (pending/failed/unknown -> abandoned, attempts untouched) and is never replayed. Anything else (a malformed class included) is an ordinary observation.
+export function abandonOf(observed){
+ return observed&&typeof observed==='object'&&observed.disposition==='abandon'&&IDENT.test(observed.errorClass||'')?observed.errorClass:null;
+}
 export function judgeReadback(observed,receipt){
  if(observed&&observed.evidence!==undefined)return validEvidence(observed.evidence,receipt)?'applied':'evidence_invalid';
  if(observed&&observed.digest===receipt.contentDigest)return 'content_unproven';
@@ -490,7 +495,8 @@ export async function receiptedWrite(env,input,hooks){
   if(due.waiting.length)return {ran:false,state:row.state,reason:due.waiting[0].reason,nextAttemptAt:row.nextAttemptAt,receipt:row};
   if(typeof hooks?.readback!=='function')throw failed('receipt_readback_required');
   const observed=(await hooks.readback(env,row.target,row))??null;
-  const action=reconcilePlan({receipts:[row],observed:{[row.requestId]:observed},marker:gate,now,policy}).actions[0];
+  const declared=abandonOf(observed);
+  const action=declared?{action:'abandon',reason:declared}:reconcilePlan({receipts:[row],observed:{[row.requestId]:observed},marker:gate,now,policy}).actions[0];
   const outcome=await applyAction(env,gate,row,action,{revalidate:hooks.revalidate,observed,clock,policy});
   if(!outcome.retry)return {ran:false,...outcome};
   attempt=row.attempts+1;currentRevision=outcome.retry.currentRevision;
@@ -517,7 +523,22 @@ export async function reconcileReceipts(env,{operations,now=()=>new Date().toISO
  for(const row of due){
   const operation=operations?.get?.(row.operation);
   if(!operation){missing.add(row.requestId);result.waiting.push({requestId:row.requestId,reason:'operation_unregistered'});continue;}
-  try{observed[row.requestId]=(await operation.readback(env,row.target,row))??null;}catch{missing.add(row.requestId);result.waiting.push({requestId:row.requestId,reason:'readback_failed'});}
+  let seen;
+  try{seen=(await operation.readback(env,row.target,row))??null;}catch{
+   // A readback that cannot run (an unreadable database) waits, but never forever: past the receipt's age bound it is abandoned like any other receipt.
+   missing.add(row.requestId);
+   if(timeOf(at)-timeOf(row.createdAt)>policy.abandonAfterMs){
+    try{await transition(env,gate,row,{kind:'abandoned',errorClass:'readback_expired'},clock());result.abandoned.push({requestId:row.requestId,reason:'readback_expired'});}catch(error){result.failed.push({requestId:row.requestId,outcome:'unsettled',errorClass:errorClassOf(error)});}
+   }else result.waiting.push({requestId:row.requestId,reason:'readback_failed'});
+   continue;
+  }
+  const declared=abandonOf(seen);
+  if(declared){
+   missing.add(row.requestId);
+   try{await transition(env,gate,row,{kind:'abandoned',errorClass:declared},clock());result.abandoned.push({requestId:row.requestId,reason:declared});}catch(error){result.failed.push({requestId:row.requestId,outcome:'unsettled',errorClass:errorClassOf(error)});}
+   continue;
+  }
+  observed[row.requestId]=seen;
  }
  const byId=new Map(due.map(row=>[row.requestId,row]));
  const plan=reconcilePlan({receipts:due.filter(row=>!missing.has(row.requestId)),observed,marker:gate,now:at,policy});

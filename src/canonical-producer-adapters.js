@@ -25,6 +25,8 @@ import {planFilmFacts,readFilmSnapshot,writeFilmFacts} from './canonical-film-wr
 export const FILM_FACTS_OPERATION='film_facts';
 // One inline reconcile pass looks at no more receipts than this (the receipts module's own hard cap is RECONCILE_LIMIT_MAX).
 export const INLINE_RECONCILE_LIMIT=10;
+// The error class of a receipt whose re-plan no longer digests to the stored content (the source moved on).
+export const SOURCE_CHANGED='producer_source_changed';
 const IDENT=/^[a-z][a-z0-9_]{0,63}$/;
 const DIGEST=/^[0-9a-f]{64}$/;
 // The facts of one Film that make up its content. The id (the target), the request id, the revision and the clocks are not content.
@@ -71,7 +73,8 @@ const matches=(input,receipt,digest)=>plain(input)&&digest===receipt.contentDige
 export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={}){
  if(typeof replan!=='function')throw failed('film_person_invalid');
  const planned=async receipt=>{
-  const input=await replan(receipt);
+  let input=null;
+  try{input=await replan(receipt);}catch{input=null;}
   if(!input)return null;
   return {input,ok:matches(input,receipt,await filmFactsDigest(input))};
  };
@@ -81,8 +84,11 @@ export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={})
   // Does the Film already hold every row of the planned facts? Content alone is never proof (the receipts module turns it into `needs_review`); an absent effect means the same request id may be retried.
   readback:async(env,target,receipt)=>{
    const found=await planned(receipt);
-   if(!found||!found.ok)throw failed('producer_replan_unavailable');
+   // A re-plan with another digest is a SOURCE THAT MOVED ON: a typed, terminal disposition (the receipts module abandons the receipt, same request id, never replays the old facts). No re-plan at all is transient:
+   // it reads as an absent effect, so the receipts bounds (5 attempts, backoff, 7 days) apply and the replay below refuses until the producer can plan again.
+   if(found&&!found.ok)return {disposition:'abandon',errorClass:SOURCE_CHANGED};
    const snapshot=await readFilmSnapshot(env,target.id);
+   if(!found)return {digest:null,revision:snapshot.revision};
    const present=!snapshot.redirect&&planFilmFacts(snapshot,{...found.input,requestId:receipt.requestId}).noop;
    return {digest:present?receipt.contentDigest:null,revision:snapshot.revision};
   },
