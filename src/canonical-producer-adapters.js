@@ -111,6 +111,11 @@ export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={})
  });
 }
 
+// The marker gate every entry point uses, for a caller that loops over several units (ADR 0124): ONE marker read. `open` is true only for the canonical route; held and unreadable markers throw.
+export async function producerRouteOpen(env){
+ return (await writerRoute(env)).writer==='canonical';
+}
+
 // ONE Film's facts, once per source event. input: the writer input of `writeFilmFacts` without requestId, expectedRevision and receiptMark (id, at, film, dimensions, localization, metadata, sync, watchlist, ...).
 // opts: {origin, event, input, replan?, now?, policy?}. Returns:
 //   {state:'skipped', reason:'projector_is_writer', receipt:false}  the marker is not `open`: one marker read, nothing else;
