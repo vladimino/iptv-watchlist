@@ -4,11 +4,11 @@ Contract: [orchestration reliability](../reference/orchestration-reliability.md#
 
 ## State machine of a run
 
-`preflight` (read) -> `launch` (reservation, instance created, receipt `created`) -> the Workflow: `begin` (receipt `running`), `seal` (baseline written, step lease, the real seal, report), `finish` (receipt `complete` or `failed`) -> `result` (read). `stop` marks the receipt `stopped` and terminates the instance. The slot (one active canary) is free in every end state.
+`preflight` (read) -> `launch` (reservation, instance created, receipt `created`) -> the Workflow: `begin` (receipt `running`), `seal` (baseline written, step lease, the real seal, report), `finish` (receipt `complete` only when the report's `outcome.ok`, otherwise `failed`) -> `result` (read). `stop` marks the receipt `stopping`, terminates the instance and releases the lease; repeat it until it answers `200 stopped` (`202` until the instance ended and the lease was quiet for 60 s). The slot (one active canary) is held through `stopping` and free in every end state. Every route needs the owner's signed Access assertion for the diagnostic Access application (`EPG_DIAGNOSTIC_ACCESS_AUD`, `EPG_DIAGNOSTIC_OWNER_EMAIL`).
 
 ## Reading a result
 
-`status` shows the receipt and the live instance; `result` returns the report once the receipt is final. Compare `expectedVsActual` (departures and rewritten segments of the plan against what the real seal archived), the `seal_stage_*` phases (`fences`, `fencesSkipped`, `fenceMs`, `readMs`, `putMs`), `storage` (per-resource reads and writes), `lease.renewals`, and the invariants (`published:false`, `productionWrites:0`, `deniedAccesses:0`, `refusedWrites:0`). The report says `canary-measured`: diagnostic D1 and bucket latency, not production latency.
+`status` shows the receipt and the live instance; `result` returns the report once the receipt is final. Compare `expectedVsActual` (departures and rewritten segments of the plan against what the real seal archived), the `seal_stage_*` phases (`fences`, `fencesSkipped`, `fenceMs`, `readMs`, `putMs`), `storage` (per-resource reads and writes), `lease.renewals`, and the invariants (measured `published:false`, `productionWrites:0`, `deniedAccesses:0`, `refusedWrites:0`) and `outcome` (`ok:true`, no `violations`); a run with a violation is `failed` with the whole report. The report says `canary-measured`: diagnostic D1 and bucket latency, not production latency.
 
 | Receipt failure | Meaning and next step |
 |---|---|

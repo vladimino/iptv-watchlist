@@ -25,10 +25,23 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-diag-run-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 const SOURCES={
  diagnostic:fs.readFileSync('src/epg-diagnostic.js','utf8'),replay:fs.readFileSync('src/epg-replay.js','utf8'),run:fs.readFileSync('src/epg-diagnostic-run.js','utf8'),
- orchestration:fs.readFileSync('src/epg-orchestration.js','utf8'),policy:scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),
+ orchestration:fs.readFileSync('src/epg-orchestration.js','utf8'),mcp:fs.readFileSync('src/mcp.js','utf8'),policy:scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),
 };
 const ALL=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const DIAG=fs.readdirSync('diagnostic-migrations').filter(name=>/\.sql$/.test(name)).sort();
+// Real signed Cloudflare Access assertions: the Worker verifies them itself (signature, issuer, audience of THIS application, expiry, identity and the owner e-mail).
+const TEAM='https://diag-team.cloudflareaccess.com',AUD='d1'.repeat(32),MCP_AUD='a1'.repeat(32),OWNER='owner@example.test';
+const RSA={name:'RSASSA-PKCS1-v1_5',modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:'SHA-256'};
+const signing=await webcrypto.subtle.generateKey(RSA,true,['sign','verify']),rogue=await webcrypto.subtle.generateKey(RSA,true,['sign','verify']);
+const publicJwk={...await webcrypto.subtle.exportKey('jwk',signing.publicKey),kid:'kid-1',alg:'RS256',use:'sig'};
+const b64=value=>Buffer.from(typeof value==='string'?value:JSON.stringify(value)).toString('base64url');
+async function accessJwt({claims={},key=signing.privateKey}={}){
+ const now=Math.floor(Date.now()/1000);
+ const input=b64({alg:'RS256',kid:'kid-1',typ:'JWT'})+'.'+b64({aud:[AUD],email:OWNER,exp:now+300,iat:now,nbf:now,iss:TEAM,sub:'owner-identity',type:'app',...claims});
+ return input+'.'+Buffer.from(await webcrypto.subtle.sign('RSASSA-PKCS1-v1_5',key,new TextEncoder().encode(input))).toString('base64url');
+}
+const VALID=await accessJwt();
+const certFetch=async url=>String(url)===TEAM+'/cdn-cgi/access/certs'?Response.json({keys:[publicJwk]}):new Response('unavailable',{status:599});
 const RESOURCE='diag-test-0001',BUILT='2026-11-12T12:00:00.000Z';
 const plain=value=>JSON.parse(JSON.stringify(value));
 let copies=0;
@@ -49,7 +62,7 @@ await bootstrap(source,0);
 for(const day of [1,2,3,4,5,6])await commit(source,day,'bounded');
 const sourceId=source.published.programmeRunId;
 const readerOver=bkt=>({get:key=>bkt.get(key)});
-const loaders=(src,context)=>{vm.runInContext(src.policy,context);vm.runInContext(src.orchestration,context);vm.runInContext(src.diagnostic,context);vm.runInContext(src.replay,context);vm.runInContext(src.run,context);};
+const loaders=(src,context)=>{vm.runInContext(src.policy,context);vm.runInContext(src.orchestration,context);vm.runInContext(src.diagnostic,context);vm.runInContext(src.replay,context);vm.runInContext(src.mcp,context);vm.runInContext(src.run,context);};
 const builderContext=loadWorker();builderContext.DiscoveryAuthority=Authority;loaders(SOURCES,builderContext);
 const Replay=vm.runInContext('EpgReplay',builderContext),Diag=vm.runInContext('EpgDiagnostic',builderContext);
 const dataset=await Replay.buildDataset(readerOver(source.bkt),{programmeRunId:sourceId,builtAt:BUILT});
@@ -60,7 +73,7 @@ const KEY1='canary-key-0000000001',KEY2='canary-key-0000000002';
 
 // ---- a domain: production-like resources, a diagnostic domain, a scripted Workflow binding, and a Worker context with all the modules ------------------------------------------------
 async function domain({provision=true,dataset:put=datasetText,sourcesOverride=null,authority='d1',published='match',diagnosticBindings=true,workflow={}}={}){
- const context=loadWorker();context.DiscoveryAuthority=Authority;loaders(sourcesOverride||SOURCES,context);
+ const context=loadWorker();context.DiscoveryAuthority=Authority;context.fetch=certFetch;context.atob=atob;loaders(sourcesOverride||SOURCES,context);
  const DiagnosticModule=vm.runInContext('EpgDiagnostic',context);
  const prodFile=database(false),prodBkt=bucket();
  await prodBkt.put('epg/generation.json',JSON.stringify({sentinel:true}));
@@ -80,14 +93,14 @@ async function domain({provision=true,dataset:put=datasetText,sourcesOverride=nu
   async readAuthority(){return {cutover:'open',mode:'d1'};},
   async currentGeneration(){return published==='none'?null:{programmeRunId:published==='match'?programmeRunId:'11111111-1111-4111-8111-111111111111',phase:'published',fence:'g-diag'};},
  };
- const env={DB:d1Standin(prodFile,{maxBinds:100}),BUCKET:prodBkt,...(diagnosticBindings?{EPG_DIAGNOSTIC_DB:diagRaw,EPG_DIAGNOSTIC_BUCKET:diagBkt,EPG_DIAGNOSTIC_RESOURCE_ID:RESOURCE,EPG_DIAGNOSTIC_WORKFLOW:binding}:{})};
+ const env={DB:d1Standin(prodFile,{maxBinds:100}),BUCKET:prodBkt,...(diagnosticBindings?{EPG_DIAGNOSTIC_DB:diagRaw,EPG_DIAGNOSTIC_BUCKET:diagBkt,EPG_DIAGNOSTIC_RESOURCE_ID:RESOURCE,EPG_DIAGNOSTIC_WORKFLOW:binding}:{}),MCP_ACCESS_TEAM_DOMAIN:TEAM,EPG_DIAGNOSTIC_ACCESS_AUD:AUD,EPG_DIAGNOSTIC_OWNER_EMAIL:OWNER};
  const Run=vm.runInContext('EpgDiagnosticRun',context);
  const state={context,env,Run,prodFile,prodBkt,diagFile,diagBkt,diagRaw,binding,instances,calls,
   prod:()=>fingerprint(prodFile,prodBkt),diag:()=>fingerprint(diagFile,diagBkt),
   receipt:key=>sql(diagFile,"SELECT * FROM epg_diagnostic_receipt WHERE idempotency_key='"+key+"'")[0]||null,
   receipts:()=>sql(diagFile,'SELECT idempotency_key, status, slot FROM epg_diagnostic_receipt ORDER BY idempotency_key'),
   async call(method,pathname,body,extraHeaders){
-   const init={method,headers:{'content-type':'application/json','Cf-Access-Jwt-Assertion':'test-assertion',...(extraHeaders||{})}};if(extraHeaders&&extraHeaders['Cf-Access-Jwt-Assertion']===null)delete init.headers['Cf-Access-Jwt-Assertion'];if(body!==undefined)init.body=JSON.stringify(body);
+   const init={method,headers:{'content-type':'application/json','Cf-Access-Jwt-Assertion':VALID,...(extraHeaders||{})}};if(extraHeaders&&extraHeaders['Cf-Access-Jwt-Assertion']===null)delete init.headers['Cf-Access-Jwt-Assertion'];if(body!==undefined)init.body=JSON.stringify(body);
    const response=await context.worker.fetch(new Request('http://worker.test'+pathname,init),env);
    return {status:response.status,body:await response.json()};
   },
@@ -113,12 +126,32 @@ const sealDiag=SOURCES;void sealDiag;
  // bindings without a resource id (the owner has not set the identity) is the same refusal
  const partial=await domain({diagnosticBindings:true});delete partial.env.EPG_DIAGNOSTIC_RESOURCE_ID;
  assert.equal((await partial.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1))).body.refused,'diagnostic_bindings_absent');
- // no Access assertion: a writing action is refused before anything is read or reserved
- for(const [route,body] of [['launch',launchBody(KEY1)],['stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'}],['cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'}]]){
-  const denied=await d.call('POST','/api/epg/diagnostic/'+route,body,{'Cf-Access-Jwt-Assertion':null});
-  assert.equal(denied.status,403,route);assert.equal(denied.body.refused,'access_assertion_missing');
+ // The Worker verifies the owner itself on EVERY route, reads included, before anything is read or reserved: no assertion, a forged signature, another Access application's audience (the
+ // MCP application), another identity, an expired or not-yet-valid assertion, and an unconfigured Worker are all refused without touching a resource.
+ {
+  const full=await domain();const before={prod:full.prod(),diag:full.diag()};
+  const bad={
+   'no assertion':null,'garbage':'not.a.jwt','signed by another key':await accessJwt({key:rogue.privateKey}),
+   'the MCP application audience':await accessJwt({claims:{aud:[MCP_AUD]}}),'another identity':await accessJwt({claims:{email:'someone@example.test'}}),
+   'no e-mail claim':await accessJwt({claims:{email:undefined}}),'a service token (empty sub)':await accessJwt({claims:{sub:''}}),
+   'expired':await accessJwt({claims:{exp:Math.floor(Date.now()/1000)-600}}),'wrong issuer':await accessJwt({claims:{iss:'https://other-team.cloudflareaccess.com'}}),
+  };
+  for(const [label,token] of Object.entries(bad))for(const [method,route,body] of [['GET','/api/epg/diagnostic/preflight'],['GET','/api/epg/diagnostic/status?key='+KEY1],['GET','/api/epg/diagnostic/result?key='+KEY1],['POST','/api/epg/diagnostic/launch',launchBody(KEY1)],['POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'}],['POST','/api/epg/diagnostic/cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'}]]){
+   const denied=await full.call(method,route,body,{'Cf-Access-Jwt-Assertion':token});
+   assert.equal(denied.status,403,label+' '+method+' '+route);assert.equal(denied.body.refused,'forbidden',label);
+  }
+  assert.deepEqual(full.receipts(),[]);assert.equal(full.calls.create.length,0,'no assertion, no reservation, no instance');
+  assert.equal(full.prod(),before.prod);assert.equal(full.diag(),before.diag,'a refused request reads and writes nothing');
+  // an unconfigured owner identity or audience closes the routes (503), it never opens them
+  for(const key of ['EPG_DIAGNOSTIC_ACCESS_AUD','EPG_DIAGNOSTIC_OWNER_EMAIL','MCP_ACCESS_TEAM_DOMAIN']){
+   const open=await domain();delete open.env[key];
+   const closed=await open.call('GET','/api/epg/diagnostic/preflight');assert.equal(closed.status,503,key);assert.equal(closed.body.refused,'access_not_configured');
+   assert.equal((await open.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1))).status,503,key);assert.deepEqual(open.receipts(),[]);
+  }
+  // the keys being unreachable fails closed as well (503, not an open route)
+  const offline=await domain();offline.context.fetch=async()=>new Response('x',{status:500});
+  const down=await offline.call('GET','/api/epg/diagnostic/preflight');assert.equal(down.status,503);assert.equal(down.body.refused,'access_unavailable');
  }
- {const full=await domain();const denied=await full.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1),{'Cf-Access-Jwt-Assertion':null});assert.equal(denied.status,403);assert.deepEqual(full.receipts(),[]);assert.equal(full.calls.create.length,0,'no assertion, no reservation, no instance');}
  // routing: methods and unknown paths
  assert.equal((await d.call('GET','/api/epg/diagnostic/launch')).status,405);assert.equal((await d.call('POST','/api/epg/diagnostic/preflight',{})).status,405);assert.equal((await d.call('GET','/api/epg/diagnostic/nothing')).status,404);
  const crossOrigin=await d.context.worker.fetch(new Request('http://worker.test/api/epg/diagnostic/launch',{method:'POST',headers:{Origin:'http://elsewhere.test','content-type':'application/json'},body:JSON.stringify(launchBody(KEY1))}),d.env);
@@ -238,7 +271,16 @@ const sealDiag=SOURCES;void sealDiag;
  const third=await d.call('POST','/api/epg/diagnostic/launch',launchBody('canary-key-0000000003',{seed:'canary-seed-3'}));assert.equal(third.status,200);
  assert.equal((await d.call('POST','/api/epg/diagnostic/cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'})).body.refused,'canary_active');
  assert.equal((await d.call('POST','/api/epg/diagnostic/cleanup',{})).body.refused,'confirmation_required');
- await d.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:'canary-key-0000000003',confirm:'STOP_EPG_DIAGNOSTIC_CANARY'});
+ // A stop is a request, not a completion: the slot stays held (no new canary, no cleanup) until the instance has ended AND the step lease is quiet for the quiescence window.
+ const stopBody={idempotencyKey:'canary-key-0000000003',confirm:'STOP_EPG_DIAGNOSTIC_CANARY'};
+ const requested=await d.call('POST','/api/epg/diagnostic/stop',stopBody);
+ assert.equal(requested.status,202);assert.equal(requested.body.stopped,false);assert.equal(requested.body.note,'quiescence_unconfirmed_repeat_stop');assert.equal(d.receipt('canary-key-0000000003').status,'stopping');
+ assert.equal((await d.call('POST','/api/epg/diagnostic/cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'})).body.refused,'canary_active','a stopping canary still holds the slot');
+ assert.equal((await d.call('POST','/api/epg/diagnostic/launch',launchBody('canary-key-0000000004',{seed:'canary-seed-4'}))).body.refused,'canary_active');
+ {const early=await d.Run.stop(d.env,stopBody,{now:()=>Date.now()+30000});assert.equal(plain(early).status??202,202);}
+ assert.equal(d.receipt('canary-key-0000000003').status,'stopping','not yet quiescent');
+ const confirmed=await d.Run.stop(d.env,stopBody,{now:()=>Date.now()+61000});
+ assert.equal(d.receipt('canary-key-0000000003').status,'stopped');assert.equal(confirmed.status,200);
  const cleaned=await d.call('POST','/api/epg/diagnostic/cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'});assert.equal(cleaned.body.cleaned,true);assert.ok(cleaned.body.removed>0);
  assert.ok(![...d.diagBkt.objects.keys()].some(key=>key.startsWith('epg/')||key==='sync.json'||key===d.Run.MATERIALIZED_KEY),'the baseline is gone');
  assert.ok(d.diagBkt.objects.has('diagnostic/identity.json')&&d.diagBkt.objects.has('diagnostic/replay/'+DIGEST+'.json'),'identity and datasets stay');
@@ -275,10 +317,16 @@ const failedWith=async(label,{prepare,expect,statusExpect='failed'})=>{
  const d=await domain();await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));
  d.diagBkt.onPut=async key=>{if(key.includes('/segments/'))d.diagBkt.__seen=(d.diagBkt.__seen||0)+1;};
  await d.runInstance(KEY1);assert.ok(d.diagBkt.__seen>0);assert.equal(d.receipt(KEY1).status,'complete');
- // a budget shorter than the run is reported, not enforced mid-step
+ // the budget is ENFORCED by the real step guard at every mutation boundary: a deadline already past stops the seal before it writes, the receipt fails typed, nothing is published
+ {const e=await domain();await e.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1,{budgetMs:60000}));
+  const over=await e.runInstance(KEY1,{now:()=>Date.now()-90000});
+  assert.equal(e.receipt(KEY1).status,'failed');assert.equal(e.receipt(KEY1).failure,'budget_exceeded');assert.equal(over.result.reason,'budget_exceeded');
+  assert.equal(e.diagBkt.objects.has('epg/generations/'+(await e.Run.runIdOf(KEY1))+'/discovery-latest.json'),false,'no staged generation after the deadline');}
+ // a run that finished but took longer than its budget (measured by the run clock) is reported in full and is NOT a successful canary
  const b=await domain();await b.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1,{budgetMs:60000}));
  let t=0;const slow=await b.runInstance(KEY1,{now:()=>{t+=40000;return Date.now()+t;}});
- assert.equal(JSON.parse(b.receipt(KEY1).report_json).withinBudget,false,'the budget overrun is reported');void slow;
+ const slowReport=JSON.parse(b.receipt(KEY1).report_json);assert.equal(slowReport.withinBudget,false,'the budget overrun is reported');
+ assert.equal(b.receipt(KEY1).status,'failed');assert.match(b.receipt(KEY1).failure,/^postcondition_failed:.*budget_exceeded/);assert.equal(slowReport.outcome.ok,false);assert.deepEqual(slowReport.outcome.violations,['budget_exceeded']);assert.equal(slow.result.reason,'postcondition_failed');
 }
 // stop semantics
 {
@@ -286,8 +334,13 @@ const failedWith=async(label,{prepare,expect,statusExpect='failed'})=>{
  await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));
  assert.equal((await d.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1})).body.refused,'confirmation_required');
  assert.equal((await d.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:'nope-nope-nope-nope-1',confirm:'STOP_EPG_DIAGNOSTIC_CANARY'})).status,404);
- const stopped=await d.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'});
- assert.equal(stopped.status,200);assert.equal(stopped.body.stopped,true);assert.equal(stopped.body.instance,'terminated');assert.deepEqual(plain(d.calls.terminate),[await d.Run.instanceIdOf(KEY1)]);
+ const stopped=await d.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'}); // the terminate is requested, but the slot stays fenced until the instance ended and the lease has been quiet for the window
+ assert.equal(stopped.status,202);assert.equal(stopped.body.stopped,false);assert.deepEqual(plain(d.calls.terminate),[await d.Run.instanceIdOf(KEY1)]);
+ assert.equal(d.receipt(KEY1).status,'stopping');assert.notEqual(d.receipt(KEY1).slot,null);
+ // a second instance that still wakes up finds a stopping receipt and does nothing
+ const wokeEarly=await d.runInstance(KEY1);assert.equal(wokeEarly.result.reason,'receipt_stopping');assert.deepEqual(wokeEarly.names,['begin']);
+ assert.equal((await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY2,{seed:'too-early'}))).body.refused,'canary_active');
+ const settled=await d.Run.stop(d.env,{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'},{now:()=>Date.now()+61000});assert.equal(settled.status,200);
  assert.equal(d.receipt(KEY1).status,'stopped');assert.equal(d.receipt(KEY1).slot,null);
  // the instance, if it still woke up, finds its receipt stopped and does nothing: no baseline, no seal
  const woke=await d.runInstance(KEY1);assert.equal(woke.result.reason,'receipt_stopped');assert.deepEqual(woke.names,['begin']);
@@ -313,23 +366,30 @@ async function quick(sourcesOverride,only=null){
  const lazy=build=>{let value;return async()=>value||(value=await build());};
  const check=async(name,run)=>{if(only&&!only.includes(name))return;try{if(await run()!==true)failed.push(name);}catch{failed.push(name);}};
  const make=options=>domain({sourcesOverride,...options});
- const launched=options=>lazy(async()=>{const x=await make(options);await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return x;});
+ const launched=({budget,...options}={})=>lazy(async()=>{const x=await make(options);await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1,budget?{budgetMs:budget}:{}));return x;});
  const tamperedText=JSON.stringify((()=>{const x=JSON.parse(datasetText);x.baseline.items[0].title=x.baseline.items[0].title.split('').reverse().join('');return x;})());
  await check('launch needs the confirmation',async()=>{const d=await make();return (await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1,{confirm:'no'}))).status===400&&d.receipts().length===0;});
  await check('the production gate refuses',async()=>{const g=await make();await g.prodBkt.put('sync.json',JSON.stringify({runId:'r',stage:'seal',updatedAt:new Date().toISOString()}));const r=await g.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return r.status===409&&g.calls.create.length===0&&g.receipts().length===0;});
  await check('an unbound Workflow refuses',async()=>{const w=await make();delete w.env.EPG_DIAGNOSTIC_WORKFLOW;const r=await w.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return r.status===503&&w.receipts().length===0;});
  await check('a tampered dataset does not start',async()=>{const t=await make({dataset:tamperedText});const r=await t.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return r.status===409&&t.calls.create.length===0&&t.receipts().length===0;});
  const n=launched();
- await check('a writing action needs the Access assertion',async()=>{const d=await make();const r=await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1),{'Cf-Access-Jwt-Assertion':null});return r.status===403&&d.receipts().length===0&&d.calls.create.length===0;});
+ await check('the owner is verified on every route',async()=>{const d=await make();const r=await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1),{'Cf-Access-Jwt-Assertion':null});const g=await d.call('GET','/api/epg/diagnostic/preflight',undefined,{'Cf-Access-Jwt-Assertion':null});return r.status===403&&g.status===403&&d.receipts().length===0&&d.calls.create.length===0;});
+ await check('only the owner e-mail passes',async()=>{const d=await make();const other=await accessJwt({claims:{email:'someone@example.test'}});const r=await d.call('GET','/api/epg/diagnostic/preflight',undefined,{'Cf-Access-Jwt-Assertion':other});return r.status===403;});
  await check('a repeat creates no second instance',async()=>{const x=await n();await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));x.instances.clear();const again=await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return x.calls.create.length===1&&again.body.note==='already_created';});
  await check('other parameters conflict',async()=>(await (await n()).call('POST','/api/epg/diagnostic/launch',launchBody(KEY1,{seed:'other-seed'}))).body.refused==='idempotency_conflict');
  await check('one canary at a time',async()=>{const x=await n();return (await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY2))).body.refused==='canary_active'&&x.receipts().length===1;});
  await check('cleanup refuses while active',async()=>(await (await n()).call('POST','/api/epg/diagnostic/cleanup',{confirm:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'})).body.refused==='canary_active');
  await check('status writes nothing',async()=>{const x=await n();const before=x.diag();await x.call('GET','/api/epg/diagnostic/status?key='+KEY1);return x.diag()===before;});
  await check('an unknown create is not retried blind',async()=>{const u=await make({workflow:{createThrows:{message:'network down',then:'unknown'},statusUnknown:true}});await u.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));await u.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));return u.calls.create.length===1&&u.receipt(KEY1).status==='reserved';});
- const s=lazy(async()=>{const x=await (launched())();await x.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'});return x;});
- await check('stop terminates the instance',async()=>(await s()).calls.terminate.length===1);
- await check('a stopped receipt does not run',async()=>{const x=await s();const r=await x.runInstance(KEY1);return r.names.length===1&&r.result.reason==='receipt_stopped'&&![...x.diagBkt.objects.keys()].some(key=>key.startsWith('epg/'));});
+ const stopBody={idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'};
+ const s=lazy(async()=>{const x=await (launched())();await x.call('POST','/api/epg/diagnostic/stop',stopBody);await x.Run.stop(x.env,stopBody,{now:()=>Date.now()+61000});return x;});
+ await check('stop terminates the instance',async()=>(await s()).calls.terminate.length>=1);
+ await check('a stop holds the slot until quiescent',async()=>{const x=await (launched())();const r=await x.call('POST','/api/epg/diagnostic/stop',stopBody);const again=await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY2,{seed:'early'}));return r.status===202&&x.receipt(KEY1).status==='stopping'&&again.body.refused==='canary_active';});
+ await check('production busy at begin fails the run',async()=>{const x=await (launched())();await x.prodBkt.put('sync.json',JSON.stringify({runId:'r',stage:'seal',updatedAt:new Date().toISOString()}));const run=await x.runInstance(KEY1);return run.names.length===1&&x.receipt(KEY1).status==='failed'&&!x.diagBkt.objects.has('sync.json');});
+ await check('an exceeded deadline is enforced by the guard',async()=>{const x=await (launched({budget:60000}))();const run=await x.runInstance(KEY1,{now:()=>Date.now()-90000});return run.result.reason==='budget_exceeded'&&x.receipt(KEY1).failure==='budget_exceeded';});
+ await check('a violated postcondition is not complete',async()=>{const x=await (launched({budget:60000}))();let t=0;await x.runInstance(KEY1,{now:()=>{t+=40000;return Date.now()+t;}});return x.receipt(KEY1).status==='failed'&&/postcondition_failed/.test(x.receipt(KEY1).failure||'');});
+ await check('production busy at seal fails the run',async()=>{const x=await (launched())();const step={do:async(name,fn)=>{const r=await fn();if(name==='begin')await x.prodBkt.put('sync.json',JSON.stringify({runId:'r',stage:'seal',updatedAt:new Date().toISOString()}));return r;}};const run=await x.Run.run(x.env,{idempotencyKey:KEY1},step);return run.reason!=='complete'&&x.receipt(KEY1).status==='failed'&&![...x.diagBkt.objects.keys()].some(key=>key.startsWith('epg/'));});
+ await check('a stopped receipt does not run',async()=>{const x=await s();const r=await x.runInstance(KEY1);return r.names.length===1&&r.result.reason==='receipt_stopped'&&x.receipt(KEY1).status==='stopped'&&![...x.diagBkt.objects.keys()].some(key=>key.startsWith('epg/'));});
  await check('a run completes with exact departures',async()=>{const x=await (launched())();const run=await x.runInstance(KEY1);const report=JSON.parse(x.receipt(KEY1).report_json||'{}');return run.result.reason==='complete'&&report.expectedVsActual?.departuresMatch===true&&report.published===false&&report.productionWrites===0&&report.label==='canary-measured';});
  await check('an unprepared domain fails closed',async()=>{const p=await (launched({published:'other'}))();const x=await p.runInstance(KEY1);return /domain_not_prepared/.test(x.result.reason)&&p.receipt(KEY1).status==='failed'&&!p.diagBkt.objects.has('sync.json');});
  await check('a dirty domain is refused',async()=>{const q=await make();await q.diagBkt.put('epg/stray.json','{}');await q.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));const x=await q.runInstance(KEY1);return /domain_not_clean/.test(x.result.reason)&&q.receipt(KEY1).status==='failed'&&!q.diagBkt.objects.has('sync.json')&&!q.diagBkt.objects.has(q.Run.MATERIALIZED_KEY);});
@@ -339,7 +399,13 @@ async function quick(sourcesOverride,only=null){
 {
  assert.deepEqual(await quick(null),[],'the real module passes every check');
  const mutants=[
-  ['a writing action needs no Access assertion',"if(!assertion||assertion.length>8192)return respond(refuse(403,'access_assertion_missing'));",""],
+  ['a stop completes without quiescence',"if(!(ended&&quiet&&waitedMs>=QUIESCENCE_MS))return reply(202,","if(false)return reply(202,"],
+  ['begin does not gate production',"if(busy){await transition(ctx.env,key,Number(row.revision),['reserved','created'],'failed',{failure:busy,now:now()});return {ok:false,code:busy};}",""],
+  ['seal does not gate production',"   if(busy)return {failure:{code:busy}};\n",""],
+  ['the deadline is not enforced',"   ctx.env.epgDeadline=started+config.budgetMs;",""],
+  ['complete ignores the outcome',"const ok=sealed.report?.outcome?.ok===true;","const ok=!!sealed.report;"],
+  ['the owner is not verified in the Worker',"if(!access.ok)return respond(refuse(access.status,access.code));",""],
+  ['the owner e-mail is not compared',"checked=await mcpVerifyAccessWith(request,{teamDomain,audience,ownerEmail});","checked=await mcpVerifyAccessWith(request,{teamDomain,audience});"],
   ['launch needs no confirmation',"if(body.confirm!==CONFIRM.launch)return refuse(400,'confirmation_required');",""],
   ['the production gate is skipped',"if(production)return refuse(409,production);",""],
   ['an unbound Workflow is accepted',"if(typeof env.EPG_DIAGNOSTIC_WORKFLOW?.create!=='function')return refuse(503,'workflow_unbound');",""],
@@ -355,11 +421,11 @@ async function quick(sourcesOverride,only=null){
   ['the published generation is not compared',"if(live){if(live.programmeRunId!==id)return {refused:'domain_not_prepared'};return {publication:{programmeRunId:id,phase:'published',fence:live.fence}};}","if(live)return {publication:{programmeRunId:id,phase:'published',fence:live.fence}};"],
   ['a dirty domain is overwritten',"if((listed.objects||[]).length)return {refused:'domain_not_clean'};",""],
   ['the dataset digest of a materialized baseline is not compared',"return body.datasetDigest===dataset.digest&&!body.consumedBy?{reused:true}:{refused:'domain_not_clean'};","return {reused:true};"],
-  ['the report claims a publication',"schemaVersion:1,label:'canary-measured',published:false,productionWrites:0,\n    dataset:","schemaVersion:1,label:'canary-measured',published:true,productionWrites:0,\n    dataset:"],
-  ['the report is labelled production-measured',"schemaVersion:1,label:'canary-measured',published:false,productionWrites:0,\n    dataset:","schemaVersion:1,label:'production-measured',published:false,productionWrites:0,\n    dataset:"],
+  ['the report claims a publication',"schemaVersion:1,label:'canary-measured',published:publishedAfter!==publishedBefore,productionWrites:measure.attempts,\n    dataset:","schemaVersion:1,label:'canary-measured',published:true,productionWrites:0,\n    dataset:"],
+  ['the report is labelled production-measured',"schemaVersion:1,label:'canary-measured',published:publishedAfter!==publishedBefore,productionWrites:measure.attempts,\n    dataset:","schemaVersion:1,label:'production-measured',published:false,productionWrites:0,\n    dataset:"],
   ['status writes',"return reply(200,{receipt:publicReceipt(row),instance:live,reconcile:hint,sideEffects:'none',writes:noteWrites(ctx)});","await transition(ctx.env,row.idempotency_key,Number(row.revision),ACTIVE,row.status);return reply(200,{receipt:publicReceipt(row),instance:live,reconcile:hint,sideEffects:'none',writes:noteWrites(ctx)});"],
  ];
- const concerns={"a writing action needs no Access assertion":["a writing action needs the Access assertion"],"launch needs no confirmation": ["launch needs the confirmation"], "the production gate is skipped": ["the production gate refuses"], "an unbound Workflow is accepted": ["an unbound Workflow refuses"], "the dataset is not verified": ["a tampered dataset does not start"], "the idempotency conflict is ignored": ["other parameters conflict"], "the active slot is ignored": ["one canary at a time"], "an unknown create is retried": ["an unknown create is not retried blind"], "an unknown status is retried": ["an unknown create is not retried blind"], "a repeat creates again": ["a repeat creates no second instance"], "stop does not terminate": ["stop terminates the instance"], "a stopped receipt runs on": ["a stopped receipt does not run"], "cleanup ignores an active canary": ["cleanup refuses while active"], "the published generation is not compared": ["an unprepared domain fails closed"], "a dirty domain is overwritten": ["a dirty domain is refused"], "the dataset digest of a materialized baseline is not compared": ["a consumed baseline is refused"], "the report claims a publication": ["a run completes with exact departures"], "the report is labelled production-measured": ["a run completes with exact departures"], "status writes": ["status writes nothing"]};
+ const concerns={"the owner is not verified in the Worker":["the owner is verified on every route"],"the owner e-mail is not compared":["only the owner e-mail passes"],"a stop completes without quiescence":["a stop holds the slot until quiescent"],"begin does not gate production":["production busy at begin fails the run"],"seal does not gate production":["production busy at seal fails the run"],"the deadline is not enforced":["an exceeded deadline is enforced by the guard"],"complete ignores the outcome":["a violated postcondition is not complete"],"launch needs no confirmation": ["launch needs the confirmation"], "the production gate is skipped": ["the production gate refuses"], "an unbound Workflow is accepted": ["an unbound Workflow refuses"], "the dataset is not verified": ["a tampered dataset does not start"], "the idempotency conflict is ignored": ["other parameters conflict"], "the active slot is ignored": ["one canary at a time"], "an unknown create is retried": ["an unknown create is not retried blind"], "an unknown status is retried": ["an unknown create is not retried blind"], "a repeat creates again": ["a repeat creates no second instance"], "stop does not terminate": ["stop terminates the instance"], "a stopped receipt runs on": ["a stopped receipt does not run"], "cleanup ignores an active canary": ["cleanup refuses while active"], "the published generation is not compared": ["an unprepared domain fails closed"], "a dirty domain is overwritten": ["a dirty domain is refused"], "the dataset digest of a materialized baseline is not compared": ["a consumed baseline is refused"], "the report claims a publication": ["a run completes with exact departures"], "the report is labelled production-measured": ["a run completes with exact departures"], "status writes": ["status writes nothing"]};
  for(const [name,from,to] of mutants){
   assert.equal(SOURCES.run.split(from).length-1,1,'the mutant pattern exists once: '+name);
   assert.ok(concerns[name],'the mutant names the checks it concerns: '+name);

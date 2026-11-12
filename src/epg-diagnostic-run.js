@@ -17,7 +17,8 @@ const EpgDiagnosticRun=(()=>{
  const CONFIRM={launch:'LAUNCH_EPG_DIAGNOSTIC_CANARY',stop:'STOP_EPG_DIAGNOSTIC_CANARY',cleanup:'CLEANUP_EPG_DIAGNOSTIC_DOMAIN'};
  const LIMITS=Object.freeze({minBudgetMs:60000,maxBudgetMs:20*60000,defaultBudgetMs:15*60000,maxDepartures:8000,maxReturns:2000,preflightProduction:true});
  const KEY_RE=/^[A-Za-z0-9_-]{16,80}$/,DIGEST_RE=/^[0-9a-f]{64}$/,SEED_RE=/^[A-Za-z0-9 ._:-]{1,64}$/;
- const ACTIVE=['reserved','created','running'];
+ const ACTIVE=['reserved','created','running','stopping'];
+ const QUIESCENCE_MS=60000;
  const datasetKey=digest=>'diagnostic/replay/'+digest+'.json';
  const MATERIALIZED_KEY='diagnostic/runs/materialized.json';
  const iso=ms=>new Date(ms).toISOString();
@@ -25,6 +26,36 @@ const EpgDiagnosticRun=(()=>{
  const refuse=(status,code,extra={})=>reply(status,{refused:code,...extra});
  const noteWrites=ctx=>{const s=ctx.stats();return s.d1.writes+s.d1.batches+s.r2.writes+s.r2.deletes;};
  const sha256=text=>EpgReplay.sha256(text);
+
+ // ---- the owner, verified in the Worker on EVERY route (reads and writes) ---------------------------------------------------------
+ // The signed Cloudflare Access assertion is checked here, independently of the edge policy: signature, issuer, audience of the Access application that fronts these routes
+ // (`EPG_DIAGNOSTIC_ACCESS_AUD`), expiry, identity and the owner's e-mail (`EPG_DIAGNOSTIC_OWNER_EMAIL`). Until the owner sets both, every route refuses `access_not_configured`.
+ async function verifyOwner(request,env){
+  const audience=typeof env?.EPG_DIAGNOSTIC_ACCESS_AUD==='string'?env.EPG_DIAGNOSTIC_ACCESS_AUD.trim():'';
+  const ownerEmail=typeof env?.EPG_DIAGNOSTIC_OWNER_EMAIL==='string'?env.EPG_DIAGNOSTIC_OWNER_EMAIL.trim().toLowerCase():'';
+  const teamDomain=mcpTeamDomain(env?.MCP_ACCESS_TEAM_DOMAIN);
+  if(!teamDomain||!/^[A-Za-z0-9_-]{16,256}$/.test(audience)||!/^[^@\s]+@[^@\s]+$/.test(ownerEmail))return {ok:false,status:503,code:'access_not_configured'};
+  const checked=await mcpVerifyAccessWith(request,{teamDomain,audience,ownerEmail});
+  return checked.ok?{ok:true}:{ok:false,status:checked.status,code:checked.status===403?'forbidden':'access_unavailable'};
+ }
+ // The production env as the gates see it: reads pass, every write is refused and counted, so `productionWrites` of a report is a measurement.
+ function readOnlyEnv(env,counter){
+  const refuseWrite=()=>{counter.attempts++;throw Object.assign(new Error('production_write_refused'),{code:'production_write_refused'});};
+  const known=new WeakMap();
+  const wrap=(inner,sql)=>{
+   const write=EpgDiagnostic.isWrite(sql);
+   const call=method=>(...args)=>{if(write)refuseWrite();return inner[method](...args);};
+   const out={bind:(...values)=>wrap(inner.bind(...values),sql),run:call('run'),first:call('first'),all:call('all'),raw:call('raw')};
+   known.set(out,{inner,write});return out;
+  };
+  const DB=env?.DB?{
+   prepare:sql=>wrap(env.DB.prepare(sql),sql),
+   batch:statements=>{const list=(statements||[]).map(item=>known.get(item));if(list.some(item=>!item||item.write))refuseWrite();return env.DB.batch(list.map(item=>item.inner));},
+   exec:refuseWrite,
+  }:env?.DB;
+  const BUCKET=env?.BUCKET?{get:(...a)=>env.BUCKET.get(...a),head:(...a)=>env.BUCKET.head(...a),list:(...a)=>env.BUCKET.list(...a),put:refuseWrite,delete:refuseWrite,createMultipartUpload:refuseWrite,resumeMultipartUpload:refuseWrite}:env?.BUCKET;
+  return {...env,DB,BUCKET};
+ }
 
  // ---- configuration: strict, immutable, fingerprinted -------------------------------------------------------------
  function validateConfig(body){
@@ -55,7 +86,8 @@ const EpgDiagnosticRun=(()=>{
   return {ctx:made};
  }
  // ---- the production env, READ ONLY ------------------------------------------------------------------------------
- async function productionGate(env,now=Date.now()){
+ async function productionGate(realEnv,now=Date.now(),measure={attempts:0}){
+  const env=readOnlyEnv(realEnv,measure);
   try{
    const lease=await EpgOrchestration.readLease(env);
    if(lease.malformed)return 'production_state_unreadable';
@@ -71,7 +103,7 @@ const EpgDiagnosticRun=(()=>{
    if(run?.stage==='seal')return 'production_seal_active';
    if(run&&['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<15*60000)return 'production_sync_active';
    return null;
-  }catch{return 'production_state_unreadable';}
+  }catch(error){return error?.code==='production_write_refused'?'production_write_attempted':'production_state_unreadable';}
  }
 
  // ---- receipts (diagnostic D1) -----------------------------------------------------------------------------------
@@ -138,8 +170,8 @@ const EpgDiagnosticRun=(()=>{
    const loaded=await loadDataset(ctx.env,datasetDigest);
    checks.dataset=loaded.refused||'verified';
   }
-  const ready=checks.workflow==='bound'&&receiptsReady&&!active&&!production;
-  return reply(200,{ready,production:production||'idle',checks,sideEffects:'none',writes:noteWrites(ctx)});
+  const ready=checks.workflow==='bound'&&receiptsReady&&!active&&!production&&(!datasetDigest||checks.dataset==='verified');
+  return reply(200,{ready,datasetChecked:!!datasetDigest,production:production||'idle',checks,sideEffects:'none',writes:noteWrites(ctx)});
  }
  async function status(env,key){
   if(typeof key!=='string'||!KEY_RE.test(key))return reply(400,{error:'Invalid key'});
@@ -181,6 +213,8 @@ const EpgDiagnosticRun=(()=>{
   let existing;try{existing=await readReceipt(ctx.env,key);}catch{return refuse(503,'receipts_unavailable');}
   if(existing){
    if(existing.fingerprint!==fingerprint)return refuse(409,'idempotency_conflict');
+   // A reservation that is resumed (its create outcome was unknown) may create or attach an instance: the production EPG must be idle NOW.
+   if(existing.status==='reserved'){const busy=await productionGate(env,now);if(busy)return refuse(409,busy,{receipt:publicReceipt(existing)});}
    return reconcile(env,ctx,existing);
   }
   const production=await productionGate(env,now);
@@ -192,7 +226,7 @@ const EpgDiagnosticRun=(()=>{
   const taken=await reserve(ctx.env,{key,fingerprint,instanceId,config,now});
   if(!taken.reserved){
    if(taken.constraint==='slot')return refuse(409,'canary_active');
-   if(taken.constraint==='key'){const again=await readReceipt(ctx.env,key);if(again&&again.fingerprint===fingerprint)return reconcile(env,ctx,again);return refuse(409,'idempotency_conflict');}
+   if(taken.constraint==='key'){const again=await readReceipt(ctx.env,key);if(again&&again.fingerprint===fingerprint){const busy=again.status==='reserved'?await productionGate(env,now):null;if(busy)return refuse(409,busy);return reconcile(env,ctx,again);}return refuse(409,'idempotency_conflict');}
    return refuse(503,'reservation_failed');
   }
   return reconcile(env,ctx,await readReceipt(ctx.env,key));
@@ -224,7 +258,16 @@ const EpgDiagnosticRun=(()=>{
  }
 
  // ---- stop and cleanup: writing actions --------------------------------------------------------------------------------
- async function stop(env,body){
+ // Stop keeps the domain FENCED until the former run is quiet. The receipt moves to `stopping` first (the slot stays taken, so no launch and no cleanup), the diagnostic step lease is
+ // invalidated (a seal that is still writing loses it at its next fence and ends), the instance is terminated, and only when the instance has ended, the lease is quiet and a
+ // quiescence interval has passed is the receipt `stopped` and the slot freed. Anything uncertain leaves it `stopping` (202): the owner repeats the same stop.
+ async function leaseQuiet(ctxEnv,now){
+  const lease=await EpgOrchestration.readLease(ctxEnv);
+  if(lease.malformed)return false;
+  const record=lease.record;
+  return !record||record.released===true||Date.parse(record.expiresAt||'')+EpgOrchestration.BOUNDARY_MARGIN_MS<now;
+ }
+ async function stop(env,body,{now=()=>Date.now()}={}){
   if(!body||typeof body!=='object'||Array.isArray(body)||Object.keys(body).some(name=>!['idempotencyKey','confirm'].includes(name)))return reply(400,{error:'Invalid request'});
   if(typeof body.idempotencyKey!=='string'||!KEY_RE.test(body.idempotencyKey))return reply(400,{error:'Invalid idempotencyKey'});
   if(body.confirm!==CONFIRM.stop)return refuse(400,'confirmation_required');
@@ -234,16 +277,25 @@ const EpgDiagnosticRun=(()=>{
   let row;try{row=await readReceipt(ctx.env,body.idempotencyKey);}catch{return refuse(503,'receipts_unavailable');}
   if(!row)return reply(404,{error:'Unknown key'});
   if(!ACTIVE.includes(row.status))return reply(200,{receipt:publicReceipt(row),stopped:false,note:'not_active'});
-  // The receipt is marked first, then the instance is terminated: a run that is still going finds its receipt stopped at its next boundary and ends.
-  const marked=await transition(ctx.env,row.idempotency_key,Number(row.revision),ACTIVE,'stopped',{failure:'stopped_by_owner'});
-  if(!marked)return refuse(409,'write_conflict');
+  if(row.status!=='stopping'){
+   if(!await transition(ctx.env,row.idempotency_key,Number(row.revision),['reserved','created','running'],'stopping',{failure:'stopped_by_owner',now:now()}))return refuse(409,'write_conflict');
+   try{await ctx.env.DB.prepare("UPDATE "+EpgOrchestration.TABLE+" SET body=json_set(body,'$.holder','stopped-by-owner','$.expiresAt',?), revision=revision+1 WHERE key='lease'").bind(iso(now())).run();}catch{return reply(202,{receipt:publicReceipt(await readReceipt(ctx.env,row.idempotency_key)),stopped:false,note:'lease_invalidation_unconfirmed_repeat_stop'});}
+   row=await readReceipt(ctx.env,row.idempotency_key);
+  }
   let terminated='not_needed';
   const binding=env.EPG_DIAGNOSTIC_WORKFLOW;
   if(binding&&typeof binding.get==='function'){
    try{const instance=await binding.get(row.instance_id);if(typeof instance?.terminate==='function'){await instance.terminate();terminated='terminated';}}
    catch(error){terminated=/not[ _.]found|does not exist/i.test(String(error?.message||''))?'absent':'terminate_failed';}
   }
-  return reply(200,{receipt:publicReceipt(await readReceipt(ctx.env,row.idempotency_key)),stopped:true,instance:terminated});
+  const live=await instanceStatus(binding,row.instance_id);
+  const ended=['terminated','complete','errored','absent'].includes(live);
+  let quiet=false;try{quiet=await leaseQuiet(ctx.env,now());}catch{quiet=false;}
+  const waitedMs=now()-Date.parse(row.updated_at);
+  const quiescence={instance:live,terminate:terminated,leaseQuiet:quiet,waitedMs,requiredMs:QUIESCENCE_MS};
+  if(!(ended&&quiet&&waitedMs>=QUIESCENCE_MS))return reply(202,{receipt:publicReceipt(row),stopped:false,note:'quiescence_unconfirmed_repeat_stop',quiescence});
+  const done=await transition(ctx.env,row.idempotency_key,Number(row.revision),['stopping'],'stopped',{now:now()});
+  return done?reply(200,{receipt:publicReceipt(await readReceipt(ctx.env,row.idempotency_key)),stopped:true,quiescence}):refuse(409,'write_conflict');
  }
  // Cleanup empties the baseline the runs materialize (objects under `epg/` and the run document) of the DIAGNOSTIC bucket, never the identity, the datasets or the receipts.
  async function cleanup(env,body){
@@ -323,9 +375,12 @@ const EpgDiagnosticRun=(()=>{
  async function sealRun(env,key,config,{now=()=>Date.now()}={}){
   const opened=await openContext(env);
   if(opened.refused)return {failure:{code:opened.refused}};
-  const ctx=opened.ctx,started=now(),before=ctx.stats(),BUCKET=ctx.env.BUCKET;
+  const ctx=opened.ctx,started=now(),before=ctx.stats(),BUCKET=ctx.env.BUCKET,measure={attempts:0};
   let step=null,phases=[],runId=await runIdOf(key);
   try{
+   // The production EPG must be idle at the moment the run actually starts, not only when it was launched (read only, fail closed).
+   const busy=await productionGate(env,now(),measure);
+   if(busy)return {failure:{code:busy}};
    const loaded=await loadDataset(ctx.env,config.datasetDigest);
    if(loaded.refused)return {failure:{code:loaded.refused}};
    const dataset=loaded.dataset,plan=await planOf(dataset,config);
@@ -336,6 +391,8 @@ const EpgDiagnosticRun=(()=>{
    // The run claims the baseline before its first seal mutation.
    await BUCKET.put(MATERIALIZED_KEY,JSON.stringify({datasetDigest:dataset.digest,programmeRunId:dataset.source.programmeRunId,consumedBy:runId}),{httpMetadata:{contentType:'application/json'}});
    const scan=await EpgReplay.replayScan(dataset,plan,helpers());
+   const publishedMark=async()=>{const now2=await publicationOf(ctx.env,dataset);return JSON.stringify(now2.publication?now2.publication.fence:now2.refused||null);};
+   const publishedBefore=await publishedMark();
    const archivePointer=await ctx.env.BUCKET.get('epg/discovery-archive/v1/current.json');
    const manifestBefore=archivePointer?(await (await ctx.env.BUCKET.get(EpgReplay.MANIFEST_KEY((await archivePointer.json()).manifestId))).json()):null;
    const segmentsBefore=Object.assign((manifestBefore?.segments||[]).map(entry=>entry.object||null),{manifestId:manifestBefore?.manifestId||null});
@@ -343,6 +400,8 @@ const EpgDiagnosticRun=(()=>{
    const taken=await EpgOrchestration.acquireStep(ctx.env,{kind:'executor',modeRevision:null,now:now()});
    if(!taken.step)return {failure:{code:taken.busy?'step_lease_held':taken.reason||'step_lease_unavailable'}};
    step=taken.step;ctx.env.epgStep=step;
+   // The budget is enforced by the real step guard at every mutation boundary of the seal (`assertStep` refuses past the deadline), not only reported afterwards.
+   ctx.env.epgDeadline=started+config.budgetMs;
    const leaseBefore=await EpgOrchestration.readLease(ctx.env);
    const at=iso(now()),run={runId,stage:'epg',startedAt:at,updatedAt:at,watchlist:[],events:[]};
    await BUCKET.put('sync.json',JSON.stringify(run),{httpMetadata:{contentType:'application/json'}});
@@ -359,8 +418,9 @@ const EpgDiagnosticRun=(()=>{
    const phase=name=>{const exit=phases.filter(event=>event.phase===name&&event.edge==='exit').pop();if(!exit)return null;const {event,runId:rid,phase:p,edge,at:when,...fields}=exit;void event;void rid;void p;void edge;void when;return fields;};
    const errored=phases.filter(event=>event.edge==='error').map(({phase:p,reason})=>({phase:p,reason:reason||null}));
    const expected={departures:plan.departureCount,segmentsRewritten:plan.archive.segmentsRewritten};
+   const publishedAfter=await publishedMark();
    const report={
-    schemaVersion:1,label:'canary-measured',published:false,productionWrites:0,
+    schemaVersion:1,label:'canary-measured',published:publishedAfter!==publishedBefore,productionWrites:measure.attempts,
     dataset:{digest:dataset.digest,programmeRunId:dataset.source.programmeRunId,builtAt:dataset.builtAt,fidelity:dataset.fidelity,items:dataset.counts.items,archivedItems:dataset.counts.archivedItems},
     plan:{seed:plan.seed,departures:plan.departureCount,returns:plan.returnCount,segmentsRewritten:plan.archive.segmentsRewritten,upsertedKeysDigest:plan.archive.upsertedKeysDigest,digest:plan.digest},
     runId,phases:{seal_stage_plan:phase('seal_stage_plan'),seal_stage_archive:phase('seal_stage_archive'),seal_stage_emit:phase('seal_stage_emit')},
@@ -370,16 +430,30 @@ const EpgDiagnosticRun=(()=>{
     retries:0,failures:errored,
     cpuMs:null,memory:null,cpuMemoryNote:'not exposed to Worker code',
     expectedVsActual:{expected,actual:{departures:actual.upsertedKeys.length,segmentsRewritten:actual.segmentsRewritten},departuresMatch:JSON.stringify(actual.upsertedKeys)===JSON.stringify(plan.departures),segmentsMatch:JSON.stringify(actual.segmentsRewritten)===JSON.stringify(plan.archive.segmentsRewritten)},
-    invariants:{published:false,productionWrites:0,deniedAccesses:after.denied,refusedWrites:after.refusedWrites,identityVerified:ctx.verified(),archivePointerMoved:actual.moved===true,productionBindingsExposed:false},
+    invariants:{published:publishedAfter!==publishedBefore,productionWrites:measure.attempts,deniedAccesses:after.denied,refusedWrites:after.refusedWrites,identityVerified:ctx.verified(),archivePointerMoved:actual.moved===true,productionBindingsExposed:false},
     withinBudget:now()-started<=config.budgetMs,
     limits:['canary-measured: diagnostic D1 and bucket latency, not production latency','application-enforced isolation, not platform isolation (ADR 0121)','a passing canary is not AIR-444 acceptance'],
    };
+   const violations=[];
+   if(!report.withinBudget)violations.push('budget_exceeded');
+   if(!report.expectedVsActual.departuresMatch)violations.push('departures_mismatch');
+   if(!report.expectedVsActual.segmentsMatch)violations.push('segments_mismatch');
+   if(plan.departureCount>0&&!report.invariants.archivePointerMoved)violations.push('archive_pointer_not_moved');
+   if(report.invariants.deniedAccesses>0)violations.push('denied_accesses');
+   if(report.invariants.refusedWrites>0)violations.push('refused_writes');
+   if(errored.length)violations.push('phase_error');
+   if(!report.lease.holderKept)violations.push('lease_not_kept');
+   if(report.published)violations.push('published_generation_moved');
+   if(report.productionWrites>0)violations.push('production_write_attempted');
+   report.outcome={ok:violations.length===0,violations};
    return {report};
   }catch(error){
+   if(error?.code==='epg_step_budget')return {failure:{code:'budget_exceeded'},phases};
    return {failure:{code:EpgOrchestration.classifyThrown(error)==='step_failed'&&error?.reason?String(error.reason):EpgOrchestration.classifyThrown(error)},phases};
   }finally{
    if(step)await EpgOrchestration.endStep(ctx.env,step).catch(()=>false);
    if(ctx.env.epgStep)delete ctx.env.epgStep;
+   if(Number.isFinite(ctx.env.epgDeadline))delete ctx.env.epgDeadline;
   }
  }
  // The Workflow body. Every step returns a plain outcome and none throws, so the Workflow engine never retries a step that may have written.
@@ -396,6 +470,9 @@ const EpgDiagnosticRun=(()=>{
     if(!row)return {ok:false,code:'receipt_missing'};
     if(row.status==='running')return {ok:true,config:JSON.parse(row.config_json),resumed:true};
     if(row.status!=='created'&&row.status!=='reserved')return {ok:false,code:'receipt_'+row.status};
+    // Production must be idle when the instance actually starts: a busy production ends this run as failed (the owner launches again later); it is never raced.
+    const busy=await productionGate(env,now());
+    if(busy){await transition(ctx.env,key,Number(row.revision),['reserved','created'],'failed',{failure:busy,now:now()});return {ok:false,code:busy};}
     if(!await transition(ctx.env,key,Number(row.revision),['reserved','created'],'running',{now:now()}))return {ok:false,code:'write_conflict'};
     return {ok:true,config:JSON.parse(row.config_json)};
    }catch{return {ok:false,code:'receipts_unavailable'};}
@@ -407,11 +484,13 @@ const EpgDiagnosticRun=(()=>{
     const row=await readReceipt(ctx.env,key);
     if(!row)return {recorded:false,code:'receipt_missing'};
     if(row.status!=='running')return {recorded:false,code:'receipt_'+row.status};
-    const done=sealed.report?await transition(ctx.env,key,Number(row.revision),['running'],'complete',{report:sealed.report,now:now()}):await transition(ctx.env,key,Number(row.revision),['running'],'failed',{failure:String(sealed.failure?.code||'step_failed').slice(0,80),report:{schemaVersion:1,label:'canary-measured',published:false,productionWrites:0,failure:sealed.failure,partial:true},now:now()});
+    // `complete` only when the measured postconditions hold; a finished run that violated one is a failed receipt that still carries its full report.
+    const ok=sealed.report?.outcome?.ok===true;
+    const done=ok?await transition(ctx.env,key,Number(row.revision),['running'],'complete',{report:sealed.report,now:now()}):sealed.report?await transition(ctx.env,key,Number(row.revision),['running'],'failed',{failure:('postcondition_failed:'+(sealed.report.outcome?.violations||[]).join(',')).slice(0,80),report:sealed.report,now:now()}):await transition(ctx.env,key,Number(row.revision),['running'],'failed',{failure:String(sealed.failure?.code||'step_failed').slice(0,80),report:{schemaVersion:1,label:'canary-measured',published:false,productionWrites:0,failure:sealed.failure,partial:true},now:now()});
     return {recorded:done};
    }catch{return {recorded:false,code:'receipts_unavailable'};}
   });
-  return {stopped:true,reason:sealed.report?'complete':String(sealed.failure?.code||'failed'),recorded:finished.recorded===true};
+  return {stopped:true,reason:sealed.report?(sealed.report.outcome?.ok===true?'complete':'postcondition_failed'):String(sealed.failure?.code||'failed'),recorded:finished.recorded===true};
  }
 
  // ---- the routes (the Worker's dispatcher calls this for `/api/epg/diagnostic/…`) -----------------------------------------------
@@ -419,6 +498,9 @@ const EpgDiagnosticRun=(()=>{
   const name=url.pathname.slice('/api/epg/diagnostic/'.length);
   const respond=result=>new Response(JSON.stringify(result.body),{status:result.status,headers:{'content-type':'application/json'}});
   const read=async()=>{try{return await request.json();}catch{return undefined;}};
+  // The owner is verified inside the Worker before anything is read or written, on reads and writes alike.
+  const access=await verifyOwner(request,env);
+  if(!access.ok)return respond(refuse(access.status,access.code));
   if(request.method==='GET'){
    if(name==='preflight')return respond(await preflight(env,{datasetDigest:url.searchParams.get('dataset')}));
    if(name==='status')return respond(await status(env,url.searchParams.get('key')));
@@ -426,10 +508,6 @@ const EpgDiagnosticRun=(()=>{
    return respond(['launch','stop','cleanup'].includes(name)?reply(405,{error:'Method not allowed'}):reply(404,{error:'Not found'}));
   }
   if(request.method==='POST'&&['launch','stop','cleanup'].includes(name)){
-   // Defence in depth for a writing action behind the Worker-wide Cloudflare Access: a request that did not pass through Access carries no assertion header. Only its presence is checked
-   // here (the Worker's JWT verifier is bound to the audience of the MCP application, not of this one); Access at the edge stays the control.
-   const assertion=request.headers.get('Cf-Access-Jwt-Assertion');
-   if(!assertion||assertion.length>8192)return respond(refuse(403,'access_assertion_missing'));
    const body=await read();
    if(body===undefined)return respond(reply(400,{error:'Invalid JSON'}));
    const action=name==='launch'?launch:name==='stop'?stop:cleanup;
