@@ -376,7 +376,7 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-producers'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,['src/canonical-person-adapters.js','src/canonical-producer-adapters.js'],'only the dormant receipt adapters import canonical-producers');
+ assert.deepEqual(importers,['src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js','src/canonical-producer-adapters.js'],'only the dormant receipt adapters import canonical-producers');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producers'),file+' does not bundle it');
  const text=fs.readFileSync('src/canonical-producers.js','utf8');
  assert.ok(!/\bR2\b|fetch\(|env\.[A-Z_]+_BUCKET|\.get\(['"]/.test(text.replace(/\/\/.*$/gm,'')),'the module reads no R2 and calls no network');

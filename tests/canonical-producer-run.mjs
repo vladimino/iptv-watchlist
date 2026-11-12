@@ -39,7 +39,7 @@ const sortedEq=(actual,expected,message)=>assert.deepEqual([...actual].sort(),[.
  assert.ok(Object.isFrozen(R.ERROR_CLASSES),'the table is frozen');
  assert.ok(Object.values(R.ERROR_CLASSES).every(value=>Object.values(CLASS).includes(value)));
  // EXHAUSTIVE over the producer path: every code a planner, an adapter, a writer or the receipt layer raises (a `failed('code')` literal) or a dictionary conflict reason has a class. A new code without a row fails here.
- const files=['canonical-epg-producer','canonical-epg-person-producer','canonical-dictionary-producer','canonical-person-adapters','canonical-producer-adapters','canonical-person-state','canonical-film-writers','canonical-mutations','canonical-receipts','canonical-producers','film-person-authority'];
+ const files=['canonical-epg-producer','canonical-epg-person-producer','canonical-dictionary-producer','canonical-person-adapters','canonical-person-mutation-producer','canonical-producer-adapters','canonical-person-state','canonical-film-writers','canonical-mutations','canonical-receipts','canonical-producers','film-person-authority'];
  const found=new Map();
  for(const file of files){
   const text=fs.readFileSync(path.resolve('src',file+'.js'),'utf8');
