@@ -442,7 +442,7 @@ const dueFailed=async()=>{
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==adapters&&fs.readFileSync(full,'utf8').includes('canonical-producer-adapters'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'nothing in src imports the adapter');
+ assert.deepEqual(importers,['src/canonical-epg-producer.js'],'only the dormant EPG producer layer imports the adapter');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-adapters'),file+' does not bundle it');
  const text=fs.readFileSync(path.join(SRC,'canonical-producer-adapters.js'),'utf8');
  const code_=text.replace(/\/\/.*$/gm,'');
