@@ -1,0 +1,54 @@
+# ADR 0123: Producer receipt adapter: `film_facts`, stable request ids, pre-plan no-op skip and own-origin inline reconcile
+
+**Status:** Accepted as DESIGN for offline, dormant code only. The owner decisions E2 and E5 it applies are ACCEPTED (source: [AIR-374](https://trello.com/c/ha7ais3w), owner decisions of 12 Nov 2026, [decision pack](../runbooks/film-person-holdpoint-decision-pack.md)). This is not merge approval and not a production GO. Migration `0019` (schema 19) is ALREADY installed in production (applied 12 Nov 2026, [evidence](../evidence/d1-migration/air-374-0019-apply-2026-11-12.md); `SCHEMA_EXPECTED=19`); this ADR changes no schema. What stays dormant is the ADAPTER: nothing calls it, it is not bundled, no marker moves and no further production operation (no activation, baseline, receipt write or reconcile) is authorized.  
+**Original decision date:** 2026-11-12  
+**Recorded at:** 2026-11-12  
+**Approval source:** Owner decisions E2 and E5 of 12 Nov 2026 on the [AIR-374 card](https://trello.com/c/ha7ais3w); the adapter shape is the reviewer-level decision the P3 plan assigned to P3-0b  
+**Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [ADR 0119](0119-durable-canonical-write-receipts.md), [ADR 0120](0120-canonical-film-writers-identity-metadata-membership.md), [ADR 0117](0117-film-person-d1-handoff-owner-decisions.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [offline evidence](../evidence/d1-migration/air-374-p3-0b-producer-receipt-adapter-offline-2026-11-12.md)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+[ADR 0119](0119-durable-canonical-write-receipts.md) decision 4 makes the canonical mutation and the applied receipt ONE fenced batch, and P3-0a gave the nine fenced writers an optional `receiptMark` for it. What was still missing is the producer side: something that decides when a receipt is needed at all, gives every request a stable id, names the unit `writeFilmFacts` writes (one call touches metadata, dimensions, sync clocks, membership, identity and effective localization, four of the registered kinds at once, while one receipt carries one kind), and reconciles a producer's own unsettled receipts without a new scheduler. The owner decided on 12 Nov 2026: E5, a producer pre-plans a no-op before a receipt exists and keeps the mutation and the applied receipt in one atomic batch, an uncertain race ending `unknown`, readback and reconcile with no silent second batch; E2, reconciliation is bounded, inline and by the producer's own origin, with no new cron and no global hourly reconcile.
+
+## Decision
+
+1. **One new operation kind, `film_facts`.** It is added to the closed `OPERATION_KINDS` (the SQL column accepts any lowercase identifier, so no migration) and names exactly one `writeFilmFacts` call: the facts of ONE Film. The receipt target is that Film. The four finer kinds stay registered for the other writers. Which kinds a producer `requires` in `PRODUCER_WIRING` is not changed here: P3a re-derives it from the harness.
+2. **Adapter module `src/canonical-producer-adapters.js`, dormant.** Nothing imports it, `build.mjs` does not bundle it, and it names no network, storage, timer or cron API. Every entry point reads the marker once through `writerRoute` and, unless the route is `canonical` (marker `open`), returns `skipped` before any other statement; `held` and an unreadable marker throw (a producer defers, it never falls back to R2). The projector stays the only canonical writer in `legacy`, `r2` and `prepared`.
+3. **Pre-plan, then receipt (E5).** `applyFilmFacts` runs the writer's own pure planner over the stored rows first. A no-op plan ends the call: no receipt, no batch. Only a plan that would change something creates the receipt and runs `receiptedWrite` in atomic mode with the writer's own `receiptMark`. A refusal the planner raises (invalid input, redirect, identity conflict) also exists before a receipt does. The residual race (identical content landing between the pre-plan and the writer's own read) leaves the receipt `unknown` (`atomic_mark_missing`), visible in `listAttention`, settled by readback and `reconcileReceipts`; there is no marking batch and no amendment of ADR 0119 decision 4.
+4. **Stable request id from the source event, the target and the content digest.** `producerRequestId({origin,event,target,digest})` requires a non-blank `event` (the producer's own run id or observation time, at most 300 characters); only the digest of `{event,target,digest}` enters the stored id (`origin:operation:sha256`). The content digest is taken over the planned facts only (`film`, `evidence`, `dimensions`, `localization`, `metadata`, `sync`, `watchlist`, the target id), with the write clocks `at` and `updatedAt` dropped at every depth and observation times kept. The same event and content always give the same id; a new event or another content gives another one. The content alone never identifies a request, because an A to B to A flip would otherwise reuse the first id and be read as `already applied`. The event must therefore be unique per observation: a producer that reuses an event id with other content gets `already applied` for it.
+5. **Replay needs a re-plan, never a stored payload; a moved source is terminal, a missing re-plan is bounded.** A receipt stores no payload, so the registry spec `filmFactsOperation({replan})` asks the producer to re-plan the Film's facts from its own source. Three cases, all with the stored request id and none ever replaying old facts: (a) the re-plan digests to the receipt's content: normal readback, replay and revalidation; (b) the re-plan digests to ANOTHER content (the source moved on): `readback` returns the typed disposition `{disposition:'abandon',errorClass:'producer_source_changed'}`; `reconcileReceipts` (and the natural `receiptedWrite` path) abandons the receipt with that class (pending, failed or unknown to abandoned; the attempts counter is untouched, `settled_at` is set, `listAttention` shows it) without a replay and without a canonical write, and the next natural run makes a new request; (c) no re-plan (null or a throwing `replan`): `readback` returns an absent effect, so the ordinary bounds apply on every inline pass: each replay attempt counts (`producer_replan_unavailable`, state `unknown`, backoff 60 s to 2 h), and after 5 attempts or 7 days the receipt is abandoned (`attempts_exhausted`, `expired`); a moved revision is abandoned `stale_revision_needs_repair`. `readback` proves nothing by content alone (the receipts module turns a content match into `needs_review`); `revalidate` answers `proceed` when the facts would still change the Film and `superseded` when they would not or the Film was redirected; no re-plan or a changed one: `stale` (repair). Contract change in `src/canonical-receipts.js` (no schema change; the transitions, attempts and generation triggers of migration `0019` already allow pending, failed and unknown to abandoned with an `error_class`): a readback may return a typed abandon disposition instead of throwing (`abandonOf`, the class must be a lowercase identifier, anything else is an ordinary observation), and a readback that THROWS (an unreadable database) still waits as `readback_failed`, but is abandoned `readback_expired` once the receipt is older than the 7-day bound instead of waiting forever.
+6. **Bounded inline reconcile by the producer's own origin (E2).** `listReceipts` and `reconcileReceipts` take an optional `origin` filter, applied in SQL so another origin's rows never use up the limit and validated before any statement. `reconcileOwnOrigin` requires an origin, is dormant unless the marker is `open`, looks at no more than 10 due receipts and has no timer. It is meant to be called by a producer after its own natural run. There is no cron, no tick call and no global reconcile; the global pass of the receipts module is unchanged and still has no caller.
+
+Not decided: the call sites (P3a to P3e), the `requires` of each producer, any production step, and whether a global reconcile is ever added (E2 recommends a separate GO after a soak).
+
+## Alternatives considered
+
+- **A one-statement no-op marker batch** for the race: rejected by owner decision E5; it would need an ADR 0119 amendment because decision 4 forbids a second marking batch.
+- **Four receipts for one `writeFilmFacts` call** (`film_metadata`, `film_dimension`, `film_sync_state`, `film_membership`): no single atomic call can satisfy four receipts; the plan recommended one kind.
+- **A request id from the content alone:** rejected, see decision 4.
+- **A stored plan payload for replay:** rejected, the receipt table stores digests only (ADR 0119); the producer re-plans from its own source.
+- **An hourly global reconcile:** not adopted (owner decision E2).
+
+## Consequences
+
+- A natural run that changes nothing costs one marker read and the planner's reads per Film, and creates no receipt; a changed Film costs about two batches (the pending insert and the writer's own).
+- A reused or missing event id is the producer's responsibility: a missing one is refused (`film_person_invalid`), a reused one with new content is read as the old request. P3a must derive the event from the run id and the observation.
+- The inline reconcile settles at most 10 receipts per call; a backlog drains over several natural runs, and a receipt that cannot be re-planned is abandoned after 5 counted attempts or 7 days, a receipt whose source moved on is abandoned at once (`producer_source_changed`), and both stay visible in `listAttention`.
+- Four mutants of the adapter are equivalent and not counted: the origin check duplicated by `requestIdOf`, the request id handed to the pre-plan (a source replay and a stale source are both skipped), the limit floor duplicated by `listReceipts`, and the target comparison duplicated by the digest.
+
+## Recovery and migration boundary
+
+Code only; it is not deployed behaviour (nothing calls it) and writes nothing. No migration, flag, Task, cron, marker move or production read is involved. Reverting the change removes the module and the `origin` filter and the `film_facts` kind; no data exists that depends on them.
+
+## Evidence
+
+- **Original decision:** [AIR-374](https://trello.com/c/ha7ais3w), owner decisions E2 and E5 of 12 Nov 2026.
+- **Implementation:** the P3-0b pull request of the same card.
+- **Dated verification:** [offline evidence](../evidence/d1-migration/air-374-p3-0b-producer-receipt-adapter-offline-2026-11-12.md), counts only.
+- **Uncertainty:** no producer calls the adapter yet; per-unit caps for a run (E6) are not measured; whether the four existing kinds are all still needed by P3a to P3d is decided there.
+
+## Follow-ups
+
+P3a to P3e wire the four producers (each with its own `requires` and differential scenarios); the capacity measurement of E6 precedes P3a.

@@ -361,7 +361,7 @@ if(section('11')){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-film-writers'))importers.push(full.replace(/\\/g,'/'));}};
  walk('src');
- assert.deepEqual(importers,['src/canonical-producers.js'],'only the producers module imports the film writers');
+ assert.deepEqual(importers.sort(),['src/canonical-producer-adapters.js','src/canonical-producers.js'],'only the producers module and the dormant receipt adapter import the film writers');
  for(const f of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(f))assert.ok(!fs.readFileSync(f,'utf8').includes('canonical-film-writers'),f+' does not bundle it');
  const text=fs.readFileSync('src/canonical-film-writers.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bR2\b|fetch\(|BUCKET/.test(text),'no R2 and no network');
