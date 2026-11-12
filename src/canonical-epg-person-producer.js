@@ -24,10 +24,10 @@ const byId=(a,b)=>a.id<b.id?-1:a.id>b.id?1:0;
 // runId: the EPG run (the source event). at: the write clock. persons: [{id, state}] with `state` = {identity?, localization?, localizationConflicts?} as the source observed it (its own observation times, e.g. `updatedAt`, are content: pass the
 // source's, not the run clock, or an unchanged Person is rewritten every run). credits: [{filmId, credits:[{personId, role}]}] in the source's billing order (at most CREDITS_PER_UNIT_MAX per Film; a longer list is refused with
 // film_person_bounded: splitting it is a later decision). Returns {event, units:[{kind, id, input}]}.
-export function planEpgPersonUnits({runId,at,persons=[],credits=[]}={}){
+export function planEpgPersonUnits({runId,at,persons=[],credits=[],unitRefusals=false}={}){
  const event=epgEvent(runId);
  if(typeof at!=='string'||!at||!Array.isArray(persons)||!Array.isArray(credits))throw failed('film_person_invalid');
- const people=new Map(),films=new Map();
+ const people=new Map(),films=new Map(),refused=[],refusedFilms=new Set();
  for(const item of persons){
   if(!plain(item)||typeof item.id!=='string'||!item.id.startsWith('person:')||people.has(item.id))throw failed('film_person_invalid');
   const input={id:item.id,at,person:item.state};
@@ -36,12 +36,14 @@ export function planEpgPersonUnits({runId,at,persons=[],credits=[]}={}){
  }
  for(const item of credits){
   if(!plain(item)||typeof item.filmId!=='string'||!item.filmId.startsWith('film:')||!Array.isArray(item.credits)||!item.credits.length||films.has(item.filmId))throw failed('film_person_invalid');
+  // ADR 0128 decision 9, OPT-IN (the default stays a whole-plan refusal): with `unitRefusals` an oversized list is a PER-UNIT refusal reported beside the units, with its incoming list as `source` (the run module digests it); the rest of the plan survives and nothing is truncated.
+  if(unitRefusals&&item.credits.length>CREDITS_PER_UNIT_MAX){if(refusedFilms.has(item.filmId))throw failed('film_person_invalid');refusedFilms.add(item.filmId);refused.push({kind:FILM_CREDITS_OPERATION,id:item.filmId,code:'film_person_bounded',source:item.credits});continue;}
   if(item.credits.length>CREDITS_PER_UNIT_MAX)throw failed('film_person_bounded');
   // The unit carries the validated, normalized credits (a malformed or duplicated credit refuses the whole plan before anything is read).
   films.set(item.filmId,{kind:FILM_CREDITS_OPERATION,id:item.filmId,input:{id:item.filmId,at,credits:filmCreditsContent({id:item.filmId,credits:item.credits})}});
  }
  const units=[...[...people.values()].sort(byId),...[...films.values()].sort(byId)];
- return {event,units};
+ return unitRefusals?{event,units,refused}:{event,units};
 }
 
 // The re-plan the receipts module asks for when it replays or revalidates a receipt: the unit of THIS run for the receipt's kind and target, and only when the receipt belongs to this run: the request id is recomputed from this plan's event,
