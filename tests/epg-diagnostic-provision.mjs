@@ -76,6 +76,18 @@ async function scenarios(api){
     if(e?.exitCode!==2)return false;
    }
    return calls===0;},
+  'the real S3 adapter targets the EU endpoint':async()=>{
+   // No injected store: the real signed S3 client runs against a fake fetch, and the outgoing request target is what is checked.
+   const d=fakeD1(),s3=[];
+   const fetchImpl=async(url,init={})=>{
+    const href=String(url);
+    if(href.startsWith(BASE))return d.fetchImpl(url,init);
+    s3.push({url:href,method:init.method||'GET',auth:String(init.headers?.Authorization||''),body:init.body??null});
+    return new Response('<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>',{status:200,headers:{'content-type':'application/xml'}});
+   };
+   const report=await api.run({command:'check',env:env(),fetchImpl});
+   const host=ACCOUNT+'.eu.r2.cloudflarestorage.com';
+   return s3.length>=1&&s3.every(request=>{const url=new URL(request.url);return url.protocol==='https:'&&url.host===host&&url.pathname==='/iptv-epg-diagnostic'&&url.searchParams.get('list-type')==='2'&&request.method==='GET'&&request.body===null&&/^AWS4-HMAC-SHA256 Credential=/.test(request.auth)&&request.auth.includes('Credential='+KEY+'/')&&/SignedHeaders=[^,]*\bhost\b/.test(request.auth)&&!request.auth.includes(SECRET);})&&d.writes()===0&&report.writes.r2===0&&report.writes.d1===0;},
   'the bucket handle writes only the identity object':async()=>{const store=bucket();const guarded=api.guardedBucket(store);const a=await failure(()=>guarded.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>guarded.delete('diagnostic/identity.json'));return !!a&&!!b&&store.objects.size===0;},
  };
  for(const [name,run] of Object.entries(checks)){try{results[name]=(await run())===true;}catch{results[name]=false;}}
@@ -191,6 +203,7 @@ const live=await import(pathToFileURL(SCRIPT).href);
   ['schema ignores a used database',"if(report.database.tables!==0)throw new ProvisionError('The diagnostic database already has tables; the schema is applied only to an empty one',3,{report});\n",'','schema refuses a database with tables'],
   ['the bucket handle writes any key',"if(key!==IDENTITY_OBJECT)throw new ProvisionError('Write refused: only '+IDENTITY_OBJECT+' may be written',3);\n",'','the bucket handle writes only the identity object'],
  ['a malformed read is taken as empty',"if(!only||only.success!==true||!Array.isArray(only.results))throw new ProvisionError('A read response did not prove its result; the state is unknown, not empty',3,{kind:'malformed_read'});\n  return only.results;","return only?.results||[];",'a malformed read does not prove an empty database'],
+  ['the S3 adapter is not given the EU endpoint',",R2_SNAPSHOT_ENDPOINT:config.r2Endpoint",'','the real S3 adapter targets the EU endpoint'],
   ['an arbitrary endpoint is trusted'," if(url.protocol==='https:'&&value===canonical)return value;\n throw new ProvisionError(label+' must be the canonical Cloudflare endpoint or a loopback test server',2);\n"," return value;\n",'an arbitrary endpoint is refused before any request'],
  ];
  for(const [name,from,to,concern] of mutants){
