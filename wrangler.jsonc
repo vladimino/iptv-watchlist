@@ -47,6 +47,11 @@
       "name": "iptv-epg",
       "binding": "EPG_WORKFLOW",
       "class_name": "EpgWorkflow"
+    },
+    {
+      "name": "iptv-epg-diagnostic",
+      "binding": "EPG_DIAGNOSTIC_WORKFLOW",
+      "class_name": "EpgDiagnosticWorkflow"
     }
   ]
 }

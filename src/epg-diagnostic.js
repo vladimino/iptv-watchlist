@@ -21,9 +21,9 @@ const EpgDiagnostic=(()=>{
  const IDENTITY_OBJECT='diagnostic/identity.json',IDENTITY_TABLE='epg_diagnostic_identity';
  // The Worker env names under which the owner will bind the diagnostic resources (AIR-456). Absent today.
  const BINDING_NAMES={db:'EPG_DIAGNOSTIC_DB',bucket:'EPG_DIAGNOSTIC_BUCKET'};
- // The only keys a diagnostic env may carry. The step, fence and generation-pin carriers (`epgStep`, `epgFence`, `discoveryLease`, `epgPin`: values the executor and the readers set on a copy, never a binding) are set by the executor on a copy.
- const ALLOWED=new Set(['DB','BUCKET','DISCOVERY_LEDGER_MODE','epgDiagnostic','epgStep','epgFence','discoveryLease','epgPin']);
- const CARRIERS=new Set(['epgStep','epgFence','discoveryLease','epgPin']);
+ // The only keys a diagnostic env may carry. The step, fence and generation-pin carriers (`epgStep`, `epgFence`, `discoveryLease`, `epgPin`, `epgDeadline`: values the executor and the readers set on a copy, never a binding) are set by the executor on a copy.
+ const ALLOWED=new Set(['DB','BUCKET','DISCOVERY_LEDGER_MODE','epgDiagnostic','epgStep','epgFence','discoveryLease','epgPin','epgDeadline']);
+ const CARRIERS=new Set(['epgStep','epgFence','discoveryLease','epgPin','epgDeadline']);
  const LEDGER_MODES=new Set(['bounded','frozen','full']);
  // Production bindings, secrets and Workflow handles. A read of one of these names on a diagnostic env is a misrouting and throws.
  const DENIED=['EPG_WORKFLOW','DISCOVERY_WORKFLOW','RATINGS_WORKFLOW','EPG_XML_URL','LETTERBOXD_USERNAME','TMDB_API_READ_ACCESS_TOKEN','TMDB_REQUEST_INTERVAL_MS','MONITOR','MONITOR_WEBHOOK_URL','MONITOR_HEARTBEAT_URL','MONITOR_TRANSPORT','MONITOR_TELEGRAM_BOT_TOKEN','MONITOR_TELEGRAM_CHAT_ID','MCP_ACCESS_AUD','MCP_ACCESS_TEAM_DOMAIN','MIGRATION_EXPORT_ENABLED','MIGRATION_EXPORT_KEY','MIGRATION_EXPORT_SITE_ID','D1_ENRICHMENT_WRITE','DISCOVERY_EXECUTOR','LIFECYCLE_LOCALIZATION','FOOTER_SOURCE_TIMEOUT_MS','RATINGS_DB_REQUIRED','PREDICTION_DB_REQUIRED'];

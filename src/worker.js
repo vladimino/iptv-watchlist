@@ -1544,7 +1544,9 @@ const RATINGS_ATTEMPT_STALE_MS=5*60000;
 // placed between two lines in Workers Observability. One line per edge: run id, phase, enter, exit or error, elapsed
 // time, and counts or byte sizes the code already holds. Never titles, film ids, HTML or payloads.
 // Best effort: a marker that cannot be logged never changes the step.
-function epgPhase(runId,phase,edge,fields={}){try{console.log(JSON.stringify({event:'epg_phase',runId:runId||null,phase,edge,at:new Date().toISOString(),...fields}));}catch{}}
+// AIR-455: the EPG diagnostic canary collects the phase markers of its own run (a unique run id) through this registry; a production run id is never registered.
+const EPG_PHASE_SINKS=new Map();
+function epgPhase(runId,phase,edge,fields={}){try{const event={event:'epg_phase',runId:runId||null,phase,edge,at:new Date().toISOString(),...fields};console.log(JSON.stringify(event));const sink=EPG_PHASE_SINKS.get(runId);if(sink)sink(event);}catch{}}
 async function tracedPhase(runId,phase,work,summary=null){
  const started=Date.now();epgPhase(runId,phase,'enter');
  let result;try{result=await work();}catch(e){epgPhase(runId,phase,'error',{elapsedMs:Date.now()-started});throw e;}
@@ -1673,6 +1675,7 @@ async fetch(request,env,execution){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(url.pathname.startsWith('/api/migration-export/'))return await migrationExportRoute(request,env,url);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
+  if(url.pathname.startsWith('/api/epg/diagnostic/'))return await EpgDiagnosticRun.route(request,env,url);
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname==='/api/admin/health')return await adminHealthRoute(request,env,url);

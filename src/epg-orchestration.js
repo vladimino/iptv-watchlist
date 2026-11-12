@@ -160,6 +160,8 @@ const EpgOrchestration=(()=>{
    return {lease,expires,leaseRevision:Number(row.lease_revision)};
   }
   const seen=await look();
+  // AIR-455: a diagnostic step carries a deadline (`epgDeadline`, ms since the epoch) that the guard enforces at every mutation boundary; production steps carry none.
+  if(Number.isFinite(env.epgDeadline)&&now>=env.epgDeadline)throw Object.assign(new Error('epg_step_budget'),{code:'epg_step_budget'});
   if(seen.expires-now<LEASE_MS/2){
    // The renewal is conditioned on the mode revision in the same statement. If it does not land (the owner closed admission, another
    // writer touched the lease, a D1 error), the step re-judges everything from a fresh read and proceeds only if all of it still holds.

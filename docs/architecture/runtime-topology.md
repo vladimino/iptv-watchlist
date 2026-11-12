@@ -60,9 +60,9 @@ Runtime mode and configured Cloudflare Access policies must be rechecked for liv
 
 See [one-chunk ADR](../adr/0006-one-chunk-discovery.md), [MCP security contract](../reference/api/mcp.md) and [D1 schema boundary](../reference/data/d1-schema.md).
 
-## EPG diagnostic canary (ADR 0121, foundation only)
+## EPG diagnostic canary (ADR 0121 and ADR 0124)
 
-Accepted design, not part of the topology above: an isolated diagnostic Workflow, bucket and D1 in the same `iptv` Worker. AIR-453 delivers only the inert execution context ([reference](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-isolated-execution-context-air-453-adr-0121)); no binding, resource or flow exists yet, so the diagrams are unchanged. The topology and scheduling diagrams are updated with the Workflow and receipts (AIR-455) and the provisioned resources (AIR-456).
+The `iptv` Worker declares one more Workflow binding, `EPG_DIAGNOSTIC_WORKFLOW` (class `EpgDiagnosticWorkflow`); a deploy creates the Workflow definition and no instance. The diagnostic D1, bucket and resource id are NOT bound until the owner provisions them (AIR-456), so the canary cannot run and its routes answer `diagnostic_bindings_absent`. The flow and the isolation boundary (application-enforced, not platform-enforced) are in [scheduling and orchestration](scheduling-and-orchestration.md#epg-diagnostic-canary-adr-0121-adr-0124-air-455) and the [reference](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0124).
 
 ## Ratings Workflow binding (AIR-347)
 
