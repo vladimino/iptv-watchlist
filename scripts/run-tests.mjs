@@ -49,7 +49,7 @@ export const WEIGHTS={
  'generation-stage-withheld.mjs':48,
  'prediction-batch-submit.mjs':23,
  'film-person-capture-mutation.mjs':45,
- 'discovery-bounded-drain.mjs':37,
+ 'discovery-bounded-drain.mjs':38,
  'discovery-seal-publish.mjs':42,
  'film-person-cutover-record-mutation.mjs':42,
  'scheduled-task-prompt-v2.mjs':13,
