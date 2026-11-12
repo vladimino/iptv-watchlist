@@ -208,7 +208,13 @@ async function bootstrapRaw(state){await bootstrap(state,0);}
  assert.equal(Diag.fromWorkerEnv({DB:spy,BUCKET:spyBucket,EPG_DIAGNOSTIC_DB:spy,EPG_DIAGNOSTIC_BUCKET:spyBucket},{resourceId:RESOURCE}).reason,'context_contradictory','diagnostic bindings that are the production objects');
  assert.deepEqual(writes,[],'no storage call at all');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8'),workerSource=fs.readFileSync('src/worker.js','utf8'),build=fs.readFileSync('build.mjs','utf8');
- assert.doesNotMatch(wrangler,/EPG_DIAGNOSTIC_(DB|BUCKET|RESOURCE_ID)|diagnostic-migrations|migrations_dir/i,'no diagnostic D1, bucket, resource id or migration directory in wrangler.jsonc (the Workflow binding of AIR-455 creates no instance and no storage)');
+ assert.doesNotMatch(wrangler,/diagnostic-migrations|migrations_dir/i,'no migration directory in wrangler.jsonc: a deploy never applies the diagnostic schema');
+ {const config=JSON.parse(wrangler.replace(/^\s*\/\/.*$/gm,''));
+  assert.deepEqual(config.d1_databases.map(entry=>[entry.binding,entry.database_name]),[['DB','iptv'],['EPG_DIAGNOSTIC_DB','iptv-epg-diagnostic']],'production DB unchanged; the diagnostic database is its own, named binding');
+  assert.deepEqual(config.r2_buckets.map(entry=>[entry.binding,entry.bucket_name]),[['BUCKET','iptv'],['EPG_DIAGNOSTIC_BUCKET','iptv-epg-diagnostic']],'production BUCKET unchanged; the diagnostic bucket is its own, named binding');
+  assert.equal(config.d1_databases[1].database_id===config.d1_databases[0].database_id,false,'the diagnostic database id is not the production one');
+  assert.equal(config.vars.EPG_DIAGNOSTIC_RESOURCE_ID,'epg-diag-20261112');
+  assert.deepEqual(config.triggers.crons,['0 * * * *'],'still the single hourly cron');}
  assert.doesNotMatch(workerSource,/\bEpgDiagnostic\b/,'the Worker entry does not reference the context module itself (only the owner-only run module of AIR-455 does, through the routes)');
  assert.match(build,/src\/epg-diagnostic\.js/,'the module is in the bundle (inert)');
  assert.ok(!fs.readdirSync('migrations').some(name=>/diagnostic/i.test(name)),'the diagnostic migration is not in the production chain');

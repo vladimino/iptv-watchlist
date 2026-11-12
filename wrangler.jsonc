@@ -8,7 +8,8 @@
   "keep_vars": true,
   "vars": {
     "PREDICTION_DB_REQUIRED": "on",
-    "RATINGS_DB_REQUIRED": "on"
+    "RATINGS_DB_REQUIRED": "on",
+    "EPG_DIAGNOSTIC_RESOURCE_ID": "epg-diag-20261112"
   },
   "observability": {
     "enabled": true
@@ -24,12 +25,21 @@
       "binding": "DB",
       "database_name": "iptv",
       "database_id": "3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb"
+    },
+    {
+      "binding": "EPG_DIAGNOSTIC_DB",
+      "database_name": "iptv-epg-diagnostic",
+      "database_id": "00000000-0000-0000-0000-000000000000"
     }
   ],
   "r2_buckets": [
     {
       "binding": "BUCKET",
       "bucket_name": "iptv"
+    },
+    {
+      "binding": "EPG_DIAGNOSTIC_BUCKET",
+      "bucket_name": "iptv-epg-diagnostic"
     }
   ],
   "workflows": [
