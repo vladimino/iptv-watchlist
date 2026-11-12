@@ -150,7 +150,8 @@ const MUTANTS=[
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'canonical-receipts-mutants-'));
 // The migrated templates are built ONCE here and copied by every mutant run (a file copy, not a chain replay): the schema 19 one for mutants of the module, the schema 18 one for mutants of the migration (they apply the mutated 0019 to a copy of it).
-const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+// The chain of the receipt tests stops at 0019 (migration 0020 follows it and has its own tests).
+const names=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
 const build=(file,list)=>assert.equal(sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+list.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
 const templates=path.join(dir,'templates');fs.mkdirSync(templates);
 build(path.join(templates,'template.sqlite'),names);

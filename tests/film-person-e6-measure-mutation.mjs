@@ -284,7 +284,8 @@ try{
  });
  // the migration chain is applied once; each mutant run copies the migrated file (E6_TEMPLATE) instead of rebuilding it
  const template=path.join(dir,'template.sqlite');
- const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ // The E6 statements model the production database they were run against: schema 19 (migration 0020 is in the repository and NOT applied, ADR 0128), so the template stops at 19.
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
  const built=sqliteSync(['-bail',template],{input:chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26});
  assert.equal(built.status,0,'the template database is built');
  assert.equal(await run({}),0,'the unmutated test passes (it builds its own template)');
