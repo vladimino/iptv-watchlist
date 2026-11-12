@@ -98,7 +98,7 @@ sequenceDiagram
                 MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
                 MCP-->>Client: Per-film results (partial success, a replay of the same body recovers a crash)
                 opt Profile changed
-                    MCP-->>Client: compatible films kept; impacted or unknown films stale_profile
+                    MCP-->>Client: compatible films kept, impacted or unknown films stale_profile
                 end
             end
             Client->>MCP: prediction_complete
