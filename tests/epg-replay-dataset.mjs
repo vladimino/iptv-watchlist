@@ -58,11 +58,34 @@ for(const [segment,count] of Object.entries(planA.archive.departuresBySegment))a
 assert.equal(planA.returns.every(key=>!dataset.baseline.items.some(item=>item.key===key)),true,'a return is a key that only the archive holds');
 const zero=await Replay.planMutation(dataset,{seed:'x',departures:0},{segmentOf});assert.equal(zero.departureCount,0);assert.deepEqual(zero.archive.segmentsRewritten,[]);
 // The scan: the baseline without the departures plus the returns; its keys are the Worker's own candidate keys.
-const scanA=await Replay.replayScan(dataset,planA,{candidateKey});
-assert.equal(scanA.length,planA.activeAfter);assert.equal(JSON.stringify(await Replay.replayScan(dataset,planA)),JSON.stringify(scanA),'the scan is deterministic');
-await assert.rejects(Replay.replayScan(dataset,{...planA,departures:planA.departures.slice(1)}),error=>error.reason==='plan_digest_mismatch','a plan edited after the fact');
-await assert.rejects(Replay.replayScan({...dataset,digest:'0'.repeat(64)},planA),error=>error.reason==='dataset_invalid');
-await assert.rejects(Replay.replayScan(dataset,{...planA,datasetDigest:'0'.repeat(64)}),error=>error.reason==='plan_mismatch','a plan of another dataset');
+const helpers={candidateKey,segmentOf};
+const scanA=await Replay.replayScan(dataset,planA,helpers);
+assert.equal(scanA.length,planA.activeAfter);assert.equal(JSON.stringify(await Replay.replayScan(dataset,planA,helpers)),JSON.stringify(scanA),'the scan is deterministic');
+await assert.rejects(Replay.replayScan(dataset,{...planA,departures:planA.departures.slice(1)},helpers),error=>error.reason==='plan_not_derived','a plan edited after the fact');
+// A digest is a fingerprint, not a proof of derivation: a forged plan with a RECOMPUTED digest is refused too, because the plan is regenerated and compared.
+const rehash=async forged=>{const {digest,...rest}=forged;void digest;return {...rest,digest:await Replay.sha256(Replay.canonical(rest))};};
+for(const [label,patch] of [
+ ['departures replaced by nothing',{departures:[],departureCount:0}],
+ ['departures replaced by other keys',{departures:[...planA.departures.slice(1),dataset.baseline.items.find(item=>!planA.departures.includes(item.key)).key].sort()}],
+ ['a duplicate return',{returns:[planA.returns[0],planA.returns[0]],returnCount:2}],
+ ['wrong counts',{departureCount:planA.departureCount+1}],
+ ['a wrong segment projection',{archive:{...planA.archive,segmentsRewritten:[...planA.archive.segmentsRewritten,63]}}],
+ ['wrong per-segment counts',{archive:{...planA.archive,departuresBySegment:Object.fromEntries(Object.entries(planA.archive.departuresBySegment).map(([k,v])=>[k,v+1]))}}],
+ ['another seed with the old selection',{seed:'canary-9'}],
+ ['a forged upsertedKeysDigest',{archive:{...planA.archive,upsertedKeysDigest:'0'.repeat(64)}}],
+ ['an extra field',{extra:true}],
+ ['active counts that do not add up',{activeAfter:1}],
+]){
+ assert.equal(await codeOf(async()=>Replay.replayScan(dataset,await rehash({...planA,...patch}),helpers)),'plan_not_derived',label);
+}
+{
+ // The caps hold at the execution boundary: a forged plan above the caller's caps is refused whatever its digest says.
+ const big=await Replay.planMutation(dataset,{seed:'cap',departures:20},{segmentOf});
+ assert.equal(await codeOf(()=>Replay.replayScan(dataset,big,{...helpers,maxDepartures:10})),'excessive_departures','the caller\'s cap applies when the plan is replayed');
+ assert.equal(await codeOf(()=>Replay.replayScan(dataset,planA,{candidateKey})),'segment_function_missing','replaying needs the real segment function');
+}
+await assert.rejects(Replay.replayScan({...dataset,digest:'0'.repeat(64)},planA,helpers),error=>error.reason==='dataset_invalid');
+await assert.rejects(Replay.replayScan(dataset,{...planA,datasetDigest:'0'.repeat(64)},helpers),error=>error.reason==='plan_mismatch','a plan of another dataset');
 
 // 3. Parity with the real planner: the replay scan, committed by the Worker's own seal path, archives exactly the planned departures into exactly the planned segments.
 {
@@ -110,6 +133,33 @@ const tamperedManifest=(patch)=>JSON.stringify({...manifest,...patch});
 assert.equal(await codeOf(()=>build({override:{[manifestKey]:tamperedManifest({totals:{...manifest.totals,items:manifest.totals.items+1}})}})),'manifest_totals_mismatch');
 assert.equal(await codeOf(()=>build({override:{[manifestKey]:tamperedManifest({segments:manifest.segments.map(entry=>entry===firstSegment||entry.segment===firstSegment.segment?{...entry,items:entry.items+1}:entry)})}})),'segment_count_mismatch');
 assert.equal(await codeOf(()=>build({override:{[manifestKey]:tamperedManifest({segments:manifest.segments.map(entry=>entry.object?{...entry,object:'other/place.json'}:entry)})}})),'segment_key_foreign','a segment outside the archive prefix');
+// The complete manifest topology and the generation's own archive summary.
+const withManifest=patch=>({[manifestKey]:JSON.stringify({...manifest,...patch(manifest)})});
+const withSummary=patch=>({[genKey]:JSON.stringify({...doc,archive:{...doc.archive,...patch(doc.archive)}})});
+const placeholder=manifest.segments.findIndex(entry=>!entry.object);assert.ok(placeholder>=0,'the fixture has an empty segment');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:m.segments.filter((_,index)=>index!==placeholder)}))})),'manifest_topology','an empty placeholder removed, totals unchanged');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:[...m.segments,{segment:m.segments.length,object:null,sha256:null,items:0,bytes:0}]}))})),'manifest_topology','more entries than segmentCount');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:m.segments.map((entry,index)=>index===1?{...entry,segment:0}:entry)}))})),'manifest_topology','a duplicate segment index');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:m.segments.map((entry,index)=>index===1?{...entry,segment:m.segmentCount+3}:entry)}))})),'manifest_topology','an out-of-range segment index');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:[m.segments[1],m.segments[0],...m.segments.slice(2)]}))})),'manifest_topology','entries out of order');
+assert.equal(await codeOf(()=>build({override:withManifest(()=>({segmentCount:0,segments:[]}))})),'manifest_topology');
+assert.equal(await codeOf(()=>build({override:withManifest(()=>({segmentCount:100000}))})),'manifest_topology');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:m.segments.map(entry=>entry.object?{...entry,object:entry.object.replace('/segments/'+String(entry.segment).padStart(3,'0')+'/','/segments/'+String((entry.segment+1)%m.segmentCount).padStart(3,'0')+'/')}:entry)}))})),'segment_key_foreign','an object in the directory of another segment');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({segments:m.segments.map(entry=>entry.object?{...entry,bytes:entry.bytes+1}:entry)}))})),'segment_bytes_mismatch');
+assert.equal(await codeOf(()=>build({override:withManifest(m=>({totals:{...m.totals,bytes:m.totals.bytes+1}}))})),'manifest_totals_mismatch');
+assert.equal(await codeOf(()=>build({override:withSummary(a=>({items:a.items+1}))})),'archive_summary_mismatch','the generation summary disagrees on items');
+assert.equal(await codeOf(()=>build({override:withSummary(a=>({segments:a.segments+1}))})),'archive_summary_mismatch','on segments');
+assert.equal(await codeOf(()=>build({override:withSummary(a=>({bytes:a.bytes+1}))})),'archive_summary_mismatch','on bytes');
+assert.equal(await codeOf(()=>build({override:withSummary(a=>({manifestId:'other'}))})),'manifest_missing','a summary naming another manifest is a missing manifest');
+assert.equal(await codeOf(()=>build({override:withSummary(a=>({uniqueArchivedItems:a.uniqueArchivedItems+1}))})),'archive_summary_mismatch','on the unique count');
+assert.equal(await codeOf(()=>build({override:withSummary(a=>({alsoArchived:[...a.alsoArchived,'not|a|key'],uniqueArchivedItems:a.uniqueArchivedItems-1}))})),'archive_summary_mismatch','also-archived names a key that is not active');
+assert.equal(await codeOf(()=>build({override:withSummary(()=>({alsoArchived:'x'}))})),'archive_summary_mismatch');
+assert.equal(await codeOf(()=>build({override:{[genKey]:JSON.stringify({...doc,archive:null})}})),null,'a generation with no archive at all is a valid reduced dataset');
+// The hard limits cannot be raised by a caller and are measured, not trusted.
+const small=load(source.replace('maxBytes:96*1024*1024,maxItems:120000','maxBytes:20000,maxItems:5'));
+assert.ok(small.LIMITS.maxItems===5,'the small-limit copy is in effect');
+assert.equal(await codeOf(()=>small.buildDataset(readerOver(state.bkt),{programmeRunId:id,builtAt:BUILT,maxBytes:1e15,maxItems:1e15})),'size_budget_exceeded','oversized builder options are clamped to the hard limits');
+assert.equal(await codeOf(()=>small.buildDataset(readerOver(state.bkt),{programmeRunId:id,builtAt:BUILT,maxBytes:Infinity,maxItems:Infinity})),'size_budget_exceeded');
 assert.equal(await codeOf(()=>build({},{maxBytes:1000})),'size_budget_exceeded');assert.equal(await codeOf(()=>build({},{maxItems:3})),'size_budget_exceeded');
 assert.equal(await codeOf(()=>Replay.buildDataset({get:async()=>{throw new Error('R2 unavailable');}},{programmeRunId:id,builtAt:BUILT})),'unreadable');
 assert.equal(await codeOf(()=>Replay.buildDataset({get:async()=>({json:async()=>({})})},{programmeRunId:id,builtAt:BUILT})),'reader_unsupported');
@@ -126,6 +176,16 @@ const verify=async value=>(await Replay.verifyDataset(value)).problems;
  const y=plain(fresh);y.fidelity={level:'full',reasons:[]};assert.ok((await verify(y)).includes('fidelity_unstated'),'a dataset cannot claim full fidelity');
  const z=plain(fresh);delete z.baseline.archive.segments.find(entry=>entry.object).text;assert.ok((await verify(z)).includes('segment_digest_mismatch'));
  assert.deepEqual((await Replay.verifyDataset(fresh,{expectedDigest:'0'.repeat(64)})).problems,['digest_unexpected']);
+ // Size metadata cannot be understated: the sizes are measured on readback, also when the digest is recomputed.
+ const under=plain(fresh);under.counts.bytes=1;under.digest=await Replay.digestOf(under);assert.ok((await verify(under)).includes('size_metadata_mismatch'),'understated bytes with a recomputed digest');
+ const over=plain(fresh);over.counts.bytes=over.counts.bytes*2;over.digest=await Replay.digestOf(over);assert.ok((await verify(over)).includes('size_metadata_mismatch'));
+ assert.ok((await small.verifyDataset(fresh)).problems.includes('size_budget_exceeded'),'the hard limits are enforced on readback (bytes and items, archive entries counted)');
+ const noMeta=plain(fresh);delete noMeta.counts.bytes;noMeta.digest=await Replay.digestOf(noMeta);assert.ok((await verify(noMeta)).includes('size_metadata_mismatch'));
+ // A rehashed dataset whose manifest topology or generation summary was edited is refused on readback.
+ const topo=plain(fresh);topo.baseline.archive.manifest.segments.pop();topo.baseline.archive.segments.pop();topo.digest=await Replay.digestOf(topo);assert.ok((await verify(topo)).includes('manifest_topology'),'a segment entry removed from the stored manifest');
+ const summ=plain(fresh);summ.baseline.generation.archive.items++;summ.digest=await Replay.digestOf(summ);assert.ok((await verify(summ)).includes('archive_summary_mismatch'),'a summary edited with a recomputed digest');
+ const idx=plain(fresh);idx.baseline.archive.manifest.segments[1].segment=0;idx.baseline.archive.segments[1].segment=0;idx.digest=await Replay.digestOf(idx);assert.ok((await verify(idx)).includes('manifest_topology'),'a duplicate segment index in the stored manifest');
+ const sb=plain(fresh);const stored=sb.baseline.archive.segments.find(entry=>entry.object);stored.bytes+=1;sb.baseline.archive.manifest.segments[stored.segment].bytes+=1;sb.digest=await Replay.digestOf(sb);assert.ok((await verify(sb)).includes('segment_bytes_mismatch'));
  assert.ok((await Replay.verifyDataset(fresh,{expectedProgrammeRunId:id})).problems.includes('generation_mismatch'),'a dataset of another generation than expected');
  assert.deepEqual((await Replay.verifyDataset({kind:'other'})).problems,['dataset_unrecognized']);
  assert.deepEqual((await Replay.verifyDataset(null)).problems,['dataset_unrecognized']);
@@ -155,9 +215,10 @@ async function synthetic(Module){
   const text=segmentFile(segment,found[1]),object=archive+'segments/00'+segment+'/w'+segment+'.json';
   files.set(object,text);entries.push({segment,object,sha256:await Module.sha256(text),items:found[1].length,bytes:text.length});
  }
- const manifest={schemaVersion:1,manifestId:'m1',segmentCount:SEG,segments:entries,totals:{items:3,bytes:0}};
+ const totalBytes=entries.reduce((n,entry)=>n+entry.bytes,0);
+ const manifest={schemaVersion:1,manifestId:'m1',segmentCount:SEG,segments:entries,totals:{items:3,bytes:totalBytes}};
  files.set(archive+'manifests/m1.json',JSON.stringify(manifest));
- files.set('epg/generations/'+runIdValue+'/discovery-latest.json',JSON.stringify({programmeRunId:runIdValue,ledgerMode:'bounded',archive:{manifestId:'m1'},items:Array.from({length:40},(_,index)=>item(index)).reverse()}));
+ files.set('epg/generations/'+runIdValue+'/discovery-latest.json',JSON.stringify({programmeRunId:runIdValue,ledgerMode:'bounded',archive:{version:'v1',manifestId:'m1',segments:SEG,items:3,bytes:totalBytes,alsoArchived:[],uniqueArchivedItems:3},items:Array.from({length:40},(_,index)=>item(index)).reverse()}));
  const reader={get:async key=>files.has(key)?{text:async()=>files.get(key)}:null};
  return {reader,files,runId:runIdValue,manifestKey:archive+'manifests/m1.json',segmentOf:(key,count)=>Number(key.slice(1))%count,entries};
 }
@@ -169,7 +230,7 @@ async function checks(Module){
  const set=(files,patch)=>({get:async key=>{if(key in patch)return {text:async()=>patch[key]};return files.has(key)?{text:async()=>files.get(key)}:null;}});
  const ds=await make();
  await check('a dataset verifies',async()=>(await Module.verifyDataset(ds)).ok);
- await check('digest is checked',async()=>{const t=JSON.parse(JSON.stringify(ds));t.baseline.items[0].title='x';return !(await Module.verifyDataset(t)).ok;});
+ await check('digest is checked',async()=>{const t=JSON.parse(JSON.stringify(ds));t.baseline.items[0].title=t.baseline.items[0].title.split('').reverse().join('');return (await Module.verifyDataset(t)).problems.join()==='digest_mismatch';});
  await check('segment digest is checked at build',async()=>{const obj=fx.entries.find(e=>e.object).object;return refused(make(set(fx.files,{[obj]:fx.files.get(obj).replace('Title','Titel')})),'segment_digest_mismatch');});
  await check('segment digest is checked in verify',async()=>{const t=JSON.parse(JSON.stringify(ds));const s=t.baseline.archive.segments.find(e=>e.object);s.text=s.text.replace('Title','Titel');return (await Module.verifyDataset(t)).problems.includes('segment_digest_mismatch');});
  await check('generation mismatch is refused',async()=>refused(make(set(fx.files,{['epg/generations/'+fx.runId+'/discovery-latest.json']:JSON.stringify({programmeRunId:'11111111-1111-4111-8111-111111111111',items:[]})})),'generation_mismatch'));
@@ -190,9 +251,36 @@ async function checks(Module){
  await check('returns are bounded by the cap',async()=>refused(plan({seed:'a',departures:1,returns:2},{segmentOf:fx.segmentOf,maxReturns:1}),'excessive_returns'));
  await check('a plan needs the real segment function',async()=>refused(plan({seed:'a',departures:1},{}),'segment_function_missing'));
  await check('a tampered dataset is not planned',async()=>{const t=JSON.parse(JSON.stringify(ds));t.baseline.items[1].title='x';return refused(Module.planMutation(t,{seed:'a',departures:1},{segmentOf:fx.segmentOf}),'dataset_invalid');});
- await check('a plan edit is detected',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,{...p,departures:p.departures.slice(1)}),'plan_digest_mismatch');});
- await check('a plan of another dataset is refused',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,{...p,datasetDigest:'0'.repeat(64)}),'plan_mismatch');});
- await check('departures and returns are disjoint from the scan',async()=>{const p=await plan({seed:'a',departures:7,returns:2});const scan=await Module.replayScan(ds,p);const keys=new Set(scan.map(i=>i.key));return p.departures.every(k=>!keys.has(k))&&p.returns.every(k=>keys.has(k))&&scan.length===35;});
+ await check('a plan edit is detected',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,{...p,departures:p.departures.slice(1)},{segmentOf:fx.segmentOf}),'plan_not_derived');});
+ await check('a plan of another dataset is refused',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,{...p,datasetDigest:'0'.repeat(64)},{segmentOf:fx.segmentOf}),'plan_mismatch');});
+ await check('departures and returns are disjoint from the scan',async()=>{const p=await plan({seed:'a',departures:7,returns:2});const scan=await Module.replayScan(ds,p,{segmentOf:fx.segmentOf});const keys=new Set(scan.map(i=>i.key));return p.departures.every(k=>!keys.has(k))&&p.returns.every(k=>keys.has(k))&&scan.length===35;});
+ const rehash=async forged=>{const {digest,...rest}=forged;void digest;return {...rest,digest:await Module.sha256(Module.canonical(rest))};};
+ await check('a forged but rehashed plan is refused',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,await rehash({...p,departures:[],departureCount:0}),{segmentOf:fx.segmentOf}),'plan_not_derived');});
+ await check('a rehashed plan with duplicate returns is refused',async()=>{const p=await plan({seed:'a',departures:7,returns:2});return refused(Module.replayScan(ds,await rehash({...p,returns:[p.returns[0],p.returns[0]],returnCount:2}),{segmentOf:fx.segmentOf}),'plan_not_derived');});
+ await check('a rehashed plan with wrong counts is refused',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,await rehash({...p,departureCount:8}),{segmentOf:fx.segmentOf}),'plan_not_derived');});
+ await check('a rehashed plan with a wrong segment projection is refused',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,await rehash({...p,archive:{...p.archive,segmentsRewritten:[3]}}),{segmentOf:fx.segmentOf}),'plan_not_derived');});
+ await check('replaying needs the segment function',async()=>{const p=await plan({seed:'a',departures:7});return refused(Module.replayScan(ds,p,{}),'segment_function_missing');});
+ await check('the cap holds when a plan is replayed',async()=>{const p=await plan({seed:'a',departures:20});return refused(Module.replayScan(ds,p,{segmentOf:fx.segmentOf,maxDepartures:10}),'excessive_departures');});
+ const setM=patch=>set(fx.files,{[fx.manifestKey]:JSON.stringify({...JSON.parse(fx.files.get(fx.manifestKey)),...patch(JSON.parse(fx.files.get(fx.manifestKey)))})});
+ const genKey='epg/generations/'+fx.runId+'/discovery-latest.json';
+ const setG=patch=>{const d=JSON.parse(fx.files.get(genKey));return set(fx.files,{[genKey]:JSON.stringify({...d,archive:{...d.archive,...patch(d.archive)}})});};
+ await check('a manifest with a placeholder removed is refused',async()=>refused(make(setM(m=>({segments:m.segments.filter(e=>e.object)}))),'manifest_topology'));
+ await check('a duplicate segment index is refused',async()=>refused(make(setM(m=>({segments:m.segments.map((e,i)=>i===1?{...e,segment:0}:e)}))),'manifest_topology'));
+ await check('an out-of-range segmentCount is refused',async()=>await refused(make(setM(()=>({segmentCount:100000}))),'manifest_topology')&&await refused(make(setM(()=>({segmentCount:0,segments:[]}))),'manifest_topology'));
+ await check('extra entries beyond segmentCount are refused',async()=>refused(make(setM(m=>({segments:[...m.segments,{segment:m.segmentCount,object:null,sha256:null,items:0,bytes:0}]}))),'manifest_topology'));
+ await check('an object in another segment directory is refused',async()=>refused(make(setM(m=>({segments:m.segments.map(e=>e.object?{...e,object:e.object.replace(/segments\/00\d/,'segments/003')}:e)}))),'segment_key_foreign'));
+ await check('segment bytes are checked',async()=>refused(make(setM(m=>({segments:m.segments.map(e=>e.object?{...e,bytes:e.bytes+1}:e)}))),'segment_bytes_mismatch'));
+ await check('manifest byte totals are checked',async()=>refused(make(setM(m=>({totals:{...m.totals,bytes:m.totals.bytes+1}}))),'manifest_totals_mismatch'));
+ await check('the summary items are checked',async()=>refused(make(setG(a=>({items:a.items+1}))),'archive_summary_mismatch'));
+ await check('the summary segments are checked',async()=>refused(make(setG(a=>({segments:a.segments+1}))),'archive_summary_mismatch'));
+ await check('the summary bytes are checked',async()=>refused(make(setG(a=>({bytes:a.bytes+1}))),'archive_summary_mismatch'));
+ await check('the summary unique count is checked',async()=>refused(make(setG(a=>({uniqueArchivedItems:a.uniqueArchivedItems+1}))),'archive_summary_mismatch'));
+ await check('also-archived must name active keys',async()=>refused(make(setG(()=>({alsoArchived:['zzz'],uniqueArchivedItems:2}))),'archive_summary_mismatch'));
+ await check('also-archived has no duplicates',async()=>refused(make(setG(()=>({alsoArchived:['k001','k001'],uniqueArchivedItems:1}))),'archive_summary_mismatch'));
+ await check('verify measures the size',async()=>{const t=JSON.parse(JSON.stringify(ds));t.counts.bytes=1;t.digest=await Module.digestOf(t);return (await Module.verifyDataset(t)).problems.includes('size_metadata_mismatch');});
+ await check('verify checks the stored topology',async()=>{const t=JSON.parse(JSON.stringify(ds));t.baseline.archive.manifest.segments.pop();t.baseline.archive.segments.pop();t.digest=await Module.digestOf(t);return (await Module.verifyDataset(t)).problems.includes('manifest_topology');});
+ await check('verify checks the stored summary',async()=>{const t=JSON.parse(JSON.stringify(ds));t.baseline.generation.archive.items++;t.digest=await Module.digestOf(t);return (await Module.verifyDataset(t)).problems.includes('archive_summary_mismatch');});
+ await check('verify checks the stored segment bytes',async()=>{const t=JSON.parse(JSON.stringify(ds));const sg=t.baseline.archive.segments.find(e=>e.object);sg.bytes+=1;t.baseline.archive.manifest.segments[sg.segment].bytes+=1;t.digest=await Module.digestOf(t);return (await Module.verifyDataset(t)).problems.includes('segment_bytes_mismatch');});
  await check('the sorted items are canonical',async()=>{const keys=ds.baseline.items.map(i=>i.key);return keys.join()===[...keys].sort().join();});
  return failed;
 }
@@ -205,9 +293,9 @@ async function checks(Module){
   ['the generation is not compared',"if(document.programmeRunId!==programmeRunId)throw fail('generation_mismatch',{expected:programmeRunId,found:document.programmeRunId??null});",""],
   ['a missing segment is accepted',"const text=await readText(reader,entry.object,'segment_missing');","let text='{}';try{text=await readText(reader,entry.object,'segment_missing');}catch{continue;}"],
   ['duplicate keys are accepted',"if(seen.has(item.key))throw fail('duplicate_key',{key:item.key});",""],
-  ['the byte budget is not enforced anywhere',"if(bytes>maxBytes)throw fail('size_budget_exceeded',{bytes,maxBytes});","",true],
-  ['the item budget is not enforced',"if(document.items.length>maxItems)throw fail('size_budget_exceeded',{items:document.items.length,maxItems});",""],
-  ['manifest totals are not compared',"if(archivedItems!==manifest.totals?.items)throw fail('manifest_totals_mismatch',{expected:manifest.totals?.items??null,found:archivedItems});",""],
+  ['the byte budget is not enforced anywhere',["if(bytes>maxBytes)throw fail('size_budget_exceeded',{bytes,maxBytes});","if(baselineBytes>maxBytes)throw fail('size_budget_exceeded',{bytes:baselineBytes,maxBytes});"],"",true],
+  ['the item budget is not enforced',["if(document.items.length>maxItems)throw fail('size_budget_exceeded',{items:document.items.length,maxItems});","if(items.length+archivedTotal>maxItems)throw fail('size_budget_exceeded',{items:items.length+archivedTotal,maxItems});"],"",true],
+  ['manifest totals are not compared',"if(archivedItems!==manifest.totals.items||archivedBytes!==manifest.totals.bytes)throw fail('manifest_totals_mismatch',{expected:manifest.totals.items,found:archivedItems});",""],
   ['fidelity can be claimed full',"dataset.fidelity.level!=='reduced'","false"],
   ['the departure cap is gone',"if(departures>departureCap)throw fail('excessive_departures',{departures,max:departureCap});",""],
   ['the return cap is gone',"if(returns>returnCap)throw fail('excessive_returns',{returns,max:returnCap});",""],
@@ -217,16 +305,51 @@ async function checks(Module){
   ['the seed is ignored',"const random=rng(dataset.digest+'|'+seed);","const random=rng(dataset.digest+'|');"],
   ['the segment function is not required',"if(typeof helpers.segmentOf!=='function')throw fail('segment_function_missing');",""],
   ['a tampered dataset is planned',"if(!checked.ok)throw fail('dataset_invalid',{problems:checked.problems});\n  const keys=","\n  const keys="],
-  ['a plan digest is not checked',"if(digest!==await sha256(canonical(rest)))throw fail('plan_digest_mismatch');",""],
+  ['the plan is not regenerated',"if(canonical(regenerated)!==canonical(plan))throw fail('plan_not_derived');",""],
+  ['the manifest length is not checked',"||!Array.isArray(manifest.segments)||manifest.segments.length!==count)return 'manifest_topology';","||!Array.isArray(manifest.segments))return 'manifest_topology';"],
+  ['the segment index is not checked',"if(!isObject(entry)||entry.segment!==index)return 'manifest_topology';","if(!isObject(entry))return 'manifest_topology';"],
+  ['the segment directory is not checked',"(typeof entry.object!=='string'||!entry.object.startsWith(segmentDir(index))))return 'segment_key_foreign';","typeof entry.object!=='string')return 'segment_key_foreign';"],
+  ['the segment count range is not checked',"||count<1||count>LIMITS.maxSegments","||false"],
+  ['segment bytes are not checked',"if(byteLength(text)!==entry.bytes)throw fail('segment_bytes_mismatch',{segment:entry.segment});",""],
+  ['the summary is not reconciled at build',"const mismatch=summaryProblem(document.archive,manifest,seen);\n   if(mismatch)throw fail(mismatch,{key});","const mismatch=null;"],
+  ['the summary items are not compared',"summary.items!==manifest.totals?.items||",""],
+  ['the summary segments are not compared',"summary.segments!==manifest.segmentCount||",""],
+  ['the summary bytes are not compared',"||summary.bytes!==manifest.totals?.bytes)return 'archive_summary_mismatch';",")return 'archive_summary_mismatch';"],
+  ['the unique count is not compared',"if(summary.uniqueArchivedItems!==manifest.totals.items-summary.alsoArchived.length)return 'archive_summary_mismatch';",""],
+  ['also-archived keys are not checked against the ledger',"summary.alsoArchived.some(key=>typeof key!=='string'||!activeKeys.has(key))||","summary.alsoArchived.some(key=>typeof key!=='string')||"],
+  ['also-archived duplicates are accepted',"||new Set(summary.alsoArchived).size!==summary.alsoArchived.length)return 'archive_summary_mismatch';",")return 'archive_summary_mismatch';"],
+  ['size metadata is trusted on readback',"if(dataset.counts?.bytes!==actualBytes)bad('size_metadata_mismatch');",""],
+  ['the stored topology is not checked',"const topology=topologyProblem(archive.manifest);if(topology)bad(topology);",""],
+  ['the stored summary is not checked',"const mismatch=summaryProblem(baseline.generation?.archive,archive.manifest,keys);if(mismatch)bad(mismatch);",""],
+  ['stored segment bytes are not checked',"if(byteLength(segment.text)!==entry.bytes||segment.bytes!==entry.bytes)bad('segment_bytes_mismatch');",""],
+  ['the replay cap is not applied',"departureCap=Math.min(LIMITS.maxDepartures,Number.isInteger(helpers.maxDepartures)&&helpers.maxDepartures>=0?helpers.maxDepartures:Infinity)","departureCap=LIMITS.maxDepartures"],
   ['a plan of another dataset is accepted',"plan.datasetDigest!==dataset.digest","false"],
   ['items are not sorted',"const items=[...document.items].sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0);","const items=[...document.items];"],
  ];
  for(const [name,from,to,every] of mutants){
-  const found=source.split(from).length-1;
-  assert.ok(every?found>=1:found===1,'the mutant pattern exists'+(every?'':' once')+': '+name);
-  const failed=await checks(load(every?source.split(from).join(to):source.replace(from,to)));
+  const patterns=Array.isArray(from)?from:[from];
+  for(const pattern of patterns){const found=source.split(pattern).length-1;assert.ok(every?found>=1:found===1,'the mutant pattern exists'+(every?'':' once')+': '+name);}
+  const failed=await checks(load(every?patterns.reduce((text,pattern)=>text.split(pattern).join(to),source):source.replace(from,to)));
   assert.ok(failed.length>0,'the checks catch the mutant "'+name+'"');
  }
+}
+{
+ // The builder's options can only narrow the hard limits: a copy whose clamp is turned into a raise accepts what the hard limit refuses.
+ const clampFrom="const maxBytes=Math.min(LIMITS.maxBytes,",itemsFrom="maxItems=Math.min(LIMITS.maxItems,";
+ assert.ok(source.includes(clampFrom)&&source.includes(itemsFrom));
+ const smallSource=source.replace('maxBytes:96*1024*1024,maxItems:120000','maxBytes:20000,maxItems:5');
+ const broken=load(smallSource.replace(clampFrom,'const maxBytes=Math.max(LIMITS.maxBytes,').replace(itemsFrom,'maxItems=Math.max(LIMITS.maxItems,'));
+ assert.equal(await codeOf(()=>broken.buildDataset(readerOver(state.bkt),{programmeRunId:id,builtAt:BUILT,maxBytes:1e15,maxItems:1e15})),null,'the raised copy accepts an oversized dataset (so the clamp is what refuses it)');
+ const noItemsCheck=load(smallSource.replace("if(items.length+archivedTotal>maxItems)throw fail('size_budget_exceeded',{items:items.length+archivedTotal,maxItems});","").replace("if(document.items.length>maxItems)throw fail('size_budget_exceeded',{items:document.items.length,maxItems});",""));
+ assert.equal(await codeOf(()=>noItemsCheck.buildDataset(readerOver(state.bkt),{programmeRunId:id,builtAt:BUILT,maxBytes:1e15,maxItems:1e15})),'size_budget_exceeded','(bytes still refuse it)');
+ const itemsOnly=load(smallSource.replace('maxBytes:20000','maxBytes:1e12').replace("if(items.length+archivedTotal>maxItems)throw fail('size_budget_exceeded',{items:items.length+archivedTotal,maxItems});","").replace("if(document.items.length>maxItems)throw fail('size_budget_exceeded',{items:document.items.length,maxItems});",""));
+ assert.equal(await codeOf(()=>itemsOnly.buildDataset(readerOver(state.bkt),{programmeRunId:id,builtAt:BUILT})),null,'without the item budget a ledger above it is accepted (so the budget counts active and archived items)');
+ const itemsOnlyReal=load(smallSource.replace('maxBytes:20000','maxBytes:1e12'));
+ assert.equal(await codeOf(()=>itemsOnlyReal.buildDataset(readerOver(state.bkt),{programmeRunId:id,builtAt:BUILT})),'size_budget_exceeded','the item budget refuses it');
+ // The stored dataset's limit is enforced on readback with the archive entries counted.
+ const archiveOnlyBudget=load(source.replace('maxBytes:96*1024*1024,maxItems:120000','maxBytes:1e12,maxItems:'+(fresh.counts.items+fresh.counts.archivedItems-1)));
+ assert.ok((await archiveOnlyBudget.verifyDataset(fresh)).problems.includes('size_budget_exceeded'),'active plus archived items are counted on readback');
+ assert.ok(!(await load(source.replace('maxBytes:96*1024*1024,maxItems:120000','maxBytes:1e12,maxItems:'+(fresh.counts.items+fresh.counts.archivedItems))).verifyDataset(fresh)).problems.includes('size_budget_exceeded'),'and the exact count is accepted');
 }
 void sql;void runId;void keyOf;void scan;void context;
 console.log('EPG replay datasets: read-only builder, digest-verified canonical dataset, deterministic seeded plans, parity with the real planner, tamper and incomplete-baseline refusals and every guard mutant caught passed');

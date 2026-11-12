@@ -38,6 +38,25 @@ const EpgReplay=(()=>{
  // The digest the Worker writes for a stored segment: sha256 of the exact text of the object (`textSha256`).
  const segmentDigest=sha256;
 
+ const segmentDir=index=>ARCHIVE_PREFIX+'segments/'+String(index).padStart(3,'0')+'/';
+ // The complete manifest topology: as many entries as `segmentCount`, entry i is segment i, and a stored object lies in the directory of its own segment.
+ function topologyProblem(manifest){
+  const count=manifest?.segmentCount;
+  if(!isObject(manifest)||!Number.isInteger(count)||count<1||count>LIMITS.maxSegments||!Array.isArray(manifest.segments)||manifest.segments.length!==count)return 'manifest_topology';
+  for(let index=0;index<count;index++){
+   const entry=manifest.segments[index];
+   if(!isObject(entry)||entry.segment!==index)return 'manifest_topology';
+   if(entry.object!==null&&entry.object!==undefined&&(typeof entry.object!=='string'||!entry.object.startsWith(segmentDir(index))))return 'segment_key_foreign';
+  }
+  return null;
+ }
+ // The generation document's own summary of its archive must agree with the manifest it names and with the active ledger (`alsoArchived` only names active keys).
+ function summaryProblem(summary,manifest,activeKeys){
+  if(!isObject(summary)||summary.manifestId!==manifest.manifestId||summary.segments!==manifest.segmentCount||summary.items!==manifest.totals?.items||summary.bytes!==manifest.totals?.bytes)return 'archive_summary_mismatch';
+  if(!Array.isArray(summary.alsoArchived)||summary.alsoArchived.some(key=>typeof key!=='string'||!activeKeys.has(key))||new Set(summary.alsoArchived).size!==summary.alsoArchived.length)return 'archive_summary_mismatch';
+  if(summary.uniqueArchivedItems!==manifest.totals.items-summary.alsoArchived.length)return 'archive_summary_mismatch';
+  return null;
+ }
  // ---- the builder: read-only --------------------------------------------------------------------------------------
  // `reader.get(key)` must return null or an object with `text()`; the builder calls nothing else, so a reader over the diagnostic copy or over a
  // read-only export serves it. `options.builtAt` is injected (the dataset is immutable, its time is part of its digest).
@@ -51,7 +70,9 @@ const EpgReplay=(()=>{
  function parseJson(text,key){
   try{return JSON.parse(text);}catch{throw fail('malformed',{key});}
  }
- async function buildDataset(reader,{programmeRunId,builtAt,maxBytes=LIMITS.maxBytes,maxItems=LIMITS.maxItems}={}){
+ async function buildDataset(reader,{programmeRunId,builtAt,maxBytes:askedBytes=LIMITS.maxBytes,maxItems:askedItems=LIMITS.maxItems}={}){
+  // A caller may only narrow the budgets, never raise them above the hard limits.
+  const maxBytes=Math.min(LIMITS.maxBytes,Number.isFinite(askedBytes)&&askedBytes>=0?askedBytes:LIMITS.maxBytes),maxItems=Math.min(LIMITS.maxItems,Number.isFinite(askedItems)&&askedItems>=0?askedItems:LIMITS.maxItems);
   if(typeof programmeRunId!=='string'||!/^[A-Za-z0-9-]{8,64}$/.test(programmeRunId))throw fail('invalid_generation');
   if(!reader||typeof reader.get!=='function')throw fail('reader_unsupported');
   if(typeof builtAt!=='string'||!Number.isFinite(Date.parse(builtAt)))throw fail('invalid_built_at');
@@ -79,13 +100,13 @@ const EpgReplay=(()=>{
    const manifestText=await readText(reader,manifestKey,'manifest_missing');
    bytes+=byteLength(manifestText);
    const manifest=parseJson(manifestText,manifestKey);
-   if(!isObject(manifest)||manifest.manifestId!==named||!Array.isArray(manifest.segments)||!Number.isInteger(manifest.segmentCount)||manifest.segmentCount<1||manifest.segmentCount>LIMITS.maxSegments)throw fail('manifest_malformed',{key:manifestKey});
+   if(!isObject(manifest)||manifest.manifestId!==named||!isObject(manifest.totals))throw fail('manifest_malformed',{key:manifestKey});
+   const topology=topologyProblem(manifest);
+   if(topology)throw fail(topology,{key:manifestKey});
    const segments=[];
-   let archivedItems=0;
+   let archivedItems=0,archivedBytes=0;
    for(const entry of manifest.segments){
-    if(!isObject(entry)||!Number.isInteger(entry.segment))throw fail('manifest_malformed',{key:manifestKey});
     if(!entry.object){segments.push({segment:entry.segment,object:null,sha256:null,items:0,bytes:0,text:null});continue;}
-    if(typeof entry.object!=='string'||!entry.object.startsWith(ARCHIVE_PREFIX+'segments/'))throw fail('segment_key_foreign',{segment:entry.segment});
     const text=await readText(reader,entry.object,'segment_missing');
     bytes+=byteLength(text);
     if(bytes>maxBytes)throw fail('size_budget_exceeded',{bytes,maxBytes});
@@ -94,19 +115,27 @@ const EpgReplay=(()=>{
     if(!isObject(body)||body.segment!==entry.segment||!isObject(body.items))throw fail('segment_malformed',{segment:entry.segment});
     const count=Object.keys(body.items).length;
     if(count!==entry.items)throw fail('segment_count_mismatch',{segment:entry.segment,expected:entry.items,found:count});
-    archivedItems+=count;
+    if(byteLength(text)!==entry.bytes)throw fail('segment_bytes_mismatch',{segment:entry.segment});
+    archivedItems+=count;archivedBytes+=entry.bytes;
     segments.push({segment:entry.segment,object:entry.object,sha256:entry.sha256,items:count,bytes:byteLength(text),text});
    }
-   if(archivedItems!==manifest.totals?.items)throw fail('manifest_totals_mismatch',{expected:manifest.totals?.items??null,found:archivedItems});
+   if(archivedItems!==manifest.totals.items||archivedBytes!==manifest.totals.bytes)throw fail('manifest_totals_mismatch',{expected:manifest.totals.items,found:archivedItems});
+   const mismatch=summaryProblem(document.archive,manifest,seen);
+   if(mismatch)throw fail(mismatch,{key});
    archive={manifestId:named,segmentCount:manifest.segmentCount,manifest,segments};
   }else reasons.push('archive_absent');
   if(bytes>maxBytes)throw fail('size_budget_exceeded',{bytes,maxBytes});
+  const baseline={generation:{...document,items:undefined},items,archive};
+  const archivedTotal=archive?archive.segments.reduce((n,segment)=>n+segment.items,0):0;
+  if(items.length+archivedTotal>maxItems)throw fail('size_budget_exceeded',{items:items.length+archivedTotal,maxItems});
+  const baselineBytes=byteLength(canonical(baseline));
+  if(baselineBytes>maxBytes)throw fail('size_budget_exceeded',{bytes:baselineBytes,maxBytes});
   const dataset={
    schemaVersion:SCHEMA_VERSION,kind:KIND,builder:BUILDER,builtAt,
    source:{programmeRunId,generationKey:key,ledgerMode:document.ledgerMode??null,archiveManifestId:named},
    fidelity:{level:'reduced',reasons},
-   counts:{items:items.length,archivedItems:archive?archive.segments.reduce((n,s)=>n+s.items,0):0,segments:archive?archive.segments.filter(s=>s.object).length:0,bytes},
-   baseline:{generation:{...document,items:undefined},items,archive},
+   counts:{items:items.length,archivedItems:archivedTotal,segments:archive?archive.segments.filter(s=>s.object).length:0,bytes:baselineBytes},
+   baseline,
   };
   dataset.digest=await digestOf(dataset);
   return dataset;
@@ -128,7 +157,10 @@ const EpgReplay=(()=>{
   if(!isObject(source)||!isObject(baseline)||!Array.isArray(baseline.items))return {ok:false,problems:[...problems,'dataset_incomplete']};
   if(expectedProgrammeRunId&&source.programmeRunId!==expectedProgrammeRunId)bad('generation_mismatch');
   if(baseline.generation?.programmeRunId!==source.programmeRunId)bad('generation_mismatch');
-  if(dataset.counts?.bytes>maxBytes)bad('size_budget_exceeded');
+  // The size is measured here, never trusted from the metadata: the canonical bytes of the baseline, against the hard limit (a caller may only narrow it).
+  const actualBytes=byteLength(canonical(baseline));
+  if(dataset.counts?.bytes!==actualBytes)bad('size_metadata_mismatch');
+  if(actualBytes>Math.min(LIMITS.maxBytes,maxBytes))bad('size_budget_exceeded');
   if(dataset.counts?.items!==baseline.items.length)bad('item_count_mismatch');
   const keys=new Set();let previous=null;
   for(const item of baseline.items){
@@ -139,10 +171,14 @@ const EpgReplay=(()=>{
   }
   if(!Array.isArray(dataset.fidelity?.reasons)||dataset.fidelity.level!=='reduced')bad('fidelity_unstated');
   const archive=baseline.archive;
-  if((source.archiveManifestId||null)!==(archive?.manifestId||null))bad('archive_mismatch');
+  if((source.archiveManifestId||null)!==(archive?.manifestId||null)||(baseline.generation?.archive?.manifestId||null)!==(source.archiveManifestId||null))bad('archive_mismatch');
   if(archive){
-   let items=0,withObject=0;
-   if(archive.manifest?.manifestId!==archive.manifestId||!Array.isArray(archive.manifest?.segments)||archive.manifest.segments.length!==archive.segments?.length)bad('manifest_malformed');
+   let items=0,withObject=0,segmentBytes=0;
+   if(archive.manifest?.manifestId!==archive.manifestId||!Array.isArray(archive.manifest?.segments)||archive.manifest.segments.length!==archive.segments?.length||!isObject(archive.manifest?.totals))bad('manifest_malformed');
+   else{
+    const topology=topologyProblem(archive.manifest);if(topology)bad(topology);
+    const mismatch=summaryProblem(baseline.generation?.archive,archive.manifest,keys);if(mismatch)bad(mismatch);
+   }
    for(const [index,segment] of (archive.segments||[]).entries()){
     const entry=archive.manifest?.segments?.[index];
     if(!entry||entry.segment!==segment.segment||(entry.object||null)!==(segment.object||null)){bad('manifest_malformed');continue;}
@@ -151,11 +187,14 @@ const EpgReplay=(()=>{
     if(typeof segment.text!=='string'||await segmentDigest(segment.text)!==segment.sha256||segment.sha256!==entry.sha256){bad('segment_digest_mismatch');continue;}
     let body=null;try{body=JSON.parse(segment.text);}catch{bad('segment_malformed');continue;}
     if(!isObject(body?.items)||Object.keys(body.items).length!==segment.items||segment.items!==entry.items)bad('segment_count_mismatch');
-    items+=segment.items;
+    if(byteLength(segment.text)!==entry.bytes||segment.bytes!==entry.bytes)bad('segment_bytes_mismatch');
+    items+=segment.items;segmentBytes+=byteLength(segment.text);
    }
-   if(items!==archive.manifest?.totals?.items||items!==dataset.counts?.archivedItems)bad('manifest_totals_mismatch');
+   if(items!==archive.manifest?.totals?.items||items!==dataset.counts?.archivedItems||segmentBytes!==archive.manifest?.totals?.bytes)bad('manifest_totals_mismatch');
+   if(baseline.items.length+items>LIMITS.maxItems)bad('size_budget_exceeded');
    if(withObject!==dataset.counts?.segments)bad('segment_count_mismatch');
   }
+  if(!archive&&baseline.items.length>LIMITS.maxItems)bad('size_budget_exceeded');
   return {ok:problems.length===0,problems:[...new Set(problems)]};
  }
 
@@ -223,10 +262,12 @@ const EpgReplay=(()=>{
   const checked=await verifyDataset(dataset);
   if(!checked.ok)throw fail('dataset_invalid',{problems:checked.problems});
   if(!isObject(plan)||plan.kind!==PLAN_KIND||plan.datasetDigest!==dataset.digest)throw fail('plan_mismatch');
-  const {digest,...rest}=plan;
-  if(digest!==await sha256(canonical(rest)))throw fail('plan_digest_mismatch');
-  const gone=new Set(plan.departures),scan=dataset.baseline.items.filter(item=>!gone.has(item.key));
-  if(plan.returns.length){const only=archivedOnly(dataset);for(const key of plan.returns){if(!only.has(key))throw fail('plan_mismatch');scan.push(only.get(key));}}
+  // A digest is a fingerprint, not a proof of derivation: the plan is REGENERATED from the dataset, its seed and its counts (with the same caps and the real segment
+  // function) and must equal the given plan exactly, so a forged or edited plan, rehashed or not, is never replayed.
+  const regenerated=await planMutation(dataset,{seed:plan.seed,departures:plan.departureCount,returns:plan.returnCount},helpers);
+  if(canonical(regenerated)!==canonical(plan))throw fail('plan_not_derived');
+  const gone=new Set(regenerated.departures),scan=dataset.baseline.items.filter(item=>!gone.has(item.key));
+  if(regenerated.returns.length){const only=archivedOnly(dataset);for(const key of regenerated.returns){if(!only.has(key))throw fail('plan_mismatch');scan.push(only.get(key));}}
   if(typeof helpers.candidateKey==='function'){
    const keys=new Set(scan.map(item=>helpers.candidateKey(item)));
    if(keys.size!==scan.length)throw fail('scan_keys_collide');
