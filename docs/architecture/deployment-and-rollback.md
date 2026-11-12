@@ -25,7 +25,7 @@ flowchart TD
     class data warning
 ```
 
-The tests of the `Test and build` box run as two shards in two jobs, `Test and build` (shard 1 of 2, also the build and the artifact) and `Test shard 2 of 2`; the deploy job needs both ([AIR-418](https://trello.com/c/5HEzNlvh)). The diagram shows them as one step: the gate before the artifact is unchanged.
+The tests of the `Test and build` box run as three shards in three jobs, `Test and build` (shard 1 of 3, also the build and the artifact), `Test shard 2 of 3` and `Test shard 3 of 3`; the deploy job needs all three ([AIR-418](https://trello.com/c/5HEzNlvh)). The diagram shows them as one step: the gate before the artifact is unchanged.
 
 PR checks do **not** publish to Cloudflare. A successful `main` run builds and uploads a verified artifact; the deploy job consumes that artifact, checks freshness, performs credentials/settings preflight and deploys only on `main`. The freshness check limits stale publishes but is not atomic with publication.
 

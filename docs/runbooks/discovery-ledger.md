@@ -158,7 +158,7 @@ This is the plan for one operation, written so that it can be approved or refuse
 
 **Preconditions (read-only, all must hold):**
 
-1. The change that sends every D1 ledger to the paged chunk and the change of ADR 0112 are deployed: `Test and build`, `Test shard 2 of 2` and `Deploy to Cloudflare` succeeded on the merge commit.
+1. The change that sends every D1 ledger to the paged chunk and the change of ADR 0112 are deployed: `Test and build`, `Test shard 2 of 3`, `Test shard 3 of 3` and `Deploy to Cloudflare` succeeded on the merge commit.
 2. `feature_flags` shows `DISCOVERY_LEDGER_MODE` absent or `frozen`; the archive pointer exists and the manifest it names is readable; the D1 transfer is `committed` and the seal is `done`; no EPG run is in stage `epg` or `seal`.
 3. The last completed EPG run published, and its ledger phase ran with the packed batches (`epg_phase` exit event with `batches` and `writeMs`).
 4. **The memory gate is decided by the owner.** The strict target of the card (not worse than the frozen commit) is not met by any cap: the floor, with only the daily flow departing, is 4-12 MB of Node old space above the frozen commit (see the evidence). The owner accepts that margin, or does not switch.
