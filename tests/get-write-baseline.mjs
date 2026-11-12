@@ -8,6 +8,7 @@ export const PREFIX_ROUTES={
  '/api/admin/':['/api/admin/overview','/api/admin/films?q=hot','/api/admin/people?queue=localization-missing','/api/admin/films?q=hot&queue=localization-missing','/api/admin/films/film:w1','/api/admin/people/person:director/one'],
  '/api/admin/films/':[],
  '/api/admin/people/':[],
+ '/api/epg/diagnostic/':['/api/epg/diagnostic/preflight','/api/epg/diagnostic/status?key=audit-key-0000000000','/api/epg/diagnostic/result?key=audit-key-0000000000'],
  '/api/admin/health':['/api/admin/health'],
  '/api/admin/limbo':['/api/admin/limbo','/api/admin/limbo?cause=backoff&subsystem=prediction&kind=film&age=14&limit=5'],
  '/api/admin/posters':['/api/admin/posters','/api/admin/posters?limit=3&cursor=a'],

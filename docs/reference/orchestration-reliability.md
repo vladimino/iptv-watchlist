@@ -240,6 +240,21 @@ Inert, offline code (`src/epg-replay.js`, `EpgReplay`): nothing calls it at runt
 
 Parity with production code: committed through the real `stageSealedGeneration`, the replay scan archives exactly the planned departures (`upsertedKeys`) into exactly the planned segments, and returned keys are active again (`tests/epg-replay-dataset.mjs`).
 
+## EPG diagnostic canary: the run and its receipt (AIR-455, ADR 0123)
+
+Owner-only, inert until the diagnostic resources are provisioned (AIR-456): without the diagnostic bindings every route answers `503 diagnostic_bindings_absent`, no Workflow instance is created and nothing is written.
+
+| Route | Kind | Contract |
+|---|---|---|
+| `GET /api/epg/diagnostic/preflight[?dataset=<digest>]` | read | `ready` is true only with the identity verified, the Workflow bound, the receipt table present, no active canary, the production EPG idle and (if asked) the dataset verifying. Reports the production state (`production_step_live`, `production_mode_switching`, `production_epg_active`, `production_seal_active`, `production_sync_active`, `production_state_unreadable`). Writes nothing (`writes` counter) |
+| `GET …/status?key=` | read | the receipt, the live instance status and a reconcile hint (`repeat_launch_to_create`, `repeat_launch_to_record`, `instance_status_unknown`, `instance_ended_before_receipt`); never writes |
+| `GET …/result?key=` | read | `200` with the report once `complete`, `failed` or `stopped`, otherwise `202` |
+| `POST …/launch` | write | body `{idempotencyKey (16 to 80 of A-Za-z0-9_-), confirm:"LAUNCH_EPG_DIAGNOSTIC_CANARY", datasetDigest, seed, departures (1 to 8000), returns (0 to 2000), budgetMs (60 s to 20 min)}`, unknown fields refused. Refusals: `confirmation_required`, `access_assertion_missing`, the production gates, `dataset_missing`, `dataset_invalid`, `plan_*`, `canary_active`, `idempotency_conflict`, `workflow_unbound`. A repeat with the same key and parameters is the same run and creates nothing; an unknown create outcome is `202` and is never retried blind |
+| `POST …/stop` | write | `confirm:"STOP_EPG_DIAGNOSTIC_CANARY"`: the receipt is marked `stopped` first (a woken instance ends at `begin`), then the instance is terminated |
+| `POST …/cleanup` | write | `confirm:"CLEANUP_EPG_DIAGNOSTIC_DOMAIN"`: refused while a canary is active; empties `epg/`, `sync.json` and the baseline marker of the diagnostic bucket, keeps the identity, the datasets and the receipts |
+
+The receipt (`epg_diagnostic_receipt`, diagnostic D1): status `reserved`, `created`, `running`, `complete`, `failed`, `stopped`; `slot` is 1 while active (unique, so one active canary); fingerprint and deterministic instance id from the key; the report. The Workflow body is `begin`, `seal`, `finish`, none throws. `seal` writes the dataset's baseline into the diagnostic bucket, takes the diagnostic step lease, runs the real `stageSealedGeneration` (plan, archive with its fences, emit) on the allowlisted context and publishes nothing; the baseline is consumed (another run needs `cleanup`). The diagnostic domain's published generation must already name the dataset's generation (`domain_not_prepared` otherwise; AIR-456). The report is labelled `canary-measured` with `published:false`, `productionWrites:0`, phase markers, per-resource reads and writes, lease renewals, expected versus actual departures and segments and the invariants; CPU and memory are not exposed to Worker code (null). A passing canary is not AIR-444 acceptance. Runbook: [EPG diagnostic canary](../runbooks/epg-diagnostic-canary.md).
+
 ## Ratings implementation status (AIR-347)
 
 Implemented and **inert**: `src/domain/orchestration-policy.js` (pure policy), `src/ratings-orchestration.js` (`RATINGS_WORKFLOW`, `RatingsOrchestration.ensure`, owner route `POST /api/letterboxd/ratings/executor`), the D1 epoch fence in `src/ratings-d1.js`, the external-writer gate in `src/letterboxd-ratings.js` and the `orchestration` object of `ratings_sync_status`. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md). Nothing runs until the owner switches the mode.

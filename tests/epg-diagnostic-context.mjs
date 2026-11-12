@@ -24,7 +24,7 @@ const Diag=loadModule(source);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-diagnostic-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 const plain=value=>JSON.parse(JSON.stringify(value));
-const IDENTITY=fs.readFileSync('diagnostic-migrations/0001_epg_diagnostic_identity.sql','utf8');
+const IDENTITY=fs.readFileSync('diagnostic-migrations/0001_epg_diagnostic_identity.sql','utf8')+'\n'+fs.readFileSync('diagnostic-migrations/0002_epg_diagnostic_receipt.sql','utf8');
 const RESOURCE='diag-test-0001';
 
 // The real step lease and the real policy, loaded into the Worker's context like the Worker bundle does.
@@ -208,8 +208,8 @@ async function bootstrapRaw(state){await bootstrap(state,0);}
  assert.equal(Diag.fromWorkerEnv({DB:spy,BUCKET:spyBucket,EPG_DIAGNOSTIC_DB:spy,EPG_DIAGNOSTIC_BUCKET:spyBucket},{resourceId:RESOURCE}).reason,'context_contradictory','diagnostic bindings that are the production objects');
  assert.deepEqual(writes,[],'no storage call at all');
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8'),workerSource=fs.readFileSync('src/worker.js','utf8'),build=fs.readFileSync('build.mjs','utf8');
- assert.doesNotMatch(wrangler,/DIAGNOSTIC/i,'no diagnostic binding, resource, route or migration directory in wrangler.jsonc');
- assert.doesNotMatch(workerSource,/EpgDiagnostic/,'the Worker entry does not reference the module');
+ assert.doesNotMatch(wrangler,/EPG_DIAGNOSTIC_(DB|BUCKET|RESOURCE_ID)|diagnostic-migrations|migrations_dir/i,'no diagnostic D1, bucket, resource id or migration directory in wrangler.jsonc (the Workflow binding of AIR-455 creates no instance and no storage)');
+ assert.doesNotMatch(workerSource,/\bEpgDiagnostic\b/,'the Worker entry does not reference the context module itself (only the owner-only run module of AIR-455 does, through the routes)');
  assert.match(build,/src\/epg-diagnostic\.js/,'the module is in the bundle (inert)');
  assert.ok(!fs.readdirSync('migrations').some(name=>/diagnostic/i.test(name)),'the diagnostic migration is not in the production chain');
  assert.doesNotMatch(source,/\bfetch\(|\.create\(|EPG_WORKFLOW\s*[.?]|new Request|crypto\.randomUUID/,'no network, no Workflow creation');

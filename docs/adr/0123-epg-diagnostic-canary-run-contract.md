@@ -1,0 +1,44 @@
+# ADR 0123: EPG diagnostic canary run contract (implementation decisions of ADR 0121)
+
+**Status:** Proposed (implementation decisions inside the accepted architecture of ADR 0121; nothing is provisioned, activated or run by this ADR)  
+**Original decision date:** not decided  
+**Recorded at:** 2026-11-12  
+**Approval source:** not yet given; the owner accepts these decisions at the review of the AIR-455 pull request or by a separate decision  
+**Related work:** [AIR-455](https://trello.com/c/dgSOG3Ct), [ADR 0121](0121-epg-diagnostic-rehearsal-design.md), [AIR-453](https://trello.com/c/pX4ME03B), [AIR-454](https://trello.com/c/BdNJFZG7)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+ADR 0121 accepted a real, isolated, on-demand Cloudflare Workflow canary in the existing `iptv` Worker, with its own diagnostic bucket and D1, durable receipts, recorded replay input and separate owner GOs. Implementing it required choices that the ADR left open: the surface, how a launch is made safe and idempotent, what the diagnostic domain must contain, and what a run leaves behind.
+
+## Decision
+
+1. **Surface.** Owner-only HTTP routes under `/api/epg/diagnostic/`: `GET preflight`, `GET status`, `GET result` (reads, no writes) and `POST launch`, `POST stop`, `POST cleanup` (writing actions). Each writing action needs its own confirmation string in the body (`LAUNCH_EPG_DIAGNOSTIC_CANARY`, `STOP_EPG_DIAGNOSTIC_CANARY`, `CLEANUP_EPG_DIAGNOSTIC_DOMAIN`) and the presence of the Cloudflare Access assertion header; the control remains the Worker-wide Cloudflare Access (the Worker's JWT verifier is bound to the MCP application's audience and is not reused). The confirmation strings are guards against accident, not authorization: every writing action still needs an operation-specific owner GO that no code grants. No MCP tool is added.
+2. **Inert.** The Workflow binding `EPG_DIAGNOSTIC_WORKFLOW` (class `EpgDiagnosticWorkflow`, Workflow `iptv-epg-diagnostic`) is declared in `wrangler.jsonc`; a deploy creates the Workflow definition and no instance. The diagnostic D1 and bucket bindings and the resource id (`EPG_DIAGNOSTIC_DB`, `EPG_DIAGNOSTIC_BUCKET`, `EPG_DIAGNOSTIC_RESOURCE_ID`) are not declared until the owner provisions them (AIR-456); without them every route answers `diagnostic_bindings_absent` and nothing is written or created.
+3. **Receipt.** One row per idempotency key in the diagnostic D1 (`epg_diagnostic_receipt`, diagnostic-migrations/0002): the key is the primary key (an atomic reservation before the Workflow is created), the fingerprint of the configuration (dataset digest, seed, departures, returns, budget) binds the key to immutable parameters, the instance id is deterministic from the key, and a unique `slot` column allows at most one active canary. Same key and parameters resolve to the same run; other parameters are `idempotency_conflict`; a second canary is `canary_active`. An unknown create outcome leaves the receipt `reserved` and is answered `202`; only a repeated launch with the same key and parameters (or a stop) resolves it, by attaching to an existing instance, never by creating a second one while the status is unknown.
+4. **Gates before a reservation.** Verified identity of both diagnostic resources; the Workflow bound; the dataset present in the diagnostic bucket (`diagnostic/replay/<digest>.json`) and verifying against its digest; the plan derivable; and the production EPG idle, read from the production env only (no live step lease, no open mode switch, no running control phase, no seal or fresh sync in `sync.json`).
+5. **The run.** The Workflow body is three steps that never throw (`begin`, `seal`, `finish`), so the engine never retries a step that may have written. `seal` writes the baseline of the dataset into the diagnostic bucket at the keys the real planner reads, takes the diagnostic step lease, and runs the real `stageSealedGeneration` on the allowlisted context; it publishes nothing. The baseline is **consumed** by a run (a marker written before the first seal mutation): another run needs the owner's `cleanup`, which empties the baseline objects of the diagnostic bucket and keeps the identity, the datasets and the receipts.
+6. **Domain preparation is a boundary, not part of this run.** The diagnostic D1's published-EPG generation and Discovery markers must already name the dataset's generation (the provisioning procedure of AIR-456); otherwise a run refuses `domain_not_prepared`. The run loads the Discovery ledger into the diagnostic D1 with the real writer when the diagnostic Discovery authority is in D1, so the lease and its fences work on the same generation as in production.
+7. **Report.** Written into the receipt: labelled `canary-measured`, `published:false`, `productionWrites:0`, the dataset digest and fidelity, the plan, the phase markers of the real seal (plan, archive with fences, fenceMs, readMs, putMs, emit), per-resource reads and writes, lease renewals, expected versus actual departures and segments, the invariants (denied accesses, refused writes, identity verified) and the limits (CPU and memory not exposed to Worker code, null; diagnostic latency is not production latency; application-enforced isolation; not AIR-444 acceptance).
+
+## Alternatives considered
+
+Reusing the MCP tool surface (rejected: the canary is an operation of the owner, and a tool would put a writing action into the model's reach); an in-Worker JWT check for the new routes (rejected for now: the existing verifier is audience-bound to the MCP application; a second audience is a configuration change for the owner); per-run key prefixes inside the diagnostic bucket (rejected: the real seal reads fixed keys, a prefix would be a second algorithm); loading the published generation into the diagnostic D1 from within a run (rejected: that is a cutover-like operation that belongs to the owner-approved provisioning).
+
+## Consequences
+
+A launch is cheap to repeat safely and expensive to run by accident. A run consumes its baseline, so repeated measurements need a cleanup in between. The diagnostic domain must be prepared by AIR-456 before the first run. The isolation limits of ADR 0121 apply unchanged.
+
+## Recovery and migration boundary
+
+Code rollback (revert) removes the routes and the class but does not delete the provisioned diagnostic resources, the receipts or a running instance: disable by `stop` first, then revert, then clean the diagnostic domain by the runbook. Provisioning, applying the diagnostic migrations, copying a dataset, activating the diagnostic markers and every launch each need an operation-specific owner GO.
+
+## Evidence
+
+- **Implementation:** the AIR-455 pull request. **Dated verification:** [offline evidence](../evidence/orchestration/epg-diagnostic-run-air-455-2026-11-12.md).
+- **Uncertainty:** the behaviour of the real Workflow engine, the diagnostic D1 and R2 latency, and whether the production generation fits the dataset budget are not established offline.
+
+## Follow-ups
+
+AIR-456: provisioning, the preparation of the diagnostic domain, the first run and its acceptance.
