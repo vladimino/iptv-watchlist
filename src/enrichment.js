@@ -927,17 +927,24 @@ const RUNNER_LEASE_TTL=15*60000;
 // changes on every write and stays inside the Worker. A renewal that loses the compare-and-swap to another write of the same lease is read again and retried a
 // bounded number of times; it becomes `lease_lost` only when the lease read afterwards names another holder, or has expired.
 const RUNNER_LEASE_ATTEMPTS=3;
+const previousEpochOf=lease=>Number.isInteger(lease?.epoch)&&lease.epoch>=0?lease.epoch:null;
 async function runnerLease(env,runId,operation='renew'){
+ let epochSeen=null;
  for(let attempt=1;;attempt++){
   const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openLease(env,RUNNER_LEASE_KEY),object=head?head.object:await env.BUCKET.get(RUNNER_LEASE_KEY),old=head?head.value:(object?await object.json():null),now=Date.now();
   if(operation==='acquire'&&old?.expiresAt>now)return {status:'already_running',runId:old.runId,expiresAt:old.expiresAt};
   if(operation!=='acquire'&&(!old||old.runId!==runId||old.expiresAt<=now))return {status:'lease_lost',runId:old?.runId||null};
-  const previousEpoch=Number.isInteger(old?.epoch)&&old.epoch>=0?old.epoch:null,epoch=operation==='acquire'?(previousEpoch??0)+1:previousEpoch;
+  const previousEpoch=previousEpochOf(old),epoch=operation==='acquire'?(previousEpoch??0)+1:previousEpoch;epochSeen=previousEpoch;
   const value={owner:runId,runId,heartbeatAt:new Date(now).toISOString(),expiresAt:operation==='release'?0:now+RUNNER_LEASE_TTL,...(epoch!==null?{epoch}:{}),...(operation!=='acquire'&&old?.submitGate?{submitGate:old.submitGate}:{})};
   const saved=head?await PredictionD1.writeLease(env,head,value):await env.BUCKET.put(RUNNER_LEASE_KEY,JSON.stringify(value),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
   if(saved===null){
    if(operation!=='acquire'&&attempt<RUNNER_LEASE_ATTEMPTS)continue;
-   const current=await loadJSON(env,RUNNER_LEASE_KEY);return {status:operation==='acquire'?'already_running':'lease_lost',runId:current?.runId||null};
+   const current=await loadJSON(env,RUNNER_LEASE_KEY);
+   if(operation==='acquire')return {status:'already_running',runId:current?.runId||null};
+   // The lease is still this run's and alive: the compare-and-swap lost to another write of it (a heartbeat or a checkpoint of the same owner), which is not a loss of ownership.
+   // The caller gets an explicit retryable answer, never `lease_lost`.
+   if(current?.runId===runId&&current.expiresAt>Date.now()&&(previousEpochOf(current)===null||previousEpochOf(current)===epochSeen))return {status:'busy',reason:'lease_contention',runId};
+   return {status:'lease_lost',runId:current?.runId||null};
   }
   const scope=requestScopeOf(env);if(scope)scope.lease={runId:value.runId,expiresAt:value.expiresAt};
   return {status:'owned',...value,...(operation==='acquire'&&old?.runId&&old.expiresAt<=now?{recoveredRunId:old.runId}:{})};
@@ -1937,21 +1944,124 @@ async function buildBatchManifest(env,{profile,items,runId,lease,dryRun=false,ex
  return {body,hash:manifestHash,bytes,films:films.length,largestFilmBytes:sizes.length?sizes[largest]:0,largestFilmId:films[largest]?.filmId??null};
 }
 const batchOverflow=(manifest,extra={})=>batchBlocked('manifest_too_large',{bytes:manifest.bytes,limit:BATCH_RUNNER.maxManifestBytes,films:manifest.films,largestFilmBytes:manifest.largestFilmBytes,largestFilmId:manifest.largestFilmId,...extra});
-// Read-only. Reads the profile, the programme, the stored queue and the films; heals, rebuilds, settles and takes nothing. A queue that fails the advance gate is reported `stale`.
+const batchBytes=value=>new TextEncoder().encode(JSON.stringify(value)).length;
+// The fields that follow the manifest in the answer. A preflight measures the answer with the widest values these can take, so a manifest that passes it cannot grow past the
+// limit when the real values are added; the exact answer is measured again before anything is persisted and before it is sent.
+const batchPlaceholderExtras=(selection,dryRun)=>({queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+// Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
+// A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
 async function batchPreflight(env,body){
- const [profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
+ const dryRun=body.dryRun===true,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
  if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
  if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return {response:json({error:'No completed programme snapshot'},409)};
- const read=await readQueueHead(env),stored=read.current,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry);
- if(why)return {profile,report,stale:why};
+ const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry);
+ if(why)return {profile,report,stale:why,revision};
  try{
   const selection=await batchSelection(env,{profile,report,queue:stored,pin:body.pin||null});
-  const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:1},dryRun:body.dryRun===true});
-  return {profile,report,queue:stored,selection,manifest};
+  const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
+  return {profile,report,queue:stored,revision,selection,manifest,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
  }catch(error){
   if(CATALOG_HELD_CODES.includes(error?.code))return {response:catalogHeldResponse(error.code)};
   throw error;
  }
+}
+const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.bytes},extra);
+// The queue refresh and the settlement that D7-A names as effects of batch_start: a queue that fails the advance gate is refreshed (not rebuilt on every start), and the films the
+// preflight found already current or without an admission leave the queue in one guarded settlement. The caller reads the result again as a fresh preflight, its new baseline.
+async function batchRefreshQueue(env,body,pre){
+ let queue=pre.queue,settled=0;
+ if(pre.stale)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:false,fallback:true});
+ const context=await advanceContext(env,pre.report,pre.profile);
+ for(let round=0;round<3;round++){
+  const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
+  if(!settle.length)break;
+  const next=await mutatePredictionQueue(env,guardedSettle(context,settle,'batch_start_settle'),'batch_start_settle',queue)||queue;
+  if(next===queue)break;
+  settled+=settle.length;queue=next;
+ }
+ return {queue,settled};
+}
+// What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
+async function batchStartRoute(env,body,requestId){
+ const bad=validateBatchStartBody(body);if(bad)return bad;
+ const notD1=await batchRequiresD1(env);if(notD1)return notD1;
+ const dryRun=body.dryRun===true;let pre=await batchPreflight(env,body);if(pre.response)return pre.response;
+ if(dryRun){
+  // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
+  if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
+  const answer={...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true};
+  if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf({...pre,bytes:batchBytes(answer)},{dryRun:true});
+  noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:batchBytes(answer)}));
+  return json(answer);
+ }
+ // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
+ if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
+ // The guards a v5 start runs before it takes the lease: the previous run's retries, and a held catalog.
+ const unsettled=await atStage('settle_previous',()=>settlePreviousRun(env));if(unsettled)return unsettled;
+ const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
+ let queueRefreshed=false,queueSettled=0;
+ if(pre.stale||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
+  try{const refreshed=await atStage('queue_refresh',()=>batchRefreshQueue(env,body,pre));queueRefreshed=true;queueSettled=refreshed.settled;}
+  catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
+  // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
+  pre=await batchPreflight(env,body);if(pre.response)return pre.response;
+  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true});
+  if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
+ }
+ const runId=crypto.randomUUID(),attemptAt=new Date().toISOString();
+ const attempt={runId,createdAt:attemptAt,diagnosticStartedAt:attemptAt,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
+ const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));
+ if(lease.status!=='owned'){
+  // Not a refusal of the manifest: the attempt is recorded as every start attempt is.
+  attempt.status='completed';attempt.completedAt=new Date().toISOString();attempt.stopReason=lease.status==='already_running'?null:lease.status;
+  await diagnosticCheckpoint(env,attempt,{startResult:'already_running'});
+  return json(lease);
+ }
+ // Revalidation, before a run, an Event or a diagnostics row exists: the queue's own generation must be the baseline's, and the selection and the manifest the same. Only the lease
+ // acquire and release may have happened if it does not hold.
+ let answer;
+ try{
+  const again=await batchPreflight(env,body);
+  if(again.response){await runnerLease(env,runId,'release');return again.response;}
+  if(again.stale||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{...(queueRefreshed?{queueRefreshed:true}:{})});}
+  const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
+  answer={...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})};
+  if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
+  pre={...again,manifest:exact,answer};
+ }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
+ return batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt});
+}
+// After the lease is held and the snapshot revalidated: the ordinary start bookkeeping (the diagnostics row, the expired diagnostics and the pending Events, a recovered run) and the run itself.
+async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}){
+ const {profile,report,queue,selection}=pre,plan=adaptivePredictionBatch(queue,body.capacity);
+ const response=await observedPrediction(env,{...body,diagnosticRunId:runId},async()=>{
+  attempt.leaseAcquiredAt=lease.heartbeatAt;attempt.lastHeartbeatAt=lease.heartbeatAt;
+  const previousRun=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;
+  attempt.startResult=previousRun&&['running','interrupted'].includes(previousRun.status)?'recovered_stale_lease':'running';
+  await diagnosticCheckpoint(env,attempt,{state:'running',startResult:attempt.startResult});
+  try{
+   const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{
+    await settleExpiredDiagnostics(env);await deliverPendingEvents(env);
+    // Reported capacity of zero stops the start as it stops a v5 start; any other value does not shorten a manifest.
+    if(plan.reason==='quota'||!selection.items.length)return startIdle(env,{runId,body,profile,queue,plan});
+    const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
+    if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
+    const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();
+    const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(item=>item.filmId),batchIds:selected.map(item=>item.filmId),selectionKind:Object.fromEntries(selected.map(item=>[item.filmId,item.lane])),baseline:Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null])),failures:{},results:{}};
+    await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)])));
+    await atStage('run_save',()=>savePredictionRun(env,run));
+    await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,null));
+    noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:batchBytes(answer)}));
+    return json(answer);
+   }));
+   if(result.status>=400)await runnerLease(env,runId,'release');
+   return result;
+  }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code)&&error?.stage==='queue_refresh'){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+ },'start',requestId);
+ const data=await response.clone().json();
+ if(data.status!=='running'){attempt.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';attempt.completedAt=new Date().toISOString();attempt.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,attempt,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:attempt.leaseAcquiredAt||null,lastHeartbeatAt:attempt.lastHeartbeatAt||null});}
+ return response;
 }
 // batch_start is observed like next and submit (one `prediction_step_timing` line) but runs without the per-request authority and object scope those two use: a start
 // writes a run, a lease and a queue, and the scope's reuse of identical reads assumes a step that already holds the lease.
@@ -1963,48 +2073,6 @@ async function timedBatchStart(env,body,requestId){
  catch(error){status=0;throw error;}
  finally{try{if(timer){const id=typeof requestId==='string'&&SAFE_LOG_ID.test(requestId)?requestId:null;console.log(JSON.stringify(timer.summary('batch_start',{requestId:id,runId:null,status})));}}catch{/* logging never changes the outcome */}}
 }
-async function batchStartRoute(env,body,requestId){
- const bad=validateBatchStartBody(body);if(bad)return bad;
- const notD1=await batchRequiresD1(env);if(notD1)return notD1;
- const pre=await batchPreflight(env,body);if(pre.response)return pre.response;
- if(body.dryRun===true){
-  // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
-  if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
-  if(pre.manifest.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflow(pre.manifest,{dryRun:true});
-  noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:pre.manifest.bytes}));
-  return json({...pre.manifest.body,runId:null,dryRun:true,notEligible:pre.selection.notEligible,eligible:pre.selection.eligible,skipped:{missingAdmission:pre.selection.skipped.missingAdmission.length,alreadyCurrent:pre.selection.skipped.alreadyCurrent.length},...scheduledRunFields()});
- }
- // Zero writes while the manifest does not fit: no lease, run record, Event, diagnostics row, queue or film write.
- if(pre.manifest&&pre.manifest.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflow(pre.manifest);
- return diagnosedStart(env,{...body,mode:'queued',batch:{preflightHash:pre.manifest?.hash||null,queueRefreshed:!!pre.stale}},requestId);
-}
-// The rest of a start for a batch run, after the lease is held and the stored queue is current (refreshed only if it failed the gate): selection, revalidation, run record, manifest.
-async function batchStartTail(env,{body,profile,report,queue:startQueue,plan,runId,lease,recovered,previous,queueStale,reused,inputs,batch}){
- // Reported capacity of zero stops the start as it stops a v5 start; any other value does not shorten a manifest (a v5 selection plan caps a selection, not a run).
- if(plan.reason==='quota')return startIdle(env,{runId,body,profile,queue:startQueue,plan});
- const context=await advanceContext(env,report,profile);let queue=startQueue,selection=null,settled=0;
- // A film already current, or one whose admission is gone, leaves the queue in one settlement (the named effect of batch_start); the selection is then read again.
- for(let round=0;round<3;round++){
-  selection=await atStage('queue_refresh',()=>batchSelection(env,{profile,report,queue}));
-  const settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
-  if(!settle.length)break;
-  const next=await atStage('queue_refresh',()=>mutatePredictionQueue(env,guardedSettle(context,settle,'batch_start_settle'),'batch_start_settle',queue))||queue;
-  if(next===queue)break;
-  settled+=settle.length;queue=next;
- }
- if(!selection.items.length)return startIdle(env,{runId,body,profile,queue,plan});
- const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId,lease,extra:{}});
- // The snapshot is revalidated before a run is persisted: a selection that moved since the read-only preflight (and no refresh explains it) is not delivered.
- if(!batch.queueRefreshed&&settled===0&&batch.preflightHash&&manifest.hash!==batch.preflightHash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed');}
- if(manifest.bytes>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow(manifest,{queueRefreshed:batch.queueRefreshed||settled>0});}
- const createdAt=new Date().toISOString(),selected=selection.items;
- const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:manifest.bytes,status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:lease.diagnosticStartedAt||createdAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:lease.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(item=>item.filmId),batchIds:selected.map(item=>item.filmId),selectionKind:Object.fromEntries(selected.map(item=>[item.filmId,item.lane])),baseline:Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null])),failures:{},results:{}};
- await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)])));
- await atStage('run_save',()=>savePredictionRun(env,run));
- await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,reused?inputs:null));
- noteStep(env,()=>({manifestFilms:manifest.films,manifestBytes:manifest.bytes}));
- return json({...manifest.body,queueRefreshed:!!batch.queueRefreshed||settled>0,...(settled?{queueSettled:settled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(queueStale?{queueStale}:{}),...scheduledRunFields()});
-}
 async function diagnosedStart(env,body,requestId){
  const runId=crypto.randomUUID(),at=new Date().toISOString(),shell={runId,createdAt:at,diagnosticStartedAt:at,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
  await diagnosticCheckpoint(env,shell,{startResult:'error'});
@@ -2013,7 +2081,7 @@ async function diagnosedStart(env,body,requestId){
   const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
   const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));if(lease.status!=='owned')return json(lease);
   shell.leaseAcquiredAt=lease.heartbeatAt;shell.lastHeartbeatAt=lease.heartbeatAt;const previous=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;shell.startResult=previous&&['running','interrupted'].includes(previous.status)?'recovered_stale_lease':'running';await diagnosticCheckpoint(env,shell,{state:'running',startResult:shell.startResult});
-  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);await deliverPendingEvents(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult},body.batch||null);}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);await deliverPendingEvents(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
  },'start',requestId);
  const data=await response.clone().json();if(data.status!=='running'){shell.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';shell.completedAt=new Date().toISOString();shell.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,shell,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:shell.leaseAcquiredAt||null,lastHeartbeatAt:shell.lastHeartbeatAt||null});}
  return response;
@@ -2021,13 +2089,13 @@ async function diagnosedStart(env,body,requestId){
 // In a scoped step (AIR-442) a run record identical to the stored one is not written again, and neither is `latest-run.json`: the step holds the runner lease, so no other run can
 // have replaced it, and the step's own final save (which always changes the record: heartbeat, activity time) writes both.
 async function savePredictionRun(env,run){const stored=await saveJSON(env,runKey(run.runId),run);if(!(requestScopeOf(env)&&stored?.etag==='unchanged'))await saveJSON(env,ENRICHMENT_KEY+'latest-run.json',run);await diagnosticCheckpoint(env,run);}
-async function enrichmentStart(env,body,acquired=null,batch=null){
+async function enrichmentStart(env,body,acquired=null){
  const mode=body.mode||'queued';if(!['watchlist_available','watchlist_all'].includes(body?.scope)||(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1))||!['queued','legacy'].includes(mode)||(body.batchSize!==undefined&&(!Number.isInteger(body.batchSize)||body.batchSize<1||body.batchSize>MAX_PREDICTION_BATCH)))return json({error:'Invalid scope, mode or batchSize'},400);
  if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
  const [profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);if(!profile)return json({error:'Taste profile is not configured'},409);if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return json({error:'No completed programme snapshot'},409);
  // The rebuild already read the programme, the catalog and the index of this generation; the start reuses them instead of reading each again
  // (AIR-417: three copies of the catalog and programme and two of the index in one request exceeded the isolate memory).
- const inputs={},startQueue=mode==='queued'?await atStage('queue_refresh',()=>currentPredictionQueue(env,report,profile,body.trigger==='scheduled'?'scheduled':'manual',{force:!batch,fallback:true,capture:inputs})):null,reused=mode==='queued'&&inputs.report?.runId===report.runId&&inputs.catalog!==undefined,legacyFilms=mode==='queued'?null:eligibleEnrichmentFilms(report),eligibleCount=mode==='queued'?(startQueue.hotCount||0)+(startQueue.coldCount||0):legacyFilms.length,plan=mode==='queued'?adaptivePredictionBatch(startQueue,body.capacity):null,queueStale=startQueue?.queueStale||null;
+ const inputs={},startQueue=mode==='queued'?await atStage('queue_refresh',()=>currentPredictionQueue(env,report,profile,body.trigger==='scheduled'?'scheduled':'manual',{force:true,fallback:true,capture:inputs})):null,reused=mode==='queued'&&inputs.report?.runId===report.runId&&inputs.catalog!==undefined,legacyFilms=mode==='queued'?null:eligibleEnrichmentFilms(report),eligibleCount=mode==='queued'?(startQueue.hotCount||0)+(startQueue.coldCount||0):legacyFilms.length,plan=mode==='queued'?adaptivePredictionBatch(startQueue,body.capacity):null,queueStale=startQueue?.queueStale||null;
  let queue=startQueue;
  // Explicit small nonlegacy diagnostics batches remain possible. The old scheduled 4 is a legacy hint, not a throughput cap.
  const batchSize=mode==='queued'?Math.min(plan.batchSize,body.batchSize!==undefined&&!(body.trigger==='scheduled'&&body.batchSize===4)?body.batchSize:MAX_PREDICTION_BATCH):legacyFilms.length;
@@ -2036,7 +2104,6 @@ async function enrichmentStart(env,body,acquired=null,batch=null){
  const recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
  if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
 
- if(batch)return batchStartTail(env,{body,profile,report,queue:startQueue,plan,runId,lease,recovered,previous,queueStale,reused,inputs,batch});
  // A selected film whose admission is gone is settled out of the queue and replaced (AIR-431), so a start never repeats a batch of missing films.
  const picked=mode==='queued'?await atStage('queue_refresh',async()=>pickBatchWithFilms(env,await advanceContext(env,report,profile),startQueue,current=>queueBatchIds(current,queueReadyIds(current),batchSize),{known:reused?inputs.catalog||{}:undefined,trigger:'start_missing_admission'})):null;
  if(picked)queue=picked.queue;

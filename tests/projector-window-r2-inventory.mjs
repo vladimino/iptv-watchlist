@@ -96,9 +96,9 @@ const FILE_SITES={
  'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
  // events): not a projector input and not on a Discovery, admin-recovery or publication path.
- // Batch runner v2: +1 wrapper site and +1 dynamic key, the create of `enrichment/sources/<runId>.json` by batch_start (the same object and key shape the v5 start writes; the metadata
- // of the run's films; not a projector input and not on a Discovery, admin-recovery or publication path).
- 'src/enrichment.js':{r2:11,wrapper:45,dynamic:31},
+ // Batch runner v2: +2 wrapper sites and +2 dynamic keys in batch_start, both the same object and key shape the v5 start writes: the create of `enrichment/sources/<runId>.json` (the metadata
+ // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
+ 'src/enrichment.js':{r2:11,wrapper:46,dynamic:32},
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},

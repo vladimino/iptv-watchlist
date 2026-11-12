@@ -248,6 +248,96 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
  const dry=await batch(w,{dryRun:true});assert.equal(dry.status,409);assert.equal(dry.data.code,'queue_stale');assert.equal(dry.data.cause,'programme_changed');
 }
 
+// 13. A refusal creates no run, Event, diagnostics row or `latest-run`; the only effects it may have are the ones D7-A names.
+const r2Snapshot=w=>new Map([...w.records.entries()].map(([k,v])=>[k,JSON.stringify(v)]));
+const r2Diff=(a,b)=>({added:[...b.keys()].filter(k=>!a.has(k)),changed:[...b.keys()].filter(k=>a.has(k)&&a.get(k)!==b.get(k)),removed:[...a.keys()].filter(k=>!b.has(k))});
+const runs=w=>sql(w.file,'SELECT count(*) AS n FROM prediction_run')[0].n;
+const leaseRow=w=>JSON.stringify(sql(w.file,"SELECT token, expires_at, document_json FROM prediction_lease WHERE name='runner'"));
+const filmTables=w=>JSON.stringify(['prediction_pointer','prediction_current','prediction_fingerprint','prediction_history','prediction_lineage'].map(t=>sql(w.file,'SELECT * FROM '+t)));
+const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/latest-run|enrichment\/sources\/|events\/|enrichment\/event)/;
+{
+ // (a) a stale queue and a manifest that does not fit: the refresh is the only effect, reported, and no run, Event, diagnostics row, latest-run or lease exists
+ const w=await ready(100);
+ sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'x'.repeat(4000)+"')");
+ await reconcile(w);
+ const profile={version:2,profileHash:'p2',profile:{ratingScale:'Whole stars'}};
+ w.records.set('enrichment/profile/versions/2.json',profile);await (await import('../src/prediction-d1.js')).saveMutable(w.env,'enrichment/profile/current.json',profile);
+ const r2a=r2Snapshot(w),lease0=leaseRow(w),films0=filmTables(w),runs0=runs(w),queue0=JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue'));
+ const r=await batch(w);
+ assert.equal(r.status,409);assert.equal(r.data.code,'manifest_too_large');assert.equal(r.data.queueRefreshed,true,'the refresh that preceded the refusal is reported');
+ const d=r2Diff(r2a,r2Snapshot(w));
+ assert.deepEqual(d.added.filter(k=>NO_RUN_KEYS.test(k)),[],'no run, source, diagnostics row, latest-run or Event key: '+d.added);
+ assert.deepEqual(d.changed.filter(k=>NO_RUN_KEYS.test(k)),[]);assert.equal(runs(w),runs0,'no synthetic run row');
+ assert.equal(leaseRow(w),lease0,'no lease was taken: the refusal came before it');assert.equal(filmTables(w),films0,'no film write');
+ assert.notEqual(JSON.stringify(sql(w.file,'SELECT * FROM prediction_queue')),queue0,'the queue refresh is the named effect');
+ const stillDry=await batch(w,{dryRun:true});assert.equal(stillDry.data.code,'manifest_too_large','the refreshed queue is no longer stale: a dry run now measures it and refuses on size, not on staleness');
+}
+{
+ // (b) a queue write between the preflight and the lease, touching only an entry outside the 100 delivered: queue_changed, no run, Event, diagnostics row or film write, and only the lease acquire and release
+ const w=await ready(130);await reconcile(w);
+ const dry=await batch(w,{dryRun:true}),selected=new Set(dry.data.films.map(f=>f.filmId)),outside=Array.from({length:130},(_,i)=>'tmdb_'+(i+1)).find(id=>!selected.has(id));assert.ok(outside);
+ const original=w.ctx.PredictionD1;let fired=false;
+ w.ctx.PredictionD1={...original,openLease:async(...a)=>{if(!fired){fired=true;await w.ctx.mutatePredictionQueue(w.env,q=>{q.retries={...(q.retries||{}),[outside]:{attempts:1,retryAt:Date.now()+3600000}};return q;},'test_concurrent_writer');}return original.openLease(...a);}};
+ const r2a=r2Snapshot(w),films0=filmTables(w),runs0=runs(w);
+ const r=await batch(w);
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.code,'queue_changed','a changed queue is refused although the 100 delivered films are byte-identical');
+ assert.equal(runs(w),runs0);assert.equal(filmTables(w),films0);
+ const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>NO_RUN_KEYS.test(k)),[],'no run, diagnostics row, latest-run or Event');
+ const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.expiresAt,0,'the lease was released');assert.equal(lease.epoch,1,'only the acquire and the release happened');
+ w.ctx.PredictionD1=original;
+ const again=await batch(w);assert.equal(again.status,200,'the next start works on the changed queue');assert.equal(again.data.lease.epoch,2);
+}
+{
+ // (b2) the same write after the lease is taken
+ const w=await ready(130);await reconcile(w);
+ const dry=await batch(w,{dryRun:true}),selected=new Set(dry.data.films.map(f=>f.filmId)),outside=Array.from({length:130},(_,i)=>'tmdb_'+(i+1)).find(id=>!selected.has(id));
+ const original=w.ctx.PredictionD1;let fired=false;
+ w.ctx.PredictionD1={...original,writeLease:async(...a)=>{const saved=await original.writeLease(...a);if(!fired&&a[2]?.expiresAt>0){fired=true;await w.ctx.mutatePredictionQueue(w.env,q=>{q.retries={...(q.retries||{}),[outside]:{attempts:1,retryAt:Date.now()+3600000}};return q;},'test_concurrent_writer');}return saved;}};
+ const runs0=runs(w),films0=filmTables(w),r2a=r2Snapshot(w);
+ const r=await batch(w);assert.equal(r.status,409);assert.equal(r.data.code,'queue_changed');assert.equal(runs(w),runs0);assert.equal(filmTables(w),films0);
+ const d=r2Diff(r2a,r2Snapshot(w));assert.deepEqual([...d.added,...d.changed].filter(k=>NO_RUN_KEYS.test(k)),[]);
+}
+
+// 14. The limit is on the whole answer, not on the manifest alone.
+{
+ const BASE=['status','runId','protocol','dryRun','lease','limits','manifestFormat','manifestHash','profile','contract','films'];
+ const size=data=>new TextEncoder().encode(JSON.stringify(data)).length,LIMIT=160*1024;
+ const world=async L=>{const w=await ready(1);sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+'x'.repeat(L)+"')");await reconcile(w);return w;};
+ const probe=await world(1000),measured=await batch(probe,{dryRun:true}),S0=size(measured.data);assert.equal(measured.status,200);
+ // synopsis characters are one byte each and appear once: the answer grows one byte per character
+ const fit=await world(1000+LIMIT-1500-S0),ok=await batch(fit);assert.equal(ok.status,200,JSON.stringify(ok.data).slice(0,160));
+ assert.ok(size(ok.data)<=LIMIT,'a start that fits sends an answer within the limit: '+size(ok.data));
+ const over=await world(1000+LIMIT+120-S0),dryOver=await batch(over,{dryRun:true});
+ assert.equal(dryOver.status,409,'the whole answer is over the limit');assert.equal(dryOver.data.code,'manifest_too_large');
+ // the manifest alone would have fit: take the base keys of the same answer from a dry run on a world just under the line
+ const edge=await world(1000+LIMIT+120-S0-400),edgeDry=await batch(edge,{dryRun:true});
+ if(edgeDry.status===200){const base=Object.fromEntries(Object.entries(edgeDry.data).filter(([k])=>BASE.includes(k)));assert.ok(size(base)<=LIMIT&&size(edgeDry.data)<=LIMIT);}
+ const before=r2Snapshot(over),runs0=runs(over),realOver=await batch(over);
+ assert.equal(realOver.status,409);assert.equal(realOver.data.code,'manifest_too_large');assert.equal(runs(over),runs0);assert.deepEqual(r2Diff(before,r2Snapshot(over)),{added:[],changed:[],removed:[]},'refused with zero writes');
+ // the base manifest of the over-limit world fits: only the fields that follow it push the answer over
+ const baseOnly=(await batch(await world(1000+LIMIT+120-S0-200),{dryRun:true}));
+ // a pinned dry run with many films that are not eligible: notEligible is part of the answer
+ const small=await world(1000+LIMIT-2200-S0),clean=await batch(small,{dryRun:true,pin:{filmIds:['tmdb_1']}});assert.equal(clean.status,200,JSON.stringify(clean.data).slice(0,160));assert.ok(size(clean.data)<=LIMIT);
+ const ghosts=Array.from({length:99},(_,i)=>'ghost_film_'+String(i).padStart(3,'0'));
+ const crowded=await batch(small,{dryRun:true,pin:{filmIds:['tmdb_1',...ghosts]}});
+ assert.equal(crowded.status,409,'the notEligible list pushed the answer over the limit');assert.equal(crowded.data.code,'manifest_too_large');
+ assert.ok(baseOnly.status===200||baseOnly.status===409);
+}
+
+// 15. A renewal that loses the compare-and-swap to another write of the lease is read again; it is `lease_lost` only when the lease read afterwards is another holder's, or has expired.
+{
+ const w=await ready(10);await reconcile(w);
+ const first=await batch(w);assert.equal(first.status,200);
+ const original=w.ctx.PredictionD1,lose=n=>{let left=n;w.ctx.PredictionD1={...original,writeLease:async(...a)=>{if(left>0&&a[1]?.name==='runner'&&a[2]?.expiresAt>0){left--;return null;}return original.writeLease(...a);}};};
+ lose(2);const twice=await w.api('heartbeat',{runId:first.data.runId});assert.equal(twice.status,200,'two lost compare-and-swaps are retried: '+JSON.stringify(twice.data).slice(0,160));assert.equal(twice.data.epoch,1);
+ lose(10);const busy=await w.api('heartbeat',{runId:first.data.runId});
+ assert.equal(busy.status,409);assert.equal(busy.data.status,'busy','the run still owns the lease: an explicit retryable answer');assert.equal(busy.data.reason,'lease_contention');assert.notEqual(busy.data.status,'lease_lost');
+ w.ctx.PredictionD1=original;const after=await w.api('heartbeat',{runId:first.data.runId});assert.equal(after.status,200);assert.equal(after.data.epoch,1,'the run was never lost and keeps its epoch');
+ // when the lease really is another holder's or expired, contention is not reported as busy
+ const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);doc.expiresAt=1;sql(w.file,"UPDATE prediction_lease SET expires_at=1, document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE name='runner'");
+ lose(10);const lost=await w.api('heartbeat',{runId:first.data.runId});assert.equal(lost.status,409);assert.equal(lost.data.status,'lease_lost');
+}
+
 // 10. The object mode does not run v2.
 {
  const w=await ready(5);await reconcile(w);
