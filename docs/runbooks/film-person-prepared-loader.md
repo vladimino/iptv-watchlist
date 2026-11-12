@@ -55,6 +55,7 @@ The durable record is (a) the stable request ids on the rows themselves and (b) 
 | --- | --- |
 | `marker_not_prepared:<mode>/<cutover>`, `baseline_not_verified`, `schema_below_16`, `marker_unreadable` | the gate; any state but `prepared` over a verified baseline at schema 16 or above |
 | `state_tables_missing`, `state_unreadable`, `state_malformed` | the copy cannot be read; a missing table is never an empty class |
+| `copy_incomplete: <statement>` | a copy made by the connector tool whose log (`connector_copy_table`) does not mark every table behind the eight state statements done, or whose log cannot be read; `plan`, `sql` and `verify` all stop before reading any row, and the detail names a statement or `log`, never a value. A file with no copy log is read as before |
 | `source_digest_mismatch:<id>`, `source_missing:<id>`, `source_malformed:<id>`, `source_changed`, `source_too_large` | the three R2 objects |
 | `retirements_invalid:<n>` | the retirement object failed validation as a whole |
 | `count_mismatch:<class>:<n>` | the planned rows are not the accepted count |

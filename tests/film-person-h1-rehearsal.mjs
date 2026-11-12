@@ -329,26 +329,28 @@ assert.equal(fresh.done,true);
  assert.equal(stale.status,1);assert.match(stale.stderr,/plan_digest_mismatch/);
 }
 
-// ================= 7. an UNFINISHED copy (the copy log marks a table done; the loader's reader does not look at the log) =================
-// Findings, from the code: `copyReadBinding` of the loader reads whatever tables the file holds and never consults `connector_copy_table`, so `plan` and `verify` cannot tell a
-// cut copy from a complete one. This section does not assert that gap (a later hardening may close it); it asserts what must hold whatever the reader does: a copy cut inside the
-// identity tables is refused by the count pins, and a post-load copy cut before the two other classes is never reported as a no-op and never passes the readback.
+// ================= 7. an UNFINISHED copy (the copy log marks a table done; the loader's reader refuses a copy whose eight state tables are not all done) =================
+// The loader's `copyReadBinding` consults `connector_copy_table` and refuses `copy_incomplete` unless the eight tables behind its state statements are done (see
+// docs/evidence/d1-migration/air-374-h1-copy-incomplete-2026-11-12.md). Whatever the reader does, these must hold: a copy cut inside the identity tables and a post-load copy cut before
+// film_rated_admission are both refused by `plan` and `verify`, never reported as a no-op, never passing the readback, and the refusal names no row.
 {
+ const refuse=(file,detail)=>{
+  const planned=loader(['plan',...common(file)]);
+  assert.equal(planned.status,1);assert.equal(planned.stderr.trim(),'STOP copy_incomplete: '+detail);assert.equal(planned.stdout,'');
+  const verified=loader(['verify',...common(file),'--expect-generation','1','--expect-reference',REF]);
+  assert.equal(verified.status,1,'a cut copy never passes the readback');assert.equal(verified.stderr.trim(),'STOP copy_incomplete: '+detail);
+ };
  const early=await takeCopy('partial-early',{stopWhenDone:'owner_review_entry',budget:15000});
  assert.equal(early.done,false);
- const earlyPlan=loader(['plan',...common(early.file)]);
- assert.equal(earlyPlan.status,2,'a copy without its identity rows is refused (count pins)');
- assert.ok(JSON.parse(earlyPlan.stdout).reasons.some(item=>item.startsWith('count_mismatch:')));
+ refuse(early.file,'identity');
  const late=await takeCopy('partial-late',{stopWhenDone:'tmdb_retirement_decision',budget:15000});
  assert.equal(late.done,false);
  const state=K.copyState(late.driver);
  assert.equal(state.tables.film_rated_admission?.done??false,false,'precondition: the cut falls before film_rated_admission');
  assert.equal(state.tables.film_external_id.done,true);
- const latePlan=loader(['plan',...common(late.file)]);
- const accepted=latePlan.status===0;
- console.log('film-person-h1-rehearsal: loader plan on a post-load copy cut before film_rated_admission: '+(accepted?'accepted (not a no-op)':'refused'));
- if(accepted)assert.equal(JSON.parse(latePlan.stdout).noop,false,'a cut copy is never a no-op');
- assert.notEqual(loader(['verify',...common(late.file),'--expect-generation','1','--expect-reference',REF]).status,0,'a cut copy never passes the readback');
+ refuse(late.file,'ratedAdmission');
+ // the finished copy is still accepted
+ assert.equal(loader(['plan',...common(first.file)]).status,0);
 }
 
 console.log('film-person-h1-rehearsal: ok ('+(Date.now()-started)+' ms)');

@@ -11,10 +11,10 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-import {ACCEPTED_DISCREPANCIES} from '../src/film-person-cutover-accepted.js';
+import {ACCEPTED_DISCREPANCIES,COPY_TABLES} from '../src/film-person-cutover-accepted.js';
 const L=await import(process.env.LOADER_MODULE?pathToFileURL(path.resolve(process.env.LOADER_MODULE)).href:'../scripts/film-person-prepared-loader.mjs');
 
-// AIR-374: LOADER_SECTIONS=<n,...> runs sections 1-3 (cheap, and they build what the others use) plus only the listed ones of 4-10; without it every section runs. The mutation check
+// AIR-374: LOADER_SECTIONS=<n,...> runs sections 1-3 (cheap, and they build what the others use) plus only the listed ones of 4-11; without it every section runs. The mutation check
 // (tests/film-person-prepared-loader-mutation.mjs) gives each mutant the section that kills it as a hint and runs the whole file before it calls a mutant a survivor.
 const ONLY=new Set((process.env.LOADER_SECTIONS||'').split(',').filter(Boolean).map(Number));
 const section=number=>ONLY.size===0||ONLY.has(number);
@@ -510,6 +510,72 @@ if(section(10)){
  assert.equal(mismatch.status,2,'sources of another world are refused against the copy');
  const refusedSql=run(['sql','--copy',small.file,'--source-dir',dir,'--at',AT,'--lease-id',LEASE,'--apply','--plan-digest','1'.repeat(64),'--out',path.join(root,'cli-out3')]);
  assert.equal(refusedSql.status,2);assert.ok(JSON.parse(refusedSql.stdout).reasons.length>0&&!fs.existsSync(path.join(root,'cli-out3')),'a refused plan emits no SQL');
+}
+}
+
+// ================= 11. an unfinished connector copy is refused (`copy_incomplete`) by every command that reads the copy =================
+// The operator copy carries `connector_copy_table` (done=1 per table). The loader reads the eight tables behind its state statements only when all eight are done.
+if(section(11)){
+{
+ const EIGHT=Object.keys(L.STATE_STATEMENTS);
+ assert.deepEqual(EIGHT,['schema','marker','baseline','identity','redirects','ratedAdmission','retention','retirement']);
+ assert.deepEqual(L.STATE_SOURCE_TABLES,{schema:'schema_contract',marker:'film_person_authority',baseline:'film_person_baseline',identity:'film_external_id',redirects:'film_redirect',ratedAdmission:'film_rated_admission',retention:'film_retention',retirement:'tmdb_retirement_decision'},'the tables are derived from the statements');
+ assert.ok(Object.values(L.STATE_SOURCE_TABLES).every(table=>COPY_TABLES.includes(table)),'the connector copies every table the loader reads');
+ const DDL='CREATE TABLE connector_copy_log (seq INTEGER PRIMARY KEY AUTOINCREMENT, sha256 TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, label TEXT, at TEXT NOT NULL, detail TEXT NOT NULL);CREATE TABLE connector_copy_table (name TEXT PRIMARY KEY, last_rowid INTEGER NOT NULL, row_count INTEGER NOT NULL, done INTEGER NOT NULL);';
+ const copyOf=(not=[],{rowsFor=COPY_TABLES,ddl=DDL,extra=''}={})=>{
+  const {file}=freshDb(world,{triggers:true});
+  sql(file,ddl+rowsFor.map(name=>`INSERT INTO connector_copy_table (name,last_rowid,row_count,done) VALUES (${q(name)},1,1,${not.includes(name)?0:1});`).join('')+extra);
+  return file;
+ };
+ const detailOf=file=>{try{L.copyReadBinding(file);}catch(error){return error.message;}return null;};
+ // positive: a complete copy is accepted and read; so is a file that holds only the eight tables done (the other tables of the plan are the connector's own concern)
+ const complete=copyOf();
+ const state=await L.readLoadState(L.copyReadBinding(complete));
+ assert.equal(L.buildLoadPlan({sources:source(world.bytes),state,at:AT,leaseId:LEASE,expected:world.expected}).ok,true);
+ assert.doesNotThrow(()=>L.copyReadBinding(copyOf([],{rowsFor:Object.values(L.STATE_SOURCE_TABLES)})));
+ // a file without any log table was not made by the connector tool: read as before (the stand-in of this file, the synthetic production of the H1 rehearsal)
+ assert.doesNotThrow(()=>L.copyReadBinding(freshDb(world,{triggers:true}).file));
+ // negative: each of the eight tables not done, one by one; and each recorded nowhere
+ for(const [id,table] of Object.entries(L.STATE_SOURCE_TABLES)){
+  assert.equal(detailOf(copyOf([table])),'copy_incomplete: '+id,table+' not done');
+  assert.equal(detailOf(copyOf([],{rowsFor:COPY_TABLES.filter(name=>name!==table)})),'copy_incomplete: '+id,table+' not in the log');
+ }
+ assert.equal(detailOf(copyOf([],{rowsFor:[]})),'copy_incomplete: schema','an empty log');
+ // fail closed on a log that cannot be read as {name, done in 0|1}
+ const bad=(label,file)=>assert.equal(detailOf(file),'copy_incomplete: log',label);
+ bad('only the log table',copyOf([],{ddl:'CREATE TABLE connector_copy_log (seq INTEGER PRIMARY KEY);',rowsFor:[]}));
+ bad('only the table log',copyOf([],{ddl:'CREATE TABLE connector_copy_table (name TEXT PRIMARY KEY, last_rowid INTEGER NOT NULL, row_count INTEGER NOT NULL, done INTEGER NOT NULL);'}));
+ bad('a log table without a done column',copyOf([],{ddl:'CREATE TABLE connector_copy_log (seq INTEGER PRIMARY KEY);CREATE TABLE connector_copy_table (name TEXT PRIMARY KEY);',rowsFor:[]}));
+ const loose='CREATE TABLE connector_copy_log (seq INTEGER PRIMARY KEY);CREATE TABLE connector_copy_table (name, last_rowid, row_count, done);';
+ bad('done is not 0 or 1',copyOf([],{ddl:loose,extra:"UPDATE connector_copy_table SET done=2 WHERE name='film_retention';"}));
+ bad('done is text',copyOf([],{ddl:loose,extra:"UPDATE connector_copy_table SET done='SECRET-VALUE' WHERE name='film_retention';"}));
+ bad('done is null',copyOf([],{ddl:loose,extra:"UPDATE connector_copy_table SET done=NULL WHERE name='film_retention';"}));
+ bad('a table without a name',copyOf([],{ddl:loose,extra:'INSERT INTO connector_copy_table VALUES (NULL,1,1,1);'}));
+ bad('a table logged twice',copyOf([],{ddl:loose,extra:"INSERT INTO connector_copy_table VALUES ('film',1,1,1);"}));
+ // every command reads the copy through the same binding: plan, verify and sql refuse with the same code and name no row
+ const cutCopy=(() => {
+  // a post-load cut: everything up to film_external_id and film_redirect is done, film_rated_admission and what follows is not
+  const first=COPY_TABLES.indexOf('film_rated_admission');
+  return copyOf(COPY_TABLES.slice(first));
+ })();
+ const dir=path.join(root,'incomplete-sources');fs.mkdirSync(dir);
+ for(const [id,name] of Object.entries(L.SOURCE_FILES))fs.writeFileSync(path.join(dir,name),world.bytes[id]);
+ const cli=process.env.LOADER_MODULE?path.resolve(process.env.LOADER_MODULE):'scripts/film-person-prepared-loader.mjs';
+ const run=args=>spawnSync(process.execPath,[cli,...args],{encoding:'utf8',env:{...process.env,R2_SNAPSHOT_ENDPOINT:'',R2_SNAPSHOT_ACCESS_KEY_ID:'',R2_SNAPSHOT_SECRET_ACCESS_KEY:''}});
+ const common=['--source-dir',dir,'--at',AT,'--lease-id',LEASE];
+ const out=path.join(root,'incomplete-out');
+ const commands={plan:['plan'],verify:['verify','--expect-generation','1','--expect-reference',REF],sql:['sql','--apply','--plan-digest','1'.repeat(64),'--out',out]};
+ for(const [name,args] of Object.entries(commands)){
+  const result=run([...args,'--copy',cutCopy,...common]);
+  assert.equal(result.status,1,name+': '+result.stdout);assert.equal(result.stderr.trim(),'STOP copy_incomplete: ratedAdmission',name+' names the statement only');assert.equal(result.stdout,'','nothing printed on stdout');
+ }
+ assert.ok(!fs.existsSync(out),'a refused sql command writes nothing');
+ const leak=copyOf([],{ddl:loose,extra:"UPDATE connector_copy_table SET done='SECRET-VALUE' WHERE name='film_retention';"});
+ const leaked=run(['plan','--copy',leak,...common]);
+ assert.equal(leaked.status,1);assert.ok(!(leaked.stdout+leaked.stderr).includes('SECRET-VALUE'),'no row value in the refusal');
+ // the same copy with its log complete is read: the small world fails the pinned counts of the CLI, not the copy
+ const ok=run(['plan','--copy',complete,...common]);
+ assert.equal(ok.status,2);assert.ok(!(ok.stdout+ok.stderr).includes('copy_incomplete'));
 }
 }
 
