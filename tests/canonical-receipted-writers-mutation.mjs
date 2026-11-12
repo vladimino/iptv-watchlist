@@ -57,6 +57,50 @@ const MUTANTS=[
  ['recordRetirementDecision drops the tail','tmdb-retirement-decisions.js',"try{await fenced.commit(env,gate,statements,entities,tail);}","try{await fenced.commit(env,gate,statements,entities);}"],
  ['recordRetirementDecision checks no entity','tmdb-retirement-decisions.js',"fenced.receiptTail(input.receiptMark,{kind:'film',id:decision.filmId})","fenced.receiptTail(input.receiptMark,{kind:'film',id:input.receiptMark?.target?.id})"],
 ];
+const LEARN=process.env.RECEIPTED_LEARN==='1';
+const HINTS={
+ "commit ignores the receipt tail":["2","mutateFilm"],
+ "the tail comes before the writer statements":["2","mutateFilm"],
+ "the tail counts against the writer cap":["6","recordRetirementDecision"],
+ "the tail length is not bounded":["6","recordRetirementDecision"],
+ "the writer cap is not enforced":["6","recordRetirementDecision"],
+ "the applied update does not check the attempt":["3","mutateFilm"],
+ "the applied update does not check the pending state":["3","mutateFilm"],
+ "the applied update does not check the request id":["3","mutateFilm"],
+ "the applied update does not check the stored target id":["9","mutateFilm"],
+ "the applied update checks neither stored target column":["9","mutateFilm"],
+ "the applied update does not check the stored planned revision":["9","mutateFilm"],
+ "the planned revision is compared without the +1":["2","mutateFilm"],
+ "the planned revision may be at or below the bumped-from revision":["9","recordPersonState"],
+ "the planned revision may be above the bumped-from revision":["9","mutateFilm"],
+ "the applied update does not check the stored marker generation":["9","mutateFilm"],
+ "the applied update compares the marker generation with a constant":["9","mutateFilm"],
+ "the applied update has no assertion":["3","mutateFilm"],
+ "the applied revision is not read after the bump":["2","mutateFilm"],
+ "a mark for another entity is accepted":["4","mutateFilm"],
+ "a mark for another kind is accepted":["4","mutateFilm"],
+ "attempt zero is accepted":["4","mutateFilm"],
+ "a text attempt is accepted":["4","mutateFilm"],
+ "an empty request id is accepted":["4","mutateFilm"],
+ "a missing clock is accepted":["4","mutateFilm"],
+ "an invalid mark is ignored":["4","mutateFilm"],
+ "an absent mark yields a tail":["1","mutateFilm"],
+ "the receipt module builds its own tail":["7","recordRetirementDecision"],
+ "mutateFilm drops the tail":["2","mutateFilm"],
+ "mutatePerson drops the tail":["2","mutatePerson"],
+ "mutateFilm validates no mark":["2","mutateFilm"],
+ "mutatePerson validates no mark":["2","mutatePerson"],
+ "the receipt tail of writeFilmFacts is not appended":["2","writeFilmFacts"],
+ "writeFilmFacts checks the mark against another entity":["4","writeFilmFacts"],
+ "recordPersonState drops the tail":["2","recordPersonState"],
+ "recordLocalizationConflicts drops the tail":["2","recordLocalizationConflicts"],
+ "recordLocalizationSources drops the tail":["2","recordLocalizationSources"],
+ "recordLocalizationSources checks the wrong kind":["4","recordLocalizationSources"],
+ "admitRatedFilm drops the tail":["2","admitRatedFilm"],
+ "retainFilm drops the tail":["2","retainFilm"],
+ "recordRetirementDecision drops the tail":["2","recordRetirementDecision"],
+ "recordRetirementDecision checks no entity":["4","recordRetirementDecision"]
+};
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'receipted-writers-mutants-'));
 try{
  const sources=new Map();
@@ -66,20 +110,40 @@ try{
  const template=path.join(dir,'template.sqlite');
  const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
- const run=(env)=>new Promise(resolve=>{
+ // AIR-374: a mutant first runs only the section (and writer) of tests/canonical-receipted-writers.mjs that killed it when the hints were learned (HINTS: mutant name to [section, writer]);
+ // a mutant that passes that run is run against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the
+ // UNMUTATED test must pass too, or a lean run could "kill" for a reason of its own. RECEIPTED_LEARN=1 runs every mutant whole and prints HINTS for the file.
+ const leanOf=hint=>({RECEIPTED_ONLY:hint[0],...(hint[1]!=='-'?{RECEIPTED_UNIT:hint[1]}:{})});
+ const learned={};
+ const run=(env,name)=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-receipted-writers.mjs'],{env:{...process.env,RECEIPTED_TEMPLATE:template,...env},stdio:['ignore','ignore','pipe']});
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
-  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+  child.on('close',code=>{
+   assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));
+   const seen=/LEAN_SECTION (\S+) (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=[seen[1],seen[2]];
+   resolve(code);
+  });
  });
  assert.equal(await run({}),0,'the unmutated test passes');
  const queue=MUTANTS.map(([name,file,from,to],index)=>{
   const copy=path.join(dir,'src'+index);
   fs.cpSync('src',copy,{recursive:true});
   fs.writeFileSync(path.join(copy,file),text(file).replace(from,()=>to));
-  return {name,env:{RECEIPTED_SRC:copy}};
+  return {name,env:{RECEIPTED_SRC:copy},hint:LEARN?null:HINTS[name]};
  });
- const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.env);fs.rmSync(item.env.RECEIPTED_SRC,{recursive:true,force:true});if(code===0)survivors.push(item.name);}}));
+ const survivors=[];let fallbacks=0;
+ for(const name of Object.keys(HINTS))assert.ok(MUTANTS.some(item=>item[0]===name),'a hint names no mutant: '+name);
+ const controls=new Map(Object.values(HINTS).map(hint=>[hint.join('/'),leanOf(hint)]));
+ for(const lean of controls.values())queue.unshift({control:lean});
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){
+  const item=queue.shift();
+  if(item.control){assert.equal(await run(item.control),0,'the unmutated test passes with '+JSON.stringify(item.control));continue;}
+  let code=item.hint?await run({...item.env,...leanOf(item.hint)},item.name):0;
+  if(code===0){if(item.hint)fallbacks++;code=await run(item.env,item.name);}
+  fs.rmSync(item.env.RECEIPTED_SRC,{recursive:true,force:true});
+  if(code===0)survivors.push(item.name);
+ }}));
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(MUTANTS.map(item=>[item[0],learned[item[0]]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
- console.log('canonical-receipted-writers-mutation: ok ('+MUTANTS.length+' mutants killed)');
+ console.log('canonical-receipted-writers-mutation: ok ('+MUTANTS.length+' mutants killed'+(fallbacks?', '+fallbacks+' needed the whole file: refresh HINTS with RECEIPTED_LEARN=1':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

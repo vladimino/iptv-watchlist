@@ -127,6 +127,125 @@ const MUTANTS=[
  ["reconcile drops the limit", "canonical-dictionary-producer.js", "...(limit!==undefined?{limit}:{}),", ""],
  ["reconcile drops the plan", "canonical-dictionary-producer.js", "filmFactsOperation({replan:dictionaryReplan(plan,env),", "filmFactsOperation({replan:async()=>null,"]
 ];
+const LEARN=process.env.DICT_LEARN==='1';
+const HINTS={
+ "a reused snapshot is not named":"7",
+ "a reused snapshot is named with another reason":"7",
+ "a reused snapshot is counted applied":"7",
+ "the gate ignores the route":"2",
+ "the gate always skips":"2",
+ "the origin is not dictionary":"1",
+ "the title source is not dictionary":"1",
+ "the localization source version carries the dictionary version":"1",
+ "the hard cap is lifted":"1",
+ "the cap floor is removed":"1",
+ "the hard cap exceeds the budget":"1",
+ "the default exceeds the ceiling":"1",
+ "the pass ignores the cursor":"8",
+ "the pass ignores the limit":"8",
+ "done is always true":"8",
+ "a held marker does not stop the pass":"8",
+ "an unreadable marker does not stop the pass":"8",
+ "a refusal stops the whole pass":"8",
+ "a refusal is not recorded":"8",
+ "the unit does not use the snapshot event":"7",
+ "the event is not bound to the digest":"1",
+ "the event is not bound to the version":"1",
+ "the digest ignores the version":"1",
+ "the digest ignores the entries":"1",
+ "the digest is not ordered":"1",
+ "the units are not sorted":"1",
+ "the sort is descending":"1",
+ "duplicate Films are accepted":"1",
+ "duplicate entry ids are accepted":"1",
+ "a non-verified entry is accepted":"1",
+ "an entry without a Film is accepted":"1",
+ "an entry id is not bounded":"1",
+ "a malformed tmdb id is accepted":"1",
+ "an entry without facts is accepted":"1",
+ "aliases are unbounded":"1",
+ "sources are unbounded":"1",
+ "an empty alias is accepted":"1",
+ "the version is not validated":"1",
+ "the clock is not required":"1",
+ "an absent Film is created":"3",
+ "an absent Film is not recognised":"3",
+ "a redirect is written":"3",
+ "a trusted other tmdb id is ignored":"3",
+ "a stored other identity is ignored":"3",
+ "a mismatch is named as another reason":"3",
+ "the identity is filled without a trusted id":"3",
+ "the identity is never filled":"3",
+ "an existing identity is overwritten":"3",
+ "the contract version is a constant":"3",
+ "the Film clock always moves":"3",
+ "the Film clock never moves":"3",
+ "the title is written without an identity row":"3",
+ "an equal title is not restated":"3",
+ "an equal title is restated without an identity row":"3",
+ "an equal unranked title is claimed":"3",
+ "an equal owner-source title is claimed":"3",
+ "an equal reviewed or owner-authority title is claimed":"3",
+ "an equal dictionary title is restated":"3",
+ "the dictionary unit does not require the Film":"3",
+ "the writer does not assert the Film inside its batch":"10b",
+ "the writer does not pre-check the Film":"10b",
+ "the adapter pre-plan does not pre-check the Film":"10b",
+ "a non-true requireExisting is accepted":"10b",
+ "a read failure in a re-plan is a missing re-plan":"10b",
+ "every re-plan error propagates":"10b",
+ "a held marker is a missing re-plan":"10b",
+ "an unreadable store is a missing re-plan":"10b",
+ "an empty title is not filled":"3",
+ "a fill does not move the clock":"3",
+ "a reviewed or owner identity row does not protect the title":"3",
+ "the owner title source does not protect the title":"3",
+ "the title reason ignores the owner authority":"3",
+ "the title reason always owner":"3",
+ "an unranked stored title is overwritten":"3",
+ "a replaced title is not named":"3",
+ "a replaced title forgets its source":"3",
+ "a replaced title is not written":"3",
+ "the title is written under another source":"3",
+ "the title is written with the Film original":"3",
+ "an owner localization is overwritten":"3",
+ "an owner localization is named as reviewed":"3",
+ "a reviewed localization replacement is not named":"3",
+ "an automatic localization replacement is not named":"3",
+ "an equal localization is a conflict":"3",
+ "a blank stored localization is a conflict":"3",
+ "the localization is not reviewed":"3",
+ "the localization authority is not dictionary":"3",
+ "the localization value is the original title":"3",
+ "the localization drops the sources":"3",
+ "the localization is not sent":"3",
+ "nothing-to-write is always proceed":"3",
+ "nothing-to-write needs no localization check":"3",
+ "nothing-to-write needs no identity check":"3",
+ "nothing-to-write needs no title check":"3",
+ "the builder accepts a missing clock":"3",
+ "conflicts are not reported":"4",
+ "conflicts lose the unit id":"4",
+ "a non-proceed outcome is applied anyway":"4",
+ "a non-proceed outcome is not counted":"4",
+ "noop is counted as applied":"4",
+ "already is not counted":"7",
+ "an unknown outcome is counted applied":"9",
+ "the cursor is malformed-tolerant":"2",
+ "a plan without an event is accepted":"2",
+ "a plan without a clock is accepted":"2",
+ "the replay is not bound to the snapshot":"10",
+ "the replay binds to a fixed event":"10",
+ "the replay ignores the receipt digest":"10",
+ "the replay ignores the Film":"10",
+ "the replay is always empty":"10",
+ "the replay is planned without the store":"10",
+ "reconcile does not give the store to the re-plan":"10",
+ "reconcile uses another origin":"10",
+ "reconcile drops the origin":"2",
+ "reconcile drops the limit":"10",
+ "reconcile drops the plan":"10"
+};
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dict-producer-mutants-'));
 try{
  const sources=new Map();
@@ -136,10 +255,14 @@ try{
  const template=path.join(dir,'template.sqlite');
  const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
- const run=(env)=>new Promise(resolve=>{
+ // AIR-374: a mutant first runs only the numbered section of the test that killed it when the hints were learned (HINTS: mutant name to section id); a mutant that passes that run is run
+ // against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the UNMUTATED test must pass too, or a
+ // lean run could "kill" for a reason of its own. DICT_LEARN=1 runs every mutant whole and prints HINTS for the file.
+ const learned={};
+ const run=(env,name)=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-dictionary-producer.mjs'],{env:{...process.env,DICT_TEMPLATE:template,...env},stdio:['ignore','ignore','pipe']});
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
-  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));const seen=/LEAN_SECTION (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=seen[1];resolve(code);});
  });
  assert.equal(await run({}),0,'the unmutated test passes');
  const queue=MUTANTS.map(([name,file,from,to],index)=>{
@@ -148,8 +271,19 @@ try{
   fs.writeFileSync(path.join(copy,file),text(file).replace(from,()=>to));
   return {name,env:{DICT_SRC:copy}};
  });
- const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.env);fs.rmSync(item.env.DICT_SRC,{recursive:true,force:true});if(code===0)survivors.push(item.name);}}));
+ const survivors=[];let fallbacks=0;
+ for(const name of Object.keys(HINTS))assert.ok(MUTANTS.some(item=>item[0]===name),'a hint names no mutant: '+name);
+ for(const section of new Set(Object.values(HINTS)))queue.unshift({control:{DICT_ONLY:section}});
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){
+  const item=queue.shift();
+  if(item.control){assert.equal(await run(item.control),0,'the unmutated test passes with '+JSON.stringify(item.control));continue;}
+  const hint=LEARN?undefined:HINTS[item.name];
+  let code=hint?await run({...item.env,DICT_ONLY:hint},item.name):0;
+  if(code===0){if(hint)fallbacks++;code=await run(item.env,item.name);}
+  fs.rmSync(item.env.DICT_SRC,{recursive:true,force:true});
+  if(code===0)survivors.push(item.name);
+ }}));
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(MUTANTS.map(item=>[item[0],learned[item[0]]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
- console.log('canonical-dictionary-producer-mutation: ok ('+MUTANTS.length+' mutants killed)');
+ console.log('canonical-dictionary-producer-mutation: ok ('+MUTANTS.length+' mutants killed'+(fallbacks?', '+fallbacks+' needed the whole file: refresh HINTS with DICT_LEARN=1':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
