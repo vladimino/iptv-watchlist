@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {DEFAULT_WEIGHT, FIRST_SHARD_OFFSET, HEAVY_PER_SHARD, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
+import {DEFAULT_WEIGHT, FIRST_SHARD_HEAVY_CREDIT, FIRST_SHARD_OFFSET, HEAVY_MIN_WEIGHT, HEAVY_MUTATION_PRESSURE, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -269,8 +269,9 @@ fs.unlinkSync(me);`;
     const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
     const isMutation = file => /-mutation\.mjs$/.test(file);
     const lightest = Math.min(...Object.values(WEIGHTS));
-    const lightestMutation = Math.min(...Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).map(entry => entry[1]));
-    const heaviest = Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3 * HEAVY_PER_SHARD).map(entry => entry[0]);
+    const serialFiles = ['local-dev-smoke.mjs', 'sqlite-session-semantics.mjs'];
+    const inCohort = file => !serialFiles.includes(file) && (isMutation(file) || weightOf(file) >= HEAVY_MIN_WEIGHT);
+    const pressureOf = file => weightOf(file) * (isMutation(file) ? HEAVY_MUTATION_PRESSURE : 1);
     const heaviestMutation = Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
     // The contract holds for the two shards the suite used first and for the three it runs in CI now (a third shard gives each runner real margin under the 180 s gate).
     for (const count of [2, 3]) {
@@ -291,15 +292,18 @@ fs.unlinkSync(me);`;
       });
       assert.ok(serialOwners.every(owner => owner >= 0), `every serial-only file is in a shard of ${count}`);
       assert.notEqual(serialOwners[0], serialOwners[1], `the two serial-only files are in different shards of ${count}`);
-      // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
-      const mutationLoad = parts.map((part, index) => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0) + (index === 0 ? FIRST_SHARD_OFFSET : 0));
-      assert.ok(Math.max(...mutationLoad) - Math.min(...mutationLoad) <= lightestMutation, `the mutation files are shared evenly across ${count}: ${mutationLoad.join(' vs ')}`);
+      // AIR-374 contention cohort: the mutation files (CPU-bound, child processes) and every other file of HEAVY_MIN_WEIGHT or more starve each other when they share a shard (12 Nov 2026: 205 s against 103 s, then 177 s and 187 s of `Run tests` for balanced plans that kept a count of only the nine heaviest apart). They are dealt before the rest by pressure (weight, times HEAVY_MUTATION_PRESSURE for a mutation file), shard 1 starting FIRST_SHARD_HEAVY_CREDIT ahead.
+      const cohortOf = part => filesOf(part).filter(inCohort);
+      const cohortCount = parts.map(part => cohortOf(part).length);
+      assert.ok(Math.max(...cohortCount) - Math.min(...cohortCount) <= 1, `the contention cohort is spread by count over ${count} shards: ${cohortCount.join(' vs ')}`);
+      const pressure = parts.map(part => cohortOf(part).reduce((sum, file) => sum + pressureOf(file), 0));
+      const credited = pressure.map((value, index) => index === 0 ? value - FIRST_SHARD_HEAVY_CREDIT : value);
+      const meanPressure = pressure.reduce((a, b) => a + b, 0) / count;
+      assert.ok(Math.max(...credited) - Math.min(...credited) <= 0.05 * meanPressure, `the cohort pressure is spread evenly over ${count} shards once shard 1's credit is counted: ${pressure.join(' vs ')} (credit ${FIRST_SHARD_HEAVY_CREDIT})`);
+      assert.equal(pressure.indexOf(Math.max(...pressure)), 0, `shard 1 carries the largest cohort pressure of ${count}, it has the most headroom: ${pressure.join(' vs ')}`);
+      const mutationWeight = parts.map(part => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
+      assert.ok(Math.max(...mutationWeight) <= 1.15 * (mutationWeight.reduce((a, b) => a + b, 0) / count), `no shard of ${count} collects the mutation files: ${mutationWeight.join(' vs ')}`);
       assert.notEqual(parts.findIndex(part => part.parallel.includes(heaviestMutation[0])), parts.findIndex(part => part.parallel.includes(heaviestMutation[1])), `the two heaviest mutation files are in different shards of ${count}`);
-      // The heaviest files are spread by count (12 Nov 2026, run 43272848716: generation-stage, film-person-connector-mutation and prediction-batch-start shared a shard and it took 177 s against 155 s planned): with HEAVY_PER_SHARD * count of them in the suite no shard holds more than HEAVY_PER_SHARD of the 3 * HEAVY_PER_SHARD heaviest.
-      if (count === 3) {
-        const heavyPerShard = parts.map(part => filesOf(part).filter(file => heaviest.includes(file)).length);
-        assert.ok(heavyPerShard.every(n => n === HEAVY_PER_SHARD), `the ${3 * HEAVY_PER_SHARD} heaviest files are spread evenly over 3 shards: ${heavyPerShard.join(' vs ')}`);
-      }
       assert.deepEqual(planTests({directory: 'tests', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
     }
     assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');

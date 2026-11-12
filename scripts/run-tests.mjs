@@ -32,7 +32,7 @@ const SERIAL_ONLY=new Set([
  // run 43186573244 (12 Nov 2026), twice, at the same line. Alone it takes about 7 s. Run alone after the parallel phase; no timeout or assertion changed.
  'sqlite-session-semantics.mjs',
 ]);
-// AIR-374: approximate cost of the heavier files, in weight units of one shard's share (about 660 per shard): the mean over 30 shard jobs (ten CI runs of 12 Nov 2026 on the three-shard plan, docs/evidence/ci/test-suite-air-374-ci-weights-recalibration-2026-11-12.md) of each file's share of its job's summed file time, scaled to 630, so a fast or a slow runner does not skew a file; every file that costs 2 or more has its own entry; DEFAULT_WEIGHT 0.8 covers the rest, whose mean is 0.5.
+// AIR-374: approximate cost of the heavier files, in weight units of one shard's share (about 660 per shard): the mean over 30 shard jobs (ten CI runs of 12 Nov 2026 on the three-shard plan, docs/evidence/ci/test-suite-air-374-ci-weights-recalibration-2026-11-12.md) of each file's share of its job's summed file time, scaled to 630, so a fast or a slow runner does not skew a file; every file that costs 2 or more has its own entry; DEFAULT_WEIGHT 0.5 covers the rest, whose mean is 0.5.
 // The two serial-only files are weighted by their solo time (mean 9.9 s and 7.2 s) divided by the 0.233 s of wall one unit holds, because they run after the parallel phase and add their whole duration to a shard's wall time.
 // Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
 // the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
@@ -175,8 +175,10 @@ export const WEIGHTS={
 export const DEFAULT_WEIGHT=0.5;
 // Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`, about 9 s more of job wall time than a plain shard job (about 5% of a shard's roughly 195 s); 33 units are 7 s of wall at 0.233 s a unit. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
 export const FIRST_SHARD_OFFSET=33;
-// How many of the heaviest files each shard is dealt first (see `planTests`): 3 per shard is 9 files of 48 to 72 units for three shards, about 40% of the suite's weight.
-export const HEAVY_PER_SHARD=3;
+// AIR-374 contention cohort (see planTests): the files that compete for the CPU are the mutation files (any weight) and every other file of at least HEAVY_MIN_WEIGHT units, about 9% of the files and 55% of the weight. They are dealt before the rest by "pressure": a file's weight, times HEAVY_MUTATION_PRESSURE for a mutation file, which re-runs a production module against many mutants in child processes and so takes far more of a 4 vCPU runner than its weight says (a fit of the 36 shard jobs of 12 runs gives about 0.65 s of `Run tests` per mutation unit against 0.06 to 0.09 s per unit of any other weight). Shard 1 starts FIRST_SHARD_HEAVY_CREDIT pressure units ahead: with 117 s in the last run against 158 s and 187 s it has the most headroom, so it gets the largest cohort share; its total weight is still dealt less by FIRST_SHARD_OFFSET.
+export const HEAVY_MIN_WEIGHT=20;
+export const HEAVY_MUTATION_PRESSURE=6;
+export const FIRST_SHARD_HEAVY_CREDIT=60;
 const MUTATION=/-mutation\.mjs$/;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
@@ -224,7 +226,7 @@ export function capture(){
 
 // `shard` is {index, count} (index from 1) or null for the whole suite. AIR-374: the files are ordered heaviest first (WEIGHTS, then name) and dealt one by one to the shard with the least weight so far
 // (ties to the lowest index), so the split is the same whichever shard asks and every file is in exactly one shard, whatever the count.
-export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights=WEIGHTS,firstShardOffset=FIRST_SHARD_OFFSET}={}){
+export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights=WEIGHTS,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit=FIRST_SHARD_HEAVY_CREDIT,mutationPressure=HEAVY_MUTATION_PRESSURE}={}){
  const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
  const weight=file=>weights[file]??DEFAULT_WEIGHT;
  const ordered=[...all].sort((a,b)=>weight(b)-weight(a)||(a<b?-1:1));
@@ -241,17 +243,17 @@ export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,
    owner.set(file,best);load[best]+=weight(file);
    if(serialOnly.has(file))serialHolders.add(best);
   };
-  // The mutation files (every one re-runs a production module against many mutants, spawning child processes) are CPU-bound and starve each other: on the 4 vCPU runner their per-file time grew five to ten times when several of them ran in one shard (CI runs 43179499163 and 43180054837: 205 s against 103 s for the same estimated weight). They are dealt first, as a class of their own, so every shard carries about the same share of them; the rest then fills up to the same total.
-  // The heaviest files (HEAVY_PER_SHARD per shard) are spread by count: after the mutation class, each remaining heavy file goes to the shard that holds the fewest heavy files so far (ties: the least loaded), so no shard collects them. Run 43272848716 had `generation-stage` (124 s), `film-person-connector-mutation` (119 s) and `prediction-batch-start` (108 s) in shard 2, each 1.2 to 2 times its mean, and that shard took 177 s of `Run tests` for a plan of 155 s while shards 1 and 3 took 124 s and 132 s: the plain greedy deal had put `generation-stage` on the shard the mutation class had left lightest.
-  const heavy=new Set(ordered.slice(0,shard.count*HEAVY_PER_SHARD));
-  const heavyCount=Array(shard.count).fill(0);
-  const dealHeavy=file=>{
-   let best=-1;
-   for(let i=0;i<load.length;i++)if(best<0||heavyCount[i]<heavyCount[best]||(heavyCount[i]===heavyCount[best]&&load[i]<load[best]))best=i;
-   owner.set(file,best);load[best]+=weight(file);heavyCount[best]++;
+  // The contention cohort is dealt first, heaviest pressure first, each file to the shard with the least pressure (ties: the least loaded), shard 1 starting `heavyCredit` ahead. Evidence (docs/evidence/ci/test-suite-air-374-ci-weights-recalibration-2026-11-12.md): the mutation files starve each other on the 4 vCPU runner (205 s against 103 s for the same weight, runs 43179499163 and 43180054837); spreading only the nine heaviest files by count left the CPU-bound middle of the suite together in shard 2, which took 177 s and then 187 s of `Run tests` (runs 43272848716 and 43275433514) for a balanced plan while shard 1 took 117 to 124 s. The remaining files then fill every shard up to the same total weight (shard 1 less by `firstShardOffset`).
+  const pressureOf=file=>weight(file)*(MUTATION.test(file)?mutationPressure:1);
+  const pressure=Array(shard.count).fill(0);
+  if(shard.count>1)pressure[0]=-heavyCredit;
+  const dealPressure=file=>{
+   let best=0;
+   for(let i=1;i<load.length;i++)if(pressure[i]<pressure[best]||(pressure[i]===pressure[best]&&load[i]<load[best]))best=i;
+   owner.set(file,best);load[best]+=weight(file);pressure[best]+=pressureOf(file);
   };
-  for(const file of ordered)if(MUTATION.test(file)){deal(file);if(heavy.has(file))heavyCount[owner.get(file)]++;}
-  for(const file of ordered)if(heavy.has(file)&&!MUTATION.test(file)&&!serialOnly.has(file))dealHeavy(file);
+  const cohort=ordered.filter(file=>!serialOnly.has(file)&&(MUTATION.test(file)||weight(file)>=heavyMinWeight)).sort((a,b)=>pressureOf(b)-pressureOf(a)||(a<b?-1:1));
+  for(const file of cohort)dealPressure(file);
   for(const file of ordered)if(!owner.has(file))deal(file);
  }
  const mine=list=>shard?list.filter(file=>owner.get(file)===shard.index-1):list;
