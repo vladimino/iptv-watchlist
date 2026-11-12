@@ -43,6 +43,13 @@
     },
     "approvedBy": {
      "type": "string"
+    },
+    "manifestHash": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "pattern": "^[0-9a-f]{64}$"
     }
    }
   },

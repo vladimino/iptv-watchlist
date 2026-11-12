@@ -29,16 +29,21 @@ const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
-const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_start','prediction_batch_submit']);
-for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
+const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_submit']);
+for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
  for(const t of forbidden){assert.ok(tools.has(t),t+' is a real tool');assert.ok(line.includes(t),t+' is forbidden');}
  for(const t of calls(text)){if(forbidden.includes(t)&&line.includes(t)&&!text.replace(line,'').includes(t+'('))continue;assert.ok(tools.has(t),t+' is a real MCP tool');assert.ok(allowed.has(t),t+' is outside the vocabulary');}
  for(const t of allowed)assert.ok(tools.has(t));
 }
 assert.ok(!/dryRun\s*:\s*true/.test(prompt.replace(forbiddenOf(prompt),'')),'the scheduled prompt never dry-runs');
-assert.ok(dry.includes("prediction_batch_start({trigger:'manual',dryRun:true,pin:{filmIds:FILM_IDS}})")&&dry.includes("prediction_batch_submit({runId:'dry-run',epoch:1,dryRun:true,manifestHash,items})"),'the dry-run calls are the exact tested ones');
-assert.ok(/\{\{SAMPLE_ID\}\}/.test(dry)&&/\{\{FILM_IDS\}\}/.test(dry)&&/\{\{GROUP_SIZE\}\}/.test(dry));
+assert.ok(dry.includes("prediction_batch_submit({runId:'dry-run',epoch:1,dryRun:true,manifestHash,items})"),'the dry-run call is the exact tested one');
+assert.ok(!/prediction_batch_start\(/.test(dry),'a pass never calls start: the manifest is frozen once (ADR 0122 decision 10)');
+assert.ok(/prediction_batch_start В ЛЮБОМ виде/.test(forbiddenOf(dry)));
+assert.ok(/\{\{SAMPLE_ID\}\}/.test(dry)&&/\{\{GROUP_SIZE\}\}/.test(dry)&&/FROZEN_MANIFEST=\{\{FROZEN_MANIFEST\}\}/.test(dry)&&!/\{\{FILM_IDS\}\}/.test(dry),'the pass takes the frozen manifest, not film ids to start from');
+assert.ok(/manifest_invalid/.test(dry)&&/НЕ вызывай ни разу/.test(dry));
+assert.ok(!/trello\.com\/c\/XDyt4qIH\)\s*'s scope/.test(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8')),'AIR-450 is not linked to the AIR-449 card');
+assert.ok(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8').includes('[AIR-450](https://trello.com/c/VPd21Y9d)'));
 const enrich=fs.readFileSync('src/enrichment.js','utf8');
 for(const reason of ['profile_changed','runner_aborted','quota','model_unavailable','model_error','api_error','storage_error','external_termination','time_budget'])assert.ok(enrich.includes("'"+reason+"'"),reason+' is a Worker stop reason');
 const live=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-only.md','utf8').match(/---BEGIN PROMPT---\n([\s\S]*)\n---END PROMPT---/)[1];
@@ -71,25 +76,33 @@ async function world(films){
 const dump=f=>{const r=sqliteSync([f,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
 
-// 5a. Dry run: the MCP schema needs a non-empty runId and a positive epoch even for a dry-run submit; the fixed synthetic pair satisfies it; nothing is written over a start and all ten group sizes.
+// 5a. Dry run, as the runbook defines it: ONE freeze start produces the manifest, which is handed over as text (the private handoff) to ten independent clean-context passes.
+// A pass calls only prediction_batch_submit(dryRun) with the manifest it was given: no start, no read. The MCP schema needs a non-empty runId and a positive epoch even for a dry-run submit.
 {
  const w=await world(30);
- const sample={schemaVersion:1,sampleId:'fixture-sample-1',filmIds:['tmdb_3','tmdb_1','tmdb_12','tmdb_7','tmdb_9','tmdb_20','tmdb_5','tmdb_14','tmdb_2','tmdb_25','tmdb_8','tmdb_30'],frozenAt:'2026-11-12T00:00:00Z',source:'offline fixture'};
+ const sample={schemaVersion:1,sampleId:'fixture-sample-1',filmIds:['tmdb_3','tmdb_1','tmdb_12','tmdb_7','tmdb_9','tmdb_20','tmdb_5','tmdb_14','tmdb_2','tmdb_25','tmdb_8','tmdb_30'],frozenAt:'2026-11-12T00:00:00Z',source:'offline fixture',manifestHash:null};
  assert.deepEqual(validSample(sample),[]);assert.ok(validSample({...sample,filmIds:['a','a']}).length,'duplicate ids rejected');assert.ok(validSample({...sample,extra:1}).length);
  const before=snapshot(w);
- const start=await w.call('prediction_batch_start',{trigger:'manual',dryRun:true,pin:{filmIds:sample.filmIds}});
- assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));const m=start.data;
- assert.equal(m.dryRun,true);assert.equal(m.runId,null);assert.deepEqual(m.films.map(f=>f.filmId),sample.filmIds,'pinned order');
- const missing=await w.call('prediction_batch_submit',{dryRun:true,manifestHash:m.manifestHash,items:[{filmId:m.films[0].filmId,fingerprint:w.fingerprint,prediction:w.prediction}]});
- assert.equal(missing.isError,true,'a dry-run submit without runId fails the MCP schema, as the review found');
- const noEpoch=await w.call('prediction_batch_submit',{runId:'dry-run',epoch:0,dryRun:true,items:[{filmId:m.films[0].filmId,prediction:w.prediction}]});assert.equal(noEpoch.isError,true);
+ const starts=[],submits=[];const tracked=async(name,args)=>{(name==='prediction_batch_start'?starts:submits).push(name);return w.call(name,args);};
+ // freeze step, once
+ const start=await tracked('prediction_batch_start',{trigger:'manual',dryRun:true,pin:{filmIds:sample.filmIds}});
+ assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));
+ const frozenText=JSON.stringify(start.data);sample.manifestHash=start.data.manifestHash;assert.deepEqual(validSample(sample),[]);
+ const frozen0=JSON.parse(frozenText);
+ assert.equal(frozen0.dryRun,true);assert.equal(frozen0.runId,null);assert.deepEqual(frozen0.films.map(f=>f.filmId),sample.filmIds,'pinned order');
+ // the handoff is complete: profile body, contract schema, metadata and the per-film input hash are in it, not only the ids and the hash
+ assert.ok(frozen0.profile?.body&&frozen0.contract?.schema&&frozen0.manifestHash&&frozen0.films.every(f=>f.plan&&f.modelMetadata&&/^[0-9a-f]{24}$/.test(f.inputHash)),'the frozen manifest carries everything a pass needs');
+ assert.ok(!fs.readdirSync('docs',{recursive:true}).some(f=>/frozen[-_]?manifest|batch[-_]?v2[-_]?manifest/i.test(String(f))),'no manifest record is stored in the repository docs');
  const results=[];
  for(let size=1;size<=10;size++){
+  const m=JSON.parse(frozenText); // a clean context: the pass has only the text it was given
+  assert.equal(m.dryRun===true&&m.runId===null&&/^[0-9a-f]{64}$/.test(m.manifestHash)&&!!m.profile.body&&!!m.contract.schema&&m.films.length>0,true,'step 1 of the prompt: the manifest is valid');
   const films=[],calls=[];let g=0;
   for(let i=0;i<m.films.length;i+=size,g++){
    const group=m.films.slice(i,i+size),items=group.map(f=>({filmId:f.filmId,...(f.plan==='fingerprint_and_prediction'?{fingerprint:w.fingerprint}:{}),prediction:w.prediction,inputHash:f.inputHash}));
-   const r=await w.call('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});
-   assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'dry_run');assert.equal(r.data.manifestHash,m.manifestHash,'the held manifest identity');
+   const missing=await w.call('prediction_batch_submit',{dryRun:true,manifestHash:m.manifestHash,items});if(g===0&&size===1)assert.equal(missing.isError,true,'a dry-run submit without runId fails the MCP schema');
+   const r=await tracked('prediction_batch_submit',{runId:'dry-run',epoch:1,dryRun:true,manifestHash:m.manifestHash,items});
+   assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));assert.equal(r.data.status,'dry_run');assert.equal(r.data.manifestHash,m.manifestHash,'the frozen manifest identity');
    calls.push({groupIndex:g,itemCount:items.length,bodyBytes:new TextEncoder().encode(JSON.stringify(items)).length,toolMs:null,ok:true});
    for(const [k,x] of r.data.results.entries())films.push({filmId:x.filmId,plan:group[k].plan,groupIndex:g,fingerprint:items[k].fingerprint??null,prediction:items[k].prediction,submitStatus:x.status,liveInput:x.liveInput,validation:x.validation||null,generationMs:null});
   }
@@ -98,9 +111,11 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
   assert.equal(calls.length,Math.ceil(sample.filmIds.length/size));assert.ok(calls.every(c=>c.itemCount<=size));
   results.push(result);
  }
- assert.equal(new Set(results.map(r=>r.manifestHash)).size,1,'one frozen manifest for all ten passes');
+ assert.equal(starts.length,1,'one start in total across all ten passes (ADR 0122 decision 10)');assert.ok(submits.length>=10);
+ assert.equal(new Set(results.map(r=>r.manifestHash)).size,1,'one frozen manifest for all ten passes');assert.equal(results[0].manifestHash,sample.manifestHash);
  assert.ok(validResult({...results[0],groupSize:11}).length&&validResult({...results[0],telemetry:{...results[0].telemetry,extra:1}}).length&&validResult({...results[0],films:[]}).length,'the result schema rejects bad records');
- assert.equal(snapshot(w),before,'the dry run (start and all ten group sizes) wrote nothing to D1 or R2');
+ const noEpoch=await w.call('prediction_batch_submit',{runId:'dry-run',epoch:0,dryRun:true,items:[{filmId:frozen0.films[0].filmId,prediction:w.prediction}]});assert.equal(noEpoch.isError,true);
+ assert.equal(snapshot(w),before,'the freeze start and all ten passes wrote nothing to D1 or R2');
  assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,0);
 }
 
