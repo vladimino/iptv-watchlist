@@ -10,7 +10,8 @@ import {needsOneShot,quoteToJson,sqliteSync} from './sqlite-session.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-sqlite-session-'));
 const db=name=>path.join(root,name+'.sqlite');
 const once=(file,input,json=false)=>spawnSync('sqlite3',[...(json?['-json']:[]),'-bail',file],{input,encoding:'utf8'});
-const session=(file,input,json=false)=>sqliteSync([...(json?['-json']:[]),'-bail',file],{input,timeoutMs:20000});
+// 60 s, not 20: on CI this file starts with the five heaviest files of its shard (CPU-bound mutation runs and a workerd one) and a call starved for more than 20 s once (run 43193761580); the session itself is unchanged.
+const session=(file,input,json=false)=>sqliteSync([...(json?['-json']:[]),'-bail',file],{input,timeoutMs:60000});
 const same=(file,input,json=false)=>{
  const a=once(file,input,json),b=session(file,input,json);
  assert.equal(b.status,a.status,'same status: '+input.slice(0,60));assert.equal(b.stdout,a.stdout,'same stdout: '+input.slice(0,60));
