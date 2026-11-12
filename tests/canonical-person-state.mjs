@@ -317,7 +317,7 @@ if(on(8)){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!=='src/canonical-person-state.js'&&fs.readFileSync(full,'utf8').includes('canonical-person-state'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.sort(),['src/canonical-producers.js'],'only the routing module registers it');
+ assert.deepEqual(importers.sort(),['src/canonical-person-adapters.js','src/canonical-producers.js'],'only the routing module registers it and the dormant Person receipt adapter (ADR 0126) reads its pre-plan');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-person-state'),file+' does not bundle it');
  const text=fs.readFileSync('src/canonical-person-state.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bR2\b|fetch\(|BUCKET|\.get\(['"]/.test(text),'no R2 and no network');

@@ -25,7 +25,7 @@ Recorded from the Controller review of this PR; decision text only, nothing exec
 - **E3:** an exclusive window is required for H2; for H1 only if the risk analysis warrants it (a lease and quiet interval regardless); H0 uses the preflight.
 - **E4:** `D1_ENRICHMENT_WRITE`, `D1_ENRICHMENT_WINDOW` and `D1_ENRICHMENT_BULK` stay unchanged unless separately approved.
 - **E5:** a producer pre-plans a no-op before creating a receipt, and keeps the canonical mutation and the applied receipt in ONE atomic fenced batch; an uncertain race is handled by `unknown`, readback and reconcile, with no silent second batch.
-- **E6:** prepare read-only Film, Person and EPG budget measurements ahead of P3a; running them in production needs a separate production-read scope and GO.
+- **E6:** prepare read-only Film, Person and EPG budget measurements ahead of P3a; running them in production needs a separate production-read scope and GO. Prepared (12 Nov 2026): the measurement scope, statements, caps, stop rules and the GO text are in [the E6 runbook](film-person-e6-budget-measurement.md) with the offline tool `scripts/film-person-e6-measure.mjs`; the owner decided that this diagnostic comes first and the per-run limit is chosen only afterwards, so the provisional 50-unit ceiling of P3a is not a production acceptance. Nothing has been run in production and the run has no GO.
 - **The 10 draft differential exceptions** (`exception_not_accepted`) are reviewed and accepted or rejected INDIVIDUALLY. The decision did not accept them as a group; all 10 remain blockers.
 
 ## AIR-374 task plan versus opened PRs

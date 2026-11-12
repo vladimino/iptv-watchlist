@@ -73,7 +73,7 @@
     },
     "sampleId": {
      "type": "string",
-     "minLength": 1
+     "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
     },
     "groupSize": {
      "type": "integer",
@@ -105,7 +105,7 @@
       },
       "hash": {
        "type": "string",
-       "minLength": 1
+       "pattern": "^[0-9a-f]{8,64}$"
       }
      }
     },
@@ -129,7 +129,8 @@
        "type": "integer"
       },
       "registryDigest": {
-       "type": "string"
+       "type": "string",
+       "pattern": "^[0-9a-f]{8,64}$"
       }
      }
     },
@@ -147,11 +148,13 @@
        "prediction",
        "submitStatus",
        "liveInput",
-       "validation"
+       "validation",
+       "callId"
       ],
       "properties": {
        "filmId": {
-        "type": "string"
+        "type": "string",
+        "pattern": "^[a-z0-9_-]{1,40}$"
        },
        "plan": {
         "enum": [
@@ -204,7 +207,12 @@
         ],
         "properties": {
          "stage": {
-          "type": "string"
+          "enum": [
+           "caller_reported",
+           "fingerprint_schema",
+           "fingerprint_missing",
+           "prediction_schema"
+          ]
          },
          "issues": {
           "type": "array",
@@ -233,6 +241,14 @@
          "null"
         ],
         "minimum": 0
+       },
+       "callId": {
+        "type": [
+         "integer",
+         "null"
+        ],
+        "minimum": 0,
+        "description": "Index of the call (calls[].callId) whose answer recorded this film's result; null for a not_submitted film. A group split over several calls gives each film its own call."
        }
       }
      }
@@ -245,7 +261,9 @@
       "required": [
        "groupIndex",
        "itemCount",
-       "ok"
+       "ok",
+       "observedProfileHash",
+       "callId"
       ],
       "properties": {
        "groupIndex": {
@@ -279,6 +297,19 @@
          "string",
          "null"
         ]
+       },
+       "observedProfileHash": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "pattern": "^[0-9a-f]{8,64}$",
+        "description": "profile.hash of the dry-run submit answer; the pass compares it with the manifest profile hash and stops with profile_moved on a difference."
+       },
+       "callId": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Unique, in the order the calls were made. A retry, a refusal or one call per film of a split group is a call of its own."
        }
       }
      }
@@ -381,6 +412,910 @@
     },
     "notes": {
      "type": "string"
+    },
+    "stoppedReason": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "enum": [
+      "profile_moved",
+      "manifest_invalid",
+      "size_refused",
+      null
+     ]
+    }
+   }
+  },
+  "report": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "schemaVersion",
+    "kind",
+    "identity",
+    "completeness",
+    "quality",
+    "perSize",
+    "stability",
+    "unknown",
+    "model"
+   ],
+   "description": "Sanitized aggregate of the ten passes, built field by field by scripts/prediction-ab-report.mjs from validated input records. Every object is closed and every string is a fixed enum, a hex hash, a short owner label or a film id: it holds no fingerprint, prediction, metadata, free text or value copied from a private string. It is the one record that may leave the private trial storage after a privacy review, and a partial report is a diagnostic, never the final AIR-450 comparison.",
+   "properties": {
+    "schemaVersion": {
+     "const": 1
+    },
+    "kind": {
+     "const": "prediction_batch_v2_ab_report"
+    },
+    "identity": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "sampleId",
+      "manifestHash",
+      "profile",
+      "contract",
+      "films",
+      "sizes",
+      "baselineSize"
+     ],
+     "properties": {
+      "sampleId": {
+       "type": "string",
+       "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+      },
+      "manifestHash": {
+       "type": "string",
+       "pattern": "^[0-9a-f]{64}$"
+      },
+      "profile": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "version",
+        "hash"
+       ],
+       "properties": {
+        "version": {
+         "type": "integer",
+         "minimum": 1
+        },
+        "hash": {
+         "type": "string",
+         "pattern": "^[0-9a-f]{8,64}$"
+        }
+       }
+      },
+      "contract": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "fingerprintSchemaVersion",
+        "fingerprintPromptVersion",
+        "predictionPromptVersion",
+        "registryDigest"
+       ],
+       "properties": {
+        "fingerprintSchemaVersion": {
+         "type": "integer"
+        },
+        "fingerprintPromptVersion": {
+         "type": "integer"
+        },
+        "predictionPromptVersion": {
+         "type": "integer"
+        },
+        "registryDigest": {
+         "type": "string",
+         "pattern": "^[0-9a-f]{8,64}$"
+        }
+       }
+      },
+      "films": {
+       "type": "integer",
+       "minimum": 1
+      },
+      "sizes": {
+       "type": "array",
+       "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+       }
+      },
+      "baselineSize": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      }
+     }
+    },
+    "completeness": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "allSizes",
+      "missingSizes",
+      "films",
+      "final",
+      "ownerAcceptance"
+     ],
+     "properties": {
+      "allSizes": {
+       "type": "boolean"
+      },
+      "missingSizes": {
+       "type": "array",
+       "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+       }
+      },
+      "films": {
+       "type": "integer"
+      },
+      "final": {
+       "type": "boolean"
+      },
+      "ownerAcceptance": {
+       "const": "required"
+      }
+     }
+    },
+    "quality": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "truth"
+     ],
+     "properties": {
+      "truth": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "available",
+        "films",
+        "basis"
+       ],
+       "properties": {
+        "available": {
+         "type": "boolean"
+        },
+        "films": {
+         "type": "integer",
+         "minimum": 0
+        },
+        "basis": {
+         "enum": [
+          "hidden_user_ratings",
+          "agreement_to_baseline_only"
+         ]
+        }
+       }
+      }
+     }
+    },
+    "perSize": {
+     "type": "array",
+     "minItems": 1,
+     "maxItems": 10,
+     "items": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+       "groupSize",
+       "films",
+       "statuses",
+       "comparableFilms",
+       "excluded",
+       "validShare",
+       "sizeRefusals",
+       "profileMismatchCalls",
+       "stoppedReason",
+       "cost"
+      ],
+      "properties": {
+       "groupSize": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+       },
+       "films": {
+        "type": "integer",
+        "minimum": 1
+       },
+       "statuses": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "would_write",
+         "already_current",
+         "not_eligible",
+         "validation_failure",
+         "not_submitted"
+        ],
+        "properties": {
+         "would_write": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "already_current": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "not_eligible": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "validation_failure": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "not_submitted": {
+          "type": "integer",
+          "minimum": 0
+         }
+        }
+       },
+       "comparableFilms": {
+        "type": "integer",
+        "minimum": 0
+       },
+       "excluded": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "liveInputChanged",
+         "staleProfile",
+         "notValid"
+        ],
+        "properties": {
+         "liveInputChanged": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "staleProfile": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "notValid": {
+          "type": "integer",
+          "minimum": 0
+         }
+        }
+       },
+       "validShare": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1
+       },
+       "sizeRefusals": {
+        "type": "integer",
+        "minimum": 0
+       },
+       "profileMismatchCalls": {
+        "type": "integer",
+        "minimum": 0
+       },
+       "stoppedReason": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "enum": [
+         "profile_moved",
+         "manifest_invalid",
+         "size_refused",
+         null
+        ]
+       },
+       "cost": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "mcpCalls",
+         "bodyBytes",
+         "toolMs",
+         "generationMs",
+         "wallMs",
+         "tokens",
+         "quota",
+         "unavailable"
+        ],
+        "properties": {
+         "mcpCalls": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "bodyBytes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "total",
+           "max"
+          ],
+          "properties": {
+           "total": {
+            "type": [
+             "integer",
+             "null"
+            ],
+            "minimum": 0
+           },
+           "max": {
+            "type": [
+             "integer",
+             "null"
+            ],
+            "minimum": 0
+           }
+          }
+         },
+         "toolMs": {
+          "type": [
+           "integer",
+           "null"
+          ],
+          "minimum": 0
+         },
+         "generationMs": {
+          "type": [
+           "integer",
+           "null"
+          ],
+          "minimum": 0
+         },
+         "wallMs": {
+          "type": [
+           "integer",
+           "null"
+          ],
+          "minimum": 0
+         },
+         "tokens": {
+          "type": [
+           "object",
+           "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+           "input",
+           "output"
+          ],
+          "properties": {
+           "input": {
+            "type": [
+             "integer",
+             "null"
+            ],
+            "minimum": 0
+           },
+           "output": {
+            "type": [
+             "integer",
+             "null"
+            ],
+            "minimum": 0
+           }
+          }
+         },
+         "quota": {
+          "type": [
+           "object",
+           "null"
+          ],
+          "additionalProperties": false,
+          "required": [
+           "remainingPercentBefore",
+           "remainingPercentAfter"
+          ],
+          "properties": {
+           "remainingPercentBefore": {
+            "type": [
+             "number",
+             "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+           },
+           "remainingPercentAfter": {
+            "type": [
+             "number",
+             "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+           }
+          }
+         },
+         "unavailable": {
+          "type": "array",
+          "items": {
+           "enum": [
+            "model",
+            "tokens",
+            "quota",
+            "wallMs",
+            "generationMs",
+            "toolMs",
+            "bodyBytes"
+           ]
+          }
+         }
+        }
+       },
+       "truth": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "n",
+         "mae",
+         "bias",
+         "threshold4Accuracy"
+        ],
+        "properties": {
+         "n": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "mae": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "bias": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "threshold4Accuracy": {
+          "type": [
+           "number",
+           "null"
+          ]
+         }
+        }
+       },
+       "agreementToBaseline": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "pairs",
+         "predictedRatingAbsDiff",
+         "probability4PlusAbsDiff",
+         "confidenceAgreement",
+         "threshold4Agreement",
+         "matchSignalsOverlap",
+         "mainRiskOverlap",
+         "executionAgreement",
+         "plotMechanicsOverlap",
+         "fingerprintPairs"
+        ],
+        "properties": {
+         "pairs": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "predictedRatingAbsDiff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "n",
+           "mean",
+           "median",
+           "p90",
+           "max"
+          ],
+          "properties": {
+           "n": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "mean": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "median": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "p90": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "max": {
+            "type": [
+             "number",
+             "null"
+            ]
+           }
+          }
+         },
+         "probability4PlusAbsDiff": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "n",
+           "mean",
+           "median",
+           "p90",
+           "max"
+          ],
+          "properties": {
+           "n": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "mean": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "median": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "p90": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "max": {
+            "type": [
+             "number",
+             "null"
+            ]
+           }
+          }
+         },
+         "confidenceAgreement": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "threshold4Agreement": {
+          "type": [
+           "number",
+           "null"
+          ]
+         },
+         "matchSignalsOverlap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "n",
+           "mean",
+           "median",
+           "p90",
+           "max"
+          ],
+          "properties": {
+           "n": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "mean": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "median": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "p90": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "max": {
+            "type": [
+             "number",
+             "null"
+            ]
+           }
+          }
+         },
+         "mainRiskOverlap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+           "n",
+           "mean",
+           "median",
+           "p90",
+           "max"
+          ],
+          "properties": {
+           "n": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "mean": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "median": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "p90": {
+            "type": [
+             "number",
+             "null"
+            ]
+           },
+           "max": {
+            "type": [
+             "number",
+             "null"
+            ]
+           }
+          }
+         },
+         "executionAgreement": {
+          "anyOf": [
+           {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+             "n",
+             "mean",
+             "median",
+             "p90",
+             "max"
+            ],
+            "properties": {
+             "n": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "mean": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "median": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "p90": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "max": {
+              "type": [
+               "number",
+               "null"
+              ]
+             }
+            }
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "plotMechanicsOverlap": {
+          "anyOf": [
+           {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+             "n",
+             "mean",
+             "median",
+             "p90",
+             "max"
+            ],
+            "properties": {
+             "n": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "mean": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "median": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "p90": {
+              "type": [
+               "number",
+               "null"
+              ]
+             },
+             "max": {
+              "type": [
+               "number",
+               "null"
+              ]
+             }
+            }
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "fingerprintPairs": {
+          "type": "integer",
+          "minimum": 0
+         }
+        }
+       }
+      }
+     }
+    },
+    "stability": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "predictedRatingSpread",
+      "probability4PlusSpread"
+     ],
+     "properties": {
+      "predictedRatingSpread": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "n",
+        "mean",
+        "median",
+        "p90",
+        "max"
+       ],
+       "properties": {
+        "n": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "mean": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "median": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "p90": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "max": {
+         "type": [
+          "number",
+          "null"
+         ]
+        }
+       }
+      },
+      "probability4PlusSpread": {
+       "type": "object",
+       "additionalProperties": false,
+       "required": [
+        "n",
+        "mean",
+        "median",
+        "p90",
+        "max"
+       ],
+       "properties": {
+        "n": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "mean": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "median": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "p90": {
+         "type": [
+          "number",
+          "null"
+         ]
+        },
+        "max": {
+         "type": [
+          "number",
+          "null"
+         ]
+        }
+       }
+      }
+     }
+    },
+    "unknown": {
+     "type": "array",
+     "items": {
+      "enum": [
+       "no_size_1_baseline",
+       "no_ground_truth",
+       "profile_moved",
+       "partial_sizes",
+       "partial_films",
+       "telemetry_model",
+       "telemetry_tokens",
+       "telemetry_quota",
+       "telemetry_wallMs",
+       "telemetry_generationMs",
+       "telemetry_toolMs",
+       "telemetry_bodyBytes"
+      ]
+     }
+    },
+    "model": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "pattern": "^[A-Za-z0-9._-]{1,40}$"
     }
    }
   }
