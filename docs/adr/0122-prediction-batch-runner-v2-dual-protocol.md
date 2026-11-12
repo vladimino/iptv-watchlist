@@ -1,4 +1,4 @@
-# ADR 0121: Prediction batch runner v2 runs beside the v5 runner on one queue, one lease and one persistence path
+# ADR 0122: Prediction batch runner v2 runs beside the v5 runner on one queue, one lease and one persistence path
 
 **Status:** Proposed
 **Original decision date:** not decided (Proposed; the Product Owner decision is a separate gate)

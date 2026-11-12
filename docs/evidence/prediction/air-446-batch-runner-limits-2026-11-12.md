@@ -1,6 +1,6 @@
 # AIR-446: limits and sizes behind the batch runner v2 contract
 
-**Captured:** 12 November 2026 (UTC). **Method:** code reading of `main` at `dfd1a51` (`src/enrichment.js`, `src/mcp.js`), the [AIR-438 evidence](air-438-step-latency-and-batch-sizing-2026-11-11.md), and the Cloudflare documentation (Workers limits, read through the documentation search on this date). **Scope:** documentation only. No production read, prediction run, Scheduled Task, flag, lease or write was made. **Verdict:** supports [ADR 0121](../../adr/0121-prediction-batch-runner-v2-dual-protocol.md) (Proposed); it decides nothing.
+**Captured:** 12 November 2026 (UTC). **Method:** code reading of `main` at `dfd1a51` (`src/enrichment.js`, `src/mcp.js`), the [AIR-438 evidence](air-438-step-latency-and-batch-sizing-2026-11-11.md), and the Cloudflare documentation (Workers limits, read through the documentation search on this date). **Scope:** documentation only. No production read, prediction run, Scheduled Task, flag, lease or write was made. **Verdict:** supports [ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Proposed); it decides nothing.
 
 Every size below marked *estimate* is arithmetic on named assumptions, not a measurement. The measurements that would replace them are in section 6.
 

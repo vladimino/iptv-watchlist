@@ -104,7 +104,7 @@ A missing line for a step means the Worker that served it predates the instrumen
 
 ## Batch runner v2 operation (Proposed)
 
-**Proposed; nothing here is live or authorized.** It applies only after [ADR 0121](../adr/0121-prediction-batch-runner-v2-dual-protocol.md) is Accepted, the code is deployed and the owner has approved the operation. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract); Task: [Batch runner Task](../reference/scheduled-tasks.md#batch-runner-task-proposed).
+**Proposed; nothing here is live or authorized.** It applies only after [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) is Accepted, the code is deployed and the owner has approved the operation. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract); Task: [Batch runner Task](../reference/scheduled-tasks.md#batch-runner-task-proposed).
 
 - **Which Task is active.** Read the live Task registry: exactly one hourly Predictions Task is enabled. Two enabled Tasks show as `already_running` stops of the later one, not as an error of the Worker.
 - **Reading a v2 run.** Status, run diagnostics and the Events footer show it as a run with `protocol: batch_v2`. Read the `prediction_step_timing` lines with `step` of `batch_start` and `batch_submit` as described [above](#reading-the-step-timing-line-air-438): `manifestBytes`, `manifestFilms`, `items`, `deferredBudget`, `staleProfile`.

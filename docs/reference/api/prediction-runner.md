@@ -94,7 +94,7 @@ The line never holds a film id, a key, a statement, a body, a fingerprint, a pre
 
 ## Batch runner v2 (Proposed contract)
 
-**Status: Proposed, not implemented.** This section is the contract of [ADR 0121](../../adr/0121-prediction-batch-runner-v2-dual-protocol.md) (Proposed). Nothing here is deployed, enabled or authorized; the v5 protocol above is the only live one and is unchanged. Sizes marked *initial* are open decisions of the ADR, not measured limits ([sizes and limits](../../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md)).
+**Status: Proposed, not implemented.** This section is the contract of [ADR 0122](../../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Proposed). Nothing here is deployed, enabled or authorized; the v5 protocol above is the only live one and is unchanged. Sizes marked *initial* are open decisions of the ADR, not measured limits ([sizes and limits](../../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md)).
 
 v2 is a second client of the same queue, runner lease, retry records, fingerprint and prediction storage and D1/R2 write order. A run has `protocol` `"v5"` (absent on older records) or `"batch_v2"`. `next` and `submit` refuse a v2 run and `batch_submit` refuses a v5 run with `409 {code: "wrong_protocol"}` and no write. One lease serves both: a second `start` or `batch_start` while a lease is held answers `already_running` and the caller stops without adopting the `runId`.
 
