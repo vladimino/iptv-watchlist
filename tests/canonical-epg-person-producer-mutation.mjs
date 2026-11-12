@@ -91,6 +91,89 @@ const MUTANTS=[
  ["the film_credits kind is not registered", "canonical-receipts.js", "'film_facts','film_credits',", "'film_facts',"],
  ["the event helper is another namespace", "canonical-epg-producer.js", "export const epgEvent=eventOf;", "export const epgEvent=runId=>eventOf(runId)+'x';"]
 ];
+const LEARN=process.env.EPGPERSON_LEARN==='1';
+const HINTS={
+ "the pass gate ignores the route":"2",
+ "the pass gate always skips":"2",
+ "the origin is not epg":"3",
+ "the unit ceiling is lifted":"9f",
+ "the unit ceiling has no floor":"9f",
+ "the cursor is ignored":"3",
+ "a pass is always done":"3",
+ "a held marker does not stop the pass":"7",
+ "every refusal stops the pass":"4",
+ "a refusal blocks the other units":"4",
+ "a refusal is not recorded":"4",
+ "an absent unit is counted a no-op":"3",
+ "a no-op is counted applied":"3",
+ "an already applied unit is counted applied":"5",
+ "an unknown outcome is counted failed":"8",
+ "every unit runs as a Person state":"3",
+ "credits come before Persons":"1",
+ "Persons are not sorted":"1",
+ "Films are not sorted":"1",
+ "a duplicate Person is accepted":"1",
+ "a duplicate Film is accepted":"1",
+ "an oversized credit list is accepted":"1",
+ "the run id is not the event":"1",
+ "the write clock is not validated":"1",
+ "a Person state is not validated":"1",
+ "credits are not normalized":"1",
+ "the replay ignores the kind":"1",
+ "the replay request id uses the wrong kind":"1",
+ "the replay is not bound to the run":"1",
+ "the replay does not check the request id":"1",
+ "the reconcile origin is not epg":"9",
+ "the reconcile does not know Person states":"9",
+ "the reconcile does not know credits":"9",
+ "the reconcile does not know Film facts":"9e",
+ "the reconcile limit is dropped":"9b",
+ "the unit gate ignores the route":"2",
+ "the unit gate always skips":"3",
+ "the request id has no source event":"5",
+ "a no-op creates a receipt":"3",
+ "an absent entity creates a receipt":"3",
+ "the write is not atomic":"3",
+ "the receipt is planned at revision 0":"3",
+ "a Person state without facts is accepted":"1",
+ "a Person state may have a non-person id":"1",
+ "the credit bound is lifted":"9d",
+ "an unknown role is accepted":"1",
+ "a duplicate credit is accepted":"1",
+ "credits are digested in sorted order":"1",
+ "the digest does not bind the target":"1",
+ "an absent Film is planned as present":"3",
+ "a redirected Film is written":"4",
+ "a stored credit of another role counts as stored":"3",
+ "every credit is missing":"3",
+ "a missing credit Person is not refused":"4",
+ "the Film contract version is overwritten":"3",
+ "a credit write with nothing missing still writes":"8",
+ "a vanished Film is written":"9d",
+ "a moved source is not abandoned by readback":"9",
+ "readback never finds the facts":"9c",
+ "a moved source is replayed":"9d",
+ "a missing re-plan is replayed":"9d",
+ "revalidate always proceeds":"9c",
+ "revalidate never supersedes an absent entity":"9c",
+ "revalidate ignores a missing re-plan":"9c",
+ "the replay write clock is dropped":"9",
+ "the pre-plan treats an absent Person as present":"3",
+ "the pre-plan never finds a no-op":"3",
+ "the pre-plan always finds a no-op":"3",
+ "the pre-plan reports revision 0":"5",
+ "the writer does not assert the Film exists":"9g",
+ "the writer always asserts the Film exists":"9g",
+ "the writer option accepts any value":"9g",
+ "the credit write does not require the Film":"9g",
+ "plans of two runs are accepted":"9g",
+ "plan metadata is not validated":"9g",
+ "every planner error is a missing plan":"9g",
+ "no planner error is a missing plan":"9g",
+ "a redirect is not a content refusal":"9g",
+ "the film_credits kind is not registered":"1",
+ "the event helper is another namespace":"1"
+};
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'epg-person-mutants-'));
 try{
  const sources=new Map();
@@ -100,10 +183,14 @@ try{
  const template=path.join(dir,'template.sqlite');
  const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
- const run=(env)=>new Promise(resolve=>{
+ // AIR-374: a mutant first runs only the numbered section of the test that killed it when the hints were learned (HINTS: mutant name to section id); a mutant that passes that run is run
+ // against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the UNMUTATED test must pass too, or a
+ // lean run could "kill" for a reason of its own. EPGPERSON_LEARN=1 runs every mutant whole and prints HINTS for the file.
+ const learned={};
+ const run=(env,name)=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-epg-person-producer.mjs'],{env:{...process.env,EPG_TEMPLATE:template,...env},stdio:['ignore','ignore','pipe']});
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
-  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));const seen=/LEAN_SECTION (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=seen[1];resolve(code);});
  });
  assert.equal(await run({}),0,'the unmutated test passes');
  const queue=MUTANTS.map(([name,file,from,to],index)=>{
@@ -112,8 +199,19 @@ try{
   fs.writeFileSync(path.join(copy,file),text(file).replace(from,()=>to));
   return {name,env:{EPG_SRC:copy}};
  });
- const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.env);fs.rmSync(item.env.EPG_SRC,{recursive:true,force:true});if(code===0)survivors.push(item.name);}}));
+ const survivors=[];let fallbacks=0;
+ for(const name of Object.keys(HINTS))assert.ok(MUTANTS.some(item=>item[0]===name),'a hint names no mutant: '+name);
+ for(const section of new Set(Object.values(HINTS)))queue.unshift({control:{EPGPERSON_ONLY:section}});
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){
+  const item=queue.shift();
+  if(item.control){assert.equal(await run(item.control),0,'the unmutated test passes with '+JSON.stringify(item.control));continue;}
+  const hint=LEARN?undefined:HINTS[item.name];
+  let code=hint?await run({...item.env,EPGPERSON_ONLY:hint},item.name):0;
+  if(code===0){if(hint)fallbacks++;code=await run(item.env,item.name);}
+  fs.rmSync(item.env.EPG_SRC,{recursive:true,force:true});
+  if(code===0)survivors.push(item.name);
+ }}));
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(MUTANTS.map(item=>[item[0],learned[item[0]]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
- console.log('canonical-epg-person-producer-mutation: ok ('+MUTANTS.length+' mutants killed)');
+ console.log('canonical-epg-person-producer-mutation: ok ('+MUTANTS.length+' mutants killed'+(fallbacks?', '+fallbacks+' needed the whole file: refresh HINTS with EPGPERSON_LEARN=1':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

@@ -31,11 +31,35 @@ const MUTANTS=[
 ];
 for(const [file,name,from] of MUTANTS)assert.equal(sources[file].split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+file);
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'projector-marker-fence-mutants-'));
-const run=(env)=>new Promise(resolve=>{
+// AIR-374: a mutant first runs only the numbered section of tests/projector-marker-fence.mjs that killed it when the hints were learned (HINTS: mutant name to section id); a mutant that passes that
+// run is run against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the UNMUTATED test must pass too, or a
+// lean run could "kill" for a reason of its own. FENCE_LEARN=1 runs every mutant whole and prints HINTS for the file.
+const LEARN=process.env.FENCE_LEARN==='1';
+const HINTS={
+ "guard ignores the generation":"4",
+ "guard ignores the mode":"4",
+ "legacy guard always holds":"5",
+ "d1 is an allowed projector mode":"1",
+ "cutover is not checked":"1",
+ "generation shape is not checked":"1",
+ "a legacy expectation survives a readable table":"5",
+ "holds ignores the generation":"4",
+ "per-entity batches carry no guard":"2",
+ "no refusal before the diff":"1",
+ "the grouped path accepts a legacy database":"5",
+ "the run forgets the marker it read":"2",
+ "an unreadable marker counts as legacy":"1",
+ "any read error counts as an absent table":"1",
+ "a refused batch is never told as a moved marker":"4",
+ "the marker is not read for a plain run":"1",
+ "the group cycle writes without its guard":"4"
+};
+const learned={};
+const run=(env,name)=>new Promise(resolve=>{
  const child=spawn(process.execPath,['tests/projector-marker-fence.mjs'],{env:{...process.env,...env},stdio:['ignore','ignore','pipe']});
  let err='';child.stderr.on('data',chunk=>{err+=chunk;});
  // a mutant that does not even parse or load is a broken mutant, not a killed one
- child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|TypeError/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+ child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|TypeError/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));const seen=/LEAN_SECTION (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=seen[1];resolve(code);});
 });
 try{
  const queue=MUTANTS.map(([file,name,from,to],index)=>{
@@ -44,9 +68,19 @@ try{
   return {name,env:file===AUTHORITY?{PROJECTOR_AUTHORITY_SOURCE:mutant}:{PROJECTOR_SOURCE:mutant}};
  });
  assert.equal(await run({}),0,'the unmutated test passes');
- const survivors=[];
- const workers=Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();if(await run(item.env)===0)survivors.push(item.name);}});
+ const survivors=[];let fallbacks=0;
+ for(const name of Object.keys(HINTS))assert.ok(MUTANTS.some(item=>item[1]===name),'a hint names no mutant: '+name);
+ for(const section of new Set(Object.values(HINTS)))queue.unshift({control:{FENCE_ONLY:section}});
+ const workers=Array.from({length:4},async()=>{while(queue.length){
+  const item=queue.shift();
+  if(item.control){assert.equal(await run(item.control),0,'the unmutated test passes with '+JSON.stringify(item.control));continue;}
+  const hint=LEARN?undefined:HINTS[item.name];
+  let code=hint?await run({...item.env,FENCE_ONLY:hint},item.name):0;
+  if(code===0){if(hint)fallbacks++;code=await run(item.env,item.name);}
+  if(code===0)survivors.push(item.name);
+ }});
  await Promise.all(workers);
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(MUTANTS.map(item=>[item[1],learned[item[1]]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
- console.log('projector-marker-fence-mutation: ok ('+MUTANTS.length+' mutants killed)');
+ console.log('projector-marker-fence-mutation: ok ('+MUTANTS.length+' mutants killed'+(fallbacks?', '+fallbacks+' needed the whole file: refresh HINTS with FENCE_LEARN=1':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

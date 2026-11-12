@@ -150,13 +150,95 @@ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'connector-mutants-'));
 assert.ok(path.relative(process.cwd(),dir).startsWith('..'),'the mutants are written outside the repository tree');
 // A copy outside the tree keeps working: every relative import of the original becomes an absolute file URL.
 const absolute=(text,from)=>text.replace(/(from\s*|import\()'(\.\.?\/[^']+)'/g,(_match,head,specifier)=>head+JSON.stringify(pathToFileURL(path.resolve(path.dirname(from),specifier)).href));
-const run=(test,variable,file,extra={})=>new Promise(resolve=>{
+// AIR-374: a gate or recorder mutant (tests/film-person-cutover-accepted.mjs) first runs only the numbered section of that test that killed it when the hints were learned (HINTS: mutant name to
+// section id, ACCEPTED_ONLY); a mutant that passes that run is run against the WHOLE file before it is called a survivor, so a stale hint costs time and never hides a survivor. Every distinct lean
+// run of the UNMUTATED copy must pass too, or a lean run could "kill" for a reason of its own. ACCEPTED_LEARN=1 runs every mutant whole and prints HINTS for the file.
+const LEARN=process.env.ACCEPTED_LEARN==='1';
+const HINTS={
+ "acceptance pinned":"2",
+ "permissions compared by deep equality":"2",
+ "cap enforced":"1",
+ "cap boundary":"1",
+ "a differing value fails":"1",
+ "an explained differing value fails too":"1",
+ "differing total":"1",
+ "unlisted class":"1",
+ "totals are the sum of the classes":"2",
+ "declared discrepancies are derived":"2",
+ "class counts consistent":"2",
+ "accepted digest checked":"2",
+ "accepted digest covers the section":"2",
+ "v1 checks kept":"1",
+ "only the unexplained rule is replaced":"3",
+ "section version":"2",
+ "declared accepted is derived":"2",
+ "declared notProved is derived":"2",
+ "permission pinned in the builder":"3",
+ "permission pinned in the gate":"3",
+ "verdict derived from the evidence":"3",
+ "caller verdict ignored for an operator copy":"3",
+ "gate derives the verdict again":"3",
+ "source kind bound":"3",
+ "no permission on another source kind":"3",
+ "production equal at the three reads":"3",
+ "T0 compared":"3",
+ "T2 compared":"3",
+ "copy equals production at T1":"3",
+ "only Discovery may move":"3",
+ "Discovery may move":"3",
+ "required counts come from the reviewed table list":"-",
+ "every copied table is required":"-",
+ "required id present in the copy comparison":"3",
+ "unknown statement id refused":"3",
+ "unknown id refused in the copy comparison too":"3",
+ "caps are the measured counts":"-",
+ "person cap is the 11 Nov count":"-",
+ "personAlias cap is the 11 Nov count":"-",
+ "gate version is 2":"1",
+ "constant version is 2":"-",
+ "moving list is Discovery only":"3",
+ "every statement present":"3",
+ "every read present":"3",
+ "lease held at every read":"3",
+ "lease is this run's":"3",
+ "lease live":"3",
+ "lease is one holding":"3",
+ "lease id required":"3",
+ "copy lease is this run's":"3",
+ "lease released":"3",
+ "released means no holder":"3",
+ "released after the last read":"3",
+ "generation equal inside the resync":"3",
+ "resync generation is the run's":"3",
+ "Discovery copy equal":"3",
+ "every Discovery table checked":"3",
+ "resync present":"3",
+ "resync between T1 and T2":"3",
+ "ETags unchanged":"3",
+ "ETags are the run's":"3",
+ "manifest is the run's":"3",
+ "complete probe":"3",
+ "probe as the run saw it":"3",
+ "consistent read":"3",
+ "read as the run saw it":"3",
+ "reads in order":"3",
+ "evidence version":"3",
+ "recording path is version 2":"-",
+ "accepted path reaches its own gate":"3",
+ "accepted gate consulted":"3",
+ "gate reasons carried":"3",
+ "recorder reasons enforced":"4",
+ "generation binding":"4",
+ "reference names gate and version":"4"
+};
+const learned={};
+const run=(test,variable,file,extra={},name=null)=>new Promise(resolve=>{
  const child=spawn(process.execPath,[test],{env:{...process.env,[variable]:file,...extra},stdio:['ignore','ignore','pipe']});
  let err='';child.stderr.on('data',chunk=>{err+=chunk;});
- child.on('close',code=>resolve({code,broken:/SyntaxError|ERR_MODULE_NOT_FOUND|ReferenceError|does not provide an export/.test(err)?err.slice(0,300):null}));
+ child.on('close',code=>{const seen=/LEAN_SECTION (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=seen[1];resolve({code,broken:/SyntaxError|ERR_MODULE_NOT_FOUND|ReferenceError|does not provide an export/.test(err)?err.slice(0,300):null});});
 });
 try{
- const queue=[];
+ const queue=[];const controls=new Map();
  for(const target of TARGETS){
   const original=fs.readFileSync(target.source,'utf8');
   for(const [name,from] of target.mutants)assert.equal(original.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+target.source);
@@ -165,12 +247,19 @@ try{
   const control=path.join(dir,stem+'.control.mjs');
   fs.writeFileSync(control,absolute(original,target.source));
   queue.push({name:'control '+target.source,test:target.test,variable:target.variable,file:control,control:true});
+  controls.set(target.variable,{test:target.test,variable:target.variable,file:control});
   target.mutants.forEach(([name,from,to,hint],index)=>{
    const file=path.join(dir,stem+'.mutant'+index+'.mjs');
    fs.writeFileSync(file,absolute(original.replace(from,()=>to),target.source));
-   queue.push({name,test:target.test,variable:target.variable,file,lean:target.test.endsWith('film-person-connector.mjs')&&hint!=='full'});
+   queue.push({name,test:target.test,variable:target.variable,file,lean:target.test.endsWith('film-person-connector.mjs')&&hint!=='full',section:target.test.endsWith('film-person-cutover-accepted.mjs')&&!LEARN?HINTS[name]:undefined});
   });
  }
+ const names=TARGETS.flatMap(target=>target.mutants.map(item=>item[0]));
+ assert.equal(new Set(names).size,names.length,'mutant names are unique');
+ for(const name of Object.keys(HINTS))assert.ok(names.includes(name),'a hint names no mutant: '+name);
+ // the unmutated copy of each module, whole file but for one section: every lean run that is used
+ const leans=new Set(queue.filter(item=>item.section).map(item=>item.variable+' '+item.section));
+ for(const lean of leans){const [variable,section]=lean.split(' ');queue.unshift({name:'lean control '+lean,...controls.get(variable),control:true,only:section});}
  const survivors=[],broken=[];
  let killed=0,fullRuns=0;
  const workers=Array.from({length:Math.max(2,Math.min(8,os.availableParallelism()))},async()=>{
@@ -179,18 +268,19 @@ try{
    // AIR-374: a connector mutant first runs WITHOUT section 3b of the connector test (CONNECTOR_SKIP_3B, an independent section that costs a third of the file). A mutant that passes
    // that run is run against the WHOLE file before it is called a survivor, so a wrong or stale choice costs time and never hides a survivor; the optional last element 'full' of a mutant
    // (the ones only section 3b kills) skips the first run. The unmutated control always runs the whole file.
-   let out=await run(item.test,item.variable,item.file,item.lean?{CONNECTOR_SKIP_3B:'1'}:{});
-   if(item.lean&&!out.broken&&out.code===0){fullRuns++;out=await run(item.test,item.variable,item.file);}
+   let out=await run(item.test,item.variable,item.file,item.lean?{CONNECTOR_SKIP_3B:'1'}:item.section?{ACCEPTED_ONLY:item.section}:item.only?{ACCEPTED_ONLY:item.only}:{},item.control?null:item.name);
    if(item.control){assert.equal(out.code,0,'the unmutated copy must pass: '+item.name+' '+(out.broken||''));continue;}
+   if((item.lean||item.section)&&!out.broken&&out.code===0){fullRuns++;out=await run(item.test,item.variable,item.file,{},item.name);}
    if(out.broken)broken.push(item.name+': '+out.broken);
    else if(out.code===0)survivors.push(item.name);
    else killed++;
   }
  });
  await Promise.all(workers);
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(names.map(name=>[name,learned[name]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(broken,[],'broken mutants (they do not parse or load, so they prove nothing)');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
  assert.equal(killed,ACCEPTED.length+RECORDER.length+CONNECTOR.length);
- console.log('film-person-connector-mutation: ok ('+ACCEPTED.length+' gate mutants, '+RECORDER.length+' recorder mutants and '+CONNECTOR.length+' connector mutants killed'+(fullRuns?', '+fullRuns+' needed the whole connector test: mark them \'full\'':'')+')');
+ console.log('film-person-connector-mutation: ok ('+ACCEPTED.length+' gate mutants, '+RECORDER.length+' recorder mutants and '+CONNECTOR.length+' connector mutants killed'+(fullRuns?', '+fullRuns+' needed the whole test file: mark the connector ones \'full\', refresh HINTS with ACCEPTED_LEARN=1 for the others':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
 assert.ok(!fs.existsSync(dir));

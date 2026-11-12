@@ -19,7 +19,10 @@
 //    same statement shape returned large values before; then it runs as `.mode quote` with headers and the output is turned into the same JSON text here. Quote
 //    mode keeps what JSON mode keeps: column names, NULL, numbers as the CLI prints them (copied verbatim) and text. The choice changes the time of a call only.
 import {spawn,spawnSync} from 'node:child_process';
-import {statSync} from 'node:fs';
+import {copyFileSync,existsSync,mkdtempSync,readFileSync,readdirSync,rmSync,statSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
 import {Worker,isMainThread,workerData,MessageChannel,receiveMessageOnPort} from 'node:worker_threads';
 
 const MARK='__SQLITE_SESSION_DONE__';
@@ -27,7 +30,8 @@ const MARK='__SQLITE_SESSION_DONE__';
 const cliArgs=args=>args.flatMap(argument=>argument==='-json'?['-quote','-header']:[argument]);
 // Statement shapes (the start of the script, literals removed) whose answers were large values. Learned from the answers of this process; see the note above.
 const largeShapes=new Set();
-const LARGE_ANSWER=50000,LARGE_PER_LINE=20000,SMALL_PER_LINE=2000;
+// AIR-374: 10 000 and 8 000 (were 50 000 and 20 000). A 36 KB text value (the prediction queue document of 130 films) still took 57 ms per read in JSON mode and never crossed the old thresholds; in quote mode it takes about 1 ms.
+const LARGE_ANSWER=10000,LARGE_PER_LINE=8000,SMALL_PER_LINE=2000;
 const shapeOf=input=>input.slice(0,400).replace(/'(?:[^']|'')*'?/g,'?').replace(/\d+/g,'?').slice(0,200);
 const lineCount=text=>{let count=1;for(let at=text.indexOf('\n');at>=0;at=text.indexOf('\n',at+1))count++;return count;};
 // Remembers what this answer says about its shape and returns the result with stdout as JSON text.
@@ -146,6 +150,36 @@ function ensure(){
  worker.unref();port.unref();
 }
 
+// The statements of a script with comments removed and literals and quoted identifiers emptied; null when a comment or literal does not end (classification is then uncertain).
+function codeStatements(text){
+ let out='',at=0;
+ while(at<text.length){
+  const c=text[at];
+  if(c==='-'&&text[at+1]==='-'){const end=text.indexOf('\n',at);at=end<0?text.length:end+1;out+=' ';continue;}
+  if(c==='/'&&text[at+1]==='*'){const end=text.indexOf('*/',at+2);if(end<0)return null;at=end+2;out+=' ';continue;}
+  if(c==="'"||c==='"'||c==='`'||c==='['){
+   const close=c==='['?']':c;let end=at+1;
+   for(;;){
+    end=text.indexOf(close,end);
+    if(end<0)return null;
+    if(close!==']'&&text[end+1]===close){end+=2;continue;}
+    break;
+   }
+   at=end+1;out+=c==="'"?"''":'x';continue;
+  }
+  out+=c;at++;
+ }
+ return out.split(';');
+}
+function changesAfterOwnWrite(text){
+ const statements=codeStatements(String(text??''));
+ if(!statements)return false;
+ const code=statements.join(';');
+ if(/\bTRIGGER\b/i.test(code))return false;
+ const reads=statements.findIndex(statement=>/\bchanges\s*\(/i.test(statement));
+ if(reads<0)return true;
+ return statements.slice(0,reads).some(statement=>/^\s*(INSERT\s+(?:OR\s+\w+\s+)?INTO\b|REPLACE\s+INTO\b|UPDATE\s+(?:OR\s+\w+\s+)?\S|DELETE\s+FROM\b)/i.test(statement));
+}
 // A script that may only be run in a process of its own (it could change the state of a connection that is reused).
 export function needsOneShot(args,input){
  const rest=args.filter(argument=>argument!=='-json'&&argument!=='-bail');
@@ -156,14 +190,57 @@ export function needsOneShot(args,input){
  if(/\bPRAGMA\b/i.test(body)||/\b(ATTACH|DETACH|TEMP|TEMPORARY|VACUUM)\b/i.test(body))return true;
  if(/\bBEGIN\b/i.test(body)&&!/\b(COMMIT|END|ROLLBACK)\b/i.test(body))return true;
  // `last_insert_rowid()`, `changes()` and `total_changes()` read per-connection counters that a fresh process starts at zero.
- if(/\b(last_insert_rowid|total_changes|changes)\s*\(/i.test(body))return true;
+ if(/\b(last_insert_rowid|total_changes)\s*\(/i.test(body))return true;
+ // AIR-374: `changes()` is the row count of the last INSERT, UPDATE or DELETE that finished on the connection. A script whose own earlier, complete statement wrote something already sets it
+ // (a guarded batch such as `UPDATE ...; UPDATE ... AND changes()=1;`), so the shared connection answers exactly what a fresh process answers. The script is read token by token (comments, string literals
+ // and quoted identifiers are skipped); anything uncertain (an unterminated comment or literal, a trigger, a statement that does not start with its write keyword) stays one-shot, as does a script that
+ // reads the counter before a complete write statement of its own.
+ if(/\bchanges\s*\(/i.test(body)&&!changesAfterOwnWrite(text))return true;
  if(/\bSAVEPOINT\b/i.test(body)&&!/\b(RELEASE|ROLLBACK)\b/i.test(body))return true;
  return false;
 }
 const fileKeyOf=file=>{try{const stat=statSync(file);return stat.dev+':'+stat.ino;}catch{return 'none';}};
 
 // Same shape as `spawnSync('sqlite3', args, {input, encoding: 'utf8'})`: `{status, stdout, stderr, signal}`.
-export function sqliteSync(args,{input='',timeoutMs=300000,...options}={}){
+// AIR-374: a script that is exactly the repository's own migration files (byte for byte, in any order or subset, joined by a newline, after `PRAGMA foreign_keys=ON;`) and runs on a database file that does
+// not exist yet builds the same database every time. The first run of such a script leaves a copy of its result in a private temporary directory; later runs of the identical script on a new file copy it
+// instead of running the chain again. Nothing else is cached: a script of any length or prefix that is not made of whole migration files (data seeding, random(), CURRENT_TIMESTAMP, strftime('now'),
+// anything file or connection dependent) runs on every database as before. Only a run that succeeded without output is remembered. The directory is removed when the process ends.
+const schemaTemplates=new Map();
+let templateDirectory=null,migrationTexts=null;
+const forgetTemplates=()=>{if(templateDirectory){try{rmSync(templateDirectory,{recursive:true,force:true});}catch{}}};
+const PRAGMA_ON='PRAGMA foreign_keys=ON;\n';
+export function approvedMigrationChain(input){
+ if(typeof input!=='string'||!input.startsWith(PRAGMA_ON))return false;
+ if(!migrationTexts){
+  try{migrationTexts=readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).map(name=>readFileSync(path.join('migrations',name),'utf8')).filter(text=>text.length>0);}catch{migrationTexts=[];}
+ }
+ let at=PRAGMA_ON.length;
+ if(at>=input.length)return false;
+ for(;;){
+  const text=migrationTexts.find(item=>input.startsWith(item,at)&&(at+item.length===input.length||input[at+item.length]==='\n'));
+  if(!text)return false;
+  at+=text.length;
+  if(at===input.length)return true;
+  at+=1;
+  if(at===input.length)return false;
+ }
+}
+export function sqliteSync(args,options={}){
+ const input=options.input;
+ const schema=args.length===2&&args[0]==='-bail'&&!args[1].startsWith(':')&&!args[1].startsWith('file:')&&approvedMigrationChain(input)&&!existsSync(args[1]);
+ if(!schema)return sqliteSync1(args,options);
+ const key=createHash('sha256').update(input).digest('hex'),template=schemaTemplates.get(key);
+ if(template){copyFileSync(template,args[1]);return {status:0,stdout:'',stderr:'',signal:null};}
+ const result=sqliteSync1(args,options);
+ if(result.status===0&&!result.stdout&&!result.stderr&&existsSync(args[1])){
+  if(!templateDirectory){templateDirectory=mkdtempSync(path.join(tmpdir(),'iptv-sqlite-schema-'));process.on('exit',forgetTemplates);}
+  const copy=path.join(templateDirectory,String(schemaTemplates.size)+'.sqlite');
+  copyFileSync(args[1],copy);schemaTemplates.set(key,copy);
+ }
+ return result;
+}
+function sqliteSync1(args,{input='',timeoutMs=300000,...options}={}){
  const json=args.includes('-json'),shape=json?shapeOf(String(input)):null,quoted=json&&largeShapes.has(shape);
  if(needsOneShot(args,input)){
   // A one-shot call in the usual form (`[-json] -bail file`) also skips the fsync per statement; any other argument list is run as given.

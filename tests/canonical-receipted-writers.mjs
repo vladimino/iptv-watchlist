@@ -12,6 +12,17 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import {CONFIRMED_RETIREMENTS,OWNER_CONFIRMATION} from '../scripts/tmdb-tv-identity-plan.mjs';
 
+// AIR-374: RECEIPTED_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
+// A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
+const ONLY=process.env.RECEIPTED_ONLY?new Set(process.env.RECEIPTED_ONLY.split(',')):null;
+let currentSection='-';
+const section=id=>{if(ONLY&&!ONLY.has(id))return false;currentSection=id;return true;};
+// RECEIPTED_UNIT="recordPersonState" narrows the scenario loops to one writer.
+const UNITS=process.env.RECEIPTED_UNIT?new Set(process.env.RECEIPTED_UNIT.split(',')):null;
+let currentUnit='-';
+const unit=name=>{if(UNITS&&!UNITS.has(name))return false;currentUnit=name;return true;};
+process.on('exit',code=>{if(code!==0)console.error('LEAN_SECTION '+currentSection+' '+currentUnit);});
+
 const SRC=process.env.RECEIPTED_SRC?path.resolve(process.env.RECEIPTED_SRC):path.resolve('src');
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const {mutateFilm,mutatePerson,fenced,MUTATION_STATEMENT_CAP}=await load('canonical-mutations.js');
@@ -89,7 +100,8 @@ async function through(env,scenario,tag,{seen=null}={}){
 }
 
 // 1. Without a mark every writer is exactly as before: no receipt statement in the batch, no receipt row, the same revision.
-for(const scenario of SCENARIOS){
+for(const scenario of section('1')?SCENARIOS:[]){
+ if(!unit(scenario.name))continue;
  const file=database('open'),env=envOf(file);
  await scenario.seed(env);
  const seeded=env.DB.calls.statements;
@@ -105,7 +117,8 @@ for(const scenario of SCENARIOS){
 }
 
 // 2. With a mark through receiptedWrite (atomic): the receipt is applied INSIDE the writer's batch, the tail follows the revision bump, and the write is exactly one batch after the pending insert.
-for(const scenario of SCENARIOS){
+for(const scenario of section('2')?SCENARIOS:[]){
+ if(!unit(scenario.name))continue;
  const file=database('open');
  await scenario.seed(envOf(file));
  const batches=[];
@@ -131,7 +144,8 @@ for(const scenario of SCENARIOS){
 }
 
 // 3. A receipt that is not this attempt's pending row rolls the WHOLE mutation back (atomic): a wrong attempt, a missing receipt, another request id, a failed receipt and an already applied one.
-for(const scenario of SCENARIOS){
+for(const scenario of section('3')?SCENARIOS:[]){
+ if(!unit(scenario.name))continue;
  const requestId=await sourceOf(scenario,'rollback');
  const pending=file=>sqlite(file,"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('"+requestId+"','"+scenario.operation+"','epg','"+scenario.target.kind+"','"+scenario.target.id+"','"+'a'.repeat(64)+"',"+scenario.expected+",2,'pending',1,'"+iso(120000)+"','"+AT+"','"+AT+"')");
  for(const [label,mark,prepare] of [
@@ -151,7 +165,8 @@ for(const scenario of SCENARIOS){
 }
 
 // 4. A malformed or foreign mark is refused before any statement: another entity, a bad attempt, a missing request id, a missing clock, not an object.
-for(const scenario of SCENARIOS){
+for(const scenario of section('4')?SCENARIOS:[]){
+ if(!unit(scenario.name))continue;
  const file=database('open');
  await scenario.seed(envOf(file));
  const before=dump(file);
@@ -167,7 +182,7 @@ for(const scenario of SCENARIOS){
 }
 
 // 5. Dormant at r2, prepared and held: a writer with a mark opens no batch and writes no receipt (the projector stays the only writer).
-for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_person_not_open'],['held','film_person_held']]){
+for(const [stage,expected] of section('5')?[['r2','film_person_not_open'],['prepared','film_person_not_open'],['held','film_person_held']]:[]){
  for(const scenario of SCENARIOS){
   const file=database(stage);
   const env=envOf(file),before=dump(file);
@@ -178,7 +193,7 @@ for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_p
 }
 
 // 6. The statement cap counts the writer's own statements only; the two-statement tail rides on top of it and no more than two are accepted.
-{
+if(section('6')){
  const aliases=count=>Array.from({length:count},(_,i)=>({kind:'title',value:'alias '+i}));
  // the fixed part of mutateFilm is 5 statements (fence, revision, redirect assertion, film, bump)
  const body=MUTATION_STATEMENT_CAP-5;
@@ -199,7 +214,7 @@ for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_p
 }
 
 // 7. appliedStatements of the receipt module is the same pair of statements the writers append.
-{
+if(section('7')){
  const input={requestId:'r-1',attempt:3,target:{kind:'film',id:'film:tmdb:1'},now:AT};
  assert.deepEqual(appliedStatements(input),fenced.appliedTail(input));
  assert.deepEqual(fenced.receiptTail({requestId:'r-1',attempt:3,now:AT,target:input.target},input.target),appliedStatements(input));
@@ -209,7 +224,7 @@ for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_p
 }
 
 // 8. E5: a writer that finds nothing to write opens no second batch. The receipt ends `unknown` (atomic_mark_missing) and is listed for review; the entity revision does not move.
-{
+if(section('8')){
  const scenario=SCENARIOS.find(item=>item.name==='writeFilmFacts');
  const file=database('open');
  await through(envOf(file),scenario,'first');
@@ -234,7 +249,8 @@ for(const [stage,expected] of [['r2','film_person_not_open'],['prepared','film_p
 // batch bumps from, and a stored marker generation other than the live one all roll the whole mutation back, receipt included. The receipt's own identity columns are never trusted from the mark.
 const pendingRow=({requestId,operation,target,planned,generation=2})=>"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('"+requestId+"','"+operation+"','epg','"+target.kind+"','"+target.id+"','"+'b'.repeat(64)+"',"+planned+","+generation+",'pending',1,'"+iso(120000)+"','"+AT+"','"+AT+"')";
 const refused=error=>error.code==='film_person_precondition';
-for(const scenario of SCENARIOS){
+for(const scenario of section('9')?SCENARIOS:[]){
+ if(!unit(scenario.name))continue;
  const requestId=await sourceOf(scenario,'identity');
  const sameKind=scenario.target.kind==='film'?{kind:'film',id:'film:tmdb:998'}:{kind:'person',id:'person:director/998'};
  const otherKind=scenario.target.kind==='film'?{kind:'person',id:'person:director/997'}:{kind:'film',id:'film:tmdb:997'};
@@ -262,7 +278,7 @@ for(const scenario of SCENARIOS){
 
 // 9b. A retry after another writer advanced the entity: the receipt is re-planned against the current revision (revalidate says proceed), the writer is run with that revision, and the receipt applies at
 // planned+1, so the planned-revision rule holds on a retry too.
-{
+if(section('9b')){
  const id='film:tmdb:700',target={kind:'film',id};
  const file=database('open'),env=envOf(file);
  const requestId=await requestIdOf({origin:'epg',operation:'film_mutation',source:{scenario:'retry'}});
