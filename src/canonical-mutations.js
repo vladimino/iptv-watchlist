@@ -93,11 +93,14 @@ function head(gate,entities){
 
 // One Film: its row, typed external ids, aliases and credits. Absent fields are left as they are.
 // input: {id, expectedRevision, at, film:{contractVersion, canonicalIdentity?, originalTitle?, externalIds?, removeExternalIds?, aliases?},
-//         credits?:{upsert?:[{personId,role,ordinal?}], remove?:[{personId,role}]}}
+//         credits?:{upsert?:[{personId,role,ordinal?}], remove?:[{personId,role}]}, requireExisting?:true}
+// `requireExisting: true` (AIR-374 P3a, ADR 0126) adds ONE assertion INSIDE the same fenced batch, before the Film upsert: the Film row must exist when the batch runs. A Film that vanished after the caller's last read then fails the whole batch
+// (receipt tail included) with `film_person_precondition`, and this writer never recreates it. Without the option nothing changes (the upsert creates the Film, as every other caller relies on).
 export async function mutateFilm(env,input){
  const id=filmId(input?.id),expected=revisionOf(input?.expectedRevision),at=text(input?.at),film=input?.film||{};
  if(!Number.isInteger(film.contractVersion))throw failed('film_person_invalid');
  const tail=receiptTail(input.receiptMark,{kind:'film',id});
+ if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
  const gate=assertWritable(await readAuthority(env));
  const db=database(env);
  const redirect=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]);
@@ -105,6 +108,7 @@ export async function mutateFilm(env,input){
  const entities=[{kind:'film',id,expected}];
  const statements=head(gate,entities);
  statements.push([assertSql('NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id]]);
+ if(input.requireExisting===true)statements.push([assertSql('EXISTS (SELECT 1 FROM film WHERE id=?)'),[id]]);
  statements.push(['INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET contract_version=excluded.contract_version,canonical_identity=COALESCE(excluded.canonical_identity,film.canonical_identity),original_title=COALESCE(excluded.original_title,film.original_title),updated_at=excluded.updated_at',[id,film.contractVersion,film.canonicalIdentity??null,film.originalTitle??null,at]]);
  for(const item of film.removeExternalIds||[])statements.push(['DELETE FROM film_external_id WHERE film_id=? AND scheme=? AND value=?',[id,text(item.scheme),String(item.value)]]);
  for(const item of film.externalIds||[])statements.push(['INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES (?,?,?,?,?,?) ON CONFLICT(film_id,scheme,value) DO UPDATE SET trusted=excluded.trusted,conflicting=excluded.conflicting,provenance_json=excluded.provenance_json',[id,text(item.scheme),String(item.value),trustedFlag(item),item.conflicting?1:0,json(item.provenance)]]);
