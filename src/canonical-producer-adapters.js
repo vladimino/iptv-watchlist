@@ -22,6 +22,9 @@ import {writerRoute} from './canonical-producers.js';
 import {RECONCILE_LIMIT_MAX,RETRY_POLICY,defineOperation,digestOf,receiptedWrite,reconcileReceipts,requestIdOf} from './canonical-receipts.js';
 import {planFilmFacts,readFilmSnapshot,writeFilmFacts} from './canonical-film-writers.js';
 
+// The receipts module's canonical digest and the writer's read-only snapshot of one Film, re-exported for the producer layers above this adapter (a producer digests its own source snapshot and reads the stored Film through them,
+// and imports neither the receipts module nor the writers).
+export {digestOf,readFilmSnapshot};
 export const FILM_FACTS_OPERATION='film_facts';
 // One inline reconcile pass looks at no more receipts than this (the receipts module's own hard cap is RECONCILE_LIMIT_MAX).
 export const INLINE_RECONCILE_LIMIT=10;
