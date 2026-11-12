@@ -22,9 +22,9 @@ const source=fs.readFileSync('src/epg-diagnostic.js','utf8');
 const loadModule=text=>new Function(text+'\nreturn EpgDiagnostic;')();
 const Diag=loadModule(source);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-diagnostic-'));
+process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
 const plain=value=>JSON.parse(JSON.stringify(value));
 const IDENTITY=fs.readFileSync('diagnostic-migrations/0001_epg_diagnostic_identity.sql','utf8');
-const LATER=fs.readdirSync('migrations').filter(name=>/^001[3-9]_/.test(name)).sort();
 const RESOURCE='diag-test-0001';
 
 // The real step lease and the real policy, loaded into the Worker's context like the Worker bundle does.
@@ -32,12 +32,17 @@ vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy
 vm.runInContext(fs.readFileSync('src/epg-orchestration.js','utf8'),context);
 const Epg=call('EpgOrchestration');
 
+// A pristine diagnostic database: the whole production chain of migrations (schema and seed rows only) followed by the diagnostic identity table. Built once, copied per use.
+const ALL=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const templateFile=path.join(root,'pristine.sqlite');
+{const input='PRAGMA foreign_keys=ON;\n'+ALL.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+'\n'+IDENTITY;const r=sqliteSync(['-bail',templateFile],{input,encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);}
+let copies=0;
+const pristine=()=>{const file=path.join(root,'p-'+(copies++)+'.sqlite');fs.copyFileSync(templateFile,file);return file;};
 // ---- harness -----------------------------------------------------------------------------------------------------------------------------------------
 // A database with the production chain (schema only) and the diagnostic identity table. `provisioned` writes the identity into the empty database and the empty bucket.
 async function diagWorld({provisioned=true,resourceId=RESOURCE}={}){
  const state=world();
- for(const name of LATER)sql(state.file,fs.readFileSync('migrations/'+name,'utf8'));
- sql(state.file,IDENTITY);
+ state.file=pristine();
  const raw=d1Standin(state.file,{maxBinds:100});
  const ctx=Diag.create({DB:raw,BUCKET:state.bkt,resourceId});
  assert.equal(ctx.ok,true,'the context is created');
@@ -45,9 +50,11 @@ async function diagWorld({provisioned=true,resourceId=RESOURCE}={}){
   const done=await Diag.provision({DB:raw,BUCKET:state.bkt,resourceId});assert.equal(done.ok,true,'provision: '+JSON.stringify(done));
   assert.equal((await ctx.verify()).ok,true,'verified');
  }
+ // The seal tests run with the Discovery authority in D1, as the bounded harness installs it (done after provisioning, which needs the pristine seed).
+ sql(state.file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  // The harness hands the guarded environment to the Worker's functions, as the executor will.
  state.raw=raw;state.ctx=ctx;state.step=null;
- state.envFactory=(st,mode)=>{ctx.env.discoveryLease=null;ctx.env.DISCOVERY_LEDGER_MODE=mode??'bounded';ctx.env.DB.calls=raw.calls;if(state.step)ctx.env.epgStep=state.step;else delete ctx.env.epgStep;return ctx.env;};
+ state.envFactory=(st,mode)=>{ctx.env.discoveryLease=null;ctx.setLedgerMode(mode??'bounded');if(state.step)ctx.env.epgStep=state.step;else delete ctx.env.epgStep;return ctx.env;};
  return state;
 }
 const fingerprint=(file,bkt)=>JSON.stringify({dump:sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28}).stdout,objects:[...bkt.objects].map(([key,value])=>[key,value.etag])});
@@ -64,7 +71,7 @@ const fingerprint=(file,bkt)=>JSON.stringify({dump:sqliteSync([file,'.dump'],{en
  await state.ctx.env.DB.prepare("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{\"holder\":\"x\",\"expiresAt\":\"2099-01-01T00:00:00.000Z\"}',1,'now')").bind().run();
  assert.equal(state.ctx.stats().d1.writes>=1,true,'a verified D1 write is counted');
  // provision is once only and never into a used domain.
- assert.equal((await Diag.provision({DB:state.raw,BUCKET:state.bkt,resourceId:RESOURCE})).reason,'domain_not_empty','a second provision refuses: the bucket is no longer empty');
+ assert.equal((await Diag.provision({DB:state.raw,BUCKET:state.bkt,resourceId:RESOURCE})).reason,'seed_mismatch','a second provision refuses: the seed rows were changed by use (and the bucket is no longer empty)');
 
  // A database or bucket with no identity: every write is refused before it reaches storage, reads still work, verify says why.
  const bare=await diagWorld({provisioned:false});
@@ -103,8 +110,31 @@ const fingerprint=(file,bkt)=>JSON.stringify({dump:sqliteSync([file,'.dump'],{en
  const prodRaw=d1Standin(prod.file,{maxBinds:100});
  assert.equal((await Diag.provision({DB:prodRaw,BUCKET:prod.bkt,resourceId:RESOURCE})).reason,'schema_missing','a database without the identity table is refused');
  sql(prod.file,IDENTITY);
- assert.equal((await Diag.provision({DB:prodRaw,BUCKET:prod.bkt,resourceId:RESOURCE})).reason,'domain_not_empty','and one with data in it, even with the table');
+ assert.equal((await Diag.provision({DB:prodRaw,BUCKET:prod.bkt,resourceId:RESOURCE})).reason,'seed_mismatch','and one with data in it, even with the table (its seed rows and tables differ from the canonical chain)');
  assert.equal([...prod.bkt.objects.keys()].includes(Diag.IDENTITY_OBJECT),false,'no identity object was written');
+}
+// 1b. `provision` accepts exactly the canonical seed of the migration chain (review finding 3 of PR #543).
+{
+ const file=pristine(),raw=d1Standin(file);
+ const dump=Object.fromEntries(Object.keys(Diag.SEED_ROWS).map(name=>[name,sql(file,'SELECT * FROM "'+name+'"')]));
+ assert.equal(JSON.stringify(dump),JSON.stringify(Diag.SEED_ROWS),'the embedded seed is exactly what the whole migration chain seeds (a new migration must update it)');
+ const allTables=sql(file,"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").map(row=>row.name);
+ for(const name of allTables.filter(name=>name!==Diag.IDENTITY_TABLE&&!(name in Diag.SEED_ROWS)))assert.equal(sql(file,'SELECT COUNT(*) AS n FROM "'+name+'"')[0].n,0,'a table the chain does not seed is empty: '+name);
+ assert.equal((await Diag.provision({DB:raw,BUCKET:bucket(),resourceId:RESOURCE})).ok,true,'a pristine database is provisioned');
+ for(const [label,statement] of [
+  ['a modified seeded row (discovery_lease)',"UPDATE discovery_lease SET lease_id='foreign' WHERE id=1"],
+  ['a modified authority marker',"UPDATE published_epg_authority SET generation=7 WHERE id=1"],
+  ['a deleted seeded row',"DELETE FROM projector_window"],
+  ['a modified schema contract note',"UPDATE schema_contract SET note='other' WHERE id=1"],
+  ['a row in an unseeded table',"INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{}',1,'t')"],
+ ]){
+  const copy=pristine(),db=d1Standin(copy),bkt=bucket();
+  db.sql(statement);
+  const refused=await Diag.provision({DB:db,BUCKET:bkt,resourceId:RESOURCE});
+  assert.ok(['seed_mismatch','domain_not_empty'].includes(refused.reason),label+': '+JSON.stringify(refused));
+  assert.equal(bkt.objects.size,0,label+': no identity object');
+  assert.equal(db.sql('SELECT COUNT(*) AS n FROM epg_diagnostic_identity')[0].n,0,label+': no identity row');
+ }
 }
 async function bootstrapRaw(state){await bootstrap(state,0);}
 
@@ -133,6 +163,41 @@ async function bootstrapRaw(state){await bootstrap(state,0);}
  assert.equal(Diag.create({DB:raw,BUCKET:bkt,resourceId:RESOURCE,production:{BUCKET:bkt}}).reason,'context_contradictory','the diagnostic bucket is the production bucket');
  // The classification of statements is fail-closed.
  for(const [text,write] of [['SELECT 1',false],[' select a from b',false],['WITH a AS (SELECT 1) SELECT * FROM a',false],['/* x */ INSERT INTO t VALUES (1)',true],['WITH a AS (SELECT 1) INSERT INTO t SELECT * FROM a',true],['UPDATE t SET a=1',true],['DELETE FROM t',true],['REPLACE INTO t VALUES (1)',true],['PRAGMA x=1',true],['SELECT updated_at FROM t',false],['-- c\nSELECT 1',true]])assert.equal(Diag.isWrite(text),write,text);
+}
+
+// 2b. The context cannot be rewired: no replacement of the storage, the identity or the ledger mode (assignment, defineProperty, prototype, extensions, wrapper
+// members), and no native statement leaks out of a statement wrapper (review findings 1 and 2 of PR #543).
+{
+ const state=await diagWorld({provisioned:false});
+ const env=state.ctx.env,productionDb=d1Standin(state.file),productionBucket=bucket();
+ const guardedDb=env.DB,guardedBucket=env.BUCKET;
+ for(const [name,value] of [['DB',productionDb],['BUCKET',productionBucket],['epgDiagnostic',{domain:'epg-diagnostic',resourceId:'x'}],['DISCOVERY_LEDGER_MODE','full']]){
+  assert.throws(()=>{env[name]=value;},error=>error.code==='diagnostic_binding_denied','assigning '+name+' is refused');
+  assert.throws(()=>Object.defineProperty(env,name,{value,writable:true}),error=>error.code==='diagnostic_binding_denied','defining '+name+' is refused');
+  assert.throws(()=>{delete env[name];},error=>error.code==='diagnostic_binding_denied','deleting '+name+' is refused');
+  assert.throws(()=>Reflect.defineProperty(env,name,{get:()=>value}),error=>error.code==='diagnostic_binding_denied');
+ }
+ assert.throws(()=>Object.defineProperty(env,'epgStep',{get:()=>1}),error=>error.code==='diagnostic_binding_denied','a carrier cannot become an accessor');
+ assert.equal(Reflect.setPrototypeOf(env,{DB:productionDb}),false);assert.equal(Reflect.preventExtensions(env),false);
+ assert.equal(env.DB,guardedDb,'the storage is still the guarded one');assert.equal(env.BUCKET,guardedBucket);assert.equal(env.DISCOVERY_LEDGER_MODE,'bounded');
+ // The guarded handles cannot be edited either: a member replaced would route around the guard.
+ for(const [handle,members] of [[guardedDb,['prepare','batch','exec','extra']],[guardedBucket,['put','get','delete','extra']]])for(const member of members){
+  assert.throws(()=>{handle[member]=()=>{};},TypeError,'assigning '+member);assert.throws(()=>Object.defineProperty(handle,member,{value:()=>{}}),TypeError,'defining '+member);
+ }
+ assert.equal(Object.isFrozen(guardedDb)&&Object.isFrozen(guardedBucket),true);
+ // The ledger mode changes through the context only, to a valid value.
+ state.ctx.setLedgerMode('frozen');assert.equal(env.DISCOVERY_LEDGER_MODE,'frozen');assert.throws(()=>state.ctx.setLedgerMode('wild'),error=>error.code==='diagnostic_ledger_mode_invalid');assert.equal(env.DISCOVERY_LEDGER_MODE,'frozen');
+ // No native statement hides in a wrapper, and a forged wrapper is refused by its provenance.
+ const statement=env.DB.prepare("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{}',1,'t')").bind();
+ assert.deepEqual(Object.keys(statement).sort(),['all','bind','first','raw','run'],'only the call surface');
+ assert.equal(statement._inner,undefined);assert.equal(statement._write,undefined);assert.equal(Object.isFrozen(statement),true);
+ const rowsBefore=()=>state.raw.sql('SELECT COUNT(*) AS n FROM epg_orchestration_document')[0].n;
+ const native=state.raw.prepare("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('lease','{}',1,'t')").bind();
+ await assert.rejects(env.DB.batch([{_inner:native,_write:false}]),error=>error.code==='diagnostic_foreign_statement','a forged wrapper');
+ await assert.rejects(env.DB.batch([env.DB.prepare('SELECT 1').bind(),native]),error=>error.code==='diagnostic_foreign_statement','a native statement');
+ await assert.rejects(env.DB.batch([null,{}]),error=>error.code==='diagnostic_foreign_statement');
+ await assert.rejects(statement.run(),error=>error.code==='diagnostic_unverified','the wrapper itself still refuses before verify');
+ assert.equal(rowsBefore(),0,'nothing was written by any of them');
 }
 
 // 3. Inert: no bindings, no route, no Workflow, no flag, no migration in the production chain ---------------------------------------------------------------
@@ -248,10 +313,11 @@ async function bootstrapRaw(state){await bootstrap(state,0);}
 }
 
 // 6. Mutation checks: the isolation checks fail on every mutant of the module ----------------------------------------------------------------------------------
+const template=templateFile;
 async function isolationChecks(Module){
  const failed=[];
  const check=async(name,run)=>{try{if(await run()!==true)failed.push(name);}catch{failed.push(name);}};
- const tiny=()=>{const file=path.join(root,'m-'+Math.random().toString(36).slice(2)+'.sqlite');sql(file,IDENTITY);sql(file,'CREATE TABLE epg_orchestration_document (key TEXT PRIMARY KEY, body TEXT, revision INTEGER, updated_at TEXT)');return {file,raw:d1Standin(file),bkt:bucket()};};
+ const tiny=()=>{const file=path.join(root,'m-'+Math.random().toString(36).slice(2)+'.sqlite');fs.copyFileSync(template,file);return {file,raw:d1Standin(file),bkt:bucket()};};
  const refuses=async(promise,code)=>{try{await promise;return false;}catch(error){return error.code===code;}};
  await check('r2 put needs the identity',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return await refuses(c.env.BUCKET.put('a','b'),'diagnostic_unverified')&&!t.bkt.objects.has('a');});
  await check('r2 delete needs the identity',async()=>{const t=tiny();await t.bkt.put('a','b');const c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return await refuses(c.env.BUCKET.delete('a'),'diagnostic_unverified')&&t.bkt.objects.has('a');});
@@ -266,6 +332,13 @@ async function isolationChecks(Module){
  await check('a used bucket is not provisioned',async()=>{const t=tiny();await t.bkt.put('epg/generation.json','{}');const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='domain_not_empty'&&!t.bkt.objects.has(Module.IDENTITY_OBJECT);});
  await check('a used database is not provisioned',async()=>{const t=tiny();t.raw.sql("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('mode','{}',1,'t')");const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='domain_not_empty'&&!t.bkt.objects.has(Module.IDENTITY_OBJECT);});
  await check('a comment cannot hide a write',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return await refuses(c.env.DB.prepare("/* x */ INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('a','{}',1,'t')").bind().run(),'diagnostic_unverified');});
+ await check('the storage cannot be replaced',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});try{c.env.BUCKET=bucket();return false;}catch(error){if(error.code!=='diagnostic_binding_denied')return false;}try{Object.defineProperty(c.env,'DB',{value:t.raw});return false;}catch(error){return error.code==='diagnostic_binding_denied';}});
+ await check('a guarded handle cannot be edited',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});try{c.env.BUCKET.put=()=>{};return false;}catch(error){return error instanceof TypeError&&await refuses(c.env.BUCKET.put('a','b'),'diagnostic_unverified');}});
+ await check('no native statement is exposed',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});const st=c.env.DB.prepare("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('a','{}',1,'t')").bind();return st._inner===undefined&&Object.keys(st).every(key=>['bind','run','first','all','raw'].includes(key));});
+ await check('a forged statement is refused by batch',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});const native=t.raw.prepare("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('a','{}',1,'t')").bind();return await refuses(c.env.DB.batch([{_inner:native,_write:false}]),'diagnostic_foreign_statement')&&t.raw.sql('SELECT COUNT(*) AS n FROM epg_orchestration_document')[0].n===0;});
+ await check('a modified seeded row is not provisioned',async()=>{const t=tiny();t.raw.sql("UPDATE discovery_lease SET lease_id='foreign' WHERE id=1");const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='seed_mismatch'&&!t.bkt.objects.has(Module.IDENTITY_OBJECT);});
+ await check('a deleted seeded row is not provisioned',async()=>{const t=tiny();t.raw.sql('DELETE FROM published_epg_authority');const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='seed_mismatch';});
+ await check('a fresh chain is provisioned',async()=>{const t=tiny();const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===true;});
  return failed;
 }
 {
@@ -280,6 +353,13 @@ async function isolationChecks(Module){
   ['production database allowed',"if(production.DB&&(production.DB===DB))return refusal('context_contradictory',{field:'DB'});",""],
   ['denied bindings readable',"if(typeof name==='string'&&DENIED.includes(name)){state.stats.denied++;throw deniedError(name);}",""],
   ['unknown keys settable',"if(!ALLOWED.has(name)){state.stats.denied++;throw deniedError(String(name));}",""],
+  ['the storage can be assigned',"if(!CARRIERS.has(name)){state.stats.denied++;throw deniedError(String(name));}\n    target[name]=value;return true;","target[name]=value;return true;"],
+  ['the storage can be redefined',"if(!CARRIERS.has(name)||!('value' in descriptor)||descriptor.get||descriptor.set){state.stats.denied++;throw deniedError(String(name));}","if(false){}"],
+  ['guarded handles are editable',"return Object.freeze({\n   prepare:","return ({\n   prepare:"],
+  ['statements are editable and expose natives',"const out=Object.freeze({","const out=({_inner:statement,"],
+  ['batch trusts the shape of a statement',"const known=list.map(item=>(item&&typeof item==='object')?registry.get(item):undefined);","const known=list.map(item=>(item&&item._inner)?{statement:item._inner,write:!!item._write}:undefined);"],
+  ['the seed is not compared',"if(JSON.stringify(rows)!==JSON.stringify(SEED_ROWS[name]))return refusal('seed_mismatch',{resource:'d1',table:name});",""],
+  ['a missing seeded table is accepted',"if(!present.has(name))return refusal('seed_mismatch',{resource:'d1',table:name});","if(!present.has(name))continue;"],
   ['bucket identity not compared',"if(record?.domain!==DOMAIN||record?.resourceId!==resourceId)return refusal('identity_mismatch',{resource:'r2'});",""],
   ['database identity not compared',"if(d1.domain!==DOMAIN||d1.resource_id!==resourceId)return refusal('identity_mismatch',{resource:'d1'});",""],
   ['a used bucket is provisioned',"if((listed?.objects||[]).length)return refusal('domain_not_empty',{resource:'r2'});",""],

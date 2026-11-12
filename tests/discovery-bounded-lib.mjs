@@ -104,12 +104,12 @@ export async function commit(state,day,mode,{latest=scan(day),sealSteps=Infinity
  if(expectThrow)assert.fail('commit of day '+day+' should have stopped');
  const staging={ms:Date.now()-started,r2Bytes:state.bkt.bytesWritten-before,r2Puts:state.bkt.puts.length-puts};
  assert.equal(run.stage,'seal');
- let steps=0,done=false;const calls=env.DB.calls,trips=()=>calls.queries+calls.batches,from=trips();
+ let steps=0,done=false;const calls=env.DB.calls||{queries:0,batches:0},trips=()=>calls.queries+calls.batches,from=trips();
  while(!done&&steps<sealSteps){
   steps++;
   const stepEnv=(state.envFactory||envOf)(state,mode),lease=await takeLease(stepEnv,state.file);
   const result=await call('sealLedgerStep')(stepEnv,run,lease,Date.now()+60000);
-  done=result.done;staging.sealTrips=(staging.sealTrips||0)+stepEnv.DB.calls.queries+stepEnv.DB.calls.batches;staging.sealBatches=(staging.sealBatches||0)+stepEnv.DB.calls.batches;
+  done=result.done;const stepCalls=stepEnv.DB.calls||{queries:0,batches:0};staging.sealTrips=(staging.sealTrips||0)+stepCalls.queries+stepCalls.batches;staging.sealBatches=(staging.sealBatches||0)+stepCalls.batches;
  }
  void from;
  if(!done)return {run,staging,done:false};

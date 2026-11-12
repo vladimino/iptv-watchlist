@@ -32,9 +32,11 @@ const EpgDiagnostic=(()=>{
  // Fail closed: a statement is a read only if it starts with SELECT (or WITH) and names no write keyword anywhere; anything else, a leading comment included, needs the verified identity.
  const READ_START=/^\s*(?:SELECT|WITH)\b/i,WRITE_WORD=/\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|ATTACH|DETACH|PRAGMA|VACUUM|REINDEX|ANALYZE)\b/i;
  const isWrite=sql=>{const text=String(sql);return !READ_START.test(text)||WRITE_WORD.test(text);};
- // Tables whose single row the migration chain itself inserts (the control and marker rows); every other table must be empty. A migration that seeds one more
- // makes `provision` refuse (fail closed) until it is listed here; the test applies the whole chain and provisions, so the omission shows in CI.
- const SEEDED=new Set(['schema_contract','metadata_cache_authority','metadata_cache_cas','prediction_domain_authority','prediction_domain_cas','published_epg_authority','published_epg_cas','owner_review_authority','owner_review_cas','ratings_domain_authority','ratings_domain_cas','discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_seal','film_person_authority','film_person_cas','film_person_baseline','projector_window']);
+ // The exact rows the migration chain itself seeds (the control and marker rows), as `SELECT *` returns them. `provision` writes the identity only into a
+ // database whose seeded tables hold exactly these rows and whose every other table is empty; a mutated, deleted or extra row refuses it. A new migration that
+ // seeds or changes a row makes `tests/epg-diagnostic-context.mjs` fail until this list follows (it compares the list with a dump of the whole chain).
+ const SEED_ROWS={"schema_contract":[{"id":1,"version":19,"note":"Schema v19: durable canonical write receipt and activation baseline (empty). Follows a complete version 18."}],"metadata_cache_authority":[{"id":1,"mode":"r2","cache_generation":0,"mirror_generation":0,"mirror_etag":null}],"metadata_cache_cas":[{"id":1,"ok":1}],"prediction_domain_authority":[{"id":1,"mode":"r2","generation":0,"queue_generation":0,"profile_generation":0,"writes":"open"}],"prediction_domain_cas":[{"id":1,"ok":1}],"published_epg_authority":[{"id":1,"mode":"r2","cutover":"open","programme_run_id":null,"generation":0,"mirror_programme_run_id":null,"mirror_etag":null,"watchlist_generation":0,"mirror_watchlist_etag":null}],"published_epg_cas":[{"id":1,"ok":1}],"owner_review_authority":[{"id":1,"mode":"r2","generation":0,"mirror_generation":0,"mirror_etag":null,"writes":"open"}],"owner_review_cas":[{"id":1,"ok":1}],"ratings_domain_authority":[{"id":1,"mode":"r2","cutover":"open","generation":0}],"ratings_domain_cas":[{"id":1,"ok":1}],"discovery_authority":[{"id":1,"mode":"r2","cutover":"open","programme_run_id":null,"generation":0,"published_programme_run_id":null}],"discovery_cas":[{"id":1,"ok":1}],"discovery_transfer":[{"id":1,"state":"idle","programme_run_id":null,"batches":0}],"discovery_lease":[{"id":1,"lease_id":null,"expires_at":0,"programme_run_id":null}],"discovery_continuation":[{"id":1,"revision":0,"programme_run_id":null,"payload_json":null}],"discovery_status":[{"id":1,"programme_run_id":null,"generation":0,"retry_at":null,"payload_json":null}],"discovery_checkpoint":[{"id":1,"programme_run_id":null,"generation":0,"hop_id":null,"payload_json":null}],"discovery_workflow":[{"id":1,"revision":0,"instance_id":null,"programme_run_id":null,"series":null,"payload_json":null}],"discovery_seal":[{"id":1,"job_id":null,"programme_run_id":null,"source_key":null,"source_etag":null,"item_total":0,"cursor_items":0,"cursor_bytes":0,"phase":"idle","updated_at":null}],"film_person_authority":[{"id":1,"mode":"r2","cutover":"open","generation":0}],"film_person_cas":[{"id":1,"ok":1}],"film_person_baseline":[{"id":1,"state":"empty","reference":null,"updated_at":null}],"projector_window":[{"id":1,"state":"idle","owner":null,"requested_at":null,"expires_at":0}]};
+ const SEEDED=new Set(Object.keys(SEED_ROWS));
  const hasD1=db=>!!db&&typeof db.prepare==='function'&&typeof db.batch==='function';
  const hasBucket=bucket=>!!bucket&&['get','put','head','delete'].every(name=>typeof bucket[name]==='function');
  const newStats=()=>({d1:{reads:0,writes:0,batches:0},r2:{reads:0,writes:0,deletes:0,heads:0,lists:0},denied:0,refusedWrites:0});
@@ -42,32 +44,37 @@ const EpgDiagnostic=(()=>{
  // ---- the guarded storage ---------------------------------------------------------------------------------
  // `gate()` throws until the identity has been verified for this context; it is called before every write, never for a read.
  function guardD1(db,state){
+  // The native statements live only here, keyed by the wrapper that owns them: a wrapper exposes no handle to its native statement, and a batch accepts a
+  // statement only if this registry knows the object (provenance, not shape).
+  const registry=new WeakMap();
   const wrapStatement=(statement,sql)=>{
    const write=isWrite(sql);
-   const out={
-    _write:write,_inner:statement,
+   const count=()=>{write?state.stats.d1.writes++:state.stats.d1.reads++;};
+   const out=Object.freeze({
     bind:(...values)=>wrapStatement(statement.bind(...values),sql),
-    async run(){if(write)state.gate();const r=await statement.run();write?state.stats.d1.writes++:state.stats.d1.reads++;return r;},
-    async first(...a){if(write)state.gate();const r=await statement.first(...a);write?state.stats.d1.writes++:state.stats.d1.reads++;return r;},
-    async all(){if(write)state.gate();const r=await statement.all();write?state.stats.d1.writes++:state.stats.d1.reads++;return r;},
-    async raw(...a){if(write)state.gate();const r=await statement.raw(...a);write?state.stats.d1.writes++:state.stats.d1.reads++;return r;},
-   };
+    async run(){if(write)state.gate();const r=await statement.run();count();return r;},
+    async first(...a){if(write)state.gate();const r=await statement.first(...a);count();return r;},
+    async all(){if(write)state.gate();const r=await statement.all();count();return r;},
+    async raw(...a){if(write)state.gate();const r=await statement.raw(...a);count();return r;},
+   });
+   registry.set(out,{statement,write});
    return out;
   };
-  return {
+  return Object.freeze({
    prepare:sql=>wrapStatement(db.prepare(sql),sql),
    async batch(statements){
     const list=Array.isArray(statements)?statements:[];
     // A statement that is not one of this guard's own is a statement that was prepared elsewhere: refused whole, nothing runs.
-    if(list.some(item=>!item||typeof item._inner!=='object'))throw Object.assign(new Error('diagnostic_foreign_statement'),{code:'diagnostic_foreign_statement'});
-    const writes=list.filter(item=>item._write).length;
+    const known=list.map(item=>(item&&typeof item==='object')?registry.get(item):undefined);
+    if(known.some(entry=>!entry))throw Object.assign(new Error('diagnostic_foreign_statement'),{code:'diagnostic_foreign_statement'});
+    const writes=known.filter(entry=>entry.write).length;
     if(writes)state.gate();
-    const r=await db.batch(list.map(item=>item._inner));
+    const r=await db.batch(known.map(entry=>entry.statement));
     state.stats.d1.batches++;state.stats.d1.writes+=writes;state.stats.d1.reads+=list.length-writes;
     return r;
    },
    async exec(){throw Object.assign(new Error('diagnostic_exec_refused'),{code:'diagnostic_exec_refused'});},
-  };
+  });
  }
  function guardBucket(bucket,state){
   const counted=(group,name,run)=>async(...args)=>{state.stats.r2[name]++;return run(...args);};
@@ -78,7 +85,7 @@ const EpgDiagnostic=(()=>{
    async delete(...a){state.gate();const r=await bucket.delete(...a);state.stats.r2.deletes++;return r;},
   };
   if(typeof bucket.list==='function')out.list=counted('r2','lists',(...a)=>bucket.list(...a));
-  return out;
+  return Object.freeze(out);
  }
 
  // ---- the context --------------------------------------------------------------------------------------------
@@ -94,23 +101,31 @@ const EpgDiagnostic=(()=>{
    if(production.DB&&(production.DB===DB))return refusal('context_contradictory',{field:'DB'});
    if(production.BUCKET&&(production.BUCKET===BUCKET))return refusal('context_contradictory',{field:'BUCKET'});
   }
-  const state={verified:false,resourceId,stats:newStats(),gate(){if(!state.verified){state.stats.refusedWrites++;throw Object.assign(new Error('diagnostic_unverified'),{code:'diagnostic_unverified'});}}};
+  const state={verified:false,resourceId,ledgerMode,stats:newStats(),gate(){if(!state.verified){state.stats.refusedWrites++;throw Object.assign(new Error('diagnostic_unverified'),{code:'diagnostic_unverified'});}}};
   const allowed={DB:guardD1(DB,state),BUCKET:guardBucket(BUCKET,state),DISCOVERY_LEDGER_MODE:ledgerMode,epgDiagnostic:Object.freeze({domain:DOMAIN,resourceId})};
-  // The real executor code sets `epgStep`, `epgFence` and `discoveryLease` on an env it copies; those are the only other own keys it may carry.
+  // The storage handles, the identity and the ledger mode of the context cannot be replaced, redefined or removed through the environment, by assignment or by
+  // `defineProperty`; only the transient carriers the executor and the readers set on a copy may change. The ledger mode is changed by `setLedgerMode` alone.
   const env=new Proxy(allowed,{
    get(target,name){
     if(typeof name==='string'&&DENIED.includes(name)){state.stats.denied++;throw deniedError(name);}
+    if(name==='DISCOVERY_LEDGER_MODE')return state.ledgerMode;
     return target[name];
    },
    set(target,name,value){
-    if(!ALLOWED.has(name)){state.stats.denied++;throw deniedError(String(name));}
+    if(!CARRIERS.has(name)){state.stats.denied++;throw deniedError(String(name));}
     target[name]=value;return true;
    },
+   defineProperty(target,name,descriptor){
+    if(!CARRIERS.has(name)||!('value' in descriptor)||descriptor.get||descriptor.set){state.stats.denied++;throw deniedError(String(name));}
+    return Reflect.defineProperty(target,name,{value:descriptor.value,writable:true,enumerable:true,configurable:true});
+   },
    has(target,name){return Object.hasOwn(target,name);},
-   // Only the step and fence carriers may be removed; the storage and the identity of the context cannot be.
    deleteProperty(target,name){if(!CARRIERS.has(name)){state.stats.denied++;throw deniedError(String(name));}delete target[name];return true;},
+   setPrototypeOf(){return false;},
+   preventExtensions(){return false;},
   });
   return {ok:true,env,resourceId,stats:()=>JSON.parse(JSON.stringify(state.stats)),verified:()=>state.verified,
+   setLedgerMode(mode){if(!LEDGER_MODES.has(mode))throw Object.assign(new Error('diagnostic_ledger_mode_invalid'),{code:'diagnostic_ledger_mode_invalid'});state.ledgerMode=mode;},
    // Reads the identity of both resources through the UNGUARDED handles (reads only). Both must hold this domain and this resourceId.
    async verify(){
     let d1;try{d1=await DB.prepare('SELECT domain, resource_id FROM '+IDENTITY_TABLE+' WHERE id=1').bind().first();}catch{return refusal('identity_unreadable',{resource:'d1'});}
@@ -142,7 +157,13 @@ const EpgDiagnostic=(()=>{
   if(!hasD1(DB)||!hasBucket(BUCKET)||typeof BUCKET.list!=='function')return refusal('context_malformed');
   let tables;try{tables=(await DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%'").bind().all()).results||[];}catch{return refusal('identity_unreadable',{resource:'d1'});}
   if(!tables.some(row=>row.name===IDENTITY_TABLE))return refusal('schema_missing');
-  // Any row of any table, other than the identity table and the singleton rows that the migrations themselves seed, means this is not an empty diagnostic database.
+  // Every seeded table holds exactly its canonical seed row(s), and any row of any other table (the identity table aside) means this is not an empty diagnostic database.
+  const present=new Set(tables.map(row=>row.name));
+  for(const name of SEEDED){
+   if(!present.has(name))return refusal('seed_mismatch',{resource:'d1',table:name});
+   const rows=(await DB.prepare('SELECT * FROM "'+name+'"').bind().all()).results||[];
+   if(JSON.stringify(rows)!==JSON.stringify(SEED_ROWS[name]))return refusal('seed_mismatch',{resource:'d1',table:name});
+  }
   for(const {name} of tables){
    if(name===IDENTITY_TABLE||SEEDED.has(name))continue;
    const row=await DB.prepare('SELECT 1 AS present FROM "'+String(name).replace(/"/g,'')+'" LIMIT 1').bind().first();
@@ -157,5 +178,5 @@ const EpgDiagnostic=(()=>{
   await DB.prepare('INSERT INTO '+IDENTITY_TABLE+' (id, domain, resource_id, created_at) SELECT 1, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM '+IDENTITY_TABLE+' WHERE id=1)').bind(DOMAIN,resourceId,now).run();
   return {ok:true,resourceId};
  }
- return {DOMAIN,IDENTITY_OBJECT,IDENTITY_TABLE,BINDING_NAMES,ALLOWED,DENIED,create,fromWorkerEnv,provision,isWrite};
+ return {DOMAIN,IDENTITY_OBJECT,IDENTITY_TABLE,BINDING_NAMES,ALLOWED,DENIED,SEED_ROWS,create,fromWorkerEnv,provision,isWrite};
 })();
