@@ -1887,7 +1887,7 @@ async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true}){
 // It runs beside the v5 runner on the same queue, runner lease, retry records and persistence. `batch_submit` is a separate delivery.
 const BATCH_PROTOCOL='batch_v2';
 const BATCH_MANIFEST_FORMAT='compact-1';
-const BATCH_RUNNER={version:2,maxManifestFilms:100,maxManifestBytes:160*1024,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000};
+const BATCH_RUNNER={version:2,maxManifestFilms:100,maxManifestBytes:256*1024,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000};
 // Films read to fill one manifest when some queued films are already current or have lost their admission: bounded so a start never walks the whole queue.
 const BATCH_SCAN_LIMIT=300;
 const BATCH_PLACEHOLDER_RUN='00000000-0000-4000-8000-000000000000';
