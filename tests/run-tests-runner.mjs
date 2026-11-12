@@ -259,21 +259,33 @@ fs.unlinkSync(me);`;
       assert.deepEqual(seen.sort(), names, `shards of ${count}: every file exactly once`);
     }
     const whole = planTests({directory: 'tests'});
-    const halves = [1, 2].map(index => planTests({directory: 'tests', shard: {index, count: 2}}));
-    assert.deepEqual([...halves[0].parallel, ...halves[0].serial, ...halves[1].parallel, ...halves[1].serial].sort(), [...whole.parallel, ...whole.serial].sort(), 'the two shards of the real suite are the whole suite, once');
-    // AIR-374: the shards are balanced by WEIGHTS (greedy, heaviest first), not by file count: the weights of the two shards differ by less than the lightest listed file, and the two heaviest files are apart
     const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
-    const load = halves.map(half => [...half.parallel, ...half.serial].reduce((sum, file) => sum + weightOf(file), 0));
-    assert.ok(Math.abs(load[0] - load[1]) <= Math.min(...Object.values(WEIGHTS)), `the shards carry the same weight: ${load.join(' vs ')}`);
-    assert.ok(Math.abs(halves[0].total - halves[1].total) <= 30, 'neither shard is nearly empty');
-    // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
     const isMutation = file => /-mutation\.mjs$/.test(file);
-    const mutationLoad = halves.map(half => [...half.parallel, ...half.serial].filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
-    assert.ok(Math.abs(mutationLoad[0] - mutationLoad[1]) <= Math.min(...Object.values(WEIGHTS)) * 2, `the mutation files are shared evenly: ${mutationLoad.join(' vs ')}`);
+    const lightest = Math.min(...Object.values(WEIGHTS));
     const heaviestMutation = Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
-    assert.notEqual(halves[0].parallel.includes(heaviestMutation[0]), halves[0].parallel.includes(heaviestMutation[1]), 'the two heaviest mutation files are in different shards');
+    // The contract holds for the two shards the suite used first and for the three it runs in CI now (a third shard gives each runner real margin under the 180 s gate).
+    for (const count of [2, 3]) {
+      const parts = Array.from({length: count}, (_, index) => planTests({directory: 'tests', shard: {index: index + 1, count}}));
+      const filesOf = part => [...part.parallel, ...part.serial];
+      assert.deepEqual(parts.flatMap(filesOf).sort(), [...whole.parallel, ...whole.serial].sort(), `the ${count} shards of the real suite are the whole suite, once`);
+      // AIR-374: the shards are balanced by WEIGHTS (greedy, heaviest first), not by file count: their weights differ by less than the lightest listed file, and the two heaviest files are apart
+      const load = parts.map(part => filesOf(part).reduce((sum, file) => sum + weightOf(file), 0));
+      assert.ok(Math.max(...load) - Math.min(...load) <= lightest, `${count} shards carry the same weight: ${load.join(' vs ')}`);
+      assert.ok(Math.max(...parts.map(part => part.total)) - Math.min(...parts.map(part => part.total)) <= 30, `no shard of ${count} is nearly empty`);
+      // The serial-only files run after the parallel phase and add their whole duration to a shard's wall time, so their weight is their solo time (times the six files that share a wall second), not their contended time: the shard that carries one is not also dealt a full parallel share.
+      const serialOwners = ['local-dev-smoke.mjs', 'sqlite-session-semantics.mjs'].map(file => {
+        assert.ok(weightOf(file) >= 30, `${file} is weighted for the serial tail it adds`);
+        return parts.findIndex(part => part.serial.includes(file));
+      });
+      assert.ok(serialOwners.every(owner => owner >= 0), `every serial-only file is in a shard of ${count}`);
+      assert.notEqual(serialOwners[0], serialOwners[1], `the two serial-only files are in different shards of ${count}`);
+      // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
+      const mutationLoad = parts.map(part => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
+      assert.ok(Math.max(...mutationLoad) - Math.min(...mutationLoad) <= lightest * 2, `the mutation files are shared evenly across ${count}: ${mutationLoad.join(' vs ')}`);
+      assert.notEqual(parts.findIndex(part => part.parallel.includes(heaviestMutation[0])), parts.findIndex(part => part.parallel.includes(heaviestMutation[1])), `the two heaviest mutation files are in different shards of ${count}`);
+      assert.deepEqual(planTests({directory: 'tests', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
+    }
     assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');
-    assert.deepEqual(planTests({directory: 'tests', shard: {index: 2, count: 2}}), halves[1], 'the split does not depend on who asks');
     assert.deepEqual(parseShard('2/3'), {index: 2, count: 3});
     assert.equal(parseShard(undefined), null);
     assert.equal(parseShard(''), null);
