@@ -28,6 +28,9 @@ const FIXTURE_DEPENDENT=new Set([
 // it (another process could take it in between), and it is slow and CPU-heavy, with its own boot timeouts.
 const SERIAL_ONLY=new Set([
  'local-dev-smoke.mjs',
+ // Its sqlite session calls wait at most 20 s for an answer of up to several MB; beside five other CPU-bound files that bound was exceeded on the post-merge
+ // run 43186573244 (12 Nov 2026), twice, at the same line. Alone it takes about 7 s. Run alone after the parallel phase; no timeout or assertion changed.
+ 'sqlite-session-semantics.mjs',
 ]);
 // AIR-374: approximate cost of the heaviest files in seconds of one slow GitHub Actions runner (the mean of the per-file times of the two CI runs 43179499163 and 43180054837 of 12 Nov 2026 on PR #539, docs/evidence/ci/test-suite-air-374-ci-rebalance-p6-2026-11-12.md; the earlier tables were calibrated on shards of different composition).
 // Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
