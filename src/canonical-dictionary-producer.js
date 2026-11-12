@@ -15,7 +15,7 @@
 //   - `dictionaryReplan` / `reconcileDictionary`  E2: the adapter's bounded inline reconcile for the origin `dictionary` ONLY. A receipt is re-planned only for the snapshot that wrote it. No cron, no tick, no global pass.
 // What a unit is: the facts of one Film that the dictionary owns: `original_title` (the entry's `original`, source `dictionary`, with `titleSource`), the effective Russian localization (reviewed, source `dictionary`) and the TMDB
 // identity (`canonical_identity` is filled only when empty and the id is a trusted external id of that Film). Membership, metadata and sync clocks are never part of a dictionary unit. Aliases are part of the snapshot digest (they
-// are dictionary content) but have no canonical table, so no unit writes them.
+// are dictionary content) but this producer does not write them: the canonical `film_alias` table exists, but no unit of this layer carries aliases (ADR 0127).
 // Named conflicts (`kind` kept: nothing written for the field; `replaced`: written over a different lower-ranked value): owner_kept, reviewed_kept, unranked_kept, no_identity_row, needs_trusted_tmdb_id,
 // identity_mismatch (kept), snapshot_already_applied (kept: this exact snapshot, version and digest, was applied before and the Film no longer holds it) and replaced_lower, replaced_reviewed, replaced_automatic (replaced). Stored: operation kind, origin, target, digests, revisions, state; no title, payload or personal data.
 import {failed} from './film-person-authority.js';
@@ -25,7 +25,7 @@ export const DICTIONARY_ORIGIN='dictionary';
 // The title source this module writes, and the constant source version of its localization row: a dictionary VERSION bump must not rewrite an unchanged row (the version lives in the request event, not in the row).
 export const DICTIONARY_SOURCE='dictionary';
 export const DICTIONARY_SOURCE_VERSION='verified';
-// Provisional ceiling of units per call (the same reasoning as ADR 0125: about 10 D1 round trips per changed Film against the 800-query run budget); the real per-run size is the E6 measurement, not authorized here.
+// Provisional ceiling of units per call (the same reasoning as ADR 0125, kept provisional): the first E6 production measurement (12 Nov 2026, docs/evidence/d1-migration/air-374-e6-production-measurement-2026-11-12.md) measured Film-facts units only: about 38 D1 round trips for a changed `applyFilmFacts` unit and 14 for an unchanged one (offline stand-in), before loop/step overhead, Person/credits work and retries; changedShare, Person/credits volume, the EPG-step budgets and the combined-producer per-run ceiling are still unmeasured and no ceiling is chosen.
 export const DICTIONARY_UNIT_HARD_CAP=50;
 export const DICTIONARY_UNIT_LIMIT_DEFAULT=25;
 const HELD=new Set(['film_person_held','film_person_unavailable']);
