@@ -90,12 +90,15 @@ async function scenarios(api){
    const report=await api.run({command:'check',env:env(),fetchImpl});
    const host=ACCOUNT+'.eu.r2.cloudflarestorage.com';
    return s3.length>=1&&s3.every(request=>{const url=new URL(request.url);return url.protocol==='https:'&&url.host===host&&url.pathname==='/iptv-epg-diagnostic'&&url.searchParams.get('list-type')==='2'&&request.method==='GET'&&request.body===null&&/^AWS4-HMAC-SHA256 Credential=/.test(request.auth)&&request.auth.includes('Credential='+KEY+'/')&&/SignedHeaders=[^,]*\bhost\b/.test(request.auth)&&!request.auth.includes(SECRET);})&&d.writes()===0&&report.writes.r2===0&&report.writes.d1===0;},
-  'prepare-domain needs the identity':async()=>{const d=fakeD1({template:tplD.file}),store=bucket();const e=await failure(()=>api.run({command:'prepare-domain',apply:true,confirm:api.CONFIRM['prepare-domain'],env:env(),fetchImpl:d.fetchImpl,store}));return e?.exitCode===3&&sqlRows(d.file,'SELECT mode FROM discovery_authority')[0].mode==='r2';},
+  'the real S3 adapter writes the dataset key':async()=>{const r=await realS3();const out=await api.run({command:'dataset-put',apply:true,confirm:api.CONFIRM['dataset-put'],input:built.file,env:env(),fetchImpl:r.fetchImpl});const key='diagnostic/replay/'+built.dataset.digest+'.json';const puts=r.seen.filter(x=>x.method==='PUT');const EU=ACCOUNT+'.eu.r2.cloudflarestorage.com';const c={written:out.dataset.state==='written',onePut:puts.length===1,key:puts[0]?.key===key,host:puts[0]?.host===EU,bucket:puts[0]?.bucket==='iptv-epg-diagnostic',ifNoneMatch:puts[0]?.ifNoneMatch==='*',contentType:puts[0]?.contentType==='application/json',body:puts[0]?.body===datasetText,signed:/SignedHeaders=[^,]*\bhost\b/.test(puts[0]?.auth||''),onlyEu:r.seen.every(x=>x.host===EU&&x.method!=='DELETE'),stored:r.objects.get(key)===datasetText};if(process.env.DEBUG_SCENARIOS)console.error('S3',JSON.stringify(c));return Object.values(c).every(Boolean);},
+ 'a symlink into the repository is refused':async()=>{const leak=path.resolve('tests/private-out');fs.rmSync(leak,{recursive:true,force:true});try{const a=await failure(()=>api.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(dirLink,'private-out'),generation:sourceId,confirm:api.CONFIRM['dataset-build'],now:FIXED}));const {d,store}=await provisioned();const b=await failure(()=>api.run({command:'dataset-put',confirm:api.CONFIRM['dataset-put'],input:fileLink,env:env(),fetchImpl:d.fetchImpl,store}));return a?.exitCode===2&&b?.exitCode===2&&!fs.existsSync(leak);}finally{fs.rmSync(leak,{recursive:true,force:true});}},
+ 'a concurrent transfer change does not move the authority':async()=>{const {d,store}=await provisioned();const racing=async(url,init={})=>{const body=init.body?JSON.parse(init.body):null;if(body?.sql&&/^UPDATE discovery_authority/.test(body.sql))sqliteSync([d.file,"UPDATE discovery_transfer SET state='loading' WHERE id=1"],{encoding:'utf8'});return d.fetchImpl(url,init);};const e=await failure(()=>api.run({command:'prepare-domain',apply:true,confirm:api.CONFIRM['prepare-domain'],env:env(),fetchImpl:racing,store}));return e?.exitCode===3&&sqlRows(d.file,'SELECT mode FROM discovery_authority')[0].mode==='r2';},
+ 'prepare-domain needs the identity':async()=>{const d=fakeD1({template:tplD.file}),store=bucket();const e=await failure(()=>api.run({command:'prepare-domain',apply:true,confirm:api.CONFIRM['prepare-domain'],env:env(),fetchImpl:d.fetchImpl,store}));return e?.exitCode===3&&sqlRows(d.file,'SELECT mode FROM discovery_authority')[0].mode==='r2';},
  'dataset-put verifies the dataset':async()=>{const {d,store}=await provisioned();const e=await failure(()=>api.run({command:'dataset-put',apply:true,confirm:api.CONFIRM['dataset-put'],input:tamperedFile,env:env(),fetchImpl:d.fetchImpl,store}));return e?.exitCode===3&&[...store.objects.keys()].join()==='diagnostic/identity.json';},
  'the dataset key is the only extra write':async()=>{const store=bucket();const plain=api.guardedBucket(store);const wide=api.guardedBucket(store,{datasetWrites:true});const key='diagnostic/replay/'+'a'.repeat(64)+'.json';const a=await failure(()=>plain.put(key,'{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>wide.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const c=await failure(()=>wide.put('diagnostic/replay/short.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));await wide.put(key,'{}',{onlyIf:{etagDoesNotMatch:'*'}});return !!a&&!!b&&!!c&&[...store.objects.keys()].join()===key;},
  'the bucket handle writes only the identity object':async()=>{const store=bucket();const guarded=api.guardedBucket(store);const a=await failure(()=>guarded.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>guarded.delete('diagnostic/identity.json'));return !!a&&!!b&&store.objects.size===0;},
  };
- for(const [name,run] of Object.entries(checks)){try{results[name]=(await run())===true;}catch{results[name]=false;}}
+ for(const [name,run] of Object.entries(checks)){try{results[name]=(await run())===true;}catch(error){if(process.env.DEBUG_SCENARIOS)console.error(name,error?.message,JSON.stringify(error?.details||null));results[name]=false;}}
  return results;
 }
 
@@ -106,6 +109,29 @@ await live.run({command:'schema',apply:true,confirm:live.CONFIRM.schema,env:env(
 await live.run({command:'identity',apply:true,confirm:live.CONFIRM.identity,env:env(),fetchImpl:tplD.fetchImpl,store:tplStore});
 const identityText=tplStore.objects.get('diagnostic/identity.json').bytes.toString('utf8');
 const provisioned=async()=>{const d=fakeD1({template:tplD.file});const store=bucket();await store.put('diagnostic/identity.json',identityText,{onlyIf:{etagDoesNotMatch:'*'}});return {d,store};};
+// The REAL signed S3 client against a fake S3 over a Map (path-style, EU endpoint of the account), with a fake D1 beside it: every request is recorded.
+const realS3=async()=>{
+ const {d}=await provisioned();
+ const objects=new Map([['diagnostic/identity.json',identityText]]),seen=[];
+ const etagOf=key=>'"e-'+key.length+'-'+objects.get(key).length+'"';
+ const fetchImpl=async(url,init={})=>{
+  const href=String(url);
+  if(href.startsWith(BASE))return d.fetchImpl(url,init);
+  const target=new URL(href),method=init.method||'GET';
+  const parts=target.pathname.split('/').filter(Boolean).map(decodeURIComponent),key=parts.slice(1).join('/');
+  const body=init.body==null?null:Buffer.from(init.body).toString('utf8');
+  seen.push({method,host:target.host,bucket:parts[0],key,ifNoneMatch:init.headers?.['if-none-match']??null,contentType:init.headers?.['content-type']??null,auth:String(init.headers?.Authorization||''),body});
+  const reply=(status,text='',headers={})=>new Response(text,{status,headers});
+  if(!key){const contents=[...objects].map(([k,v])=>'<Contents><Key>'+k+'</Key><Size>'+Buffer.byteLength(v)+'</Size><ETag>'+etagOf(k)+'</ETag><LastModified>2026-11-12T00:00:00.000Z</LastModified></Contents>').join('');return reply(200,'<ListBucketResult><IsTruncated>false</IsTruncated>'+contents+'</ListBucketResult>');}
+  if(method==='GET'||method==='HEAD'){if(!objects.has(key))return reply(404);return reply(200,method==='GET'?objects.get(key):'',{etag:etagOf(key),'content-length':String(Buffer.byteLength(objects.get(key)))});}
+  if(method==='PUT'){if(init.headers?.['if-none-match']==='*'&&objects.has(key))return reply(412);objects.set(key,body);return reply(200,'',{etag:etagOf(key)});}
+  throw new Error('unexpected S3 request '+method);
+ };
+ return {d,objects,seen,fetchImpl};
+};
+const linkRoot=path.join(root,'links');fs.mkdirSync(linkRoot,{recursive:true});
+const dirLink=path.join(linkRoot,'to-repo-tests'),fileLink=path.join(linkRoot,'to-repo-file.json');
+fs.symlinkSync(path.resolve('tests'),dirLink,'dir');fs.symlinkSync(path.resolve('package.json'),fileLink);
 const sourceWorld=world();await bootstrap(sourceWorld,0);for(const day of [1,2,3,4,5,6])await commit(sourceWorld,day,'bounded');
 const sourceId=sourceWorld.published.programmeRunId;
 const privateRoot=path.join(root,'private');
@@ -311,6 +337,9 @@ const tamperedFile=path.join(privateRoot,'tampered.json');fs.writeFileSync(tampe
   ['the bucket handle writes any key',"if(!allowed(key))throw new ProvisionError('Write refused: '+key+' is not a key this command may write',3);\n",'','the bucket handle writes only the identity object'],
  ['a malformed read is taken as empty',"if(!only||only.success!==true||!Array.isArray(only.results))throw new ProvisionError('A read response did not prove its result; the state is unknown, not empty',3,{kind:'malformed_read'});\n  return only.results;","return only?.results||[];",'a malformed read does not prove an empty database'],
   ['the S3 adapter is not given the EU endpoint',",R2_SNAPSHOT_ENDPOINT:config.r2Endpoint",'','the real S3 adapter targets the EU endpoint'],
+  ['the lower store never learns the dataset key'," if(apply)s3Allowed.add(key);\n",'','the real S3 adapter writes the dataset key'],
+  ['containment is lexical',"const resolved=realResolve(target),repo=realResolve(REPO);","const resolved=path.resolve(target),repo=REPO;",'a symlink into the repository is refused'],
+  ['the transfer predicate is dropped'," AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='idle')",'','a concurrent transfer change does not move the authority'],
   ['prepare-domain skips the identity check',"async function prepareDomain({d1,bucket,Diag,config,report,apply}){\n await verifyIdentity(d1,bucket,Diag,config);\n","async function prepareDomain({d1,bucket,Diag,config,report,apply}){\n",'prepare-domain needs the identity'],
   ['dataset-put skips the verification'," if(!checked.ok)throw new ProvisionError('The dataset does not verify: '+checked.problems.join(','),3,{problems:checked.problems});\n const key="," const key=",'dataset-put verifies the dataset'],
   ['every command may write the dataset key',"const allowed=key=>key===IDENTITY_OBJECT||(datasetWrites&&DATASET_KEY.test(key));","const allowed=key=>key===IDENTITY_OBJECT||DATASET_KEY.test(key);",'the dataset key is the only extra write'],

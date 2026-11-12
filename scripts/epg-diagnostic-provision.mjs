@@ -51,10 +51,24 @@ export function loadDiagnostic(file=path.join(REPO,'src/epg-diagnostic.js')){ret
 
 export function loadReplay(file=path.join(REPO,'src/epg-replay.js')){return new Function(fs.readFileSync(file,'utf8')+'\nreturn EpgReplay;')();}
 // A private file path must be absolute and outside the Git repository (a dataset holds ledger payloads).
+// Containment is checked on REAL paths: the nearest existing ancestor is resolved through every symlink, so a directory or a file that is a symlink into the repository is refused as well as a
+// path that is lexically inside it.
+function realResolve(target){
+ const parts=[];let current=path.resolve(target);
+ for(;;){
+  try{const real=fs.realpathSync(current);return parts.length?path.join(real,...parts.reverse()):real;}
+  catch(error){
+   if(error?.code!=='ENOENT'&&error?.code!=='ENOTDIR')throw new ProvisionError('The path cannot be resolved',2);
+   const parent=path.dirname(current);
+   if(parent===current)return path.resolve(target);
+   parts.push(path.basename(current));current=parent;
+  }
+ }
+}
 function outsideRepo(target,label){
  if(typeof target!=='string'||!path.isAbsolute(target))throw new ProvisionError(label+' must be an absolute path',2);
- const resolved=path.resolve(target);
- if(resolved===REPO||resolved.startsWith(REPO+path.sep))throw new ProvisionError(label+' must be outside the Git repository',2);
+ const resolved=realResolve(target),repo=realResolve(REPO);
+ if(resolved===repo||resolved.startsWith(repo+path.sep))throw new ProvisionError(label+' must be outside the Git repository',2);
  return resolved;
 }
 
@@ -211,7 +225,7 @@ async function prepareDomain({d1,bucket,Diag,config,report,apply}){
  if(untouched(before)&&before.mode==='d1'){report.prepared='already';report.writes={d1:d1.stats.writes,r2:bucket.writes.length};return report;}
  if(!(untouched(before)&&before.mode==='r2'))throw new ProvisionError('The Discovery authority of the diagnostic domain is neither the seeded state nor the prepared one; nothing was changed',3,{report});
  if(!apply){report.prepared='would_write';report.writes={d1:0,r2:0};return report;}
- await d1.binding.prepare("UPDATE discovery_authority SET mode='d1' WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL").bind().run();
+ await d1.binding.prepare("UPDATE discovery_authority SET mode='d1' WHERE id=1 AND mode='r2' AND cutover='open' AND generation=0 AND programme_run_id IS NULL AND published_programme_run_id IS NULL AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='idle')").bind().run();
  const after=await discoveryState(d1);
  report.discoveryAuthority.after=after;report.writes={d1:d1.stats.writes,r2:bucket.writes.length};
  if(!(untouched(after)&&after.mode==='d1'))throw new ProvisionError('The Discovery authority read back is not d1/open',3,{report});
@@ -219,7 +233,7 @@ async function prepareDomain({d1,bucket,Diag,config,report,apply}){
  return report;
 }
 
-async function putDataset({d1,bucket,Diag,config,report,apply,input}){
+async function putDataset({d1,bucket,Diag,config,report,apply,input,s3Allowed}){
  await verifyIdentity(d1,bucket,Diag,config);
  const file=outsideRepo(input,'--input');
  const text=fs.readFileSync(file,'utf8');
@@ -228,6 +242,7 @@ async function putDataset({d1,bucket,Diag,config,report,apply,input}){
  const checked=await Replay.verifyDataset(dataset);
  if(!checked.ok)throw new ProvisionError('The dataset does not verify: '+checked.problems.join(','),3,{problems:checked.problems});
  const key='diagnostic/replay/'+dataset.digest+'.json';
+ if(apply)s3Allowed.add(key);
  report.dataset={digest:dataset.digest,programmeRunId:dataset.source.programmeRunId,counts:dataset.counts,fidelity:dataset.fidelity,bytes:Buffer.byteLength(text,'utf8'),key};
  const existing=await bucket.get(key);
  if(existing){
@@ -294,7 +309,9 @@ export async function run({command,apply=false,confirm=null,env=process.env,fetc
  const Diag=diagnostic||loadDiagnostic();
  const d1=createD1Client({config,fetchImpl,sleep});
  const live=await target(d1,config);
- const bucketStore=store||createS3Store({credentials:readCredentials({R2_SNAPSHOT_ACCOUNT_ID:config.accountId,R2_SNAPSHOT_ACCESS_KEY_ID:config.accessKeyId,R2_SNAPSHOT_SECRET_ACCESS_KEY:config.secretAccessKey,R2_SNAPSHOT_BUCKET:config.bucket,R2_SNAPSHOT_ENDPOINT:config.r2Endpoint}),fetchImpl,allowedWrites:new Set([IDENTITY_OBJECT])});
+ // The lower store allows the identity object only; `dataset-put` adds exactly the digest-derived key of the dataset it has verified, and no other command can write it.
+ const s3Allowed=new Set([IDENTITY_OBJECT]);
+ const bucketStore=store||createS3Store({credentials:readCredentials({R2_SNAPSHOT_ACCOUNT_ID:config.accountId,R2_SNAPSHOT_ACCESS_KEY_ID:config.accessKeyId,R2_SNAPSHOT_SECRET_ACCESS_KEY:config.secretAccessKey,R2_SNAPSHOT_BUCKET:config.bucket,R2_SNAPSHOT_ENDPOINT:config.r2Endpoint}),fetchImpl,allowedWrites:s3Allowed});
  const bucket=guardedBucket(bucketStore,{datasetWrites:command==='dataset-put'});
  const report={command,mode:apply?'apply':'dry-run',database:{name:live.name,tables:await tableCount(d1)},bucket:{name:config.bucket,objects:((await bucket.list({limit:1})).objects||[]).length},resourceId:config.resourceId};
 
@@ -318,7 +335,7 @@ export async function run({command,apply=false,confirm=null,env=process.env,fetc
  }
 
  if(command==='prepare-domain')return prepareDomain({d1,bucket,Diag,config,report,apply});
- if(command==='dataset-put')return putDataset({d1,bucket,Diag,config,report,apply,input});
+ if(command==='dataset-put')return putDataset({d1,bucket,Diag,config,report,apply,input,s3Allowed});
 
  // identity
  report.assess=await Diag.assess({DB:d1.binding,BUCKET:bucket,resourceId:config.resourceId});

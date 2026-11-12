@@ -316,6 +316,10 @@ const EpgDiagnosticRun=(()=>{
  // Writes the baseline of the dataset into the diagnostic bucket at the keys the real planner reads: the generation ledger, the archive (segments at their own
  // keys, manifest, pointer) and the EPG generation pointer. Idempotent by a marker written last; another dataset's baseline is never overwritten.
  async function materialize(ctxEnv,dataset){
+  // Nothing is written to a domain whose Discovery authority is not d1/open: the replay would not be the production path (fail closed on a missing module or a read error).
+  if(typeof DiscoveryAuthority==='undefined')return {refused:'diagnostic_module_unavailable'};
+  let gate;try{gate=await DiscoveryAuthority.readAuthority(ctxEnv);}catch{return {refused:'domain_not_prepared'};}
+  if(gate.ready!==true)return {refused:'domain_not_prepared'};
   const marker=await ctxEnv.BUCKET.get(MATERIALIZED_KEY);
   // A baseline that a run has already sealed on is consumed: the archive has moved on, so a second run on it would not compare with the dataset. The owner's cleanup resets it.
   if(marker){const body=JSON.parse(await marker.text());return body.datasetDigest===dataset.digest&&!body.consumedBy?{reused:true}:{refused:'domain_not_clean'};}
@@ -332,15 +336,12 @@ const EpgDiagnosticRun=(()=>{
   await put(EPG_GENERATION_KEY,JSON.stringify({phase:'published',programmeRunId:id}));
   // With the Discovery authority of the diagnostic domain in D1, the ledger of the generation is loaded the way a handoff loads it, by the real writer, so that the Discovery lease
   // and its fences work on the same generation as in production. Marker last.
-  if(typeof DiscoveryAuthority!=='undefined'){
-   const gate=await DiscoveryAuthority.readAuthority(ctxEnv);
-   if(gate.ready){
-    const taken=await DiscoveryAuthority.acquireLease(ctxEnv,{programmeRunId:null});
-    if(!taken.lease)return {refused:'discovery_lease_unavailable'};
-    ctxEnv.discoveryLease=taken.lease;
-    try{await DiscoveryAuthority.ingestLedger(ctxEnv,{programmeRunId:id,handoff:true,lease:taken.lease,items:(async function*(){for(const item of dataset.baseline.items)yield item;})()});}
-    finally{await DiscoveryAuthority.releaseLease(ctxEnv,taken.lease);ctxEnv.discoveryLease=null;}
-   }
+  {
+   const taken=await DiscoveryAuthority.acquireLease(ctxEnv,{programmeRunId:null});
+   if(!taken.lease)return {refused:'discovery_lease_unavailable'};
+   ctxEnv.discoveryLease=taken.lease;
+   try{await DiscoveryAuthority.ingestLedger(ctxEnv,{programmeRunId:id,handoff:true,lease:taken.lease,items:(async function*(){for(const item of dataset.baseline.items)yield item;})()});}
+   finally{await DiscoveryAuthority.releaseLease(ctxEnv,taken.lease);ctxEnv.discoveryLease=null;}
   }
   await put(MATERIALIZED_KEY,JSON.stringify({datasetDigest:dataset.digest,programmeRunId:id}));
   return {written:true};
@@ -377,12 +378,7 @@ const EpgDiagnosticRun=(()=>{
    const loaded=await loadDataset(ctx.env,config.datasetDigest);
    if(loaded.refused)return {failure:{code:loaded.refused}};
    const dataset=loaded.dataset,plan=await planOf(dataset,config);
-   // The Discovery ledger of production is D1-owned. A diagnostic domain whose Discovery authority is not `d1`/`open` would run the legacy R2 ledger path (one D1 write, not the production
-   // hundreds) and a report measured on it would say nothing about production: refuse before the baseline is written (the operator's `prepare-domain` sets the marker).
-   if(typeof DiscoveryAuthority!=='undefined'){
-    const gate=await DiscoveryAuthority.readAuthority(ctx.env);
-    if(!gate.ready)return {failure:{code:'domain_not_prepared'}};
-   }
+   // The Discovery authority is checked inside `materialize`, before the first write (the ledger of production is D1-owned; the legacy R2 path would measure nothing about production).
    const materialized=await materialize(ctx.env,dataset);
    if(materialized.refused)return {failure:{code:materialized.refused}};
    const published=await publicationOf(ctx.env,dataset);
