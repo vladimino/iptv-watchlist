@@ -105,6 +105,7 @@ export const WEIGHTS={
  'canonical-producer-adapters-mutation.mjs':6,
  'canonical-epg-producer-mutation.mjs':6,
  'canonical-epg-person-producer-mutation.mjs':8,
+ 'canonical-person-mutation-producer-mutation.mjs':7,
  'canonical-dictionary-producer-mutation.mjs':12,
  'discovery-pipeline-d1-status.mjs':6,
  'epg-status-ledger-mode.mjs':6,

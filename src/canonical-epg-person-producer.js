@@ -1,3 +1,5 @@
+// ADR 0129 (additive): the plan also carries `person_mutation` units (the Person rows, planned first, order: person_mutation, person_state, film_credits) and the bounded reconcile covers that kind in the same pass. A credit unit whose Person is
+// still missing stays the recoverable refusal `film_person_reference` (ADR 0126, ADR 0128), not changed here.
 // AIR-374 P3a, PLANNING AND APPLY LAYER of the EPG producer for Person and credit units (ADR 0126; owner decision of 12 Nov 2026, step 3, delivered separately from the Film layer of ADR 0125). DORMANT: nothing in the Worker imports this
 // module, it is not bundled (build.mjs is unchanged), `epgSync` does not call it and no route, job or cron does. The projector stays the only canonical writer while the marker is `legacy`, `r2` or `prepared`: `applyEpgPersonUnits` and
 // `reconcileEpgRun` read the marker ONCE and, unless it is `open`, return `skipped` before any other statement. `held` and an unreadable marker throw (the producer defers, it never falls back to R2).
@@ -13,9 +15,12 @@
 import {failed} from './film-person-authority.js';
 import {EPG_ORIGIN,EPG_UNIT_HARD_CAP,EPG_UNIT_LIMIT_DEFAULT,epgEvent,epgReplan,epgUnitCap} from './canonical-epg-producer.js';
 import {FILM_FACTS_OPERATION,filmFactsOperation,producerRequestId,producerRouteOpen,reconcileOwnOrigin} from './canonical-producer-adapters.js';
-import {APPLY_UNIT,CREDITS_PER_UNIT_MAX,FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,filmCreditsContent,personStateContent,unitOperation} from './canonical-person-adapters.js';
+import {PERSON_MUTATION_OPERATION,applyPersonMutation,personMutationContent,personMutationOperation} from './canonical-person-mutation-producer.js';
+import {APPLY_UNIT as ADAPTER_APPLY,CREDITS_PER_UNIT_MAX,FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,filmCreditsContent,personStateContent,unitOperation} from './canonical-person-adapters.js';
 
 export {EPG_UNIT_HARD_CAP,EPG_UNIT_LIMIT_DEFAULT};
+// `person_mutation` (ADR 0129) is the Person-row unit: the only one that may create a Person. Its apply function joins the two adapter kinds.
+const APPLY_UNIT={...ADAPTER_APPLY,[PERSON_MUTATION_OPERATION]:applyPersonMutation};
 const HELD=new Set(['film_person_held','film_person_unavailable']);
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const emptyCounts=()=>({applied:0,noop:0,already:0,unknown:0,failed:0,absent:0,pending:0});
@@ -24,10 +29,17 @@ const byId=(a,b)=>a.id<b.id?-1:a.id>b.id?1:0;
 // runId: the EPG run (the source event). at: the write clock. persons: [{id, state}] with `state` = {identity?, localization?, localizationConflicts?} as the source observed it (its own observation times, e.g. `updatedAt`, are content: pass the
 // source's, not the run clock, or an unchanged Person is rewritten every run). credits: [{filmId, credits:[{personId, role}]}] in the source's billing order (at most CREDITS_PER_UNIT_MAX per Film; a longer list is refused with
 // film_person_bounded: splitting it is a later decision). Returns {event, units:[{kind, id, input}]}.
-export function planEpgPersonUnits({runId,at,persons=[],credits=[]}={}){
+export function planEpgPersonUnits({runId,at,persons=[],credits=[],personRows=[]}={}){
  const event=epgEvent(runId);
- if(typeof at!=='string'||!at||!Array.isArray(persons)||!Array.isArray(credits))throw failed('film_person_invalid');
- const people=new Map(),films=new Map();
+ if(typeof at!=='string'||!at||!Array.isArray(persons)||!Array.isArray(credits)||!Array.isArray(personRows))throw failed('film_person_invalid');
+ const people=new Map(),films=new Map(),rows=new Map();
+ // personRows (ADR 0129): [{id, roleId, contractVersion, externalIds?, aliases?, mode?}], the Person rows the run observed. They are planned FIRST, so a `person_state` or `film_credits` unit of the same run finds the Person the row unit created.
+ for(const item of personRows){
+  if(!plain(item)||typeof item.id!=='string'||rows.has(item.id))throw failed('film_person_invalid');
+  const input={id:item.id,at,...(item.mode!==undefined?{mode:item.mode}:{}),person:{roleId:item.roleId,contractVersion:item.contractVersion,...(item.externalIds!==undefined?{externalIds:item.externalIds}:{}),...(item.aliases!==undefined?{aliases:item.aliases}:{})}};
+  personMutationContent(input);
+  rows.set(item.id,{kind:PERSON_MUTATION_OPERATION,id:item.id,input});
+ }
  for(const item of persons){
   if(!plain(item)||typeof item.id!=='string'||!item.id.startsWith('person:')||people.has(item.id))throw failed('film_person_invalid');
   const input={id:item.id,at,person:item.state};
@@ -40,7 +52,7 @@ export function planEpgPersonUnits({runId,at,persons=[],credits=[]}={}){
   // The unit carries the validated, normalized credits (a malformed or duplicated credit refuses the whole plan before anything is read).
   films.set(item.filmId,{kind:FILM_CREDITS_OPERATION,id:item.filmId,input:{id:item.filmId,at,credits:filmCreditsContent({id:item.filmId,credits:item.credits})}});
  }
- const units=[...[...people.values()].sort(byId),...[...films.values()].sort(byId)];
+ const units=[...[...rows.values()].sort(byId),...[...people.values()].sort(byId),...[...films.values()].sort(byId)];
  return {event,units};
 }
 
@@ -107,6 +119,7 @@ export async function reconcileEpgRun(env,{plan,filmPlan,limit,now,policy}={}){
   [FILM_FACTS_OPERATION,filmFactsOperation({replan:epgReplan(filmPlan,env),...clock})],
   [PERSON_STATE_OPERATION,unitOperation(PERSON_STATE_OPERATION,{replan:personReplan,...clock})],
   [FILM_CREDITS_OPERATION,unitOperation(FILM_CREDITS_OPERATION,{replan:personReplan,...clock})],
+  [PERSON_MUTATION_OPERATION,personMutationOperation({replan:personReplan,...clock})],
  ]);
  return reconcileOwnOrigin(env,{origin:EPG_ORIGIN,operations,...(limit!==undefined?{limit}:{}),...clock,...(policy?{policy}:{})});
 }

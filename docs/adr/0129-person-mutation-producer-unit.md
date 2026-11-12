@@ -1,0 +1,53 @@
+# ADR 0129: `person_mutation`, the Person-row producer unit (P3a, planning and apply, dormant)
+
+**Status:** Accepted as DESIGN for offline, dormant code only, within the owner decisions E2, E4 and E5 of 12 Nov 2026, the Controller handoff of 12 Nov 2026 ("deliver `person_mutation` through the existing fenced `mutatePerson` and the receipt adapter BEFORE the real `epgSync` wiring") and guardrail G9 / stage S5-0 of [ADR 0128](0128-epg-canonical-producer-durable-execution.md) (source: [AIR-374](https://trello.com/c/ha7ais3w)). This is not merge approval and not a production GO. Nothing here is wired: `epgSync` is unchanged, the module is not bundled, no marker moves and no production operation is authorized. The number 0129 is provisional: 0128 is held by the design PR of the durable execution plan and 0127 is the highest on `main` at the time of writing; the number is renumbered on merge if a collision appears.  
+**Original decision date:** 2026-11-12  
+**Recorded at:** 2026-11-12  
+**Approval source:** Controller handoff and owner decisions of 12 Nov 2026 (build `person_mutation` before wiring any credit producer); the unit semantics below (creator, ordering, refusals) are the reviewer-level decisions stage S5-0 assigned to this delivery  
+**Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [ADR 0126](0126-epg-producer-layer-person-credits.md), [ADR 0128](0128-epg-canonical-producer-durable-execution.md), [ADR 0123](0123-producer-receipt-adapter-film-facts.md), [ADR 0119](0119-durable-canonical-write-receipts.md), [ADR 0099](0099-canonical-film-person-d1-authority.md), [offline evidence](../evidence/d1-migration/air-374-p3a-person-mutation-offline-2026-11-12.md)  
+**Supersedes:** None  
+**Superseded by:** None
+
+## Context
+
+[ADR 0126](0126-epg-producer-layer-person-credits.md) built the `person_state` and `film_credits` units. Neither creates a Person: `person_state` skips an absent Person and a credit whose Person is missing is refused with `film_person_reference` before any receipt, because nothing in the producer layer owns the Person row (`person`, `person_external_id`, `person_alias`). The fenced writer for that row exists since [ADR 0099](0099-canonical-film-person-d1-authority.md): `mutatePerson`. The operation kind `person_mutation` is already in the closed `OPERATION_KINDS`, and `epg_commit` already requires it, but no adapter exists, so `producer_not_wired:epg_commit` correctly stays a blocker ([ADR 0128](0128-epg-canonical-producer-durable-execution.md) guardrail G9: build `person_mutation` before any credit producer is wired).
+
+## Decision
+
+1. **A new module, no second write path.** `src/canonical-person-mutation-producer.js` plans and applies `person_mutation` units. Its only canonical write is `mutatePerson` with the P3-0a `receiptMark` tail, so the Person mutation and its applied receipt are ONE fenced batch. It has no SQL that changes a table, reads no R2, EPG or dictionary, and is imported only by the EPG Person layer. Below `open` (`legacy`, `r2`, `prepared`) one marker read returns `skipped`; `held` and an unreadable marker throw.
+2. **Who may create a Person: this unit, and only this unit.** The Person row belongs to the Person writer and `person_mutation` is its producer kind, so it is the one legitimate creator. `person_state` and `film_credits` never create one (ADR 0126 is unchanged: an absent Person is `absent`, a missing credit Person is the recoverable `film_person_reference`). Creation is explicit: the unit's `mode` is `ensure` (default, creates an absent row) or `existing` (never creates: an absent Person is `absent`, no receipt, no row). The mode is part of the content digest.
+3. **Presence is proven in the same batch.** `mutatePerson` gains one additive opt-in option, `presence: 'existing' | 'absent'` (one fenced assertion before the row upsert, validated before the database is touched, byte-identical SQL without it). The unit passes `absent` when its fresh read found no row and `existing` otherwise, so a Person that appears (a raw or revisionless insert included) or vanishes between that read and the batch rolls the whole batch back, receipt tail included, with `film_person_precondition` (retryable by the same request id): an appeared row is never overwritten and a vanished one is never recreated by an update.
+4. **What the unit writes, and the protections.** The planner hands the writer only what is still missing, so a stored value is never rewritten. (a) The row: created with the unit's `roleId` and `contractVersion`; an existing row keeps its stored role id (a different one is refused `person_role_collision` before any receipt, and so is a role id held by another Person) and its stored contract version. Like every `mutatePerson` call a real write sets `person.updated_at` and the revision to the write clock; a no-op writes nothing. (b) External ids: insert-if-absent and upsert-only. A stored `(scheme, value)` is never touched (trust, conflict flag and provenance kept), nothing is removed or pruned (the registry's `external_ids_not_pruned_by_the_planner` exception is referenced, not edited or accepted here), and a trusted id whose scheme already holds a DIFFERENT trusted value for that Person is refused `identity_collision`. (c) Aliases: insert-if-absent, none removed. (d) Blank never overwrites: a blank role id, scheme, value or alias, a duplicate id or alias in one unit, or a non-positive contract version is refused `film_person_invalid`; an omitted list writes nothing. (e) Redirects: Persons have no redirect table; Film redirects stay refused by the credit unit. (f) The unit is bounded at 50 external ids plus aliases (`film_person_bounded`, below the writer's 60-statement cap).
+5. **Idempotency and replay.** The digest binds the operation, the target id and the content (a set: external ids and aliases are sorted; the write clock is not content). The request id comes from the source event, the kind, the target and the digest (ADR 0123 decision 4). The pre-plan reads the stored rows and a no-op ends there with NO receipt (E5). A race that leaves nothing to write ends `unknown` (`atomic_mark_missing`), never a second marking batch. The registry spec (readback, replay, revalidate) follows `person_state` and `film_credits`: a re-plan whose digest moved is a source that moved on (terminal abandon), only content refusals mean "no plan" and a transient D1 read failure propagates, so the receipt stays due and is never abandoned as stale.
+6. **Plan order and the EPG layer (additive).** `planEpgPersonUnits` accepts an optional `personRows: [{id, roleId, contractVersion, externalIds?, aliases?, mode?}]` and orders the units `person_mutation`, then `person_state`, then `film_credits` (each by id). A credit unit whose Person the same run created is therefore applied in the same pass; a credit whose Person is still missing remains the recoverable `film_person_reference` (ADR 0126 and ADR 0128 classification unchanged). `applyEpgPersonUnits` applies the new kind with the same ceiling, cursor and refusal isolation. `reconcileEpgRun` covers `person_mutation` in the SAME bounded pass (the adapter's shared inline limit, no per-kind fairness); the re-plan is bound to the run's event, so a receipt of another run is never replayed. No cron, no tick, no global pass. A plan without `personRows` is exactly as before.
+7. **Readiness stays truthful.** No operation is registered in `PRODUCER_OPERATIONS`; `PRODUCER_WIRING`, `APPROVED_EXCEPTIONS` and `handoffReadiness` are unchanged, and `producer_not_wired:epg_commit` remains a blocker (the layer is not wired, and ADR 0128 clears it only in S5-1). The kind was already in `OPERATION_KINDS`, so that list is unchanged.
+
+Not decided: the call site and the source of the Person rows in `epgSync` (which observed Persons become `personRows`, how `contractVersion` is chosen), splitting a Person with more than 50 ids and aliases, the durable cursor and per-unit failure results of ADR 0128, and the E6 ceiling for the combined producer.
+
+## Alternatives considered
+
+- **Let `film_credits` or `person_state` create the Person:** rejected: it would put the Person row under a second owner and let a credit write invent a Person from a reference alone.
+- **Call `mutatePerson` for every observed Person as a plain upsert:** rejected: the writer's upsert overwrites `role_id`, `contract_version` and external-id trust, so a stored or owner-set value would be downgraded, and a vanished or appeared row would be written blindly.
+- **Prune external ids the source no longer lists:** rejected for the planner (upsert-only; the registered exception stays an exception).
+- **A `requireExisting`-style boolean pair on `mutatePerson`:** rejected for one `presence` value, which cannot be both at once.
+
+## Consequences
+
+- A pass at `prepared` costs one marker read. At `open` a changed Person costs the planner reads, the pending-receipt batch, the writer's fresh read and one atomic batch; an unchanged Person costs the reads only and no receipt.
+- The EPG Person plan can now create the Persons its credits point to, so a later wiring PR does not need a second creator.
+- `mutatePerson` has one new, validated, opt-in option; callers that do not pass it are byte-identical.
+
+## Recovery and migration boundary
+
+Code only; nothing calls it and it writes nothing. No migration, flag, Task, cron, marker move, R2 write or production read is involved. Reverting the change removes the module, its tests and the `presence` option; no data depends on it.
+
+## Evidence
+
+- **Original decision:** [AIR-374](https://trello.com/c/ha7ais3w), Controller handoff and owner decisions of 12 Nov 2026.
+- **Implementation:** the `person_mutation` pull request of the same card.
+- **Dated verification:** [offline evidence](../evidence/d1-migration/air-374-p3a-person-mutation-offline-2026-11-12.md), counts only.
+- **Uncertainty:** no production measurement of Person-row volume or changed share exists; the unit sizes (50) and the per-run ceiling are provisional until E6.
+
+## Follow-ups
+
+The call site and the source of the Person rows (S5-1 of ADR 0128), the durable cursor and failure results, and an owner choice on splitting an oversized Person unit.
