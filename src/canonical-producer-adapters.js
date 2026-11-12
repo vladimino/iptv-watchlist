@@ -43,6 +43,9 @@ function withoutClocks(value){
 }
 export function filmFactsContent(input){
  if(!plain(input)||typeof input.id!=='string'||!input.id.startsWith('film:'))throw failed('film_person_invalid');
+ // A RELEASE-ONLY input (`release:true`, ADR 0124) changes membership and nothing else: its content is that intent alone. The Film facts it carries (the stored contract version it is resolved with) are not content, so the digest is stable
+ // whatever the stored Film looks like when the request is replayed.
+ if(input.release===true)return {release:true,watchlist:input.watchlist};
  const content={};
  for(const key of CONTENT_KEYS)if(input[key]!==undefined)content[key]=withoutClocks(input[key]);
  return content;
@@ -109,6 +112,15 @@ export function filmFactsOperation({replan,now=()=>new Date().toISOString()}={})
    return planFilmFacts(snapshot,{...found.input,requestId:receipt.requestId}).noop?'superseded':'proceed';
   },
  });
+}
+
+// Read-only. The concrete writer input of a RELEASE-ONLY unit {id, at, release:true, watchlist:false}: it exists only for a Film the canonical store HOLDS (the stored `film` row, not a plan change), and it carries that row's own
+// contract version and `updated_at` and no identity or title, so the writer re-writes the Film row byte for byte and only the membership (and the revision) changes. null when the Film is absent: a release never creates a Film.
+export async function resolveReleaseInput(env,input){
+ if(!plain(input)||input.release!==true||input.watchlist!==false)throw failed('film_person_invalid');
+ const snapshot=await readFilmSnapshot(env,input.id);
+ if(!snapshot.film||!Number.isInteger(snapshot.film.contract_version))return null;
+ return {...input,film:{contractVersion:snapshot.film.contract_version},updatedAt:snapshot.film.updated_at||input.at};
 }
 
 // The marker gate every entry point uses, for a caller that loops over several units (ADR 0124): ONE marker read. `open` is true only for the canonical route; held and unreadable markers throw.

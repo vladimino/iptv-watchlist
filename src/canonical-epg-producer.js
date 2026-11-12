@@ -6,13 +6,13 @@
 //   - `planEpgUnits`      PURE. One unit per Film that the run observed (its facts) and one release-only unit per departed member (watchlist false). Deterministic order (by id), duplicates refused, the run id is the source event.
 //   - `applyEpgUnits`     bounded, resumable by cursor. At most `limit` units per call (injected, hard ceiling EPG_UNIT_HARD_CAP: the E6 production measurement is not done, so the ceiling is provisional). Each unit goes through
 //                         `applyFilmFacts` (no-op pre-plan before any receipt, ONE atomic fenced batch with the applied receipt, uncertain race = unknown, never a silent second batch). A refusal of one unit never blocks the others;
-//                         `film_person_held` / `film_person_unavailable` stop the pass and keep the cursor on that unit. A release-only unit for a Film that does not exist is skipped: a release never creates a Film.
-//   - `epgReplan`         the producer's re-plan for the receipts replay: the unit of the run for a receipt target, or null (a receipt of another run or a Film without a unit cannot be replayed).
+//                         `film_person_held` / `film_person_unavailable` stop the pass and keep the cursor on that unit. A release-only unit is resolved against the stored Film row: absent is skipped (a release never creates a Film), present keeps its contract version, identity, title and updated_at.
+//   - `epgReplan`         the producer's re-plan for the receipts replay: the unit of the run for a receipt target, or null; the receipt's request id is recomputed from THIS run's event, so a receipt of another run is never replayed.
 //   - `reconcileEpg`      E2: the adapter's bounded inline reconcile for the origin `epg` only. No cron, no tick, no global pass.
 // Request ids come from the run id (the event), the Film (the target) and the content digest of the adapter; the same run observing the same Film twice is the same request, a new run or other content is another one.
 // Stored: operation kind, origin, target, digests, revisions, state; no payload, title or personal data.
 import {failed} from './film-person-authority.js';
-import {FILM_FACTS_OPERATION,applyFilmFacts,filmFactsDigest,filmFactsOperation,prePlanFilmFacts,producerRequestId,producerRouteOpen,reconcileOwnOrigin} from './canonical-producer-adapters.js';
+import {FILM_FACTS_OPERATION,applyFilmFacts,filmFactsOperation,producerRequestId,producerRouteOpen,reconcileOwnOrigin,resolveReleaseInput} from './canonical-producer-adapters.js';
 
 export const EPG_ORIGIN='epg';
 // Provisional ceiling of units per call: ~10 D1 round trips per changed Film against the repository's 800-query run budget leaves room for fewer than 80. The real per-run size is the E6 measurement (production read, not authorized here).
@@ -39,15 +39,26 @@ export function planEpgUnits({runId,at,films=[],departed=[]}={}){
  for(const id of departed){
   if(typeof id!=='string'||!id.startsWith('film:'))throw failed('film_person_invalid');
   if(units.has(id))continue;
-  units.set(id,{id,release:true,input:{id,at,film:{contractVersion:1},watchlist:false}});
+  units.set(id,{id,release:true,input:{id,at,release:true,watchlist:false}});
  }
  return {event,units:[...units.values()].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0)};
 }
 
-// The re-plan the receipts module asks for when it replays or revalidates a receipt: the unit of THIS run for the receipt's Film. null when the run has no such unit.
-export function epgReplan(plan){
+// The re-plan the receipts module asks for when it replays or revalidates a receipt: the unit of THIS run for the receipt's Film, and only when the receipt belongs to this run: the request id is recomputed from this plan's event, the
+// receipt's target and its content digest and must equal the receipt's own (a digest alone does not encode the event, so a receipt of run A would otherwise replay from run B that observed the same facts). null otherwise (no unit, another
+// run, a malformed receipt): the receipts module then treats it as no re-plan (counted retry with backoff, abandoned by attempts or expiry; never abandoned merely because another run is planned). A release-only unit is resolved
+// against the stored Film through `env`; with no `env` or no stored Film it cannot be re-planned (a release never creates a Film).
+export function epgReplan(plan,env){
  const byId=new Map((plan?.units||[]).map(unit=>[unit.id,unit]));
- return async receipt=>byId.get(receipt?.target?.id)?.input||null;
+ return async receipt=>{
+  const unit=byId.get(receipt?.target?.id);
+  if(!unit||typeof plan?.event!=='string')return null;
+  let expected=null;
+  try{expected=await producerRequestId({origin:EPG_ORIGIN,event:plan.event,target:receipt.target,digest:receipt.contentDigest});}catch{return null;}
+  if(expected!==receipt.requestId)return null;
+  if(!unit.release)return unit.input;
+  return env?resolveReleaseInput(env,unit.input):null;
+ };
 }
 
 // The units one call may visit: the injected limit raised to at least 1 and never above the hard ceiling.
@@ -67,13 +78,13 @@ export async function applyEpgUnits(env,{plan,cursor=0,limit=EPG_UNIT_LIMIT_DEFA
  for(;index<plan.units.length&&index-cursor<cap;index++){
   const unit=plan.units[index];
   try{
+   let input=unit.input;
    if(unit.release){
-    // A release never creates a Film: a member the canonical store does not hold has nothing to release.
-    const requestId=await producerRequestId({origin:EPG_ORIGIN,event:plan.event,target:{kind:'film',id:unit.id},digest:await filmFactsDigest(unit.input)});
-    const pre=await prePlanFilmFacts(env,{input:unit.input,requestId});
-    if(pre.changes.includes('film')){counts.absent++;continue;}
+    // A release never creates a Film and never rewrites one: it is resolved against the STORED Film row (its own contract version and updated_at, no identity or title), so only membership and the revision change. No stored row: nothing to release.
+    input=await resolveReleaseInput(env,unit.input);
+    if(!input){counts.absent++;continue;}
    }
-   const outcome=await applyFilmFacts(env,{origin:EPG_ORIGIN,event:plan.event,input:unit.input,...(now?{now}:{}),...(policy?{policy}:{})});
+   const outcome=await applyFilmFacts(env,{origin:EPG_ORIGIN,event:plan.event,input,...(now?{now}:{}),...(policy?{policy}:{})});
    if(outcome.state==='noop')counts.noop++;
    else if(outcome.already===true)counts.already++;
    else if(outcome.state==='applied')counts.applied++;
@@ -91,6 +102,6 @@ export async function applyEpgUnits(env,{plan,cursor=0,limit=EPG_UNIT_LIMIT_DEFA
 
 // E2: the producer's own receipts only, at most the adapter's inline bound per call. `plan` supplies the re-plan of THIS run; a receipt of an earlier run is then abandoned `producer_source_changed` or backs off, never replayed.
 export async function reconcileEpg(env,{plan,limit,now,policy}={}){
- const operations=new Map([[FILM_FACTS_OPERATION,filmFactsOperation({replan:epgReplan(plan),...(now?{now}:{})})]]);
+ const operations=new Map([[FILM_FACTS_OPERATION,filmFactsOperation({replan:epgReplan(plan,env),...(now?{now}:{})})]]);
  return reconcileOwnOrigin(env,{origin:EPG_ORIGIN,operations,...(limit!==undefined?{limit}:{}),...(now?{now}:{}),...(policy?{policy}:{})});
 }

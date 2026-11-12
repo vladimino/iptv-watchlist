@@ -16,6 +16,7 @@ const E=await load('canonical-epg-producer.js');
 const {writeFilmFacts}=await load('canonical-film-writers.js');
 const {readAuthority}=await load('film-person-authority.js');
 const {PRODUCER_WIRING,PRODUCER_OPERATIONS}=await load('canonical-producers.js');
+const {producerRequestId,filmFactsDigest,filmFactsContent}=await load('canonical-producer-adapters.js');
 const {planEpgUnits,applyEpgUnits,reconcileEpg,epgReplan,epgUnitCap,EPG_UNIT_HARD_CAP,EPG_UNIT_LIMIT_DEFAULT}=E;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-producer-'));
@@ -64,7 +65,8 @@ const plan=(over={})=>planEpgUnits({runId:'run-1',at:T,films:films3,departed:[],
  assert.equal(p.event,'epg:run-1');
  assert.deepEqual(p.units.map(unit=>unit.id),[ID(1),ID(2),ID(3),ID(9)],'sorted by id; an observed member is not also released');
  assert.deepEqual(p.units.map(unit=>unit.release),[false,false,false,true]);
- assert.deepEqual(p.units[3].input,{id:ID(9),at:T,film:{contractVersion:1},watchlist:false});
+ assert.deepEqual(p.units[3].input,{id:ID(9),at:T,release:true,watchlist:false},'a release carries no Film facts: the contract version comes from the stored row');
+ assert.deepEqual(filmFactsContent(p.units[3].input),{release:true,watchlist:false});
  assert.equal(p.units[0].input.at,T);assert.equal(p.units[0].input.id,ID(1));
  const dirty=planEpgUnits({runId:'r',at:T,films:[{id:ID(1),facts:{...facts(),id:'film:other',at:'x',requestId:'q',expectedRevision:7,receiptMark:{}}}]});
  assert.deepEqual(Object.keys(dirty.units[0].input).sort(),['at','film','id','metadata','sync','watchlist'],'caller-supplied id, clock, request id, revision and receipt mark are dropped');
@@ -74,8 +76,12 @@ const plan=(over={})=>planEpgUnits({runId:'run-1',at:T,films:films3,departed:[],
   assert.throws(()=>plan(bad),code('film_person_invalid'),JSON.stringify(Object.keys(bad)));
  assert.deepEqual(plan({films:[],departed:[]}).units,[]);
  const replan=epgReplan(p);
- assert.equal((await replan({target:{id:ID(2)}})).film.originalTitle,'B');
+ const own=async id=>{const target={kind:'film',id},unit=p.units.find(item=>item.id===id),contentDigest=await filmFactsDigest(unit.input);return {target,contentDigest,requestId:await producerRequestId({origin:'epg',event:p.event,target,digest:contentDigest})};};
+ assert.equal((await replan(await own(ID(2)))).film.originalTitle,'B');
  assert.equal(await replan({target:{id:ID(77)}}),null);assert.equal(await replan({}),null);assert.equal(await epgReplan(null)({target:{id:ID(1)}}),null);
+ assert.equal(await replan({...(await own(ID(2))),requestId:(await own(ID(1))).requestId}),null,'a receipt whose request id is not this run\'s is not re-planned');
+ assert.equal(await replan({...(await own(ID(2))),contentDigest:(await own(ID(1))).contentDigest}),null);
+ assert.equal(await replan(await own(ID(9))),null,'a release has no re-plan without the store to resolve it against');
  assert.equal(epgUnitCap(1000),EPG_UNIT_HARD_CAP);assert.equal(epgUnitCap(0),1);assert.equal(epgUnitCap(undefined),1);assert.equal(epgUnitCap(-5),1);assert.equal(epgUnitCap(7),7);
  assert.ok(EPG_UNIT_LIMIT_DEFAULT<=EPG_UNIT_HARD_CAP&&EPG_UNIT_HARD_CAP<=80,'the ceiling stays under the 800-query run budget at ~10 round trips per changed Film');
 }
@@ -261,6 +267,78 @@ function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film W
  const [done]=receipts(file);
  assert.deepEqual([done.state,done.attempts,done.applied_revision,done.origin],['applied',2,2,'epg']);
  assert.equal(member(file,ID(1)),1);assert.equal(revision(file,ID(1)),2);
+}
+
+// 8. BLOCKER 1: a release-only unit is resolved against the STORED Film. Missing Film: skipped and never created. Existing Film at contract version 2 (and with identity and title): only the membership and the revision change, the Film row is
+// untouched (contract version, title, identity, updated_at), in ONE receipted atomic batch. A departed non-member is a no-op. The release of a Film whose contract version differs from 1 does NOT overwrite it with 1.
+{
+ const file=database('open');
+ const U='2026-11-01T00:00:00.000Z';
+ assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('"+ID(20)+"',2,'Kept Title','"+U+"'),('"+ID(21)+"',1,'Plain','"+U+"'),('"+ID(22)+"',3,'Not Member','"+U+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('"+ID(20)+"','"+U+"'),('"+ID(21)+"','"+U+"')").status,0);
+ const filmRow=id=>JSON.stringify(rows(file,"SELECT * FROM film WHERE id='"+id+"'"));
+ const before={20:filmRow(ID(20)),21:filmRow(ID(21)),22:filmRow(ID(22))};
+ const p=planEpgUnits({runId:'rel-1',at:T,films:[],departed:[ID(20),ID(21),ID(22),ID(23)]});
+ const env=envOf(file);
+ const out=await applyEpgUnits(env,{plan:p,now:()=>T});
+ assert.deepEqual([out.done,out.counts.applied,out.counts.noop,out.counts.absent,out.counts.failed,out.counts.unknown],[true,2,1,1,0,0]);
+ assert.equal(env.DB.calls.batches,4,'two changed Films, two batches each (pending receipt, atomic write with the applied receipt)');
+ for(const id of [20,21,22])assert.equal(filmRow(ID(id)),before[id],'the Film row of '+id+' is byte for byte what it was: contract version, title, identity, updated_at');
+ assert.equal(one(file,"SELECT contract_version FROM film WHERE id='"+ID(20)+"'"),2,'not overwritten with 1');
+ assert.equal(filmCount(file,ID(23)),0,'a missing Film is never created');
+ assert.deepEqual([member(file,ID(20)),member(file,ID(21)),member(file,ID(22)),member(file,ID(23))],[0,0,0,0]);
+ assert.deepEqual([revision(file,ID(20)),revision(file,ID(21)),revision(file,ID(22)),revision(file,ID(23))],[1,1,0,0],'only the released members move their revision; the non-member and the missing Film do not');
+ const list=receipts(file);
+ assert.deepEqual(list.map(item=>[item.target_id,item.state,item.applied_revision]),[[ID(20),'applied',1],[ID(21),'applied',1]],'one applied receipt per released member, none for the no-op or the missing Film');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_metadata WHERE film_id IN ('"+ID(20)+"','"+ID(21)+"')"),0,'no other row is written');
+ assert.equal(one(file,"SELECT COUNT(*) FROM film_dimension WHERE film_id IN ('"+ID(20)+"','"+ID(21)+"')"),0);
+ // Again: everything is a no-op, no batch, nothing moves.
+ const stable=dump(file),again=envOf(file);
+ const second=await applyEpgUnits(again,{plan:p,now:()=>T});
+ assert.deepEqual([second.counts.noop,second.counts.absent,second.counts.applied],[3,1,0]);assert.equal(again.DB.calls.batches,0);assert.equal(dump(file),stable);
+}
+
+// 9. BLOCKER 2: a receipt of run A is never replayed from run B, even when B observed the same content (the content digest does not encode the event); the same run replays it with the SAME request id. The write of run A fails
+// transiently (the revision does not move), so the receipt is due and failed with a counted attempt.
+{
+ const file=database('open');
+ const mk=runId=>planEpgUnits({runId,at:T,films:[{id:ID(1),facts:facts('A')}]});
+ const A=mk('run-A'),B=mk('run-B');
+ assert.equal(await filmFactsDigest(A.units[0].input),await filmFactsDigest(B.units[0].input),'same content, same digest');
+ let seen=0;
+ const flaky=envOf(file,{onBatch:async()=>{seen++;if(seen===2)throw new Error('transient');}});
+ const first=await applyEpgUnits(flaky,{plan:A,now:()=>T});
+ assert.equal(first.counts.applied,0);
+ const [failedReceipt]=receipts(file);
+ assert.equal(failedReceipt.applied_revision,null);assert.equal(filmCount(file,ID(1)),0);
+ const fromB=await reconcileEpg(envOf(file),{plan:B,now:()=>iso(3600000)});
+ assert.equal(fromB.considered,1);
+ const [afterB]=receipts(file);
+ assert.equal(afterB.request_id,failedReceipt.request_id,'the original request id is kept');
+ assert.notEqual(afterB.state,'applied','run B does not settle run A\'s request');
+ assert.equal(filmCount(file,ID(1)),0,'no canonical write from the other run');assert.equal(revision(file,ID(1)),0);
+ assert.ok(afterB.attempts>=failedReceipt.attempts&&afterB.state!=='abandoned','a counted retry, not an abandonment on an arbitrary new run: '+JSON.stringify(afterB));
+ const fromA=await reconcileEpg(envOf(file),{plan:A,now:()=>iso(2*3600000+1)});
+ assert.equal(fromA.considered,1);
+ const [afterA]=receipts(file);
+ assert.deepEqual([afterA.state,afterA.request_id,afterA.applied_revision],['applied',failedReceipt.request_id,1],'the same run replays under the same request id: '+JSON.stringify(afterA));
+ assert.equal(member(file,ID(1)),1);assert.equal(title(file),'A');
+}
+
+// 9b. A release-only receipt of the same run is replayed through the stored Film (contract version kept); the release of another run is not.
+{
+ const file=database('open');
+ const U='2026-11-01T00:00:00.000Z';
+ assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('"+ID(30)+"',2,'Kept','"+U+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('"+ID(30)+"','"+U+"')").status,0);
+ const A=planEpgUnits({runId:'rel-A',at:T,departed:[ID(30)]}),B=planEpgUnits({runId:'rel-B',at:T,departed:[ID(30)]});
+ let seen=0;
+ await applyEpgUnits(envOf(file,{onBatch:async()=>{seen++;if(seen===2)throw new Error('transient');}}),{plan:A,now:()=>T});
+ assert.equal(member(file,ID(30)),1);
+ await reconcileEpg(envOf(file),{plan:B,now:()=>iso(3600000)});
+ assert.equal(member(file,ID(30)),1,'another run does not replay the release');
+ await reconcileEpg(envOf(file),{plan:A,now:()=>iso(2*3600000+1)});
+ assert.equal(member(file,ID(30)),0);
+ assert.deepEqual(rows(file,"SELECT contract_version,original_title,updated_at FROM film WHERE id='"+ID(30)+"'"),[{contract_version:2,original_title:'Kept',updated_at:U}]);
+ assert.deepEqual([receipts(file)[0].state,revision(file,ID(30))],['applied',1]);
 }
 
 // 7. Static: dormant. No source file imports the module, build.mjs and the Worker do not name it, it imports exactly the adapter and the authority helpers, names no network, timer, cron or R2 API and holds no SQL;
