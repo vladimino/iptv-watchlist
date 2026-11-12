@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
-import {DEFAULT_WEIGHT, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
+import {DEFAULT_WEIGHT, FIRST_SHARD_OFFSET, WEIGHTS, capture, HEAD_LIMIT, TAIL_LIMIT, parseShard, planTests} from '../scripts/run-tests.mjs';
 
 const runner = path.resolve('scripts/run-tests.mjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'air378-runner-'));
@@ -277,7 +277,10 @@ fs.unlinkSync(me);`;
       assert.deepEqual(parts.flatMap(filesOf).sort(), [...whole.parallel, ...whole.serial].sort(), `the ${count} shards of the real suite are the whole suite, once`);
       // AIR-374: the shards are balanced by WEIGHTS (greedy, heaviest first), not by file count: their weights differ by less than the lightest listed file, and the two heaviest files are apart
       const load = parts.map(part => filesOf(part).reduce((sum, file) => sum + weightOf(file), 0));
-      assert.ok(Math.max(...load) - Math.min(...load) <= lightest, `${count} shards carry the same weight: ${load.join(' vs ')}`);
+      // Shard 1 also runs the documentation governance check and the build outside `Run tests`, so it is dealt FIRST_SHARD_OFFSET less: with the offset added back the shards are equal, and shard 1 really is the lightest by about that much.
+      const offsetLoad = load.map((value, index) => index === 0 ? value + FIRST_SHARD_OFFSET : value);
+      assert.ok(Math.max(...offsetLoad) - Math.min(...offsetLoad) <= lightest, `${count} shards carry the same weight, shard 1 less by the offset: ${load.join(' vs ')} (offset ${FIRST_SHARD_OFFSET})`);
+      assert.ok(Math.min(...load.slice(1)) - load[0] >= FIRST_SHARD_OFFSET - lightest, `shard 1 carries less weight than every other shard of ${count}: ${load.join(' vs ')}`);
       assert.ok(Math.max(...parts.map(part => part.total)) - Math.min(...parts.map(part => part.total)) <= 30, `no shard of ${count} is nearly empty`);
       // The serial-only files run after the parallel phase and add their whole duration to a shard's wall time, so their weight is their solo time (times the six files that share a wall second), not their contended time: the shard that carries one is not also dealt a full parallel share.
       const serialOwners = ['local-dev-smoke.mjs', 'sqlite-session-semantics.mjs'].map(file => {
@@ -287,7 +290,7 @@ fs.unlinkSync(me);`;
       assert.ok(serialOwners.every(owner => owner >= 0), `every serial-only file is in a shard of ${count}`);
       assert.notEqual(serialOwners[0], serialOwners[1], `the two serial-only files are in different shards of ${count}`);
       // The mutation files are CPU-bound and starve each other when they share a shard (the 12 Nov 2026 CI imbalance): they are dealt as a class of their own, so each shard carries about the same share of them, and the two heaviest are apart.
-      const mutationLoad = parts.map(part => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
+      const mutationLoad = parts.map((part, index) => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0) + (index === 0 ? FIRST_SHARD_OFFSET : 0));
       assert.ok(Math.max(...mutationLoad) - Math.min(...mutationLoad) <= lightest * 2, `the mutation files are shared evenly across ${count}: ${mutationLoad.join(' vs ')}`);
       assert.notEqual(parts.findIndex(part => part.parallel.includes(heaviestMutation[0])), parts.findIndex(part => part.parallel.includes(heaviestMutation[1])), `the two heaviest mutation files are in different shards of ${count}`);
       assert.deepEqual(planTests({directory: 'tests', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
