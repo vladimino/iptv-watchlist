@@ -6,6 +6,9 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {exportSnapshot,verifySnapshot,ExportError} from '../scripts/migration-export.mjs';
 
+// AIR-374: the exporter waits 100, 200 and 300 ms between retries of a failed request (scripts/migration-export.mjs); the cases that inject failures only count the attempts and
+// look at the outcome, never at the delay, so those waits (about 6 s of idle time in total) are shortened to 1 ms here. Other timers keep their real delay.
+{const realSetTimeout=globalThis.setTimeout;globalThis.setTimeout=(callback,milliseconds,...rest)=>realSetTimeout(callback,milliseconds>=100&&milliseconds<=300?1:milliseconds,...rest);}
 const source=await readFile('src/migration-export.js','utf8');
 const context=vm.createContext({Response,Request,URL,JSON,Date,crypto:webcrypto});
 vm.runInContext(source+'\nglobalThis.handleMigrationExport=migrationExportRoute;',context);
