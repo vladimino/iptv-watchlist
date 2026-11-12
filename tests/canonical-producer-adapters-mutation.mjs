@@ -68,6 +68,66 @@ const MUTANTS=[
  ["an unreadable target is abandoned at once", "canonical-receipts.js", "if(timeOf(at)-timeOf(row.createdAt)>policy.abandonAfterMs){\n    try", "if(true){\n    try"],
  ["film_facts is not an operation kind", "canonical-receipts.js", "'film_merge','film_facts','film_credits','film_metadata'", "'film_merge','film_credits','film_metadata'"]
 ];
+const LEARN=process.env.ADAPTER_LEARN==='1';
+const HINTS={
+ "applyFilmFacts ignores the route":"1",
+ "reconcileOwnOrigin ignores the route":"1",
+ "the digest keeps the write clock at":"2",
+ "the digest keeps updatedAt":"2",
+ "the digest ignores the target id":"2",
+ "the digest ignores the facts":"2",
+ "the request id drops the source event":"2",
+ "the request id drops the digest":"2",
+ "the request id drops the target":"2",
+ "the event is optional":"2",
+ "a blank event is accepted":"2",
+ "the event length is unbounded":"2",
+ "the target kind is unchecked":"2",
+ "the digest shape is unchecked":"2",
+ "a no-op still creates a receipt":"3",
+ "the pre-plan reports the planned revision as 0":"6",
+ "the adapter write is not atomic":"3",
+ "the spec is not atomic":"1",
+ "the writer gets no receipt mark":"3",
+ "the replay gets no receipt mark":"8",
+ "the writer runs against the planned revision on a retry":"8b",
+ "the replay runs against the planned revision":"8",
+ "the writer uses another request id than the receipt":"3b",
+ "the writer mark carries another attempt":"8b",
+ "the reconcile drops the origin":"10",
+ "the inline limit is not applied":"10",
+ "the inline reconcile needs no origin":"10",
+ "the inline reconcile needs no registry":"10",
+ "the replay trusts a changed re-plan":"9",
+ "the replay trusts a missing re-plan":"9",
+ "the re-plan digest is not compared":"9",
+ "the readback treats absent content as present":"8",
+ "the readback treats present content as absent":"7",
+ "the revalidation always proceeds":"9",
+ "the revalidation never proceeds":"8",
+ "the revalidation proceeds without a re-plan":"9",
+ "the spec needs no re-plan hook":"9",
+ "the outcome loses the request id":"3",
+ "the listing ignores the origin":"10",
+ "the listing origin is applied after the limit":"10",
+ "the listing origin is not validated":"10",
+ "the reconcile does not pass the origin on":"10",
+ "the reconcile origin is not validated":"10",
+ "a changed re-plan throws instead of declaring a disposition":"9",
+ "a changed re-plan reads as present or absent content":"9",
+ "the source-changed class is another one":"9",
+ "a missing re-plan is terminal":"9",
+ "a missing re-plan throws out of the readback":"9",
+ "a throwing re-plan escapes":"9",
+ "a declared disposition is not recognised":"12",
+ "a declared class is not validated":"12",
+ "the reconcile does not act on a declared disposition":"12",
+ "the reconcile abandons with another class":"12",
+ "the natural path ignores a declared disposition":"12",
+ "an unreadable target waits forever":"12",
+ "an unreadable target is abandoned at once":"10",
+ "film_facts is not an operation kind":"1"
+};
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'producer-adapters-mutants-'));
 try{
  const sources=new Map();
@@ -77,10 +137,14 @@ try{
  const template=path.join(dir,'template.sqlite');
  const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
- const run=(env)=>new Promise(resolve=>{
+ // AIR-374: a mutant first runs only the numbered section of the test that killed it when the hints were learned (HINTS: mutant name to section id); a mutant that passes that run is run
+ // against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the UNMUTATED test must pass too, or a
+ // lean run could "kill" for a reason of its own. ADAPTER_LEARN=1 runs every mutant whole and prints HINTS for the file.
+ const learned={};
+ const run=(env,name)=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-producer-adapters.mjs'],{env:{...process.env,ADAPTER_TEMPLATE:template,...env},stdio:['ignore','ignore','pipe']});
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
-  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));const seen=/LEAN_SECTION (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=seen[1];resolve(code);});
  });
  assert.equal(await run({}),0,'the unmutated test passes');
  const queue=MUTANTS.map(([name,file,from,to],index)=>{
@@ -89,8 +153,19 @@ try{
   fs.writeFileSync(path.join(copy,file),text(file).replace(from,()=>to));
   return {name,env:{ADAPTER_SRC:copy}};
  });
- const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.env);fs.rmSync(item.env.ADAPTER_SRC,{recursive:true,force:true});if(code===0)survivors.push(item.name);}}));
+ const survivors=[];let fallbacks=0;
+ for(const name of Object.keys(HINTS))assert.ok(MUTANTS.some(item=>item[0]===name),'a hint names no mutant: '+name);
+ for(const section of new Set(Object.values(HINTS)))queue.unshift({control:{ADAPTER_ONLY:section}});
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){
+  const item=queue.shift();
+  if(item.control){assert.equal(await run(item.control),0,'the unmutated test passes with '+JSON.stringify(item.control));continue;}
+  const hint=LEARN?undefined:HINTS[item.name];
+  let code=hint?await run({...item.env,ADAPTER_ONLY:hint},item.name):0;
+  if(code===0){if(hint)fallbacks++;code=await run(item.env,item.name);}
+  fs.rmSync(item.env.ADAPTER_SRC,{recursive:true,force:true});
+  if(code===0)survivors.push(item.name);
+ }}));
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(MUTANTS.map(item=>[item[0],learned[item[0]]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
- console.log('canonical-producer-adapters-mutation: ok ('+MUTANTS.length+' mutants killed)');
+ console.log('canonical-producer-adapters-mutation: ok ('+MUTANTS.length+' mutants killed'+(fallbacks?', '+fallbacks+' needed the whole file: refresh HINTS with ADAPTER_LEARN=1':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

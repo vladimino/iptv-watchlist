@@ -63,6 +63,61 @@ const MUTANTS=[
  ["the cursor is malformed-tolerant", "canonical-epg-producer.js", "||!Number.isInteger(cursor)||cursor<0)throw", "||false)throw"],
  ["a plan without an event is accepted", "canonical-epg-producer.js", "typeof plan.event!=='string'||", ""]
 ];
+const LEARN=process.env.EPGPRODUCER_LEARN==='1';
+const HINTS={
+ "the gate ignores the route":"2",
+ "the gate always skips":"2",
+ "the route helper is always open":"2",
+ "the route helper is never open":"3",
+ "the origin is not epg":"1",
+ "the hard cap is lifted":"1",
+ "the cap floor is removed":"1",
+ "the hard cap exceeds the budget":"1",
+ "the default exceeds the ceiling":"1",
+ "the pass ignores the cursor":"3",
+ "the pass ignores the limit":"3",
+ "done is always true":"3",
+ "a held marker does not stop the pass":"5",
+ "an unreadable marker does not stop the pass":"5b",
+ "a refusal stops the whole pass":"4",
+ "a refusal is not recorded":"4",
+ "a release creates a missing Film":"3",
+ "every release is skipped":"3",
+ "a release does not clear membership":"1",
+ "a release overwrites the stored contract version":"8",
+ "a release touches the Film clock":"8",
+ "a release existence test is the plan change":"8",
+ "a release digest includes the Film facts":"1",
+ "the replay is not bound to the run event":"1",
+ "the replay binds to a fixed event":"1",
+ "the replay ignores the receipt digest":"1",
+ "a release re-plans without the store":"1",
+ "reconcile does not give the store to the re-plan":"9b",
+ "a departed member that is observed is released":"1",
+ "duplicates are accepted":"1",
+ "the units are not sorted":"1",
+ "the sort is descending":"1",
+ "caller clocks survive":"1",
+ "the run clock is not applied":"1",
+ "the run id is not required":"1",
+ "the run id is not bounded":"1",
+ "the event is not namespaced":"1",
+ "the clock is not required":"1",
+ "departed ids are not validated":"1",
+ "film ids are not validated":"1",
+ "the re-plan ignores the Film":"1",
+ "the re-plan is always empty":"1",
+ "reconcile uses another origin":"5d",
+ "reconcile drops the origin":"2",
+ "reconcile drops the limit":"5d",
+ "reconcile drops the plan":"6",
+ "the unit does not use the run event":"3b",
+ "noop is counted as applied":"3",
+ "already is not counted":"3",
+ "an unknown outcome is counted applied":"5c",
+ "the cursor is malformed-tolerant":"2",
+ "a plan without an event is accepted":"2"
+};
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'epg-producer-mutants-'));
 try{
  const sources=new Map();
@@ -72,10 +127,14 @@ try{
  const template=path.join(dir,'template.sqlite');
  const chain=fs.readdirSync('migrations').filter(file=>/^\d{4}_.*\.sql$/.test(file)).sort();
  assert.equal(sqliteSync(['-bail',template],{input:chain.map(file=>fs.readFileSync('migrations/'+file,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26}).status,0);
- const run=(env)=>new Promise(resolve=>{
+ // AIR-374: a mutant first runs only the numbered section of the test that killed it when the hints were learned (HINTS: mutant name to section id); a mutant that passes that run is run
+ // against the WHOLE file before it is called a survivor, so a stale or wrong hint costs time and never hides a survivor. Every distinct lean run of the UNMUTATED test must pass too, or a
+ // lean run could "kill" for a reason of its own. EPGPRODUCER_LEARN=1 runs every mutant whole and prints HINTS for the file.
+ const learned={};
+ const run=(env,name)=>new Promise(resolve=>{
   const child=spawn(process.execPath,['tests/canonical-epg-producer.mjs'],{env:{...process.env,EPG_TEMPLATE:template,...env},stdio:['ignore','ignore','pipe']});
   let err='';child.stderr.on('data',chunk=>{err+=chunk;});
-  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));resolve(code);});
+  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+JSON.stringify(env)+': '+err.slice(0,300));const seen=/LEAN_SECTION (\S+)/.exec(err);if(name&&code!==0&&seen)learned[name]=seen[1];resolve(code);});
  });
  assert.equal(await run({}),0,'the unmutated test passes');
  const queue=MUTANTS.map(([name,file,from,to],index)=>{
@@ -84,8 +143,19 @@ try{
   fs.writeFileSync(path.join(copy,file),text(file).replace(from,()=>to));
   return {name,env:{EPG_SRC:copy}};
  });
- const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.env);fs.rmSync(item.env.EPG_SRC,{recursive:true,force:true});if(code===0)survivors.push(item.name);}}));
+ const survivors=[];let fallbacks=0;
+ for(const name of Object.keys(HINTS))assert.ok(MUTANTS.some(item=>item[0]===name),'a hint names no mutant: '+name);
+ for(const section of new Set(Object.values(HINTS)))queue.unshift({control:{EPGPRODUCER_ONLY:section}});
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){
+  const item=queue.shift();
+  if(item.control){assert.equal(await run(item.control),0,'the unmutated test passes with '+JSON.stringify(item.control));continue;}
+  const hint=LEARN?undefined:HINTS[item.name];
+  let code=hint?await run({...item.env,EPGPRODUCER_ONLY:hint},item.name):0;
+  if(code===0){if(hint)fallbacks++;code=await run(item.env,item.name);}
+  fs.rmSync(item.env.EPG_SRC,{recursive:true,force:true});
+  if(code===0)survivors.push(item.name);
+ }}));
+ if(LEARN)console.log('const HINTS='+JSON.stringify(Object.fromEntries(MUTANTS.map(item=>[item[0],learned[item[0]]]).filter(entry=>entry[1])),null,1)+';');
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
- console.log('canonical-epg-producer-mutation: ok ('+MUTANTS.length+' mutants killed)');
+ console.log('canonical-epg-producer-mutation: ok ('+MUTANTS.length+' mutants killed'+(fallbacks?', '+fallbacks+' needed the whole file: refresh HINTS with EPGPRODUCER_LEARN=1':'')+')');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}

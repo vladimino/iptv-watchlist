@@ -10,6 +10,13 @@ import {pathToFileURL} from 'node:url';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
+// AIR-374: DICT_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
+// A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
+const ONLY=process.env.DICT_ONLY?new Set(process.env.DICT_ONLY.split(',')):null;
+let currentSection='-';
+const section=id=>{if(ONLY&&!ONLY.has(id))return false;currentSection=id;return true;};
+process.on('exit',code=>{if(code!==0)console.error('LEAN_SECTION '+currentSection);});
+
 const SRC=process.env.DICT_SRC?path.resolve(process.env.DICT_SRC):path.resolve('src');
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const {readAuthority}=await load('film-person-authority.js');
@@ -72,7 +79,7 @@ const filmCount=(file,id)=>one(file,"SELECT COUNT(*) FROM film WHERE id='"+id+"'
 const reasons=out=>out.conflicts.map(item=>item.field+':'+item.reason+':'+item.kind).sort();
 
 // 1. The snapshot and the pure plan: the event carries the version AND the digest of the whole curated snapshot; sorted by Film id; duplicates, non-reviewed and malformed entries refused.
-{
+if(section('1')){
  const entries=[entry(3),entry(1),entry(2)];
  const p=await plan(entries);
  assert.deepEqual(p.units.map(unit=>unit.id),[ID(1),ID(2),ID(3)]);
@@ -101,7 +108,7 @@ const reasons=out=>out.conflicts.map(item=>item.field+':'+item.reason+':'+item.k
 }
 
 // 2. Dormancy: below open a pass and an inline reconcile each cost exactly one marker read; held throws; a malformed call reads nothing.
-for(const stage of ['r2','prepared']){
+for(const stage of section('2')?['r2','prepared']:[]){
  const file=database(stage),before=dump(file);
  const probe=envOf(file);await readAuthority(probe);
  const markerQueries=probe.DB.calls.queries;
@@ -116,7 +123,7 @@ for(const stage of ['r2','prepared']){
  assert.equal(env.DB.calls.queries,2*markerQueries);
  assert.equal(dump(file),before,stage+': nothing written');
 }
-{
+if(section('2')){
  const env=envOf(database('held'));const p=await plan([entry(1)]);
  await assert.rejects(()=>D.applyDictionaryUnits(env,{plan:p}),code('film_person_held'));
  await assert.rejects(()=>D.reconcileDictionary(env,{plan:p}),code('film_person_held'));
@@ -128,7 +135,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 3. The pure builder over stored rows: every named outcome.
-{
+if(section('3')){
  const unit={id:ID(1),entry:entry(1)};
  const film=(over={})=>({id:ID(1),contract_version:3,canonical_identity:null,original_title:null,updated_at:U,...over});
  const snap=(over={})=>({id:ID(1),film:film(),redirect:null,dimensions:{identity:{status:'provisional',authority:null,provenance_json:null}},trustedTmdb:['1'],...over});
@@ -195,7 +202,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 4. open: the applied path. One unit, ONE atomic batch with the receipt (a pending insert and the writer batch), a title, its titleSource, the identity and the reviewed localization, all through writeFilmFacts. Absent Films are never created.
-{
+if(section('4')){
  const file=database('open');
  seed(file,1);seed(file,2,{title:'Orig 2',source:'tmdb',identity:'tmdb:2',loc:{status:'provisional',source:'wikidata',value:'Старое'}});
  const p=await plan([entry(1),entry(2),entry(3),entry(4,{tmdbId:null})]);
@@ -230,7 +237,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 5. Owned facts are preserved: an owner identity row and an owner localization row, or an owner title source, are never overwritten; the outcome is named and no receipt, batch or revision exists.
-{
+if(section('5')){
  const file=database('open');
  seed(file,1,{title:'Mine',source:'owner',identity:'tmdb:1',status:'reviewed',authority:'owner',loc:{status:'reviewed',source:'owner',authority:'owner',value:'Моё'}});
  seed(file,2,{title:'Mine',source:'owner',identity:'tmdb:2',loc:{status:'provisional',source:'wikidata',value:'Старое'}});
@@ -252,7 +259,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 6. Conflicts and precedence through the writer: a lower-ranked title is replaced and the provenance follows it; an unranked or missing provenance is kept; a mismatching Film gets nothing; a redirect is refused.
-{
+if(section('6')){
  const file=database('open');
  seed(file,1,{title:'Old',source:'tmdb',identity:'tmdb:1'});
  seed(file,2,{title:'Old',identity:'tmdb:2'});
@@ -279,7 +286,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 7. Snapshot-bound request ids (the request id also binds the PLANNED CONTENT: what is handed to the writer, so a stored-state change that changes it is another request, never a replay of stale content): a dictionary edit under UNIQUE versions, A v1 to B v2 to A v3, is three requests; a REUSED label cannot restore A (below) (a content-only id would flip back to the first and read applied); the same snapshot is the same request.
-{
+if(section('7')){
  const file=database('open');
  seed(file,1);
  const mk=(version,title)=>plan([entry(1,{title})],{version});
@@ -316,7 +323,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 8. A bounded, resumable pass: two units per call, the cursor, the ceiling, a refusal of one unit isolated, a held marker stopping the pass on its unit.
-{
+if(section('8')){
  const file=database('open');
  for(const k of [1,2,3,4,5])seed(file,k);
  const p=await plan([1,2,3,4,5].map(k=>entry(k)));
@@ -359,7 +366,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 9. E5: identical content landing between the builder's read and the adapter's own read: counted unknown, 2 batches, no marking batch. Mirrors the EPG layer.
-{
+if(section('9')){
  const file=database('open');seed(file,1);
  const p=await plan([entry(1)]);
  let hit=0;
@@ -370,7 +377,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 10. Reconcile (E2): own origin only; a receipt is re-planned from the snapshot that wrote it, never from another; another origin's receipt is untouched.
-{
+if(section('10')){
  const file=database('open');seed(file,1);seed(file,2);
  const mk=version=>plan([entry(1),entry(2)],{version});
  const A=await mk('vA'),B=await mk('vB');
@@ -435,7 +442,7 @@ for(const stage of ['r2','prepared']){
 // 10b. Review findings of PR #560. (1) A Film deleted AFTER the builder's and the writer's reads and BEFORE the writer batch is never recreated: `requireExisting` is asserted inside the fenced batch (the writer option, byte-identical
 // without it). (2) An equal unranked or owner title is not claimed by equality, and a later different dictionary title keeps it. (3) A transient D1 failure in the dictionary re-plan never abandons a due receipt. (4) The same
 // snapshot version with another digest is another event, never a replay of the old request ids.
-{
+if(section('10b')){
  const file=database('open');
  seed(file,1);
  const p=await plan([entry(1)]);
@@ -472,7 +479,7 @@ for(const stage of ['r2','prepared']){
  await writeFilmFacts(vanish5,{...base,film:{contractVersion:1,originalTitle:'N',source:'tmdb'}});
  assert.equal(filmCount(f5,ID(9)),1);
 }
-{
+if(section('10b')){
  // (2) equal titles: nothing written, no receipt, provenance unchanged; a later different dictionary title is still preserved.
  for(const [label,k,opts,wantSource] of [['unranked',1,{},null],['unranked owner authority',2,{authority:'owner'},null],['owner source',3,{source:'owner'},'owner'],['already dictionary',4,{source:'dictionary'},'dictionary']]){
   const file=database('open');
@@ -493,7 +500,7 @@ for(const stage of ['r2','prepared']){
  const out=await D.applyDictionaryUnits(envOf(file),{plan:await plan([entry(1,{title:null})]),now:()=>T});
  assert.deepEqual([out.counts.applied,titleSource(file,1),filmRow(file,1).updated_at],[1,'dictionary',U]);
 }
-{
+if(section('10b')){
  // (3) a transient D1 read failure in the re-plan or the re-validation never abandons a due receipt; a later pass settles it.
  const reads=/SELECT id,contract_version,canonical_identity,original_title,updated_at FROM film WHERE id=/;
  for(const failOn of [1,2,3]){
@@ -523,7 +530,7 @@ for(const stage of ['r2','prepared']){
  for(const c of ['film_person_unavailable','film_person_held','film_person_not_open'])await assert.rejects(()=>failing(c).revalidate(envOf(file),receipt),code2=>code2.code===c);
  for(const c of ['film_person_invalid','film_person_redirect','something_else',undefined])assert.equal(await failing(c).revalidate(envOf(file),receipt),'stale',String(c));
 }
-{
+if(section('10b')){
  // (4) the same version with another digest is another event: distinct request ids, never the old receipt replayed (A v1 then B v1 only: a third A v1 is the unsupported reused-label case of section 7).
  const file=database('open');seed(file,1);
  const A=await plan([entry(1,{title:'Один'})],{version:'v1'}),B=await plan([entry(1,{title:'Два'})],{version:'v1'});
@@ -538,7 +545,7 @@ for(const stage of ['r2','prepared']){
 
 // 11. Static: dormant. Nothing in src imports it, build.mjs and the Worker do not name it, it imports exactly the adapter (with its digest and Film snapshot) and the authority helpers, names no network, timer, cron or R2 API and holds
 // no SQL of its own (the fenced writer is the only writer); readiness stays truthful: no receipt operation is registered.
-{
+if(section('11')){
  const self='src/canonical-dictionary-producer.js';
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&fs.readFileSync(full,'utf8').includes('canonical-dictionary-producer'))importers.push(full);}};

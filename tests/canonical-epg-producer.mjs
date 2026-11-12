@@ -10,6 +10,13 @@ import {pathToFileURL} from 'node:url';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
+// AIR-374: EPGPRODUCER_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
+// A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
+const ONLY=process.env.EPGPRODUCER_ONLY?new Set(process.env.EPGPRODUCER_ONLY.split(',')):null;
+let currentSection='-';
+const section=id=>{if(ONLY&&!ONLY.has(id))return false;currentSection=id;return true;};
+process.on('exit',code=>{if(code!==0)console.error('LEAN_SECTION '+currentSection);});
+
 const SRC=process.env.EPG_SRC?path.resolve(process.env.EPG_SRC):path.resolve('src');
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const E=await load('canonical-epg-producer.js');
@@ -60,7 +67,7 @@ const films3=[{id:ID(3),facts:facts('C')},{id:ID(1),facts:facts('A')},{id:ID(2),
 const plan=(over={})=>planEpgUnits({runId:'run-1',at:T,films:films3,departed:[],...over});
 
 // 1. The pure plan: deterministic order by id, the run id is the event, the write clock is the run's, release units, duplicates and malformed input refused.
-{
+if(section('1')){
  const p=plan({departed:[ID(9),ID(1)]});
  assert.equal(p.event,'epg:run-1');
  assert.deepEqual(p.units.map(unit=>unit.id),[ID(1),ID(2),ID(3),ID(9)],'sorted by id; an observed member is not also released');
@@ -87,7 +94,7 @@ const plan=(over={})=>planEpgUnits({runId:'run-1',at:T,films:films3,departed:[],
 }
 
 // 2. Dormancy: at r2 and prepared a pass and an inline reconcile each cost exactly one marker read (SELECTs only), no batch, nothing written; held throws.
-for(const stage of ['r2','prepared']){
+for(const stage of section('2')?['r2','prepared']:[]){
  const file=database(stage),before=dump(file);
  const probe=envOf(file);await readAuthority(probe);
  const markerQueries=probe.DB.calls.queries;
@@ -103,13 +110,13 @@ for(const stage of ['r2','prepared']){
  assert.equal(env.DB.calls.queries,2*markerQueries,stage+': the reconcile reads only the marker');
  assert.equal(dump(file),before,stage+': nothing written');
 }
-{
+if(section('2')){
  const file=database('held'),env=envOf(file);
  await assert.rejects(()=>applyEpgUnits(env,{plan:plan()}),code('film_person_held'));
  await assert.rejects(()=>reconcileEpg(env,{plan:plan()}),code('film_person_held'));
  assert.equal(env.DB.calls.batches,0);
 }
-{
+if(section('2')){
  const env=envOf(database('open'));
  for(const bad of [{plan:null},{plan:{units:[]}},{plan:{units:'x',event:'e'}},{plan:plan(),cursor:-1},{plan:plan(),cursor:1.5}])
   await assert.rejects(()=>applyEpgUnits(env,bad),code('film_person_invalid'),JSON.stringify(Object.keys(bad)));
@@ -117,7 +124,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 3. open: a bounded, resumable pass. Two changed Films per call, then the rest; each changed Film is ONE receipt of origin epg, applied after two batches; a release of a Film the store does not hold creates nothing; a held member is released.
-{
+if(section('3')){
  const file=database('open');
  assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('"+ID(8)+"',1,'"+T+"'),('"+ID(9)+"',1,'"+T+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('"+ID(8)+"','"+T+"')").status,0);
  const p=plan({departed:[ID(8),ID(99)]});
@@ -165,7 +172,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 3b. A to B to A on one Film: the third run carries the FIRST content again and is a THIRD request (revision 3), not the first one read as already applied.
-{
+if(section('3b')){
  const file=database('open');
  const run=(runId,runtime)=>applyEpgUnits(envOf(file),{plan:planEpgUnits({runId,at:T,films:[{id:ID(5),facts:{...facts('A'),metadata:META({runtime})}}]}),now:()=>T});
  const a=await run('flip-1',136),b=await run('flip-2',100),c=await run('flip-3',136);
@@ -175,7 +182,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 4. One refusal never blocks the others, and it is counted with its code (no receipt exists for a refusal the planner raises).
-{
+if(section('4')){
  const file=database('open');
  const p=plan();
  p.units[1]={...p.units[1],input:{...p.units[1].input,film:{originalTitle:'B'}}};
@@ -185,7 +192,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 5. A marker that goes held mid-pass stops the pass ON the unit it refused, the cursor stays there, and the unit is not counted.
-{
+if(section('5')){
  const file=database('open');
  let flipped=false,env=null;
  env=envOf(file,{onQuery:async text=>{
@@ -197,7 +204,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 5b. An unreadable marker mid-pass stops the pass the same way (the marker table cannot be read after the first Film).
-{
+if(section('5b')){
  const file=database('open');
  let env=null;
  env=envOf(file,{rewrite:sql=>env&&env.DB.calls.batches>=2&&/film_person_authority/.test(sql)?sql.replace(/film_person_authority/g,'film_person_missing'):sql});
@@ -205,7 +212,7 @@ for(const stage of ['r2','prepared']){
  assert.deepEqual([out.cursor,out.done,out.stoppedBy,out.counts.applied],[1,false,'film_person_unavailable',1]);
 }
 // 5c. E5: identical content landing between the pre-plan and the writer ends the receipt `unknown` (counted so, no second batch, visible to the reconcile).
-{
+if(section('5c')){
  const file=database('open');
  const p=planEpgUnits({runId:'run-5',at:T,films:[{id:ID(1),facts:facts('A')}]});
  let seen=0;
@@ -216,7 +223,7 @@ for(const stage of ['r2','prepared']){
  assert.deepEqual([receipts(file)[0].state,receipts(file)[0].error_class],['unknown','atomic_mark_missing']);
 }
 // 5d. The inline reconcile honours its limit: two due receipts, one considered.
-{
+if(section('5d')){
  const file=database('open');
  const p=planEpgUnits({runId:'run-6',at:T,films:[{id:ID(1),facts:facts('A')},{id:ID(2),facts:facts('B')}]});
  let seen=0;
@@ -230,7 +237,7 @@ for(const stage of ['r2','prepared']){
 }
 // 6. Stale revision: an interloper moves a Film between the pre-plan and the writer batch. The pass counts it failed (retryable), the own-origin inline reconcile re-validates and replays the SAME request id and the
 // receipt ends applied at attempt 2. A reconcile that cannot re-plan the Film never replays and backs off; a plan of another run whose content differs abandons it.
-{
+if(section('6')){
  const file=database('open');
  const p=planEpgUnits({runId:'run-7',at:T,films:[{id:ID(1),facts:facts('A')}]});
  let seen=0;
@@ -245,7 +252,7 @@ for(const stage of ['r2','prepared']){
  assert.deepEqual([receipts(file)[0].state,receipts(file)[0].error_class],['abandoned','stale_revision_needs_repair'],'no re-plan after a moved revision: repair, never a blind replay');
  assert.equal(title(file),'Z','nothing replayed without a re-plan');
 }
-{
+if(section('6')){
  const file=database('open');
  const p=planEpgUnits({runId:'run-7',at:T,films:[{id:ID(1),facts:facts('A')}]});
  let seen=0;
@@ -256,7 +263,7 @@ for(const stage of ['r2','prepared']){
  assert.equal(gone.abandoned.length,1);assert.equal(receipts(file)[0].error_class,'producer_source_changed');assert.equal(title(file),'Z','a source that moved on is never replayed');
 }
 function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film WHERE id='"+id+"'");}
-{
+if(section('6')){
  const file=database('open');
  const p=planEpgUnits({runId:'run-8',at:T,films:[{id:ID(1),facts:facts('A')}]});
  let seen=0;
@@ -271,7 +278,7 @@ function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film W
 
 // 8. BLOCKER 1: a release-only unit is resolved against the STORED Film. Missing Film: skipped and never created. Existing Film at contract version 2 (and with identity and title): only the membership and the revision change, the Film row is
 // untouched (contract version, title, identity, updated_at), in ONE receipted atomic batch. A departed non-member is a no-op. The release of a Film whose contract version differs from 1 does NOT overwrite it with 1.
-{
+if(section('8')){
  const file=database('open');
  const U='2026-11-01T00:00:00.000Z';
  assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('"+ID(20)+"',2,'Kept Title','"+U+"'),('"+ID(21)+"',1,'Plain','"+U+"'),('"+ID(22)+"',3,'Not Member','"+U+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('"+ID(20)+"','"+U+"'),('"+ID(21)+"','"+U+"')").status,0);
@@ -299,7 +306,7 @@ function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film W
 
 // 9. BLOCKER 2: a receipt of run A is never replayed from run B, even when B observed the same content (the content digest does not encode the event); the same run replays it with the SAME request id. The write of run A fails
 // transiently (the revision does not move), so the receipt is due and failed with a counted attempt.
-{
+if(section('9')){
  const file=database('open');
  const mk=runId=>planEpgUnits({runId,at:T,films:[{id:ID(1),facts:facts('A')}]});
  const A=mk('run-A'),B=mk('run-B');
@@ -325,7 +332,7 @@ function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film W
 }
 
 // 9b. A release-only receipt of the same run is replayed through the stored Film (contract version kept); the release of another run is not.
-{
+if(section('9b')){
  const file=database('open');
  const U='2026-11-01T00:00:00.000Z';
  assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('"+ID(30)+"',2,'Kept','"+U+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('"+ID(30)+"','"+U+"')").status,0);
@@ -343,7 +350,7 @@ function title(file,id=ID(1)){return one(file,"SELECT original_title FROM film W
 
 // 7. Static: dormant. No source file imports the module, build.mjs and the Worker do not name it, it imports exactly the adapter and the authority helpers, names no network, timer, cron or R2 API and holds no SQL;
 // readiness stays truthful: the registry of receipt operations is still empty, so epg_commit (which also needs the person kinds) is not wired.
-{
+if(section('7')){
  const self='src/canonical-epg-producer.js';
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&fs.readFileSync(full,'utf8').includes('canonical-epg-producer'))importers.push(full);}};

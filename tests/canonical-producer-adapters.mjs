@@ -11,6 +11,13 @@ import {pathToFileURL} from 'node:url';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
+// AIR-374: ADAPTER_ONLY="4,9" runs only those numbered sections (the mutation runner's first, cheap run of a mutant; a mutant that survives it is run against the whole file). Absent: every section.
+// A failing run names the section it died in on stderr (LEAN_SECTION), which is how the runner's hints are learned.
+const ONLY=process.env.ADAPTER_ONLY?new Set(process.env.ADAPTER_ONLY.split(',')):null;
+let currentSection='-';
+const section=id=>{if(ONLY&&!ONLY.has(id))return false;currentSection=id;return true;};
+process.on('exit',code=>{if(code!==0)console.error('LEAN_SECTION '+currentSection);});
+
 const SRC=process.env.ADAPTER_SRC?path.resolve(process.env.ADAPTER_SRC):path.resolve('src');
 const load=name=>import(pathToFileURL(path.join(SRC,name)).href);
 const A=await load('canonical-producer-adapters.js');
@@ -64,7 +71,7 @@ const raceAt=(file,index,action)=>{let seen=0;return envOf(file,{onBatch:async()
 const ops=input=>operationRegistry([filmFactsOperation({replan:async()=>input,now:()=>T})]);
 
 // 1. The route gate: at r2 and prepared exactly ONE marker read (the queries of readAuthority, all SELECTs) and no batch; held throws; nothing is written, no receipt.
-for(const stage of ['r2','prepared']){
+for(const stage of section('1')?['r2','prepared']:[]){
  const file=database(stage),before=dump(file);
  const probe=envOf(file);await readAuthority(probe);
  const markerQueries=probe.DB.calls.queries;
@@ -80,7 +87,7 @@ for(const stage of ['r2','prepared']){
  assert.equal(env.DB.calls.queries,2*markerQueries,stage+': the reconcile reads only the marker');
  assert.equal(dump(file),before,stage+': nothing written');
 }
-{
+if(section('1')){
  const file=database('held'),env=envOf(file);
  await assert.rejects(()=>apply(env),code('film_person_held'));
  await assert.rejects(()=>reconcileOwnOrigin(env,{origin:'epg',operations:ops(facts())}),code('film_person_held'));
@@ -88,7 +95,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 2. Digest and request id. The digest is the planned CONTENT (clocks dropped at every depth, key order irrelevant); the request id adds the source event and the target.
-{
+if(section('2')){
  const base=await filmFactsDigest(facts());
  assert.match(base,/^[0-9a-f]{64}$/);
  assert.equal(await filmFactsDigest(facts({at:iso(5000),metadata:META({updatedAt:iso(9000)}),updatedAt:iso(1)})),base,'at and updatedAt (at any depth) are not content');
@@ -114,7 +121,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 3. The happy path: one pending insert and ONE writer batch (the applied receipt is inside it), applied at the revision the batch produced; the same event again is a no-op with no receipt and no batch.
-{
+if(section('3')){
  const file=database('open');
  const batches=[];
  const env=envOf(file,{onBatch:async statements=>{batches.push(statements.map(item=>item.text));}});
@@ -142,7 +149,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 3b. The writer stores the receipt's own request id on the localization source rows it writes (the request id the adapter handed over is the receipt's, not another).
-{
+if(section('3b')){
  const file=database('open'),env=envOf(file);
  const input=facts({id:'film:tmdb:700',localization:{sources:[{source:'wikidata',value:'Value',sourceVersion:'v1',provenance:{},observedAt:T}]}});
  const done=await apply(env,{input});
@@ -151,7 +158,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 4. A no-op against stored content creates no receipt (content written by the projector or by another producer), and a refusal before any receipt exists leaves nothing behind.
-{
+if(section('4')){
  const file=database('open');
  await interlope(file,facts(),0);
  const env=envOf(file);
@@ -168,7 +175,7 @@ for(const stage of ['r2','prepared']){
 }
 
 // 5. Without the activation baseline the adapter writes nothing (no receipt can exist, so nothing canonical may be written).
-{
+if(section('5')){
  const file=database('open',{baseline:false}),before=dump(file);
  await assert.rejects(()=>apply(envOf(file)),code('receipt_baseline_missing'));
  assert.equal(dump(file),before);
@@ -177,7 +184,7 @@ for(const stage of ['r2','prepared']){
 
 // 6. A source event is never replaced by content: A, then B, then A again under NEW events is three requests (three receipts, final content A). The same event id for the second A is the producer's bug: it is an already
 // applied request and is not run again, which is exactly why the event is mandatory and must be unique per observation.
-{
+if(section('6')){
  const file=database('open'),env=envOf(file);
  const a=facts(),b=facts({film:{contractVersion:1,originalTitle:'Title B',source:'tmdb'}});
  const r1=await apply(env,{input:a,event:'run-1'});
@@ -198,7 +205,7 @@ for(const stage of ['r2','prepared']){
 // 7. E5: identical content lands between the pre-plan and the writer's own read. The writer finds nothing to write, opens no batch, and the receipt ends `unknown` (atomic_mark_missing): never a second marking batch.
 // It is visible in listAttention and settled by readback: the content is there but unproven, so it goes to review.
 let raced;
-{
+if(section('7')){
  const file=database('open');
  const env=raceAt(file,1,async()=>{await interlope(file,facts(),0);});
  const done=await apply(env);
@@ -225,7 +232,7 @@ let raced;
 
 // 8. A stale revision. Another actor changes the Film between the pre-plan and the writer's batch: the batch is refused whole (`failed`, retryable, the revision conflict is thrown after the receipt is marked). The inline reconcile
 // re-validates against the CURRENT rows: the facts would still change something -> proceed, the SAME request id is replayed at the current revision and applied; the facts would change nothing -> superseded, abandoned, no write.
-{
+if(section('8')){
  const file=database('open');
  const env=raceAt(file,2,async()=>{await interlope(file,{id:FILM,at:T,film:{contractVersion:1},sync:{metadataAt:iso(500)}},0);});
  await assert.rejects(()=>apply(env),code('film_person_revision_conflict'));
@@ -242,7 +249,7 @@ let raced;
  assert.equal(revision(file),2);
  assert.equal(one(file,'SELECT metadata_at FROM film_sync_state'),T,'our sync clock was written over the interloper one by the same field-wise merge');
 }
-{
+if(section('8')){
  const file=database('open');
  const env=raceAt(file,2,async()=>{await interlope(file,facts(),0);});
  await assert.rejects(()=>apply(env),code('film_person_revision_conflict'));
@@ -254,7 +261,7 @@ let raced;
 
 // 8b. The same event again, through applyFilmFacts, after the failure: the existing receipt is settled by readback and retried with the SAME request id, planned against the CURRENT revision even when another actor
 // advanced it after the pre-plan, on attempt 2.
-{
+if(section('8b')){
  const file=database('open');
  const first=raceAt(file,2,async()=>{await interlope(file,{id:FILM,at:T,film:{contractVersion:1},sync:{metadataAt:iso(500)}},0);});
  await assert.rejects(()=>apply(first),code('film_person_revision_conflict'));
@@ -274,7 +281,7 @@ let raced;
 }
 
 // 9. The operation spec: atomic, registered, and its replay and readback refuse a source that moved on or cannot be re-planned.
-{
+if(section('9')){
  const spec=filmFactsOperation({replan:async()=>facts()});
  assert.equal(spec.atomic,true);assert.equal(spec.operation,'film_facts');assert.equal(typeof spec.revalidate,'function');
  assert.equal(operationRegistry([spec]).get('film_facts'),spec);
@@ -305,7 +312,7 @@ let raced;
 }
 
 // 10. The origin filter: in SQL (another origin's rows never use up the limit), an invalid origin is refused, and the reconcile of one origin never touches another's receipts.
-{
+if(section('10')){
  const file=database('open');
  const insert=(id,origin,at)=>"INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('"+id+"','film_facts','"+origin+"','film','film:tmdb:"+id.replace(/\D/g,'')+"','"+'a'.repeat(64)+"',0,2,'pending',1,'"+at+"','"+T+"','"+T+"')";
  const text=[];
@@ -361,7 +368,7 @@ const dueFailed=async()=>{
  assert.deepEqual([row.state,row.attempts],['failed',1]);
  return {file,row,before:dump(file).replace(/"updated_at":"[^"]*"/g,'')};
 };
-{
+if(section('12')){
  const {file,row}=await dueFailed();
  const writes=dump(file);
  const moved=operationRegistry([filmFactsOperation({replan:async()=>facts({film:{contractVersion:1,originalTitle:'Other'}}),now:()=>T})]);
@@ -382,7 +389,7 @@ const dueFailed=async()=>{
  void writes;
 }
 // the same source change met on the natural path (applyFilmFacts of the same event after the failure) settles the receipt without a write too
-{
+if(section('12')){
  const {file,row}=await dueFailed();
  const done=await applyFilmFacts(envOf(file),{origin:'epg',event:'run-1',input:facts(),replan:async()=>facts({film:{contractVersion:1,originalTitle:'Other'}}),now:()=>iso(61000)});
  assert.deepEqual([done.state,done.reason,done.requestId],['abandoned','producer_source_changed',row.request_id]);
@@ -390,7 +397,7 @@ const dueFailed=async()=>{
  assert.equal(receipts(file)[0].error_class,'producer_source_changed');
 }
 // A transient or absent re-plan stays retryable but BOUNDED: each inline pass counts an attempt (backoff applies), and after maxAttempts the receipt is abandoned `attempts_exhausted`; never a write.
-{
+if(section('12')){
  const {file,row}=await seeded();
  const gone=operationRegistry([filmFactsOperation({replan:async()=>null,now:()=>T})]);
  let at=121000,seen=[];
@@ -411,7 +418,7 @@ const dueFailed=async()=>{
  void row;
 }
 // A producer whose re-plan throws behaves like an absent one (counted), and an unreadable database waits only until the receipt's age bound, then abandons `readback_expired`.
-{
+if(section('12')){
  const {file,row}=await seeded();
  const boom=operationRegistry([filmFactsOperation({replan:async()=>{throw new Error('producer down');},now:()=>T})]);
  await reconcileOwnOrigin(envOf(file),{origin:'epg',operations:boom,now:()=>iso(121000)});
@@ -428,7 +435,7 @@ const dueFailed=async()=>{
 }
 
 // A malformed disposition is not a disposition: it is an ordinary observation of an absent effect (bounded retry), never an abandon with an arbitrary class.
-{
+if(section('12')){
  const {file}=await seeded();
  let replays=0;
  const odd=operationRegistry([defineOperation({operation:'film_facts',atomic:true,readback:async()=>({disposition:'abandon',errorClass:'Bad Class!'}),replay:async()=>{replays++;throw new Error('replayed');}})]);
@@ -437,7 +444,7 @@ const dueFailed=async()=>{
 }
 
 // 11. Static: dormant. No source file imports the adapter, build.mjs does not bundle it, it names no network, storage, timer or cron API, and it imports exactly the modules it is allowed to.
-{
+if(section('11')){
  const adapters='src/canonical-producer-adapters.js';
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==adapters&&fs.readFileSync(full,'utf8').includes('canonical-producer-adapters'))importers.push(full);}};
