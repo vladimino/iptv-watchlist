@@ -34,6 +34,8 @@ So the apply and the bump are one operation with this order: GO, preflight, appl
 | `tests/canonical-handoff-readiness.mjs` | the `production()` helper (line 26) lowers the contract to 18 to represent production; once production is 19 the helper and the assertion at line 243 ("migration 0019 exists ... NOT applied") must describe the applied state, and the `receipts_schema_missing` expectation changes to absent |
 | `docs/runbooks/film-person-open-handoff.md`, `docs/adr/0119-...md` (Follow-ups), `migrations/README.md` (status of `0019`), `docs/reference/data/d1-schema.md` | state "applied" with the dated evidence link (a dated evidence file is added; see section 8) |
 
+The SCHEMA_EXPECTED PR is prepared beforehand as a DRAFT and is not merge-ready: merge it only after the owner-GO'd apply of 0019 and a successful production readback (section 6). In it the readiness test models production as the whole migration chain (version 19, so its blocker list loses `receipts_schema_missing`: 29 remain) and keeps a lowered-contract helper only for the "schema below 19" case. The docs that still say "schema 18" or "30 blockers" are updated by the post-apply evidence change (section 8), not by that PR, because they describe observed production.
+
 Tests that stop at 0018 for other reasons need no change (`tests/projector-window.mjs`, `tests/discovery-chunk-budget.mjs`, `tests/discovery-operational-status.mjs`, `tests/film-person-prepared-loader.mjs` build their own 0001-0018 chains; the loader refuses only `schema_below_16`). Not verified: whether the full suite stays green with the bump; the executor runs `npm test` on the PR.
 
 ## 3. The GO statement the owner signs

@@ -22,8 +22,9 @@ const mod=await import(pathToFileURL(source).href);
 const {handoffReadiness,CALLS,RECONCILE,GAPS,PRODUCER_WIRING,PRODUCER_OPERATIONS,RECEIPTS_PROTOCOL,EMPTY_CLASSES}=mod;
 const ALL_EXCEPTIONS=[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS];
 
-// Production today is schema 18 (migration 0019 exists in the repository but is NOT applied there): the test chain includes 0019, so the production state is built by lowering the contract.
-const production=file=>{sqlite(file,'DROP TRIGGER IF EXISTS schema_contract_no_downgrade;UPDATE schema_contract SET version=18 WHERE id=1');return file;};
+// Production is schema 19 once the owner-approved apply of migration 0019 is read back: the test chain includes 0019, so the production state is the chain as it is. `schema18` lowers the contract to model a database that has not had the apply.
+const production=file=>file;
+const schema18=file=>{sqlite(file,'DROP TRIGGER IF EXISTS schema_contract_no_downgrade;UPDATE schema_contract SET version=18 WHERE id=1');return file;};
 // A synthetic fully satisfied fixture: schema 19 (the real receipt tables), the three classes loaded at SMALL counts (2, 1, 1), a free lease, an idle window, marker prepared with a
 // verified baseline. The evidence replaces the registries only here: every producer wired, every reader moved, receipts registered, every named difference accepted.
 const SMALL=[{name:'ratedAdmission',table:'film_rated_admission',expected:2},{name:'retention',table:'film_retention',expected:1},{name:'retirement',table:'tmdb_retirement_decision',expected:1}];
@@ -55,7 +56,7 @@ if(on('2')){
  assert.equal(out.ready,false);
  const expected=[
   ...ALL_EXCEPTIONS.filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
-  'receipts_schema_missing','receipts_protocol_unregistered',
+  'receipts_protocol_unregistered',
   ...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name),
   ...CANONICAL_READER_REGISTRY.filter(item=>item.class==='freeze'&&!item.moved).map(item=>'reader_not_moved:'+item.name),
   ...EMPTY_CLASSES.map(item=>'empty_class_not_loaded:'+item.name+':0/'+item.expected),
@@ -83,7 +84,7 @@ if(on('2')){
  if(on('3b')){
  {const f=copyOf(base,'x');sqlite(f,'DROP TABLE canonical_write_receipt');await only('receipt table absent',f,good(),'receipts_schema_missing');}
  {const f=copyOf(base,'x');sqlite(f,'DROP TABLE canonical_receipt_baseline_seal');await only('baseline seal table absent',f,good(),'receipts_schema_missing');}
- await only('schema below 19',production(copyOf(base,'x')),good(),'receipts_schema_missing');
+ await only('schema below 19',schema18(copyOf(base,'x')),good(),'receipts_schema_missing');
  // the protocol and the producers come from the receipts registry: an empty registry, or one missing a kind, or a non-atomic operation
  await only('no operation registered',base,{...good(),operations:registryOf([])},'receipts_protocol_unregistered',...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name));
  for(const kind of OPERATION_KINDS){
@@ -240,7 +241,7 @@ if(on('6')){
  else assert.ok(!bundled,'no operation is registered: the producers module is not bundled');
  const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name));
  const introduced=migrations.some(name=>fs.readFileSync('migrations/'+name,'utf8').includes(RECEIPTS_PROTOCOL.table));
- assert.ok(introduced,'migration 0019 exists in the repository (it is NOT applied in production, schema 18)');
+ assert.ok(introduced,'migration 0019 exists in the repository (applied in production, schema 19)');
  for(const item of PRODUCER_WIRING)for(const kind of item.requires)assert.ok(OPERATION_KINDS.includes(kind),kind+' is a receipts operation kind');
  assert.ok(!/canonical-differential-registry/.test(bundle));
  const importers=[];
