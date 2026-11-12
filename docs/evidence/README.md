@@ -69,6 +69,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-453 EPG diagnostic canary foundation, offline mechanics evidence | [orchestration/epg-diagnostic-foundation-air-453-2026-11-12.md](orchestration/epg-diagnostic-foundation-air-453-2026-11-12.md) |
 | AIR-454 EPG diagnostic canary replay datasets, offline mechanics and fidelity evidence | [orchestration/epg-replay-datasets-air-454-2026-11-12.md](orchestration/epg-replay-datasets-air-454-2026-11-12.md) |
 | AIR-455 EPG diagnostic canary owner-only Workflow, receipts and reporting, offline evidence | [orchestration/epg-diagnostic-run-air-455-2026-11-12.md](orchestration/epg-diagnostic-run-air-455-2026-11-12.md) |
+| AIR-456 H1 EPG diagnostic domain: provisioning of the D1 database and the R2 bucket | [orchestration/epg-diagnostic-provisioning-air-456-h1-2026-11-12.md](orchestration/epg-diagnostic-provisioning-air-456-h1-2026-11-12.md) |
 | AIR-348 migration 0017 production apply | [d1-migration/air-348-0017-apply-2026-11-08.md](d1-migration/air-348-0017-apply-2026-11-08.md) |
 | AIR-348 cron `0 * * * *` coexistence preflight | [orchestration/cron-coexistence-air-348-2026-11-08.md](orchestration/cron-coexistence-air-348-2026-11-08.md) |
 | AIR-348 first natural EPG Cloudflare run, read-only 8 November 2026: the instance stopped after 61 steps with `epoch_mismatch` while the mode document was unchanged | [orchestration/epg-first-natural-run-air-348-2026-11-08.md](orchestration/epg-first-natural-run-air-348-2026-11-08.md) |
