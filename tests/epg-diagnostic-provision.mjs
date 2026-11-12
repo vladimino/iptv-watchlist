@@ -13,7 +13,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
-import {bucket} from './discovery-bounded-lib.mjs';
+import {bucket,world,bootstrap,commit} from './discovery-bounded-lib.mjs';
+import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-diag-provision-'));
@@ -28,8 +29,9 @@ const json=(body,status=200)=>new Response(JSON.stringify(body),{status,headers:
 
 // A fake D1 REST endpoint over a sqlite file: GET database -> its metadata; POST query {sql}: a single SELECT answers its rows, anything else is executed as a script (all or nothing for
 // the failing statement, as `-bail` does) and answers one success. Every request is logged; a write whose text matches `throwOn` fails in transit.
-function fakeD1({name='iptv-epg-diagnostic',uuid=DBID,throwOn=null,readBody=null}={}){
+function fakeD1({name='iptv-epg-diagnostic',uuid=DBID,throwOn=null,readBody=null,template=null}={}){
  const file=path.join(root,'d-'+(counter++)+'.sqlite'),log=[];
+ if(template)fs.copyFileSync(template,file);
  const fetchImpl=async(url,init={})=>{
   const target=String(url),method=init.method||'GET',body=init.body?JSON.parse(init.body):null;
   log.push({method,url:target,sql:body?.sql??null});
@@ -88,13 +90,59 @@ async function scenarios(api){
    const report=await api.run({command:'check',env:env(),fetchImpl});
    const host=ACCOUNT+'.eu.r2.cloudflarestorage.com';
    return s3.length>=1&&s3.every(request=>{const url=new URL(request.url);return url.protocol==='https:'&&url.host===host&&url.pathname==='/iptv-epg-diagnostic'&&url.searchParams.get('list-type')==='2'&&request.method==='GET'&&request.body===null&&/^AWS4-HMAC-SHA256 Credential=/.test(request.auth)&&request.auth.includes('Credential='+KEY+'/')&&/SignedHeaders=[^,]*\bhost\b/.test(request.auth)&&!request.auth.includes(SECRET);})&&d.writes()===0&&report.writes.r2===0&&report.writes.d1===0;},
-  'the bucket handle writes only the identity object':async()=>{const store=bucket();const guarded=api.guardedBucket(store);const a=await failure(()=>guarded.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>guarded.delete('diagnostic/identity.json'));return !!a&&!!b&&store.objects.size===0;},
+  'the real S3 adapter writes the dataset key':async()=>{const r=await realS3();const out=await api.run({command:'dataset-put',apply:true,confirm:api.CONFIRM['dataset-put'],input:built.file,env:env(),fetchImpl:r.fetchImpl});const key='diagnostic/replay/'+built.dataset.digest+'.json';const puts=r.seen.filter(x=>x.method==='PUT');const EU=ACCOUNT+'.eu.r2.cloudflarestorage.com';const c={written:out.dataset.state==='written',onePut:puts.length===1,key:puts[0]?.key===key,host:puts[0]?.host===EU,bucket:puts[0]?.bucket==='iptv-epg-diagnostic',ifNoneMatch:puts[0]?.ifNoneMatch==='*',contentType:puts[0]?.contentType==='application/json',body:puts[0]?.body===datasetText,signed:/SignedHeaders=[^,]*\bhost\b/.test(puts[0]?.auth||''),onlyEu:r.seen.every(x=>x.host===EU&&x.method!=='DELETE'),stored:r.objects.get(key)===datasetText};if(process.env.DEBUG_SCENARIOS)console.error('S3',JSON.stringify(c));return Object.values(c).every(Boolean);},
+ 'a symlink into the repository is refused':async()=>{const leak=path.resolve('tests/private-out');fs.rmSync(leak,{recursive:true,force:true});try{const a=await failure(()=>api.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(dirLink,'private-out'),generation:sourceId,confirm:api.CONFIRM['dataset-build'],now:FIXED}));const {d,store}=await provisioned();const b=await failure(()=>api.run({command:'dataset-put',confirm:api.CONFIRM['dataset-put'],input:fileLink,env:env(),fetchImpl:d.fetchImpl,store}));return a?.exitCode===2&&b?.exitCode===2&&!fs.existsSync(leak);}finally{fs.rmSync(leak,{recursive:true,force:true});}},
+ 'a concurrent transfer change does not move the authority':async()=>{const {d,store}=await provisioned();const racing=async(url,init={})=>{const body=init.body?JSON.parse(init.body):null;if(body?.sql&&/^UPDATE discovery_authority/.test(body.sql))sqliteSync([d.file,"UPDATE discovery_transfer SET state='loading' WHERE id=1"],{encoding:'utf8'});return d.fetchImpl(url,init);};const e=await failure(()=>api.run({command:'prepare-domain',apply:true,confirm:api.CONFIRM['prepare-domain'],env:env(),fetchImpl:racing,store}));return e?.exitCode===3&&sqlRows(d.file,'SELECT mode FROM discovery_authority')[0].mode==='r2';},
+ 'prepare-domain needs the identity':async()=>{const d=fakeD1({template:tplD.file}),store=bucket();const e=await failure(()=>api.run({command:'prepare-domain',apply:true,confirm:api.CONFIRM['prepare-domain'],env:env(),fetchImpl:d.fetchImpl,store}));return e?.exitCode===3&&sqlRows(d.file,'SELECT mode FROM discovery_authority')[0].mode==='r2';},
+ 'dataset-put verifies the dataset':async()=>{const {d,store}=await provisioned();const e=await failure(()=>api.run({command:'dataset-put',apply:true,confirm:api.CONFIRM['dataset-put'],input:tamperedFile,env:env(),fetchImpl:d.fetchImpl,store}));return e?.exitCode===3&&[...store.objects.keys()].join()==='diagnostic/identity.json';},
+ 'the dataset key is the only extra write':async()=>{const store=bucket();const plain=api.guardedBucket(store);const wide=api.guardedBucket(store,{datasetWrites:true});const key='diagnostic/replay/'+'a'.repeat(64)+'.json';const a=await failure(()=>plain.put(key,'{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>wide.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const c=await failure(()=>wide.put('diagnostic/replay/short.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));await wide.put(key,'{}',{onlyIf:{etagDoesNotMatch:'*'}});return !!a&&!!b&&!!c&&[...store.objects.keys()].join()===key;},
+ 'the bucket handle writes only the identity object':async()=>{const store=bucket();const guarded=api.guardedBucket(store);const a=await failure(()=>guarded.put('epg/generation.json','{}',{onlyIf:{etagDoesNotMatch:'*'}}));const b=await failure(()=>guarded.delete('diagnostic/identity.json'));return !!a&&!!b&&store.objects.size===0;},
  };
- for(const [name,run] of Object.entries(checks)){try{results[name]=(await run())===true;}catch{results[name]=false;}}
+ for(const [name,run] of Object.entries(checks)){try{results[name]=(await run())===true;}catch(error){if(process.env.DEBUG_SCENARIOS)console.error(name,error?.message,JSON.stringify(error?.details||null));results[name]=false;}}
  return results;
 }
 
 const live=await import(pathToFileURL(SCRIPT).href);
+// A provisioned diagnostic domain (schema and identity) built once and copied per use, and a real replay dataset built by the script from the stored state of a bounded-ledger world.
+const tplD=fakeD1(),tplStore=bucket();
+await live.run({command:'schema',apply:true,confirm:live.CONFIRM.schema,env:env(),fetchImpl:tplD.fetchImpl,store:tplStore});
+await live.run({command:'identity',apply:true,confirm:live.CONFIRM.identity,env:env(),fetchImpl:tplD.fetchImpl,store:tplStore});
+const identityText=tplStore.objects.get('diagnostic/identity.json').bytes.toString('utf8');
+const provisioned=async()=>{const d=fakeD1({template:tplD.file});const store=bucket();await store.put('diagnostic/identity.json',identityText,{onlyIf:{etagDoesNotMatch:'*'}});return {d,store};};
+// The REAL signed S3 client against a fake S3 over a Map (path-style, EU endpoint of the account), with a fake D1 beside it: every request is recorded.
+const realS3=async()=>{
+ const {d}=await provisioned();
+ const objects=new Map([['diagnostic/identity.json',identityText]]),seen=[];
+ const etagOf=key=>'"e-'+key.length+'-'+objects.get(key).length+'"';
+ const fetchImpl=async(url,init={})=>{
+  const href=String(url);
+  if(href.startsWith(BASE))return d.fetchImpl(url,init);
+  const target=new URL(href),method=init.method||'GET';
+  const parts=target.pathname.split('/').filter(Boolean).map(decodeURIComponent),key=parts.slice(1).join('/');
+  const body=init.body==null?null:Buffer.from(init.body).toString('utf8');
+  seen.push({method,host:target.host,bucket:parts[0],key,ifNoneMatch:init.headers?.['if-none-match']??null,contentType:init.headers?.['content-type']??null,auth:String(init.headers?.Authorization||''),body});
+  const reply=(status,text='',headers={})=>new Response(text,{status,headers});
+  if(!key){const contents=[...objects].map(([k,v])=>'<Contents><Key>'+k+'</Key><Size>'+Buffer.byteLength(v)+'</Size><ETag>'+etagOf(k)+'</ETag><LastModified>2026-11-12T00:00:00.000Z</LastModified></Contents>').join('');return reply(200,'<ListBucketResult><IsTruncated>false</IsTruncated>'+contents+'</ListBucketResult>');}
+  if(method==='GET'||method==='HEAD'){if(!objects.has(key))return reply(404);return reply(200,method==='GET'?objects.get(key):'',{etag:etagOf(key),'content-length':String(Buffer.byteLength(objects.get(key)))});}
+  if(method==='PUT'){if(init.headers?.['if-none-match']==='*'&&objects.has(key))return reply(412);objects.set(key,body);return reply(200,'',{etag:etagOf(key)});}
+  throw new Error('unexpected S3 request '+method);
+ };
+ return {d,objects,seen,fetchImpl};
+};
+const linkRoot=path.join(root,'links');fs.mkdirSync(linkRoot,{recursive:true});
+const dirLink=path.join(linkRoot,'to-repo-tests'),fileLink=path.join(linkRoot,'to-repo-file.json');
+fs.symlinkSync(path.resolve('tests'),dirLink,'dir');fs.symlinkSync(path.resolve('package.json'),fileLink);
+const sourceWorld=world();await bootstrap(sourceWorld,0);for(const day of [1,2,3,4,5,6])await commit(sourceWorld,day,'bounded');
+const sourceId=sourceWorld.published.programmeRunId;
+const privateRoot=path.join(root,'private');
+const FIXED=()=>new Date('2026-11-12T12:00:00Z');
+const BUILD_CONFIRM=live.CONFIRM['dataset-build'];
+const PROD_KEY='prod-read-key-ID',PROD_SECRET='prod-read-SECRET-value';
+const prodEnv=(extra={})=>env({R2_SNAPSHOT_ACCESS_KEY_ID:PROD_KEY,R2_SNAPSHOT_SECRET_ACCESS_KEY:PROD_SECRET,...extra});
+const built=await live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'a'),generation:sourceId,confirm:BUILD_CONFIRM,now:FIXED});
+const datasetText=fs.readFileSync(built.file,'utf8');
+const tamperedText=(()=>{const x=JSON.parse(datasetText);x.baseline.items[0].title=String(x.baseline.items[0].title).split('').reverse().join('')+'!';return JSON.stringify(x);})();
+const tamperedFile=path.join(privateRoot,'tampered.json');fs.writeFileSync(tamperedFile,tamperedText,{mode:0o600});
 
 // ---- 1-6: the real script -------------------------------------------------------------------------------------------------------------------------------------------------------------
 {
@@ -192,6 +240,91 @@ const live=await import(pathToFileURL(SCRIPT).href);
  assert.ok(!fs.readFileSync('build.mjs','utf8').includes('epg-diagnostic-provision'),'an operator script is not part of the Worker bundle');
 }
 
+// ---- H2: dataset-build, prepare-domain and dataset-put ----------------------------------------------------------------------------------------------------------------------------
+{
+ // dataset-build reads the production store and writes nothing to it; the report has no payload; the file is private; the same stored state and time give the same digest
+ assert.equal(built.command,'dataset-build');assert.deepEqual(built.writes,{cloudflare:0});assert.equal(built.source.bucket,'iptv');assert.equal(built.source.programmeRunId,sourceId);
+ assert.equal(fs.statSync(built.file).mode&0o777,0o600,'a private file');assert.equal(path.basename(built.file),'epg-replay-'+built.dataset.digest+'.json');
+ const Replay=live.loadReplay();assert.equal((await Replay.verifyDataset(JSON.parse(datasetText),{expectedDigest:built.dataset.digest,expectedProgrammeRunId:sourceId})).ok,true);
+ assert.equal(built.dataset.fidelity.level,'reduced');for(const word of ['Сталкер','Солярис','Зеркало'])assert.ok(!JSON.stringify(built).includes(word),'no payload in the report');
+ const putsBefore=sourceWorld.bkt.puts.length;
+ const again=await live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'b'),generation:sourceId,confirm:BUILD_CONFIRM,now:FIXED});
+ assert.equal(again.dataset.digest,built.dataset.digest,'deterministic');assert.equal(sourceWorld.bkt.puts.length,putsBefore,'the production store was only read');
+ // the pointer names the generation when none is given; an unpublished or absent pointer, an unknown generation, a missing confirmation and a path in the repository or a relative one are refused
+ await sourceWorld.bkt.put('epg/published-generation.json',JSON.stringify({programmeRunId:sourceId,phase:'published'}));
+ const viaPointer=await live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'c'),confirm:BUILD_CONFIRM,now:FIXED});assert.equal(viaPointer.dataset.digest,built.dataset.digest);
+ await sourceWorld.bkt.put('epg/published-generation.json',JSON.stringify({programmeRunId:sourceId,phase:'staging'}));
+ assert.equal((await failure(()=>live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'d'),confirm:BUILD_CONFIRM,now:FIXED})))?.exitCode,3,'an unpublished pointer');
+ assert.equal((await failure(()=>live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'e'),generation:'ffffffff-ffff-4fff-8fff-ffffffffffff',confirm:BUILD_CONFIRM,now:FIXED})))?.exitCode,3,'an unknown generation');
+ assert.equal((await failure(()=>live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'f'),generation:sourceId,confirm:null})))?.exitCode,2,'no confirmation');
+ assert.equal((await failure(()=>live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.resolve('tests/private-dataset'),generation:sourceId,confirm:BUILD_CONFIRM,now:FIXED})))?.exitCode,2,'inside the repository');
+ assert.equal((await failure(()=>live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:'relative/dir',generation:sourceId,confirm:BUILD_CONFIRM,now:FIXED})))?.exitCode,2,'relative path');
+ assert.equal((await failure(()=>live.buildDataset({env:prodEnv(),store:sourceWorld.bkt,output:path.join(privateRoot,'a'),generation:sourceId,confirm:BUILD_CONFIRM,now:FIXED})))?.exitCode===3,true,'an existing file is never overwritten');
+ // the real S3 client reads the PRODUCTION bucket on the account's default endpoint, GET only, signed with the read-only key, and nothing is sent anywhere else
+ const seen=[];
+ const fetchImpl=async(url,init={})=>{seen.push({url:String(url),method:init.method||'GET',auth:String(init.headers?.Authorization||''),body:init.body??null});return new Response('',{status:404});};
+ const missing=await failure(()=>live.buildDataset({env:prodEnv(),fetchImpl,output:path.join(privateRoot,'g'),confirm:BUILD_CONFIRM,now:FIXED}));
+ assert.equal(missing?.exitCode,3);assert.equal(seen.length,1);
+ const target=new URL(seen[0].url);assert.equal(target.host,ACCOUNT+'.r2.cloudflarestorage.com');assert.equal(target.pathname,'/iptv/epg/published-generation.json');assert.equal(seen[0].method,'GET');assert.equal(seen[0].body,null);
+ assert.ok(seen[0].auth.includes('Credential='+PROD_KEY+'/')&&/SignedHeaders=[^,]*\bhost\b/.test(seen[0].auth)&&!seen[0].auth.includes(PROD_SECRET));
+ const arbitrary=await failure(()=>live.buildDataset({env:prodEnv({EPG_DIAGNOSTIC_PRODUCTION_R2_ENDPOINT:'https://arbitrary-host.example'}),fetchImpl:async()=>{throw new Error('no request');},output:path.join(privateRoot,'h'),confirm:BUILD_CONFIRM}));
+ assert.equal(arbitrary?.exitCode,2,'a credential never goes to an arbitrary host');
+ assert.equal((await failure(()=>live.buildDataset({env:env(),store:sourceWorld.bkt,output:path.join(privateRoot,'i'),generation:sourceId,confirm:BUILD_CONFIRM})))?.exitCode,2,'the production read key is required');
+}
+{
+ // prepare-domain: only on a domain that carries its identity, only from the seeded state, exactly one guarded statement, read back
+ const {d,store}=await provisioned();
+ const mode=()=>sqlRows(d.file,'SELECT mode, cutover, generation FROM discovery_authority')[0];
+ assert.deepEqual(mode(),{mode:'r2',cutover:'open',generation:0});
+ const noConfirm=await failure(()=>live.run({command:'prepare-domain',apply:true,confirm:null,env:env(),fetchImpl:d.fetchImpl,store}));assert.equal(noConfirm?.exitCode,2);
+ const dry=await live.run({command:'prepare-domain',env:env(),fetchImpl:d.fetchImpl,store});
+ assert.equal(dry.prepared,'would_write');assert.equal(dry.discoveryAuthority.before.mode,'r2');assert.deepEqual(dry.writes,{d1:0,r2:0});assert.equal(mode().mode,'r2');
+ const before=d.writes();
+ const done=await live.run({command:'prepare-domain',apply:true,confirm:live.CONFIRM['prepare-domain'],env:env(),fetchImpl:d.fetchImpl,store});
+ assert.equal(done.prepared,'written');assert.equal(done.discoveryAuthority.after.mode,'d1');assert.equal(done.discoveryAuthority.after.cutover,'open');assert.equal(d.writes()-before,1,'one statement');
+ assert.deepEqual(mode(),{mode:'d1',cutover:'open',generation:0});
+ const repeat=await live.run({command:'prepare-domain',apply:true,confirm:live.CONFIRM['prepare-domain'],env:env(),fetchImpl:d.fetchImpl,store});
+ assert.equal(repeat.prepared,'already');assert.equal(d.writes()-before,1,'a second apply writes nothing');
+ const checked=await live.run({command:'check',env:env(),fetchImpl:d.fetchImpl,store});assert.equal(checked.discoveryAuthority.mode,'d1');
+ // a domain that has moved on (a generation, a programme, a transfer) is not touched
+ const moved=await provisioned();
+ sqliteSync([moved.d.file,"UPDATE discovery_authority SET generation=5 WHERE id=1"],{encoding:'utf8'});
+ const refused=await failure(()=>live.run({command:'prepare-domain',apply:true,confirm:live.CONFIRM['prepare-domain'],env:env(),fetchImpl:moved.d.fetchImpl,store:moved.store}));
+ assert.equal(refused?.exitCode,3);assert.equal(sqlRows(moved.d.file,'SELECT mode FROM discovery_authority')[0].mode,'r2');assert.equal(moved.d.writes(),0);
+ // the identity must be in both places
+ const noObject=await provisioned();await noObject.store.delete('diagnostic/identity.json');
+ assert.equal((await failure(()=>live.run({command:'prepare-domain',apply:true,confirm:live.CONFIRM['prepare-domain'],env:env(),fetchImpl:noObject.d.fetchImpl,store:noObject.store})))?.exitCode,3);
+ // with the REAL Discovery authority reading the marker: ready only after the preparation (the same gate the run asks)
+ const Authority=await import('../src/discovery-authority.js');
+ const asEnv=file=>({DB:d1Standin(file,{maxBinds:100})});
+ assert.equal((await Authority.readAuthority(asEnv(moved.d.file))).ready,false,'the seeded marker is not ready');
+ assert.equal((await Authority.readAuthority(asEnv(d.file))).ready,true,'the prepared marker is the production state');
+}
+{
+ // dataset-put: only on a domain with its identity; verified before it is written; create-only; read back; the same file twice is a no-op; a different content under the same key is never overwritten
+ const {d,store}=await provisioned();
+ const args=(extra={})=>({command:'dataset-put',confirm:live.CONFIRM['dataset-put'],input:built.file,env:env(),fetchImpl:d.fetchImpl,store,...extra});
+ const noConfirm=await failure(()=>live.run(args({apply:true,confirm:null})));assert.equal(noConfirm?.exitCode,2);
+ const dry=await live.run(args());
+ assert.equal(dry.dataset.state,'would_write');assert.equal(dry.dataset.key,'diagnostic/replay/'+built.dataset.digest+'.json');assert.deepEqual(dry.writes,{d1:0,r2:0});assert.deepEqual([...store.objects.keys()],['diagnostic/identity.json']);
+ assert.ok(!JSON.stringify(dry).includes('Сталкер'),'no payload in the report');
+ const tampered=await failure(()=>live.run(args({apply:true,input:tamperedFile})));assert.equal(tampered?.exitCode,3);assert.match(tampered.message,/does not verify/);assert.deepEqual([...store.objects.keys()],['diagnostic/identity.json']);
+ const inRepo=await failure(()=>live.run(args({apply:true,input:path.resolve('package.json')})));assert.equal(inRepo?.exitCode,2);
+ const written=await live.run(args({apply:true}));
+ assert.equal(written.dataset.state,'written');assert.deepEqual(written.writes.r2,1);assert.deepEqual([...store.objects.keys()].sort(),['diagnostic/identity.json','diagnostic/replay/'+built.dataset.digest+'.json'].sort());
+ assert.equal(store.objects.get('diagnostic/replay/'+built.dataset.digest+'.json').bytes.toString('utf8'),datasetText,'byte for byte the file');
+ const second=await live.run(args({apply:true}));assert.equal(second.dataset.state,'already_present');assert.equal(second.writes.r2,0);
+ // a different content under the same key is never overwritten
+ store.objects.set('diagnostic/replay/'+built.dataset.digest+'.json',{bytes:Buffer.from('{}'),etag:'x'});
+ const clash=await failure(()=>live.run(args({apply:true})));assert.equal(clash?.exitCode,3);assert.equal(store.objects.get('diagnostic/replay/'+built.dataset.digest+'.json').bytes.toString('utf8'),'{}');
+ // no identity, no dataset
+ const bare=await provisioned();await bare.store.delete('diagnostic/identity.json');
+ assert.equal((await failure(()=>live.run({command:'dataset-put',apply:true,confirm:live.CONFIRM['dataset-put'],input:built.file,env:env(),fetchImpl:bare.d.fetchImpl,store:bare.store})))?.exitCode,3);
+ // the Worker's own loader accepts what the operator wrote (the run reads `diagnostic/replay/<digest>.json` and verifies it)
+ const Replay=live.loadReplay();const stored=await (await (await provisioned()).store.get('diagnostic/identity.json')).json();void stored;
+ assert.equal((await Replay.verifyDataset(JSON.parse(datasetText),{expectedDigest:built.dataset.digest})).ok,true);
+}
+
 // ---- 7: mutation checks ---------------------------------------------------------------------------------------------------------------------------------------------------------------
 {
  const mutants=[
@@ -201,9 +334,15 @@ const live=await import(pathToFileURL(SCRIPT).href);
   ['the database uuid is not compared',"if(live.uuid!==config.databaseId)throw new ProvisionError('The database read back is not the configured one',3);\n",'','the database uuid read back must match'],
   ['apply needs no confirmation'," if(apply&&confirm!==CONFIRM[command])throw new ProvisionError('--apply needs --confirm '+CONFIRM[command],2);\n",'','apply needs its confirmation'],
   ['schema ignores a used database',"if(report.database.tables!==0)throw new ProvisionError('The diagnostic database already has tables; the schema is applied only to an empty one',3,{report});\n",'','schema refuses a database with tables'],
-  ['the bucket handle writes any key',"if(key!==IDENTITY_OBJECT)throw new ProvisionError('Write refused: only '+IDENTITY_OBJECT+' may be written',3);\n",'','the bucket handle writes only the identity object'],
+  ['the bucket handle writes any key',"if(!allowed(key))throw new ProvisionError('Write refused: '+key+' is not a key this command may write',3);\n",'','the bucket handle writes only the identity object'],
  ['a malformed read is taken as empty',"if(!only||only.success!==true||!Array.isArray(only.results))throw new ProvisionError('A read response did not prove its result; the state is unknown, not empty',3,{kind:'malformed_read'});\n  return only.results;","return only?.results||[];",'a malformed read does not prove an empty database'],
   ['the S3 adapter is not given the EU endpoint',",R2_SNAPSHOT_ENDPOINT:config.r2Endpoint",'','the real S3 adapter targets the EU endpoint'],
+  ['the lower store never learns the dataset key'," if(apply)s3Allowed.add(key);\n",'','the real S3 adapter writes the dataset key'],
+  ['containment is lexical',"const resolved=realResolve(target),repo=realResolve(REPO);","const resolved=path.resolve(target),repo=REPO;",'a symlink into the repository is refused'],
+  ['the transfer predicate is dropped'," AND EXISTS (SELECT 1 FROM discovery_transfer WHERE id=1 AND state='idle')",'','a concurrent transfer change does not move the authority'],
+  ['prepare-domain skips the identity check',"async function prepareDomain({d1,bucket,Diag,config,report,apply}){\n await verifyIdentity(d1,bucket,Diag,config);\n","async function prepareDomain({d1,bucket,Diag,config,report,apply}){\n",'prepare-domain needs the identity'],
+  ['dataset-put skips the verification'," if(!checked.ok)throw new ProvisionError('The dataset does not verify: '+checked.problems.join(','),3,{problems:checked.problems});\n const key="," const key=",'dataset-put verifies the dataset'],
+  ['every command may write the dataset key',"const allowed=key=>key===IDENTITY_OBJECT||(datasetWrites&&DATASET_KEY.test(key));","const allowed=key=>key===IDENTITY_OBJECT||DATASET_KEY.test(key);",'the dataset key is the only extra write'],
   ['an arbitrary endpoint is trusted'," if(url.protocol==='https:'&&value===canonical)return value;\n throw new ProvisionError(label+' must be the canonical Cloudflare endpoint or a loopback test server',2);\n"," return value;\n",'an arbitrary endpoint is refused before any request'],
  ];
  for(const [name,from,to,concern] of mutants){

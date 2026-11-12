@@ -12,7 +12,7 @@ Contract: [orchestration reliability](../reference/orchestration-reliability.md#
 
 | Receipt failure | Meaning and next step |
 |---|---|
-| `domain_not_prepared` | the diagnostic published generation does not name the dataset's generation: the preparation of AIR-456 is missing |
+| `domain_not_prepared` | the diagnostic published generation does not name the dataset's generation, or the Discovery authority of the diagnostic D1 is not `d1`/`open` (the seeded `r2` would run the legacy R2 ledger path and measure nothing about production): run `prepare-domain` |
 | `domain_not_clean` | a stray object, another dataset's baseline or a consumed baseline: run `cleanup` (owner GO), then launch again |
 | `dataset_missing`, `dataset_invalid` | the dataset is not at `diagnostic/replay/<digest>.json` or does not verify |
 | `step_lease_expired`, `epoch_mismatch`, `step_lease_held` | the diagnostic step lease ran out, was lost or is held: no retry; read the report, then `cleanup` |
@@ -31,6 +31,16 @@ An unknown create outcome (`202`, receipt `reserved`) is resolved by repeating t
 | `schema --apply --confirm APPLY_EPG_DIAGNOSTIC_SCHEMA` | applies them, one request per file, only to a database with no tables; stops at the first failure without a retry (delete and recreate an empty diagnostic database to start over); then judges the domain |
 | `identity` | dry run: the Worker's own `EpgDiagnostic.assess` (seed rows exactly canonical, no other rows, empty bucket, no identity) |
 | `identity --apply --confirm PROVISION_EPG_DIAGNOSTIC_IDENTITY` | the Worker's own `EpgDiagnostic.provision`: writes `diagnostic/identity.json` and the identity row once, then reads both back |
+
+H2 commands (each needs its own owner GO; a dataset holds ledger payloads, so every file stays outside the repository: the paths are checked on their real, symlink-resolved location, so a symlink into the repository is refused as well as a path inside it):
+
+| Command | Effect |
+|---|---|
+| `prepare-domain` | dry run: reads the Discovery authority of the diagnostic D1 and says whether it is the seeded state (`r2`/`open`, generation 0, nothing loaded), the prepared one or something else |
+| `prepare-domain --apply --confirm PREPARE_EPG_DIAGNOSTIC_DOMAIN` | needs the identity in both D1 and R2; one guarded statement (`mode='d1'` only from the untouched seeded state, with the idle transfer row part of the same statement's predicate), read back; a domain that has moved on is refused untouched |
+| `dataset-build --output <abs dir> [--generation <programmeRunId>] --confirm READ_PRODUCTION_EPG_GENERATION` | reads the PRODUCTION bucket `iptv` only (the read-only snapshot key `R2_SNAPSHOT_ACCESS_KEY_ID`/`R2_SNAPSHOT_SECRET_ACCESS_KEY`, GET only, the account's default R2 endpoint; no write exists); without `--generation` the pointer `epg/published-generation.json` names the published generation; writes one private file `epg-replay-<digest>.json` (mode 0600, never overwritten) and reports digest, counts and fidelity, never a payload |
+| `dataset-put --input <abs file>` | dry run: verifies the file with the Worker's own `verifyDataset` and says where it would be written |
+| `dataset-put --input … --apply --confirm PUT_EPG_DIAGNOSTIC_DATASET` | needs the identity; writes `diagnostic/replay/<digest>.json` once (create-only; the lower S3 store is told exactly that digest-derived key after the dataset verified, and no other command can write it), reads it back byte for byte and re-verifies it; the same file again is a no-op, a different content under the same key is never overwritten |
 
 The confirmation strings are guards against accident; every `--apply` needs the owner's operation-specific GO. The script never deletes, and the bucket handle it gives `provision` can write only the identity object.
 
