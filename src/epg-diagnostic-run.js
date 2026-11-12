@@ -377,6 +377,12 @@ const EpgDiagnosticRun=(()=>{
    const loaded=await loadDataset(ctx.env,config.datasetDigest);
    if(loaded.refused)return {failure:{code:loaded.refused}};
    const dataset=loaded.dataset,plan=await planOf(dataset,config);
+   // The Discovery ledger of production is D1-owned. A diagnostic domain whose Discovery authority is not `d1`/`open` would run the legacy R2 ledger path (one D1 write, not the production
+   // hundreds) and a report measured on it would say nothing about production: refuse before the baseline is written (the operator's `prepare-domain` sets the marker).
+   if(typeof DiscoveryAuthority!=='undefined'){
+    const gate=await DiscoveryAuthority.readAuthority(ctx.env);
+    if(!gate.ready)return {failure:{code:'domain_not_prepared'}};
+   }
    const materialized=await materialize(ctx.env,dataset);
    if(materialized.refused)return {failure:{code:materialized.refused}};
    const published=await publicationOf(ctx.env,dataset);

@@ -59,7 +59,7 @@ const launchBody=(key,extra={})=>({idempotencyKey:key,confirm:'LAUNCH_EPG_DIAGNO
 const KEY1='canary-key-0000000001',KEY2='canary-key-0000000002';
 
 // ---- a domain: production-like resources, a diagnostic domain, a scripted Workflow binding, and a Worker context with all the modules ------------------------------------------------
-async function domain({provision=true,dataset:put=datasetText,sourcesOverride=null,authority='d1',published='match',diagnosticBindings=true,workflow={}}={}){
+async function domain({realPublished=false,provision=true,dataset:put=datasetText,sourcesOverride=null,authority='d1',published='match',diagnosticBindings=true,workflow={}}={}){
  const context=loadWorker();context.DiscoveryAuthority=Authority;loaders(sourcesOverride||SOURCES,context);
  const DiagnosticModule=vm.runInContext('EpgDiagnostic',context);
  const prodFile=database(false),prodBkt=bucket();
@@ -76,7 +76,8 @@ async function domain({provision=true,dataset:put=datasetText,sourcesOverride=nu
   if(put)await diagBkt.put('diagnostic/replay/'+DIGEST+'.json',put);
  }
  const programmeRunId=dataset.source.programmeRunId;
- context.PublishedEpg={
+ if(realPublished)vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),context);
+ else context.PublishedEpg={
   async readAuthority(){return {cutover:'open',mode:'d1'};},
   async currentGeneration(){return published==='none'?null:{programmeRunId:published==='match'?programmeRunId:'11111111-1111-4111-8111-111111111111',phase:'published',fence:'g-diag'};},
  };
@@ -313,6 +314,21 @@ const failedWith=async(label,{prepare,expect,statusExpect='failed'})=>{
  assert.equal((await d.call('POST','/api/epg/diagnostic/stop',{idempotencyKey:KEY1,confirm:'STOP_EPG_DIAGNOSTIC_CANARY'})).body.note,'not_active');
  assert.equal((await d.call('POST','/api/epg/diagnostic/launch',launchBody(KEY2,{seed:'after-stop'}))).status,200,'the slot is free after a stop');
 }
+// ================================ 4b. the domain as the operator prepares it, with the REAL published-EPG module (no stub) ================================
+{
+ // `prepare-domain` sets the Discovery authority of the diagnostic D1 to d1/open, the production state. With it, the real modules complete a run on the D1 ledger path (hundreds of D1 writes
+ // in sixteen batches); the seeded marker (r2) is refused before anything is written, because it would run the legacy R2 ledger path and measure nothing about production.
+ const ready=await domain({realPublished:true,authority:'d1'});
+ await ready.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));
+ await ready.runInstance(KEY1);
+ const done=JSON.parse(ready.receipt(KEY1).report_json);
+ assert.equal(ready.receipt(KEY1).status,'complete');assert.equal(done.outcome.ok,true);assert.ok(done.storage.d1.writes>100,'the ledger goes through D1, as in production');assert.ok(done.storage.d1.batches>=1);
+ const seeded=await domain({realPublished:true,authority:'r2'});
+ await seeded.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));
+ const refused=await seeded.runInstance(KEY1);
+ assert.equal(seeded.receipt(KEY1).status,'failed');assert.equal(seeded.receipt(KEY1).failure,'domain_not_prepared');assert.equal(refused.result.reason,'domain_not_prepared');
+ assert.equal([...seeded.diagBkt.objects.keys()].some(key=>key.startsWith('epg/')),false,'nothing was materialized on an unprepared domain');
+}
 // static wiring
 {
  const wrangler=fs.readFileSync('wrangler.jsonc','utf8'),build=fs.readFileSync('build.mjs','utf8'),workerSource=fs.readFileSync('src/worker.js','utf8');
@@ -351,6 +367,7 @@ async function quick(sourcesOverride,only=null){
  await check('production busy at begin fails the run',async()=>{const x=await (launched())();await x.prodBkt.put('sync.json',JSON.stringify({runId:'r',stage:'seal',updatedAt:new Date().toISOString()}));const run=await x.runInstance(KEY1);return run.names.length===1&&x.receipt(KEY1).status==='failed'&&!x.diagBkt.objects.has('sync.json');});
  await check('an exceeded deadline is enforced by the guard',async()=>{const x=await (launched({budget:60000}))();const run=await x.runInstance(KEY1,{now:()=>Date.now()-90000});return run.result.reason==='budget_exceeded'&&x.receipt(KEY1).failure==='budget_exceeded';});
  await check('a violated postcondition is not complete',async()=>{const x=await (launched({budget:60000}))();let t=0;await x.runInstance(KEY1,{now:()=>{t+=40000;return Date.now()+t;}});return x.receipt(KEY1).status==='failed'&&/postcondition_failed/.test(x.receipt(KEY1).failure||'');});
+ await check('a seeded Discovery marker is refused',async()=>{const x=await make({realPublished:true,authority:'r2'});await x.call('POST','/api/epg/diagnostic/launch',launchBody(KEY1));const run=await x.runInstance(KEY1);return run.result.reason==='domain_not_prepared'&&x.receipt(KEY1).status==='failed'&&![...x.diagBkt.objects.keys()].some(key=>key.startsWith('epg/'));});
  await check('production busy at seal fails the run',async()=>{const x=await (launched())();const step={do:async(name,fn)=>{const r=await fn();if(name==='begin')await x.prodBkt.put('sync.json',JSON.stringify({runId:'r',stage:'seal',updatedAt:new Date().toISOString()}));return r;}};const run=await x.Run.run(x.env,{idempotencyKey:KEY1},step);return run.reason!=='complete'&&x.receipt(KEY1).status==='failed'&&![...x.diagBkt.objects.keys()].some(key=>key.startsWith('epg/'));});
  await check('a stopped receipt does not run',async()=>{const x=await s();const r=await x.runInstance(KEY1);return r.names.length===1&&r.result.reason==='receipt_stopped'&&x.receipt(KEY1).status==='stopped'&&![...x.diagBkt.objects.keys()].some(key=>key.startsWith('epg/'));});
  await check('a run completes with exact departures',async()=>{const x=await (launched())();const run=await x.runInstance(KEY1);const report=JSON.parse(x.receipt(KEY1).report_json||'{}');return run.result.reason==='complete'&&report.expectedVsActual?.departuresMatch===true&&report.published===false&&report.productionWrites===0&&report.label==='canary-measured';});
@@ -364,6 +381,7 @@ async function quick(sourcesOverride,only=null){
  const mutants=[
   ['a stop completes without quiescence',"if(!(ended&&quiet&&waitedMs>=QUIESCENCE_MS))return reply(202,","if(false)return reply(202,"],
   ['begin does not gate production',"if(busy){await transition(ctx.env,key,Number(row.revision),['reserved','created'],'failed',{failure:busy,now:now()});return {ok:false,code:busy};}",""],
+  ['an unprepared Discovery marker is accepted',"    if(!gate.ready)return {failure:{code:'domain_not_prepared'}};\n",'','a seeded Discovery marker is refused'],
   ['seal does not gate production',"   if(busy)return {failure:{code:busy}};\n",""],
   ['the deadline is not enforced',"   ctx.env.epgDeadline=started+config.budgetMs;",""],
   ['complete ignores the outcome',"const ok=sealed.report?.outcome?.ok===true;","const ok=!!sealed.report;"],
@@ -386,7 +404,7 @@ async function quick(sourcesOverride,only=null){
   ['the report is labelled production-measured',"schemaVersion:1,label:'canary-measured',published:publishedAfter!==publishedBefore,productionWrites:measure.attempts,\n    dataset:","schemaVersion:1,label:'production-measured',published:false,productionWrites:0,\n    dataset:"],
   ['status writes',"return reply(200,{receipt:publicReceipt(row),instance:live,reconcile:hint,sideEffects:'none',writes:noteWrites(ctx)});","await transition(ctx.env,row.idempotency_key,Number(row.revision),ACTIVE,row.status);return reply(200,{receipt:publicReceipt(row),instance:live,reconcile:hint,sideEffects:'none',writes:noteWrites(ctx)});"],
  ];
- const concerns={"a stop completes without quiescence":["a stop holds the slot until quiescent"],"begin does not gate production":["production busy at begin fails the run"],"seal does not gate production":["production busy at seal fails the run"],"the deadline is not enforced":["an exceeded deadline is enforced by the guard"],"complete ignores the outcome":["a violated postcondition is not complete"],"launch needs no confirmation": ["launch needs the confirmation"], "the production gate is skipped": ["the production gate refuses"], "an unbound Workflow is accepted": ["an unbound Workflow refuses"], "the dataset is not verified": ["a tampered dataset does not start"], "the idempotency conflict is ignored": ["other parameters conflict"], "the active slot is ignored": ["one canary at a time"], "an unknown create is retried": ["an unknown create is not retried blind"], "an unknown status is retried": ["an unknown create is not retried blind"], "a repeat creates again": ["a repeat creates no second instance"], "stop does not terminate": ["stop terminates the instance"], "a stopped receipt runs on": ["a stopped receipt does not run"], "cleanup ignores an active canary": ["cleanup refuses while active"], "the published generation is not compared": ["an unprepared domain fails closed"], "a dirty domain is overwritten": ["a dirty domain is refused"], "the dataset digest of a materialized baseline is not compared": ["a consumed baseline is refused"], "the report claims a publication": ["a run completes with exact departures"], "the report is labelled production-measured": ["a run completes with exact departures"], "status writes": ["status writes nothing"]};
+ const concerns={"a stop completes without quiescence":["a stop holds the slot until quiescent"],"begin does not gate production":["production busy at begin fails the run"],"seal does not gate production":["production busy at seal fails the run"],"an unprepared Discovery marker is accepted":["a seeded Discovery marker is refused"],"the deadline is not enforced":["an exceeded deadline is enforced by the guard"],"complete ignores the outcome":["a violated postcondition is not complete"],"launch needs no confirmation": ["launch needs the confirmation"], "the production gate is skipped": ["the production gate refuses"], "an unbound Workflow is accepted": ["an unbound Workflow refuses"], "the dataset is not verified": ["a tampered dataset does not start"], "the idempotency conflict is ignored": ["other parameters conflict"], "the active slot is ignored": ["one canary at a time"], "an unknown create is retried": ["an unknown create is not retried blind"], "an unknown status is retried": ["an unknown create is not retried blind"], "a repeat creates again": ["a repeat creates no second instance"], "stop does not terminate": ["stop terminates the instance"], "a stopped receipt runs on": ["a stopped receipt does not run"], "cleanup ignores an active canary": ["cleanup refuses while active"], "the published generation is not compared": ["an unprepared domain fails closed"], "a dirty domain is overwritten": ["a dirty domain is refused"], "the dataset digest of a materialized baseline is not compared": ["a consumed baseline is refused"], "the report claims a publication": ["a run completes with exact departures"], "the report is labelled production-measured": ["a run completes with exact departures"], "status writes": ["status writes nothing"]};
  for(const [name,from,to] of mutants){
   assert.equal(SOURCES.run.split(from).length-1,1,'the mutant pattern exists once: '+name);
   assert.ok(concerns[name],'the mutant names the checks it concerns: '+name);
