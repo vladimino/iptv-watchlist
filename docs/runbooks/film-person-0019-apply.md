@@ -46,7 +46,7 @@ Under [authorization levels](../process/authorization-and-escalation.md) this is
 
 ## 4. Read-only preflight (immediately before the apply; every statement is one `SELECT`)
 
-Run in this order through the Cloudflare D1 read path (the Cloudflare API connector `execute`, or `d1_database_query`) and keep the rows as evidence. Write nothing. Do not use `GET /api/enrichment/*`, `GET /api/events` or `epg_pipeline_status` as probes. The offline helper `scripts/schema-preflight.mjs` knows only migrations 0013 to 0016 (`SEQUENCE`) and has no 0019 mode; the statements below are specified here and are **not** generated or tested by any tool (not verified in a run). Run each statement through `assertReadOnly`-style discipline by hand: a single `SELECT`.
+Run in this order through the Cloudflare D1 read path (the Cloudflare API connector `execute`, or `d1_database_query`) and keep the rows as evidence. Write nothing. Do not use `GET /api/enrichment/*`, `GET /api/events` or `epg_pipeline_status` as probes. The offline helper `scripts/schema-preflight.mjs` knows only migrations 0013 to 0016 (`SEQUENCE`); the 0019 statements are emitted and judged by the separate offline tool [`scripts/film-person-0019-preflight.mjs`](../../scripts/film-person-0019-preflight.mjs) (section 4a). It touches no network, D1, R2 or connector; it is tested against the real migration chain over the sqlite3 stand-in and mutation-tested, and it has never been run against production (not verified in a run). Every emitted statement is a single `SELECT` (`assertReadOnly`).
 
 | # | Statement (shape) | Expected | Why it matters |
 | --- | --- | --- | --- |
@@ -63,6 +63,20 @@ Run in this order through the Cloudflare D1 read path (the Cloudflare API connec
 | 11 | `epg_status` / `sync.json` stage; the EPG executor control phase | no publication in flight (`running`, `switching`, `metadata`, `epg` mean wait) | same stop list as the [window activation runbook](d1-projector-window-activation.md) |
 | 12 | The D1 Time Travel bookmark for `iptv` (`wrangler d1 time-travel info iptv`, a read) recorded before the apply | a bookmark and its timestamp | recorded as a recovery point only; restoring it loses every later write of every domain and is an owner decision, never automatic (the connector path for this read is not verified) |
 | 13 | Feature flags (`feature_flags` tool, read) and the registry of the hourly Predictions Task | recorded as observed; no change | not a gate for the DDL; recorded so the evidence names the concurrent writers |
+
+### 4a. The offline tool (identity, emitted statements, verification of pasted results)
+
+All commands are dry: they read the checked-in file and stdin-free arguments only, and write nothing but their JSON to standard output.
+
+| Command | Output |
+| --- | --- |
+| `node scripts/film-person-0019-preflight.mjs identity` | git blob hash, sha256, byte count and statement count (28) of `migrations/0019_canonical_write_receipt.sql`, recomputed from the file, with the apply result shape expected (28 `success`, first `changes` 0, last `changes` 1). The GO names these values; compare them with the section 1 identity and with `git hash-object` of the file on `main`. |
+| `node scripts/film-person-0019-preflight.mjs preflight-sql` | The eleven read-only `SELECT` statements of rows 2 to 10 (ids `schema`, `prerequisites`, `existing_receipt_objects`, `shared_trigger`, `canonical_revision`, `marker`, `fence`, `baseline`, `projector_lease`, `projector_window`, `discovery_lease`; the eight prerequisite tables are read from the refuse-insert of the file) and the four rows that are not SQL (1, 11, 12, 13) to record by hand. |
+| `node scripts/film-person-0019-preflight.mjs verify-preflight results.json [--now ISO] [--reference R]` | Judges the pasted results against section 4. |
+| `node scripts/film-person-0019-preflight.mjs readback-sql` | The eight read-only statements of section 6 (ids `schema`, `objects`, `foreign_objects`, `receipt_rows`, `unchanged_rows`, `marker`, `fence`, `baseline`). Run it only after the apply: the row counts read the four new tables. |
+| `node scripts/film-person-0019-preflight.mjs verify-readback results.json [--reference R]` | Judges the pasted results against section 6: version 19 and the exact note, the 4 tables, 2 indexes, 19 new triggers and the shared one present by name, nothing else matching `canonical_*receipt*`, 0 rows in each new table and in `canonical_revision`, `film_rated_admission`, `film_retention`, `tmdb_retirement_decision`, marker `prepared`/`open`/1, fence `ok` 1, baseline `verified` with a reference of the form `cutover_accepted/v2:<64 hex>` (exactly equal to `--reference` when given). |
+
+A results file is JSON `{"<statement id>": <rows array or the D1 response envelope [{success,results}]>}`. The verifier exits 1 and names every refusal (`result_missing:<id>`, `result_failed:<id>`, `schema_version:<n>`, `marker_moved:<mode>/<cutover>/<generation>`, `receipt_objects_present:<n>`, `projector_lease_live`, `objects_missing:<type:name,...>`, `count_not_expected:<table>:<n>`, and so on); a missing, failed or malformed result is a refusal, never an empty one. `ok` is evidence and never a permission: the GO of section 3 is separate, and the manual rows are not judged by the tool.
 
 Which of these matter and which do not:
 
@@ -98,7 +112,7 @@ Operator rules:
 | Unchanged | marker `prepared`/`open`/1, fence `ok` 1, baseline `verified` with the same reference, `canonical_revision` 0 rows, projector lease and window as in the preflight, `film_rated_admission`, `film_retention`, `tmdb_retirement_decision` counts as before (0 each until H1) |
 | `handoffReadiness` (read-only, run on an operator copy or by the same SELECTs) | `receipts_schema_missing` absent; the other 29 blockers unchanged |
 
-A mismatch, an unexpected row count or a partial object set is STOP; escalate with the rows. No automatic repair, retry or downgrade.
+The `verify-readback` command of section 4a evaluates every row above except `handoffReadiness`, which stays a separate read. A mismatch, an unexpected row count or a partial object set is STOP; escalate with the rows. No automatic repair, retry or downgrade.
 
 ## 7. STOP conditions and recovery (truthful)
 
