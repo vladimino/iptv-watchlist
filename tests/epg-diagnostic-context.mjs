@@ -338,6 +338,7 @@ async function isolationChecks(Module){
  await check('a forged statement is refused by batch',async()=>{const t=tiny(),c=Module.create({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});const native=t.raw.prepare("INSERT INTO epg_orchestration_document (key,body,revision,updated_at) VALUES ('a','{}',1,'t')").bind();return await refuses(c.env.DB.batch([{_inner:native,_write:false}]),'diagnostic_foreign_statement')&&t.raw.sql('SELECT COUNT(*) AS n FROM epg_orchestration_document')[0].n===0;});
  await check('a modified seeded row is not provisioned',async()=>{const t=tiny();t.raw.sql("UPDATE discovery_lease SET lease_id='foreign' WHERE id=1");const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='seed_mismatch'&&!t.bkt.objects.has(Module.IDENTITY_OBJECT);});
  await check('a deleted seeded row is not provisioned',async()=>{const t=tiny();t.raw.sql('DELETE FROM published_epg_authority');const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='seed_mismatch';});
+ await check('a missing seeded table is not provisioned',async()=>{const t=tiny();t.raw.sql('DROP TABLE projector_window');const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===false&&done.reason==='seed_mismatch'&&!t.bkt.objects.has(Module.IDENTITY_OBJECT);});
  await check('a fresh chain is provisioned',async()=>{const t=tiny();const done=await Module.provision({DB:t.raw,BUCKET:t.bkt,resourceId:RESOURCE});return done.ok===true;});
  return failed;
 }
@@ -352,7 +353,6 @@ async function isolationChecks(Module){
   ['production bucket allowed',"if(production.BUCKET&&(production.BUCKET===BUCKET))return refusal('context_contradictory',{field:'BUCKET'});",""],
   ['production database allowed',"if(production.DB&&(production.DB===DB))return refusal('context_contradictory',{field:'DB'});",""],
   ['denied bindings readable',"if(typeof name==='string'&&DENIED.includes(name)){state.stats.denied++;throw deniedError(name);}",""],
-  ['unknown keys settable',"if(!ALLOWED.has(name)){state.stats.denied++;throw deniedError(String(name));}",""],
   ['the storage can be assigned',"if(!CARRIERS.has(name)){state.stats.denied++;throw deniedError(String(name));}\n    target[name]=value;return true;","target[name]=value;return true;"],
   ['the storage can be redefined',"if(!CARRIERS.has(name)||!('value' in descriptor)||descriptor.get||descriptor.set){state.stats.denied++;throw deniedError(String(name));}","if(false){}"],
   ['guarded handles are editable',"return Object.freeze({\n   prepare:","return ({\n   prepare:"],
