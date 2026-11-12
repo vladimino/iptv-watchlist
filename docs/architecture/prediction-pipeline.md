@@ -72,14 +72,14 @@ sequenceDiagram
     participant Queue as Prediction queue and lease
     participant Store as D1 pointers and R2 bodies
     Client->>MCP: prediction_batch_start
-    MCP->>Queue: Acquire the one runner lease
-    alt Lease held by any run
-        MCP-->>Client: already_running (stop, do not adopt)
-    else New run
-        MCP->>Queue: Select once, hot first (up to 100 films)
-        alt Whole answer over the byte limit
-            MCP-->>Client: manifest_too_large (no run, no lease, no write, nothing shortened)
-        else Fits
+    MCP->>Queue: Read-only preflight: select once, hot first (up to 100 films), measure the manifest
+    alt Whole answer over the byte limit
+        MCP-->>Client: manifest_too_large (zero writes: no lease, run or Event; nothing shortened)
+    else Fits
+        MCP->>Queue: Acquire the one runner lease, revalidate the snapshot
+        alt Lease held by any run
+            MCP-->>Client: already_running (stop, do not adopt)
+        else New run
             MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch
             loop Until the manifest is spent (at most 100 films)
                 opt Model call may be long
@@ -89,12 +89,13 @@ sequenceDiagram
                 end
                 Client->>Client: Generate up to 10 films from the manifest
                 Client->>MCP: prediction_batch_submit (1 to 10 items, runId and epoch)
+                MCP->>Queue: Set the submit gate (an overlapping call gets submit_in_flight)
                 MCP->>MCP: Validate each film, compare profile impact
                 loop Each valid film in order
                     MCP->>Store: Immutable body, then pointer and view index
                     MCP->>MCP: Save the film result in the run record
                 end
-                MCP->>Queue: One queue settlement for the call, renew lease
+                MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
                 MCP-->>Client: Per-film results (partial success; a replay of the same body recovers a crash)
                 opt Profile changed
                     MCP-->>Client: compatible films kept; impacted or unknown films stale_profile
