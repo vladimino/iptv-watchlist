@@ -127,9 +127,37 @@ export async function readLoadState(db){
  }
  return rows;
 }
-// A read-only binding over the operator copy (a local sqlite file): one SELECT per statement, nothing else is accepted.
+// The table behind each state statement, taken from the statements themselves (one FROM each) so the list below cannot drift from them.
+export const STATE_SOURCE_TABLES=Object.freeze(Object.fromEntries(Object.entries(STATE_STATEMENTS).map(([id,sql])=>{
+ const names=[...sql.matchAll(/\bFROM\s+([a-z_]+)/gi)].map(match=>match[1]);
+ if(names.length!==1)throw new Error('state statement '+id+' must read exactly one table');
+ return [id,names[0]];
+})));
+const COPY_LOG_TABLES=Object.freeze(['connector_copy_log','connector_copy_table']);
+// The connector tool (scripts/film-person-connector-run.mjs) records every copied table in `connector_copy_table` (done=1 once its last page is in). A copy made by that tool is read
+// only when ALL eight tables behind the state statements are recorded done: a copy cut anywhere else (for example after film_external_id and before film_rated_admission) would be
+// read as it stands, and `plan` would report rows to load against an empty class. Refusal code `copy_incomplete`, detail = the state statement id (or `log`), never a row value.
+// Fail closed: a log table without its twin, an unreadable log, or any row that is not {name: text, done: 0|1} refuses too. A file with NO log table was not made by the connector tool
+// (the sqlite stand-in of tests/film-person-prepared-loader.mjs, the synthetic production of tests/film-person-h1-rehearsal.mjs): it is read as before, and the pinned counts,
+// marker and baseline of the plan are then its only completeness check; every real operator copy carries the log.
+export function assertCopyComplete(driver){
+ const present=driver.query("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('connector_copy_log','connector_copy_table')").map(row=>row.name);
+ if(present.length===0)return false;
+ if(COPY_LOG_TABLES.some(name=>!present.includes(name)))throw stop('copy_incomplete','log');
+ let logged;
+ try{logged=driver.query('SELECT name, done FROM connector_copy_table');}catch{throw stop('copy_incomplete','log');}
+ const done=new Map();
+ for(const row of logged){
+  if(typeof row?.name!=='string'||!(row.done===0||row.done===1)||done.has(row.name))throw stop('copy_incomplete','log');
+  done.set(row.name,row.done===1);
+ }
+ for(const [id,table] of Object.entries(STATE_SOURCE_TABLES))if(done.get(table)!==true)throw stop('copy_incomplete',id);
+ return true;
+}
+// A read-only binding over the operator copy (a local sqlite file): one SELECT per statement, nothing else is accepted. Every command reads the copy through here.
 export function copyReadBinding(file){
  const driver=sqliteDriver(file);
+ assertCopyComplete(driver);
  return {prepare(sql){
   const text=assertReadOnly(sql);
   return {all:async()=>({results:driver.query(text)})};

@@ -87,6 +87,16 @@ const LOADER=[
  ['readback: the baseline is the pinned one',"if(!baseline||baseline.state!=='verified'||baseline.reference!==plan.gate.baselineReference)reasons.push('baseline_changed');",'',7],
  ['readback: a class must match exactly',"const ok=missing===0&&different===0&&unexpected===0&&stored.size===plan.classes[name].expected;","const ok=missing===0&&different===0;",7],
  ['readback: the pins are checked',"if(expectGeneration!==plan.gate.generation||expectReference!==plan.gate.baselineReference)reasons.push('gate_not_the_pinned_one');",'',7],
+ // the copy must be a finished connector copy
+ ['copyReadBinding checks the copy log',"assertCopyComplete(driver);\n return {prepare","return {prepare",11],
+ ['no log table: not a connector copy',"if(present.length===0)return false;","",11],
+ ['the log tables come as a pair',"if(COPY_LOG_TABLES.some(name=>!present.includes(name)))throw stop('copy_incomplete','log');","",11],
+ ['an unreadable log refuses',"catch{throw stop('copy_incomplete','log');}","catch{logged=[];}",11],
+ ['done is exactly 0 or 1',"||!(row.done===0||row.done===1)||","||",11],
+ ['a table logged twice refuses',"||done.has(row.name))throw stop('copy_incomplete','log');",")throw stop('copy_incomplete','log');",11],
+ ['a nameless log row refuses',"if(typeof row?.name!=='string'||","if(",11],
+ ['every state table must be done',"if(done.get(table)!==true)throw stop('copy_incomplete',id);","if(done.get(table)===undefined)throw stop('copy_incomplete',id);",11],
+ ['a state table missing from the log refuses',"if(done.get(table)!==true)throw stop('copy_incomplete',id);","if(done.get(table)===false)throw stop('copy_incomplete',id);",11],
  // the CLI
  ['the CLI plan is dry',"if(command==='plan'){\n  if(option('out'))writePrivate(path.join(privatePath(option('out')),'plan.private.json'),built.plan);\n  return print({ok:true,mode:'dry-run',...summarize(built.plan)});\n }\n const emitted=emitLoadSql({plan:built.plan,apply:rest.includes('--apply'),planDigest:option('plan-digest')});","if(command==='plan'){\n  return print({ok:true,mode:'dry-run',...summarize(built.plan)});\n }\n const emitted=emitLoadSql({plan:built.plan,apply:true,planDigest:option('plan-digest')});",10],
  ['the CLI emits only against --apply',"apply:rest.includes('--apply')","apply:true",10],
@@ -108,7 +118,7 @@ try{
  const source='scripts/film-person-prepared-loader.mjs';
  const original=fs.readFileSync(source,'utf8');
  assert.equal(original.split(ROOT_LINE).length,2,'the root line of the loader is found once');
- for(const [name,from,,hint] of LOADER)assert.ok(Number.isInteger(hint)&&hint>=0&&hint<=10,'the section of "'+name+'"');
+ for(const [name,from,,hint] of LOADER)assert.ok(Number.isInteger(hint)&&hint>=0&&hint<=11,'the section of "'+name+'"');
  for(const [name,from] of LOADER)assert.equal(original.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once in '+source);
  // the unmutated copy, moved the same way, must PASS: otherwise every mutant would be "killed" by the move itself
  const control=path.join(dir,'loader.control.mjs');
