@@ -100,6 +100,10 @@ This addendum records implementation-time corrections to the decision text above
 - **Result names (decision 5).** The delivery scope fixed `needs_regeneration` (this ADR's `stale_profile`) and `validation_failure` (this ADR's `validation_error`); the semantics are those described above.
 - **Epoch mismatch (decision 7a).** A request whose `epoch` is not the run's is `409 epoch_mismatch`, a caller error that never stops the run, rather than `lease_lost` (which would record a stop for the real owner).
 
+## Addendum 2026-11-12: manifest ceiling raised to 256 KiB (AIR-450)
+
+Decision D1 reserved the byte limit of `batch_start` for the owner after a measurement, and the accepted text above is not rewritten. The owner approved raising `maxManifestBytes` from the initial 160 KiB to **256 KiB (262,144 bytes)** after a bounded production canary was refused with `manifest_too_large` (`bytes` 239,968 for 100 films, `largestFilmBytes` 3,265) at 163,840. The fail-closed behaviour of decision 2 is unchanged: nothing is shortened, skipped or replaced, and an answer over the new ceiling is the same `409`. Only the constant changed; the 100 films, the compact format, `pin` and snapshot rules, the queue, the lease, D1/R2 authority and the submit limits did not. The measurement, the MCP result size (about twice the answer) and the unproven client side are in the [AIR-450 evidence](../evidence/prediction/air-450-manifest-limit-256kib-2026-11-12.md). No architecture diagram changes: no flow, authority or trust boundary moved.
+
 ## Follow-ups
 
 Next card: [AIR-447](https://trello.com/c/3jrJcvWH). Current state and later cards belong to the Trello roadmap and GitHub.
