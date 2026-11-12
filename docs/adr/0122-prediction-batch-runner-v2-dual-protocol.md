@@ -106,7 +106,7 @@ Decision D1 reserved the byte limit of `batch_start` for the owner after a measu
 
 ## Addendum 2026-11-12: a read-only group preflight before submit (AIR-450)
 
-The statement above that validation happens once, at submit, so that no `prediction_validate` call is needed, is refined by [ADR 0130](0130-batch-candidate-preflight-tool.md) (owner decision after checkpoint C6): the batch protocol gains an optional MCP tool `prediction_batch_validate` that checks 1 to 10 candidates with the same validators and writes and reads nothing. The validation at `batch_submit` is unchanged and stays authoritative (it also checks the manifest, `inputHash` and the live profile). The accepted text above is not rewritten.
+The statement above that validation happens once, at submit, so that no `prediction_validate` call is needed, is refined by [ADR 0131](0131-batch-candidate-preflight-tool.md) (owner decision after checkpoint C6): the batch protocol gains an optional MCP tool `prediction_batch_validate` that checks 1 to 10 candidates with the same validators and writes and reads nothing. The validation at `batch_submit` is unchanged and stays authoritative (it also checks the manifest, `inputHash` and the live profile). The accepted text above is not rewritten.
 
 ## Follow-ups
 

@@ -1,4 +1,4 @@
-# ADR 0130: A read-only batch preflight tool, prediction_batch_validate, runs before prediction_batch_submit
+# ADR 0131: A read-only batch preflight tool, prediction_batch_validate, runs before prediction_batch_submit
 
 **Status:** Accepted
 **Original decision date:** 2026-11-12 (Product Owner decision after checkpoint C6)
