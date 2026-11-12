@@ -48,7 +48,7 @@ Against the decision pack: its 30-blocker text (11 Nov 2026, schema 18) listed o
 | `producer_not_wired:discovery_admission` | Wire Discovery catalog admission (`film_mutation`). | P3c (not in the ADR 0128 plan). |
 | `producer_not_wired:rated_admission_retention` | Wire rated admission and retention (`film_admission`, `film_retention`). | P3d (not in the ADR 0128 plan). |
 
-The stage names are those of the staged plan in [ADR 0128](../../adr/0128-epg-canonical-producer-durable-execution.md), which is a proposal at the time of writing; this page claims nothing about whether it is accepted.
+The stage names are those of the staged plan in [ADR 0128](../../adr/0128-epg-canonical-producer-durable-execution.md), accepted as design on 12 Nov 2026 (design only; no production operation is authorized by it).
 
 ### 2. Data/H1 (3)
 
