@@ -74,7 +74,7 @@ sequenceDiagram
     Client->>MCP: prediction_batch_start
     MCP->>Queue: Read-only preflight: select once, hot first (up to 100 films), measure the manifest
     alt Whole answer over the byte limit
-        MCP-->>Client: manifest_too_large (zero writes: no lease, run or Event; nothing shortened)
+        MCP-->>Client: manifest_too_large (zero writes: no lease, run or Event, nothing shortened)
     else Fits
         MCP->>Queue: Acquire the one runner lease, revalidate the snapshot
         alt Lease held by any run
@@ -96,7 +96,7 @@ sequenceDiagram
                     MCP->>MCP: Save the film result in the run record
                 end
                 MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
-                MCP-->>Client: Per-film results (partial success; a replay of the same body recovers a crash)
+                MCP-->>Client: Per-film results (partial success, a replay of the same body recovers a crash)
                 opt Profile changed
                     MCP-->>Client: compatible films kept; impacted or unknown films stale_profile
                 end
