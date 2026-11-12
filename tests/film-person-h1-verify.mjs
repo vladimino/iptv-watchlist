@@ -2,6 +2,7 @@
 // verdicts are checked on result bundles built from that state and on in-memory fixtures. VERIFY_MODULE points the file at a mutant copy (tests/film-person-h1-verify-mutation.mjs).
 // No R2, no D1, no Cloudflare, no network: nothing here sends or builds a write batch.
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -372,6 +373,69 @@ assert.equal(K.verifyBatch(results(40),{rows:40,diagnostic:true}).ok,false);
 assert.equal(K.verifyBatch(results(40),{diagnostic:true}).shapeOk,true);
 assert.equal(K.verifyBatch(results(3,0),{rows:3,diagnostic:true}).shapeOk,false);
 
+const WINDOW='h1-window:20261112T1000';
+let okPlan,otherLease,windowedPlan;
+{
+// ---------- the PRIVATE plan: the lease id (and window owner) of the GO is bound to the plan the digest names ----------
+// A small plan built from the loader's own guard statements (guardSql) and summarize; the digest and batch digests are recomputed the way the loader computes them.
+const sorted=value=>value&&typeof value==='object'?(Array.isArray(value)?value.map(sorted):Object.fromEntries(Object.keys(value).sort().map(key=>[key,sorted(value[key])]))):value;
+const stable=value=>JSON.stringify(sorted(value));
+const sha=text=>createHash('sha256').update(text).digest('hex');
+const PRIV_COUNTS=[3,2,1];
+const privatePlan=({lease=LEASE,window=null,claim=lease,claimWindow=window}={})=>{
+ const batches=L.CLASSES.map((name,i)=>({class:name,table:L.TABLES[name],rows:PRIV_COUNTS[i],statements:Array.from({length:PRIV_COUNTS[i]},(_,n)=>{const guard=L.guardSql({generation:1,reference:REF,leaseId:claim,windowOwner:claimWindow,table:L.TABLES[name],initial:0,total:PRIV_COUNTS[i]});return {sql:'INSERT INTO '+L.TABLES[name]+' ... WHERE '+guard.sql,params:[...guard.params,'row-'+n]};})}));
+ const core={version:L.LOADER_VERSION,gate:{mode:'prepared',cutover:'open',generation:1,baselineReference:REF},leaseId:lease,windowOwner:window,at:'2026-11-12T10:00:00.000Z',
+  sources:planSummary().sources,
+  classes:Object.fromEntries(L.CLASSES.map((name,i)=>[name,{expected:L.EXPECTED[name],planned:PRIV_COUNTS[i],already:0,toLoad:PRIV_COUNTS[i],stored:0,digest:hex('a'),toLoadDigest:hex('a'),skipped:{unverified:0}}])),
+  bounds:{batchRows:40,runBatches:40,runStatements:1200},batches:batches.map(batch=>({class:batch.class,rows:batch.rows,digest:sha(stable(batch.statements))})),deferred:0};
+ return {...core,digest:sha(stable(core)),complete:true,noop:false,expectedRows:{ratedAdmission:[{secret:'PRIVATE-TITLE'}],retention:[],retirement:[]},batchStatements:batches};
+};
+const PV={leaseId:LEASE,counts:PRIV_COUNTS,expectReference:REF,at:'2026-11-12T10:00:00.000Z',sources:SOURCES};
+const withDigest=(plan,opts)=>({...PV,...opts,planDigest:plan.digest});
+okPlan=privatePlan();
+const okVerdict=K.verifyPrivatePlan(okPlan,withDigest(okPlan));
+assert.deepEqual({ok:okVerdict.ok,refusals:okVerdict.refusals,total:okVerdict.total,batches:okVerdict.batches},{ok:true,refusals:[],total:6,batches:3});
+const privRefuses=(plan,opts,want)=>{const r=K.verifyPrivatePlan(plan,opts);assert.equal(r.ok,false);assert.deepEqual(r.refusals,[].concat(want));return r;};
+// a plan prepared against another lease id: its digest is its own, every otherLease pin matches, and it still refuses
+otherLease=privatePlan({lease:'h1-load:OTHER-LEASE'});
+privRefuses(otherLease,withDigest(otherLease),['lease_id_mismatch','statement_lease_unbound:6']);
+// a digest recomputed over a changed lease id but guards still carrying the GO's lease, and the reverse
+const retagged=privatePlan({lease:'h1-load:OTHER-LEASE',claim:LEASE});
+privRefuses(retagged,withDigest(retagged),'lease_id_mismatch');
+const guardsOther=privatePlan({claim:'h1-load:OTHER-LEASE'});
+privRefuses(guardsOther,withDigest(guardsOther),['lease_id_mismatch'].slice(1).concat('statement_lease_unbound:6'));
+// the lease pin is mandatory
+privRefuses(okPlan,withDigest(okPlan,{leaseId:null}),['lease_id_missing','lease_id_mismatch','statement_lease_unbound:6']);
+privRefuses(okPlan,withDigest(okPlan,{leaseId:'x'}),['lease_id_invalid','lease_id_mismatch','statement_lease_unbound:6']);
+// the digest pin, content and tamper checks
+privRefuses(okPlan,{...PV,planDigest:hex('7')},'plan_digest_mismatch');
+privRefuses(okPlan,{...PV,planDigest:null},'plan_digest_missing');
+const edited=privatePlan();edited.at='2026-11-12T10:00:01.000Z';
+privRefuses(edited,withDigest(edited),['plan_tampered','plan_at_mismatch']);
+const swapped=privatePlan();swapped.batchStatements[0].statements[0].params[0]='tampered';
+privRefuses(swapped,withDigest(swapped),'batch_digest_mismatch:0');
+privRefuses(privatePlan(),withDigest(okPlan,{counts:[3,2,2]}),['class_planned_not_pinned:retirement:1','class_toload_not_pinned:retirement:1']);
+// the window owner: a pin must match plan and guards; an unpinned owner in the plan is refused
+const windowed=windowedPlan=privatePlan({window:WINDOW});
+assert.equal(K.verifyPrivatePlan(windowed,withDigest(windowed,{windowOwner:WINDOW})).ok,true);
+privRefuses(windowed,withDigest(windowed,{windowOwner:'h1-window:OTHER'}),['window_owner_mismatch','statement_window_unbound:6']);
+privRefuses(windowed,withDigest(windowed),['window_owner_not_pinned','statement_window_unbound:6']);
+privRefuses(okPlan,withDigest(okPlan,{windowOwner:WINDOW}),['window_owner_mismatch','statement_window_unbound:6']);
+privRefuses(okPlan,withDigest(okPlan,{windowOwner:'x'}),['window_owner_invalid','window_owner_mismatch','statement_window_unbound:6']);
+const windowGuardOnly=privatePlan({window:null,claimWindow:WINDOW});
+privRefuses(windowGuardOnly,withDigest(windowGuardOnly),['statement_window_unbound:6']);
+const shortList=privatePlan();shortList.batchStatements.pop();
+privRefuses(shortList,withDigest(shortList),'batch_count_mismatch');
+// a public summary or garbage is not a private plan
+privRefuses(planSummary(),withDigest(okPlan),'private_plan_malformed');
+privRefuses(null,withDigest(okPlan),'private_plan_malformed');
+// the verdict never carries a row, id, title, SQL, lease id or window owner (a refusing and a passing one)
+for(const result of [okVerdict,K.verifyPrivatePlan(otherLease,withDigest(otherLease)),K.verifyPrivatePlan(windowed,withDigest(windowed,{windowOwner:WINDOW})),K.verifyPrivatePlan(swapped,withDigest(swapped))]){
+ const text=JSON.stringify(result);
+ for(const secret of ['PRIVATE-TITLE','INSERT','SELECT',LEASE,'OTHER-LEASE',WINDOW,'row-0','film:'])assert.ok(!text.includes(secret),'verdict leaks '+secret);
+}
+
+}
 // ---------- the CLI: refusal exit status, and nothing written but standard output ----------
 const logged=[];
 const logOriginal=console.log,errorOriginal=console.error;
@@ -389,6 +453,16 @@ assert.equal(cli(['verify-readback',fLoaded,'--reference',REF,'--lease-id',LEASE
 assert.equal(cli(['verify-readback',fLoaded,'--held',fHeld,'--reference',REF,'--lease-id',LEASE,'--now',NOW]),1,'counts are mandatory');
 assert.equal(cli(['verify-plan',fPlan,'--plan-digest',hex('9'),'--counts','708,401,4','--reference',REF,'--at','2026-11-12T10:00:00.000Z','--verified-films-sha',SOURCES.verifiedFilms,'--view-index-sha',SOURCES.viewIndex,'--retirements-sha',SOURCES.retirements]),0);
 assert.equal(cli(['verify-plan',fPlan,'--plan-digest',hex('9'),'--counts','708,401,4','--reference',REF,'--at','2026-11-12T10:00:00.000Z']),1,'source digests are mandatory');
+const fPriv=write('plan.private.json',okPlan),fPrivOther=write('plan.other.json',otherLease);
+const privArgs=['--plan-digest',okPlan.digest,'--counts','3,2,1','--reference',REF,'--at','2026-11-12T10:00:00.000Z','--verified-films-sha',SOURCES.verifiedFilms,'--view-index-sha',SOURCES.viewIndex,'--retirements-sha',SOURCES.retirements];
+assert.equal(cli(['verify-private-plan',fPriv,'--lease-id',LEASE,...privArgs]),0);assert.equal(JSON.parse(logged[0]).ok,true);assert.ok(!logged[0].includes('PRIVATE-TITLE'));
+const fPrivWindow=write('plan.window.json',windowedPlan);
+assert.equal(cli(['verify-private-plan',fPrivWindow,'--lease-id',LEASE,'--window-owner',WINDOW,...privArgs.map(item=>item===okPlan.digest?windowedPlan.digest:item)]),0);
+assert.equal(cli(['verify-private-plan',fPrivWindow,'--lease-id',LEASE,...privArgs.map(item=>item===okPlan.digest?windowedPlan.digest:item)]),1,'an unpinned window owner');
+assert.equal(cli(['verify-private-plan',fPriv,...privArgs]),1,'the lease pin is mandatory');assert.ok(JSON.parse(logged[0]).refusals.includes('lease_id_missing'));
+assert.equal(cli(['verify-private-plan',fPrivOther,'--lease-id',LEASE,...privArgs.map(item=>item===okPlan.digest?otherLease.digest:item)]),1,'another lease id');assert.ok(JSON.parse(logged[0]).refusals.includes('lease_id_mismatch'));
+assert.equal(cli(['verify-private-plan',path.join(root,'missing.json'),'--lease-id',LEASE,...privArgs]),1,'unreadable file');assert.ok(!logged[0].includes('missing.json'));
+assert.equal(cli(['verify-private-plan',fPriv,'--lease-id',LEASE,'--diagnostic',...privArgs]),1,'no diagnostic pass');
 assert.equal(cli(['verify-emitted',fEmit,'--plan-digest',hex('9'),'--counts','708,401,4']),0);
 assert.equal(cli(['verify-emitted',fEmit,'--plan-digest',hex('9')]),1);
 assert.equal(cli(['verify-batch',fBatch,'--rows','2']),0);

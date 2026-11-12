@@ -11,9 +11,12 @@
 //   node scripts/film-person-h1-verify.mjs verify-readback <results.json> --held <held.json> --reference R --lease-id ID --counts A,B,C [--now ISO]
 //   node scripts/film-person-h1-verify.mjs verify-released <results.json> --held <held.json> --reference R --lease-id ID --counts A,B,C
 //   node scripts/film-person-h1-verify.mjs verify-plan <plan.json> --plan-digest D --counts A,B,C --reference R --at ISO --verified-films-sha X --view-index-sha Y --retirements-sha Z
+//   node scripts/film-person-h1-verify.mjs verify-private-plan <plan.private.json> --plan-digest D --lease-id ID [--window-owner ID] --counts A,B,C --reference R --at ISO --verified-films-sha X --view-index-sha Y --retirements-sha Z
 //   node scripts/film-person-h1-verify.mjs verify-emitted <sql-output.json> --plan-digest D --counts A,B,C [--batch-set-digest H]
 //   node scripts/film-person-h1-verify.mjs verify-batch <response.json> --rows N
 //   any verify command with --diagnostic: shape only, never a pass (ok is always false, diagnosticOnly true)
+// verify-private-plan is the one check that binds the lease id (and the pinned window owner) of the GO to the PRIVATE plan: the public summary of `plan` carries no lease id by design. It reads the private plan file
+// locally and prints ONLY a sanitized verdict (reason codes, counts): never a row, id, title, SQL, lease id or window owner. verify-plan alone does not attest the lease id; the write GO needs verify-private-plan.
 // Every verification FAILS CLOSED: the pinned values of the GO (reference, counts, digests, lease id) are mandatory; without them it refuses. Results files are {"<statement id>": <rows array | D1 envelope>}.
 // Exit status 1 on a refusal.
 import {createHash} from 'node:crypto';
@@ -22,7 +25,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {assertReadOnly,unwrap} from './schema-preflight.mjs';
 import {NOTE,RECEIPT_TABLES,preflightSteps as migrationSteps} from './film-person-0019-preflight.mjs';
-import {BATCH_ROWS,CLASSES,EXPECTED,LOADER_VERSION,MAX_SOURCE_BYTES,RUN_BATCHES,RUN_STATEMENTS,SOURCE_KEYS,TABLES} from './film-person-prepared-loader.mjs';
+import {BATCH_ROWS,CLASSES,EXPECTED,LOADER_VERSION,MAX_SOURCE_BYTES,RUN_BATCHES,RUN_STATEMENTS,SOURCE_KEYS,TABLES,summarize} from './film-person-prepared-loader.mjs';
 
 export const SCHEMA_VERSION=19;
 export const MARKER_GENERATION=1;
@@ -297,6 +300,49 @@ export function verifyPlan(plan,{planDigest=null,counts=null,expectReference=nul
  return finish(diagnostic,refusals,notes,{total,batches});
 }
 
+// ---------- the PRIVATE plan file (`plan --out`): lease id, window owner and digest bound to the GO ----------
+// Reads the private plan (it holds rows: nothing of it is ever copied to the verdict). It recomputes the plan digest from the content (an edited file does not pass), the digest of every batch from its statements, requires
+// the pinned lease id (and the pinned window owner, or none) to be the ones the plan and EVERY rendered statement guard carry, then runs the public-summary checks on the summary derived from the very same plan.
+const sorted=value=>value&&typeof value==='object'?(Array.isArray(value)?value.map(sorted):Object.fromEntries(Object.keys(value).sort().map(key=>[key,sorted(value[key])]))):value;
+const stable=value=>JSON.stringify(sorted(value===undefined?null:value));
+const sha=text=>createHash('sha256').update(text).digest('hex');
+export function verifyPrivatePlan(plan,{planDigest=null,leaseId=null,windowOwner=null,counts=null,expectReference=null,at=null,sources={}}={}){
+ const refusals=[];
+ if(typeof leaseId!=='string'||leaseId==='')refusals.push('lease_id_missing');
+ else if(!LEASE_ID.test(leaseId))refusals.push('lease_id_invalid');
+ if(windowOwner!==null&&(typeof windowOwner!=='string'||!LEASE_ID.test(windowOwner)))refusals.push('window_owner_invalid');
+ if(!record(plan)||!record(plan.expectedRows)||!Array.isArray(plan.batchStatements)||!Array.isArray(plan.batches)||!record(plan.classes)){refusals.push('private_plan_malformed');return verdict(refusals);}
+ const {digest,complete,noop,expectedRows,batchStatements,...core}=plan;
+ if(typeof digest!=='string'||!HEX64.test(digest)||sha(stable(core))!==digest)refusals.push('plan_tampered');
+ if(plan.leaseId!==leaseId)refusals.push('lease_id_mismatch');
+ if(windowOwner===null){if(plan.windowOwner!==null)refusals.push('window_owner_not_pinned');}
+ else if(plan.windowOwner!==windowOwner)refusals.push('window_owner_mismatch');
+ if(batchStatements.length!==plan.batches.length)refusals.push('batch_count_mismatch');
+ let guardLease=0,guardWindow=0,guardStray=0;
+ batchStatements.forEach((batch,index)=>{
+  const list=record(batch)&&Array.isArray(batch.statements)?batch.statements:null;
+  if(!list){refusals.push('batch_malformed:'+index);return;}
+  if(record(plan.batches[index])&&sha(stable(list))!==plan.batches[index].digest)refusals.push('batch_digest_mismatch:'+index);
+  for(const statement of list){
+   const params=record(statement)&&Array.isArray(statement.params)?statement.params:[],text=record(statement)&&typeof statement.sql==='string'?statement.sql:'';
+   if(!params.includes(leaseId))guardLease++;
+   if(windowOwner!==null?!params.includes(windowOwner):text.includes('projector_window'))guardWindow++;
+   if(record(statement)&&typeof statement.sql!=='string')guardStray++;
+  }
+ });
+ if(guardLease)refusals.push('statement_lease_unbound:'+guardLease);
+ if(guardWindow)refusals.push('statement_window_unbound:'+guardWindow);
+ if(guardStray)refusals.push('statement_malformed:'+guardStray);
+ let summary=null;
+ try{summary={ok:true,mode:'dry-run',...summarize(plan)};}catch{refusals.push('private_plan_malformed');}
+ let total=0,batches=0;
+ if(summary){
+  const inner=verifyPlan(summary,{planDigest,counts,expectReference,at,sources});
+  refusals.push(...inner.refusals);total=inner.total??0;batches=inner.batches??0;
+ }
+ return verdict([...new Set(refusals)],['sanitized verdict: the private plan, its rows, ids and SQL are never copied here; a pass is evidence, not the GO'],{total,batches});
+}
+
 // ---------- the batch list printed by `sql --apply` (metadata only: the SQL stays in the loader's private files) ----------
 export function verifyEmitted(output,{planDigest=null,counts=null,batchSetDigest=null,diagnostic=false}={}){
  const refusals=[],notes=[];
@@ -371,15 +417,17 @@ export function main(argv){
  const now=flag('--now')||new Date().toISOString();
  const counts=parseCounts(flag('--counts'));
  const heldFile=flag('--held');
+ const readSafe=file=>{try{return read(file);}catch{return null;}};
  let out;
  if(command==='state-sql')out={steps:stateSteps(),manual:MANUAL_STEPS};
  else if(command==='verify-preflight'&&arg)out=verifyState('preflight',read(arg),{expectReference:flag('--reference'),now,diagnostic});
  else if(command==='verify-held'&&arg)out=verifyState('held',read(arg),{expectReference:flag('--reference'),leaseId:flag('--lease-id'),now,diagnostic});
  else if((command==='verify-readback'||command==='verify-released')&&arg)out=verifyState(command.slice(7),read(arg),{expectReference:flag('--reference'),leaseId:flag('--lease-id'),counts,now,held:heldFile?read(heldFile):null,diagnostic});
  else if(command==='verify-plan'&&arg)out=verifyPlan(read(arg),{planDigest:flag('--plan-digest'),counts,expectReference:flag('--reference'),at:flag('--at'),sources:{verifiedFilms:flag('--verified-films-sha'),viewIndex:flag('--view-index-sha'),retirements:flag('--retirements-sha')},diagnostic});
+ else if(command==='verify-private-plan'&&arg)out=diagnostic?{ok:false,refusals:['diagnostic_not_allowed'],notes:[]}:verifyPrivatePlan(readSafe(arg),{planDigest:flag('--plan-digest'),leaseId:flag('--lease-id'),windowOwner:flag('--window-owner'),counts,expectReference:flag('--reference'),at:flag('--at'),sources:{verifiedFilms:flag('--verified-films-sha'),viewIndex:flag('--view-index-sha'),retirements:flag('--retirements-sha')}});
  else if(command==='verify-emitted'&&arg)out=verifyEmitted(read(arg),{planDigest:flag('--plan-digest'),counts,batchSetDigest:flag('--batch-set-digest'),diagnostic});
  else if(command==='verify-batch'&&arg)out=verifyBatch(read(arg),{rows:flag('--rows')===null?null:Number(flag('--rows')),diagnostic});
- else{console.error('usage: state-sql | verify-preflight|verify-held|verify-readback|verify-released <results.json> ... | verify-plan <plan.json> ... | verify-emitted <sql-output.json> ... | verify-batch <response.json> --rows N (see the header of this file)');return 2;}
+ else{console.error('usage: state-sql | verify-preflight|verify-held|verify-readback|verify-released <results.json> ... | verify-plan <plan.json> ... | verify-private-plan <plan.private.json> ... | verify-emitted <sql-output.json> ... | verify-batch <response.json> --rows N (see the header of this file)');return 2;}
  console.log(JSON.stringify(out,null,1));
  return out.ok===false?1:0;
 }
