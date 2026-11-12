@@ -1,4 +1,4 @@
-// AIR-374. Pure, DORMANT grouping of the blocker strings that handoffReadiness (src/canonical-producers.js) returns, by the kind of work that clears them. Nothing in the Worker
+// AIR-374. Pure, DORMANT grouping of the blocker strings that handoffReadiness (the producers module) returns, by the kind of work that clears them. Nothing in the Worker
 // imports this module (it is not bundled). It reads no database and no registry, never changes the readiness verdict, and adds no blocker: it only sorts strings it is given.
 // A blocker whose prefix is not listed lands in `unclassified`, so a new blocker kind cannot be silently dropped from a report.
 export const BLOCKER_CLASSES=Object.freeze(['registry_code','data_load','owner_exception','read_move','operational_state']);
