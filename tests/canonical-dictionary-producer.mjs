@@ -278,7 +278,7 @@ for(const stage of ['r2','prepared']){
  assert.equal(receipts(file).length,4);
 }
 
-// 7. Snapshot-bound request ids (the request id also binds the PLANNED CONTENT: what is handed to the writer, so a stored-state change that changes it is another request, never a replay of stale content): a dictionary edit under another version, A to B to A, is three requests (a content-only id would flip back to the first and read applied); the same snapshot is the same request.
+// 7. Snapshot-bound request ids (the request id also binds the PLANNED CONTENT: what is handed to the writer, so a stored-state change that changes it is another request, never a replay of stale content): a dictionary edit under UNIQUE versions, A v1 to B v2 to A v3, is three requests; a REUSED label cannot restore A (below) (a content-only id would flip back to the first and read applied); the same snapshot is the same request.
 {
  const file=database('open');
  seed(file,1);
@@ -291,6 +291,20 @@ for(const stage of ['r2','prepared']){
  const same=await D.applyDictionaryUnits(envOf(file),{plan:A1,now:()=>iso(0)});
  assert.equal(same.counts.noop,1,'the first snapshot again: the facts are stored, nothing is written');assert.equal(receipts(file).length,3);
  assert.notEqual(A1.event,A2.event);
+ // A REUSED label is unsupported: A v1, B v1, A v1 again is A's own request id; the Film stays B and the outcome is NAMED (`already` + snapshot_already_applied), not a silent success.
+ {
+  const f=database('open');seed(f,1,{title:'Orig 1',identity:'tmdb:1',source:'dictionary'}); // identity and title already stored: the planned content is the localization alone, so label and content fully determine the request id
+  const r=(title)=>plan([entry(1,{title})],{version:'v1'});
+  const a1=await r('Один'),b=await r('Два'),a2=await r('Один');
+  assert.equal(a1.event,a2.event);
+  for(const p of [a1,b])assert.equal((await D.applyDictionaryUnits(envOf(f),{plan:p,now:()=>iso(0)})).counts.applied,1);
+  const env3=envOf(f),third=await D.applyDictionaryUnits(env3,{plan:a2,now:()=>iso(0)});
+  assert.deepEqual([third.counts.already,third.counts.applied,env3.DB.calls.batches,locRow(f,1).value,receipts(f).length],[1,0,0,'Два',2]);
+  assert.deepEqual(third.conflicts.filter(c=>c.reason==='snapshot_already_applied'),[{id:ID(1),field:'snapshot',reason:'snapshot_already_applied',kind:'kept'}]);
+  const fresh=await plan([entry(1,{title:'Один'})],{version:'v3'});
+  assert.equal((await D.applyDictionaryUnits(envOf(f),{plan:fresh,now:()=>iso(0)})).counts.applied,1);
+  assert.equal(locRow(f,1).value,'Один','a fresh version restores A');
+ }
  // The same request after another actor moved the Film: counted `already`, not rewritten.
  const file2=database('open');seed(file2,1);
  const P=await plan([entry(1,{tmdbId:null,original:null})]);
@@ -510,7 +524,7 @@ for(const stage of ['r2','prepared']){
  for(const c of ['film_person_invalid','film_person_redirect','something_else',undefined])assert.equal(await failing(c).revalidate(envOf(file),receipt),'stale',String(c));
 }
 {
- // (4) the same version with another digest is another event: distinct request ids, never the old receipt replayed.
+ // (4) the same version with another digest is another event: distinct request ids, never the old receipt replayed (A v1 then B v1 only: a third A v1 is the unsupported reused-label case of section 7).
  const file=database('open');seed(file,1);
  const A=await plan([entry(1,{title:'Один'})],{version:'v1'}),B=await plan([entry(1,{title:'Два'})],{version:'v1'});
  assert.equal(A.snapshot.version,B.snapshot.version);assert.notEqual(A.snapshot.digest,B.snapshot.digest);assert.notEqual(A.event,B.event);

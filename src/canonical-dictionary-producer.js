@@ -6,6 +6,9 @@
 // every outcome. Precedence is the writer's own: the title order owner > dictionary > tmdb > letterboxd > watchlist > epg > discovery (original_title only) with `titleSource` in the identity provenance, and the localization tiers
 // owner > reviewed dictionary > automatic. An owner-owned value is never overwritten.
 //   - `dictionarySnapshot`   async. The version (a caller label) and a content DIGEST of the whole curated snapshot. The pair is the source EVENT of every request id, so a replay is bound to the dictionary version it was planned from.
+//                            CONTRACT: every genuine dictionary change OR REVERT must carry a FRESH, UNIQUE `version` (a revision token the future caller mints; never a reused label). The same version with the same content is the same event
+//                            and the same request id by design, so an A -> B -> A edit under a REUSED label cannot restore A: the third pass meets A's applied receipt and is NOT written. It is a NAMED outcome, never a silent success:
+//                            counted `already` and listed as the kept conflict `snapshot_already_applied` (field `snapshot`). Distinct request ids for A -> B -> A need three distinct versions (A v1, B v2, A v3).
 //   - `planDictionaryUnits`  async, PURE. One unit per dictionary entry that names a canonical Film (`filmId`), sorted by Film id; duplicates and malformed entries are refused.
 //   - `buildDictionaryInput` PURE over the stored rows of ONE Film. Decides `proceed` (with the writer input), `absent`, `redirected`, `identity_mismatch` or `kept`, and lists the named conflicts.
 //   - `applyDictionaryUnits` bounded, resumable by cursor, at most `limit` units per call (hard ceiling, provisional: E6 is not measured). A refusal of one unit never blocks the others; held and unreadable stop the pass.
@@ -14,7 +17,7 @@
 // identity (`canonical_identity` is filled only when empty and the id is a trusted external id of that Film). Membership, metadata and sync clocks are never part of a dictionary unit. Aliases are part of the snapshot digest (they
 // are dictionary content) but have no canonical table, so no unit writes them.
 // Named conflicts (`kind` kept: nothing written for the field; `replaced`: written over a different lower-ranked value): owner_kept, reviewed_kept, unranked_kept, no_identity_row, needs_trusted_tmdb_id,
-// identity_mismatch (kept) and replaced_lower, replaced_reviewed, replaced_automatic (replaced). Stored: operation kind, origin, target, digests, revisions, state; no title, payload or personal data.
+// identity_mismatch (kept), snapshot_already_applied (kept: this exact snapshot, version and digest, was applied before and the Film no longer holds it) and replaced_lower, replaced_reviewed, replaced_automatic (replaced). Stored: operation kind, origin, target, digests, revisions, state; no title, payload or personal data.
 import {failed} from './film-person-authority.js';
 import {applyFilmFacts,digestOf,filmFactsOperation,producerRequestId,producerRouteOpen,readFilmSnapshot,reconcileOwnOrigin,FILM_FACTS_OPERATION} from './canonical-producer-adapters.js';
 
@@ -48,7 +51,8 @@ function normaliseEntry(raw){
 }
 const byFilm=(a,b)=>a.filmId<b.filmId?-1:a.filmId>b.filmId?1:0;
 
-// The identity of the curated snapshot a plan was made from: the caller's version label and a digest of EVERY entry (aliases and sources included), in a fixed order. Any edit of the dictionary is another snapshot.
+// The identity of the curated snapshot a plan was made from: the caller's version label and a digest of EVERY entry (aliases and sources included), in a fixed order. Any edit of the dictionary is another snapshot, but only a UNIQUE
+// version makes it another REQUEST when an earlier content returns: the label is mandatory-unique per genuine change or revert (module header; the plan does not and cannot detect reuse, it never sees the receipts).
 export async function dictionarySnapshot({version,entries}={}){
  if(typeof version!=='string'||!VERSION.test(version)||!Array.isArray(entries))throw failed('film_person_invalid');
  const list=entries.map(normaliseEntry).sort(byFilm);
@@ -163,7 +167,10 @@ export async function applyDictionaryUnits(env,{plan,cursor=0,limit=DICTIONARY_U
    if(built.outcome!=='proceed'){counts[built.outcome]++;continue;}
    const outcome=await applyFilmFacts(env,{origin:DICTIONARY_ORIGIN,event:plan.event,input:built.input,...(now?{now}:{}),...(policy?{policy}:{})});
    if(outcome.state==='noop')counts.noop++;
-   else if(outcome.already===true)counts.already++;
+   else if(outcome.already===true){
+    // The adapter's pre-plan found the stored Film different from this unit, yet a receipt of the SAME request id is applied: this exact snapshot (version and digest) was applied before. Either another actor moved the Film since, or the caller REUSED a version label for a revert. Nothing is written; name it so it is never read as success. A revert needs a fresh version.
+    counts.already++;conflicts.push({id:unit.id,field:'snapshot',reason:'snapshot_already_applied',kind:'kept'});
+   }
    else if(outcome.state==='applied')counts.applied++;
    else if(outcome.state==='unknown')counts.unknown++;
    else if(outcome.state==='failed')counts.failed++;

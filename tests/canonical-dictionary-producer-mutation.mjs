@@ -10,6 +10,9 @@ import {sqliteSync} from './sqlite-session.mjs';
 
 // [name, file in src/, exact text that occurs once, replacement]
 const MUTANTS=[
+ ["a reused snapshot is not named", "canonical-dictionary-producer.js", "counts.already++;conflicts.push({id:unit.id,field:'snapshot',reason:'snapshot_already_applied',kind:'kept'});", "counts.already++;"],
+ ["a reused snapshot is named with another reason", "canonical-dictionary-producer.js", "reason:'snapshot_already_applied',kind:'kept'", "reason:'owner_kept',kind:'kept'"],
+ ["a reused snapshot is counted applied", "canonical-dictionary-producer.js", "counts.already++;conflicts.push({id:unit.id,field:'snapshot'", "counts.applied++;conflicts.push({id:unit.id,field:'snapshot'"],
  ["the gate ignores the route", "canonical-dictionary-producer.js", "if(!(await producerRouteOpen(env)))return {skipped:true", "if(false)return {skipped:true"],
  ["the gate always skips", "canonical-dictionary-producer.js", "if(!(await producerRouteOpen(env)))return {skipped:true", "if(true)return {skipped:true"],
  ["the origin is not dictionary", "canonical-dictionary-producer.js", "export const DICTIONARY_ORIGIN='dictionary';", "export const DICTIONARY_ORIGIN='epg';"],
@@ -107,7 +110,7 @@ const MUTANTS=[
  ["a non-proceed outcome is applied anyway", "canonical-dictionary-producer.js", "if(built.outcome!=='proceed'){counts[built.outcome]++;continue;}", "if(false){counts[built.outcome]++;continue;}"],
  ["a non-proceed outcome is not counted", "canonical-dictionary-producer.js", "if(built.outcome!=='proceed'){counts[built.outcome]++;continue;}", "if(built.outcome!=='proceed'){continue;}"],
  ["noop is counted as applied", "canonical-dictionary-producer.js", "if(outcome.state==='noop')counts.noop++;", "if(outcome.state==='noop')counts.applied++;"],
- ["already is not counted", "canonical-dictionary-producer.js", "else if(outcome.already===true)counts.already++;", "else if(outcome.already===true){/* lost */}"],
+ ["already is not counted", "canonical-dictionary-producer.js", "counts.already++;conflicts.push({id:unit.id,field:'snapshot'", "conflicts.push({id:unit.id,field:'snapshot'"],
  ["an unknown outcome is counted applied", "canonical-dictionary-producer.js", "else if(outcome.state==='unknown')counts.unknown++;", "else if(outcome.state==='unknown')counts.applied++;"],
  ["the cursor is malformed-tolerant", "canonical-dictionary-producer.js", "||!Number.isInteger(cursor)||cursor<0)throw", "||false)throw"],
  ["a plan without an event is accepted", "canonical-dictionary-producer.js", "typeof plan.event!=='string'||typeof plan.at!=='string'||", "typeof plan.at!=='string'||"],
