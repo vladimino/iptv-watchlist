@@ -152,7 +152,8 @@ const EpgDiagnostic=(()=>{
  // ---- provisioning identity (used by AIR-456's operation, tested here) ----------------------------------------
  // Writes the identity into a database and a bucket that are both EMPTY of everything but the schema: the diagnostic D1 holds the production
  // chain of migrations (schema only) plus diagnostic-migrations/0001; a production database has rows, a production bucket has objects.
- async function provision({DB,BUCKET,resourceId}={}){
+ // `assess` is the read-only half (never writes): the operator's dry-run and `provision` share it, so a dry-run that says ready is the same judgement the write makes.
+ async function assess({DB,BUCKET,resourceId}={}){
   if(typeof resourceId!=='string'||!/^[a-z0-9][a-z0-9-]{7,63}$/.test(resourceId))return refusal('context_malformed',{field:'resourceId'});
   if(!hasD1(DB)||!hasBucket(BUCKET)||typeof BUCKET.list!=='function')return refusal('context_malformed');
   let tables;try{tables=(await DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND name NOT LIKE 'd1_%'").bind().all()).results||[];}catch{return refusal('identity_unreadable',{resource:'d1'});}
@@ -172,11 +173,16 @@ const EpgDiagnostic=(()=>{
   if(await DB.prepare('SELECT 1 AS present FROM '+IDENTITY_TABLE+' LIMIT 1').bind().first())return refusal('identity_exists',{resource:'d1'});
   const listed=await BUCKET.list({limit:1});
   if((listed?.objects||[]).length)return refusal('domain_not_empty',{resource:'r2'});
+  return {ok:true,resourceId,writes:'none'};
+ }
+ async function provision({DB,BUCKET,resourceId}={}){
+  const assessed=await assess({DB,BUCKET,resourceId});
+  if(!assessed.ok)return assessed;
   const now=new Date().toISOString();
   const stored=await BUCKET.put(IDENTITY_OBJECT,JSON.stringify({domain:DOMAIN,resourceId,createdAt:now}),{onlyIf:{etagDoesNotMatch:'*'},httpMetadata:{contentType:'application/json'}});
   if(stored===null)return refusal('identity_exists',{resource:'r2'});
   await DB.prepare('INSERT INTO '+IDENTITY_TABLE+' (id, domain, resource_id, created_at) SELECT 1, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM '+IDENTITY_TABLE+' WHERE id=1)').bind(DOMAIN,resourceId,now).run();
   return {ok:true,resourceId};
  }
- return {DOMAIN,IDENTITY_OBJECT,IDENTITY_TABLE,BINDING_NAMES,ALLOWED,DENIED,SEED_ROWS,create,fromWorkerEnv,provision,isWrite};
+ return {DOMAIN,IDENTITY_OBJECT,IDENTITY_TABLE,BINDING_NAMES,ALLOWED,DENIED,SEED_ROWS,create,fromWorkerEnv,assess,provision,isWrite};
 })();
