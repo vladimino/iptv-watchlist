@@ -123,3 +123,36 @@ export async function reconcileEpgRun(env,{plan,filmPlan,limit,now,policy}={}){
  ]);
  return reconcileOwnOrigin(env,{origin:EPG_ORIGIN,operations,...(limit!==undefined?{limit}:{}),...clock,...(policy?{policy}:{})});
 }
+
+// ADR 0128 decision 9 (S4-1): the same plan with PER-UNIT refusals instead of a whole-plan refusal. `planEpgPersonUnits` is unchanged (an accepted, tested whole-plan behaviour). A Person or a Film whose id is usable but whose content is refused
+// (`film_person_invalid`: a malformed state, an empty or malformed credit list, a duplicated credit; `film_person_bounded`: more than CREDITS_PER_UNIT_MAX credits) is reported in `refused:[{kind,id,code,source}]` (`source` is the incoming value, never truncated; the
+// run module digests it) and the rest of the plan survives. An id that is already used by ANY other entry, refused or not, in either order, is a malformed input and refuses the whole plan; so does an item with no usable id (it has no key to record a result under).
+export function planEpgPersonUnitsWithRefusals({runId,at,persons=[],credits=[]}={}){
+ if(!Array.isArray(persons)||!Array.isArray(credits))throw failed('film_person_invalid');
+ const keepPersons=[],keepCredits=[],refused=[],seen=new Set();
+ const source=value=>value===undefined?null:value;
+ for(const item of persons){
+  if(plain(item)&&typeof item.id==='string'&&item.id.startsWith('person:')){
+   if(seen.has(item.id))throw failed('film_person_invalid');
+   seen.add(item.id);
+   let ok=true;
+   try{personStateContent({id:item.id,at,person:item.state});}catch(error){if(error?.code!=='film_person_invalid')throw error;ok=false;}
+   if(!ok){refused.push({kind:PERSON_STATE_OPERATION,id:item.id,code:'film_person_invalid',source:source(item.state)});continue;}
+  }
+  keepPersons.push(item);
+ }
+ const refusedFilms=[];
+ for(const item of credits){
+  if(plain(item)&&typeof item.filmId==='string'&&item.filmId.startsWith('film:')){
+   if(seen.has(item.filmId))throw failed('film_person_invalid');
+   seen.add(item.filmId);
+   const over=Array.isArray(item.credits)&&item.credits.length>CREDITS_PER_UNIT_MAX;
+   let ok=!over;
+   if(ok)try{filmCreditsContent({id:item.filmId,credits:item.credits});}catch(error){if(error?.code!=='film_person_invalid')throw error;ok=false;}
+   if(!ok){refusedFilms.push({kind:FILM_CREDITS_OPERATION,id:item.filmId,code:over?'film_person_bounded':'film_person_invalid',source:source(item.credits)});continue;}
+  }
+  keepCredits.push(item);
+ }
+ const plan=planEpgPersonUnits({runId,at,persons:keepPersons,credits:keepCredits});
+ return {...plan,refused:[...refused.sort(byId),...refusedFilms.sort(byId)]};
+}

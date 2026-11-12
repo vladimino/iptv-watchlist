@@ -249,6 +249,20 @@
         ],
         "minimum": 0,
         "description": "Index of the call (calls[].callId) whose answer recorded this film's result; null for a not_submitted film. A group split over several calls gives each film its own call."
+       },
+       "failureReason": {
+        "type": [
+         "string",
+         "null"
+        ],
+        "enum": [
+         "insufficient_metadata",
+         "insufficient_knowledge",
+         "json_unparseable",
+         "other",
+         null
+        ],
+        "description": "The honest reason the pass gives for a film it could not submit as a prediction (a reported parse_error) or the Worker refused: a diagnostic of the data, never an input to a rule. null when the film has no failure."
        }
       }
      }
@@ -616,7 +630,8 @@
        "sizeRefusals",
        "profileMismatchCalls",
        "stoppedReason",
-       "cost"
+       "cost",
+       "failureReasons"
       ],
       "properties": {
        "groupSize": {
@@ -1187,6 +1202,39 @@
           ]
          },
          "fingerprintPairs": {
+          "type": "integer",
+          "minimum": 0
+         }
+        }
+       },
+       "failureReasons": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "insufficient_metadata",
+         "insufficient_knowledge",
+         "json_unparseable",
+         "other",
+         "unspecified"
+        ],
+        "properties": {
+         "insufficient_metadata": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "insufficient_knowledge": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "json_unparseable": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "other": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "unspecified": {
           "type": "integer",
           "minimum": 0
          }

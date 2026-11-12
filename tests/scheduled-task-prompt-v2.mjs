@@ -45,6 +45,8 @@ assert.ok(!/prediction_batch_start\(/.test(dry),'a pass never calls start: the m
 assert.ok(/prediction_batch_start В ЛЮБОМ виде/.test(forbiddenOf(dry)));
 assert.ok(/\{\{SAMPLE_ID\}\}/.test(dry)&&/\{\{GROUP_SIZE\}\}/.test(dry)&&/FROZEN_MANIFEST=\{\{FROZEN_MANIFEST\}\}/.test(dry)&&!/\{\{FILM_IDS\}\}/.test(dry),'the pass takes the frozen manifest, not film ids to start from');
 assert.ok(/manifest_invalid/.test(dry)&&/НЕ вызывай ни разу/.test(dry));
+assert.ok(/failureReason/.test(dry)&&/insufficient_metadata/.test(dry)&&/insufficient_knowledge/.test(dry)&&/json_unparseable/.test(dry),'the dry-run prompt asks for an honest failureReason');
+assert.ok(steps(prompt).join('\n').includes('НЕ добавляй и НЕ вычисляй fingerprint.sourceBasis')&&!/Вычисляй fingerprint\.sourceBasis/.test(doc),'ADR 0129: the model no longer computes the aggregate, in both prompts');
 assert.ok(/observedProfileHash/.test(dry)&&/profile_moved/.test(dry)&&/not_submitted/.test(dry)&&/liveInput не same/.test(dry),'the dry-run prompt makes the per-submit profile check and the liveInput rule explicit');
 assert.ok(!/trello\.com\/c\/XDyt4qIH\)\s*'s scope/.test(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8')),'AIR-450 is not linked to the AIR-449 card');
 assert.ok(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8').includes('[AIR-450](https://trello.com/c/VPd21Y9d)'));

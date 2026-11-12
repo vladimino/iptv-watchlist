@@ -688,7 +688,7 @@ if(on(12)){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!=='src/canonical-receipts.js'&&fs.readFileSync(full,'utf8').includes('canonical-receipts'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.sort(),['src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js','src/canonical-producer-adapters.js','src/canonical-producers.js'],'only the dormant producers module (readiness, read-only) and the dormant receipt adapters import canonical-receipts');
+ assert.deepEqual(importers.sort(),['src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js','src/canonical-producer-adapters.js','src/canonical-producer-run.js','src/canonical-producers.js'],'only the dormant producers module (readiness, read-only), the dormant receipt adapters and the dormant pure producer-run module (ADR 0128, S4-1: pure helpers only) import canonical-receipts');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-receipts'),file+' does not bundle it');
  const source=fs.readFileSync('src/canonical-receipts.js','utf8');
  assert.ok(!/\bfetch\(|BUCKET|R2|setTimeout|setInterval|cron|scheduled/i.test(source.replace(/\/\/.*$/gm,'')),'no network, R2, timer or schedule');

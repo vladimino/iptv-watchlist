@@ -6,6 +6,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
+| [0129 — The Worker derives fingerprint.sourceBasis and sourceRefs from valid evidence when the caller omits both](0129-fingerprint-source-fields-derived-from-evidence.md) | **Accepted** 2026-11-12 (owner decision, [AIR-450](https://trello.com/c/VPd21Y9d)). Code only; no production operation authorized | Removes the C3 failure class (`sourceRefs invalid_ref` after correct evidence): derived only when both fields are omitted and the map is valid, never rewriting a supplied value; no version change; all submit paths and `prediction_validate` agree |
 | [0001 — D1 schema v1 is unapplied](0001-d1-schema-v1.md) | Accepted (existing record, unchanged) | Local-only D1 schema/repositories; [AIR-49](https://trello.com/c/YNaLFwtW), [PR #51](https://github.com/vladimino/iptv-watchlist/pull/51) |
 | [0002 — Cloudflare Worker and R2 authority](0002-cloudflare-worker-r2-authority.md) | Accepted; retrospective record 2026-10-24 | Production cutover on 19 October; legacy Sites reserve |
 | [0003 — GitHub Actions tested-artifact deployment](0003-github-ci-deployment.md) | Accepted; original date unknown | GitHub main build and Cloudflare CD, code-only rollback |
