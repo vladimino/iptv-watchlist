@@ -32,6 +32,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Film/Person migration 0019: owner GO and apply procedure](film-person-0019-apply.md) (AIR-374 H0, applied to production on 12 Nov 2026: [apply record](../evidence/d1-migration/air-374-0019-apply-2026-11-12.md); the page stays the procedure and its GO text)
 - [Film/Person E6: read-only budget measurement for the EPG producer](film-person-e6-budget-measurement.md) (AIR-374, prepared GO package, offline tool, not executed; a production read needs its own owner GO)
 - [Film/Person activation: owner decision pack for the production holdpoints](film-person-holdpoint-decision-pack.md) (AIR-374 H0 to H4: H0/H1 prepared future GOs, H2 to H4 blocked; design, not executed)
+- [Film/Person H1: operator package for the P5 load of the three empty classes](film-person-h1-load-package.md) (AIR-374, prepared GO drafts and offline verifier, not executed; the snapshot reads and the load each need their own owner GO)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).

@@ -1,0 +1,188 @@
+# Film/Person H1: operator package for the P5 load of the three empty classes (prepared, not executed)
+
+**Role:** the operator package of holdpoint H1 of the [decision pack](film-person-holdpoint-decision-pack.md) for [AIR-374](https://trello.com/c/ha7ais3w): what a fresh source snapshot needs, what the plan artifact must show, how the preflight, the load, the readback and the release are verified, when to STOP, and the two owner GOs that would be requested (a read GO for the snapshot, then a write GO for the load). **This page authorizes nothing and nothing in it has been executed.** It prepares; it never loads. The batch SQL exists only as a private artifact of the loader's `sql` command and is sent only under the second GO. Every number below that describes production is an EXPECTED figure from the 11 Nov 2026 measurement, not a current one.
+
+Tooling, all offline (no network, no D1, no R2, no connector at import or run):
+
+- [`scripts/film-person-prepared-loader.mjs`](../../scripts/film-person-prepared-loader.mjs) (P5, merged): `plan`, `sql`, `verify`; described in [the loader runbook](film-person-prepared-loader.md). It is not changed by this package.
+- [`scripts/film-person-h1-verify.mjs`](../../scripts/film-person-h1-verify.mjs) (this package): emits the read-only state statements and verifies what the operator pastes back: `verify-preflight`, `verify-held`, `verify-plan`, `verify-emitted`, `verify-batch`, `verify-readback`, `verify-released`. It cannot build, emit or send a write. Tested by `tests/film-person-h1-verify.mjs` (the emitted statements run on the real migration chain 0001 to 0019 over the sqlite stand-in) and `tests/film-person-h1-verify-mutation.mjs` (each mutant removes or inverts one guard; every one is killed). A pass of any verifier is evidence, never permission.
+
+## 1. Scope and non-goals
+
+**In scope (design only):** the three D1 classes `film_rated_admission`, `film_retention` and `tmdb_retirement_decision`, loaded while the marker is `prepared` by the P5 loader ([ADR 0117](../adr/0117-film-person-d1-handoff-owner-decisions.md) decision 2); the source snapshot and its digest; the generation and baseline fence; the lease and quiet-window preflight; the plan artifact; idempotency; the readback; STOP and recovery; the draft GO texts; the open questions.
+
+**Not in scope, and not authorized by this page or by any GO drafted here:** the marker move (`prepared` to `open`, H2), the baseline or the fence, the receipt baseline and any receipt, `canonical_revision`, any Film, Person or identity row, any other table, producers (P3), flags, Scheduled Tasks, cron, Workflow runs, the projector exclusive window, a corrective write, a Time Travel restore, a code merge. H0 (migration 0019) is applied and read back; it is not repeated here.
+
+## 2. What is already known
+
+| Fact | Value | Source and status |
+| --- | --- | --- |
+| Classes and EXPECTED row counts | `film_rated_admission` 708, `film_retention` 401, `tmdb_retirement_decision` 4; 1,113 in total | The accepted 11 Nov 2026 measurement ([AIR-373 baseline record](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md), `ACCEPTED_DISCREPANCIES.caps` of `src/film-person-cutover-accepted.js`). **Still EXPECTED figures: not current until a new snapshot says so.** The retention count follows the view index, which the hourly Predictions Task rewrites. |
+| Why `prepared` | The fenced writers (`admitRatedFilm`, `retainFilm`, `recordRetirementDecision`) accept only `open` (`assertWritable`), so they cannot run now. The projector writes none of the three tables. The P5 loader is their `prepared` counterpart. | [Loader runbook](film-person-prepared-loader.md), ADR 0117 decision 2 |
+| Marker, baseline, fence | marker `prepared` / `open` / generation 1; baseline `verified` with reference `cutover_accepted/v2:732b9768abcd3b0c2c460a9b0766b25aa1fbe472daed7a93393dbbe073a97cb5`; fence `ok` 1 | Recorded 11 Nov 2026 ([evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md)). **Re-read live; the GO names the live values.** |
+| Schema | 19 (H0 applied 12 Nov 2026), the four receipt tables present and empty | [0019 apply record](../evidence/d1-migration/air-374-0019-apply-2026-11-12.md). The loader itself needs 16 or above; this verifier pins exactly 19 and the note of the migration. |
+| Triggers protecting the tables | `tmdb_retirement_decision` is append-only (triggers refuse update and delete; two more validate `retire` and `restore` rows). `film_rated_admission` and `film_retention` have no marker trigger (migrations 0014, 0015): a wrong row there can be removed only by a new, owner-approved corrective write. The four receipt tables have `BEFORE` triggers that refuse every write unless the marker is `d1` / `open`. | Migrations 0016 and 0019, [0019 procedure](film-person-0019-apply.md) |
+| Behaviour of loaded rows at `prepared` | None observable. `catalogReaderGate` answers from the existing runtime for `legacy`, `r2` and `prepared`; the D1 readers of these tables (`catalogAdmittedFilmFromD1`) answer only at `open`. | `src/canonical-catalog-reader.js`; [decision pack](film-person-holdpoint-decision-pack.md) |
+| One thing that does change later | At `open`, a Film with a `tmdb_retirement_decision` row cannot be merged by the fenced merge (`film_person_retirement_history`). | `src/canonical-mutations.js` |
+| Row bounds | at most 40 rows (statements) per atomic batch; at most 40 batches and 1,200 statements per run; 1,113 rows are 30 batches (18 + 11 + 1) | `BATCH_ROWS`, `RUN_BATCHES`, `RUN_STATEMENTS` of the loader |
+| Concurrent writers | The Worker cron `0 * * * *` runs the projector (skips its tick while an operator lease is live), the EPG ensure and the Discovery reconcile; the Predictions Task is hourly at about `:20` and rewrites `enrichment/view-index.json` for about 25 minutes | [Decision pack, concurrent writers](film-person-holdpoint-decision-pack.md); live values must be read |
+
+## 3. Source snapshot
+
+### 3.1 What the loader reads
+
+The loader reads two kinds of input and nothing else (see `SOURCE_KEYS`, `STATE_STATEMENTS`).
+
+| Input | Exact object | Used for |
+| --- | --- | --- |
+| R2 `letterboxd/admissions/verified-films.json` | the rated-archive receipts (`RATED_RECEIPT_KEY`) | the 708 `film_rated_admission` rows (each entry accepted by `verifiedAdmission`) |
+| R2 `enrichment/view-index.json` | the view index | the 401 `film_retention` rows (the `watchlist` fact per Letterboxd id) |
+| R2 `identity/tmdb-retirements.json` | the owner retirement decisions (`RETIREMENTS_KEY`) | the 4 `tmdb_retirement_decision` rows (whole object validated by `prepareRetirementImport`) |
+| D1 `schema_contract`, `film_person_authority`, `film_person_baseline` | one `SELECT` each | the gate: schema at least 16, marker `prepared` / `open`, baseline `verified`, the generation and reference the plan pins |
+| D1 `film_external_id` (schemes `tmdb` and `letterboxd`), `film_redirect` | `SELECT` ordered, no `LIMIT` | the identity each row stands on: the Film that holds the movie id (trusted, not conflicting) or the Letterboxd id, not a redirect source |
+| D1 `film_rated_admission`, `film_retention`, `tmdb_retirement_decision` | `SELECT` ordered | what is already stored (identical = already loaded, different = refusal, unknown = refusal) |
+
+The D1 side is read from an operator copy (`--copy FILE`, a local sqlite file); the sources come from `--source-dir DIR` (three saved files named `verified-films.json`, `view-index.json`, `tmdb-retirements.json`) or `--r2` (the loader's own read-only client). Every private path must be outside the repository (the loader refuses a path inside it).
+
+### 3.2 The reads a FRESH snapshot needs against production (exact list)
+
+None of these is authorized by this page. They need the separate scoped GO of section 3.4. No Worker route, MCP tool, `epg_*`, `prediction_*`, `ratings_*` or sync tool is used.
+
+**R2, read-only credential (`R2_SNAPSHOT_*`, loaded as the [credentials skill](../../.claude/skills/iptv-credentials/SKILL.md) describes, never printed):**
+
+| # | Request | Count | Cap |
+| --- | --- | --- | --- |
+| 1 to 3 | for each of the three keys above: `HEAD`, conditional `GET` (`If-Match` the ETag of the `HEAD`), `HEAD` | 9 requests in total, no list request | 64 MiB per object (`MAX_SOURCE_BYTES`, a refusal threshold, not a measurement); a moved ETag is `source_changed`, never a retry |
+
+**D1, read-only, through the Cloudflare D1 read path (the Developer Platform connector `d1_database_query`, or the API connector `execute`), one `SELECT` per request:**
+
+- The logical read set is the eight `STATE_STATEMENTS` of the loader: `schema`, `marker`, `baseline`, `identity`, `redirects`, `ratedAdmission`, `retention`, `retirement`.
+- The only reviewed and tested way to get them into a local sqlite file is the connector path's `ddl` and `copy` functions (`node scripts/film-person-connector-run.mjs plan`), which read the 39 tables of its copy plan in pages (`PAGE_ROWS` 2,000, `WALL_CLOCK_MS` 40 s per function call, result budget 8 MB in the code and lowered by hand to 4 MB on 11 Nov 2026 because the 8 MB response closed the MCP connection twice). The full copy took about 19 minutes on 11 Nov 2026. **A narrow copy of only the eight tables is not built** (open question 1). Not verified: that the `copy` and `load` functions of that tool work without its lease and `resync` functions, which this snapshot does not use; this must be rehearsed offline on a synthetic database before the read GO is requested.
+- Not used by the snapshot: `leaseAcquire`, `leaseRenew`, `leaseRelease` (they write the `projection_run` row and belong to the load GO of section 9), the witness and gate statements, `resync`.
+
+**Classification against [read side effects](../reference/api/read-side-effects.md):** that page inventories Worker routes and MCP tools. An R2 request with the read-only credential and a connector D1 `SELECT` are not on it: no Worker code, Workflow, continuation or `waitUntil` runs, so none of its entries applies. What bounds the read is the statement text (`assertReadOnly`: one `SELECT`, no `;`, no write or DDL keyword, no `PRAGMA`) and the allowlist of three keys, both enforced by reviewed code; the operator pastes the emitted text without editing it. This read is **not** the counts-only read of E6: it brings Film identifiers (identity claims, redirects), receipt keys, titles and view-index entries into a private local file. That file is confidential production data: outside the repository (mode 600), never pasted into a PR, a Trello card, a document or a log; only counts and digests leave it. A potentially writing probe would be L2 or L3 under [authorization](../process/authorization-and-escalation.md); none is in this list.
+
+**Timing and stop rules of the snapshot:** read the R2 keys outside the Predictions Task run (about `:20` to `:45`; read the live registry, do not assume), so the view index does not move between `HEAD` and `GET`. STOP, no retry, owner decides, on: any `success: false` or error; any R2 status other than 200 (or 404 for a missing key, which is itself `source_missing`); `source_changed` or a size over the cap; a marker, baseline reference, generation or schema value that differs from the GO; a copy longer than 45 minutes; a response that closes the connection. One repeat of an R2 read after `source_changed` is allowed inside the same GO and window; anything else is a new request to the owner.
+
+### 3.3 From the snapshot to the pinned digests
+
+1. Save the three sources to a private directory and the copy to a private sqlite file (outside the repository).
+2. Compute `sha256sum` of each source file independently of the loader; these are the source digests of the GO.
+3. Run the loader's dry run with the pinned instant and the lease id that the load will use (section 5 explains why both are chosen now): `node scripts/film-person-prepared-loader.mjs plan --copy <copy.sqlite> --source-dir <dir> --at <ISO ms Z> --lease-id <ID> --out <private dir>`. It prints counts, digests and bounds and writes `plan.private.json` (rows: private).
+4. Verify the printed summary: `node scripts/film-person-h1-verify.mjs verify-plan <plan.json> --plan-digest <D> --counts A,B,C --reference <REF> --at <ISO> --verified-films-sha <X> --view-index-sha <Y> --retirements-sha <Z>`. The first pass uses `--diagnostic` (shape only, never a pass) to print the digest the owner will pin; the second pass pins it. Run `plan` a second time from the same inputs: the digest must be equal (it is deterministic for the same sources, state, `--at` and lease id).
+5. If the planned counts are not 708, 401 and 4, the loader refuses (`count_mismatch:<class>:<n>`) because its caps are the accepted measurement; a changed count is a reviewed code and owner decision (open question 2), not a verifier input. The verifier also refuses a plan whose `expected` is not the loader's own (`class_expected_not_loader`).
+
+### 3.4 Draft GO for the snapshot reads (to be shown to the owner; fill the brackets)
+
+> GO for the READ-ONLY snapshot of H1 of AIR-374, production R2 bucket `iptv` and D1 database `iptv` (id `[from the account listing]`), executed by `[who]`: (1) R2: for exactly the three keys `letterboxd/admissions/verified-films.json`, `enrichment/view-index.json` and `identity/tmdb-retirements.json`, `HEAD`, conditional `GET`, `HEAD` each (9 requests, no list, no write), read-only credential, at most 64 MiB per object, between `[start]` and `[end]` Europe/Madrid (`[UTC]`), outside the Predictions run (`[slot read live]`); (2) D1: the `ddl` and `copy` functions of `node scripts/film-person-connector-run.mjs plan` from `main` `[sha]`, plan digest `[digest]` (`SELECT` only, one per request, pasted without edit, result budget 4 MB, 2,000 rows per page, no lease, witness or resync function), once. Bounds: a stop at the first error, moved ETag, over-cap size, marker or baseline value that differs from `prepared` / `open` / 1 and `[REF]`, or a copy longer than 45 minutes; no retry beyond one repeat of an R2 read after `source_changed`. The files stay private (outside the repository, mode 600); only counts and digests are reported. This GO does NOT authorize: any write, DDL, lease, marker, baseline, flag, Scheduled Task, cron, Workflow, sync, projector, discovery, EPG or prediction run, any GET route or MCP tool, any other R2 key or listing, an edited statement, the H1 load, or the choice of counts.
+
+## 4. Preflight and the quiet window
+
+The state statements are emitted, never typed: `node scripts/film-person-h1-verify.mjs state-sql` prints eleven read-only `SELECT`s (`assertReadOnly` on each). The lease, window, Discovery lease, marker, fence, baseline and schema statements are the **exact statements of the [0019 preflight kit](film-person-0019-apply.md)** (a test pins them character for character); the others are new:
+
+| Id | Statement | Preflight expectation |
+| --- | --- | --- |
+| `schema` | `SELECT id, version, note FROM schema_contract ORDER BY id` | one row, version 19, the note of migration 0019 |
+| `marker` | `SELECT mode, cutover, generation FROM film_person_authority WHERE id = 1` | `prepared` / `open` / 1 |
+| `fence` | `SELECT ok FROM film_person_cas WHERE id = 1` | `ok` 1 |
+| `baseline` | `SELECT state, reference FROM film_person_baseline WHERE id = 1` | `verified`, the reference named in the GO |
+| `projector_lease` | `SELECT lease_id, lease_until FROM projection_run WHERE projection = 'enrichment'` | no row, `lease_id` null, or `lease_until` earlier than now |
+| `projector_window` | `SELECT state, expires_at FROM projector_window WHERE id = 1` | `idle` |
+| `discovery_lease` | `SELECT id, lease_id, expires_at FROM discovery_lease` (`expires_at` in epoch milliseconds) | no row, `lease_id` null, or `expires_at` in the past |
+| `receipt_tables` | `sqlite_master` names of the four receipt tables | 4 rows (schema 19 present) |
+| `loader_tables` | `sqlite_master` names of the three class tables, `film_external_id`, `film_redirect` | 5 rows |
+| `class_counts` | three `COUNT(*)` in one row | 0, 0, 0 |
+| `other_counts` | `COUNT(*)` of `film`, `person`, `film_external_id`, `film_redirect`, `canonical_revision` and the four receipt tables | receipt tables 0 (a non-empty `canonical_revision` is a note) |
+
+Manual rows, recorded by hand (`MANUAL_STEPS`): main SHA and the loader and verifier at it; the EPG state (`epg_status` or `sync.json` stage and the executor phase: no publication in flight); no Predictions run in progress; the D1 Time Travel bookmark of `iptv` (a recovery point only); the feature flags and the Predictions Task registry as observed.
+
+Run the eleven statements (one request each), save the answers as `{"<id>": <rows or D1 envelope>}`, then `node scripts/film-person-h1-verify.mjs verify-preflight <results.json> --reference <REF> [--now <ISO>]`. It refuses a missing result, a failed envelope, a schema other than 19, a moved marker or generation, a fence not `ok`, an unverified baseline or a reference that differs from the one pinned, a live projector lease, a window not `idle`, a live Discovery lease, a missing receipt or loader table, any receipt row, and any class that is not empty (`class_not_empty:<table>:<n>`). Without `--reference` it refuses (`expected_reference_missing`); `--diagnostic` checks the shape only and never passes.
+
+**Quiet window.** A lease and a quiet interval are required (decision pack E3); an exclusive window is not requested, because the only table writers here are the loader's own three tables, which nothing else writes at `prepared`, and because whether an operator can request the projector window by itself is not verified. A candidate slot is a few minutes after the Predictions run ends and ends before the next `:00` tick (for example `:46` to `:56` Madrid time); the exact minutes must be read live from the lease rows.
+
+## 5. The plan artifact
+
+`plan` is a dry run (the only mode of that command). Its printed summary holds counts, digests and bounds only; `plan.private.json` holds the rows and the rendered statements and is private.
+
+What `plan` emits and how it is judged (`verify-plan`):
+
+- `ok`, `mode: dry-run`, loader `version`, and the plan `digest`, equal to the pinned one. The digest covers the sources, the pinned gate (marker generation and baseline reference), the lease id, the instant, the state the plan was built from, every row and every statement.
+- The gate: `prepared` / `open` / generation 1 and the baseline reference of the GO.
+- The three sources: each `key`, `sha256` (equal to the independently computed digest) and `size` within the cap.
+- Per class: `expected` (the loader's own), `planned`, `toLoad` equal to the pinned count, `already` 0, `stored` 0, `digest` and `toLoadDigest` (equal while nothing is loaded), and the `skipped` reasons (accepted gaps counted, not loaded; reported as notes).
+- `complete` true, `noop` false, `deferred` 0, `batches` 30 and `statements` 1,113 for the EXPECTED counts (computed from the counts and `bounds.batchRows`), bounds within the loader's own (40 rows, 40 batches, 1,200 statements).
+- It refuses a pasted private plan (`private_plan_pasted`): the summary is the only thing to paste anywhere.
+
+**The batch SQL is held only as an artifact.** `node scripts/film-person-prepared-loader.mjs sql <the same inputs> --apply --plan-digest <D> --out <private dir>` rebuilds the plan, refuses unless its digest equals the pinned one, and writes one private file per batch (`sql-batch-000.json` and on). It never executes anything and this package never runs it. Its stdout lists `index`, `class`, `rows`, `digest` per batch; `verify-emitted <stdout.json> --plan-digest <D> --counts A,B,C [--batch-set-digest H]` checks the plan digest, the order (admission, then retention, then retirement), at most 40 rows per batch, class sums equal to the pinned counts, distinct batch digests, at most 40 batches and 1,200 statements, and prints one batch set digest that the GO names. It refuses pasted SQL.
+
+**Why `--at` and the lease id are chosen at plan time.** Both enter the plan digest. `--at` is stamped into `updated_at`, `recorded_at` and `observed_at` of the rows, so it is the instant of the plan, not of the load (open question 3). The lease id of the load is fixed first (for example `h1-load:<UTC stamp>`, 8 to 80 characters of `A-Za-z0-9:._-`); the lease is taken later under the second GO with exactly that id, or the plan is rebuilt.
+
+## 6. Idempotency, from the code
+
+- Each row is one statement: `INSERT ... SELECT ..., CASE WHEN (guard) THEN request_id END ... WHERE NOT EXISTS (the identical row)`. The guard column is `request_id`: when the guard is false it becomes `NULL`, a NOT NULL violation, and the batch fails. The guard asserts the marker `prepared` / `open` at the planned generation and the baseline `verified` at the planned reference, the projector lease of the run live by the database clock, the class count in `[initial, expected - 1]`, and the identity the row stands on (the trusted movie id or the Letterboxd id held by exactly that Film, which is not a redirect source). The guard writes nothing.
+- **A row that already exists with the same content** is skipped by the statement itself (`NOT EXISTS`): the statement produces no row, so the guard is not evaluated and `changes` is 0. Replaying an emitted batch is therefore a no-op (the loader test replays all batches at an unmoved marker and compares a digest of every table). By the shape of the statement a replay after a marker move also inserts nothing and fails nothing; that case is not separately tested. A row the plan does not know, or one stored with other content, refuses the plan (`unknown_rows`, `mismatch`); nothing is ever updated or deleted.
+- **A moved marker, generation or baseline** (or a lost lease, or a changed identity, or a stale count) makes every row that would insert fail the guard, so the batch writes nothing.
+- **A partial apply** is possible only between batches (one batch is one atomic D1 batch, assumed from the D1 API, not proved for the connector: decision pack, H1 risks). After batches 1 to k, the class counts are exactly the rows of those batches. The guard's count bound `[initial, total - 1]` stays valid, so the remaining batches of the same plan may continue under the same GO after a readback; otherwise a new plan from a fresh read is built.
+- Request ids are content-derived and stable (`p5-load:<sha16>:<key>` for admission and retention, `r2-import:<sha16>:<film id>` for retirement), so a second plan from the same sources proposes the same rows.
+
+## 7. Readback (after the last batch, with the lease still held)
+
+1. The class counts and the unchanged facts: re-run the eleven statements and `node scripts/film-person-h1-verify.mjs verify-readback <results.json> --held <held.json> --reference <REF> --lease-id <ID> --counts 708,401,4`. It requires the pinned counts per class (`count_not_expected:<table>:<n>`), the lease still the run's own and live, marker / baseline / fence / schema as in the preflight, **and, against the bundle taken with the lease held before the first batch (`held.json`)**, `film`, `person`, `film_external_id`, `film_redirect` and `canonical_revision` row counts unchanged (`unchanged_moved:<table>`), the four receipt tables still empty, the baseline reference and the projector window unchanged. A Discovery lease that moved is a note (Discovery writes Discovery tables only), not a refusal.
+2. Content readback: a fresh operator copy after the run (the same read path and caps as section 3.2) and `node scripts/film-person-prepared-loader.mjs verify <the same inputs> --expect-generation 1 --expect-reference <REF> --out <private dir>`. Its ledger names, per class, the stored rows against the planned rows (`missing`, `different`, `unexpected` must be 0) and a digest of the stored rows equal to the plan's class digest; it writes a receipt of counts and digests only. A rerun of `plan` on that copy must report `noop`.
+3. The other tables untouched: the loader's own test compares a digest of every other table before and after a full load at the accepted counts; on production the evidence is the unchanged counts of step 1 and the `noop` of step 2, not a table digest (not verified on production).
+4. After the release: `verify-released <results.json> --held <held.json> --reference <REF> --lease-id <ID> --counts 708,401,4` (the lease row is gone, the counts stand).
+5. `handoffReadiness` loses the three `empty_class_not_loaded` blockers (a separate read, not judged by the verifier).
+
+## 8. STOP rules and recovery
+
+**Stop at the first of these, record it, change nothing further, and hand the rows to the owner:** any preflight or held row off (section 4); a plan whose digest, counts, gate, instant or source digests differ from the GO; any `verify-batch` refusal (`statement_failed`, `statement_no_change`, `statement_changes`, `result_count`); a batch result that is missing, ambiguous or an unknown outcome; a lease that is lost, expiring or foreign; a marker, generation or baseline reference that moved; a class count that is not `Σ rows of the batches acknowledged`; any receipt row; a connector error; the run exceeding the lease (45 minutes from the last renewal) or the window.
+
+**No blind retry, no resend.** A batch result of 0 `changes` means rows existed or were skipped: it is a STOP and a readback, not a reason to send again. After any failure or unknown outcome the order is: (1) read the class counts and the marker/baseline/lease rows (`state-sql`); (2) compare with the batches acknowledged; (3) the owner decides. Replaying a batch is a no-op by design and is still sent only after the reading.
+
+**What recovery exists, and what does not:**
+
+- A failed batch wrote nothing when D1 rolls a failed batch back as the stand-in does. That is assumed from the D1 API and is the first unknown of this package (open question 8); a count that is not a multiple of the acknowledged batches would show a non-transactional connector.
+- The lease is released after the readback with the connector's release statement (covered by the GO); if the run is abandoned the lease expires 45 minutes after its last renewal and the projector resumes by itself.
+- **The loaded rows are inert at `prepared`** (section 2): no runtime reads them until `open`, so leaving them in place is the safe default after a partial or doubtful load. Removing them is a corrective write under a new GO: possible for `film_rated_admission` and `film_retention` (no marker trigger), **not possible for `tmdb_retirement_decision`**, which is append-only by trigger (an inverse `restore` row is the only correction, and only through the fenced writer at `open`).
+- **A code revert or a deploy changes no data.**
+- **The D1 Time Travel bookmark** recorded before the first batch is a recovery point only. Restoring it loses every later write of every domain (EPG, Discovery, metadata, ratings, predictions, owner reviews); it is an owner decision for a corrupted database and never a remedy for this operation.
+- Not verified: whether the projector can merge or redirect a Film that already carries a loaded row before `open`. The in-row guard re-checks redirects only at load time; the fenced merge handles these rows at `open` (`canonical-mutations.js`). See open question 6.
+
+## 9. Draft GO for the load (a separate GO, after the plan is verified and the snapshot is read)
+
+To be shown with the verified preflight, the plan summary and the batch list. Fill the brackets from the NEW snapshot; a GO that does not name them is not this GO. The load takes a lease row and 30 insert batches, so it is a bounded production WRITE: an operation-specific standing contract or owner-approved plan under [authorization](../process/authorization-and-escalation.md) (L2 or L3 by the owner's classification).
+
+> GO for the H1 load of AIR-374, production D1 database `iptv` (id `[id]`), executed by `[operator: the assistant through the Cloudflare Developer Platform connector `d1_database_query` under the owner's presence]`, between `[start]` and `[end]` Europe/Madrid (`[UTC]`), after the Predictions run and before the `:00` tick. Pinned: `main` `[sha]` (loader blob `[git hash-object scripts/film-person-prepared-loader.mjs]`, verifier blob `[git hash-object scripts/film-person-h1-verify.mjs]`); marker `prepared` / `open` / generation 1; baseline `verified` with reference `[REF]`; plan digest `[D]`; batch set digest `[H]`; instant `[at]`; lease id `[ID]`; sources `verified-films.json` `[X]`, `view-index.json` `[Y]`, `tmdb-retirements.json` `[Z]`; rows `[A]` into `film_rated_admission`, `[B]` into `film_retention`, `[C]` into `tmdb_retirement_decision` (`[A+B+C]` in total; EXPECTED 708, 401, 4, 1,113), in `[N]` batches of at most 40 rows (EXPECTED 30), each sent once as one request in the printed order, at most 40 batches and 1,200 statements. It authorizes exactly: (1) the read-only preflight and the bundle with the lease held; (2) the lease on the `enrichment` row of `projection_run`: the acquire statement with the lease id `[ID]`, renewals, and the release; (3) the `[N]` batches, each read before the next is sent, with `verify-batch`; (4) the readback, the post-run read-only copy of the same bounded scope as the snapshot GO of `[date]`, and the release. STOP rules: section 8 of the package, including any refusal of a verifier, a lease or marker that moved, an unknown outcome and a count that does not match the acknowledged batches; after a STOP, reads only, no resend, no retry. This GO does NOT authorize: the marker (`prepared` to `open`, H2), the baseline or the fence, the receipt baseline or any receipt, `canonical_revision`, any Film, Person or identity row, any table other than the three and the lease row, the projector window, any flag, Scheduled Task, cron or Workflow, any producer (P3), a corrective write, a second run, a different or edited statement, an R2 write, a Time Travel restore, a merge, or H2 to H4.
+
+## 10. Operator sequence (only under the GOs above)
+
+| Step | Action | Evidence |
+| --- | --- | --- |
+| S0 | Owner answers the open questions; the read GO of section 3.4 is given | GO text |
+| S1 | Snapshot reads (section 3.2); private files; `sha256sum` of the sources | digests, counts |
+| S2 | `plan` twice, `verify-plan` (pinned), `sql --apply` to private files, `verify-emitted` | plan digest, batch set digest |
+| S3 | Owner reads the counts, skipped reasons and digests; the load GO of section 9 is requested and, if given, a slot is fixed | GO text |
+| S4 | `state-sql` and `verify-preflight`; Time Travel bookmark and the manual rows | preflight bundle |
+| S5 | Acquire the lease (`leaseAcquire` of the connector plan, the lease id of the GO); `verify-held` on a second `state-sql` read | held bundle |
+| S6 | Send batch 0, read the result, `verify-batch --rows <n>`; the next only on a pass; renew the lease before it falls under 15 minutes | per-batch result |
+| S7 | `state-sql`, `verify-readback`; the post-run copy, loader `verify`, `plan` reports `noop` | readback, receipt |
+| S8 | Release the lease; `verify-released` | released bundle |
+| S9 | Evidence note, Trello comment (Controller), PR for any doc change; H2 stays blocked | evidence |
+
+## 11. Open questions for the owner
+
+1. **Snapshot path.** Accept the reviewed full connector copy (39 tables including the moving Discovery tables, about 19 minutes measured), or commission a narrow eight-table read and local-sqlite builder first (not built)? The narrow path would shorten both the snapshot and the post-run copy.
+2. **Counts.** The loader caps are the accepted 11 Nov 2026 counts. If the fresh snapshot gives other counts (the retention count follows the view index), a reviewed change of the caps and an owner acceptance come before any plan can exist. Is that the intended route?
+3. **Staleness and `at`.** How old may the snapshot be at load time (proposal: a new plan if more than a few hours pass, if any Predictions run rewrote the view index in between, or if the marker or baseline moved), and is the plan instant an acceptable `observed_at` / `updated_at` / `recorded_at` for the rows (rebuilding the plan at load time changes the digest)?
+4. **Window.** Is the projector lease plus a quiet interval enough (no exclusive window)? Whether an operator can request the projector window is not verified.
+5. **Post-run content readback.** Is the counts-and-unchanged readback plus the loader `verify` on a fresh copy required before H1 is accepted, or may the copy be taken later with the H2 preparation?
+6. **Merges before `open`.** Can the projector merge or redirect a Film that already carries a loaded row while the marker is `prepared`? If yes, should H1 run as late as practical before H2, or be preceded by a check of `film_redirect`?
+7. **Slot and who.** The Madrid time slot, the operator (Controller with the connector) and where the R2 read-only credential is loaded.
+8. **Atomicity.** The connector's multi-statement request is assumed atomic from the D1 API and has not been proved on production: accept that risk with the readback-before-resend rule, or rehearse it on a safe copy first?
+9. **Corrective policy.** Rows of the first two classes can be removed only by a new GO; retirement rows never. Confirm that a wrong load is handled as a forward correction under a new GO, not by a restore.
+
+## 12. Verified and not verified
+
+Verified offline: the verifier's emitted statements are single `SELECT`s that run on the real chain 0001 to 0019 and equal the 0019 kit's own lease, window, Discovery and marker statements; every refusal named above is provoked by a fixture; each diagnostic output never passes; the 97 mutants of `tests/film-person-h1-verify-mutation.mjs` are all killed; the module has no network, file-write or write-SQL path and never calls the loader's plan or emit functions.
+
+Not verified: any production value (counts, digests, lease or window rows, flags, the Predictions slot); that the connector `copy` and `load` functions work without the lease and `resync` functions; D1 atomicity of a multi-statement request; the time the snapshot, the 30 batches and the post-run copy take (only the 19-minute copy of 11 Nov 2026 is measured); that the projector cannot merge a Film carrying a loaded row at `prepared`; the sizes of the three sources and of `film_external_id`. No production operation was run, no read, no write, no lease; no GitHub comment or Trello write was made.
