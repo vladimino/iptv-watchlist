@@ -40,7 +40,7 @@ Against the decision pack: its 30-blocker text (11 Nov 2026, schema 18) listed o
 
 ### 1. Registry/code (5)
 
-| Blocker | What clears it | Stage (the proposed ADR 0128 plan, S4 to S5; AIR-374 task plan P3) |
+| Blocker | What clears it | Stage (ADR 0128 plan, S4 to S5; AIR-374 task plan P3) |
 | --- | --- | --- |
 | `receipts_protocol_unregistered` | At least one `atomic:true` operation in `PRODUCER_OPERATIONS` (derived, never a flag). The first producer PR that registers its operations clears it. | S5-1 (EPG wiring); also P3b to P3d for the other producers. Schema 19 is applied, so ADR 0119 no longer blocks it. |
 | `producer_not_wired:epg_commit` | Re-derive `requires` from the kinds the EPG producer really uses, register an atomic operation for each, and bundle the modules. `person_mutation` has no producer yet. | S4-1 to S4-4 (pure plan module, migration `0020` file, store, durable driver), the `0020` apply holdpoint, S5-0 (`person_mutation`), then S5-1 (wiring, dormant at `prepared`). |
@@ -48,7 +48,7 @@ Against the decision pack: its 30-blocker text (11 Nov 2026, schema 18) listed o
 | `producer_not_wired:discovery_admission` | Wire Discovery catalog admission (`film_mutation`). | P3c (not in the ADR 0128 plan). |
 | `producer_not_wired:rated_admission_retention` | Wire rated admission and retention (`film_admission`, `film_retention`). | P3d (not in the ADR 0128 plan). |
 
-ADR 0128 is a proposal on its own branch at the time of writing and is not on `main`; the stage names are those of its staged plan, and this page claims nothing about whether it is accepted.
+The stage names are those of the staged plan in [ADR 0128](../../adr/0128-epg-canonical-producer-durable-execution.md), which is a proposal at the time of writing; this page claims nothing about whether it is accepted.
 
 ### 2. Data/H1 (3)
 
