@@ -59,6 +59,17 @@ The protocol is implemented directly in `src/mcp.js` instead of through the MCP 
 | `prediction_heartbeat` | yes | `POST /api/enrichment/heartbeat` |
 | `prediction_complete` | yes | `POST /api/enrichment/complete`. HTTP 503 `prediction_catalog_held` is a wait: the run is not completed. Optional `fault` is caller-reported and only valid with an external or systemic `reason`. A normal completion rejects it. See [run diagnostics](run-diagnostics.md). |
 
+### Batch runner tools (Proposed)
+
+**Proposed, not implemented, not in the tool list.** [ADR 0121](../../adr/0121-prediction-batch-runner-v2-dual-protocol.md) (Proposed) would add two write tools beside the v5 prediction tools, which stay unchanged. Full contract: [batch runner v2](prediction-runner.md#batch-runner-v2-proposed-contract).
+
+| Tool | Writes | What it would call |
+| --- | --- | --- |
+| `prediction_batch_start` | yes (no write with `dryRun: true`) | `POST /api/enrichment/batch/start` with `scope: watchlist_all`, `mode: queued`. One call returns the manifest of up to 100 films with profile, contract and per-film `modelMetadata` |
+| `prediction_batch_submit` | yes (no write with `dryRun: true`) | `POST /api/enrichment/batch/submit` with 1 to 10 items, validated per film on the Worker. A tool call body is bound by the 64 KiB inbound limit above: the caller splits a group on `413` |
+
+`prediction_heartbeat` and `prediction_complete` serve both protocols. A client that caches the tool list sees the new tools only after it refreshes or reconnects. The response of `prediction_batch_start` can be far larger than any v5 answer; the Worker caps it by bytes as well as by count.
+
 All MCP tools require the [Cloudflare Access and Worker JWT validation](#authorization) described below. `epg_sync_step` follows the [discovery continuation contract](#discovery-contract-for-scheduled-tasks). External Scheduled Tasks orchestrate EPG and predictions independently of deployment; D1 is not the authoritative data source for these tools.
 
 Write tools are annotated `readOnlyHint: false`. `enrichment_status` is annotated `readOnlyHint: true`: it shares the HTTP status body, projects an expired lease and does not persist a run or deliver a stop event ([AIR-415](https://trello.com/c/NHyIKM6z)). `tests/get-write-audit.mjs` fails on any read-only tool that has an effect. `epg_sync_start` and `epg_sync_step` are `openWorldHint: true` because they fetch Letterboxd, the configured EPG source, or TMDB. A wrong argument returns a tool result with `isError: true` and does not call the domain function. An unknown tool returns JSON-RPC error `-32602`. The response never contains the caller's identity.

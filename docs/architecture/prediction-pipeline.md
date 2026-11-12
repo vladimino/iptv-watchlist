@@ -61,6 +61,42 @@ The "Read schema" step and the "Isolated invalid output" branch share [one valid
 
 **Run events.** The start and the systemic stop of a run each write a durable record and then the Events Log item. A delivery that failed or was interrupted is completed by the next authorized start, inside the writer lease, from the latest run's records and a small index of earlier failures; after eight failed attempts an entry is quarantined and shown in the status read. No read delivers an event ([events](../reference/domain/events.md#delivery-of-prediction-run-events), [AIR-416](https://trello.com/c/f7FX4Elk)). The diagram's start step is unchanged: the delivery is part of it.
 
+## Batch runner v2 (Proposed)
+
+**Proposed, not implemented.** [ADR 0121](../adr/0121-prediction-batch-runner-v2-dual-protocol.md) (Proposed) adds a second protocol beside the one above. It shares the queue, the runner lease, the retry records and the D1/R2 persistence; the diagram above is unchanged and stays the live protocol. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract).
+
+```mermaid
+sequenceDiagram
+    actor Client as ChatGPT runner v2
+    participant MCP as Worker MCP tools
+    participant Queue as Prediction queue and lease
+    participant Store as D1 pointers and R2 bodies
+    Client->>MCP: prediction_batch_start
+    MCP->>Queue: Acquire the one runner lease
+    alt Lease held by any run
+        MCP-->>Client: already_running (stop, do not adopt)
+    else New run
+        MCP->>Queue: Select once, hot first (up to 100 films)
+        MCP-->>Client: Manifest: profile, contract, films with metadata and plan
+        loop Until the manifest is spent (at most 100 films)
+            Client->>Client: Generate up to 10 films from the manifest
+            Client->>MCP: prediction_batch_submit (1 to 10 items, lease fence)
+            MCP->>MCP: Validate each film, compare profile impact
+            MCP->>Store: Write the valid films (immutable body, then pointer)
+            MCP->>Queue: One queue write for the call, renew lease
+            MCP-->>Client: Per-film results (partial success)
+            opt Profile changed
+                MCP-->>Client: compatible films kept; impacted or unknown films stale_profile
+            end
+        end
+        Client->>MCP: prediction_complete
+        MCP->>Queue: Record completion, release lease
+    end
+    Note over Client,Store: A dry run (dryRun true) reads and validates the same way and writes nothing: no lease, run, queue or storage write
+```
+
+The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A v2 run that stops leaves its unsubmitted films in the queue; the next execution selects them again. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+
 ## Queue writes
 
 The prediction runner is one of several writers of the queue object `enrichment/prediction-queue.json`. Every writer, with or without a lease, goes through the same conditional write ([ADR 0064](../adr/0064-prediction-queue-conditional-writes.md), Accepted 2026-10-31).

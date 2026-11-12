@@ -92,6 +92,63 @@ The line never holds a film id, a key, a statement, a body, a fingerprint, a pre
 
 **Batch sizes the contract has.** The selection batch of a run is `min(adaptive plan, body.batchSize)` with the plan capped at 12 while `capacity.remainingPercent` is unknown and at 20 (`MAX_PREDICTION_BATCH`); `start` refuses more than 20. HTTP `next` accepts `batchSize` 1 to 20 and HTTP `submit` 1 to 10 items. The MCP tools send `batchSize: 1` for `prediction_next` and accept exactly one item in `prediction_submit`, and `enrichment_runner` publishes `modelBatching.enabled: false` with one ready fingerprint per call. Each `next` reads the stored fingerprint and prediction of every film in the run's selection, so its cost grows with the selection batch; its calls do not grow with the number of items it returns.
 
+## Batch runner v2 (Proposed contract)
+
+**Status: Proposed, not implemented.** This section is the contract of [ADR 0121](../../adr/0121-prediction-batch-runner-v2-dual-protocol.md) (Proposed). Nothing here is deployed, enabled or authorized; the v5 protocol above is the only live one and is unchanged. Sizes marked *initial* are open decisions of the ADR, not measured limits ([sizes and limits](../../evidence/prediction/air-446-batch-runner-limits-2026-11-12.md)).
+
+v2 is a second client of the same queue, runner lease, retry records, fingerprint and prediction storage and D1/R2 write order. A run has `protocol` `"v5"` (absent on older records) or `"batch_v2"`. `next` and `submit` refuse a v2 run and `batch_submit` refuses a v5 run with `409 {code: "wrong_protocol"}` and no write. One lease serves both: a second `start` or `batch_start` while a lease is held answers `already_running` and the caller stops without adopting the `runId`.
+
+**Flow.** `batch_start` (once) → repeat { generate up to `generationSize` films, `batch_submit` 1 to 10 items } until the manifest is spent, a `mustComplete` or `action: "complete"` answer → `complete`. `heartbeat` and `complete` are the existing routes. At most 100 films per execution.
+
+### `POST /api/enrichment/batch/start`
+
+Request: `{scope: "watchlist_all", mode: "queued", trigger: "scheduled"|"manual", dryRun?: boolean, pin?: {filmIds: string[]}}`. `pin` is accepted only with `dryRun: true`. Capacity is reported as in `start`; a total-film or time cap is not imposed beyond the 100.
+
+Answer `200 {status: "running", runId, protocol: "batch_v2", lease {expiresAt, ttlMs, fence}, limits, profile, contract, films, truncated?}`:
+
+| Field | Content |
+| --- | --- |
+| `limits` | `maxManifestFilms` (100), `maxManifestBytes` (*initial* 160 KiB), `generationSizeDefault` (10), `generationSizeRange` (1–10), `submitMaxItems` (10), `submitMaxBodyBytes` (the 64 KiB inbound limit of [MCP](mcp.md#transport), advised 56 KiB), `callBudgetMs` (*initial* 25000) |
+| `profile` | The taste profile body, `version`, `hash` and `lineage` (the published profile's own lineage record). Sent once per execution |
+| `contract` | The runner contract fields v5 reads separately: `enrichment_schema.contract` (the rules `batch_submit` validates with and its version), `fingerprintSchemaVersion`, `fingerprintPromptVersion`, `predictionPromptVersion`, registry digest |
+| `films[]` | `{filmId, lane: "hot"\|"cold", plan: "fingerprint_and_prediction"\|"prediction_only", modelMetadata, fingerprint?}`. `modelMetadata` is the full existing object; `fingerprint` (the stored valid object and its hash) is present only for `prediction_only`. Null fields are omitted and repeated genre text may be shared; the compact form is part of the contract version |
+| `truncated` | `{reason: "bytes"\|"count", eligibleRemaining}` when fewer films than are eligible fit; a shorter manifest is normal |
+
+The Worker takes the lease, selects once (hot first; cold only while no hot film is outstanding; films with a future `retryAt` excluded), writes the run record and the run's `sources` object, and answers. It reads each film's state in parallel and the catalog by id as in v5. A queue that fails the [advance gate](#queue-writes) is rebuilt as in `start`; `503 {status: "blocked", code: "prediction_catalog_held"}` and `prediction_retry_heal_pending` are the `start` answers they are for v5. `queue_empty`, `retry_backoff` and `noop` are as in `start`.
+
+With `dryRun: true` no lease, run record, `sources` object, queue, Event or diagnostics row is written and the answer is the same manifest with `runId: null`, `dryRun: true` and a `dryRunId` (a hash of the profile hash, the contract and the film ids). A dry run may coexist with a live run. A pinned film that is no longer eligible is listed in `notEligible[]` and not replaced.
+
+### `POST /api/enrichment/batch/submit`
+
+Request: `{runId, fence, items[1..10], dryRun?: boolean, dryRunId?: string}`; each item `{filmId, fingerprint?, prediction}` or `{filmId, failure: {kind: "parse_error"|"validation_error"}}`. A body over 64 KiB is rejected `413` by the transport before processing: split the group in half. The Worker checks protocol, the lease holder, expiry and `fence` before the first film, and renews the lease with every call.
+
+Answer `200 {status, runId, lease {expiresAt, fence}, results[], profile, remaining, mustComplete?, action?, hotArrived?, stopReason?}`. `results[]` has one entry per item, in request order:
+
+| `result` | Meaning |
+| --- | --- |
+| `created`, `recalculated`, `already_current` | As in `submit`. `already_current` with `replayed: true` is an identical item already settled by this run |
+| `validation_error` | The retryable item failure, with `validation {stage, reportedBy, issues[{path, code}]}` as in [the submit validation contract](enrichment.md#submit-validation-contract); the film is deferred by the existing retry policy and is not resubmitted in the run. No MCP preflight is required; `prediction_validate` stays available |
+| `stale_profile` | The current profile differs from the run's and the film's `compatibility` is `impacted` or `unknown`. Nothing is written for it, no retry record is created and it does not count towards `format_error_storm` |
+| `not_in_manifest` | The film is not selected by this run. Nothing is written |
+| `deferred_budget` | The call's wall budget was spent before this item; nothing is written; resubmit it |
+| `conflict` | A different payload for a film this run already settled. Nothing is written |
+
+An item is identified by `(runId, filmId, contentSha256)`, the hash being of its canonical objects, so a repeated call after a lost response is safe. The queue is advanced by one conditional `batch_progress` write per call for every settled film. Every item carries `compatibility` (`compatible`, `impacted`, `unknown`) when the profile changed.
+
+**Profile change.** `profile` is `{changed: false}` or `{changed: true, from, to, scope: "global"|"selective"}`. The evaluator is the existing [profile impact](../domain/prediction-compatibility.md#prediction-queue) rule, once per film. `compatible` films are written with the profile identity they were generated under (so unaffected films are not recalculated); `impacted` and `unknown` films are `stale_profile`. `scope: "global"` answers `action: "complete"`; `selective` lists the remaining `compatible` manifest films the caller may continue with. A profile mismatch is never a `validation_error`.
+
+**Whole-call refusals** write nothing: `409 {code: "lease_lost"}`, `409 {code: "contract_changed"}`, `409 {code: "wrong_protocol"}`, `404 {error: "Unknown run"}`, `409 {error: "Run already complete"}`, `503 prediction_catalog_held` (keep the `runId`, retry within the lease as v5), `413`, `502 storage_error` with the boundary line of [failed boundaries](#queue-writes). `mustComplete` and the stop reasons are those of `next`.
+
+With `dryRun: true` the answer is the one the call would give, with `validation` issues and `compatibility`, and nothing is stored: no lease, run, queue, prediction, fingerprint or view-index write.
+
+### Error shape and bounds
+
+Errors keep the existing shape `{error, code, status?, reason?}` plus `requestId`. Per execution: at most 100 films delivered; per call at most 10 items, at most `callBudgetMs` of Worker wall time and one queue write. The step timing line ([above](#step-timing-line-air-438)) is written with `step` `batch_start` or `batch_submit` and counters `manifestFilms`, `manifestBytes`, `items`, `created`, `recalculated`, `alreadyCurrent`, `failures`, `deferredBudget` and `staleProfile`. A dry run writes the line too (a log, not storage).
+
+### Compatibility, rollback and authorization
+
+v5 routes, tools, the retry policy, hot-first selection and the validation contract are unchanged and keep working in parallel; exactly one hourly Predictions Task is enabled at a time and there is no feature flag. Rollback is disabling the v2 Task and re-enabling the v5 Task; there is no data migration. Deploying this contract authorizes no run, dry run or Task change: each needs a separate owner approval ([scheduled tasks](../scheduled-tasks.md#batch-runner-task-proposed)).
+
 ## Stored prediction record and its lineage
 
 A committed prediction (`enrichment/films/<id>/predictions.json` `current`, the same record in `history` with `replacedAt` once replaced) holds the model's fields as submitted (`predictedRating`, `probability4Plus`, `confidence`, `matchSignals`, `mainRisk`, `moodLabels`) and the Worker's: `filmId`, `generatedAt`, `tasteProfileVersion`, `tasteProfileHash`, `fingerprintHash`, `fingerprintSchemaVersion`, `fingerprintPromptVersion`, `predictionPromptVersion`, `runId`, `trigger` (`scheduled` or `manual`) of the run that produced it, and, on a snapshot written by this submit path, `confidenceAssessment`. The bundle keeps every replaced record; a recalculation never removes one. `fingerprintPromptVersion`, `runId` and `trigger` exist only on records committed since they were added ([ADR 0038](../../adr/0038-durable-rating-and-prediction-lineage.md)); an older record without them has an unknown prompt version and run, and no reader may fill them from the current state. Why a record was replaced is derived from the two records (a different profile, fingerprint or prompt version), not stored. One film's records and rating events are read through [the film history API](film-history.md).
