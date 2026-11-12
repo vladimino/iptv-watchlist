@@ -692,7 +692,7 @@ if(on(12)){
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-receipts'),file+' does not bundle it');
  const source=fs.readFileSync('src/canonical-receipts.js','utf8');
  assert.ok(!/\bfetch\(|BUCKET|R2|setTimeout|setInterval|cron|scheduled/i.test(source.replace(/\/\/.*$/gm,'')),'no network, R2, timer or schedule');
- assert.ok(!fs.readFileSync('src/canonical-mutations.js','utf8').includes('canonical-receipts'),'canonical-mutations.js is wrapped, not edited');
+ assert.ok(!fs.readFileSync('src/canonical-mutations.js','utf8').includes('canonical-receipts'),'canonical-mutations.js does not import the receipt module (it owns the applied tail SQL, AIR-374 P3-0a)');
  assert.deepEqual(Object.keys(await import('../src/film-person-authority.js')).includes('receiptedWrite'),false);
  assert.ok(OPERATION_KINDS.includes('film_mutation')&&OPERATION_KINDS.includes('person_state')&&OPERATION_KINDS.includes('localization_conflict'));
  assert.equal(canonicalJson({b:1,a:[{d:undefined,c:2}]}),'{"a":[{"c":2}],"b":1}');

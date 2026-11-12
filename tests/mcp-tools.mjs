@@ -93,6 +93,17 @@ const forbidden=[
  ['epg_sync_step',{runId:'run-1',chunks:12}],
  ['prediction_start',{trigger:'scheduled',scope:'watchlist_all',mode:'queued'}],
  ['prediction_start',{trigger:'scheduled',batchSize:20}],
+ ['prediction_batch_start',{trigger:'scheduled',scope:'watchlist_all',mode:'queued'}],
+ ['prediction_batch_start',{trigger:'scheduled',batchSize:100}],
+ ['prediction_batch_start',{trigger:'scheduled',key:'enrichment/x'}],
+ ['prediction_batch_start',{}],
+ ['prediction_batch_start',{trigger:'daily'}],
+ ['prediction_batch_start',{trigger:'scheduled',capacity:{remainingPercent:101}}],
+ ['prediction_batch_start',{trigger:'scheduled',dryRun:'yes'}],
+ ['prediction_batch_start',{trigger:'scheduled',pin:{filmIds:['film-1']}}],
+ ['prediction_batch_start',{trigger:'scheduled',dryRun:true,pin:{filmIds:[]}}],
+ ['prediction_batch_start',{trigger:'scheduled',dryRun:true,pin:{filmIds:['../secret']}}],
+ ['prediction_batch_start',{trigger:'scheduled',dryRun:true,pin:{filmIds:['film-1'],prefix:'enrichment/'}}],
  ['prediction_next',{runId:'run-1',batchSize:20}],
  ['prediction_submit',{runId:'run-1',items:[{filmId:'film-1',fingerprint:{},key:'enrichment/x'}]}],
  ['prediction_submit',{runId:'run-1',items:[{filmId:'../secret'},{filmId:'film-2'}]}],
@@ -146,7 +157,7 @@ for(const name of ['prediction_queue_overview','prediction_film_diagnostics','pr
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);
 }
-for(const name of ['epg_sync_start','epg_sync_step','prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']){
+for(const name of ['epg_sync_start','epg_sync_step','prediction_start','prediction_batch_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
 assert.equal(tools.find(item=>item.name==='epg_sync_step').annotations.openWorldHint,true);

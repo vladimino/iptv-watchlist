@@ -210,6 +210,20 @@ Every domain delivery implements the rows that apply to it, against an injected 
 
 Each domain moves alone: inert code with mode `external`; an owner-approved three-step mode switch to `cloudflare` (close admission, verified drain, complete); real production acceptance from the read model; then, separately, disabling that domain's ChatGPT task path. Rollback is the same three-step switch in the other direction (close admission, verified drain, second CAS), then re-enabling the task path. A code rollback changes neither data, mode, cron nor the task registry. Operator steps: [deployment runbook](../runbooks/deployment.md#moving-a-pipeline-to-a-cloudflare-executor).
 
+## EPG diagnostic canary: the isolated execution context (AIR-453, ADR 0121)
+
+Inert foundation, no route, Workflow binding, flag or schedule. `src/epg-diagnostic.js` (`EpgDiagnostic`) builds the only environment the canary's seal path may run on. The real functions (`stageSealedGeneration`, `planDiscoveryLedger`, `writeLedgerSegment`, the manifest and pointer compare-and-swap, `EpgOrchestration.assertStep` with its 300 s application lease and renewals, the fence cadence, `classifyThrown`) take their storage from their `env` argument, so the isolation is made by that argument and no algorithm is duplicated.
+
+| Rule | Behaviour |
+|---|---|
+| Allowlist | The environment is built from scratch with `DB`, `BUCKET`, `DISCOVERY_LEDGER_MODE`, `epgDiagnostic` and the carriers the code sets on a copy (`epgStep`, `epgFence`, `discoveryLease`, `epgPin`). Reading a production binding or secret name (`EPG_WORKFLOW`, `DISCOVERY_WORKFLOW`, `RATINGS_WORKFLOW`, the TMDB, monitor and migration-export names, `D1_ENRICHMENT_WRITE`, …) throws `diagnostic_binding_denied`; so does setting any other key |
+| Contradictory or malformed context | Refused by `create` before anything exists: `context_malformed` (field named) or `context_contradictory` (the diagnostic `DB` or `BUCKET` is the production object) |
+| Verified identity before any write | Writes (R2 `put` and `delete`, every D1 statement that is not a plain read, `batch` with a write) throw `diagnostic_unverified` until `verify` read the identity of both resources and found them equal to the expected `resourceId`. Reads are not gated. A statement is a read only if it starts with `SELECT` or `WITH` and names no write keyword (fail closed); `exec` and a statement prepared elsewhere are refused |
+| No bindings | `fromWorkerEnv` answers `diagnostic_bindings_absent` (or `_incomplete`) and touches no storage while the Worker has no `EPG_DIAGNOSTIC_DB` and `EPG_DIAGNOSTIC_BUCKET` |
+| Counters | `stats()` counts reads, writes, deletes, refused writes and denied accesses per resource, the base of the report of AIR-455 |
+
+**Residual risk.** This is an application-enforced boundary. The same Worker is also bound to the production resources, so a routing defect in other code could still address them; the module bounds what the diagnostic path is given and makes a misrouting loud, it is not platform privilege isolation. A passing canary is not AIR-444 acceptance. Tests: `tests/epg-diagnostic-context.mjs` (parity of the real seal on the context with a plain environment, lease renewal, expiry, loss, pointer conflict, stale generation, production-like resources byte for byte unchanged, inert wiring, mutation checks).
+
 ## Ratings implementation status (AIR-347)
 
 Implemented and **inert**: `src/domain/orchestration-policy.js` (pure policy), `src/ratings-orchestration.js` (`RATINGS_WORKFLOW`, `RatingsOrchestration.ensure`, owner route `POST /api/letterboxd/ratings/executor`), the D1 epoch fence in `src/ratings-d1.js`, the external-writer gate in `src/letterboxd-ratings.js` and the `orchestration` object of `ratings_sync_status`. See [ADR 0090](../adr/0090-ratings-cloudflare-workflow-executor.md). Nothing runs until the owner switches the mode.

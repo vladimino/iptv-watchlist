@@ -66,6 +66,7 @@ This is the canonical GitHub folder index; `index.md` is a compatibility link. *
 | AIR-347 Ratings Task disabled after Cloudflare cutover | [orchestration/ratings-task-disabled-2026-11-06.md](orchestration/ratings-task-disabled-2026-11-06.md) |
 | AIR-347 Ratings executor offline evidence | [orchestration/ratings-executor-air-347-2026-11-05.md](orchestration/ratings-executor-air-347-2026-11-05.md) |
 | AIR-348 EPG executor offline evidence | [orchestration/epg-executor-air-348-2026-11-07.md](orchestration/epg-executor-air-348-2026-11-07.md) |
+| AIR-453 EPG diagnostic canary foundation, offline mechanics evidence | [orchestration/epg-diagnostic-foundation-air-453-2026-11-12.md](orchestration/epg-diagnostic-foundation-air-453-2026-11-12.md) |
 | AIR-348 migration 0017 production apply | [d1-migration/air-348-0017-apply-2026-11-08.md](d1-migration/air-348-0017-apply-2026-11-08.md) |
 | AIR-348 cron `0 * * * *` coexistence preflight | [orchestration/cron-coexistence-air-348-2026-11-08.md](orchestration/cron-coexistence-air-348-2026-11-08.md) |
 | AIR-348 first natural EPG Cloudflare run, read-only 8 November 2026: the instance stopped after 61 steps with `epoch_mismatch` while the mode document was unchanged | [orchestration/epg-first-natural-run-air-348-2026-11-08.md](orchestration/epg-first-natural-run-air-348-2026-11-08.md) |
