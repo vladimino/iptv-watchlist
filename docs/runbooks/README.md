@@ -13,6 +13,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Recovery procedures](recovery/README.md)
 - [MCP connection and read-only smoke](mcp-connectivity.md)
 - [Prediction Scheduled Tasks and safe diagnostics](prediction-operations.md)
+- [Batch runner v2 dry-run A/B procedure](prediction-batch-v2-dry-run-ab.md) (proposed, owner-gated)
 - [Scheduled Task drift monitor: triage and owner gates](scheduled-task-drift.md)
 - [Taste-profile publication procedure (owner approval required)](taste-profile-publication.md)
 - [Production R2 snapshot export, read-only (owner approval required)](r2-snapshot-export.md)

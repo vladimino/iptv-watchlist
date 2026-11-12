@@ -64,6 +64,7 @@ export const WEIGHTS={
  'd1-enrichment-stored-pages.mjs':26,
  'prediction-batch-start.mjs':25,
  'prediction-batch-submit.mjs':28,
+ 'scheduled-task-prompt-v2.mjs':20,
  'canonical-receipts-mutation.mjs':24,
  'd1-enrichment-bucket-unicode.mjs':24,
  'd1-backfill.mjs':22,
