@@ -58,7 +58,7 @@ const MUTANTS=[
  ["the source-changed class is another one", "canonical-producer-adapters.js", "export const SOURCE_CHANGED='producer_source_changed';", "export const SOURCE_CHANGED='producer_replan_unavailable';"],
  ["a missing re-plan is terminal", "canonical-producer-adapters.js", "if(!found)return {digest:null,revision:snapshot.revision};", "if(!found)return {disposition:'abandon',errorClass:SOURCE_CHANGED};"],
  ["a missing re-plan throws out of the readback", "canonical-producer-adapters.js", "if(!found)return {digest:null,revision:snapshot.revision};", "if(!found)throw failed('producer_replan_unavailable');"],
- ["a throwing re-plan escapes", "canonical-producer-adapters.js", "try{input=await replan(receipt);}catch{input=null;}", "input=await replan(receipt);"],
+ ["a throwing re-plan escapes", "canonical-producer-adapters.js", "try{input=await replan(receipt);}catch(error){if(READ_FAILURES.has(error?.code))throw error;input=null;}", "input=await replan(receipt);"],
  ["a declared disposition is not recognised", "canonical-receipts.js", "observed.disposition==='abandon'&&IDENT.test", "false&&IDENT.test"],
  ["a declared class is not validated", "canonical-receipts.js", "observed.disposition==='abandon'&&IDENT.test(observed.errorClass||'')?", "observed.disposition==='abandon'?"],
  ["the reconcile does not act on a declared disposition", "canonical-receipts.js", "const declared=abandonOf(seen);\n  if(declared){", "const declared=null;\n  if(declared){"],
