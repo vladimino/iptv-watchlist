@@ -33,6 +33,31 @@ Each pass ends with one JSON object shaped as `$defs.result` of the schema: iden
 5. **Quota.** Quota before and after each pass, and tokens where shown, per film and per pass. Unavailable stays unavailable.
 6. **Decision output.** A table of the ten sizes against 2–5 and a recommended `generationSize` with the evidence. The owner decides the value; the Worker's range stays 1–10.
 
+## Sample selection and ground truth
+
+The card asks for 100 films with a user rating the generator never sees, so that MAE and bias can be measured against a real rating. Two facts limit that, and the owner decides at the AIR-450 approval:
+
+- **A pinned dry run selects queued films only.** `pin` returns a film that is not eligible (not queued, current or in backoff) in `notEligible` with reason `not_queued`, and never puts it in the manifest. A film that is already rated and watched is normally not queued. Whether 100 films exist that are both queued and have a hidden rating is unknown without a production read, which AIR-450 does not do without the owner's GO.
+- **Without ground truth the report is agreement to the size-1 baseline only.** The aggregator says so explicitly (`quality.truth.basis: agreement_to_baseline_only`), and a model prediction is never called the truth. A larger decision (a separate, owner-scoped delivery that admits non-queued rated films to a dry-run manifest, or a smaller sample) is the owner's and is not made here.
+
+The truth file, if any, is a private `{filmId: rating}` JSON object kept in the same private storage as the manifest. The generator never receives it: the manifest holds no prediction, rating or personal field (`modelMetadata` is limited to `id`, `letterboxdUri`, `tmdbUri`, `title`, `original`, `year`, `genres`, `synopsis`, `directors`, `actors`, `runtime`, asserted by `tests/prediction-dry-run-isolation.mjs`), and a film with a current prediction is never in it.
+
+## Report
+
+After the ten passes, the owner runs the offline aggregator on the private result records (it reads no production, model or network):
+
+```
+node scripts/prediction-ab-report.mjs --results <private-dir> [--truth <private-truth.json>] --out report.json --markdown report.md
+```
+
+It refuses (fails closed, exit 1) when the passes are not one experiment: another `manifestHash`, `sampleId`, profile or contract identity, another film order, a repeated group size or a call above its group size. Its output is the sanitized `$defs.report` of the schema (a test validates it): validity and status counts per size, per-size cost (MCP calls, body bytes, tool and generation time, model, tokens and quota only where the pass recorded them, otherwise `null` and named in `unknown`), the distribution (mean, median, p90, max) of the absolute differences of `predictedRating` and `probability4Plus` against the size-1 pass, agreement of the 4.0 threshold and of `confidence`, overlap of `matchSignals`, `mainRisk`, execution values and plot mechanics, the spread of each film across sizes and, with a truth file, MAE, bias and 4.0 threshold accuracy per size. The report holds numbers, enums, safe identifiers and hashes only; a guard rejects any payload key or free text. After a privacy review the report and its Markdown form may go to `docs/evidence/prediction/`; the result records and the truth file never do.
+
+**A profile that moved after the freeze.** `liveInput` compares the film inputs, not the profile. When the live profile changes after the freeze, a dry-run submit still answers `would_write`/`same` for those films and names the live profile in its `profile {version, hash}`. A pass whose answer `profile.hash` differs from the manifest's profile hash is stale: discard it and report that the freeze moved (a limitation of the prompt text accepted in AIR-449, not changed here).
+
+## Isolation proof (offline)
+
+`tests/prediction-dry-run-isolation.mjs` runs every dry-run RPC on the real Worker code while any R2 put or delete and any D1 write statement or batch is a fault: default and pinned start (a current film, an unknown id, a 100-film pin, a bad pin), submit of valid, invalid, failure-only and unknown-film items, repeated trials, a wrong or malformed `manifestHash`, a changed contract, a missing `runId`, `epoch` 0, a group of 11, a profile that moved after the freeze, all beside a live run that holds the lease. It counts write attempts (none are allowed) and compares the whole D1 dump and every R2 object before and after. It also asserts the production surface is unchanged: the v5 tools take no dry-run argument, the v5 `next` and `submit` refuse a v2 run, and the runner contract is pipeline 5 with model batching off.
+
 ## Not part of this procedure
 
 Any non-dry-run call, a Scheduled Task, an installed prompt, a production write, flags and the cutover (AIR-451). The [bounded-run signal](../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md#owner-activation-gate-bounded-run-signal) is a separate owner decision before activation.

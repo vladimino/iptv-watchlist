@@ -65,6 +65,8 @@ export const WEIGHTS={
  'prediction-batch-start.mjs':25,
  'prediction-batch-submit.mjs':28,
  'scheduled-task-prompt-v2.mjs':20,
+ 'prediction-dry-run-isolation.mjs':20,
+ 'prediction-ab-report.mjs':6,
  'canonical-receipts-mutation.mjs':24,
  'd1-enrichment-bucket-unicode.mjs':24,
  'd1-backfill.mjs':22,
