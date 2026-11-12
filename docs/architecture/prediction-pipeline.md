@@ -92,7 +92,7 @@ sequenceDiagram
                 MCP->>Queue: Set the submit gate (an overlapping call gets submit_in_flight)
                 MCP->>MCP: Validate each film, compare profile impact
                 loop Each valid film in order
-                    MCP->>Store: Immutable body, then pointer and view index
+                    MCP->>Store: Immutable body, then one D1 batch guarded by lease epoch and gate, then view index
                     MCP->>MCP: Save the film result in the run record
                 end
                 MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
