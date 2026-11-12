@@ -1,11 +1,11 @@
 # ADR 0121: Owner-only EPG diagnostic canary on an isolated Cloudflare Workflow (design for owner decision)
 
-**Status:** Proposed (design only; nothing is implemented, provisioned, deployed or activated by this ADR)  
-**Original decision date:** not decided (preliminary direction of 12 Nov 2026 below, not an acceptance)  
+**Status:** Accepted (architecture only; nothing is implemented, provisioned, deployed or activated by this ADR)  
+**Original decision date:** 2026-11-12 (explicit owner acceptance following independent review of PR #540)  
 **Recorded at:** 2026-11-12  
-**Approval source:** not yet given. The owner's [design feedback on PR #540](https://github.com/vladimino/iptv-watchlist/pull/540#issuecomment-6818501618) selects a preliminary direction and asks for this revision; the owner approves the architecture only after reading it  
+**Approval source:** Explicit Product Owner instruction on 2026-11-12 in the AIR-445 project conversation to mark ADR 0121 Accepted and merge PR #540, after independent [review of PR #540 HEAD `200866e`](https://github.com/vladimino/iptv-watchlist/pull/540#pullrequestreview-5871329798). Earlier [design feedback](https://github.com/vladimino/iptv-watchlist/pull/540#issuecomment-6818501618) provides the selected options. Architecture approval only; no provisioning, migration or diagnostic run authorized  
 **Related work:** [AIR-445](https://trello.com/c/ssRI21B6), [AIR-444](https://trello.com/c/lSSrrJdE), [PR #538](https://github.com/vladimino/iptv-watchlist/pull/538), [ADR 0100](0100-epg-cloudflare-workflow-executor.md), [ADR 0108](0108-epg-mirror-reconciliation-writer.md)  
-**Supersedes:** None (replaces the earlier A1 then A2 recommendation of this same Proposed ADR)  
+**Supersedes:** None  
 **Superseded by:** None
 
 ## Context
@@ -20,9 +20,9 @@ What the code does (read on `main` at `dfd1a51`):
 4. The production run needs `sync.json` in stage `epg` for the same `runId`.
 5. Persisted input exists read-only: each published generation keeps `epg/generations/<programmeRunId>/discovery-latest.json` (the scan result of that publication, streamable) and the ledger archive pointer, manifest and segments. Whether this is a faithful substitute for the live scan (it is the merged result, not the raw feed) is **not yet verified** and is the first read-only step of implementation, see decision 4.
 
-## Decision (proposed)
+## Decision
 
-The preliminary direction chosen by the owner, set down as a design to be reviewed:
+The following architecture was explicitly accepted by the owner on 2026-11-12:
 
 1. **Option B: a real, on-demand, isolated Cloudflare Workflow canary.** It runs in the **existing `iptv` Worker service** with its own Workflow binding (for example `EPG_DIAGNOSTIC_WORKFLOW`, own class and instance namespace). No second Worker service and no Worker request with in-memory write overlays.
 2. **Isolation is an application-enforced routing and capability boundary, not platform privilege isolation.** The canary has its own R2 bucket, D1 database, lease and authority documents, receipt state, run ids and Workflow binding. Diagnostic mutations never touch the production EPG publication, Discovery authority and ledger, compatibility mirrors, events, ratings, predictions, `sync.json` or any operational lease. The diagnostic pointer and manifest CAS operate only inside the diagnostic bucket. Because the same Worker is bound to both sets of resources, the production bindings remain reachable by the Worker's code. **Residual risk, stated plainly:** a routing defect in this code could address a production binding. The mitigations are structural and tested, not absolute (decision 6).
@@ -43,7 +43,7 @@ The preliminary direction chosen by the owner, set down as a design to be review
 |---|---|---|---|---|
 | A1 Offline replay (Node, `MemoryBucket`) | yes, with test doubles | no, simulated | none | Kept as the offline test layer of B, not as the deliverable |
 | A2 In-Worker replay with a write-diverting overlay on production bindings | yes, behind an overlay | production reads, simulated writes | none by design; a defect is a production write | Not selected: simulated writes contradict the goal and the overlay is a new boundary on production bindings |
-| **B Isolated canary Workflow in the existing Worker (selected direction)** | yes, real writes into the diagnostic domain | diagnostic-resource timing, not production's | none by design; shared Worker keeps production capabilities | Proposed |
+| **B Isolated canary Workflow in the existing Worker (accepted)** | yes, real writes into the diagnostic domain | diagnostic-resource timing, not production's | none by design; shared Worker keeps production capabilities | Accepted architecture |
 | B' Isolated canary in a separate Worker service | yes | diagnostic | none; production bindings not given to that Worker (platform-level separation) | Stronger isolation, not selected: the owner chose the existing Worker; a second service remains the fallback if the residual risk is not accepted |
 | C Second production commit | n/a | yes | yes | Rejected: the daily `runKey` allows one successful publication and is never bypassed |
 
@@ -57,7 +57,7 @@ This ADR adds documentation only. Implementation, when separately approved, ship
 
 ## Evidence
 
-- **Original decision:** not recorded; direction in the owner's PR #540 comment of 12 Nov 2026.
+- **Original decision:** explicit owner architecture acceptance on 2026-11-12, following independent review on PR #540; prior design direction recorded in the owner's PR comment.
 - **Implementation:** none.
 - **Dated verification:** not recorded; the 348 s observation is in the AIR-444 report linked above.
 - **Uncertainty:** the 348 s versus modeled 195 s step; the fidelity of the persisted generation scan as a replay input; the real behaviour of shared account-level limits; the residual routing risk of one Worker holding both binding sets.
@@ -68,4 +68,4 @@ This ADR adds documentation only. Implementation, when separately approved, ship
 
 ## Follow-ups
 
-An implementation card after the owner's final decision, and separate operation GO cards for provisioning and the first invocation; created by the Planner.
+An implementation card after this architecture acceptance, and separate operation GO cards for provisioning and the first invocation; created by the Planner.
