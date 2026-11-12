@@ -258,7 +258,8 @@ try{
  assert.equal(new Set(names).size,names.length,'mutant names are unique');
  for(const name of Object.keys(HINTS))assert.ok(names.includes(name),'a hint names no mutant: '+name);
  // the unmutated copy of each module, whole file but for one section: every lean run that is used
- for(const section of new Set(Object.values(HINTS)))for(const control of controls.values())if(control.test.endsWith('film-person-cutover-accepted.mjs'))queue.unshift({name:'lean control '+control.variable+' '+section,...control,control:true,only:section});
+ const leans=new Set(queue.filter(item=>item.section).map(item=>item.variable+' '+item.section));
+ for(const lean of leans){const [variable,section]=lean.split(' ');queue.unshift({name:'lean control '+lean,...controls.get(variable),control:true,only:section});}
  const survivors=[],broken=[];
  let killed=0,fullRuns=0;
  const workers=Array.from({length:Math.max(2,Math.min(8,os.availableParallelism()))},async()=>{
