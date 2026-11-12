@@ -51,7 +51,7 @@ Preflight item 5 is now checkable by code. `handoffReadiness` (read-only, unbund
 
 ## Cross-links
 
-What the owner signs at each holdpoint, and which blockers precede it: [the holdpoint decision pack](film-person-holdpoint-decision-pack.md). The exact procedure for applying migration 0019: [the 0019 apply procedure](film-person-0019-apply.md).
+What the owner signs at each holdpoint, and which blockers precede it: [the holdpoint decision pack](film-person-holdpoint-decision-pack.md). The exact procedure for applying migration 0019: [the 0019 apply procedure](film-person-0019-apply.md). Both pages describe prepared future GOs (H0, H1) and blocked holdpoints (H2 to H4); the 12 Nov 2026 owner decisions are in [the decision pack](film-person-holdpoint-decision-pack.md#owner-decisions-of-12-november-2026).
 
 ## Not covered
 

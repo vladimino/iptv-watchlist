@@ -27,8 +27,8 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Bounded discovery ledger: modes, verification and rollback (owner approval required)](discovery-ledger.md); also [one stuck observation](discovery-ledger.md#one-stuck-observation): the owner page read and the guarded reconsideration
 - [Letterboxd export reconciliation, offline (complete matching needs an approved R2 snapshot), and identity from film pages (network run needs owner approval)](letterboxd-export-reconciliation.md)
 - [Film/Person `open` handoff, `held` and forward fix: design only, authorizes nothing](film-person-open-handoff.md) (AIR-374, not executed)
-- [Film/Person migration 0019: owner GO and apply procedure](film-person-0019-apply.md) (AIR-374 H0, design, not executed)
-- [Film/Person activation: owner decision pack for the production holdpoints](film-person-holdpoint-decision-pack.md) (AIR-374 H0 to H4, design, not executed)
+- [Film/Person migration 0019: owner GO and apply procedure](film-person-0019-apply.md) (AIR-374 H0, prepared future GO, not executed)
+- [Film/Person activation: owner decision pack for the production holdpoints](film-person-holdpoint-decision-pack.md) (AIR-374 H0 to H4: H0/H1 prepared future GOs, H2 to H4 blocked; design, not executed)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 
 Historical, non-authoritative Sites and R2 migration steps are in [archive](../archive/README.md). Contracts, ADRs and dated experiments have separate roles in the [documentation index](../README.md).

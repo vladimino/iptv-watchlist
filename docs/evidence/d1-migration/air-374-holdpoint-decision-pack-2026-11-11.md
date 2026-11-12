@@ -2,13 +2,15 @@
 
 **Captured:** 2026-11-11, code and document reading on `origin/main` `dfd1a51` (the P1 to P7 offline PRs merged). **Method:** reading only; no production read, no connector, Cloudflare, R2, D1, Trello or GitHub write other than this documentation PR. Two local read-only `node` evaluations of data constants (the exception lists and the producer wiring registry) and the repository's own test commands. This file holds counts and digests only.
 
+**Follow-up of 12 Nov 2026 (documentation only):** the Controller review recorded the owner decisions: H0 and H1 are PREPARED future GOs, not executed; E1 accepted (`metadata.json` is the live D1-authoritative metadata-cache mirror and an exception under ADR 0073; `titles.json` and `people.json` stay frozen); E2 to E6 as listed in the [decision pack](../../runbooks/film-person-holdpoint-decision-pack.md#owner-decisions-of-12-november-2026); H2 to H4 stay BLOCKED; the 10 draft differential exceptions are decided individually. No production action was taken for this follow-up. Trigger wording is uniform: 20 `CREATE TRIGGER` statements, 19 NEW trigger names (the shared `schema_contract_no_downgrade` is `IF NOT EXISTS`).
+
 **Result:** the two runbooks ([0019 apply](../../runbooks/film-person-0019-apply.md), [holdpoint decision pack](../../runbooks/film-person-holdpoint-decision-pack.md)) were written against the merged code. They authorize nothing and nothing in them was executed.
 
 ## What was verified, against which files
 
 | Claim | Source read | Result |
 | --- | --- | --- |
-| 0019 is 28 statements: 1 refuse-insert, 4 tables, 2 indexes, 20 triggers (19 new plus the shared `IF NOT EXISTS`), 1 update | `migrations/0019_canonical_write_receipt.sql`; counts of `CREATE TABLE` 4 and `CREATE TRIGGER` 20 | confirmed; file blob `275cbcf`, sha256 `75acd55e`, 15,398 bytes |
+| 0019 is 28 statements: 1 refuse-insert, 4 tables, 2 indexes, 20 `CREATE TRIGGER` statements (19 new names plus the shared `schema_contract_no_downgrade`, `IF NOT EXISTS`), 1 update | `migrations/0019_canonical_write_receipt.sql`; counts of `CREATE TABLE` 4 and `CREATE TRIGGER` 20 | confirmed; file blob `275cbcf`, sha256 `75acd55e`, 15,398 bytes |
 | The refuse-insert aborts on anything but a complete v18 (primary key `id=1`) | the same file; `migrations/0001_schema_v1.sql` `schema_contract` | confirmed |
 | No trigger of 0019 is attached to an existing table; new tables are write-refused unless the marker is `d1`/`open` | the same file | confirmed |
 | `film_person_authority_needs_baseline` checks the baseline only when leaving `r2`; `prepared` to `d1` is not baseline-checked in SQL | `migrations/0013_film_person_authority.sql` | confirmed |
@@ -28,10 +30,10 @@
 
 - Production state of any kind after the 11 Nov 2026 baseline record (schema 18, marker, lease, window, flag values, counts of 0 rows in the new tables): every value is carried from earlier dated evidence and must be re-read live.
 - That D1 runs a multi-statement `query` body atomically on the connector, and how a mid-file failure leaves the schema.
-- That the connector accepts the 20 trigger bodies of 0019 as it accepted the six of 0013.
+- That the connector accepts the 20 `CREATE TRIGGER` bodies of 0019 as it accepted the six of 0013.
 - The `wrangler` route for any step and the Time Travel read through a connector.
 - The deployed Worker version and whether the ADR 0116 fence is the deployed code.
 - Whether an operator can request the exclusive projector window; the exact times of the Predictions, Discovery and EPG runs.
-- Whether a PR is planned for the eleven `reader_not_moved` readers, and the form of the activation, drill and receipt-baseline tooling.
+- Whether the planned P4c scopes (P4c-1 to P4c-4) become PRs and what they deliver (a task plan, not opened PRs), and the form of the activation, drill and receipt-baseline tooling.
 - Effort estimates in the summary table (author's estimates, not measurements).
 - That the full test suite stays green after the SCHEMA_EXPECTED bump; that belongs to the PR which makes it.
