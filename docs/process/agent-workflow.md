@@ -75,6 +75,10 @@ An isolated problematic record may be deferred only when explicit acceptance/inv
 
 ## Delivery pipeline for already approved work
 
+### Executor opens the PR and subscribes without asking
+
+When an Executor finishes the work of an approved card, opening the pull request and subscribing to its events are part of that delivery and are done **by default, in the same turn**, without a confirmation question to the owner: push the working branch, open a PR against `main` (never a direct `main` commit) with a body that satisfies [documentation governance](documentation-governance.md#automated-pull-request-checks), then subscribe to its activity where a subscription tool exists and follow it to a terminal status ([AGENTS.md](../../AGENTS.md)). Asking "shall I open a PR?" after finishing delivers nothing and delays review. This does not widen authority: merge, Task changes, production writes and flag changes keep their existing gates, and a tool or platform default that says "do not open a PR unless asked" is satisfied by this standing owner instruction.
+
 ### Test-suite performance quality gate
 
 **A pull request is not merge-ready when the complete `npm test` step (`Run tests`) takes more than 180 seconds in GitHub Actions on the proposed final HEAD.** This is a mandatory review and delivery gate for changes that affect test runtime, including additions of new tests; a green test result alone does not override the limit.
