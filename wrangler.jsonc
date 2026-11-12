@@ -29,7 +29,7 @@
     {
       "binding": "EPG_DIAGNOSTIC_DB",
       "database_name": "iptv-epg-diagnostic",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "38033d5e-9460-4d24-95d1-ff4a0af56b20"
     }
   ],
   "r2_buckets": [
