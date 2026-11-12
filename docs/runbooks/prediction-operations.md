@@ -104,9 +104,9 @@ A missing line for a step means the Worker that served it predates the instrumen
 
 ## Batch runner v2 operation (Proposed)
 
-The start step exists in the Worker; there is no submit step yet, so nothing below can finish a v2 run. A v2 run that is started stops by lease expiry like any run, and its films stay queued.
+Both steps exist in the Worker and nothing calls them. A v2 run that stops without a `complete` ends by lease expiry like any run, and its unwritten films stay queued.
 
-**Accepted design; nothing here is live or authorized.** It applies only after [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) is implemented, the code is deployed and the owner has approved the operation. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract); Task: [Batch runner Task](../reference/scheduled-tasks.md#batch-runner-task-proposed).
+**Nothing here is live or authorized.** It applies only after the code is deployed and the owner has approved the operation ([ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md)). Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract); Task: [Batch runner Task](../reference/scheduled-tasks.md#batch-runner-task-proposed).
 
 - **Which Task is active.** Read the live Task registry: exactly one hourly Predictions Task is enabled. Two enabled Tasks show as `already_running` stops of the later one, not as an error of the Worker.
 - **Reading a v2 run.** Status, run diagnostics and the Events footer show it as a run with `protocol: batch_v2`. Read the `prediction_step_timing` lines with `step` of `batch_start` and `batch_submit` as described [above](#reading-the-step-timing-line-air-438): `manifestBytes`, `manifestFilms`, `items`, `deferredBudget`, `staleProfile`.
@@ -117,6 +117,7 @@ The start step exists in the Worker; there is no submit step yet, so nothing bel
 - **`submit_in_flight` that does not clear.** If the gate does not clear within the caller's bounded retries, stop heartbeating and leave the run for lease expiry; do not reset the lease. A superseded handler commits nothing (`gate_lost`).
 - **A stuck v2 run.** Wait for lease expiry (15 minutes). Do not reset the lease. Its unsubmitted films are still in the queue.
 - **Idle starts.** A `batch_start` that answers `noop`, or `blocked` with reason `quota` or `retry_backoff`, took no lease and created no run, stop Event or `latest-run`; only the start-attempt row and the queue's `lastBatch` record it. `already_running` is the holder's run: the attempt wrote nothing to the queue, run or lease.
+- **Submit results.** `needs_regeneration` is not a failure: the taste profile moved under the run and the change reaches that film; the answer carries the new profile and the film ids to regenerate, and `action: complete` (a global change) means call `prediction_complete` with reason `profile_changed`. `validation_failure` is the existing retryable item failure (sanitized stage and issue codes, backoff, never resubmitted in the run). `deferred_budget` films are submitted again as they were. `epoch_mismatch` is the caller's error and stops nothing. A group over 56 KiB is refused by the MCP tool with nothing submitted: split it.
 - **`wrong_protocol`.** A client called the other protocol's tool on this run: stop it, do not retry with the other tool.
 - **Rollback.** Disable the v2 Task and re-enable the v5 Task (owner action). No data repair is needed.
 - **Dry run.** Writes nothing to prediction state, but it spends model quota and reads production: run it only with the owner's approval and record the result in [evidence](../evidence/prediction/README.md).
