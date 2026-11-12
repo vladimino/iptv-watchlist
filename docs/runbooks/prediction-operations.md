@@ -104,11 +104,14 @@ A missing line for a step means the Worker that served it predates the instrumen
 
 ## Batch runner v2 operation (Proposed)
 
+The start step exists in the Worker; there is no submit step yet, so nothing below can finish a v2 run. A v2 run that is started stops by lease expiry like any run, and its films stay queued.
+
 **Accepted design; nothing here is live or authorized.** It applies only after [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) is implemented, the code is deployed and the owner has approved the operation. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract); Task: [Batch runner Task](../reference/scheduled-tasks.md#batch-runner-task-proposed).
 
 - **Which Task is active.** Read the live Task registry: exactly one hourly Predictions Task is enabled. Two enabled Tasks show as `already_running` stops of the later one, not as an error of the Worker.
 - **Reading a v2 run.** Status, run diagnostics and the Events footer show it as a run with `protocol: batch_v2`. Read the `prediction_step_timing` lines with `step` of `batch_start` and `batch_submit` as described [above](#reading-the-step-timing-line-air-438): `manifestBytes`, `manifestFilms`, `items`, `deferredBudget`, `staleProfile`.
 - **`manifest_too_large`.** The preflight refusal wrote nothing; a refusal that follows a queue refresh invoked by the start, or found at revalidation (lease acquire and release only), is not write-free. No run record or Event was created. It repeats while the same films lead the queue. Do not shorten anything by hand: record the reported `bytes`, `limit` and `largestFilmBytes` and take the decision to the owner.
+- **Start refusals that write nothing about a run.** `batch_runner_requires_d1` (the prediction authority marker is not `d1`), `queue_stale` (a dry run found the stored queue stale and never rebuilds it), `queue_changed` (the selection moved between the read-only preflight and the lease; the lease is released and no run exists). Repeat the start; do not reset the lease.
 - **A lost response or `502` on a submit.** Replay the same body with the same `runId` and `epoch`: committed films come back `replayed`. A heartbeat in between does not change the `epoch`.
 - **`submit_in_flight`.** An earlier call of the same run still holds the submit gate (a replay that overlapped it, or an overlapping batch). Wait `retryAfterMs` and replay the same body; do not send a different batch meanwhile. The gate expires by itself if the handler died.
 - **`submit_in_flight` that does not clear.** If the gate does not clear within the caller's bounded retries, stop heartbeating and leave the run for lease expiry; do not reset the lease. A superseded handler commits nothing (`gate_lost`).

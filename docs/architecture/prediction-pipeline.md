@@ -63,7 +63,7 @@ The "Read schema" step and the "Isolated invalid output" branch share [one valid
 
 ## Batch runner v2 (Proposed)
 
-**Accepted design, not implemented.** [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Accepted) defines a second protocol beside the one above. It shares the queue, the runner lease, the retry records and the D1/R2 persistence; the diagram above is unchanged and stays the live protocol. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract).
+**Accepted design; the start step is implemented and the submit step is not.** [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) (Accepted) defines a second protocol beside the one above. It shares the queue, the runner lease, the retry records and the D1/R2 persistence; the diagram above is unchanged and stays the live protocol. Contract: [batch runner v2](../reference/api/prediction-runner.md#batch-runner-v2-proposed-contract).
 
 ```mermaid
 sequenceDiagram
