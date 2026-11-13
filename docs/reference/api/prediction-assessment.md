@@ -1,6 +1,6 @@
-# Prediction assessment contract (Proposed draft)
+# Prediction assessment contract (Accepted architecture; not yet implemented)
 
-**Status: a proposed contract for review, not accepted and not implemented.** It specifies the design of [ADR 0132](../../adr/0132-prediction-assessment-artifact.md) (Proposed). Nothing here is live: no tool, schema, object or field named below exists yet, no run, dry run, Scheduled Task or deployment is authorized, and every number is a draft the owner may change. Revised after the independent design review of 13 Nov 2026 ([comment](https://github.com/vladimino/iptv-watchlist/pull/585#issuecomment-6849607697)): source access quality, attempted-but-unproductive research, conflicting evidence and a v2-only validation boundary were added. Facts about today's behaviour are in the [evidence page](../../evidence/prediction/air-450-assessment-current-state-2026-11-13.md).
+**Status: architectural contract accepted 2026-11-13, not implemented or live.** The Product Owner approved [ADR 0132](../../adr/0132-prediction-assessment-artifact.md) after independent review, with approval recorded on [AIR-450](https://trello.com/c/VPd21Y9d). No tool, schema, object or field specified here is available in production yet; the decision does not authorize implementation, deployment, an A/B run, a Scheduled Task operation or storage writes. Current submit behavior is documented in the [offline evidence](../../evidence/prediction/air-450-assessment-current-state-2026-11-13.md).
 
 ## What it is
 
@@ -33,7 +33,7 @@ An optional `assessment` object on an item of `prediction_batch_submit` (a sibli
 | `conflicts` | 0 to 2 of `{topic, positions, handling}`, see below | material disagreement between used sources, kept visible |
 | `model` | `{status: reported, id: text 1 to 80, version?: text 1 to 40, effort?: text 1 to 20}` or `{status: unavailable}` | the model identity as the caller can state it; required, so an unknown identity is explicit |
 
-The whole object is also bounded by a **serialized cap** (draft: 3,000 bytes of UTF-8 JSON, issue `too_large`; raised from 2,400 for the research, access and conflict fields); the field bounds are maxima, not a promise that every maximum fits together. No other key is accepted. Issues use the existing closed vocabulary (`required`, `invalid_type`, `invalid_enum`, `too_few`, `too_many`, `empty`, `too_long`, `invalid_ref`, `too_large`) with `assessment.*` paths, at most 20 per item, and never echo a value. The Worker validates shape and consistency only: it fetches nothing and verifies neither that a source exists, nor that it was read, nor how completely.
+The whole object has an approved **serialized cap of 3,000 bytes of UTF-8 JSON** (issue `too_large`); individual field bounds do not guarantee that the combined object fits. Unknown keys are rejected with `unknown_field`. The approved validation issue vocabulary consists of `required`, `invalid_type`, `invalid_enum`, `too_few`, `too_many`, `empty`, `too_long`, `invalid_ref`, `too_large` and the new `unknown_field` for undeclared fields; issues use `assessment.*` paths, at most 20 per item, and never echo a value. The Worker validates shape and consistency only: it fetches nothing and verifies neither that a source exists, nor that it was read, nor how completely.
 
 ### Research status, source access quality and conflicting evidence
 
@@ -75,11 +75,11 @@ enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json      (
 
 ## Exposure and privacy
 
-An assessment can echo the Taste Profile and is private user context. It is not written to, or derived into, the view index, the D1 display document, the bundle, Events, the public film shape or any log; `prediction_film_diagnostics` and other MCP reads show only presence, size and `assessmentSha256`. Analysis reads R2 through the existing read-only snapshot export, whose inventory gains the new prefix; no new read endpoint is proposed. Retention and deletion are open (below).
+An assessment can echo the Taste Profile and is private user context. It is not written to, or derived into, the view index, the D1 display document, the bundle, Events, the public film shape or any log; `prediction_film_diagnostics` and other MCP reads show only presence, size and `assessmentSha256`. Analysis reads R2 through the existing controlled read-only snapshot export, whose inventory gains the new prefix; no new read endpoint is approved. Assessments are retained together with the linked immutable prediction history: no separate automatic cleanup timer is introduced. Any future history deletion must account for linked assessment objects, under a separately approved deletion procedure.
 
 ## Size and the group limit
 
-A group request is bounded at 56 KiB (57,344 bytes; the MCP inbound limit is 64 KiB). Measured headroom for ten items: about 1.67 KB per film beside rich fingerprints (40,653 bytes measured), about 5.3 KB per film for `prediction_only` items. With the draft cap of 3,000 bytes a group of ten rich films (about 40.7 KB plus up to 30 KB) usually exceeds the bound and is split into two submit calls by the existing guidance; a `prediction_only` group fits. This separates the generation size from the submit size; it changes the number of MCP calls and is to be measured, not assumed. A cap near 1.5 KB would keep rich groups of ten whole at the price of a thinner assessment and little room for source access and conflict records.
+A group request is bounded at 56 KiB (57,344 bytes; the MCP inbound limit is 64 KiB). Measured headroom for ten items: about 1.67 KB per film beside rich fingerprints (40,653 bytes measured), about 5.3 KB per film for `prediction_only` items. With the approved cap of 3,000 bytes a group of ten rich films (about 40.7 KB plus up to 30 KB) usually exceeds the bound and is split into two submit calls by the existing guidance; a `prediction_only` group fits. This separates the generation size from the submit size; it changes the number of MCP calls and is to be measured, not assumed. A cap near 1.5 KB would keep rich groups of ten whole at the price of a thinner assessment and little room for source access and conflict records.
 
 ## Compatibility
 
@@ -87,9 +87,9 @@ Optional at first. A version without an assessment object is "no assessment", ne
 
 ## Prerequisite: close the unknown-key hole
 
-Today the prediction validator ignores keys outside the six model fields and both submit paths copy the whole object into the version body, the D1 display document, the bundle and the view index. Before any assessment is stored, the validator should reject undeclared keys in `prediction` (the derived `confidenceAssessment` stays stripped), in both protocols. Open: the issue code and path for a rejected key (the closed vocabulary has no "unknown field" code; reusing `invalid_type` at `prediction` or adding a code changes the contract), and whether the live v5 Task, which sends only the six fields, needs a transition.
+Today the prediction validator ignores keys outside the six model fields and both submit paths copy the whole object into the version body, the D1 display document, the bundle and the view index. Before any assessment is stored, validators must reject undeclared keys in `prediction` (the derived `confidenceAssessment` stays stripped) in both protocols, with `unknown_field` at the rejected field path. The v5 HTTP route must also reject undeclared top-level item keys with `unknown_field` instead of silently dropping them; v5 MCP already rejects undeclared keys. Valid legacy payloads containing only the six declared model fields remain compatible. A live v5 Task prompt change is neither required by this decision nor authorized here; test the actual caller shape before shipping the stricter validator.
 
-## Proposed phases (each needs its own approval after the decision)
+## Implementation phases (each requires separately approved scope)
 
 1. Close the unknown-key persistence (validator, tests, v5 and v2), including undeclared item keys on the v5 HTTP route.
 2. The assessment schema, `contract.assessment`, validator and preflight (no storage).
@@ -101,12 +101,6 @@ Today the prediction validator ignores keys outside the six model fields and bot
 
 Closed-key and bound validation per field with every issue code; the serialized cap; `sources` rules (metadata token present, URL rule, duplicates); `access` required for `web_research` and forbidden otherwise; the `research.status` consistency rules and that a blocked page can only be an attempt; conflict positions (distinct valid indices, bounds); the absence of `assessment` from `prediction_validate` and its refusal on the v5 paths; parity between `prediction_validate`, `prediction_batch_validate`, the dry run and the real submit; zero writes of the dry run with an assessment; the write order with a fault before and after each write; replay completes a missing object; a different assessment is `conflict`; digests of items without an assessment unchanged; no assessment content in the view index, D1 display, bundle, Events or public shape; the unknown-key closure on both protocols; legacy versions without an object; the group split at the 56 KiB bound.
 
-## Open questions for the owner
+## Deferred decisions and delivery gates
 
-1. Storage: B as proposed, or A, C or D ([alternatives](../../adr/0132-prediction-assessment-artifact.md#alternatives-considered)).
-2. The schema fields and caps, and the serialized cap (1.5 KB, 3 KB, other), including the research status, `access` and conflict representation.
-3. Optional first, and when or whether to require it; whether to backfill legacy versions.
-4. The unknown-key closure: issue code, and v5 treatment.
-5. The model identity: what counts as `reported`, and whether a platform-supplied identity may later be marked confirmed.
-6. Retention and deletion of assessment objects, and who may read them.
-7. Whether a D1 index is wanted later.
+The following are **not** authorized by ADR acceptance: making assessments mandatory; backfilling legacy versions; creating an analytic D1 index; treating caller-reported model identity as platform-confirmed; adding a purge timer or exercising any deletion; editing or running Scheduled Tasks or production prediction writers. Future changes need separate decisions and suitable tests. The approved initial contract is variant B, `optional` v2 only, private R2 sidecar with controlled export, 3,000-byte cap, source access and conflict evidence, and explicit `unknown_field` rejection. Before implementation is delivered, independently verify the v5 HTTP compatibility boundary, correct index exclusion, digest/replay behavior, group-splitting behavior and zero-write dry-run isolation.
