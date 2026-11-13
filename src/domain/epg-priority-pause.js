@@ -37,14 +37,15 @@ export function preferredBusy(reasons) {
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 // The day that may be written on the pointer. `syncRunKey` is frozen on `sync.json` at `beginSync`
-// and is never rewritten. `workflowRunKey` is the adopting Workflow's admitted day. It is not a source:
-// after midnight that Workflow can resume yesterday's `stage==='seal'` (ADR 0092) under today's key.
-// A missing sync key fails closed. A different Workflow key fails closed and does not stamp today.
+// and is never rewritten. `workflowRunKey` is the adopting Workflow's admitted day. After midnight
+// that Workflow can resume yesterday's `stage==='seal'` (ADR 0092). The stamp stays the frozen day,
+// so the publish is not refused. `certifyWorkflow` is true only when that day is the Workflow's own
+// day: the adopting control must not be marked done for the old seal. A missing sync key fails closed.
 export function publicationDay({syncRunKey, workflowRunKey} = {}) {
   const frozen = DAY.test(syncRunKey || '') ? syncRunKey : null;
-  if (!frozen) return {ok: false, reason: 'evidence_unreadable', dayKey: null};
-  if (workflowRunKey != null && workflowRunKey !== frozen) return {ok: false, reason: 'run_key_mismatch', dayKey: null};
-  return {ok: true, reason: 'frozen', dayKey: frozen};
+  if (!frozen) return {ok: false, reason: 'evidence_unreadable', dayKey: null, certifyWorkflow: false};
+  const same = workflowRunKey == null || workflowRunKey === frozen;
+  return {ok: true, reason: same ? 'frozen' : 'adopted_seal', dayKey: frozen, certifyWorkflow: workflowRunKey === frozen};
 }
 
 export function pauseOpensAt(dayKey) {

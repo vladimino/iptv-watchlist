@@ -125,7 +125,7 @@ assert.equal(owedDayKey(base({nowMs: at('2026-10-26', 10, 0), ...published('2026
 // After midnight the next Workflow may resume yesterday's seal. Its payload key must not label that programme as today.
 {
   const adopted = publicationDay({syncRunKey: '2026-11-13', workflowRunKey: '2026-11-14'});
-  assert.deepEqual(adopted, {ok: false, reason: 'run_key_mismatch', dayKey: null});
+  assert.deepEqual(adopted, {ok: true, reason: 'adopted_seal', dayKey: '2026-11-13', certifyWorkflow: false});
   const nowMs = at('2026-11-14', 17, 10);
   const facts = base({nowMs, publishedDayKey: adopted.dayKey, publishedProgrammeRunId: 'yesterday-seal', handoffProgrammeRunId: 'yesterday-seal', row: row('paused', '2026-11-14'), requestedProgrammeRunId: 'yesterday-seal'});
   assert.equal(discoveryAdmission(facts).reason, 'epg_priority');
@@ -134,7 +134,7 @@ assert.equal(owedDayKey(base({nowMs: at('2026-10-26', 10, 0), ...published('2026
   assert.equal(missing.reason, 'evidence_unreadable');
   assert.equal(missing.dayKey, null);
   const same = publicationDay({syncRunKey: '2026-11-13', workflowRunKey: '2026-11-13'});
-  assert.deepEqual(same, {ok: true, reason: 'frozen', dayKey: '2026-11-13'});
+  assert.deepEqual(same, {ok: true, reason: 'frozen', dayKey: '2026-11-13', certifyWorkflow: true});
 }
 
 // Pointer and pin can name one run and still be the wrong Madrid day, or no day at all.

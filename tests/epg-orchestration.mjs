@@ -831,4 +831,27 @@ for(const stage of ['epg','seal']){
  assert.equal(model.health,'healthy');assert.equal(model.seal,null);
  assert.ok(model.publication.publishedAt&&model.publication.latencyMs>=0&&model.publication.overdueMs===null,'a published day reports its latency');
 }
+// AIR-458 / ADR 0135. Today's Workflow may finish yesterday's durable seal. That publication
+// stays on yesterday's frozen sync runKey and does not mark today's control done.
+{
+ const now=Date.parse('2026-11-14T16:30:00Z');
+ const h=cloudflare({
+  sync:{runId:'yesterday-seal',stage:'seal',remaining:0,runKey:'2026-11-13',startedAt:'2026-11-13T18:00:00.000Z',updatedAt:'2026-11-13T22:00:00.000Z',seal:{phase:'publish'},cursor:0},
+  pipeline:(pathname,body,state)=>{
+   if(pathname==='/api/sync/epg'){state.sync={...state.sync,stage:'complete',updatedAt:'2026-11-14T16:30:00.000Z'};return {body:{stage:'complete',runId:'yesterday-seal'}};}
+   return {body:{runId:'today-run',stage:'metadata'}};
+  },
+ });
+ await h.epg.ensure(h.env,{now:Date.parse('2026-11-14T16:00:00Z')});
+ const result=await h.epg.act(h.env,{runKey:'2026-11-14',series:0,epoch:1,id:'epg_20261114_0',now:()=>now,clock:()=>now,random:()=>0.5});
+ assert.equal(result.kind,'continue');
+ assert.equal(result.reason,'adopted_seal');
+ const stored=await control(h);
+ assert.equal(stored.doneAt,null);
+ assert.equal(stored.publishedRunId,null);
+ assert.equal(stored.runKey,'2026-11-14');
+ assert.equal(stored.phase,'running');
+ assert.equal(h.state.sync.stage,'complete');
+ assert.equal(h.state.sync.runKey,'2026-11-13');
+}
 console.log('epg-orchestration: ok');

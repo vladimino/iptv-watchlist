@@ -375,8 +375,20 @@ const EpgOrchestration=(()=>{
    const progressed=outcome.finished===true||(outcome.started!==true&&advanced(outcome.run,control.checkpoint));
    if(progressed){next.budget=policy().applyProgress(control.budget);next.lastDurableProgressAt=iso(now);next.cooldownUntil=null;next.failure=null;}
    next.checkpoint={key,phase:outcome.run?.stage??null,runId:outcome.run?.runId??null,count:progressCount(outcome.run)};
-   if(outcome.finished){next.doneAt=iso(now);next.phase='done';next.publishedRunId=outcome.published??null;}else next.phase=outcome.wake?'waiting':'running';
-   result=outcome.finished?{kind:'stop',reason:'complete'}:outcome.wake?{kind:'sleep',until:outcome.wake,reason:outcome.note||'wait'}:{kind:'continue',reason:null};
+   // AIR-458 / ADR 0135. A seal started on an earlier Madrid day may finish under that frozen
+   // sync.json runKey (ADR 0092). Completing it does not mark this Workflow's control done, and
+   // does not publish this control's runKey onto that programme. The next action starts this day's run.
+   const frozenDay=run=>{
+    const key=typeof run?.runKey==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(run.runKey)?run.runKey:null;
+    const started=run&&Number.isFinite(Date.parse(run.startedAt||''))?dayOf(Date.parse(run.startedAt)):null;
+    if(key&&started&&key!==started)return null;
+    return key||started;
+   };
+   const sameDay=outcome.finished&&frozenDay(outcome.run)===control.runKey;
+   if(sameDay){next.doneAt=iso(now);next.phase='done';next.publishedRunId=outcome.published??null;}
+   else if(outcome.finished){next.phase='running';next.publishedRunId=null;}
+   else next.phase=outcome.wake?'waiting':'running';
+   result=sameDay?{kind:'stop',reason:'complete'}:outcome.finished?{kind:'continue',reason:'adopted_seal'}:outcome.wake?{kind:'sleep',until:outcome.wake,reason:outcome.note||'wait'}:{kind:'continue',reason:null};
   }
   let committed;
   try{committed=await writeControl(env,adm,next);}
