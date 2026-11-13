@@ -120,6 +120,7 @@ export const WEIGHTS={
  'canonical-producer-store-mutation.mjs':3,
  'epg-producer-dry-run-mutation.mjs':3,
  'epg-producer-m2b-mutation.mjs':9,
+ 'epg-producer-m2b-reader-mutation.mjs':19,
  'canonical-person-mutation-producer-mutation.mjs':9,
  'canonical-epg-person-producer.mjs':5,
  'canonical-film-writers-mutation.mjs':5,
