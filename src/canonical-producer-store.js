@@ -89,9 +89,11 @@ export async function dueResults(env,{now,limit=DUE_LIMIT_MAX,origin}={}){
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 
-// S4-4: the newest run of origin `epg` (by creation time, then key), or null. Read-only; the input of `canonicalFreshness`.
-export async function latestEpgRun(env){
- try{return (await one(database(env),"SELECT "+RUN_COLUMNS+" FROM canonical_producer_run WHERE origin='epg' ORDER BY created_at DESC,run_key DESC LIMIT 1"))||null;}
+// S4-4: the run of origin `epg` that answers for ONE published generation, or null. The generation is the authoritative input; nothing here orders generations or runs by time or by name. When several runs exist for the same generation (distinct events that
+// published it), the answer is deterministic: the more advanced state first (passed, which is the only state that holds the applied claim, then passing, stopped, superseded), then the higher revision, then the run key as a last, arbitrary but stable tie-break. Read-only; the input of `canonicalFreshness`.
+export async function epgRunForGeneration(env,{sourceGeneration}={}){
+ if(typeof sourceGeneration!=='string'||!sourceGeneration)throw invalid();
+ try{return (await one(database(env),"SELECT "+RUN_COLUMNS+" FROM canonical_producer_run WHERE origin='epg' AND source_generation=? ORDER BY CASE pass_state WHEN 'passed' THEN 3 WHEN 'passing' THEN 2 WHEN 'stopped' THEN 1 ELSE 0 END DESC,revision DESC,run_key ASC LIMIT 1",[sourceGeneration]))||null;}
  catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 // S4-4: the LIVE results of origin `epg` that belong to OTHER runs than `runKey` and are owned by the unit (a receipt-owned row settles by evidence), one keyset page at a time in key order: the input of the cross-run supersession a completed pass performs.
@@ -105,11 +107,12 @@ export async function earlierLiveResults(env,{runKey,after=null,limit=50}={}){
    [runKey,...LIVE_STATES,...(after?[after.run_key,after.pass_no,after.kind,after.unit_id]:[]),limit]);
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
-// S4-4: the LIVE results of ONE run (any pass, any owner), at most `limit` rows in key order: what a pass has to settle when it re-observes a unit it already recorded a failure for. Read-only.
-export async function liveRunResults(env,{origin,runKey,limit=200}={}){
+// S4-4: the LIVE results of ONE run (any pass, any owner), one keyset page of at most `limit` rows in key order (`after` is the key {pass_no, kind, unit_id} of the last row of the previous page): what a pass has to settle when it re-observes a unit it already recorded a failure for. Read-only.
+export async function liveRunResults(env,{origin,runKey,after=null,limit=200}={}){
  if(!ORIGINS.includes(origin)||typeof runKey!=='string'||!runKey||!Number.isInteger(limit)||limit<1||limit>500)throw invalid();
+ if(after!==null&&(!plain(after)||!Number.isInteger(after.pass_no)||typeof after.kind!=='string'||typeof after.unit_id!=='string'))throw invalid();
  try{
-  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE origin=? AND run_key=? AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+') ORDER BY pass_no,kind,unit_id LIMIT ?',[origin,runKey,...LIVE_STATES,limit]);
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE origin=? AND run_key=? AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')'+(after?' AND (pass_no,kind,unit_id)>(?,?,?)':'')+' ORDER BY pass_no,kind,unit_id LIMIT ?',[origin,runKey,...LIVE_STATES,...(after?[after.pass_no,after.kind,after.unit_id]:[]),limit]);
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 // S4-4: the number of LIVE membership-affecting results (kind `film_facts`, origin `epg`, any run): the third input of `canonicalFreshness` and the `open_at_completion` of a pass. Read-only.

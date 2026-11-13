@@ -22,7 +22,7 @@ import {
  CLASS,afterRetry,keyOfRow,buildPlanEntries,canonicalFreshness,classOfCode,classifyProducerError,dictionaryUnitDigest,failureWrite,ownerReviewGuard,planFingerprint,prereqStamp,resumeIndex,retryDecision,strikeStep,
 } from './canonical-producer-run.js';
 import {
- DUE_LIMIT_MAX,SLICE_STATEMENT_CAP,commitPassComplete,commitResume,commitSlice,commitStop,commitStrike,dueResults,earlierLiveResults,latestEpgRun,liveMembershipCount,liveResult,liveRunResults,mintDictionaryRun,openEpgRun,settleResult,updateResult,
+ DUE_LIMIT_MAX,SLICE_STATEMENT_CAP,commitPassComplete,commitResume,commitSlice,commitStop,commitStrike,dueResults,earlierLiveResults,epgRunForGeneration,liveMembershipCount,liveResult,liveRunResults,mintDictionaryRun,openEpgRun,settleResult,updateResult,
 } from './canonical-producer-store.js';
 
 // The step lease of the EPG executor (`LEASE_MS` and `BOUNDARY_MARGIN_MS` of src/epg-orchestration.js; a test pins both numbers to that file).
@@ -34,8 +34,10 @@ const SLICE_BASE_STATEMENTS=4;
 export const SUPERSEDE_PAGE=50;
 export const SUPERSEDE_MAX_PAGES=20;
 export const SAME_RUN_LIVE_LIMIT=200;
+export const SAME_RUN_PAGE=100;
 // The two bounds a caller may only LOWER (a test seam): a larger or invalid value is the reviewed constant.
 export const supersedeBound=value=>Number.isInteger(value)&&value>=1?Math.min(value,SUPERSEDE_MAX_PAGES):SUPERSEDE_MAX_PAGES;
+export const sameRunPageBound=value=>Number.isInteger(value)&&value>=1?Math.min(value,SAME_RUN_PAGE):SAME_RUN_PAGE;
 export const sameRunBound=value=>Number.isInteger(value)&&value>=1?Math.min(value,SAME_RUN_LIVE_LIMIT):SAME_RUN_LIVE_LIMIT;
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const codeOf=error=>classifyProducerError(error).code;
@@ -156,7 +158,7 @@ async function stampFor(env,ctx,entry,code){
 // Only a run PROVEN earlier is touched: `order(earlierGeneration, laterGeneration)` is the caller's authoritative ordering of published generations (-1 earlier, 1 later); a row of a later run (a delayed older pass) is left alone, and a COVERED row whose order
 // cannot be proven (no ordering, a throw, an equal or unordered answer) fails the sweep closed (no claim); an uncovered one is simply not settled. One keyset page at a time, one terminal settle per row (compare-and-set on state and attempts), at most `maxPages`
 // pages, and the remaining deadline is checked before EVERY read and EVERY write. The same-run left-plan cleanup (the live rows an earlier pass of THIS run left for a unit the new plan no longer holds) runs last, once provenance holds.
-async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance}){
+async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance,ownPage}){
  const covered=new Set(entries.map(keyOf));
  let after=null,superseded=0,leftPlan=0,unproven=false,finished=false;
  const settle=async(row,settledBy)=>{
@@ -184,12 +186,22 @@ async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expir
  if(unproven)return {complete:false,superseded,leftPlan,reason:'order_unproven'};
  if(provenance){
   if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
-  const own=await liveRunResults(env,{origin:'epg',runKey:run.run_key,limit:500});
-  for(const row of own){
-   if(row.retry_owner!=='unit'||covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+  // One keyset page at a time over ALL the live rows of this run, receipt-owned and still-covered rows included (they are paged past, never settled, and cannot starve the rest). A page budget that runs out is NOT completion: the call ends
+  // `max_pages`, no claim, and the next call resumes (the settled rows are no longer live, so it makes progress as long as the unsettleable rows fit in one call's budget).
+  let afterOwn=null;
+  for(let page=0;;page++){
+   if(page>=maxPages)return {complete:false,superseded,leftPlan,reason:'max_pages'};
    if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
-   await settle(row,'left_plan');
-   leftPlan++;
+   const own=await liveRunResults(env,{origin:'epg',runKey:run.run_key,after:afterOwn,limit:ownPage});
+   for(const row of own){
+    if(row.retry_owner!=='unit'||covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+    if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
+    await settle(row,'left_plan');
+    leftPlan++;
+   }
+   if(own.length<ownPage)break;
+   const last=own[own.length-1];
+   afterOwn={pass_no:last.pass_no,kind:last.kind,unit_id:last.unit_id};
   }
  }
  return {complete:true,superseded,leftPlan};
@@ -311,7 +323,7 @@ async function runSlices(env,ctx){
    // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
    // The remaining deadline holds through the whole sweep and before the claim: no write and no claim after it; the next step resumes (the cursor is already past the last unit).
    if(expired())return {...base(),state:'partial',reason:'deadline'};
-   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),maxPages:supersedeBound(params.supersedeMaxPages)});
+   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});
    if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
    if(expired())return {...base(),state:'partial',reason:'deadline',supersededEarlier:sweep.superseded};
    const open=await liveMembershipCount(env);
@@ -463,7 +475,7 @@ export async function retryEpgProducerResults(env,params={}){
 // The one read of freshness: the latest epg run, the live membership results and the published generation, through `canonicalFreshness`. A store that is absent or unreadable is `unknown`; this function never throws.
 export async function readCanonicalFreshness(env,{publishedGeneration}={}){
  try{
-  const run=await latestEpgRun(env);
+  const run=typeof publishedGeneration==='string'&&publishedGeneration?await epgRunForGeneration(env,{sourceGeneration:publishedGeneration}):undefined;
   const live=await liveMembershipCount(env);
   return {freshness:canonicalFreshness({publishedGeneration,run,liveFilmFactsResults:live}),publishedGeneration:publishedGeneration??null,appliedGeneration:run?.applied_generation??null,passState:run?.pass_state??null};
  }catch(error){return {freshness:'unknown',publishedGeneration:publishedGeneration??null,appliedGeneration:null,passState:null,code:codeOf(error)};}

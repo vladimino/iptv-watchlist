@@ -80,7 +80,7 @@ const MUTANTS=[
  ["the retry selection is not limited to its origin", DRIVER, "limit:params.limit,origin:'epg'});", "limit:params.limit});"],
  ["the origin filter is dropped in SQL", STORE, "(origin?' AND origin=?':'')+\" AND state IN ('open','refused_recoverable')", "''+\" AND state IN ('open','refused_recoverable')"],
  ["an unknown origin is accepted by the selection", STORE, "||(origin!==undefined&&!ORIGINS.includes(origin)))throw invalid();", ")throw invalid();"],
- ["an earlier generation is never superseded", DRIVER, "const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),maxPages:supersedeBound(params.supersedeMaxPages)});", "const sweep={complete:true,superseded:0,leftPlan:0};"],
+ ["an earlier generation is never superseded", DRIVER, "const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),ownPage:sameRunPageBound(params.sameRunPage),maxPages:supersedeBound(params.supersedeMaxPages)});", "const sweep={complete:true,superseded:0,leftPlan:0};"],
  ["an uncovered earlier result is superseded", DRIVER, "if(!isCovered&&!provenance)continue;", ""],
  ["the supersession is not named newer_run", DRIVER, "await settle(row,isCovered?'newer_run':'left_plan');", "await settle(row,'applied');"],
  ["an unfinished sweep claims completion", DRIVER, "if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending'", "if(false)return {...base(),state:'partial',reason:'supersession_pending'"],
@@ -106,7 +106,7 @@ const MUTANTS=[
  ["the held rows read is unbounded", DRIVER, "limit:cap+1});", "limit:500});"],
  ["an absent unit is settled without provenance", DRIVER, "if(!isCovered&&!provenance)continue;", ""],
  ["an absent unit is named newer_run", DRIVER, "isCovered?'newer_run':'left_plan'", "'newer_run'"],
- ["the same-run cleanup is skipped", DRIVER, "if(provenance){\n  if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n  const own=", "if(false){\n  if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n  const own="],
+ ["the same-run cleanup is skipped", DRIVER, "if(provenance){\n  if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n  // One keyset page", "if(false){\n  if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n  // One keyset page"],
  ["a receipt-owned same-run row is settled left_plan", DRIVER, "if(row.retry_owner!=='unit'||covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;", "if(covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;"],
  ["a same-run row that is still covered is settled left_plan", DRIVER, "if(row.retry_owner!=='unit'||covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;", "if(row.retry_owner!=='unit')continue;"],
  ["an incomplete input is provenance", DRIVER, "provenance.complete===true&&", ""],
@@ -115,13 +115,19 @@ const MUTANTS=[
  ["an unsealed input is provenance", DRIVER, "provenance.sealed===true&&", ""],
  ["a truthy sealed flag is provenance", DRIVER, "provenance.sealed===true&&", "provenance.sealed&&"],
  ["another generation's input is provenance", DRIVER, "provenance.publishedGeneration===sourceGeneration", "true"],
+ ["the same-run page budget is not a bound", DRIVER, "if(page>=maxPages)return {complete:false,superseded,leftPlan,reason:'max_pages'};\n   if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n   const own=", "if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n   const own="],
+ ["only the first page of the same run is examined", DRIVER, "if(own.length<ownPage)break;", "break;"],
+ ["the same-run page never advances", DRIVER, "afterOwn={pass_no:last.pass_no,kind:last.kind,unit_id:last.unit_id};", "afterOwn=null;"],
+ ["the deadline is not checked before a same-run settlement", DRIVER, "if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};\n    await settle(row,'left_plan');", "await settle(row,'left_plan');"],
+ ["a passing pass does not outrank a stopped one", STORE, "WHEN 'passing' THEN 2", "WHEN 'passing' THEN 0"],
+ ["a passed pass does not outrank the others", STORE, "WHEN 'passed' THEN 3", "WHEN 'passed' THEN 0"],
+ ["the same-run read has no continuation key", STORE, "(after?' AND (pass_no,kind,unit_id)>(?,?,?)':'')", "''"],
  ["a result update may lower the attempts", STORE, "||next.attempts<row.attempts)throw invalid();", ")throw invalid();"],
  ["a result update may move a terminal state", STORE, "!LIVE_STATES.includes(next.state)||", ""],
  ["a result update ignores the route gate", STORE, "const gate=await routeOf(env);\n if(!gate.open)return SKIPPED;\n const key=keyOfRow(row);\n await commit(env,gate,[fence(gate),\n  ['UPDATE canonical_producer_unit_result SET state=?,code=?,attempts=?,prereq_stamp=?,next_attempt_at=?,updated_at=?", "const gate=await routeOf(env);\n const key=keyOfRow(row);\n await commit(env,gate,[fence(gate),\n  ['UPDATE canonical_producer_unit_result SET state=?,code=?,attempts=?,prereq_stamp=?,next_attempt_at=?,updated_at=?"],
  ["a resume of a run that is not stopped is accepted", STORE, "run.pass_state!=='stopped'||typeof at!=='string')throw invalid();", "typeof at!=='string')throw invalid();"],
  ["a resume touches the cursor", STORE, "SET pass_state='passing',stopped_by=NULL,revision=revision+1", "SET pass_state='passing',stopped_by=NULL,cursor_kind=NULL,cursor_id=NULL,revision=revision+1"],
  ["the membership count includes every kind", STORE, "WHERE origin='epg' AND kind='film_facts' AND state IN (", "WHERE origin='epg' AND state IN ("],
- ["the latest run is the oldest", STORE, "ORDER BY created_at DESC,run_key DESC LIMIT 1\"))||null;}\n catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}\n}\n// S4-4: the LIVE results of origin", "ORDER BY created_at ASC,run_key ASC LIMIT 1\"))||null;}\n catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}\n}\n// S4-4: the LIVE results of origin"]
 ];
 export async function runMutationPart(part,parts){
  const SELECTED=MUTANTS.filter((_,index)=>index%parts===part);
