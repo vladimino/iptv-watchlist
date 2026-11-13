@@ -36,9 +36,9 @@ const instant=value=>{if(typeof value!=='string'||!ISO.test(value))return null;c
 export const P6_DIFFERENTIAL_EXCEPTIONS=Object.freeze([
  {id:'sync_null_clock_keeps_stored',status:'accepted',area:'film_sync_state',rule:'A missing or null clock in a partial sync update leaves the stored clock unchanged; clearing needs sync.clear or sync:null. The projector writes a missing clock as null.'},
  {id:'identity_provenance_title_source',status:'accepted',area:'film_dimension.identity.provenance_json',rule:'The canonical writer adds a titleSource key {source,at} when it writes original_title; the projector writes the provenance it is given.'},
- {id:'blank_never_overwrites',status:'draft',area:'film, film_metadata, film_dimension localization',rule:'A blank incoming value keeps the stored one; the projector overwrites.'},
- {id:'reviewed_owner_rows_protected',status:'draft',area:'film_dimension, film.original_title, film.canonical_identity',rule:'A reviewed or owner identity/lifecycle row is never replaced by an automatic write; the projector guards only localization.'},
- {id:'redirected_film_refused',status:'draft',area:'watchlist_film and all film rows',rule:'A redirected Film is refused (film_person_redirect); the projector skips membership release silently.'},
+ {id:'blank_never_overwrites',status:'accepted',area:'film, film_metadata, film_dimension localization',rule:'A blank incoming value keeps the stored one; the projector overwrites.'},
+ {id:'reviewed_owner_rows_protected',status:'accepted',area:'film_dimension, film.original_title, film.canonical_identity',rule:'A reviewed or owner identity/lifecycle row is never replaced by an automatic write; the projector guards only localization.'},
+ {id:'redirected_film_refused',status:'accepted',area:'watchlist_film and all film rows',rule:'A redirected Film is refused (film_person_redirect); the projector skips membership release silently.'},
 ]);
 const titleSourceOf=row=>{try{const value=JSON.parse(row?.provenance_json||'null')?.titleSource;return plain(value)&&typeof value.source==='string'?value.source:null;}catch{return null;}};
 const rank=source=>{const index=TITLE_SOURCE_ORDER.indexOf(source);return index<0?-1:TITLE_SOURCE_ORDER.length-index;};

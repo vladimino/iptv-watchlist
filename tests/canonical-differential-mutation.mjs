@@ -21,7 +21,7 @@ const REGISTRY_MUTANTS=[
  ['a coverage entry claims a table its scenarios never fill',"['first_write','normal_refresh'],['film_metadata']","['first_write','normal_refresh'],['film_metadata','film_redirect']"],
  ['a former gap is renamed in the registry',"cover('film_sync_state clocks'","cover('film_sync_state clocks and more'"],
  ['an exception nothing exercises is registered',"{id:'credit_ordinals_kept'","{id:'never_met_anywhere',status:'draft',area:'x',rule:'x'},\n {id:'credit_ordinals_kept'"],
- ['an exception the harness meets is dropped',"{id:'credit_ordinals_kept',status:'draft',area:'film_person_credit.ordinal',rule:'The projector renumbers ordinals from its source; the canonical writers keep an existing ordinal and append a new credit after the highest of its role.'},",""],
+ ['an exception the harness meets is dropped',"{id:'credit_ordinals_kept',status:'accepted',area:'film_person_credit.ordinal',rule:'The projector renumbers ordinals from its source; the canonical writers keep an existing ordinal and append a new credit after the highest of its role.'},",""],
  ['a coverage entry has no writer',"cover('film_sync_state clocks',['writeFilmFacts']","cover('film_sync_state clocks',[]"],
 ];
 const PRODUCER_MUTANTS=[
