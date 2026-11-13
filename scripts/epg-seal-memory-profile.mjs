@@ -132,7 +132,10 @@ try{
    done=out.done;
    sample('step_end');
   }
-  result.ledger={steps,done,elapsedMs:Date.now()-started,rows:Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id='run-new'")[0].n)};
+  const rows=Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_observation WHERE source_key='active' AND residence='active' AND programme_run_id='run-new'")[0].n);
+  const transfer=sql(file,'SELECT state FROM discovery_transfer')[0]?.state;
+  result.ledger={steps,done,elapsedMs:Date.now()-started,rows,transfer};
+  if(!done||rows!==ITEMS||transfer!=='committed')throw new Error('replay_incomplete: ledger done='+done+' rows='+rows+'/'+ITEMS+' transfer='+transfer);
  }
 
  if(SCENARIO==='publish'||SCENARIO==='both'){
@@ -163,8 +166,12 @@ try{
    result.publish={elapsedMs:Date.now()-started,phase:run.seal.phase,units:run.seal.units||null,answer:out&&out.seal||null};
   }catch(error){result.publish={error:String(error&&error.message||error),elapsedMs:Date.now()-started,units:run.seal.units||null};}
   sample('step_end');
+  const after=await PublishedEpg.currentGeneration(env);
+  result.publish.pointer=after?.programmeRunId||null;
+  if(result.publish.error||run.seal.phase!=='finalize'||after?.programmeRunId!=='run-new')throw new Error('replay_incomplete: publish error='+result.publish.error+' phase='+run.seal.phase+' pointer='+result.publish.pointer);
  }
 }catch(error){failure=String(error&&error.stack||error).split('\n').slice(0,6).join(' | ');}
 result.error=failure;
 result.phases=[...phases.values()];
 console.log(JSON.stringify(result));
+if(failure)process.exitCode=1;
