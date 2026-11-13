@@ -31,6 +31,10 @@ When a Discovery Workflow instance ends `errored`, the hourly cron arms `recover
 
 Revert the code. The cron path and the records are unchanged by this decision.
 
+## Follow-ups
+
+Accepted [ADR 0135](0135-epg-priority-discovery-pause.md) adds a refusal in front of the successor create: while the EPG-priority pause is open, the wake does not open an instance, and the pause is not a step failure. That record is Accepted, not implemented and not activated, and changes no runtime behaviour.
+
 ## Unsupported assumptions
 
 - That the platform replays a step that failed after its retries with the same recorded failure. If it re-runs the step on replay and the step now succeeds, the instance continues normally and the cron or a later wake finds a `stopped` record whose owner check fails, so no second writer runs; this was not observed.
