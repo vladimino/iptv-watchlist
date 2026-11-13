@@ -54,7 +54,7 @@ assert.ok(!/web search[^.]*доступен и подтверждён/i.test(pro
 // Runtime batching: generationSize=1 accumulates to submitBatchSize=5; several independent v2 Tasks share the lease.
 assert.ok(/generationSize=1/.test(prompt)&&/submitBatchSize=5/.test(prompt)&&/накапливай до submitBatchSize/.test(prompt),'template accumulates generationSize=1 films to submitBatchSize');
 assert.ok(/буфер достигнет submitBatchSize/.test(prompt)&&/накопленного буфера/.test(prompt),'scheduled loop names the submit buffer');
-assert.ok(/несколько независимых почасовых v2 Tasks/.test(prompt)&&/already_running от другой v2 Task/.test(prompt),'multi-Task lease sharing is explicit');
+assert.ok(/несколько независимых почасовых v2 Tasks/.test(prompt)&&/already_running от другой Task/.test(prompt),'multi-Task lease sharing is explicit');
 assert.ok(!/только активн\w* Predictions Task/i.test(prompt)&&!/only active Predictions Task/i.test(prompt),'no singleton active-Task claim');
 
 
