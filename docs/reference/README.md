@@ -1,5 +1,7 @@
 # Maintained technical reference
 
+- [Prediction assessment contract (proposed)](api/prediction-assessment.md): additive submit/preflight assessment payload, immutable R2 linkage, model/timestamp provenance, dry-run isolation (not deployed).
+
 This section describes **currently implemented contracts**, not historical rollout verdicts or action approvals. Source and authorized runtime must be rechecked before operational claims.
 
 - [Production Scheduled Tasks](scheduled-tasks.md) — expected external task schedules, MCP permissions, sequencing and validation; check live registry for current settings. Draft post-cutover Daily and Hourly texts and the proposed single-Task Drift text: [scheduled-task-prompts](scheduled-task-prompts/daily-epg-no-discovery.md), [drift-hourly-only](scheduled-task-prompts/drift-hourly-only.md), and the proposed batch runner v2 Predictions text [hourly-predictions-batch-v2](scheduled-task-prompts/hourly-predictions-batch-v2.md) (none of them is the live registry).
