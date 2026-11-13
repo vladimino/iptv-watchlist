@@ -1,0 +1,62 @@
+// AIR-374 M2b step 0: mutation check of the offline copy tooling (scripts/epg-producer-m2b.mjs), in the pattern of tests/epg-producer-dry-run-mutation.mjs. Each mutant is a copy of the script (with its src/, scripts/ and tests/ helpers beside it)
+// with ONE rule removed or inverted; tests/epg-producer-m2b.mjs, pointed at the copy through M2B_SCRIPT, must FAIL on it. A surviving mutant is a rule no test depends on; a mutant that does not load is BROKEN. The copies live OUTSIDE the repository tree.
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const MUTANTS=[
+ ["the statements digest is not checked", "results._statementsDigest!==plan.statementsDigest", "false"],
+ ["the capture time is not checked", "typeof results?._capturedAt!=='string'||!Number.isFinite(Date.parse(results._capturedAt))", "false"],
+ ["a table outside the plan is accepted", "if(!COPY_PLAN.some(item=>item.table===name))refusals.push(", "if(false)refusals.push("],
+ ["a missing table is accepted", "if(!Array.isArray(rows)){refusals.push('table_missing:'+item.table);continue;}", "if(!Array.isArray(rows)){continue;}"],
+ ["the per-table row cap is not checked", "if(rows.length>caps.rowsReadPerStatement)refusals.push('rows_over_cap:'+item.table);", ""],
+ ["the total row cap is not checked", "if(total>caps.rowsReadTotal)refusals.push('rows_total_over_cap');\n return {ok:refusals.length===0,refusals:[...new Set(refusals)],counts};", "return {ok:refusals.length===0,refusals:[...new Set(refusals)],counts};"],
+ ["extra or missing columns are accepted", "if(keys.length!==item.columns.length||keys.some(key=>!allowed.has(key))){", "if(false){"],
+ ["a non-scalar value is accepted", "if(keys.some(key=>row[key]!==null&&!['string','number'].includes(typeof row[key]))){", "if(false){"],
+ ["a row that is not an object is accepted", "if(!row||typeof row!=='object'||Array.isArray(row)){", "if(false){"],
+ ["an existing output file is overwritten", "if(fs.existsSync(outFile))return {ok:false,refusals:['output_exists']};", ""],
+ ["a wrong schema version is accepted", "if(version!==CAPS.schemaVersion)refusals.push('schema_version:'+version);", ""],
+ ["an unreadable copy is accepted", "}catch(error){refusals.push('copy_unreadable');}", "}catch(error){}"],
+ ["foreign-key violations are not counted", "counts.foreign_key_violations=rowsOf(file,'PRAGMA foreign_key_check').length;", "counts.foreign_key_violations=0;"],
+ ["the run does not verify the copy first", "const verdict=verifyCopy(file);\n if(!verdict.ok)return {ok:false,refusals:verdict.refusals};", "const verdict=verifyCopy(file);"],
+ ["the observed Films are every stored Film", "const scope=allFilms?stored:stored.filter(row=>watch.has(row.id));", "const scope=stored;"],
+ ["the allFilms switch is ignored", "const scope=allFilms?stored:", "const scope=false?stored:"],
+ ["a departed sample includes members", "stored.filter(row=>!watch.has(row.id)&&!ids.has(row.id))", "stored.filter(row=>!ids.has(row.id))"],
+ ["a departed sample includes observed Films", "stored.filter(row=>!watch.has(row.id)&&!ids.has(row.id))", "stored.filter(row=>!watch.has(row.id))"],
+ ["the Film bound is ignored", "const films=maxFilms?scope.slice(0,Number(maxFilms)):scope;", "const films=scope;"],
+ ["every Person is a Person row", ".filter(row=>creditedPersons.has(row.id))", ""],
+ ["credits of unobserved Films are kept", "if(!ids.has(row.film_id))continue;", ""],
+ ["a Film off the watchlist is a member", "watchlist:watch.has(row.id),", "watchlist:true,"],
+ ["the page key is inclusive", "WHERE rowid > ? ORDER BY rowid LIMIT ?'", "WHERE rowid >= ? ORDER BY rowid LIMIT ?'"],
+ ["a column of the plan is dropped", "'canonical_identity','original_title','updated_at']}", "'canonical_identity','updated_at']}"],
+ ["a table the harness reads is not copied", " {table:'person_alias',columns:['person_id','kind','value','provenance_json']},\n", ""],
+ ["the copy is loaded with the wrong column order", "INSERT INTO '+item.table+' ('+item.columns.join(',')+') VALUES ('+item.columns.map(column=>literal(row[column])).join(',')+');", "INSERT INTO '+item.table+' ('+item.columns.join(',')+') VALUES ('+[...item.columns].reverse().map(column=>literal(row[column])).join(',')+');"],
+];
+const dir=fs.mkdtempSync(path.join(os.tmpdir(),'m2b-mutants-'));
+try{
+ const original=fs.readFileSync('scripts/epg-producer-m2b.mjs','utf8');
+ for(const [name,from] of MUTANTS)assert.equal(original.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once');
+ const run=file=>new Promise(resolve=>{
+  const child=spawn(process.execPath,['tests/epg-producer-m2b.mjs'],{env:{...process.env,M2B_SCRIPT:file},stdio:['ignore','ignore','pipe']});
+  let err='';child.stderr.on('data',chunk=>{err+=chunk;});
+  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+file+': '+err.slice(0,300));resolve(code);});
+ });
+ // each copy sits in its own directory with its own scripts/, src/ and tests/ helpers, so its relative imports resolve; migrations are read from the working directory
+ const place=(index,text)=>{
+  const base=path.join(dir,'m'+index);
+  fs.mkdirSync(path.join(base,'scripts'),{recursive:true});fs.mkdirSync(path.join(base,'tests'),{recursive:true});
+  fs.cpSync('src',path.join(base,'src'),{recursive:true});
+  for(const file of ['scripts/schema-preflight.mjs','scripts/epg-producer-dry-run.mjs','tests/d1-standin.mjs','tests/sqlite-session.mjs'])fs.copyFileSync(file,path.join(base,file));
+  const file=path.join(base,'scripts','epg-producer-m2b.mjs');
+  fs.writeFileSync(file,text);
+  return file;
+ };
+ assert.equal(await run(place('base',original)),0,'the unmutated copy passes the whole test');
+ const queue=MUTANTS.map(([name,from,to],index)=>({name,file:place(index,original.replace(from,()=>to))}));
+ const survivors=[];
+ await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.file);if(code===0)survivors.push(item.name);}}));
+ assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
+ console.log('epg-producer-m2b-mutation: ok ('+MUTANTS.length+' mutants killed)');
+}finally{fs.rmSync(dir,{recursive:true,force:true});}

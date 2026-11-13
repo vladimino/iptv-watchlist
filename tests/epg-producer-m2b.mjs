@@ -1,0 +1,190 @@
+// AIR-374 M2b step 0: the offline tooling of the dry run on a local copy (scripts/epg-producer-m2b.mjs), on the sqlite3-CLI D1 stand-in. Covered: the emitted statements are read-only keyset pages over exactly the planned columns, the plan covers every table
+// the M2 harness really reads, the pasted pages load into an identical copy that the harness plans like the original, every refusal of the results file, the copy verification, the run leaves the copy byte-identical and its report holds counts and timings
+// only, and the script imports no apply function or writer. No Worker, R2, D1 or Cloudflare access. M2B_SCRIPT points the file at a mutant copy (tests/epg-producer-m2b-mutation.mjs).
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
+import {applyEpgUnits,planEpgUnits} from '../src/canonical-epg-producer.js';
+import {dryRun} from '../scripts/epg-producer-dry-run.mjs';
+import {assertReadOnly} from '../scripts/schema-preflight.mjs';
+
+const M2B=await import(pathToFileURL(path.resolve(process.env.M2B_SCRIPT||'scripts/epg-producer-m2b.mjs')).href);
+const {CAPS,COPY_PLAN,emitSql,verifyResults,loadCopy,verifyCopy,inputsFromCopy,runOnCopy}=M2B;
+
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-m2b-'));
+process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
+const sqlite=(file,text,json=false)=>{const r=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});assert.equal(r.status,0,r.stderr);return r.stdout;};
+const rows=(file,sql)=>{const out=sqlite(file,sql+';',true).trim();return out?JSON.parse(out):[];};
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const template=path.join(root,'template.sqlite');
+sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+const EMPTY='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+const sha=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const T='2026-11-13T10:00:00.000Z';
+const ID=k=>'film:tmdb:'+k;
+const META=()=>({schemaVersion:1,year:1999,runtime:136,synopsis:'S',poster:'/p.jpg',url:'https://example.test/m',genres:['g'],peopleVersion:2,payload:{k:'v'},r2Key:null,contentSha256:null,updatedAt:T});
+const facts=title=>({film:{contractVersion:1,originalTitle:title,source:'tmdb'},metadata:META(),sync:{metadataAt:T,synopsisFetchedAt:T,peopleNamesVersion:2,peopleLocalizedAt:T},watchlist:true});
+const steady=()=>{let t=0;return ()=>(t+=2);};
+let n=0;
+// The "production" stand-in: the real writer stored five Films, plus Person and credit rows.
+async function production(){
+ const file=path.join(root,'prod-'+(n++)+'.sqlite');fs.copyFileSync(template,file);
+ for(const s of ["UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;","UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1","UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1","INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+T+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','"+T+"');"])sqlite(file,s);
+ const list=[1,2,3,4,5].map(k=>({id:ID(k),facts:{...facts('Title '+k),watchlist:k!==5}}));
+ const applied=await applyEpgUnits({DB:d1Standin(file)},{plan:planEpgUnits({runId:'seed',at:T,films:list}),now:()=>T});
+ assert.equal(applied.counts.applied,5);
+ sqlite(file,"INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb:1','role:1',1,'"+T+"'),('person:tmdb:2','role:2',1,'"+T+"'),('person:tmdb:3','role:3',1,'"+T+"');INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('"+ID(1)+"','person:tmdb:1','director',0),('"+ID(1)+"','person:tmdb:2','actor',1),('"+ID(5)+"','person:tmdb:3','actor',0);");
+ return file;
+}
+// A reader of the emitted statements: pages of `pageRows` (small here so a table needs several pages), as an authorized operator would paste them.
+function read(file,pageRows=2){
+ const tables={};
+ for(const statement of emitSql().statements){
+  const all=[];let last=0;
+  for(;;){
+   const page=rows(file,statement.sql.replace(/\? ORDER BY rowid LIMIT \?/,last+' ORDER BY rowid LIMIT '+pageRows));
+   for(const row of page){const {_rid,...rest}=row;all.push(rest);last=_rid;}
+   if(page.length<pageRows)break;
+  }
+  tables[statement.table]=all;
+ }
+ return {_statementsDigest:emitSql().statementsDigest,_capturedAt:T,tables};
+}
+const dump=file=>JSON.stringify(COPY_PLAN.map(item=>[item.table,rows(file,'SELECT '+item.columns.join(',')+' FROM '+item.table+' ORDER BY '+item.columns.join(','))]));
+
+// 1. The emitted statements.
+{
+ const plan=emitSql();
+ assert.equal(plan.statements.length,COPY_PLAN.length);
+ for(const statement of plan.statements){
+  assertReadOnly(statement.sql);
+  assert.match(statement.sql,/^SELECT rowid AS _rid, [a-z0-9_, ]+ FROM [a-z_]+ WHERE rowid > \? ORDER BY rowid LIMIT \?$/);
+  assert.equal(statement.sql.split('?').length-1,2);
+  assert.ok(statement.pageRows<=CAPS.pageRows&&statement.maxRows<=CAPS.rowsReadPerStatement);
+ }
+ assert.equal(emitSql().statementsDigest,plan.statementsDigest,'the digest is stable');
+ // the planned columns are exactly the columns of the migrated table, in order
+ for(const item of COPY_PLAN)assert.deepEqual(rows(template,'PRAGMA table_info('+item.table+')').map(column=>column.name),item.columns,item.table);
+ assert.ok(CAPS.rowsReadTotal<=1500000&&CAPS.rowsReadPerStatement<=300000,'the caps are not above the E6 proposals');
+}
+
+// 2. The plan covers every table the harness really reads (a new read breaks this test until the plan names it).
+{
+ const file=await production();
+ const seen=new Set();
+ const db=d1Standin(file,{onQuery:async text=>{for(const match of text.matchAll(/\b(?:FROM|JOIN)\s+([a-z_]+)/gi))seen.add(match[1]);}});
+ await dryRun({env:{DB:db},at:T,runId:'probe',films:[{id:ID(1),facts:facts('Title 1')},{id:ID(6),facts:facts('New')}],departed:[ID(9),ID(1)],personRows:[{id:'person:tmdb:1',roleId:'role:1',contractVersion:1}],credits:[{filmId:ID(1),credits:[{personId:'person:tmdb:1',role:'director'}]}],clock:steady()});
+ const planned=new Set(COPY_PLAN.map(item=>item.table));
+ assert.deepEqual([...seen].filter(table=>!planned.has(table)),[],'the harness reads a table the copy plan does not carry');
+}
+
+// 3. Round trip: statements run against the "production" file, pages pasted, a copy loaded; the copy is identical on the planned tables and the harness plans it like the original.
+const prod=await production();
+const results=read(prod);
+{
+ assert.ok(results.tables.film.length===5&&results.tables.person.length===3&&results.tables.film_person_credit.length===3);
+ const verdict=verifyResults(results);
+ assert.deepEqual([verdict.ok,verdict.refusals],[true,[]]);
+ const out=path.join(root,'copy-1.sqlite');
+ const loaded=loadCopy(results,out);
+ assert.equal(loaded.ok,true);assert.equal(loaded.counts.film,5);
+ assert.equal(dump(out),dump(prod),'the planned tables are row-for-row identical');
+ assert.deepEqual([verifyCopy(out).ok,verifyCopy(out).counts.foreign_key_violations],[true,0]);
+ // no output is overwritten
+ assert.deepEqual(loadCopy(results,out),{ok:false,refusals:['output_exists']});
+ const before=sha(out);
+ const run=await runOnCopy(out,{departed:2,at:T,clock:steady()});
+ assert.equal(run.copyUnchanged,true);
+ assert.equal(sha(out),before,'the copy is byte-identical after the run');
+ assert.equal(run.ok,true);
+ assert.equal(run.report.writes,0);
+ assert.deepEqual(run.volume,{films:4,departed:1,creditFilms:1,personRows:2,personStateUnits:'unmeasured'},'the observed Films are the 4 watchlist members; Film 5 is the only Film that left it');
+ assert.deepEqual(run.report.byKind.film_facts,{units:5,changed:0,noop:5,absent:0,refused:0,failed:0},'the stored rows replay as no-ops; a release of a Film already off the watchlist is a no-op');
+ assert.equal(run.report.byKind.person_mutation.units,2);
+ assert.equal(run.report.changed,0);
+ // the report holds counts and timings only
+ const text=JSON.stringify(run);
+ for(const needle of ['film:','person:','tmdb','Title','https://','role:'])assert.ok(!text.includes(needle),'the report names '+needle);
+ // the copy agrees with the original: the same harness on the original file gives the same counts
+ const direct=await dryRun({env:{DB:d1Standin(prod)},at:T,runId:'m2b',...inputsFromCopy(prod,{departed:2}),clock:steady()});
+ const viaCopy=await dryRun({env:{DB:d1Standin(out)},at:T,runId:'m2b',...inputsFromCopy(out,{departed:2}),clock:steady()});
+ assert.deepEqual(viaCopy,direct,'a copy gives the report of the original');
+}
+
+// 4. The inputs: the watchlist members are the observed Films, a deterministic sample of the Films that left it, the credited Persons.
+{
+ const out=path.join(root,'copy-1.sqlite');
+ const ids=list=>list.map(item=>item.id);
+ assert.deepEqual(ids(inputsFromCopy(out).films),[ID(1),ID(2),ID(3),ID(4)],'the observed Films are the watchlist members, not every stored Film');
+ assert.deepEqual(ids(inputsFromCopy(out,{allFilms:true}).films),[1,2,3,4,5].map(ID),'allFilms observes every stored Film');
+ assert.deepEqual(inputsFromCopy(out,{departed:2}).departed,[ID(5)],'only a Film that is off the watchlist and not observed; never more than there are');
+ assert.deepEqual(inputsFromCopy(out,{departed:2}).departed,inputsFromCopy(out,{departed:2}).departed,'deterministic');
+ assert.equal(inputsFromCopy(out,{departed:0}).departed.length,0);
+ assert.equal(inputsFromCopy(out,{allFilms:true,departed:2}).departed.length,0,'every Film is observed: no departed sample');
+ assert.deepEqual(ids(inputsFromCopy(out,{maxFilms:2}).films),[ID(1),ID(2)],'the Film bound keeps the first members by id');
+ const inputs=inputsFromCopy(out);
+ assert.deepEqual([inputs.credits.length,inputs.personRows.map(row=>row.id)],[1,['person:tmdb:1','person:tmdb:2']],'the Persons credited from the observed Films only (Person 3 is credited from Film 5, which is not observed)');
+ assert.deepEqual([inputsFromCopy(out,{allFilms:true}).credits.length,inputsFromCopy(out,{allFilms:true}).personRows.length],[2,3]);
+ assert.equal(inputsFromCopy(out,{maxFilms:0}).personRows.length,2,'maxFilms 0 means no bound');
+ assert.deepEqual(inputsFromCopy(out,{maxFilms:2,departed:9}).departed,[ID(5)],'unobserved watchlist members (3 and 4) are not departed Films');
+ assert.equal(inputsFromCopy(out,{allFilms:true}).films.find(item=>item.id===ID(5)).facts.watchlist,false,'a Film off the watchlist is not a member');
+ const first=inputs.films.find(item=>item.id===ID(1)).facts;
+ assert.deepEqual([first.film.originalTitle,first.film.source,first.watchlist,first.metadata.genres,first.sync.peopleNamesVersion],['Title 1','tmdb',true,['g'],2]);
+}
+
+// 5. Every refusal of the results file and of the copy.
+{
+ const clone=()=>JSON.parse(JSON.stringify(results));
+ const refused=(mutate,expected)=>{const copy=clone();mutate(copy);const verdict=verifyResults(copy);assert.equal(verdict.ok,false,expected);assert.ok(verdict.refusals.some(code=>code.startsWith(expected)),expected+' in '+verdict.refusals);};
+ refused(copy=>{copy._statementsDigest='0'.repeat(64);},'statements_digest_mismatch');
+ refused(copy=>{copy._capturedAt='yesterday';},'captured_at_invalid');
+ refused(copy=>{delete copy.tables;},'tables_missing');
+ refused(copy=>{copy.tables.secret_table=[];},'table_not_in_plan');
+ refused(copy=>{delete copy.tables.person;},'table_missing');
+ refused(copy=>{copy.tables.film[0].extra='x';},'columns_mismatch');
+ refused(copy=>{copy.tables.film[0]={...copy.tables.film[0]};delete copy.tables.film[0].id;},'columns_mismatch');
+ refused(copy=>{copy.tables.film[0].original_title={a:1};},'value_not_scalar');
+ refused(copy=>{copy.tables.film[0]=5;},'row_not_object');
+ // the caps are a parameter so the test needs no million rows: a table over the per-table cap, and a total over the total cap
+ {
+  const tight=verifyResults(clone(),{...CAPS,rowsReadPerStatement:4});
+  assert.equal(tight.ok,false);
+  assert.ok(tight.refusals.includes('rows_over_cap:film')&&!tight.refusals.includes('rows_over_cap:person'),'five Films are over a cap of four, two Persons are not');
+  const total=verifyResults(clone(),{...CAPS,rowsReadTotal:10});
+  assert.deepEqual([total.ok,total.refusals],[false,['rows_total_over_cap']]);
+  assert.equal(verifyResults(clone(),CAPS).ok,true);
+ }
+ // a refused file is never loaded
+ const bad=clone();bad._statementsDigest='1'.repeat(64);
+ const target=path.join(root,'never.sqlite');
+ assert.deepEqual(loadCopy(bad,target),{ok:false,refusals:['statements_digest_mismatch']});
+ assert.equal(fs.existsSync(target),false);
+ // the copy verifier: wrong schema version, an unreadable file
+ const old=path.join(root,'old.sqlite');sqlite(old,chain.slice(0,-1).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+ assert.deepEqual(verifyCopy(old).refusals,['schema_version:20']);
+ assert.deepEqual((await runOnCopy(old)).refusals,['schema_version:20'],'a run is refused on a wrong copy');
+ const missing=path.join(root,'missing.sqlite');
+ assert.deepEqual(verifyCopy(missing).refusals,['copy_unreadable']);
+ // a partial page that splits a pair leaves foreign-key violations: counted, not hidden
+ const split=clone();split.tables.film=split.tables.film.slice(1);
+ const splitFile=path.join(root,'split.sqlite');
+ assert.equal(loadCopy(split,splitFile).ok,true);
+ assert.ok(verifyCopy(splitFile).counts.foreign_key_violations>0);
+}
+
+// 6. Static: no apply function or writer, no network, no environment, only the planned imports.
+{
+ const text=fs.readFileSync(process.env.M2B_SCRIPT||'scripts/epg-producer-m2b.mjs','utf8').replace(/\/\/.*$/gm,'');
+ assert.ok(!/\b(applyFilmFacts|applyEpgUnits|applyEpgPersonUnits|applyPersonMutation|applyPersonState|applyFilmCredits|receiptedWrite|writeFilmFacts|mutateFilm|mutatePerson|reconcile\w*)\b/.test(text),'no apply function or writer');
+ assert.ok(!/\b(fetch|setTimeout|setInterval|BUCKET|process\.env|child_process|execSync|spawn|cloudflare)\b/i.test(text),'no network, timer, environment or process');
+ assert.deepEqual([...text.matchAll(/from '([^']+)'/g)].map(match=>match[1]).sort(),['../tests/d1-standin.mjs','../tests/sqlite-session.mjs','./epg-producer-dry-run.mjs','./schema-preflight.mjs','node:crypto','node:fs','node:path','node:url']);
+ // the writes of the script are the new local copy file only
+ assert.ok(!/\bwriteFileSync|appendFile|createWriteStream\b/.test(text));
+ for(const file of ['build.mjs','package.json','wrangler.jsonc'])assert.ok(!fs.readFileSync(file,'utf8').includes('epg-producer-m2b'),file+' does not carry the tool');
+}
+console.log('epg-producer-m2b: ok');
