@@ -26,14 +26,19 @@ assert.equal(dry.length,Number(statedDry[1]));assert.equal(sha(dry),statedDry[2]
 // 2. The generation steps 4, 5 and 6 are byte-identical in both prompts: an A/B changes grouping only.
 const steps=text=>text.split('\n').filter(l=>/^[456]\. /.test(l));
 assert.equal(steps(prompt).length,3);assert.deepEqual(steps(dry),steps(prompt),'identical generation instructions');
-// 2b. ADR 0132 / AIR-450 S5-C: shared research and assessment step 3а plus mandatory research-quality step 3б are byte-identical in both prompts. Web Search availability is never assumed.
+// Research quality: the reusable assessment schema instructions remain identical, while the production-only research gate is not silently added to the historical A/B template.
 const step3a=text=>text.split('\n').filter(l=>l.startsWith('3а. '));
 assert.equal(step3a(prompt).length,1);assert.deepEqual(step3a(dry),step3a(prompt),'identical research and assessment instructions');
 const step3b=text=>text.split('\n').filter(l=>l.startsWith('3б. '));
-assert.equal(step3b(prompt).length,1);assert.deepEqual(step3b(dry),step3b(prompt),'identical AIR-450 S5-C research quality gate');
-for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN сама по себе НЕ означает READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','ВРЕМЕННЫЙ аудит','НЕ новые поля','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
+assert.equal(step3b(prompt).length,1);assert.equal(step3b(dry).length,0,'the frozen A/B procedure does not inherit a new production-only research gate');
+for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN — НЕ READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','ВРЕМЕННЫЙ аудит','НЕ новые поля','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
 for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','opposition_competence','НЕ strong','research.attempts','МАССИВ','sources[].usedFor','1–120 Unicode','prediction_batch_validate','Buffer, TextEncoder','НЕ заменяет','не прекращай весь run'])assert.ok(prompt.includes(needle),'production manual closed-schema guard: '+needle);
-assert.ok(!/экспериментальный офлайн-протокол AIR-450/.test(prompt),'production research gate must not describe itself as offline-only');
+for(const [name,value] of [['production',prompt],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must be free of historical ticket/decision IDs');
+assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test(prompt)&&/Для исследования фильмов используй доступные web search/.test(prompt),'IPTV MCP boundary must allow independent film research');
+assert.ok(/не второй поисковый проход/i.test(prompt),'research gate must not duplicate the search budget');
+assert.ok(/search_snippet допустим БЕЗ прочтения страницы/.test(prompt),'search snippet is not a read article');
+assert.ok(/gateStatus=blocked \(при этом assessment\.research\.status=not_attempted\)/.test(prompt),'unavailable search audit is distinct from assessment research status');
+assert.ok(!/другой v2 Task или ещё не выключенный legacy/.test(prompt),'scheduled prompt cannot assume historic enabled state');
 assert.ok(!/FROZEN_MANIFEST|tmdb_800815|5bd010a00102b73a9c8bd24ef67cb56ca17f86918aca7d4715de20752e5dca7e/.test(prompt),'production uses only the live batch manifest, never frozen S5-C test inputs');
 assert.ok(/prediction_batch_start\(\{trigger:'scheduled', manifestSize\}\)/.test(prompt),'production starts its own scheduled batch manifest');
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
@@ -45,7 +50,7 @@ assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
 assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
 assert.ok(!/web search[^.]*доступен и подтверждён/i.test(prompt),'no confirmed Web Search availability claim');
-// AIR-463 review: generationSize=1 accumulates to submitBatchSize=5; several independent v2 Tasks may share the lease (no singleton "only active Task" claim).
+// Runtime batching: generationSize=1 accumulates to submitBatchSize=5; several independent v2 Tasks share the lease.
 assert.ok(/generationSize=1/.test(prompt)&&/submitBatchSize=5/.test(prompt)&&/накапливай до submitBatchSize/.test(prompt),'template accumulates generationSize=1 films to submitBatchSize');
 assert.ok(/буфер достигнет submitBatchSize/.test(prompt)&&/накопленного буфера/.test(prompt),'scheduled loop names the submit buffer');
 assert.ok(/несколько независимых почасовых v2 Tasks/.test(prompt)&&/already_running от другой v2 Task/.test(prompt),'multi-Task lease sharing is explicit');
