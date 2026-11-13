@@ -82,6 +82,17 @@ const MUTANTS=[
  ["the page size is not recorded", "_pageRows:pageRows,", "_pageRows:caps.pageRows,"],
  ["the checks are not reported", "checks:{schemaVersion:schema.rows[0].version,marker:{mode:mark.mode,cutover:mark.cutover,generation:mark.generation}}", "checks:{}"],
  ["a defect of the reader is not reported as one", "return {ok:false,stop:{code:'reader_defect'},requests:state.requests};", "throw error;"],
+ ["the approved digest is not checked", "if(plan.statementsDigest!==APPROVED_DIGEST||tables.length!==APPROVED.length)halt('plan_not_approved',{why:'plan'});", "if(tables.length!==APPROVED.length)halt('plan_not_approved',{why:'plan'});"],
+ ["a plan with fewer tables than the approved plan is accepted", "||tables.length!==APPROVED.length)halt('plan_not_approved'", ")halt('plan_not_approved'"],
+ ["the approved tables and columns are not checked", "if(!approved||approved[0]!==table||approved[1].length!==page.columns.length||approved[1].some((column,place)=>column!==page.columns[place]))halt('plan_not_approved',{why:'table',table});", ""],
+ ["an extra table beyond the approved list is accepted", "if(!approved||approved[0]", "if(approved&&approved[0]"],
+ ["the approved table name is not compared", "approved[0]!==table||", ""],
+ ["the approved column count is not compared", "approved[1].length!==page.columns.length||", ""],
+ ["the approved column names are not compared", "||approved[1].some((column,place)=>column!==page.columns[place])", ""],
+ ["the approved digest of the text is another plan", "const APPROVED_DIGEST='ca84fae5", "const APPROVED_DIGEST='ca84fae6"],
+ ["the approved list drops a column", '["film",["id","contract_version",', '["film",["id",'],
+ ["the approved list adds a table", '["canonical_revision",["kind","id","revision","updated_at"]]]', '["canonical_revision",["kind","id","revision","updated_at"]],["schema_contract",["version"]]]'],
+ ["the operator bundle is offered", "export function bundleText(){throw new Error('single_result_delivery_blocked');}", "export function bundleText(options){return executeBodyText(options);}"],
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'m2b-reader-mutants-'));
 try{

@@ -4,6 +4,7 @@
 // calls check() on every mutant in one process.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -64,7 +65,7 @@ function reference(file,pageRows){
 const dump=file=>JSON.stringify(COPY_PLAN.map(item=>[item.table,rows(file,'SELECT '+item.columns.join(',')+' FROM '+item.table+' ORDER BY '+item.columns.join(','))]));
 
 // The functions under test are bound by check(): the mutation runner calls it for every mutant in ONE process.
-let readCopy,bundleText,readerDigest;
+let readCopy,bundleText,executeBodyText,readerDigest;
 const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
 const ACCOUNT='acct',DATABASE='dbid';
 const SCHEMA_SQL='SELECT version FROM schema_contract WHERE id = 1';
@@ -112,7 +113,7 @@ const sqlHas=text=>context=>context.sql.includes(text);
 export async function check(module,readerPath=path.resolve('scripts/epg-producer-m2b-reader.mjs'),{docs=false}={}){
 // The reader must RETURN a result for any answer, never throw: a thrown error is an assertion failure here, so a mutant that makes it throw is killed by the assertion about the rule, not by the crash.
 readCopy=async(...args)=>{try{return await module.readCopy(...args);}catch(error){assert.fail('readCopy threw instead of returning a result: '+String(error?.message).split('\n')[0].slice(0,100));}};
-bundleText=module.bundleText;readerDigest=module.readerDigest;
+bundleText=module.bundleText;executeBodyText=module.executeBodyText;readerDigest=module.readerDigest;
 work=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-m2b-reader-work-'));
 try{
  const prod=await production();
@@ -227,6 +228,8 @@ try{
  {
   const plan=emitSql();
   const mutate=change=>{const copy=JSON.parse(JSON.stringify(plan));change(copy);return copy;};
+  // the count and page statements of a table, built exactly as the reader builds them: identifier-safe and self-consistent, so only the allowlist can refuse them
+  const unapproved=(table,columns)=>[{id:table+'#count',table,kind:'count',sql:'SELECT COUNT(*) AS n, MAX(rowid) AS max_rowid FROM '+table},{id:table+'#page',table,kind:'page',columns,sql:'SELECT rowid AS _rid, '+columns.join(', ')+' FROM '+table+' WHERE rowid > ? ORDER BY rowid LIMIT ?'}];
   const refusals=[
    ['digest',mutate(copy=>{copy.statementsDigest='nope';}),'plan_invalid'],
    ['caps missing',mutate(copy=>{delete copy.caps;}),'plan_invalid'],
@@ -252,6 +255,20 @@ try{
    ['a table twice',mutate(copy=>{copy.statements.push(copy.statements[0],copy.statements[1]);}),'plan_invalid'],
    ['a write statement',mutate(copy=>{copy.statements[1].sql='DELETE FROM film';}),'statement_not_read_only'],
    ['a second statement',mutate(copy=>{copy.statements[0].sql+='; DELETE FROM film';}),'statement_not_read_only'],
+   // PLAN ALLOWLIST: a self-consistent, identifier-safe plan is still refused unless it is EXACTLY the reviewed plan, and no request is sent
+   ['an unapproved table appended, with the real digest',mutate(copy=>{copy.statements.push(...unapproved('schema_contract',['version']));}),'plan_not_approved'],
+   ['an unapproved table in place of the first, with a well-formed digest',mutate(copy=>{copy.statementsDigest='a'.repeat(64);copy.statements.splice(0,2,...unapproved('schema_contract',['version']));}),'plan_not_approved'],
+   ['an unapproved table in place of the last, with the real digest',mutate(copy=>{copy.statements.splice(-2,2,...unapproved('schema_contract',['version']));}),'plan_not_approved'],
+   ['only an unapproved table',mutate(copy=>{copy.statements=unapproved('schema_contract',['version']);}),'plan_not_approved'],
+   ['an extra column of an approved table',mutate(copy=>{copy.statements.splice(0,2,...unapproved('film',[...COPY_PLAN[0].columns,'updated_by']));}),'plan_not_approved'],
+   ['a column of an approved table left out',mutate(copy=>{copy.statements.splice(0,2,...unapproved('film',COPY_PLAN[0].columns.slice(1)));}),'plan_not_approved'],
+   ['the columns of an approved table reordered',mutate(copy=>{copy.statements.splice(0,2,...unapproved('film',[...COPY_PLAN[0].columns].reverse()));}),'plan_not_approved'],
+   ['an unapproved table with the columns of an approved one',mutate(copy=>{copy.statements.splice(0,2,...unapproved('film_copy',COPY_PLAN[0].columns));}),'plan_not_approved'],
+   ['a column of another table in an approved one',mutate(copy=>{copy.statements.splice(0,2,...unapproved('film',['id','payload_json']));}),'plan_not_approved'],
+   ['the approved tables in another order',mutate(copy=>{const first=copy.statements.splice(0,2);copy.statements.push(...first);}),'plan_not_approved'],
+   ['an approved table left out',mutate(copy=>{copy.statements.splice(-2,2);}),'plan_not_approved'],
+   ['the approved plan with a well-formed digest of another plan',mutate(copy=>{copy.statementsDigest='a'.repeat(64);}),'plan_not_approved'],
+   ['the approved plan with the digest of the empty string',mutate(copy=>{copy.statementsDigest=createHash('sha256').update('').digest('hex');}),'plan_not_approved'],
    ['a different SELECT',mutate(copy=>{copy.statements[0].sql='SELECT original_title FROM film';}),'statement_not_read_only'],
    ['the page statement without its cursor',mutate(copy=>{copy.statements[1].sql=copy.statements[1].sql.replace('WHERE rowid > ? ','');}),'statement_not_read_only'],
   ];
@@ -281,9 +298,9 @@ try{
   assert.ok(!/\bcloudflare\b/.test(text),'the function does not name the connector: the request is injected');
   assert.ok(/^async function readCopy/.test(text));
   const options={plan:emitSql(),databaseId:DATABASE};
-  const bundle=bundleText(options);
+  const bundle=executeBodyText(options);
   assert.ok(bundle.startsWith('async () => {')&&bundle.includes(emitSql().statementsDigest)&&bundle.includes(JSON.stringify(DATABASE)));
-  assert.equal(bundle,bundleText(options),'the text is deterministic');
+  assert.equal(bundle,executeBodyText(options),'the text is deterministic');
   const fake=connector(prod);
   const ran=await new AsyncFunction('cloudflare','accountId','return ('+bundle+')()')({request:fake.request},ACCOUNT);
   assert.equal(ran.ok,true,JSON.stringify(ran.stop));
@@ -295,6 +312,21 @@ try{
   // `now` is injected; without it the stamp is a valid ISO time
   const stamped=await readCopy({request:connector(prod).request,accountId:ACCOUNT,databaseId:DATABASE,plan:emitSql()});
   assert.ok(stamped.ok&&Number.isFinite(Date.parse(stamped.results._capturedAt)));
+ }
+
+ // 4b. The allowlist inside the text is the reviewed COPY_PLAN and its digest (the text of the reader names exactly them), and the single-result delivery is BLOCKED.
+ {
+  const text=String(module.readCopy);
+  assert.ok(text.includes(JSON.stringify(COPY_PLAN.map(item=>[item.table,item.columns]))),'the allowlist inside the reader equals COPY_PLAN, in order');
+  assert.ok(text.includes("'"+emitSql().statementsDigest+"'"),'the digest inside the reader equals the statements digest');
+  assert.throws(()=>bundleText({plan:emitSql(),databaseId:DATABASE}),/single_result_delivery_blocked/,'the operator bundle is refused');
+  assert.throws(()=>bundleText(),/single_result_delivery_blocked/);
+  if(docs){
+   const cli=spawnSync(process.execPath,['scripts/epg-producer-m2b-reader-bundle.mjs','bundle','--database',DATABASE],{encoding:'utf8'});
+   assert.equal(cli.status,3);assert.equal(cli.stdout,'','no text on stdout');assert.match(cli.stderr,/BLOCKED/);
+   const digest=spawnSync(process.execPath,['scripts/epg-producer-m2b-reader-bundle.mjs','digest'],{encoding:'utf8'});
+   assert.equal(digest.status,0);assert.equal(JSON.parse(digest.stdout).readerDigest,readerDigest());
+  }
  }
 
  // 5. Static: the module imports only the digest primitive; the reader never names a write statement.

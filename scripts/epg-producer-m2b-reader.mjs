@@ -5,7 +5,7 @@
 // (the schema version check, the Film/Person marker read, then per table the count statement and the keyset pages), checks the response and the connector metrics of EACH response BEFORE it sends the next statement, and assembles exactly the
 // results file that `verifyResults` of scripts/epg-producer-m2b.mjs accepts. On ANY problem it STOPS: it returns `{ok:false, stop:{code, ...}, requests}`, sends no further request and has no retry loop.
 //
-// `readCopy` is written to be self-contained (no import, no outer name except the JS built-ins), so `String(readCopy)` is its complete text: `bundleText` wraps that text for an `execute` call, and `readerDigest` is the digest of it.
+// `readCopy` is written to be self-contained (no import, no outer name except the JS built-ins), so `String(readCopy)` is its complete text, and `readerDigest` is the digest of it. The plan allowlist (digest, ordered tables and columns) is part of that text. Delivery of a full-table result through one `execute` call is BLOCKED: `bundleText` refuses.
 // Nothing here is a GO: a production read needs its own exactly scoped owner GO.
 import {createHash} from 'node:crypto';
 
@@ -15,6 +15,9 @@ export async function readCopy({request,accountId,databaseId,plan,pageRows:pageR
  const SCHEMA_SQL='SELECT version FROM schema_contract WHERE id = 1';
  const MARKER_SQL='SELECT mode, cutover, generation FROM film_person_authority WHERE id = 1';
  const IDENT=/^[a-z_][a-z0-9_]*$/;
+ // The APPROVED plan, bound into the reviewed text: the statements digest and the ORDERED tables with their ORDERED columns of COPY_PLAN in scripts/epg-producer-m2b.mjs (a test keeps the two in step). A caller-supplied plan is only DATA that must equal it; nothing outside it is ever requested.
+ const APPROVED_DIGEST='ca84fae592b98b40696348f1c7af355284b8f5acc48e44749a5440aeb79a06b3';
+ const APPROVED=[["film",["id","contract_version","canonical_identity","original_title","updated_at"]],["film_metadata",["film_id","schema_version","year","runtime","synopsis","poster","url","genres_json","people_version","payload_json","r2_key","content_sha256","updated_at"]],["film_sync_state",["film_id","metadata_at","synopsis_fetched_at","people_names_version","people_localized_at"]],["film_external_id",["film_id","scheme","value","trusted","conflicting","provenance_json"]],["film_redirect",["from_id","to_film_id","at"]],["film_dimension",["film_id","dimension","status","source","source_version","provenance_json","value","authority","last_error","failure_reason","retry_at","attempts","next_action","updated_at"]],["film_localization_source",["film_id","source","value","source_version","provenance_json","request_id","observed_at","updated_at"]],["watchlist_film",["film_id","updated_at"]],["person",["id","role_id","contract_version","updated_at"]],["person_external_id",["person_id","scheme","value","trusted","conflicting","provenance_json"]],["person_alias",["person_id","kind","value","provenance_json"]],["film_person_credit",["film_id","person_id","role","ordinal"]],["canonical_revision",["kind","id","revision","updated_at"]]];
  const state={requests:0};
  const halt=(code,detail)=>{const error=new Error(code);error.halt={code,...(detail||{})};throw error;};
  const isInt=value=>Number.isInteger(value)&&value>=0;
@@ -46,8 +49,11 @@ export async function readCopy({request,accountId,databaseId,plan,pageRows:pageR
    const pageSql='SELECT rowid AS _rid, '+page.columns.join(', ')+' FROM '+table+' WHERE rowid > ? ORDER BY rowid LIMIT ?';
    if(count.sql!==countSql||page.sql!==pageSql||!readOnly(count.sql)||!readOnly(page.sql))halt('statement_not_read_only',{table});
    if(tables.some(item=>item.table===table))halt('plan_invalid',{why:'duplicate'});
+   const approved=APPROVED[tables.length];
+   if(!approved||approved[0]!==table||approved[1].length!==page.columns.length||approved[1].some((column,place)=>column!==page.columns[place]))halt('plan_not_approved',{why:'table',table});
    tables.push({table,columns:page.columns,countSql,pageSql});
   }
+  if(plan.statementsDigest!==APPROVED_DIGEST||tables.length!==APPROVED.length)halt('plan_not_approved',{why:'plan'});
   // ---- one statement per request; every response is judged before the next request ----
   const target='/accounts/'+accountId+'/d1/database/'+databaseId+'/query';
   let totalRead=0,totalMs=0;
@@ -122,11 +128,13 @@ export async function readCopy({request,accountId,databaseId,plan,pageRows:pageR
  }
 }
 
-// The text an authorized operator hands to an `execute` call: the function text, called with the plan and the target database inline. The plan is DATA (the output of `emit-sql`); the database id is the operator's.
-export function bundleText({plan,databaseId,pageRows}){
+// The text of an `execute` body: the function text, called with the plan and the target database inline. It is NOT an operator path: the single returned result of a full-table run (about 210,000 rows) is far above what the connector returns (about 6,000 tokens by default), so
+// `bundleText` below refuses and this function exists only so that the tests can prove the text is self-contained and runs as a body.
+export function executeBodyText({plan,databaseId,pageRows}){
  const options='{request:o=>cloudflare.request(o),accountId,databaseId:'+JSON.stringify(databaseId)+',plan:'+JSON.stringify(plan)+(pageRows===undefined?'':',pageRows:'+JSON.stringify(pageRows))+'}';
  return 'async () => {\n'+String(readCopy)+'\nreturn readCopy('+options+');\n}';
 }
+// The operator entry point is BLOCKED (Controller review of PR #600): no text is printed until a tested, lossless connector-to-local-file handoff has been reviewed and the owner has decided the delivery path.
+export function bundleText(){throw new Error('single_result_delivery_blocked');}
 // The digest of the reader: of the text of `readCopy` alone, so it does not move with the plan or the database id.
 export const readerDigest=()=>createHash('sha256').update(String(readCopy)).digest('hex');
-export const bundleDigest=options=>createHash('sha256').update(bundleText(options)).digest('hex');
