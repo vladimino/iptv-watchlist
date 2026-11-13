@@ -20,7 +20,7 @@ const clone=value=>JSON.parse(JSON.stringify(value));
 const REF='cutover_accepted/v2:'+'ab'.repeat(32);
 const LEASE='h1-load:20261112T1000';
 const NOW='2026-11-12T10:00:00.000Z';
-const COUNTS=[708,401,4];
+const COUNTS=[708,398,4];
 const hex=char=>char.repeat(64);
 
 // ---------- the emitted statements ----------
@@ -41,8 +41,8 @@ assert.throws(()=>K.step('x','y','SELECT 1; DROP TABLE a',''),/read-only SELECT/
 assert.equal(K.SCHEMA_VERSION,19);
 assert.equal(K.MARKER_GENERATION,1);
 assert.equal(K.MIN_LEASE_REMAINING_MS,15*60000);
-assert.deepEqual(K.parseCounts('708,401,4'),[708,401,4]);
-for(const bad of [null,undefined,'','708,401','708,401,4,1','a,b,c','708,-1,4','708,401,4 ','1234567,1,1'])assert.equal(K.parseCounts(bad),null,String(bad));
+assert.deepEqual(K.parseCounts('708,398,4'),[708,398,4]);
+for(const bad of [null,undefined,'','708,398','708,398,4,1','a,b,c','708,-1,4','708,398,4 ','1234567,1,1'])assert.equal(K.parseCounts(bad),null,String(bad));
 
 // ---------- the real chain: a schema 19 database at prepared, as production is expected to be before H1 ----------
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
@@ -85,8 +85,8 @@ const base=()=>({
 });
 const preflight=base();
 const held={...base(),projector_lease:[{lease_id:LEASE,lease_until:'2026-11-12T10:45:00.000Z'}]};
-const loaded=()=>({...clone(held),class_counts:[{film_rated_admission:708,film_retention:401,tmdb_retirement_decision:4}]});
-const released=()=>({...base(),class_counts:[{film_rated_admission:708,film_retention:401,tmdb_retirement_decision:4}]});
+const loaded=()=>({...clone(held),class_counts:[{film_rated_admission:708,film_retention:398,tmdb_retirement_decision:4}]});
+const released=()=>({...base(),class_counts:[{film_rated_admission:708,film_retention:398,tmdb_retirement_decision:4}]});
 const P1={expectReference:REF,now:NOW};
 const H1={expectReference:REF,leaseId:LEASE,now:NOW};
 const R1={...H1,counts:COUNTS,held};
@@ -169,7 +169,7 @@ const noted=K.verifyState('preflight',{...clone(preflight),other_counts:[{...pre
 assert.equal(noted.ok,true);assert.ok(noted.notes.includes('canonical_revision_not_empty:3'));
 // the three classes must be empty before the load
 pre({class_counts:[{film_rated_admission:1,film_retention:0,tmdb_retirement_decision:0}]},'class_not_empty:film_rated_admission:1');
-pre({class_counts:[{film_rated_admission:0,film_retention:401,tmdb_retirement_decision:4}]},['class_not_empty:film_retention:401','class_not_empty:tmdb_retirement_decision:4']);
+pre({class_counts:[{film_rated_admission:0,film_retention:398,tmdb_retirement_decision:4}]},['class_not_empty:film_retention:398','class_not_empty:tmdb_retirement_decision:4']);
 pre({class_counts:[{film_rated_admission:0,film_retention:0}]},'count_unreadable:tmdb_retirement_decision');
 pre({class_counts:[]},'class_counts_rows:0');
 pre({schema:'rows'},'result_malformed:schema');
@@ -184,7 +184,7 @@ assert.equal(K.verifyState('held',held,{expectReference:REF,now:NOW}).refusals[0
 assert.equal(K.verifyState('held',held,{expectReference:REF,leaseId:'a b',now:NOW}).refusals[0],'lease_id_invalid');
 assert.equal(K.verifyState('readback',loaded(),{...H1,held}).refusals[0],'counts_missing');
 assert.equal(K.verifyState('readback',loaded(),{...H1,held,counts:[0,0,0]}).refusals[0],'counts_invalid');
-assert.equal(K.verifyState('readback',loaded(),{...H1,held,counts:[708,401]}).refusals[0],'counts_invalid');
+assert.equal(K.verifyState('readback',loaded(),{...H1,held,counts:[708,398]}).refusals[0],'counts_invalid');
 assert.equal(K.verifyState('readback',loaded(),{...H1,held,counts:[708,-1,4]}).refusals[0],'counts_invalid');
 assert.deepEqual(K.verifyState('readback',loaded(),{...H1,counts:COUNTS}).refusals,['held_bundle_missing']);
 // held: the lease must be the run's own, live, with time left
@@ -198,9 +198,9 @@ hld({class_counts:[{film_rated_admission:5,film_retention:0,tmdb_retirement_deci
 hld({discovery_lease:[{id:1,lease_id:'x',expires_at:Date.parse(NOW)+1}]},'discovery_lease_live');
 hld({projector_window:[{state:'held',expires_at:1}]},'projector_window_not_idle:held');
 // readback: the pinned counts, the lease still ours, nothing else moved against the held bundle
-rdb({class_counts:[{film_rated_admission:707,film_retention:401,tmdb_retirement_decision:4}]},'count_not_expected:film_rated_admission:707');
+rdb({class_counts:[{film_rated_admission:707,film_retention:398,tmdb_retirement_decision:4}]},'count_not_expected:film_rated_admission:707');
 rdb({class_counts:[{film_rated_admission:708,film_retention:402,tmdb_retirement_decision:4}]},'count_not_expected:film_retention:402');
-rdb({class_counts:[{film_rated_admission:708,film_retention:401,tmdb_retirement_decision:3}]},'count_not_expected:tmdb_retirement_decision:3');
+rdb({class_counts:[{film_rated_admission:708,film_retention:398,tmdb_retirement_decision:3}]},'count_not_expected:tmdb_retirement_decision:3');
 rdb({class_counts:[{film_rated_admission:0,film_retention:0,tmdb_retirement_decision:0}]},COUNTS.map((n,i)=>'count_not_expected:'+L.TABLES[L.CLASSES[i]]+':0'));
 rdb({projector_lease:[]},'projector_lease_rows:0');
 rdb({projector_lease:[{lease_id:'someone-else-1',lease_until:'2026-11-12T10:45:00.000Z'}]},'projector_lease_not_ours:someone-else-1');
@@ -228,7 +228,7 @@ check('released',{...released(),projector_lease:[{lease_id:LEASE,lease_until:'20
 check('released',{...released(),projector_lease:[{lease_id:'someone-else-1',lease_until:'2026-11-12T10:45:00.000Z'}]},R1,'projector_lease_foreign');
 check('released',{...released(),projector_lease:[{lease_id:null,lease_until:null},{lease_id:null,lease_until:null}]},R1,'projector_lease_rows:2');
 assert.equal(K.verifyState('released',{...released(),projector_lease:[{lease_id:null,lease_until:null}]},R1).ok,true);
-check('released',{...released(),class_counts:[{film_rated_admission:700,film_retention:401,tmdb_retirement_decision:4}]},R1,'count_not_expected:film_rated_admission:700');
+check('released',{...released(),class_counts:[{film_rated_admission:700,film_retention:398,tmdb_retirement_decision:4}]},R1,'count_not_expected:film_rated_admission:700');
 check('released',released(),{...R1,held:undefined},'held_bundle_missing');
 check('released',{...released(),other_counts:[{...held.other_counts[0],film:99}]},R1,'unchanged_moved:film:100->99');
 
@@ -246,11 +246,11 @@ const SOURCES={verifiedFilms:hex('1'),viewIndex:hex('2'),retirements:hex('3')};
 const planSummary=()=>({ok:true,mode:'dry-run',version:L.LOADER_VERSION,digest:hex('9'),gate:{mode:'prepared',cutover:'open',generation:1,baselineReference:REF},at:'2026-11-12T10:00:00.000Z',complete:true,noop:false,
  sources:{verifiedFilms:{key:L.SOURCE_KEYS.verifiedFilms,sha256:SOURCES.verifiedFilms,size:1000},viewIndex:{key:L.SOURCE_KEYS.viewIndex,sha256:SOURCES.viewIndex,size:2000},retirements:{key:L.SOURCE_KEYS.retirements,sha256:SOURCES.retirements,size:300}},
  classes:Object.fromEntries(L.CLASSES.map((name,i)=>[name,{expected:L.EXPECTED[name],planned:COUNTS[i],already:0,toLoad:COUNTS[i],stored:0,digest:hex('a'),toLoadDigest:hex('a'),skipped:{unverified:0}}])),
- batches:18+11+1,statements:1113,deferred:0,bounds:{batchRows:40,runBatches:40,runStatements:1200}});
-// the batch arithmetic of the loader: 708 -> 18 batches, 401 -> 11, 4 -> 1
-assert.equal(Math.ceil(708/40)+Math.ceil(401/40)+Math.ceil(4/40),30);
+ batches:18+10+1,statements:1110,deferred:0,bounds:{batchRows:40,runBatches:40,runStatements:1200}});
+// the batch arithmetic of the loader: 708 -> 18 batches, 398 -> 10, 4 -> 1
+assert.equal(Math.ceil(708/40)+Math.ceil(398/40)+Math.ceil(4/40),29);
 const PP={planDigest:hex('9'),counts:COUNTS,expectReference:REF,at:'2026-11-12T10:00:00.000Z',sources:SOURCES};
-assert.deepEqual(K.verifyPlan(planSummary(),PP),{ok:true,refusals:[],notes:[],total:1113,batches:30});
+assert.deepEqual(K.verifyPlan(planSummary(),PP),{ok:true,refusals:[],notes:[],total:1110,batches:29});
 const plan=(mutate,want,opts=PP)=>{const value=planSummary();mutate(value);const result=K.verifyPlan(value,opts);assert.equal(result.ok,false);assert.deepEqual(result.refusals,[].concat(want));};
 plan(v=>{v.ok=false;},'plan_not_ok');
 plan(v=>{v.mode='apply';},'plan_not_dry_run');
@@ -277,15 +277,15 @@ plan(v=>{v.sources.verifiedFilms.size=L.MAX_SOURCE_BYTES+1;},'source_invalid:ver
 plan(v=>{v.sources.viewIndex.sha256='zz';},'source_invalid:viewIndex');
 plan(v=>{delete v.sources;},['source_invalid:verifiedFilms','source_invalid:viewIndex','source_invalid:retirements']);
 plan(v=>{v.classes.retention.planned=400;},'class_planned_not_pinned:retention:400');
-plan(v=>{v.classes.retention.toLoad=400;v.statements=1112;},['class_toload_not_pinned:retention:400','batches_not_expected:30/29']);
+plan(v=>{v.classes.retention.toLoad=440;v.statements=1152;},['class_toload_not_pinned:retention:440','batches_not_expected:29/30']);
 plan(v=>{v.classes.ratedAdmission.already=1;},'class_already_loaded:ratedAdmission:1');
 plan(v=>{v.classes.retirement.stored=2;},'class_not_empty:retirement:2');
 plan(v=>{v.classes.retirement.expected=5;},'class_expected_not_loader:retirement:5');
 plan(v=>{v.classes.retention.digest='x';},'class_digest_shape:retention');
 plan(v=>{v.classes.retention.toLoadDigest=hex('b');},'class_digest_not_whole_set:retention');
-plan(v=>{delete v.classes.retirement;},['class_missing:retirement','statements_not_total:1113/1109','batches_not_expected:30/29']);
-plan(v=>{v.statements=1112;},'statements_not_total:1112/1113');
-plan(v=>{v.batches=31;},'batches_not_expected:31/30');
+plan(v=>{delete v.classes.retirement;},['class_missing:retirement','statements_not_total:1110/1106','batches_not_expected:29/28']);
+plan(v=>{v.statements=1109;},'statements_not_total:1109/1110');
+plan(v=>{v.batches=31;},'batches_not_expected:31/29');
 plan(v=>{v.expectedRows={};},'private_plan_pasted');
 plan(v=>{v.batchStatements=[];},'private_plan_pasted');
 const big=planSummary();big.classes.ratedAdmission.toLoad=1000;big.classes.retention.toLoad=200;
@@ -294,7 +294,7 @@ const skipped=planSummary();skipped.classes.ratedAdmission.skipped={unverified:0
 const skippedResult=K.verifyPlan(skipped,PP);
 assert.equal(skippedResult.ok,true);assert.deepEqual(skippedResult.notes,['skipped ratedAdmission: noFilm=2 (accepted gaps counted, not loaded)']);
 // a plan for counts the loader does not expect (a changed count is a reviewed loader change, not a verifier input)
-plan(()=>{},['class_planned_not_pinned:ratedAdmission:708','class_toload_not_pinned:ratedAdmission:708'],{...PP,counts:[709,401,4]});
+plan(()=>{},['class_planned_not_pinned:ratedAdmission:708','class_toload_not_pinned:ratedAdmission:708'],{...PP,counts:[709,398,4]});
 // pins are mandatory
 assert.deepEqual(K.verifyPlan(planSummary(),{}).refusals,['plan_digest_missing','expected_reference_missing','counts_missing','at_invalid','source_sha_missing:verifiedFilms','source_sha_missing:viewIndex','source_sha_missing:retirements']);
 assert.deepEqual(K.verifyPlan(planSummary(),{...PP,planDigest:'zz'}).refusals,['plan_digest_invalid','plan_digest_mismatch']);
@@ -307,13 +307,13 @@ const planDiagnostic=K.verifyPlan(planSummary(),{diagnostic:true});
 assert.equal(planDiagnostic.ok,false);assert.equal(planDiagnostic.diagnosticOnly,true);assert.equal(planDiagnostic.shapeOk,true);
 
 // ---------- the batch list printed by `sql --apply` ----------
-const emittedList=()=>{const batches=[];let index=0,digit=0;for(const [cls,count] of [['ratedAdmission',708],['retention',401],['retirement',4]])for(let left=count;left>0;left-=40)batches.push({index:index++,class:cls,rows:Math.min(40,left),digest:hex('0123456789abcdef'[digit++%16])+''});return batches;};
+const emittedList=()=>{const batches=[];let index=0,digit=0;for(const [cls,count] of [['ratedAdmission',708],['retention',398],['retirement',4]])for(let left=count;left>0;left-=40)batches.push({index:index++,class:cls,rows:Math.min(40,left),digest:hex('0123456789abcdef'[digit++%16])+''});return batches;};
 // 30 distinct digests: make them distinct
 const distinct=list=>list.map((batch,i)=>({...batch,digest:i.toString(16).padStart(2,'0').repeat(32)}));
 const emitted=()=>({ok:true,planDigest:hex('9'),batches:distinct(emittedList()),note:'emitted, not executed'});
 const EP={planDigest:hex('9'),counts:COUNTS};
 const good=K.verifyEmitted(emitted(),EP);
-assert.equal(good.ok,true);assert.deepEqual(good.refusals,[]);assert.equal(good.batches,30);assert.equal(good.total,1113);assert.match(good.batchSetDigest,/^[0-9a-f]{64}$/);
+assert.equal(good.ok,true);assert.deepEqual(good.refusals,[]);assert.equal(good.batches,29);assert.equal(good.total,1110);assert.match(good.batchSetDigest,/^[0-9a-f]{64}$/);
 assert.equal(K.verifyEmitted(emitted(),{...EP,batchSetDigest:good.batchSetDigest}).ok,true);
 const emit=(mutate,want,opts=EP)=>{const value=emitted();mutate(value);const result=K.verifyEmitted(value,opts);assert.equal(result.ok,false);assert.deepEqual(result.refusals,[].concat(want));};
 emit(()=>{},'batch_set_digest_mismatch',{...EP,batchSetDigest:hex('f')});
@@ -324,16 +324,16 @@ emit(v=>{delete v.batches;},'batches_missing');
 emit(v=>{v.batches=[];},'batches_missing');
 emit(v=>{v.batches[3].index=9;},'batch_index:3:9');
 emit(v=>{v.batches[0].class='nothing';},['batch_class:0','class_rows_not_pinned:ratedAdmission:668']);
-emit(v=>{v.batches[18].class='ratedAdmission';},['class_rows_not_pinned:ratedAdmission:748','class_rows_not_pinned:retention:361']);
+emit(v=>{v.batches[18].class='ratedAdmission';},['class_rows_not_pinned:ratedAdmission:748','class_rows_not_pinned:retention:358']);
 emit(v=>{v.batches[0].rows=41;},['batch_rows:0:41','class_rows_not_pinned:ratedAdmission:709']);
 emit(v=>{v.batches[0].rows=0;},['batch_rows:0:0','class_rows_not_pinned:ratedAdmission:668']);
 emit(v=>{v.batches[1].digest='x';},'batch_digest_shape:1');
 emit(v=>{v.batches[2].digest=v.batches[1].digest;},'batch_digest_duplicate:2');
-emit(v=>{v.batches.push({index:30,class:'retirement',rows:1,digest:hex('e')});},['class_rows_not_pinned:retirement:5']);
+emit(v=>{v.batches.push({index:29,class:'retirement',rows:1,digest:hex('e')});},['class_rows_not_pinned:retirement:5']);
 emit(v=>{v.batches[0]=null;},['batch_malformed:0','class_rows_not_pinned:ratedAdmission:668']);
 emit(v=>{v.statements=[];},'sql_pasted');
 emit(v=>{v.sql='INSERT';},'sql_pasted');
-assert.ok(K.verifyEmitted({...emitted(),batches:[...emitted().batches,...Array.from({length:11},(_,i)=>({index:30+i,class:'retirement',rows:1,digest:(i+100).toString(16).padStart(2,'0').repeat(32).slice(0,64)}))]},EP).refusals.includes('run_cap_exceeded'));
+assert.ok(K.verifyEmitted({...emitted(),batches:[...emitted().batches,...Array.from({length:12},(_,i)=>({index:29+i,class:'retirement',rows:1,digest:(i+100).toString(16).padStart(2,'0').repeat(32).slice(0,64)}))]},EP).refusals.includes('run_cap_exceeded'));
 // the order of the classes: a retention batch before an admission batch is refused
 const swapped=emitted();[swapped.batches[17],swapped.batches[18]]=[{...swapped.batches[18],index:17},{...swapped.batches[17],index:18}];
 assert.ok(K.verifyEmitted(swapped,EP).refusals.includes('batch_order:18'));
@@ -448,11 +448,11 @@ assert.equal(cli(['verify-preflight',fPre,'--now',NOW]),1,'no pinned reference')
 assert.equal(cli(['verify-preflight',fPre,'--diagnostic']),1);assert.equal(JSON.parse(logged[0]).diagnosticOnly,true);
 assert.equal(cli(['verify-held',fHeld,'--reference',REF,'--lease-id',LEASE,'--now',NOW]),0);
 assert.equal(cli(['verify-held',fHeld,'--reference',REF,'--now',NOW]),1);
-assert.equal(cli(['verify-readback',fLoaded,'--held',fHeld,'--reference',REF,'--lease-id',LEASE,'--counts','708,401,4','--now',NOW]),0);
-assert.equal(cli(['verify-readback',fLoaded,'--reference',REF,'--lease-id',LEASE,'--counts','708,401,4','--now',NOW]),1);
+assert.equal(cli(['verify-readback',fLoaded,'--held',fHeld,'--reference',REF,'--lease-id',LEASE,'--counts','708,398,4','--now',NOW]),0);
+assert.equal(cli(['verify-readback',fLoaded,'--reference',REF,'--lease-id',LEASE,'--counts','708,398,4','--now',NOW]),1);
 assert.equal(cli(['verify-readback',fLoaded,'--held',fHeld,'--reference',REF,'--lease-id',LEASE,'--now',NOW]),1,'counts are mandatory');
-assert.equal(cli(['verify-plan',fPlan,'--plan-digest',hex('9'),'--counts','708,401,4','--reference',REF,'--at','2026-11-12T10:00:00.000Z','--verified-films-sha',SOURCES.verifiedFilms,'--view-index-sha',SOURCES.viewIndex,'--retirements-sha',SOURCES.retirements]),0);
-assert.equal(cli(['verify-plan',fPlan,'--plan-digest',hex('9'),'--counts','708,401,4','--reference',REF,'--at','2026-11-12T10:00:00.000Z']),1,'source digests are mandatory');
+assert.equal(cli(['verify-plan',fPlan,'--plan-digest',hex('9'),'--counts','708,398,4','--reference',REF,'--at','2026-11-12T10:00:00.000Z','--verified-films-sha',SOURCES.verifiedFilms,'--view-index-sha',SOURCES.viewIndex,'--retirements-sha',SOURCES.retirements]),0);
+assert.equal(cli(['verify-plan',fPlan,'--plan-digest',hex('9'),'--counts','708,398,4','--reference',REF,'--at','2026-11-12T10:00:00.000Z']),1,'source digests are mandatory');
 const fPriv=write('plan.private.json',okPlan),fPrivOther=write('plan.other.json',otherLease);
 const privArgs=['--plan-digest',okPlan.digest,'--counts','3,2,1','--reference',REF,'--at','2026-11-12T10:00:00.000Z','--verified-films-sha',SOURCES.verifiedFilms,'--view-index-sha',SOURCES.viewIndex,'--retirements-sha',SOURCES.retirements];
 assert.equal(cli(['verify-private-plan',fPriv,'--lease-id',LEASE,...privArgs]),0);assert.equal(JSON.parse(logged[0]).ok,true);assert.ok(!logged[0].includes('PRIVATE-TITLE'));
@@ -463,7 +463,7 @@ assert.equal(cli(['verify-private-plan',fPriv,...privArgs]),1,'the lease pin is 
 assert.equal(cli(['verify-private-plan',fPrivOther,'--lease-id',LEASE,...privArgs.map(item=>item===okPlan.digest?otherLease.digest:item)]),1,'another lease id');assert.ok(JSON.parse(logged[0]).refusals.includes('lease_id_mismatch'));
 assert.equal(cli(['verify-private-plan',path.join(root,'missing.json'),'--lease-id',LEASE,...privArgs]),1,'unreadable file');assert.ok(!logged[0].includes('missing.json'));
 assert.equal(cli(['verify-private-plan',fPriv,'--lease-id',LEASE,'--diagnostic',...privArgs]),1,'no diagnostic pass');
-assert.equal(cli(['verify-emitted',fEmit,'--plan-digest',hex('9'),'--counts','708,401,4']),0);
+assert.equal(cli(['verify-emitted',fEmit,'--plan-digest',hex('9'),'--counts','708,398,4']),0);
 assert.equal(cli(['verify-emitted',fEmit,'--plan-digest',hex('9')]),1);
 assert.equal(cli(['verify-batch',fBatch,'--rows','2']),0);
 assert.equal(cli(['verify-batch',fBatch,'--rows','3']),1);

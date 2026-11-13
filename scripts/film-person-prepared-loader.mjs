@@ -1,6 +1,6 @@
 // AIR-374 P5 (ADR 0099, ADR 0110; owner decision 2 of 11 Nov 2026, https://trello.com/c/ha7ais3w): the bounded, idempotent loader of the three D1 classes that
-// the projector does not write and that are EMPTY while the marker is `prepared`: film_rated_admission (expected 708), film_retention (401) and
-// tmdb_retirement_decision (4), 1,113 rows. The fenced writers (admitRatedFilm, retainFilm, recordRetirementDecision) need the marker `open`
+// the projector does not write and that are EMPTY while the marker is `prepared`: film_rated_admission (expected 708), film_retention (398) and
+// tmdb_retirement_decision (4), 1,110 rows. The fenced writers (admitRatedFilm, retainFilm, recordRetirementDecision) need the marker `open`
 // (assertWritable) and so cannot be used; this tool is their `prepared` counterpart, separately verified, and it is NOT a second canonical writer: it never writes
 // a Film, a Person, an identity row or the marker, only these three tables, and only against a verified baseline.
 // OFFLINE and INACTIVE: not bundled (build.mjs lists no such file), no `src/` or Worker import, no route, cron or job, no side effect at import. It has NO write
@@ -20,7 +20,6 @@ import {createHash} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {ACCEPTED_DISCREPANCIES} from '../src/film-person-cutover-accepted.js';
 import {watchlistAdmissionsFromIndex} from '../src/enrichment-projection.js';
 import {RATED_RECEIPT_KEY,verifiedAdmission} from '../src/film-admission.js';
 import {RETIREMENTS_KEY,normalizeDecision,prepareRetirementImport} from '../src/tmdb-retirement-decisions.js';
@@ -34,8 +33,9 @@ const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export const LOADER_VERSION=1;
 export const CLASSES=Object.freeze(['ratedAdmission','retention','retirement']);
 export const TABLES=Object.freeze({ratedAdmission:'film_rated_admission',retention:'film_retention',retirement:'tmdb_retirement_decision'});
-// The pinned expectations are the accepted 11 Nov 2026 measurement (ACCEPTED_DISCREPANCIES.caps), not a number typed again.
-export const EXPECTED=Object.freeze(Object.fromEntries(CLASSES.map(name=>[name,ACCEPTED_DISCREPANCIES.caps[name]])));
+// The pinned H1 expectations: the owner-accepted counts of the 12 Nov 2026 snapshot (retention 398; the 11 Nov value 401 was superseded by owner decision). They are
+// the loader's own constant: the cutover record ACCEPTED_DISCREPANCIES.caps (src/film-person-cutover-accepted.js, the 10/11 Nov measurement) is not changed by it.
+export const EXPECTED=Object.freeze({ratedAdmission:708,retention:398,retirement:4});
 // Bounds. A batch is one atomic D1 batch with one statement per row, never more than the fenced writers' own cap (MUTATION_STATEMENT_CAP, 60). A run (one plan,
 // one pinned digest) carries at most RUN_BATCHES batches; what does not fit is reported as `deferred` and goes into a later run built from the then-current state.
 export const BATCH_ROWS=40;

@@ -72,7 +72,7 @@ const production=path.join(root,'production.sqlite');
 sql(production,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 assert.deepEqual(rows(production,'SELECT version FROM schema_contract WHERE id = 1'),[{version:19}],'schema 19');
 sql(production,`UPDATE film_person_baseline SET state='loading' WHERE id=1;UPDATE film_person_baseline SET state='verified',reference=${q(REF)} WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;`);
-const world=makeWorld({admissions:708,retention:401,retirements:4,noise:true});
+const world=makeWorld({admissions:708,retention:398,retirements:4,noise:true});
 sql(production,world.script);
 // rows in other copied tables: more than one page of canonical_revision at the page size the copy uses below, so the copy resumes inside a table
 sql(production,"WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<250) INSERT INTO canonical_revision (kind,id,revision,updated_at) SELECT 'film','film:rev'||i,i,'2026-11-01T00:00:00.000Z' FROM n;");
@@ -177,9 +177,9 @@ const dry=loader(['plan',...common(first.file),'--out',outDir]);
 assert.equal(dry.status,0,dry.stderr);
 const shown=JSON.parse(dry.stdout);
 assert.equal(shown.ok,true);assert.equal(shown.mode,'dry-run');assert.equal(shown.noop,false);assert.equal(shown.complete,true);
-assert.deepEqual(L.CLASSES.map(name=>shown.classes[name].toLoad),[708,401,4]);
+assert.deepEqual(L.CLASSES.map(name=>shown.classes[name].toLoad),[708,398,4]);
 assert.deepEqual(L.CLASSES.map(name=>shown.classes[name].stored),[0,0,0]);
-assert.equal(shown.batches,Math.ceil(708/40)+Math.ceil(401/40)+1);
+assert.equal(shown.batches,Math.ceil(708/40)+Math.ceil(398/40)+1);
 // the plan from the copy is the plan from production, and a second copy gives the same digest
 assert.equal(JSON.parse(loader(['plan',...common(production)]).stdout).digest,shown.digest,'plan from the copy = plan from production');
 assert.equal(JSON.parse(loader(['plan',...common(first.file)]).stdout).digest,shown.digest,'deterministic');
@@ -190,7 +190,7 @@ assert.equal(sha(fs.readFileSync(production)),productionBytes);
 const summaryFile=path.join(root,'plan-summary.json'),privateFile=path.join(outDir,'plan.private.json');
 fs.writeFileSync(summaryFile,dry.stdout);
 const sources={verifiedFilms:sha(world.bytes.verifiedFilms),viewIndex:sha(world.bytes.viewIndex),retirements:sha(world.bytes.retirements)};
-const pins=['--counts','708,401,4','--reference',REF,'--at',AT,'--verified-films-sha',sources.verifiedFilms,'--view-index-sha',sources.viewIndex,'--retirements-sha',sources.retirements];
+const pins=['--counts','708,398,4','--reference',REF,'--at',AT,'--verified-films-sha',sources.verifiedFilms,'--view-index-sha',sources.viewIndex,'--retirements-sha',sources.retirements];
 const verdict=(result)=>({status:result.status,out:JSON.parse(result.stdout)});
 {
  const diagnostic=verdict(verifier(['verify-plan',summaryFile,'--diagnostic',...pins]));
@@ -207,7 +207,7 @@ const verdict=(result)=>({status:result.status,out:JSON.parse(result.stdout)});
  refused(['verify-private-plan',privateFile,'--plan-digest',shown.digest,...pins],'lease_id_missing','no lease id');
  refused(['verify-private-plan',privateFile,'--plan-digest',shown.digest,'--lease-id',LEASE,'--window-owner','window-other-01',...pins],'window_owner_mismatch','a window owner the plan does not carry');
  refused(['verify-private-plan',privateFile,'--plan-digest','0'.repeat(64),'--lease-id',LEASE,...pins],'plan_digest_mismatch','another digest');
- refused(['verify-private-plan',privateFile,'--plan-digest',shown.digest,'--lease-id',LEASE,...pins.map(item=>item==='708,401,4'?'708,401,5':item)],'class_planned_not_pinned','another count');
+ refused(['verify-private-plan',privateFile,'--plan-digest',shown.digest,'--lease-id',LEASE,...pins.map(item=>item==='708,398,4'?'708,398,5':item)],'class_planned_not_pinned','another count');
  refused(['verify-private-plan',privateFile,'--plan-digest',shown.digest,'--lease-id',LEASE,...pins.map(item=>item===sources.viewIndex?'f'.repeat(64):item)],'source_sha_mismatch','another source digest');
  refused(['verify-plan',privateFile,'--plan-digest',shown.digest,...pins],'private_plan_pasted','the private plan is not a summary');
  const edited=JSON.parse(fs.readFileSync(privateFile,'utf8'));edited.batchStatements[0].statements[0].params[0]='film:tmdb:1';
@@ -219,10 +219,10 @@ const sqlOut=path.join(root,'sql-out');
 const emitted=loader(['sql',...common(first.file),'--apply','--plan-digest',shown.digest,'--out',sqlOut]);
 assert.equal(emitted.status,0,emitted.stderr);
 const emittedJson=JSON.parse(emitted.stdout);
-const emittedVerdict=V.verifyEmitted(emittedJson,{planDigest:shown.digest,counts:[708,401,4]});
+const emittedVerdict=V.verifyEmitted(emittedJson,{planDigest:shown.digest,counts:[708,398,4]});
 assert.equal(emittedVerdict.ok,true,JSON.stringify(emittedVerdict));
 const batches=fs.readdirSync(sqlOut).sort().map(name=>JSON.parse(fs.readFileSync(path.join(sqlOut,name),'utf8')));
-assert.equal(batches.length,shown.batches);assert.equal(batches.reduce((sum,batch)=>sum+batch.rows,0),1113);
+assert.equal(batches.length,shown.batches);assert.equal(batches.reduce((sum,batch)=>sum+batch.rows,0),1110);
 assert.deepEqual(counts(production),none,'plan and sql write nothing');
 
 // ================= 5. multi-statement atomicity on the stand-in (the connector request is modelled as one transaction) =================
@@ -295,11 +295,11 @@ const fails=(work,label)=>assert.throws(work,/D1_ERROR/,label);
  assert.ok(V.verifyBatch(ok.slice(1),{rows:batches[0].rows}).refusals.some(item=>item.startsWith('result_count')));
 }
 
-// ================= 6. the simulated load of all 30 batches, then a FRESH copy, the loader `verify` and a no-op `plan` =================
+// ================= 6. the simulated load of all 29 batches, then a FRESH copy, the loader `verify` and a no-op `plan` =================
 {
  const responses=batches.map(batch=>{const response=transaction(production,statementsOf(batch));assert.deepEqual(V.verifyBatch(response,{rows:batch.rows}).refusals,[],'batch '+batch.index);return response;});
- assert.equal(responses.length,30);
- assert.deepEqual(counts(production),{ratedAdmission:708,retention:401,retirement:4});
+ assert.equal(responses.length,29);
+ assert.deepEqual(counts(production),{ratedAdmission:708,retention:398,retirement:4});
  // replaying every batch changes nothing (changes 0 per statement: verify-batch calls that a STOP, as the runbook says)
  const settled=tableDigests(production);
  const replay=transaction(production,statementsOf(batches[0]));
@@ -316,7 +316,7 @@ assert.equal(fresh.done,true);
  assert.equal(result.status,0,result.stderr);
  const readback=JSON.parse(result.stdout);
  assert.equal(readback.ledger.ok,true);assert.deepEqual(readback.ledger.reasons,[]);
- for(const [name,count] of [['ratedAdmission',708],['retention',401],['retirement',4]]){const item=readback.ledger.classes[name];assert.deepEqual([item.stored,item.missing,item.different,item.unexpected],[count,0,0,0],name);}
+ for(const [name,count] of [['ratedAdmission',708],['retention',398],['retirement',4]]){const item=readback.ledger.classes[name];assert.deepEqual([item.stored,item.missing,item.different,item.unexpected],[count,0,0,0],name);}
  assert.ok(fs.existsSync(path.join(out,'receipt.json'))&&fs.existsSync(path.join(out,'readback.json')));
  assert.equal(loader(['verify',...common(fresh.file),'--expect-generation','2','--expect-reference',REF]).status,2,'a pinned generation that is not the copy\'s is refused');
  const replan=JSON.parse(loader(['plan',...common(fresh.file)]).stdout);

@@ -1,12 +1,12 @@
 # Film/Person `prepared` loader: rated admission, retention and TMDB retirement
 
-**Role:** the procedure and the offline tooling of [AIR-374](https://trello.com/c/ha7ais3w) P5 for the three D1 classes the projector does not write: `film_rated_admission` (expected 708 rows), `film_retention` (401) and `tmdb_retirement_decision` (4), 1,113 rows. They are empty while the marker is `prepared` and are the accepted gaps named in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md); the parent decision is [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md). This page does not authorize a write.
+**Role:** the procedure and the offline tooling of [AIR-374](https://trello.com/c/ha7ais3w) P5 for the three D1 classes the projector does not write: `film_rated_admission` (expected 708 rows), `film_retention` (398) and `tmdb_retirement_decision` (4), 1,110 rows. They are empty while the marker is `prepared` and are the accepted gaps named in [ADR 0110](../adr/0110-film-person-operator-copy-and-accepted-discrepancies.md); the parent decision is [ADR 0099](../adr/0099-canonical-film-person-d1-authority.md). This page does not authorize a write.
 
 Tooling: [`scripts/film-person-prepared-loader.mjs`](../../scripts/film-person-prepared-loader.mjs), tested by `tests/film-person-prepared-loader.mjs` (a sqlite file as production D1 with the migrated schema, the D1 stand-in applying the emitted statements, a read-only R2 double) and `tests/film-person-prepared-loader-mutation.mjs` (each mutant removes or inverts one guard; every one is killed). Nothing is bundled into the Worker and nothing in `src/` imports it.
 
 ## Accepted owner decision
 
-**Owner decision 2 of 11 Nov 2026** ([AIR-374](https://trello.com/c/ha7ais3w), Trello comment): the three empty classes (`ratedAdmission` 708, `retention` 401, `retirement` 4; 1,113 rows) are loaded into D1 **while the marker is still `prepared`**, through a separately verified, bounded, idempotent loader with a dry run, receipts and a readback. **A live run needs its own owner GO**; this page and PR record only the offline tool. Until that run, the `d1` activation keeps these classes as open gaps.
+**Owner decision 2 of 11 Nov 2026** ([AIR-374](https://trello.com/c/ha7ais3w), Trello comment): the three empty classes (`ratedAdmission` 708, `retention` 401 at that date, 398 since the 12 Nov 2026 snapshot, `retirement` 4; 1,110 rows) are loaded into D1 **while the marker is still `prepared`**, through a separately verified, bounded, idempotent loader with a dry run, receipts and a readback. **A live run needs its own owner GO**; this page and PR record only the offline tool. Until that run, the `d1` activation keeps these classes as open gaps.
 
 ## Why a separate writer
 
@@ -28,7 +28,7 @@ Sources (`--source-dir`, the operator-copy path, or `--r2`): `letterboxd/admissi
 - **Retention.** The `watchlist` boolean of each view-index entry, on the one Film that carries that Letterboxd id (two Films refuse the plan). Evidence is the view-index digest. `observed_at` is the pinned run instant. Request id `p5-load:<view-index sha16>:<film id>`.
 - **Retirement.** The whole `tmdb-retirements.json` object validated by `prepareRetirementImport` (one invalid entry or a duplicate invalidates all), each decision normalized by the fenced writer's `normalizeDecision`; request ids `r2-import:<sha16>:<film id>`, origin `r2_import`, the owner confirmation of the object.
 
-The plan refuses unless each class holds exactly the accepted count (`ACCEPTED_DISCREPANCIES.caps`, the 11 Nov 2026 measurement), so a source that moved is caught before any SQL exists.
+The plan refuses unless each class holds exactly the accepted count (the loader's own `EXPECTED`: 708, 398 and 4, the owner-accepted counts of the 12 Nov 2026 snapshot; the retention count follows the view index and the 11 Nov value 401 was superseded by owner decision after a fresh snapshot, the owner accepted the risk and no further investigation was done), so a source that moved is caught before any SQL exists.
 
 ### The fence is inside every row
 
@@ -43,7 +43,7 @@ The assertion writes nothing. No table outside the three is written, no fence ta
 
 ### Bounded and idempotent
 
-One batch is one atomic D1 batch with one statement per row: at most 40 rows (`BATCH_ROWS`, never above the fenced writers' cap of 60). One run (one plan, one pinned digest) holds at most 40 batches and 1,200 statements, which holds the 1,113 rows in 30 batches; what does not fit is `deferred` and goes into a later run planned from the then-current state. The plan is always rebuilt from the current state, so a loaded row is never planned again; request ids are content-derived and stable; a row that already exists with the same content is skipped by the statement itself, so **replaying the same emitted SQL is a no-op**. A stored row with other content (`mismatch`) or a stored row the plan does not know (`unknown_rows`) refuses the plan: nothing is ever updated or deleted.
+One batch is one atomic D1 batch with one statement per row: at most 40 rows (`BATCH_ROWS`, never above the fenced writers' cap of 60). One run (one plan, one pinned digest) holds at most 40 batches and 1,200 statements, which holds the 1,110 rows in 29 batches; what does not fit is `deferred` and goes into a later run planned from the then-current state. The plan is always rebuilt from the current state, so a loaded row is never planned again; request ids are content-derived and stable; a row that already exists with the same content is skipped by the statement itself, so **replaying the same emitted SQL is a no-op**. A stored row with other content (`mismatch`) or a stored row the plan does not know (`unknown_rows`) refuses the plan: nothing is ever updated or deleted.
 
 ### Receipts and readback
 
@@ -77,4 +77,4 @@ A failed or interrupted run needs no repair step: rebuild the plan from the curr
 
 ## What this does not prove
 
-The tests prove the tool against the sqlite stand-in and fixtures at the accepted counts. They do not prove that D1's multi-statement request rolls back exactly like the stand-in's transaction (the same assumption as the [baseline record and transition SQL](film-person-baseline.md#recording-paths-and-the-measuring-run-offline-code-nothing-executed)), that the real sources resolve to 708/401/4 (the plan refuses if they do not), or that the copy is current (the in-row guard re-checks identity, marker, baseline, lease and counts at run time). No production operation was run. Counts in this page are the accepted 11 Nov 2026 measurement; the dated offline evidence is [here](../evidence/d1-migration/air-374-p5-prepared-loader-offline-2026-11-11.md).
+The tests prove the tool against the sqlite stand-in and fixtures at the accepted counts. They do not prove that D1's multi-statement request rolls back exactly like the stand-in's transaction (the same assumption as the [baseline record and transition SQL](film-person-baseline.md#recording-paths-and-the-measuring-run-offline-code-nothing-executed)), that the real sources resolve to 708/398/4 (the plan refuses if they do not), or that the copy is current (the in-row guard re-checks identity, marker, baseline, lease and counts at run time). No production operation was run. Counts in this page are the accepted 12 Nov 2026 snapshot counts; the dated offline evidence is [here](../evidence/d1-migration/air-374-p5-prepared-loader-offline-2026-11-11.md).
