@@ -350,7 +350,7 @@ const oldSeal=extra=>due=>({runId:'old',stage:'seal',startedAt:at(due-20*H),upda
  }
 }
 // 7a2. Malformed, contradicting or missing frozen provenance fails closed: the old seal is not stepped, nothing is certified.
-for(const [label,extra] of [['malformed runKey',{runKey:'tomorrow'}],['non-string runKey',{runKey:20261108}],['runKey contradicts startedAt',{runKey:'2026-11-08'}],['no frozen day',{startedAt:undefined}]]){
+for(const [label,extra] of [['malformed runKey',{runKey:'tomorrow'}],['non-string runKey',{runKey:20261108}],['runKey contradicts startedAt',{runKey:'2026-11-08'}],['no frozen day',{startedAt:undefined}],['valid runKey, unparseable startedAt',{runKey:'2026-11-08',startedAt:'not-a-date'}],['valid runKey, absent startedAt',{runKey:'2026-11-08',startedAt:undefined}]]){
  const snaps=[];
  const {h,state,paths}=await adopt({sync:due=>oldSeal(extra)(due),snapshots:snaps});
  const c=await control(h);
@@ -359,6 +359,16 @@ for(const [label,extra] of [['malformed runKey',{runKey:'tomorrow'}],['non-strin
  assert.equal(c.failure?.code,'evidence_contradictory',label+': classified');
  assert.ok(!paths.includes('/api/sync/epg'),label+': the old seal is not stepped');
  assert.equal(state.sync.runId,'old',label+': the old run is untouched');
+}
+// 7a2b. The read model uses the same frozen day: a complete run with a valid runKey and unreadable startedAt is not today's publication.
+{
+ const h=cloudflare({pipeline:pipeline({})});
+ const due=Date.parse('2026-11-08T16:00:00Z');
+ h.state.sync={runId:'old',stage:'complete',runKey:'2026-11-08',startedAt:'not-a-date',updatedAt:at(due-1*H)};
+ await h.epg.ensure(h.env,{now:due});
+ const model=await h.epg.readModel(h.env,due+2*H);
+ assert.notEqual(model.health,'healthy');
+ assert.equal(model.publication?.publishedAt??null,null);
 }
 // 7a3. A same-day seal with a matching frozen runKey keeps the normal completion.
 {

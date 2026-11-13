@@ -305,9 +305,9 @@ const DAY_KEY=/^\d{4}-\d{2}-\d{2}$/;
 function frozenDay(run){
  if(!run||typeof run!=='object')return null;
  const at=Date.parse(run.startedAt),fromStart=Number.isFinite(at)?dayOf(at):null;
+ if(fromStart===null)return null;
  if(run.runKey===undefined||run.runKey===null)return fromStart;
- if(typeof run.runKey!=='string'||!DAY_KEY.test(run.runKey))return null;
- if(fromStart!==null&&fromStart!==run.runKey)return null;
+ if(typeof run.runKey!=='string'||!DAY_KEY.test(run.runKey)||fromStart!==run.runKey)return null;
  return run.runKey;
 }
  async function body(response){try{return await response.json();}catch{return {};}}
