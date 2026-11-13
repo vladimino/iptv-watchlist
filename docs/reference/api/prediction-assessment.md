@@ -1,6 +1,6 @@
 # Prediction assessment contract (Proposed draft)
 
-**Status: a proposed contract for review, not accepted and not implemented.** It specifies the design of [ADR 0132](../../adr/0132-prediction-assessment-artifact.md) (Proposed). Nothing here is live: no tool, schema, object or field named below exists yet, no run, dry run, Scheduled Task or deployment is authorized, and every number is a draft the owner may change. Facts about today's behaviour are in the [evidence page](../../evidence/prediction/air-450-assessment-current-state-2026-11-13.md).
+**Status: a proposed contract for review, not accepted and not implemented.** It specifies the design of [ADR 0132](../../adr/0132-prediction-assessment-artifact.md) (Proposed). Nothing here is live: no tool, schema, object or field named below exists yet, no run, dry run, Scheduled Task or deployment is authorized, and every number is a draft the owner may change. Revised after the independent design review of 13 Nov 2026 ([comment](https://github.com/vladimino/iptv-watchlist/pull/585#issuecomment-6849607697)): source access quality, attempted-but-unproductive research, conflicting evidence and a v2-only validation boundary were added. Facts about today's behaviour are in the [evidence page](../../evidence/prediction/air-450-assessment-current-state-2026-11-13.md).
 
 ## What it is
 
@@ -8,7 +8,11 @@ A per-film diagnostic artifact for later analysis of the Taste Profile and of Pr
 
 ## Where it travels (v2 only)
 
-An optional `assessment` object on an item of `prediction_batch_submit` (a sibling of `prediction`, **not** inside it), validated identically in `prediction_batch_validate`, `prediction_validate` and the `dryRun: true` submit. The v5 `submit` takes no assessment.
+An optional `assessment` object on an item of `prediction_batch_submit` (a sibling of `prediction`, **not** inside it), validated identically in `prediction_batch_validate` and the `dryRun: true` submit. Nothing else accepts it:
+
+- **`prediction_validate`** (the single-film tool) does **not** take an assessment, so a green result of that tool can never be read as permission to persist one.
+- **The v5 `submit`** takes no assessment and never persists one. Through MCP an item with an undeclared key (including `assessment`) is already refused as a tool error. The HTTP route of the v5 `submit` does not check item keys today: an `assessment` key there would be ignored and the call would still succeed. Closing that (an undeclared item key is a refusal on that route too) is part of phase 1 below, so that "accepted" never silently means "dropped".
+- `prediction_batch_validate` states in its description and answer that its assessment verdict applies to the v2 submit only; the answer carries `assessment {checked, issues}` per item beside `fingerprint` and `prediction`.
 
 ```
 {filmId, fingerprint?, prediction, assessment?}      // or {filmId, failure:{kind}}
@@ -24,10 +28,23 @@ An optional `assessment` object on an item of `prediction_batch_submit` (a sibli
 | `tasteSignals` | 0 to 5 of `{direction: supports \| against \| neutral, signal: text 1 to 220, anchor?: text 1 to 120}` | concrete signals against the Taste Profile; `anchor` names the profile statement it relates to |
 | `risks` | 0 to 3 of `{risk: text 1 to 220, severity: low \| medium \| high}` | film-specific risks |
 | `uncertainties` | 0 to 3 of text 1 to 220 | what is not known; an honest `unknown`, never `low` |
-| `sources` | 0 to 6 of `{kind: metadata \| model_knowledge \| web_research, ref, usedFor: text 1 to 160}` | `ref` is a `metadata:*` token present in the film's metadata (as for fingerprint evidence), the string `model_knowledge`, or an `https` URL accepted by the same URL rule as evidence; `web_research` only for sources really consulted; the Worker fetches and verifies nothing; no duplicate `(kind, ref)` |
+| `research` | `{status, attempts?}`, see below | what research was done, including what produced nothing |
+| `sources` | 0 to 6 of `{kind, ref, usedFor, access?}`, see below | only sources that were **used**: usable evidence |
+| `conflicts` | 0 to 2 of `{topic, positions, handling}`, see below | material disagreement between used sources, kept visible |
 | `model` | `{status: reported, id: text 1 to 80, version?: text 1 to 40, effort?: text 1 to 20}` or `{status: unavailable}` | the model identity as the caller can state it; required, so an unknown identity is explicit |
 
-The whole object is also bounded by a **serialized cap** (draft: 2,400 bytes of UTF-8 JSON, issue `too_large`); the field bounds are maxima, not a promise that every maximum fits together. No other key is accepted. Issues use the existing closed vocabulary (`required`, `invalid_type`, `invalid_enum`, `too_few`, `too_many`, `empty`, `too_long`, `invalid_ref`, `too_large`) with `assessment.*` paths, at most 20 per item, and never echo a value.
+The whole object is also bounded by a **serialized cap** (draft: 3,000 bytes of UTF-8 JSON, issue `too_large`; raised from 2,400 for the research, access and conflict fields); the field bounds are maxima, not a promise that every maximum fits together. No other key is accepted. Issues use the existing closed vocabulary (`required`, `invalid_type`, `invalid_enum`, `too_few`, `too_many`, `empty`, `too_long`, `invalid_ref`, `too_large`) with `assessment.*` paths, at most 20 per item, and never echo a value. The Worker validates shape and consistency only: it fetches nothing and verifies neither that a source exists, nor that it was read, nor how completely.
+
+### Research status, source access quality and conflicting evidence
+
+All of this is **caller-reported**. The Worker never claims that a source was accessible or read.
+
+- **`research.status`** (required): `not_attempted`; `attempted_blocked` (every attempt failed to open or read anything); `attempted_no_findings` (pages were read but nothing relevant was found); `attempted_found` (usable sources exist, so `sources` is non-empty). The consistency rule: `attempted_found` requires at least one `sources` item with `kind: web_research`; the other statuses forbid one.
+- **`research.attempts`** (0 to 4 of `{outcome: blocked | unreadable | irrelevant, ref?: https URL, note?: text 1 to 100}`): the attempts that did **not** yield usable evidence. A blocked or unreadable page is recorded here, never in `sources`, so a page the caller could not open is never represented as evidence. `ref`, when given, follows the same URL rule as a source.
+- **`sources[].access`** (required when `kind` is `web_research`, forbidden otherwise): `full_text` (the content was read in full), `partial_text` (part of it was read), or `search_snippet` (only a search-result excerpt was available; the page itself was not opened). A snippet is never to be described as read. A source of kind `metadata` or `model_knowledge` has no `access`.
+- **`conflicts`** (0 to 2): a material disagreement between used sources, traceable and not averaged. Each `{topic: text 1 to 120, positions: 2 to 3 of {source: integer index into sources, stance: text 1 to 160}, handling: kept_unresolved | weighted | not_relied_on}`. The position sources must be distinct valid indices; a position naming a `search_snippet` source stays visible as such. There is no numeric blending field: the disagreement and the way it was handled are recorded, and the assessment's own `uncertainties` carry what remains unknown.
+
+The experimental research protocol the owner approved for testing (film identity, a metadata-only baseline, question-led gap analysis, at most 2 web search queries and 3 independently authored sources per film, an accessible-source preference such as Guardian, Letterboxd and Slant, then an independent taste assessment before fingerprint and prediction) lives in the test prompt and runbook, **not** in this schema: the 2 and 3 budgets and any source whitelist are not storage constraints, and the schema stays generic (up to 6 sources, 4 attempts). Quota use and the availability of web search inside a Scheduled Task are to be measured, not assumed.
 
 ## What the Worker stores (confirmed against reported)
 
@@ -38,8 +55,8 @@ enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json      (
 {
   objectVersion: 1, filmId, predictionSha256, predictionKey,
   confirmed:      {recordedAt, runId, trigger, predictionGeneratedAt, tasteProfile:{version, hash}, fingerprintHash, assessmentSha256},
-  callerReported: {model, sources},          // as sent; unverified; model is {status:'unavailable'} when the caller could not say
-  assessment:     {ratingBasis, probability4PlusBasis, tasteSignals, risks, uncertainties}
+  callerReported: {model, research, sources, conflicts},   // as sent; unverified; model is {status:'unavailable'} when the caller could not say
+  assessment:     {ratingBasis, probability4PlusBasis, tasteSignals, risks, uncertainties}   // research, sources, conflicts and model are kept under callerReported
 }
 ```
 
@@ -54,7 +71,7 @@ enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json      (
 
 ## Dry run, preflight and the published contract
 
-`dryRun: true` validates the assessment and reports `assessment: would_write` without any write, lease, run, queue or storage effect; its zero-write isolation test covers the new field. `prediction_batch_validate` and `prediction_validate` take the same optional `assessment` and report `assessment.*` issues beside `fingerprint` and `prediction`; the 56 KiB request bound includes it. `enrichment_schema` publishes `contract.assessment` (version, bounds, serialized cap, `required: false`). `PREDICTION_PROMPT_VERSION`, the fingerprint versions and freshness are unchanged.
+`dryRun: true` validates the assessment and reports `assessment: would_write` without any write, lease, run, queue or storage effect; its zero-write isolation test covers the new field. `prediction_batch_validate` takes the same optional `assessment` and reports `assessment.*` issues beside `fingerprint` and `prediction` (the single-film `prediction_validate` does not, see above); the 56 KiB request bound includes it. `enrichment_schema` publishes `contract.assessment` (version, bounds, serialized cap, `required: false`). `PREDICTION_PROMPT_VERSION`, the fingerprint versions and freshness are unchanged.
 
 ## Exposure and privacy
 
@@ -62,7 +79,7 @@ An assessment can echo the Taste Profile and is private user context. It is not 
 
 ## Size and the group limit
 
-A group request is bounded at 56 KiB (57,344 bytes; the MCP inbound limit is 64 KiB). Measured headroom for ten items: about 1.67 KB per film beside rich fingerprints (40,653 bytes measured), about 5.3 KB per film for `prediction_only` items. With the draft cap of 2,400 bytes a group of ten rich films (about 40.7 KB plus up to 24 KB) usually exceeds the bound and is split into two submit calls by the existing guidance; a `prediction_only` group fits. This separates the generation size from the submit size; it changes the number of MCP calls and is to be measured, not assumed. A cap near 1.5 KB would keep rich groups of ten whole at the price of a thinner assessment.
+A group request is bounded at 56 KiB (57,344 bytes; the MCP inbound limit is 64 KiB). Measured headroom for ten items: about 1.67 KB per film beside rich fingerprints (40,653 bytes measured), about 5.3 KB per film for `prediction_only` items. With the draft cap of 3,000 bytes a group of ten rich films (about 40.7 KB plus up to 30 KB) usually exceeds the bound and is split into two submit calls by the existing guidance; a `prediction_only` group fits. This separates the generation size from the submit size; it changes the number of MCP calls and is to be measured, not assumed. A cap near 1.5 KB would keep rich groups of ten whole at the price of a thinner assessment and little room for source access and conflict records.
 
 ## Compatibility
 
@@ -74,7 +91,7 @@ Today the prediction validator ignores keys outside the six model fields and bot
 
 ## Proposed phases (each needs its own approval after the decision)
 
-1. Close the unknown-key persistence (validator, tests, v5 and v2).
+1. Close the unknown-key persistence (validator, tests, v5 and v2), including undeclared item keys on the v5 HTTP route.
 2. The assessment schema, `contract.assessment`, validator and preflight (no storage).
 3. The write path, digest rule, statuses and exposure guards; the dry-run isolation test.
 4. Prompts, the dry-run private result and report fields (presence, size, issue counts per size; never content).
@@ -82,12 +99,12 @@ Today the prediction validator ignores keys outside the six model fields and bot
 
 ## Tests the implementation would carry
 
-Closed-key and bound validation per field with every issue code; the serialized cap; `sources` rules (metadata token present, URL rule, duplicates); parity between `prediction_validate`, `prediction_batch_validate`, the dry run and the real submit; zero writes of the dry run with an assessment; the write order with a fault before and after each write; replay completes a missing object; a different assessment is `conflict`; digests of items without an assessment unchanged; no assessment content in the view index, D1 display, bundle, Events or public shape; the unknown-key closure on both protocols; legacy versions without an object; the group split at the 56 KiB bound.
+Closed-key and bound validation per field with every issue code; the serialized cap; `sources` rules (metadata token present, URL rule, duplicates); `access` required for `web_research` and forbidden otherwise; the `research.status` consistency rules and that a blocked page can only be an attempt; conflict positions (distinct valid indices, bounds); the absence of `assessment` from `prediction_validate` and its refusal on the v5 paths; parity between `prediction_validate`, `prediction_batch_validate`, the dry run and the real submit; zero writes of the dry run with an assessment; the write order with a fault before and after each write; replay completes a missing object; a different assessment is `conflict`; digests of items without an assessment unchanged; no assessment content in the view index, D1 display, bundle, Events or public shape; the unknown-key closure on both protocols; legacy versions without an object; the group split at the 56 KiB bound.
 
 ## Open questions for the owner
 
 1. Storage: B as proposed, or A, C or D ([alternatives](../../adr/0132-prediction-assessment-artifact.md#alternatives-considered)).
-2. The schema fields and caps, and the serialized cap (1.5 KB, 2.4 KB, other).
+2. The schema fields and caps, and the serialized cap (1.5 KB, 3 KB, other), including the research status, `access` and conflict representation.
 3. Optional first, and when or whether to require it; whether to backfill legacy versions.
 4. The unknown-key closure: issue code, and v5 treatment.
 5. The model identity: what counts as `reported`, and whether a platform-supplied identity may later be marked confirmed.
