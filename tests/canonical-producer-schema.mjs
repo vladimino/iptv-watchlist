@@ -527,12 +527,13 @@ if(on(9)){
 // ===== 10. Dormancy: nothing bundles, reads or applies the tables or the file =====
 if(on(10)){
  const grep=(dir,needle)=>{const hits=[];for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())hits.push(...grep(file,needle));else if(/\.(js|mjs|json|jsonc|yml)$/.test(entry.name)&&fs.readFileSync(file,'utf8').includes(needle))hits.push(file);}return hits;};
- const named=needle=>grep('src',needle).filter(file=>file!=='src/canonical-producer-run.js');
+ // AIR-374 S4-3: the dormant store (src/canonical-producer-store.js, tests/canonical-producer-store.mjs proves it is unimported and unbundled) is the only other module that names the tables.
+ const named=needle=>grep('src',needle).filter(file=>file!=='src/canonical-producer-run.js'&&file!=='src/canonical-producer-store.js');
  // the dormant pure module names the tables in comments only; it is imported by tests alone (tests/canonical-receipts.mjs keeps the importer list)
  assert.deepEqual(named('canonical_producer_run'),[],'no Worker code names the run table');
  assert.deepEqual(named('canonical_producer_unit_result'),[],'no Worker code names the result table');
  assert.deepEqual(named('0020_canonical_producer_run'),[]);
- assert.ok(!fs.readFileSync('build.mjs','utf8').includes('canonical-producer-run'),'the pure module and the migration are not bundled');
+ assert.ok(!/canonical-producer-(run|store)/.test(fs.readFileSync('build.mjs','utf8')),'the pure module, the store and the migration are not bundled');
  assert.ok(!fs.readFileSync('wrangler.jsonc','utf8').includes('migrations'),'wrangler.jsonc has no migrations directory: a deploy applies nothing');
  for(const file of fs.readdirSync('.github/workflows'))assert.ok(!/d1\s+(execute|migrations)|migrations\s+apply|0020_canonical/.test(fs.readFileSync('.github/workflows/'+file,'utf8')),file+' applies no migration');
  const statements=text20.split('\n').filter(line=>/^(INSERT|CREATE|UPDATE)\b/.test(line)).length;
