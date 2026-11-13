@@ -45,6 +45,10 @@ Nothing is written (no lease, run, queue, fingerprint, prediction, version objec
 
 Owner decision 13 November 2026 (AIR-463): spending the selected manifest is a **normal** completion (`reason: manifest_spent`, `status: complete`, truthful Event with selected/created/outstanding counters). Do not use `time_budget` for a spent short run and do not describe it as «Прогнозы приостановлены». Enabling up to four independent hourly v2 Tasks that share one lease/queue remains [AIR-451](https://trello.com/c/NN3N6kRp) and needs a separate operation-specific owner GO; this prompt file alone edits no Scheduled Task registry. Legacy v5 must stay disabled for the whole cutover.
 
+### Planned parameters and rollout (AIR-451, not installed)
+
+The planned Tasks (one canary, then hourly `:00`, `:15`, `:30`, `:45` Europe/Madrid) all use this one canonical text unchanged, with `manifestSize=5`, `generationSize=1`, `submitBatchSize=5` as written in its parameter block. No prompt variant, no rewritten quality rule and no new SHA-256 is introduced. The plan and its owner GO gates are in the [runbook](../../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451); nothing is installed.
+
 ### Installation, activation and rollback (owner gates)
 
 - **Install (disabled):** creating the Task, setting its schedule and every prompt edit need the owner's operation-specific approval. Create it disabled; paste the text below; compare the registry readback (length and SHA-256) with this header.

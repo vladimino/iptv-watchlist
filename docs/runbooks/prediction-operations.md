@@ -124,6 +124,20 @@ Both steps exist in the Worker and nothing calls them. A v2 run that stops witho
 - **Rollback.** Disable the v2 Task and re-enable the v5 Task (owner action). No data repair is needed.
 - **Dry run.** Writes nothing to prediction state, but it spends model quota and reads production: run it only with the owner's approval and record the result in [evidence](../evidence/prediction/README.md).
 
+## Planned rollout of four hourly v2 Tasks (AIR-451)
+
+**Plan, not authorization and not live state.** No v2 Task exists. Each step below is a separate operation needing the owner's own GO, performed by the Delivery Controller; the executor of the documentation does not create, edit, enable or run any Task and calls no production `prediction_batch_start`, submit, complete, sync, flag or lease reset. Expected Task set and parameters: [scheduled-tasks reference](../reference/scheduled-tasks.md#planned-four-hourly-v2-tasks-air-451-not-installed); flow: [scheduling diagram](../architecture/scheduling-and-orchestration.md#planned-four-independent-hourly-predictions-v2-tasks-air-451-not-installed).
+
+1. **Documentation PR** (this change): independent review, CI, Controller merge.
+2. **Preflight (read-only, immediately before each GO):** Task registry for the legacy Task, the Drift Task and any v2 Task (`is_enabled`, exact IDs, recurrence and `TZID`, prompt length and SHA-256 against the [prompt file](../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md)); deployed Worker and MCP expose `manifestSize` and `manifest_spent`; legacy v5 disabled; no live lease or unexpected run; available Task slots; this rollback.
+3. **Canary (GO 1):** the Controller creates **one** one-off v2 Task with the canonical prompt. Analyse its natural run only: per-film receipts, quality and assessment, completion Event, lease release, duration. No synthetic or manual run.
+4. **Hourly `:00` (GO 2):** after the canary is reviewed, create or convert Task A at `:00` and read the registry back.
+5. **Scale (owner command):** Tasks `:15`, `:30`, `:45`, one operation each.
+6. **Acceptance:** several natural runs: created, recalculated, already_current, failed and deferred counts, outstanding counters, no false partial or `time_budget`, stable lease, throughput, early, late, overlap and noop counts, documented limits. Then owner product and quality acceptance; until then the card stays in `Верификация`.
+7. **Rollback (each an owner action):** disable every v2 Task, wait for lease expiry or release (never reset), then re-enable the legacy Task with its verified old prompt. Saved predictions, D1 and R2 are not reverted; a code rollback is a separate deploy.
+
+An `already_running` from an overlap is a normal lost slot, not an incident. Monitoring uses the existing Data Health, Worker monitor and Telegram paths; no new alert is part of this plan.
+
 ## One film without a current prediction
 
 Open `/admin/limb`, find the film among the prediction or fingerprint items and press «Разобрать прогноз» (or read `GET /api/admin/prediction-recovery?film=<storedId>`, [contract](../reference/api/admin.md#prediction-recovery-get-apiadminprediction-recovery)). The read writes nothing and starts nothing. There is no targeted retry or requeue of one film ([why](../reference/api/admin-actions.md#prediction-recovery)); act on the verdict instead:

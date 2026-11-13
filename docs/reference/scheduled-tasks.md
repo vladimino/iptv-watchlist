@@ -20,6 +20,24 @@ The bullets below are the contract of the retired Task as it ran before the cuto
 - **Completion:** read `epg_status`, `epg_pipeline_status` and `enrichment_queue`; distinguish published programme, pending discovery and `ratingsPending`. Ratings/Letterboxd HTTP 403 are not reasons to restart EPG. Do **not** run predictions or modify the Taste Profile in this task.
 - **Ratings ownership:** the task calls no ratings tool of its own. Production runs ratings through the [Cloudflare executor](#ratings-task-and-the-cloudflare-executor-air-347). Once the storage migration is complete, this task's `epg_sync_step` does not read Diary. An incomplete migration still publishes and records `ratingsPipeline: blocked`; it does not read Diary. A Ratings Workflow failure is not an EPG publication failure when `epg_status.stage` is `complete`.
 
+## Planned four hourly v2 Tasks (AIR-451, not installed)
+
+**Plan, not live state.** No v2 Task is created, enabled or scheduled; the legacy `Почасовые прогнозы «В эфире»` entry is the only Predictions Task described above. The planned set, each a separate registry entry created disabled and enabled only by its own owner GO:
+
+| Slot | Recurrence (Europe/Madrid) | Parameters | Prompt |
+| --- | --- | --- | --- |
+| Canary | One-off, one natural run | `manifestSize=5`, `generationSize=1`, `submitBatchSize=5` | [`hourly-predictions-batch-v2.md`](scheduled-task-prompts/hourly-predictions-batch-v2.md), unchanged canonical text |
+| A | hourly at `:00` | same | same |
+| B | hourly at `:15` | same | same |
+| C | hourly at `:30` | same | same |
+| D | hourly at `:45` | same | same |
+
+- **Per invocation:** one `prediction_batch_start({manifestSize:5})`, one film per generation cycle, accumulate up to five, `prediction_batch_validate` then `prediction_batch_submit` (56 KiB split allowed), then one owned `prediction_complete` with `manifest_spent`. A fresh context each run.
+- **Shared state:** one D1 queue, one lease and epoch, idempotent submit. A trigger is not an exact time: an overlapping start answers `already_running`, which is a lost slot, never adopted, reset or made up by hand.
+- **Must stay true:** legacy v5 disabled for the whole cutover; `IPTV Scheduled Task Drift` unchanged; no flag, migration or authority change; no synthetic invocation to create evidence.
+- **Registry identity:** Task IDs, schedule text and prompt SHA-256 are recorded here and in [evidence](../evidence/prediction/README.md) only after a real, owner-approved installation. Until then this section states no ID.
+- **Acceptance (after real runs):** registry readback, per-film receipts, valid `assessment`, one truthful `manifest_spent` Event per run, consistent queue and lease, measured throughput and jitter, then owner acceptance. Procedure and rollback: [runbook](../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451).
+
 ## Hourly predictions
 
 **Live prompt: Stage B only.** The live `Почасовые прогнозы «В эфире»` prompt has been the Predictions-only text since the owner-approved [AIR-324](https://trello.com/c/kNtaEbm8) edit (11,372 characters; [the proposed text](scheduled-task-prompts/hourly-predictions-only.md)). It forbids `epg_sync_start`, `epg_sync_step` for any reason, discovery resolve, TMDB, the ratings tools and any lease reset. Its first natural run (scheduled 10:20 UTC on 6 November 2026) was recorded `completed` with no failure. Discovery catch-up is no longer a duty of this Task: the Cloudflare Discovery Workflow renews its series itself. This page does not edit a task prompt, an enabled flag or a schedule, and the live registry, not this page, holds the executable prompt.
