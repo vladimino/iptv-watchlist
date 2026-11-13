@@ -117,6 +117,8 @@ export const WEIGHTS={
  'projector-marker-fence.mjs':6,
  'canonical-film-external-ids-producer-mutation.mjs':5,
  'canonical-discovery-admission-producer-mutation.mjs':5,
+ 'canonical-producer-store-mutation.mjs':3,
+ 'epg-producer-dry-run-mutation.mjs':3,
  'canonical-person-mutation-producer-mutation.mjs':9,
  'canonical-epg-person-producer.mjs':5,
  'canonical-film-writers-mutation.mjs':5,

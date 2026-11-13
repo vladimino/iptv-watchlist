@@ -42,8 +42,8 @@ export const ERROR_CLASSES=Object.freeze(Object.fromEntries([
  // SYSTEMIC: a PASS-LEVEL STOP, never a strike, never a unit result. The cursor and the strike count stay as they are.
  ...rows(CLASS.SYSTEMIC,[
   'film_person_unavailable','film_person_held','film_person_not_open','film_person_fence','film_person_run_mismatch','film_person_not_projector','film_person_transition','film_person_baseline_not_verified',
-  // The producer store (S4-3): a missing table, an unreadable run row, a lost compare-and-set, a failed slice or strike commit, the marker read, transport, timeout and storage.
-  'producer_store_missing','producer_run_unreadable','producer_cas_lost','producer_slice_commit_failed','producer_strike_commit_failed','producer_marker_unreadable','producer_transport','producer_timeout','producer_storage',
+  // The producer store (S4-3): a missing table, an unreadable run row, a lost compare-and-set, an existing run of another source generation, a failed slice or strike commit, the marker read, transport, timeout and storage.
+  'producer_store_missing','producer_run_unreadable','producer_cas_lost','producer_source_generation_mismatch','producer_slice_commit_failed','producer_strike_commit_failed','producer_marker_unreadable','producer_transport','producer_timeout','producer_storage',
   // The receipt layer and the producers module, which own their own retry: a protocol or store problem is never the unit's fault. `producer_replan_unavailable` is raised only by a receipt replay (the receipt owns that retry).
   'producer_replan_unavailable','canonical_producer_invalid','receipt_schema_missing','receipt_baseline_missing','receipt_baseline_exists','receipt_atomic_required','receipt_conflict','receipt_exists','receipt_readback_required','receipt_state_conflict','baseline_over_capacity',
   // The owner-review check itself cannot be performed (decision 12 b).
