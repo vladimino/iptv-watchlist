@@ -101,18 +101,25 @@ sequenceDiagram
         MCP-->>Task: noop or blocked, no run and no Event
     else Run created
         MCP-->>Task: Manifest of up to 5 films, runId, epoch
-        loop One film per generation cycle
+        loop Until every selected film is settled
             Task->>Task: Research and predict one film into the buffer
+            opt Buffer holds 5 items, next item would pass 56 KiB, or end of manifest
+                Task->>MCP: prediction_batch_validate then prediction_batch_submit
+                MCP->>D1: Commit per film, settle queue, renew lease
+                MCP-->>Task: Per-film results, replay same body after a lost answer
+            end
         end
-        Task->>MCP: prediction_batch_validate then prediction_batch_submit, up to 5 items
-        MCP->>D1: Commit per film, settle queue, renew lease
-        Task->>MCP: prediction_complete with reason manifest_spent
-        MCP->>D1: Normal complete Event once, release lease
+        alt All selected films settled
+            Task->>MCP: prediction_complete with reason manifest_spent
+            MCP->>D1: Normal complete Event once, release lease
+        else Unsettled films, deferred_budget, profile or contract drift, or lease lost
+            Note over Task,MCP: Existing fail-closed semantics, no manifest_spent, lease expires or systemic stop
+        end
     end
     Note over Sched,D1: Overlap gives already_running for the later Task, retries stay in the queue, no manual make-up
 ```
 
-Boundaries: legacy v5 stays disabled for the whole cutover; the Worker never reads the Task registry; `IPTV Scheduled Task Drift` is not changed by this plan; a fifth Task (`:00/:12/:24/:36/:48`) is out of scope until measured jitter and limits are reviewed and needs its own owner GO. Rollout order after this documentation is merged: one one-off canary Task, then `:00`, then `:15/:30/:45`, each a separate owner GO ([runbook](../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451)).
+Boundaries: legacy v5 stays disabled for the whole cutover; the Worker never reads the Task registry; `IPTV Scheduled Task Drift` is not changed by this plan; a fifth Task (`:00/:12/:24/:36/:48`) is out of scope until measured jitter and limits are reviewed and needs its own owner GO. Rollout order after this documentation is merged: one one-off canary Task, then that same Task rescheduled to `:00`, then `:15/:30/:45`, each a separate owner GO ([runbook](../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451)).
 
 ### Read-only Scheduled Task registry drift
 
