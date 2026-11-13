@@ -110,6 +110,28 @@ assert.equal(owedDayKey(base({nowMs: at('2026-10-26', 10, 0), ...published('2026
   assert.equal(discoveryAdmission(base({nowMs, role: 'epg', tablePresent: undefined, row: null})).reason, 'epg_publication');
 }
 
+// A late publication keeps the admitted run key. published_at on the next Madrid date is not an input and does not move the day.
+{
+  const night = at('2026-11-14', 0, 30);
+  const late = base({nowMs: night, publishedDayKey: '2026-11-13', publishedProgrammeRunId: 'run-13', handoffProgrammeRunId: 'run-13', row: row('paused', '2026-11-13'), requestedProgrammeRunId: 'run-13'});
+  assert.equal(owedDayKey(late), null);
+  assert.equal(discoveryAdmission(late).reason, 'clear');
+  assert.deepEqual(pauseRowWrite(late), {state: 'clear', owedDayKey: null, overrideDayKey: null});
+  const timestamp = base({...late, publishedDayKey: '2026-11-14T00:10:00.000Z'});
+  assert.equal(discoveryAdmission(timestamp).reason, 'epg_priority');
+  assert.equal(discoveryAdmission(timestamp).owedDayKey, '2026-11-13');
+}
+
+// Pointer and pin can name one run and still be the wrong Madrid day, or no day at all.
+{
+  const nowMs = at('2026-11-13', 17, 10);
+  const wrong = base({nowMs, publishedDayKey: '2026-11-12', publishedProgrammeRunId: 'same', handoffProgrammeRunId: 'same', row: row('paused', '2026-11-13'), requestedProgrammeRunId: 'same'});
+  assert.equal(discoveryAdmission(wrong).reason, 'epg_priority');
+  assert.equal(pauseRowWrite(wrong), null);
+  const missing = base({...wrong, publishedDayKey: null});
+  assert.equal(discoveryAdmission(missing).reason, 'epg_priority');
+}
+
 // The Discovery pin moves in sealArchive, before the published pointer. That lag does not lift the pause.
 {
   const nowMs = at('2026-11-13', 17, 20);

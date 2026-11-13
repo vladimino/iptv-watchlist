@@ -61,7 +61,9 @@ function rowUsable(row) {
 
 function handoffConfirmed(facts) {
   const id = facts.publishedProgrammeRunId;
-  return typeof facts.publishedDayKey === 'string' && facts.publishedDayKey !== ''
+  // publishedDayKey is published_epg_authority.madrid_run_key, a YYYY-MM-DD run key.
+  // A timestamp, a null, or any other string is not that column and does not prove a day.
+  return DAY.test(facts.publishedDayKey || '')
     && typeof id === 'string' && id !== ''
     && id === facts.handoffProgrammeRunId;
 }
