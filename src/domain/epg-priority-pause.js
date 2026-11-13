@@ -34,6 +34,19 @@ export function preferredBusy(reasons) {
   return null;
 }
 
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+// The day that may be written on the pointer. `syncRunKey` is frozen on `sync.json` at `beginSync`
+// and is never rewritten. `workflowRunKey` is the adopting Workflow's admitted day. It is not a source:
+// after midnight that Workflow can resume yesterday's `stage==='seal'` (ADR 0092) under today's key.
+// A missing sync key fails closed. A different Workflow key fails closed and does not stamp today.
+export function publicationDay({syncRunKey, workflowRunKey} = {}) {
+  const frozen = DAY.test(syncRunKey || '') ? syncRunKey : null;
+  if (!frozen) return {ok: false, reason: 'evidence_unreadable', dayKey: null};
+  if (workflowRunKey != null && workflowRunKey !== frozen) return {ok: false, reason: 'run_key_mismatch', dayKey: null};
+  return {ok: true, reason: 'frozen', dayKey: frozen};
+}
+
 export function pauseOpensAt(dayKey) {
   return madridInstant(dayKey, EPG_SCHEDULE.hour, EPG_SCHEDULE.minute) - EPG_PRIORITY_LEAD_MINUTES * 60_000;
 }
@@ -42,8 +55,6 @@ function previousDayKey(dayKey) {
   // Noon minus 24 h stays on the previous Madrid date across both DST transitions.
   return madridDayKey(madridInstant(dayKey, 12, 0) - 24 * 3600000);
 }
-
-const DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 function programmeId(value) {
   return typeof value === 'string' && value !== '' ? value : null;

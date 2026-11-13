@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import {madridDayKey, madridMinutes} from '../src/domain/orchestration-policy.js';
 import {
   DISCOVERY_EPG_PRIORITY_POLL_MS, EPG_PRIORITY_LEAD_MINUTES, budgetEffect, discoveryAdmission,
-  owedDayKey, pauseOpensAt, pauseRowWrite, preferredBusy,
+  owedDayKey, pauseOpensAt, pauseRowWrite, preferredBusy, publicationDay,
 } from '../src/domain/epg-priority-pause.js';
 
 assert.doesNotMatch(fs.readFileSync('src/domain/epg-priority-pause.js', 'utf8'), /\b(fetch|BUCKET|Date\.now|Math\.random|crypto)\b/, 'the contract has no I/O, clock or randomness');
@@ -120,6 +120,21 @@ assert.equal(owedDayKey(base({nowMs: at('2026-10-26', 10, 0), ...published('2026
   const timestamp = base({...late, publishedDayKey: '2026-11-14T00:10:00.000Z'});
   assert.equal(discoveryAdmission(timestamp).reason, 'epg_priority');
   assert.equal(discoveryAdmission(timestamp).owedDayKey, '2026-11-13');
+}
+
+// After midnight the next Workflow may resume yesterday's seal. Its payload key must not label that programme as today.
+{
+  const adopted = publicationDay({syncRunKey: '2026-11-13', workflowRunKey: '2026-11-14'});
+  assert.deepEqual(adopted, {ok: false, reason: 'run_key_mismatch', dayKey: null});
+  const nowMs = at('2026-11-14', 17, 10);
+  const facts = base({nowMs, publishedDayKey: adopted.dayKey, publishedProgrammeRunId: 'yesterday-seal', handoffProgrammeRunId: 'yesterday-seal', row: row('paused', '2026-11-14'), requestedProgrammeRunId: 'yesterday-seal'});
+  assert.equal(discoveryAdmission(facts).reason, 'epg_priority');
+  assert.equal(discoveryAdmission(facts).owedDayKey, '2026-11-14');
+  const missing = publicationDay({syncRunKey: null, workflowRunKey: '2026-11-14'});
+  assert.equal(missing.reason, 'evidence_unreadable');
+  assert.equal(missing.dayKey, null);
+  const same = publicationDay({syncRunKey: '2026-11-13', workflowRunKey: '2026-11-13'});
+  assert.deepEqual(same, {ok: true, reason: 'frozen', dayKey: '2026-11-13'});
 }
 
 // Pointer and pin can name one run and still be the wrong Madrid day, or no day at all.
