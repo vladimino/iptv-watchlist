@@ -34,6 +34,7 @@ These pages describe maintained operational boundaries under [authorization leve
 - [Film/Person E6: read-only budget measurement for the EPG producer](film-person-e6-budget-measurement.md) (AIR-374, prepared GO package, offline tool, not executed; a production read needs its own owner GO)
 - [Film/Person M2b: the EPG producer dry run on a local copy of the canonical rows](film-person-m2b-dry-run-copy.md) (AIR-374, offline tool, nothing run in production; the bounded copy needs its own owner GO)
 - [Film/Person activation: owner decision pack for the production holdpoints](film-person-holdpoint-decision-pack.md) (AIR-374 H0 to H4: H0/H1 prepared future GOs, H2 to H4 blocked; design, not executed)
+- [EPG producer durable execution: owner decision pack for D-C](film-person-d-c-decision-pack.md) (AIR-374 D-C: slice size, `maxSlicesPerRun`, slice deadline, per-run ceiling and lag SLA options with arithmetic; a labelled recommendation; design, not executed)
 - [Film/Person H1: operator package for the P5 load of the three empty classes](film-person-h1-load-package.md) (AIR-374, prepared GO drafts and offline verifier, not executed; the snapshot reads and the load each need their own owner GO)
 - [Film retention: watchlist-fact admission, projector effect and recovery](film-retention.md)
 
