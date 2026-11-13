@@ -182,11 +182,11 @@ const PREDICTION_RULES={
  mainRisk:{kind:'text',maxLength:220,nullable:true},
  moodLabels:{kind:'text_list',minItems:2,maxItems:4,maxLength:45},
 };
-const ISSUE_CODES=['required','invalid_type','invalid_version','invalid_enum','too_few','too_many','empty','too_long','out_of_range','invalid_step','invalid_ref','too_large'];
+const ISSUE_CODES=['required','invalid_type','invalid_version','invalid_enum','too_few','too_many','empty','too_long','out_of_range','invalid_step','invalid_ref','too_large','unknown_field'];
 const MAX_ISSUES=20;
 // Returns [{path, code}] with path = <root>[.<field>[.<subfield>]] from the rule tables and code from ISSUE_CODES.
 // Field order follows the rule table; a text-list item issue is reported once per field, without the item.
-function ruleIssues(root,rules,value){
+function ruleIssues(root,rules,value,closed){
  const issues=[],add=(path,code)=>{if(issues.length<MAX_ISSUES)issues.push({path,code});};
  if(value===undefined){add(root,'required');return issues;}
  if(!isObject(value)){add(root,'invalid_type');return issues;}
@@ -201,6 +201,8 @@ function ruleIssues(root,rules,value){
   else if(rule.kind==='number'){if(x===undefined)add(path,'required');else if(typeof x!=='number'||!Number.isFinite(x))add(path,'invalid_type');else if(x<rule.min||x>rule.max)add(path,'out_of_range');else if(rule.step&&(x/rule.step)%1!==0)add(path,'invalid_step');}
   else if(rule.kind==='text'){if(x===undefined||x===null){if(!rule.nullable)add(path,'required');}else if(typeof x!=='string')add(path,'invalid_type');else if(!x.trim().length)add(path,'empty');else if(x.length>rule.maxLength)add(path,'too_long');}
  }
+ // Closed contract (ADR 0132): a key the table does not declare is rejected, never copied; the key in the path is sanitised and truncated, its value is never echoed.
+ if(closed)for(const key of Object.keys(value)){if(!Object.hasOwn(rules,key)&&!(closed.ignore||[]).includes(key))add(root+'.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),'unknown_field');}
  return issues;
 }
 function evidenceUrlOk(value){
@@ -332,7 +334,9 @@ function fingerprintIssues(f,metadata){
  if(isObject(f)&&!issues.length&&JSON.stringify(f).length>FINGERPRINT_MAX_CHARS)issues.push({path:'fingerprint',code:'too_large'});
  return issues;
 }
-function predictionIssues(p){return ruleIssues('prediction',PREDICTION_RULES,p);}
+function predictionIssues(p){return ruleIssues('prediction',PREDICTION_RULES,p,{ignore:['confidenceAssessment']});}
+// Only the six declared model fields reach a stored version (ADR 0132); validation has already rejected anything else.
+function pickPrediction(p){const out={};for(const k of Object.keys(PREDICTION_RULES))if(p[k]!==undefined)out[k]=p[k];return out;}
 const issueText=issues=>issues.length?'Invalid '+issues.map(issue=>issue.path+' '+issue.code).join(', '):null;
 function validateFingerprint(f){return issueText(fingerprintIssues(f));}
 function validatePrediction(p){return issueText(predictionIssues(p));}
@@ -2118,7 +2122,10 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
 const BATCH_GATE_TTL_MS=60000;
 const BATCH_COMMIT_GUARD=Symbol.for('iptv.prediction.commitGuard');
 const BATCH_MODEL_FIELDS=['predictedRating','probability4Plus','confidence','matchSignals','mainRisk','moodLabels'];
-const BATCH_ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash'];
+const BATCH_ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash','assessment'];
+const V5_ITEM_KEYS=['filmId','fingerprint','prediction','failure'];
+// Undeclared item keys are named with the closed-contract code; only a sanitised, truncated key reaches the path, never a value.
+function unknownItemKeyIssues(items,allowed){const issues=[];if(Array.isArray(items))items.forEach((item,i)=>{if(isObject(item))for(const key of Object.keys(item))if(!allowed.includes(key)&&issues.length<MAX_ISSUES)issues.push({path:'items['+i+'].'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});});return issues;}
 const batchPick=(value,keys)=>Object.fromEntries(keys.filter(key=>isObject(value)&&value[key]!==undefined).map(key=>[key,value[key]]));
 // One digest per item over one tuple of reproducible projections (ADR 0122 decision 6): the model-supplied prediction fields (not the Worker's), the fingerprint's content hash
 // (the same one the stored fingerprint carries) and the failure kind. It is recomputable from a committed film, so a replay after a crash is recognized without a receipt store.
@@ -2128,7 +2135,8 @@ async function batchItemDigest(id,item){
 function validateBatchSubmitBody(body){
  if(!isObject(body)||!isText(body.runId,100)||!Number.isInteger(body.epoch)||body.epoch<1)return json({error:'Invalid runId or epoch'},400);
  if(!Array.isArray(body.items)||!body.items.length||body.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Expected 1–'+BATCH_RUNNER.submitMaxItems+' items'},400);
- for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||Object.keys(item).some(key=>!BATCH_ITEM_KEYS.includes(key))||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure))return json({error:'Invalid item'},400);
+ {const unknown=unknownItemKeyIssues(body.items,BATCH_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
+ for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure))return json({error:'Invalid item'},400);
  if(new Set(body.items.map(item=>String(item.filmId))).size!==body.items.length)return json({error:'Duplicate filmId'},400);
  if(body.dryRun!==true&&body.items.some(item=>item.inputHash!==undefined))return json({error:'inputHash is accepted only with dryRun'},400);
  if(body.items.some(item=>item.inputHash!==undefined&&!/^[0-9a-f]{24}$/.test(String(item.inputHash))))return json({error:'Invalid inputHash'},400);
@@ -2239,7 +2247,7 @@ async function batchSubmitItem(env,ctx,item){
    run.results[id] ||= 'already_current';delete run.failures[id];run.submitted[id]={outcome:'already_current',inputDigest:digest,committedAt:new Date().toISOString()};result={filmId:id,status:'already_current'};
   }else{
    const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}
-   const submitted={...item.prediction};delete submitted.confidenceAssessment;const at=new Date().toISOString();
+   const submitted=pickPrediction(item.prediction);const at=new Date().toISOString();
    // The record keeps the profile identity the model worked from: the run's, which is not the current one after a change.
    const generated={...submitted,filmId:id,generatedAt:at,tasteProfileVersion:run.tasteProfileVersion,tasteProfileHash:run.tasteProfileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
    // The profile moved under the run: the same combined verdict (selective rule, lineage, impact features) decides, film by film. A film the change does not reach is kept; the others are
@@ -2538,6 +2546,7 @@ async function enrichmentNext(env,body,requestId){
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
 async function enrichmentSubmit(env,body,requestId){
+ {const unknown=unknownItemKeyIssues(body?.items,V5_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.protocol===BATCH_PROTOCOL)return wrongProtocolResponse();if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({...runSummary(run),mustComplete:true,stopReason:run.systemicStopReason});
@@ -2559,7 +2568,7 @@ async function enrichmentSubmit(env,body,requestId){
    if(freshness.state(state.predictions?.current,fingerprint,source[id]?.genres)){await updateViewIndex(env,id,{prediction:state.predictions.current,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;run.results[id] ||= 'already_current';delete run.failures[id];results.push({filmId:id,status:'already_current'});}
    // Lineage of a new prediction (AIR-12): the fingerprint's prompt version completes its identity, runId and trigger name the run
    // that produced it. Records written before carry none of the three; readers treat them as unknown, never as the current run.
-   else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const submitted={...item.prediction};delete submitted.confidenceAssessment;const at=new Date().toISOString(),generated={...submitted,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})},old=state.predictions?.current,history=[...(state.predictions?.history||[])];
+   else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const submitted=pickPrediction(item.prediction);const at=new Date().toISOString(),generated={...submitted,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})},old=state.predictions?.current,history=[...(state.predictions?.history||[])];
     // The version object is written first (write-once, keyed by checksum); a crash before the bundle write leaves an unreferenced object and an unchanged bundle, never a pointer to a missing object.
     const prediction={...generated,...(await writePredictionVersion(env,id,generated))};
     if(old)history.push({...old,replacedAt:at});await saveJSON(env,filmKey(id)+'predictions.json',{current:prediction,history});await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;delete run.failures[id];run.results[id]=old?'recalculated':'created';results.push({filmId:id,status:run.results[id]});}
