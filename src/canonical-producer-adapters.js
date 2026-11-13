@@ -18,7 +18,7 @@
 // Retries are bounded by the receipts module (5 attempts, backoff 60 s to 2 h, abandoned after 7 days) and always reuse the SAME request id. A stale revision is re-validated against the current rows, never replayed blind.
 // Stored: operation kind, origin, target, digests, revisions, state; no payload, title or personal data. The producer's `event` enters the request id only as a digest.
 import {failed} from './film-person-authority.js';
-import {writerRoute} from './canonical-producers.js';
+import {writerRoute} from './canonical-writer-route.js';
 import {RECONCILE_LIMIT_MAX,RETRY_POLICY,defineOperation,digestOf,receiptedWrite,reconcileReceipts,requestIdOf} from './canonical-receipts.js';
 import {planFilmFacts,readFilmSnapshot,writeFilmFacts} from './canonical-film-writers.js';
 

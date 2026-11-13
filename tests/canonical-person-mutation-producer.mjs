@@ -469,9 +469,9 @@ for(const stage of ['legacy','r2','prepared']){
  assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(body),'no network, timer, cron or R2 reference');
  assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s+(INTO|FROM)?\s*\w/.test(body),'no write SQL of its own');
  assert.ok(/mutatePerson\(/.test(body)&&/receiptMark/.test(body)&&/presence/.test(body));
- assert.deepEqual([...body.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-adapters.js','./canonical-producer-adapters.js','./canonical-producers.js','./canonical-receipts.js','./film-person-authority.js']);
+ assert.deepEqual([...body.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-adapters.js','./canonical-producer-adapters.js','./canonical-receipts.js','./canonical-writer-route.js','./film-person-authority.js']);
  await assert.rejects(()=>mutatePerson(envOf(database('open')),{id:PID(1),expectedRevision:0,at:T,presence:'maybe',person:{roleId:'director/1',contractVersion:1}}),code('film_person_invalid'));
- assert.equal(PRODUCER_OPERATIONS.size,0);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered');
  const epgWiring=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epgWiring.requires.includes('person_mutation')&&epgWiring.requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)));
  const readiness=await handoffReadiness(envOf(database('prepared')),{now:T});

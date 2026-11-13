@@ -8,6 +8,8 @@
 **Supersedes:** None. It overrides ADR 0130's rejected alternative "prune external ids the source no longer lists" for FILM external ids only; Person external ids stay upsert-only  
 **Superseded by:** None
 
+> **Update 2026-11-13 (owner decision, variant B, [AIR-374](https://trello.com/c/ha7ais3w)):** the earlier requirement that this unit be wired before the H2 marker flip is withdrawn. No EPG, metadata or Discovery source owns a complete Film external-id set, so wiring it would risk deleting identity, rated-admission or owner ids. `external_ids_not_pruned_by_the_planner` is now `accepted` as a REVISION of the owner's earlier decision (not proof that pruning is wired). This unit stays dormant and OPTIONAL for a future source that really owns a complete set; its protections stay as accepted above.
+
 ## Context
 
 The differential harness found that the projector replaces the whole external-id set of a Film from its source while the canonical planner only upserts, so an id the source dropped stays and keeps resolving the Film (`external_ids_not_pruned_by_the_planner`, kept `draft`). The owner decided on 13 Nov 2026 that this one difference must be fixed, not accepted, before the H2 marker flip: an outdated external identifier must not produce incorrect identity resolution. The review of the code showed that no production unit plans the external ids of a Film at all: the EPG layer (ADR 0126) writes facts, credits and membership, the dictionary producer (ADR 0127) writes title and identity, and `film_external_id` is written only by the projector. The "planner" of the exception is the harness's model of a call that no producer makes yet. The fix is therefore a missing unit, not a change to an existing one.

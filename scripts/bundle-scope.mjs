@@ -29,3 +29,15 @@ export function scopePersonIdentity(files=['src/domain/canonical-person.js','src
  }
  return 'const PersonIdentity=(()=>{\n'+body+'return {projectPersonIdentity,resolvePersonReference,filmsForPerson,personSurfaces,personFold};\n})();\n';
 }
+
+// AIR-374 P3c: a canonical producer module that imports several already-scoped bindings. EVERY single-line import is removed and `preamble` (destructuring of the scopes already in the Worker) takes its place, so the module sees the same
+// names it has offline. `export {a,b};` re-export lines are dropped and `a`/`b` are handed over too (they must be bindings of the scope or of the preamble). The scope exports every `export function|const|async function`.
+export function scopedImports(file,name,preamble){
+ let source=fs.readFileSync(file,'utf8').replace(/^\s*import\s+\{[^}]+\}\s+from\s+['"][^'"]+['"];?\r?\n/gm,'');
+ if(/^\s*import\s/m.test(source))throw new Error(file+' cannot be bundled: an import is not a single-line named import');
+ const reexported=[];
+ source=source.replace(/^export\s*\{([^}]+)\};?\r?\n/gm,(_,names)=>{reexported.push(...names.split(',').map(item=>item.trim()).filter(Boolean));return '';});
+ const exported=[...new Set([...[...source.matchAll(/^export\s+(?:async\s+)?(?:function|const)\s+([A-Za-z0-9_]+)/gm)].map(match=>match[1]),...reexported])];
+ if(!exported.length)throw new Error(file+' hands over nothing');
+ return 'const '+name+'=(()=>{\n'+preamble+'\n'+source.replace(/^export\s+/gm,'')+'\nreturn {'+exported.join(',')+'};\n})();';
+}

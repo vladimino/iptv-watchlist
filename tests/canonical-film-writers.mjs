@@ -362,7 +362,9 @@ if(section('11')){
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-film-writers'))importers.push(full.replace(/\\/g,'/'));}};
  walk('src');
  assert.deepEqual(importers.sort(),['src/canonical-producer-adapters.js','src/canonical-producers.js'],'only the producers module and the dormant receipt adapter import the film writers');
- for(const f of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(f))assert.ok(!fs.readFileSync(f,'utf8').includes('canonical-film-writers'),f+' does not bundle it');
+ for(const f of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(f))assert.ok(!fs.readFileSync(f,'utf8').includes('canonical-film-writers'),f+' does not bundle it');
+ // AIR-374 P3c: the Discovery admission unit needs this module, so build.mjs carries it in ONE named scope (and nowhere else).
+ { const build=fs.readFileSync('build.mjs','utf8'); assert.equal(build.split('src/canonical-film-writers.js').length-1,1,'one bundle scope'); assert.ok(build.includes("scopedImports('src/canonical-film-writers.js','CanonicalFilmWriters'"),'the scope is CanonicalFilmWriters'); }
  const text=fs.readFileSync('src/canonical-film-writers.js','utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\bR2\b|fetch\(|BUCKET/.test(text),'no R2 and no network');
  assert.ok(!/INSERT INTO (film_external_id|film_alias|film_person_credit|person)\b|candidate|fingerprint_payload|prediction_/.test(text),'no identity id, alias, credit, person, fingerprint or prediction write');

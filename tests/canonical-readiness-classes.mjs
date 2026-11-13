@@ -13,6 +13,8 @@ import {CANONICAL_READER_REGISTRY} from '../src/canonical-catalog-reader.js';
 const target=path.resolve('src/canonical-readiness-classes.js');
 const expectedBlockers=()=>[
  ...[...P6_DIFFERENTIAL_EXCEPTIONS,...EXTRA_EXCEPTIONS].filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
+ // AIR-374: every real exception is accepted since 13 Nov 2026, so this classifier fixture carries one SYNTHETIC unaccepted difference to keep the owner_exception class populated (the classifier, not the registry, is under test).
+ 'exception_not_accepted:synthetic_difference',
  'receipts_protocol_unregistered',
  ...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name),
  ...CANONICAL_READER_REGISTRY.filter(item=>item.class==='freeze'&&!item.moved).map(item=>'reader_not_moved:'+item.name),

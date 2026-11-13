@@ -17,7 +17,7 @@
 // race (nothing left to write) ends `unknown`/`atomic_mark_missing`, never a second marking batch; a replay re-plans from the producer's own source and is refused when the digest moved. Reconciliation is the origin's own bounded inline pass (E2).
 // Stored: operation kind, origin, target, digests, revisions, state; no payload, name or personal data.
 import {database,failed,many,one} from './film-person-authority.js';
-import {writerRoute} from './canonical-producers.js';
+import {writerRoute} from './canonical-writer-route.js';
 import {RETRY_POLICY,defineOperation,digestOf,receiptedWrite} from './canonical-receipts.js';
 import {mutatePerson} from './canonical-mutations.js';
 import {SOURCE_CHANGED,producerRequestId} from './canonical-producer-adapters.js';

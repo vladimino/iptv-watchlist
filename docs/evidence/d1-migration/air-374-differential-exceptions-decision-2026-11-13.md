@@ -35,3 +35,8 @@ Of the 26 blockers expected after H1, the ten `exception_not_accepted` become on
 - Not an owner GO for any production mutation, natural write, migration, flag, Scheduled Task, lease reset or the `prepared` to `open` marker flip. H2 stays closed.
 - The fix for #6 is not implemented here: it belongs to the producer delivery that owns the change.
 - Whether any consumer reads `updated_at` as source time was not found by a search of `src`, but runtime reads were not examined.
+
+
+## Revision of the same day (owner decision, variant B)
+
+Later on 13 Nov 2026 the owner revised row 6: `external_ids_not_pruned_by_the_planner` is **accepted** (`EXTRA_EXCEPTIONS`), so no exception blocks H2 any more. This REVISES the mandatory fix; it is not proof that pruning is wired. No EPG, metadata or Discovery source owns a complete Film external-id set, so a producer does not remove ids a partial source no longer lists; identity-bearing ids are never removed, one trusted id is never given to two Films and identity conflicts are refused. The dormant `film_external_ids` unit ([ADR 0133](../../adr/0133-film-external-ids-producer-unit.md)) stays optional. No production operation was involved.

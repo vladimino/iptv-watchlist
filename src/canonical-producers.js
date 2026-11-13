@@ -15,6 +15,8 @@
 //   run by tests/canonical-differential.mjs) marks it covered; every other condition of a `prepared` to `open` handoff is a named blocker. It is information for the
 //   owner's decision, never a permission, and nothing in the Worker calls it.
 import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {writerRoute} from './canonical-writer-route.js';
+import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
 import {fenced,mutateFilm,mutatePerson} from './canonical-mutations.js';
 import {compareLocalization,recordLocalizationSources} from './localization-sources.js';
 import {admitRatedFilm,retainFilm,verifiedAdmission} from './film-admission.js';
@@ -54,7 +56,9 @@ export const PRODUCER_WIRING=Object.freeze([
  Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
  Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
 ]);
-export const PRODUCER_OPERATIONS=operationRegistry([]);
+// P3c: the Discovery admission registers its atomic `film_mutation` spec. The registry is static, so its re-plan is the honest "no source here" (null): a receipt that reaches the generic registry is never replayed blind. The REAL settlement is
+// the origin's own inline reconcile, which binds the same spec to the environment and re-plans from the current `discovery_admission` row (`discoveryAdmissionRegistry` in src/canonical-discovery-admission-producer.js, called by `admitDiscoveryFilms`).
+export const PRODUCER_OPERATIONS=operationRegistry([discoveryAdmissionOperation({replan:async()=>null})]);
 // P4: the readers are NOT listed here. handoffReadiness derives them from CANONICAL_READER_REGISTRY of src/canonical-catalog-reader.js (the one registry, owner decision 4): every entry of
 // class 'freeze' with moved:false is `reader_not_moved:<name>`; an entry of class 'exception' never blocks and must not be marked moved.
 // ADR 0117 owner decision 5 / ADR 0119: durable cross-domain receipts inside the existing D1. The protocol is "registered" only when PRODUCER_OPERATIONS holds at least one atomic operation
@@ -74,13 +78,7 @@ const skipped=(producer,reason)=>({producer,calls:[],skipped:[{reason}]});
 
 // One routing decision from the marker. legacy/r2/prepared: the projector writes, the adapters are dormant. open: the adapters write, the
 // projector is compare-only. held and an unreadable marker throw (film_person_held / film_person_unavailable) and name no writer.
-export async function writerRoute(env){
- const gate=await readAuthority(env);
- if(gate.r2Allowed===true)return {writer:'projector',projector:'writes',canonical:'dormant',state:gate.state,generation:gate.generation};
- if(gate.state==='open')return {writer:'canonical',projector:'compare_only',canonical:'writes',state:gate.state,generation:gate.generation};
- assertWritable(gate); // throws film_person_held / film_person_unavailable
- throw failed('film_person_unavailable');
-}
+export {writerRoute};
 
 // The statement a projector batch would add after its own fence. Null when there is no marker (legacy): nothing to prove. Otherwise it
 // holds only while the marker is the r2 or prepared mode at cutover open and the generation the projector read, so a batch that started before a move to open
