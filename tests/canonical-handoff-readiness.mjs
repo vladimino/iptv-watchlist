@@ -63,7 +63,9 @@ if(on('2')){
  ];
  assert.deepEqual(out.blockers,expected,'the computed blockers of this repository');
  assert.deepEqual(out.blockers.filter(item=>/^(gap|marker|baseline|schema|projector)/.test(item)),[],'the marker, baseline, schema, lease and window are not what blocks');
- assert.deepEqual(EMPTY_CLASSES.map(item=>item.expected),[708,401,4],'the accepted class counts');
+ assert.deepEqual(EMPTY_CLASSES.map(item=>item.expected),[708,398,4],'the accepted class counts');
+ {const {EXPECTED}=await import('../scripts/film-person-prepared-loader.mjs');assert.deepEqual(Object.fromEntries(EMPTY_CLASSES.map(item=>[item.name,item.expected])),{...EXPECTED},'the readiness counts equal the loader EXPECTED (no drift)');}
+ assert.ok(!out.blockers.includes('empty_class_not_loaded:retention:0/401'),'the superseded 401 is not the retention expectation');
  assert.deepEqual(PRODUCER_WIRING.map(item=>item.name),['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
  assert.equal(PRODUCER_OPERATIONS.size,0,'no producer operation is registered');assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
  fs.writeFileSync(path.join(root,'today.json'),JSON.stringify(out.blockers));
