@@ -30,7 +30,7 @@ import {createReadOnlyClient} from './r2-snapshot-export.mjs';
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export const MANIFEST_VERSION=1;
 export const REPORT_VERSION=1;
-export const SCHEMA_EXPECTED=19;
+export const SCHEMA_EXPECTED=21;
 // Per object. The largest projector input is metadata.json; the cap is a refusal threshold, not a measurement (unmeasured: the real sizes).
 export const MAX_OBJECT_BYTES=64*1024*1024;
 export const MAX_TOTAL_BYTES=512*1024*1024;

@@ -24,10 +24,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {assertReadOnly,unwrap} from './schema-preflight.mjs';
-import {NOTE,RECEIPT_TABLES,preflightSteps as migrationSteps} from './film-person-0019-preflight.mjs';
+import {RECEIPT_TABLES,preflightSteps as migrationSteps} from './film-person-0019-preflight.mjs';
 import {BATCH_ROWS,CLASSES,EXPECTED,LOADER_VERSION,MAX_SOURCE_BYTES,RUN_BATCHES,RUN_STATEMENTS,SOURCE_KEYS,TABLES,summarize} from './film-person-prepared-loader.mjs';
 
-export const SCHEMA_VERSION=19;
+export const SCHEMA_VERSION=21;
+export const NOTE="Schema v21: the four normalized-UTC time CHECKs of 0014 and 0015 rebuilt under the D1 50-byte LIKE and GLOB pattern limit. Follows a complete version 20.";
 export const MARKER_GENERATION=1;
 export const MIN_LEASE_REMAINING_MS=15*60000;
 const REFERENCE=/^cutover_accepted\/v2:[0-9a-f]{64}$/;
@@ -48,14 +49,14 @@ export function stateSteps(){
  const count=table=>'(SELECT COUNT(*) FROM '+table+') AS '+table;
  const list=names=>names.map(quote).join(', ');
  return [
-  pick('schema','schema_contract','one row, version 19, the note of migration 0019'),
+  pick('schema','schema_contract','one row, version 21, the note of migration 0021'),
   pick('marker','the Film/Person marker','prepared / open / 1 (every phase)'),
   pick('fence','the CAS fence','ok 1'),
   pick('baseline','the activation baseline','verified, the reference named in the GO'),
   pick('projector_lease','the projector lease (the statement of the 0019 preflight)','preflight: no row, lease_id null, or lease_until earlier than now. held and readback: one row naming the lease id of the GO and live. released: lease_id null or no row'),
   pick('projector_window','the projector window (the statement of the 0019 preflight)','idle (every phase)'),
   pick('discovery_lease','the Discovery lease; expires_at is epoch milliseconds (the statement of the 0019 preflight)','preflight and held: no row, lease_id null, or expires_at in the past (epoch milliseconds)'),
-  step('receipt_tables','schema 19: the four receipt tables exist',"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ("+list(RECEIPT_TABLES)+") ORDER BY name",'4 rows'),
+  step('receipt_tables','schema 21: the four receipt tables exist',"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ("+list(RECEIPT_TABLES)+") ORDER BY name",'4 rows'),
   step('loader_tables','the tables the loader reads or writes exist',"SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ("+list([...CLASSES.map(name=>TABLES[name]),...IDENTITY_TABLES])+") ORDER BY name",'5 rows'),
   step('class_counts','row counts of the three classes','SELECT '+CLASSES.map(name=>count(TABLES[name])).join(', '),'preflight and held: 0 each. readback and released: the pinned counts'),
   step('other_counts','row counts that must not move (and the receipt tables, which must stay empty)','SELECT '+[...OTHER_TABLES,...RECEIPT_TABLES].map(count).join(', '),'receipt tables 0; the others equal to the held bundle (canonical_revision 0 is a note when not)'),
@@ -114,7 +115,7 @@ function pinRefusals({reference,counts,leaseId,now},{needLease,needCounts}){
  return out;
 }
 
-// The facts that hold in EVERY phase: schema 19, marker prepared/open/1, fence, baseline at the pinned reference, window idle, the tables, the receipt tables empty.
+// The facts that hold in EVERY phase: schema 21, marker prepared/open/1, fence, baseline at the pinned reference, window idle, the tables, the receipt tables empty.
 function commonState(results,refusals,{expectReference}){
  const schema=rowsOf(results,'schema',refusals);
  if(schema){

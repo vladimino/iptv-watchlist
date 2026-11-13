@@ -1,5 +1,5 @@
 // AIR-374 H1 rehearsal (offline, synthetic): the snapshot route the H1 operator package (docs/runbooks/film-person-h1-load-package.md) section 3.2 describes, run end to end
-// on a synthetic schema-19 database and a local sqlite stand-in. A sqlite file plays production D1; a FAKE connector (`cloudflare.request` over that file, SELECT only: any
+// on a synthetic schema-21 database and a local sqlite stand-in. A sqlite file plays production D1; a FAKE connector (`cloudflare.request` over that file, SELECT only: any
 // other statement throws) runs the function texts of scripts/film-person-connector-run.mjs. ONLY `ddl` and `copy` are run, never `leaseAcquire`, `leaseRenew`,
 // `leaseRelease`, `check` or `resync`. The copy is loaded with `load` (CLI and API), the loader's `plan` and `sql` run on it, the H1 verifier's `verify-plan`,
 // `verify-private-plan` and `verify-emitted` run on the REAL output of those commands (no fixture), the emitted batches are applied to the synthetic production under
@@ -67,10 +67,10 @@ const tableDigests=file=>{
 const counts=file=>Object.fromEntries(Object.entries(L.TABLES).map(([name,table])=>[name,rows(file,'SELECT COUNT(*) AS n FROM '+table)[0].n]));
 const none={ratedAdmission:0,retention:0,retirement:0};
 
-// ================= 1. synthetic production: schema 19 from the repository migrations, a `prepared` marker over a verified baseline, synthetic rows only =================
+// ================= 1. synthetic production: schema 21 from the repository migrations, a `prepared` marker over a verified baseline, synthetic rows only =================
 const production=path.join(root,'production.sqlite');
-sql(production,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
-assert.deepEqual(rows(production,'SELECT version FROM schema_contract WHERE id = 1'),[{version:19}],'schema 19');
+sql(production,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+assert.deepEqual(rows(production,'SELECT version FROM schema_contract WHERE id = 1'),[{version:21}],'schema 21');
 sql(production,`UPDATE film_person_baseline SET state='loading' WHERE id=1;UPDATE film_person_baseline SET state='verified',reference=${q(REF)} WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;`);
 const world=makeWorld({admissions:708,retention:398,retirements:4,noise:true});
 sql(production,world.script);

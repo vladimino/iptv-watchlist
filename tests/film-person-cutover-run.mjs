@@ -24,7 +24,7 @@ const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:text+'
 // The migrated schema is built once; each test database is a file copy. The fixture changes authority rows directly, so the guard triggers of those tables are
 // dropped in the template (a test-only stand-in for a writer's own path).
 // The capture gate expects the schema production holds (SCHEMA_EXPECTED, 19, after the owner-approved apply of migration 0019 under ADR 0119), so this fixture is the whole chain.
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
 const template=path.join(root,'template.sqlite');
 sql(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 for(const trigger of rows(template,"SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name IN ('film_person_authority','film_person_cas','discovery_authority','published_epg_authority','owner_review_authority','projector_window','film','projection_run','owner_review_entry')"))sql(template,'DROP TRIGGER '+trigger.name+';');

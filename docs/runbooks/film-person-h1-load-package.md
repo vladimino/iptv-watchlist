@@ -1,6 +1,6 @@
 # Film/Person H1: operator package for the P5 load of the three empty classes (prepared, not executed)
 
-> **Blocked until `0021` is applied (13 Nov 2026).** The first H1 load attempt was refused by D1 (error 7500): `film_rated_admission` and `film_retention` carry a 92-byte `GLOB` time `CHECK` that D1 cannot evaluate, so no INSERT into them can succeed ([evidence](../evidence/d1-migration/air-374-h1-load-refused-glob-limit-2026-11-13.md), nothing was written). The order is `0020`, then [`0021`](film-person-0021-apply.md), then this load on a rebuilt plan; the schema version this page and the verifier expect (19) moves with those applies in a separate PR.
+> **Blocked until `0021` is applied (13 Nov 2026).** The first H1 load attempt was refused by D1 (error 7500): `film_rated_admission` and `film_retention` carry a 92-byte `GLOB` time `CHECK` that D1 cannot evaluate, so no INSERT into them can succeed ([evidence](../evidence/d1-migration/air-374-h1-load-refused-glob-limit-2026-11-13.md), nothing was written). The order is `0020`, then [`0021`](film-person-0021-apply.md), then this load on a rebuilt plan; the schema version the verifier expects moves from 19 to 21 in one bump PR that is merged after the readback of `0021` ([order](film-person-0021-apply.md#2-order)).
 
 **Role:** the operator package of holdpoint H1 of the [decision pack](film-person-holdpoint-decision-pack.md) for [AIR-374](https://trello.com/c/ha7ais3w): what a fresh source snapshot needs, what the plan artifact must show, how the preflight, the load, the readback and the release are verified, when to STOP, and the two owner GOs that would be requested (a read GO for the snapshot, then a write GO for the load). **This page authorizes nothing and nothing in it has been executed.** It prepares; it never loads. The batch SQL exists only as a private artifact of the loader's `sql` command and is sent only under the second GO. Every number below that describes production is an EXPECTED figure from the 11 Nov 2026 measurement, not a current one.
 
@@ -85,14 +85,14 @@ The state statements are emitted, never typed: `node scripts/film-person-h1-veri
 
 | Id | Statement | Preflight expectation |
 | --- | --- | --- |
-| `schema` | `SELECT id, version, note FROM schema_contract ORDER BY id` | one row, version 19, the note of migration 0019 |
+| `schema` | `SELECT id, version, note FROM schema_contract ORDER BY id` | one row, version 21 (19 until the bump PR merges), the note of migration 0021 |
 | `marker` | `SELECT mode, cutover, generation FROM film_person_authority WHERE id = 1` | `prepared` / `open` / 1 |
 | `fence` | `SELECT ok FROM film_person_cas WHERE id = 1` | `ok` 1 |
 | `baseline` | `SELECT state, reference FROM film_person_baseline WHERE id = 1` | `verified`, the reference named in the GO |
 | `projector_lease` | `SELECT lease_id, lease_until FROM projection_run WHERE projection = 'enrichment'` | no row, `lease_id` null, or `lease_until` earlier than now |
 | `projector_window` | `SELECT state, expires_at FROM projector_window WHERE id = 1` | `idle` |
 | `discovery_lease` | `SELECT id, lease_id, expires_at FROM discovery_lease` (`expires_at` in epoch milliseconds) | no row, `lease_id` null, or `expires_at` in the past |
-| `receipt_tables` | `sqlite_master` names of the four receipt tables | 4 rows (schema 19 present) |
+| `receipt_tables` | `sqlite_master` names of the four receipt tables | 4 rows (the receipt tables of schema 19 are present) |
 | `loader_tables` | `sqlite_master` names of the three class tables, `film_external_id`, `film_redirect` | 5 rows |
 | `class_counts` | three `COUNT(*)` in one row | 0, 0, 0 |
 | `other_counts` | `COUNT(*)` of `film`, `person`, `film_external_id`, `film_redirect`, `canonical_revision` and the four receipt tables | receipt tables 0 (a non-empty `canonical_revision` is a note) |
