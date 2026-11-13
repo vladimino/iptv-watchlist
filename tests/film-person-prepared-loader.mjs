@@ -11,7 +11,7 @@ import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
-import {ACCEPTED_DISCREPANCIES,COPY_TABLES} from '../src/film-person-cutover-accepted.js';
+import {COPY_TABLES} from '../src/film-person-cutover-accepted.js';
 const L=await import(process.env.LOADER_MODULE?pathToFileURL(path.resolve(process.env.LOADER_MODULE)).href:'../scripts/film-person-prepared-loader.mjs');
 
 // AIR-374: LOADER_SECTIONS=<n,...> runs sections 1-3 (cheap, and they build what the others use) plus only the listed ones of 4-11; without it every section runs. The mutation check
@@ -311,8 +311,7 @@ await refusal('view index not a record',{sources:{...source(world.bytes),viewInd
 await refusal('count below expectation',{expected:{...world.expected,ratedAdmission:9}},'count_mismatch:ratedAdmission');
 await refusal('count above expectation',{expected:{...world.expected,retention:5}},'count_mismatch:retention');
 await refusal('retirement count',{expected:{...world.expected,retirement:3}},'count_mismatch:retirement');
-assert.deepEqual(L.EXPECTED,{ratedAdmission:708,retention:401,retirement:4});
-assert.deepEqual(L.EXPECTED,Object.fromEntries(L.CLASSES.map(name=>[name,ACCEPTED_DISCREPANCIES.caps[name]])));
+assert.deepEqual(L.EXPECTED,{ratedAdmission:708,retention:398,retirement:4});
 await refusal('inputs, bounds and pins are validated',{at:'2026-11-12T09:00:00Z'},'at_invalid');
 await refusal('lease id',{leaseId:'x'},'lease_id_invalid');
 await refusal('window owner',{windowOwner:'x'},'window_owner_invalid');
@@ -369,30 +368,30 @@ if(section(6)){
  }
  assert.deepEqual(counts(target.file),world.expected);
  assert.equal(L.readbackLedger({plan:(await planOf(world,target.file)).plan,state:await stateOf(target.file)}).ok,true);
- assert.equal(L.RUN_STATEMENTS>=1113&&L.RUN_BATCHES>=30&&L.BATCH_ROWS<=L.BATCH_STATEMENT_CAP,true,'the default bounds hold the 1,113 accepted rows in one run');
+ assert.equal(L.RUN_STATEMENTS>=1110&&L.RUN_BATCHES>=29&&L.BATCH_ROWS<=L.BATCH_STATEMENT_CAP,true,'the default bounds hold the 1,110 accepted rows in one run');
 }
 }
 
-// ================= 7. the accepted production counts, end to end (708 / 401 / 4) =================
+// ================= 7. the accepted production counts, end to end (708 / 398 / 4) =================
 if(section(7)){
 {
- const big=makeWorld({admissions:708,retention:401,retirements:4,noise:true});
+ const big=makeWorld({admissions:708,retention:398,retirements:4,noise:true});
  const target=freshDb(big,{triggers:false});
  const built3=L.buildLoadPlan({sources:source(big.bytes),state:await stateOf(target.file),at:AT,leaseId:LEASE});
  assert.equal(built3.ok,true,JSON.stringify(built3.reasons));
  const p=built3.plan;
- assert.deepEqual(L.CLASSES.map(name=>p.classes[name].toLoad),[708,401,4]);
- assert.equal(p.batches.length,Math.ceil(708/40)+Math.ceil(401/40)+1);
- assert.ok(p.batches.length<=L.RUN_BATCHES&&p.batches.reduce((sum,batch)=>sum+batch.rows,0)===1113&&p.complete);
+ assert.deepEqual(L.CLASSES.map(name=>p.classes[name].toLoad),[708,398,4]);
+ assert.equal(p.batches.length,Math.ceil(708/40)+Math.ceil(398/40)+1);
+ assert.ok(p.batches.length<=L.RUN_BATCHES&&p.batches.reduce((sum,batch)=>sum+batch.rows,0)===1110&&p.complete);
  assert.ok(p.batchStatements.every(batch=>batch.statements.length<=L.BATCH_STATEMENT_CAP));
  const out=emit(p);
  const guardCheck=tableDigests(target.file);
  await applyBound(target.file,out.batches);
- assert.deepEqual(counts(target.file),{ratedAdmission:708,retention:401,retirement:4});
+ assert.deepEqual(counts(target.file),{ratedAdmission:708,retention:398,retirement:4});
  const ledger2=L.readbackLedger({plan:p,state:await stateOf(target.file)});
  assert.equal(ledger2.ok,true,JSON.stringify(ledger2.reasons));
  for(const [name,digest] of Object.entries(tableDigests(target.file)))if(!THREE.includes(name))assert.equal(digest,guardCheck[name],name+' untouched at scale');
- assert.equal(L.buildLoadPlan({sources:source(big.bytes),state:await stateOf(target.file),at:AT,leaseId:LEASE}).plan.noop,true,'the 1,113 rows are loaded once: the next plan is a no-op');
+ assert.equal(L.buildLoadPlan({sources:source(big.bytes),state:await stateOf(target.file),at:AT,leaseId:LEASE}).plan.noop,true,'the 1,110 rows are loaded once: the next plan is a no-op');
  // the readback notices every kind of difference
  sql(target.file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:spareX',1,'2026-11-01T00:00:00.000Z');INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:spareX','watchlist_fact',0,'{}','x','2026-11-01T00:00:00.000Z','2026-11-01T00:00:00.000Z');");
  const extra=L.readbackLedger({plan:p,state:await stateOf(target.file)});
@@ -463,7 +462,7 @@ if(section(9)){
 // ================= 10. the CLI: dry by default, --apply and the pinned digest for SQL, private paths only =================
 if(section(10)){
 {
- const w=makeWorld({admissions:708,retention:401,retirements:4,noise:false});
+ const w=makeWorld({admissions:708,retention:398,retirements:4,noise:false});
  const target=freshDb(w,{triggers:true});
  const dir=path.join(root,'cli-sources');fs.mkdirSync(dir);
  for(const [id,name] of Object.entries(L.SOURCE_FILES))fs.writeFileSync(path.join(dir,name),w.bytes[id]);
@@ -473,7 +472,7 @@ if(section(10)){
  const dry=run(['plan',...common]);
  assert.equal(dry.status,0,dry.stderr);
  const shown=JSON.parse(dry.stdout);
- assert.equal(shown.mode,'dry-run');assert.deepEqual(L.CLASSES.map(name=>shown.classes[name].toLoad),[708,401,4]);
+ assert.equal(shown.mode,'dry-run');assert.deepEqual(L.CLASSES.map(name=>shown.classes[name].toLoad),[708,398,4]);
  assert.deepEqual(counts(target.file),{ratedAdmission:0,retention:0,retirement:0},'a plan loads nothing');
  const out=path.join(root,'cli-out');
  const noApply=run(['sql',...common,'--plan-digest',shown.digest,'--out',out]);
@@ -493,7 +492,7 @@ if(section(10)){
  const dumped=files.map(name=>JSON.parse(fs.readFileSync(path.join(out,name),'utf8')));
  assert.ok(dumped.every(batch=>batch.planDigest===shown.digest));
  await applyBound(target.file,dumped);
- assert.deepEqual(counts(target.file),{ratedAdmission:708,retention:401,retirement:4});
+ assert.deepEqual(counts(target.file),{ratedAdmission:708,retention:398,retirement:4});
  const ver=run(['verify',...common,'--expect-generation','1','--expect-reference',REF,'--out',path.join(root,'cli-verify')]);
  assert.equal(ver.status,0,ver.stderr);assert.equal(JSON.parse(ver.stdout).ledger.ok,true);
  assert.ok(fs.existsSync(path.join(root,'cli-verify','receipt.json')));

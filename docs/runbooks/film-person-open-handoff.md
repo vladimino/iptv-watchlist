@@ -9,7 +9,7 @@ Counts and digests only in any evidence; no ids, titles, payloads or credentials
 1. Marker is `prepared`/`open` at generation G; fence row ok; baseline `verified` with the recorded reference ([AIR-373 evidence](../evidence/d1-migration/air-373-baseline-prepared-2026-11-11.md)).
 2. Schema version at least 16; migrations 0013 to 0016 triggers present.
 3. The projector fence of [ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md) / PR #524 (marker and generation in every real projector batch, unconditional) is implemented; confirm it is the deployed code on the exact commit before activation.
-4. The bounded loader for the three empty classes (1,113 rows) has run with its own GO ([loader runbook](film-person-prepared-loader.md)); receipts and readback match.
+4. The bounded loader for the three empty classes (1,110 rows) has run with its own GO ([loader runbook](film-person-prepared-loader.md)); receipts and readback match.
 5. Every canonical producer is wired (P2/P3) but dormant at `prepared`; readers fail closed (P4); `handoffReadiness` is computed and ready (P6; today `GAPS` makes it never ready).
 6. The frozen-mirror classification (ADR 0117 decision 3) is recorded object by object.
 7. Receipts for cross-domain operations exist (ADR 0117 decision 4, [ADR 0119](../adr/0119-durable-canonical-write-receipts.md)): written atomically with each mutation, the activation baseline recorded and verified, `readUnreceipted` clean, and no pending, failed, unknown or abandoned receipt left (`listAttention` empty).

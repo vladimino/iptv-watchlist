@@ -73,7 +73,7 @@ const LOADER=[
  ['a stored row with other content refuses',"else reasons.push('mismatch:'+name);",'else already[name]++;',5],
  ['a stored row the plan does not know refuses',"if([...stored.keys()].some(key=>!planned.has(key)))reasons.push('unknown_rows:'+name);",'',5],
  ['counts are pinned',"if(planned.size!==expected[name])reasons.push('count_mismatch:'+name+':'+planned.size);",'',5],
- ['the accepted measurement is the default expectation',"Object.fromEntries(CLASSES.map(name=>[name,ACCEPTED_DISCREPANCIES.caps[name]]))","Object.fromEntries(CLASSES.map(name=>[name,ACCEPTED_DISCREPANCIES.caps[name]+1]))",5],
+ ['the owner-accepted 12 Nov counts are the default expectation',"Object.freeze({ratedAdmission:708,retention:398,retirement:4})","Object.freeze({ratedAdmission:708,retention:399,retirement:4})",5],
  ['request ids are content-derived (admission)',"request_id:'p5-load:'+receiptsSha16+':'+admission.receiptFilmKey","request_id:'p5-load:'+Math.random()+':'+admission.receiptFilmKey",0],
  // the sources client
  ['the ETag is checked after the GET',"if(!second||second.etag!==first.etag||second.size!==first.size)throw stop('source_changed',id);",'',8],
