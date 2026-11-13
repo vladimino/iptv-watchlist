@@ -71,8 +71,8 @@ sequenceDiagram
     participant MCP as Worker MCP tools
     participant Queue as Prediction queue and lease
     participant Store as D1 pointers and R2 bodies
-    Client->>MCP: prediction_batch_start
-    MCP->>Queue: Read-only preflight: stored queue and its generation, hot first, up to 100 films, measure the whole answer
+    Client->>MCP: prediction_batch_start with optional manifestSize (1..100, default 100)
+    MCP->>Queue: Read-only preflight: stored queue and its generation, hot first, up to manifestSize films, measure the whole answer
     alt A live runner lease exists (v5 or v2 run)
         MCP-->>Client: already_running, names the holder, no manifest, no queue write
     else No live lease
@@ -94,41 +94,48 @@ sequenceDiagram
                 MCP->>Queue: Release the lease
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only
             else Unchanged
-                MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch
-                loop Until the manifest is spent, at most 100 films
+                MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch, manifestSize, filmsSelected
+                loop Until every selected manifest film is settled
                     opt Model call may be long
                         Client->>MCP: prediction_heartbeat, before the call and at least every 10 minutes
                         MCP->>Queue: Renew lease, same ownership epoch
                         MCP-->>Client: expiresAt and epoch
                     end
-                    Client->>Client: Generate up to 10 films from the manifest, each with an optional assessment
-                    Client->>MCP: prediction_batch_validate, 1 to 10 candidates with their assessment, read-only preflight
-                    MCP-->>Client: Per-film issues, no storage read or write, no run or lease
-                    opt A candidate has issues
-                        Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
-                    end
-                    Client->>MCP: prediction_batch_submit, 1 to 10 items, runId and epoch
-                    MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
-                    MCP->>MCP: Validate each film, compare profile impact
-                    loop Each valid film in order
-                        MCP->>Store: Immutable body, then the create-only assessment object when one was sent, then one D1 batch guarded by lease epoch and gate, then view index
-                        MCP->>MCP: Save the film result in the run record
-                    end
-                    MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
-                    MCP-->>Client: Per-film results, partial success, a replay of the same body recovers a crash
-                    opt Profile changed
-                        MCP-->>Client: compatible films kept, impacted or unknown films needs_regeneration with no retry record
+                    Client->>Client: Generate up to generationSize films (template 1) into a submit buffer
+                    opt Buffer reaches submitBatchSize (template 5) or 56 KiB, or end of manifest
+                        Client->>MCP: prediction_batch_validate, buffer candidates with assessment, read-only preflight
+                        MCP-->>Client: Per-film issues, no storage read or write, no run or lease
+                        opt A candidate has issues
+                            Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
+                        end
+                        Client->>MCP: prediction_batch_submit, buffer items (1 to submitBatchSize), runId and epoch
+                        MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
+                        MCP->>MCP: Validate each film, compare profile impact
+                        loop Each valid film in order
+                            MCP->>Store: Immutable body, then the create-only assessment object when one was sent, then one D1 batch guarded by lease epoch and gate, then view index
+                            MCP->>MCP: Save the film result in the run record
+                        end
+                        MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
+                        MCP-->>Client: Per-film results, partial success, a replay of the same body recovers a crash
+                        Client->>Client: Clear the submit buffer and continue
                     end
                 end
-                Client->>MCP: prediction_complete
-                MCP->>Queue: Record completion, release lease
+                alt Profile or contract drift after the last submit
+                    Client->>MCP: prediction_complete with reason manifest_spent
+                    MCP-->>Client: 409 Profile or Contract changed — fenced, not a false normal complete
+                    Client->>MCP: prediction_complete with systemic reason profile_changed or runner_aborted
+                    MCP->>Queue: Partial stop Event, release lease
+                else Manifest spent with matching profile and contract
+                    Client->>MCP: prediction_complete with reason manifest_spent
+                    MCP->>Queue: Normal complete Event once, release lease — global queue may still have ready films
+                end
             end
         end
     end
     Note over Client,Store: A dry run with dryRun true ignores the lease, reads and validates the same way and writes nothing: no lease, run, queue or storage write
 ```
 
-The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that stops leaves its unsubmitted films in the queue; the next `batch_start` selects them again, and a hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that ends with `manifest_spent` ([ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md)) releases the lease as a normal complete while unsubmitted films of a failed short run stay in the queue for the next `batch_start`. A hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
 
 The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-artifact.md), [contract](../reference/api/prediction-assessment.md)) travels only on the batch runner v2 items. Its own immutable R2 object `enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json` is written after the version object and before the guarded D1 commit, so a committed prediction has its assessment when one was sent and a failure before the commit leaves only unreferenced objects. It is a diagnostic: no rule, queue, freshness verdict, D1 row, bundle, view index entry, Event or public response reads or carries it, and the v5 path and `prediction_validate` take none.
 
