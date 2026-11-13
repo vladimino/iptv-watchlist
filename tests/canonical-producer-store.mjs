@@ -343,7 +343,8 @@ for(const stage of ['legacy','r2','prepared']){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&entry.name!=='canonical-producer-store.js'&&fs.readFileSync(full,'utf8').includes('canonical-producer-store'))importers.push(full.replace(/\\/g,'/'));}};
  walk('src');
- assert.deepEqual(importers,[],'nothing in src imports the store');
+ // AIR-374 S4-4: the dormant driver is the one importer of the store; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
+ assert.deepEqual(importers,['src/canonical-producer-driver.js'],'only the dormant driver imports the store');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-store'),file+' does not bundle it');
  assert.deepEqual([...text.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-producer-run.js','./canonical-writer-route.js','./film-person-authority.js']);
 }
