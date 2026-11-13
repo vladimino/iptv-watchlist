@@ -38,7 +38,7 @@ const SERIAL_ONLY=new Set([
 // Two uses, both scheduling only: the files start heaviest first, and the files are dealt to the shards by greedy longest-processing-time assignment (every file has DEFAULT_WEIGHT unless listed), so
 // the shards carry about the same total weight and not the same number of files. A name that no longer exists, or a new slow file that is missing here, changes the wall time and nothing else:
 // every file still runs exactly once, in exactly one shard.
-// AIR-374 S4-4: the two driver entries are LOCAL estimates (the mutation check ran 92 s of wall and about 80 s of CPU with four mutants at a time, the test 7 s), scaled like the producer-run mutation check (50 s of wall, weight 25); a CI recalibration replaces them.
+// AIR-374 S4-4: the driver entries are LOCAL estimates (the mutation check is two files of about 65 s of wall each with four mutants at a time, the test 7 s), scaled like the producer-run mutation check (50 s of wall, weight 25); a CI recalibration replaces them.
 // AIR-374 S4-2 (migration 0020): the four new entries (the two schema tests and the two preflight tests) are LOCAL estimates, not CI means: wall time of one `npm test -- --jobs 3` run on a shared machine (7.4 s, 36.8 s, 1.2 s and 9.2 s) scaled by the ratio of the entries of the existing files of the same kind; a CI recalibration replaces them.
 export const WEIGHTS={
  'epg-r2-known-length.mjs':72,
@@ -119,7 +119,8 @@ export const WEIGHTS={
  'canonical-film-external-ids-producer-mutation.mjs':5,
  'canonical-discovery-admission-producer-mutation.mjs':5,
  'canonical-producer-store-mutation.mjs':3,
- 'canonical-producer-driver-mutation.mjs':40,
+ 'canonical-producer-driver-mutation.mjs':20,
+ 'canonical-producer-driver-mutation-b.mjs':20,
  'canonical-producer-driver.mjs':4,
  'epg-producer-dry-run-mutation.mjs':3,
  'epg-producer-m2b-mutation.mjs':9,

@@ -151,32 +151,52 @@ async function stampFor(env,ctx,entry,code){
  return prereqStamp(code,snapshot);
 }
 
-// Cross-run supersession (ADR 0128: results covered by a newer run's plan become `superseded` / `newer_run`). Only a result of a run that is PROVEN earlier is superseded: `order(earlierGeneration, laterGeneration)` is the caller's authoritative ordering of
-// published generations (-1 earlier, 1 later); a row of a later run is left alone (it is not this run's to settle), and a covered row whose order cannot be proven (no ordering, a throw, an equal or unordered answer) fails the sweep closed (nothing superseded for it,
-// no claim). One keyset page at a time, one terminal settle per row (compare-and-set on state and attempts), at most `maxPages` pages, and the remaining deadline is checked before EVERY read and EVERY write.
-async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired}){
+// Cross-run supersession (ADR 0128: results covered by a newer run's plan become `superseded` / `newer_run`) and the owner-approved left-plan cleanup (option C, PR #601 decision record): once the COMPLETE, COMMITTED, SEALED candidate input of THIS generation
+// (`provenance`, see `inputProvenanceOk`) shows that a unit with an older live result is absent from the current full plan, that result is superseded `left_plan`, history kept. Without that provenance nothing is settled for an absent unit (fail closed).
+// Only a run PROVEN earlier is touched: `order(earlierGeneration, laterGeneration)` is the caller's authoritative ordering of published generations (-1 earlier, 1 later); a row of a later run (a delayed older pass) is left alone, and a COVERED row whose order
+// cannot be proven (no ordering, a throw, an equal or unordered answer) fails the sweep closed (no claim); an uncovered one is simply not settled. One keyset page at a time, one terminal settle per row (compare-and-set on state and attempts), at most `maxPages`
+// pages, and the remaining deadline is checked before EVERY read and EVERY write. The same-run left-plan cleanup (the live rows an earlier pass of THIS run left for a unit the new plan no longer holds) runs last, once provenance holds.
+async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired,provenance}){
  const covered=new Set(entries.map(keyOf));
- let after=null,superseded=0,unproven=false;
- for(let page=0;page<maxPages;page++){
-  if(expired())return {complete:false,superseded,reason:'deadline'};
+ let after=null,superseded=0,leftPlan=0,unproven=false,finished=false;
+ const settle=async(row,settledBy)=>{
+  const answer=await settleResult(env,{row,state:'superseded',settledBy,at:now()});
+  if(answer.state==='skipped')throw fail('film_person_not_open');
+ };
+ for(let page=0;page<maxPages&&!finished;page++){
+  if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
   const rows=await earlierLiveResults(env,{runKey:run.run_key,after,limit:SUPERSEDE_PAGE});
   for(const row of rows){
-   if(!covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+   const isCovered=covered.has(keyOf({kind:row.kind,id:row.unit_id}));
+   if(!isCovered&&!provenance)continue;
    let verdict=null;
    try{verdict=typeof order==='function'?await order(row.run_source_generation,run.source_generation):null;}catch{verdict=null;}
    if(verdict===1)continue;
-   if(verdict!==-1){unproven=true;continue;}
-   if(expired())return {complete:false,superseded,reason:'deadline'};
-   const answer=await settleResult(env,{row,state:'superseded',settledBy:'newer_run',at:now()});
-   if(answer.state==='skipped')throw fail('film_person_not_open');
-   superseded++;
+   if(verdict!==-1){if(isCovered)unproven=true;continue;}
+   if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
+   await settle(row,isCovered?'newer_run':'left_plan');
+   if(isCovered)superseded++;else leftPlan++;
   }
-  if(rows.length<SUPERSEDE_PAGE)return unproven?{complete:false,superseded,reason:'order_unproven'}:{complete:true,superseded};
-  const last=rows[rows.length-1];
-  after={run_key:last.run_key,pass_no:last.pass_no,kind:last.kind,unit_id:last.unit_id};
+  if(rows.length<SUPERSEDE_PAGE)finished=true;
+  else{const last=rows[rows.length-1];after={run_key:last.run_key,pass_no:last.pass_no,kind:last.kind,unit_id:last.unit_id};}
  }
- return {complete:false,superseded,reason:'max_pages'};
+ if(!finished)return {complete:false,superseded,leftPlan,reason:'max_pages'};
+ if(unproven)return {complete:false,superseded,leftPlan,reason:'order_unproven'};
+ if(provenance){
+  if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
+  const own=await liveRunResults(env,{origin:'epg',runKey:run.run_key,limit:500});
+  for(const row of own){
+   if(row.retry_owner!=='unit'||covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+   if(expired())return {complete:false,superseded,leftPlan,reason:'deadline'};
+   await settle(row,'left_plan');
+   leftPlan++;
+  }
+ }
+ return {complete:true,superseded,leftPlan};
 }
+// The provenance of the candidate input: the caller states, strictly, that the input this plan was built from is COMPLETE, COMMITTED and SEALED for the published generation of this run (a chunk, a partial or unsealed scan, a failed build, a pending
+// generation is none of that). Anything but exactly `true` on each field and the same generation is no provenance.
+export const inputProvenanceOk=(provenance,sourceGeneration)=>plain(provenance)&&provenance.complete===true&&provenance.committed===true&&provenance.sealed===true&&typeof sourceGeneration==='string'&&provenance.publishedGeneration===sourceGeneration;
 
 // The obsolete live result of the SAME run (an earlier pass of it) for a unit that has now succeeded (applied, a verified no-op, a named kept outcome): the settle that goes in the same batch as the cursor move. A receipt-owned row is never settled here (an unresolved
 // receipt belongs to its owner), a changed digest is `superseded` / `source_changed`, the same digest is `settled` after the unit's own proof. Returns the `supersede` write of `commitSlice` or null.
@@ -238,9 +258,7 @@ async function runSlices(env,ctx){
   const obsolete=async(unit,entry,outcome)=>{
    if(!overflow&&heldRows.size===0)return null;
    const row=overflow?await liveResult(env,{origin:ctx.origin,runKey:run.run_key,kind:unit.kind,unitId:unit.id}):heldRows.get(keyOf(unit))||null;
-   const write=obsoleteWrite(row,entry,outcome,now());
-   if(write)heldRows.delete(keyOf(unit));
-   return write;
+   return obsoleteWrite(row,entry,outcome,now());
   };
   const attach=async write=>{
    const cost=writeCost(write);
@@ -293,14 +311,14 @@ async function runSlices(env,ctx){
    // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
    // The remaining deadline holds through the whole sweep and before the claim: no write and no claim after it; the next step resumes (the cursor is already past the last unit).
    if(expired())return {...base(),state:'partial',reason:'deadline'};
-   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,maxPages:supersedeBound(params.supersedeMaxPages)});
-   if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded};
+   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,provenance:inputProvenanceOk(params.inputProvenance,ctx.sourceGeneration),maxPages:supersedeBound(params.supersedeMaxPages)});
+   if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
    if(expired())return {...base(),state:'partial',reason:'deadline',supersededEarlier:sweep.superseded};
    const open=await liveMembershipCount(env);
    const answer=await commitPassComplete(env,{run,openAtCompletion:open,at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
    run=answer.run;
-   return {...base(),state:'complete',openAtCompletion:open,appliedGeneration:run.applied_generation,supersededEarlier:sweep.superseded};
+   return {...base(),state:'complete',openAtCompletion:open,appliedGeneration:run.applied_generation,supersededEarlier:sweep.superseded,leftPlan:sweep.leftPlan};
   }
   return {...base(),state:'complete'};
  }catch(error){
@@ -327,7 +345,7 @@ export async function runEpgProducerPass(env,params={}){
   const opened=await openEpgRun(env,{runKey:event,sourceGeneration:params.sourceGeneration,fingerprint,units:plan.entries,at:nowOf(params)()});
   if(opened.state==='skipped')return {state:'skipped',reason:'projector_is_writer'};
   if(opened.run.pass_state==='passed'&&opened.run.applied_generation!==null)return {state:'already_complete',passNo:opened.run.pass_no,appliedGeneration:opened.run.applied_generation};
-  return await runSlices(env,{params,origin:'epg',event,at:params.at,entries:plan.entries,byKey:plan.byKey,run:opened.run,startIndex:opened.startIndex,absent:plan.absent,
+  return await runSlices(env,{params,origin:'epg',sourceGeneration:params.sourceGeneration,event,at:params.at,entries:plan.entries,byKey:plan.byKey,run:opened.run,startIndex:opened.startIndex,absent:plan.absent,
    prerequisites:params.prerequisites,appliers:applierOf(params),applyOptions:applyOptionsOf(params)});
  }catch(error){return errorResult(error);}
 }
