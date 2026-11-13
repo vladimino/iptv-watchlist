@@ -16,7 +16,7 @@ The file (read from `main`; its identity must be recomputed from `main` immediat
 
 ## 2. Order
 
-`0020` first (it requires a complete version 19 and carries the same pattern fix for its own `CHECK`s), then `0021`, then the H1 load. The H1 verifier and loader gate on a schema version (the verifier requires 19 today), so the code that follows the applies (the expected schema version in `scripts/film-person-capture.mjs`, the H1 verifier and the test fixtures) is a separate PR that merges with or just before the corresponding apply. This page does not change them.
+`0020` first (it requires a complete version 19 and carries the same pattern fix for its own `CHECK`s), then `0021`, then the H1 load. The capture gate (`SCHEMA_EXPECTED` in `scripts/film-person-capture.mjs`), the E6 stop rule and the H1 verifier (`SCHEMA_VERSION`, the schema note of `0021`) gate on one schema version and refuse any other. One bump PR moves all of them to 21 together with the test fixtures. Like the `0019` bump it is prepared beforehand and **merged only after the readback of `0021`**: merged earlier, those tools would refuse production at 19 or 20; merged later, they would refuse 21. Until then they expect 19.
 
 ## 3. GO statement the owner signs (fill the brackets)
 

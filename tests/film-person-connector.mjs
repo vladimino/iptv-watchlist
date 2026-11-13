@@ -36,7 +36,7 @@ const stops=async(work,reason,label=reason)=>assert.rejects(async()=>work(),erro
 // ---------- "production": the migrated schema (built once) with all three D1 routes on, some canonical rows and a table that needs more than one page ----------
 const template=path.join(root,'template.sqlite');
 // The capture gate expects the schema production holds (SCHEMA_EXPECTED, 19, after the owner-approved apply of migration 0019 under ADR 0119), so this fixture is the whole chain.
-sql(template,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
+sql(template,fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort().map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
 const production=path.join(root,'production.sqlite');
 fs.copyFileSync(template,production);
 for(const trigger of rows(production,"SELECT name FROM sqlite_master WHERE type='trigger'"))sql(production,'DROP TRIGGER '+trigger.name+';');

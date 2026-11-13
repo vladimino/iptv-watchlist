@@ -38,20 +38,20 @@ assert.ok(steps.find(item=>item.id==='other_counts').sql.includes('canonical_wri
 assert.equal(K.MANUAL_STEPS.length,5);
 assert.throws(()=>K.step('x','y','DROP TABLE a',''),/read-only SELECT/);
 assert.throws(()=>K.step('x','y','SELECT 1; DROP TABLE a',''),/read-only SELECT/);
-assert.equal(K.SCHEMA_VERSION,19);
+assert.equal(K.SCHEMA_VERSION,21);
 assert.equal(K.MARKER_GENERATION,1);
 assert.equal(K.MIN_LEASE_REMAINING_MS,15*60000);
 assert.deepEqual(K.parseCounts('708,398,4'),[708,398,4]);
 for(const bad of [null,undefined,'','708,398','708,398,4,1','a,b,c','708,-1,4','708,398,4 ','1234567,1,1'])assert.equal(K.parseCounts(bad),null,String(bad));
 
-// ---------- the real chain: a schema 19 database at prepared, as production is expected to be before H1 ----------
+// ---------- the real chain: a schema 21 database at prepared, as production is expected to be before H1 ----------
 const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 const db=path.join(root,'v19.sqlite');
-run(db,chain.filter(name=>Number(name.slice(0,4))<=19).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+
+run(db,chain.filter(name=>Number(name.slice(0,4))<=21).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')+
  `\nUPDATE film_person_baseline SET state='loading',reference='${REF}' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1;`);
 const collect=file=>Object.fromEntries(steps.map(item=>[item.id,run(file,item.sql,true)]));
 const real=collect(db);
-assert.equal(real.schema[0].version,19);
+assert.equal(real.schema[0].version,21);
 assert.equal(real.receipt_tables.length,4);
 assert.equal(real.loader_tables.length,5);
 assert.deepEqual(real.class_counts,[{film_rated_admission:0,film_retention:0,tmdb_retirement_decision:0}]);
@@ -71,7 +71,7 @@ assert.equal(K.verifyState('held',Object.fromEntries(Object.entries(heldReal).ma
 
 // ---------- in-memory fixtures for every phase ----------
 const base=()=>({
- schema:[{id:1,version:19,note:P.NOTE}],
+ schema:[{id:1,version:21,note:K.NOTE}],
  marker:[{mode:'prepared',cutover:'open',generation:1}],
  fence:[{ok:1}],
  baseline:[{state:'verified',reference:REF}],
@@ -121,9 +121,9 @@ assert.equal(K.verifyState('preflight',null,P1).ok,false);
 // schema
 pre({schema:[{id:1,version:18,note:'x'}]},'schema_version:18');
 pre({schema:[{id:1,version:20,note:'x'}]},'schema_version:20');
-pre({schema:[{id:1,version:19,note:'other'}]},'schema_note_mismatch');
-pre({schema:[{id:2,version:19,note:P.NOTE}]},'schema_contract_id:2');
-pre({schema:[{id:1,version:19,note:P.NOTE},{id:2,version:19,note:P.NOTE}]},'schema_contract_rows:2');
+pre({schema:[{id:1,version:21,note:'other'}]},'schema_note_mismatch');
+pre({schema:[{id:2,version:21,note:K.NOTE}]},'schema_contract_id:2');
+pre({schema:[{id:1,version:21,note:K.NOTE},{id:2,version:21,note:K.NOTE}]},'schema_contract_rows:2');
 pre({schema:[]},'schema_contract_rows:0');
 // marker, fence, baseline
 pre({marker:[{mode:'d1',cutover:'open',generation:2}]},'marker_moved:d1/open/2');

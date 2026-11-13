@@ -94,8 +94,8 @@ const MUTANTS=[
  ['the statements digest is not compared',"else if(results._statementsDigest!==statementsDigest())refusals.push('statements_digest_mismatch');","else if(false)refusals.push('statements_digest_mismatch');"],
  ['the capture time is not checked',"if(typeof results._capturedAt!=='string'||!ISO.test(results._capturedAt))","if(false)"],
  ['a non-object bundle is accepted',"if(!results||typeof results!=='object'||Array.isArray(results))return","if(false)return"],
- ['the schema stop rule is dropped',"if(id==='schema'&&one&&one.version!==19)","if(false)"],
- ['the schema stop rule accepts 18',"if(id==='schema'&&one&&one.version!==19)","if(id==='schema'&&one&&one.version<18)"],
+ ['the schema stop rule is dropped',"if(id==='schema'&&one&&one.version!==21)","if(false)"],
+ ['the schema stop rule accepts 20',"if(id==='schema'&&one&&one.version!==21)","if(id==='schema'&&one&&one.version<20)"],
  ['a held marker is not a stop',"if(id==='film_person_marker'&&one&&one.cutover==='held')","if(false)"],
  ['the EPG authority may be r2',"if(id==='epg_authority'&&one&&!(one.mode==='d1'&&one.cutover==='open'))","if(id==='epg_authority'&&one&&!(one.cutover==='open'))"],
  ['the EPG authority may be held',"if(id==='epg_authority'&&one&&!(one.mode==='d1'&&one.cutover==='open'))","if(id==='epg_authority'&&one&&!(one.mode==='d1'))"],
@@ -284,8 +284,8 @@ try{
  });
  // the migration chain is applied once; each mutant run copies the migrated file (E6_TEMPLATE) instead of rebuilding it
  const template=path.join(dir,'template.sqlite');
- // The E6 statements model the production database they were run against: schema 19 (migration 0020 is in the repository and NOT applied, ADR 0128), so the template stops at 19.
- const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
+ // The E6 statements model the production database they were run against: schema 21 (the version after the applies of 0020 and 0021), so the template runs the whole chain.
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
  const built=sqliteSync(['-bail',template],{input:chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8',maxBuffer:1<<26});
  assert.equal(built.status,0,'the template database is built');
  assert.equal(await run({}),0,'the unmutated test passes (it builds its own template)');

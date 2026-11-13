@@ -23,7 +23,7 @@ export const SECTION_COUNT=21;
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-capture-'));
 process.on('exit',()=>fs.rmSync(root,{recursive:true,force:true}));
 // The capture gate expects the schema production holds (SCHEMA_EXPECTED, 19, after the owner-approved apply of migration 0019 under ADR 0119), so this fixture is the whole chain.
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
 let n=0;
 // The same persistent sqlite session the D1 stand-in uses (AIR-408): a one-shot process per fixture statement was most of this file's time.
 const sqlite=(file,text)=>{const r=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text});if(r.status!==0)throw new Error(r.stderr);};
@@ -138,7 +138,7 @@ if(section(3)){
  assert.deepEqual(absent,['diary','discoveryLease','ownerMirror','retirements','sync','verifiedFilms','viewIndex']);
  assert.deepEqual(C.verifyManifest(m,result.bodies),[]);
  assert.ok(m.notCovered.some(text=>/do not prove a consistent R2\+D1 snapshot/.test(text)));
- assert.ok(m.d1.before.marker&&m.d1.before.schema.version===19&&m.d1.before.window&&m.d1.before.discovery&&m.d1.before.baseline&&m.d1.before.fence&&m.d1.before.lease&&m.witness.before.film);
+ assert.ok(m.d1.before.marker&&m.d1.before.schema.version===21&&m.d1.before.window&&m.d1.before.discovery&&m.d1.before.baseline&&m.d1.before.fence&&m.d1.before.lease&&m.witness.before.film);
  for(const r of bucket.requests){assert.ok(['GET','HEAD'].includes(r.method),r.method);assert.equal(r.query,'');assert.ok(C.isAllowed(r.path.replace('/iptv/',''),'run-1'),r.path);}
  // per key the order is HEAD, GET, HEAD, and the final recheck HEAD again
  const metadataRequests=bucket.requests.filter(r=>r.path==='/iptv/metadata.json').map(r=>r.method);
@@ -227,9 +227,9 @@ for(const [name,setup,reason] of [
  ['live window',f=>sql(f,"UPDATE projector_window SET state='held',owner='x',requested_at="+(Date.parse(AT)-1000)+",expires_at="+(Date.parse(AT)+60000)),'window_live'],
 ]){
  const bucket=await fakeBucket(INPUT);const file=database();gateRowsOk(file);setup(file);
- const result=await C.captureProjectorInputs({client:bucket.client(),db:d1Standin(file),now:NOW,expectedSchema:name==='schema moved'?18:19});
+ const result=await C.captureProjectorInputs({client:bucket.client(),db:d1Standin(file),now:NOW,expectedSchema:name==='schema moved'?20:21});
  assert.equal(result.ok,false,name);
- assert.ok(name==='schema moved'?result.reasons.includes('schema_unexpected:19'):result.reasons.includes(reason),name+': '+result.reasons);
+ assert.ok(name==='schema moved'?result.reasons.includes('schema_unexpected:21'):result.reasons.includes(reason),name+': '+result.reasons);
  assert.equal(bucket.requests.length,0,name+': nothing is requested from R2 when the D1 gate refuses');
  bucket.close();
 }
@@ -267,7 +267,7 @@ if(section(10)){
  assert.equal(bad.ok,false);assert.ok(bad.reasons[0].startsWith('probe_malformed'),bad.reasons);
  const failing=await C.captureProjectorInputs({client:bucket.client(),db:stub(async()=>{throw new Error('boom');}),now:NOW});
  assert.ok(failing.reasons[0].startsWith('probe_failed'),failing.reasons);
- const twoRows=await C.captureProjectorInputs({client:bucket.client(),db:stub(async()=>({results:[{id:1,version:19},{id:2,version:19}]})),now:NOW});
+ const twoRows=await C.captureProjectorInputs({client:bucket.client(),db:stub(async()=>({results:[{id:1,version:21},{id:2,version:21}]})),now:NOW});
  assert.ok(twoRows.reasons[0].startsWith('probe_malformed'));
  assert.equal(bucket.requests.length,0);bucket.close();
 }

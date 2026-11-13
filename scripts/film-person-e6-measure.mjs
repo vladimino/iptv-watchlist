@@ -57,7 +57,7 @@ const DELTA_COLUMNS={kind:word('programme','watchlist','any'),anchor:TS,members:
 const countOf=table=>'(SELECT COUNT(*) FROM '+table+') AS ';
 
 export const STATEMENTS=Object.freeze({
- schema:cell('SELECT version FROM schema_contract WHERE id = 1',1,{version:INT},{minRows:1,answers:'schema version (stop rule: not 19)',classification:CLASS}),
+ schema:cell('SELECT version FROM schema_contract WHERE id = 1',1,{version:INT},{minRows:1,answers:'schema version (stop rule: not 21)',classification:CLASS}),
  film_person_marker:cell('SELECT mode, cutover, generation FROM film_person_authority WHERE id = 1',1,{mode:{pattern:/^[a-z0-9_]{1,16}$/},cutover:word('open','held'),generation:INT},{minRows:1,answers:'Film/Person marker state (stop rule: held)',classification:CLASS}),
  epg_authority:cell('SELECT mode, cutover, generation, watchlist_generation FROM published_epg_authority WHERE id = 1',1,{mode:word('r2','d1'),cutover:word('open','held'),generation:INT,watchlist_generation:INT},{minRows:1,answers:'published EPG authority (stop rule: not d1 / open)',classification:CLASS}),
  table_counts:cell('SELECT '+[['film','films'],['person','persons'],['film_person_credit','credit_rows'],['watchlist_film','watchlist_films'],['film_metadata','metadata_rows'],['film_sync_state','sync_rows'],['film_dimension','dimension_rows'],['canonical_write_receipt','receipt_rows']].map(([t,a])=>countOf(t)+a).join(', '),1,{films:INT,persons:INT,credit_rows:INT,watchlist_films:INT,metadata_rows:INT,sync_rows:INT,dimension_rows:INT,receipt_rows:INT},{minRows:1,answers:'Film, Person, credit and watchlist counts; receipts must be 0 (no producer wired)',classification:CLASS}),
@@ -155,7 +155,7 @@ const biggestOf=members=>Math.max(...members.map(row=>Math.max(row.programme_mem
 // Stop rules of ONE statement (preconditions of the measurement). `rowsOfId` are its verified rows.
 function singleRules(id,rowsOfId,stops){
  const one=rowsOfId.length===1?rowsOfId[0]:null;
- if(id==='schema'&&one&&one.version!==19)stops.push('schema_version:'+one.version);
+ if(id==='schema'&&one&&one.version!==21)stops.push('schema_version:'+one.version);
  if(id==='film_person_marker'&&one&&one.cutover==='held')stops.push('film_person_held');
  if(id==='epg_authority'&&one&&!(one.mode==='d1'&&one.cutover==='open'))stops.push('epg_authority_not_d1_open:'+one.mode+'/'+one.cutover);
  // receipts must be empty while the producer is dormant: an unexpected receipt is a stop, not a note (the world is not the one the measurement assumes)

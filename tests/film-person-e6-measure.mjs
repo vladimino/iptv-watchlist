@@ -23,7 +23,7 @@ const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGM
 const template=process.env.E6_TEMPLATE?path.resolve(process.env.E6_TEMPLATE):path.join(root,'template.sqlite');
 if(!process.env.E6_TEMPLATE){
  // The E6 statements model the production database they were run against: schema 19 (migration 0020 is in the repository and NOT applied, ADR 0128), so this fixture stops at 19.
- const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=19).sort();
+ const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
  assert.equal(sqlite(template,chain.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
 }
 let n=0;
@@ -85,7 +85,7 @@ const collect=(file,meta)=>({_statementsDigest:statementsDigest(),_capturedAt:'2
 const file=seeded();
 const good=collect(file);
 const R=id=>good[id][0].results;
-assert.deepEqual(R('schema'),[{version:19}]);
+assert.deepEqual(R('schema'),[{version:21}]);
 assert.deepEqual(R('film_person_marker'),[{mode:'r2',cutover:'open',generation:0}]);
 assert.deepEqual(R('epg_authority'),[{mode:'d1',cutover:'open',generation:3,watchlist_generation:3}]);
 assert.deepEqual(R('table_counts'),[{films:6,persons:3,credit_rows:6,watchlist_films:4,metadata_rows:3,sync_rows:2,dimension_rows:1,receipt_rows:0}]);
@@ -170,13 +170,13 @@ refused(c=>{c.schema[0].meta.duration=CAPS.msPerStatement+1;},'duration_cap:sche
 assert.equal(mutate(c=>{c.schema[0].meta.duration=CAPS.msPerStatement;}).ok,true,'exactly the time cap passes');
 refused(c=>{for(const id of ORDER)c[id][0].meta={rows_read:Math.ceil(CAPS.rowsReadTotal/ORDER.length)+1,duration:1};},'rows_read_total');
 refused(c=>{for(const id of ORDER)c[id][0].meta={rows_read:1,duration:CAPS.msTotal/ORDER.length+1};},'duration_total');
-refused(c=>{c.schema[0].results=[{version:19},{version:19}];},'row_cap:schema:2');
+refused(c=>{c.schema[0].results=[{version:21},{version:21}];},'row_cap:schema:2');
 refused(c=>{c.schema[0].results=[];},'rows_missing:schema:0');
 refused(c=>{c.generation_members[0].results=Array.from({length:9},(_,i)=>({...c.generation_members[0].results[0],rank:i+1}));},'row_cap:generation_members:9');
-refused(c=>{c.schema[0].results=[{version:19,extra:1}];},'columns_mismatch:schema');
+refused(c=>{c.schema[0].results=[{version:21,extra:1}];},'columns_mismatch:schema');
 refused(c=>{c.schema[0].results=[{}];},'columns_mismatch:schema');
 refused(c=>{c.schema[0].results=[{version:-1}];},'value_invalid:schema:version');
-refused(c=>{c.schema[0].results=[{version:'19'}];},'value_invalid:schema:version');
+refused(c=>{c.schema[0].results=[{version:'21'}];},'value_invalid:schema:version');
 refused(c=>{c.schema[0].results=[{version:1.5}];},'value_invalid:schema:version');
 refused(c=>{c.film_person_marker[0].results[0].mode='tmdb';},'payload_pattern:film_person_marker');
 refused(c=>{c.film_person_marker[0].results[0].mode='Mode';},'value_invalid:film_person_marker:mode');
@@ -194,6 +194,7 @@ assert.equal(verify([]).ok,false);
 assert.deepEqual(verify('x').refusals,['results_not_an_object']);
 // stop rules
 refused(c=>{c.schema[0].results[0].version=18;},'schema_version:18');
+refused(c=>{c.schema[0].results[0].version=20;},'schema_version:20');
 refused(c=>{c.film_person_marker[0].results[0].cutover='held';},'film_person_held');
 refused(c=>{c.epg_authority[0].results[0].mode='r2';},'epg_authority_not_d1_open:r2/open');
 refused(c=>{c.epg_authority[0].results[0].cutover='held';},'epg_authority_not_d1_open:d1/held');
@@ -312,7 +313,7 @@ refused(c=>{c.table_counts[0].results[0].receipt_rows=1;c.receipt_states[0].resu
  stepStop(c=>{c.schema[0].meta.rows_read=CAPS.rowsReadPerStatement+1;},'schema','rows_read_cap:schema');
  stepStop(c=>{c.schema[0].meta.duration=CAPS.msPerStatement+1;},'schema','duration_cap:schema');
  stepStop(c=>{c.schema=c.schema[0].results;},'schema','plain_rows_without_meta:schema');
- stepStop(c=>{c.schema[0].results=[{version:19,extra:1}];},'schema','columns_mismatch:schema');
+ stepStop(c=>{c.schema[0].results=[{version:21,extra:1}];},'schema','columns_mismatch:schema');
  stepStop(c=>{c.film_person_marker[0].results[0].mode='tmdb';},'film_person_marker','payload_pattern:film_person_marker');
  stepStop(c=>{delete c.schema;},'schema','result_missing:schema');
  stepStop(c=>{c.receipt_states[0].results=[{state:'applied',n:1}];},'receipt_states','receipt_states_present:1');
