@@ -56,8 +56,8 @@ if(on('2')){
  assert.equal(out.ready,false);
  const expected=[
   ...ALL_EXCEPTIONS.filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
-  'receipts_protocol_unregistered',
-  ...PRODUCER_WIRING.map(item=>'producer_not_wired:'+item.name),
+  // AIR-374 P3c: the Discovery admission registers its atomic `film_mutation` operation, so the protocol is registered and `discovery_admission` is wired; the other three producers still need their kinds.
+  ...PRODUCER_WIRING.filter(item=>item.name!=='discovery_admission').map(item=>'producer_not_wired:'+item.name),
   ...CANONICAL_READER_REGISTRY.filter(item=>item.class==='freeze'&&!item.moved).map(item=>'reader_not_moved:'+item.name),
   ...EMPTY_CLASSES.map(item=>'empty_class_not_loaded:'+item.name+':0/'+item.expected),
  ];
@@ -67,7 +67,7 @@ if(on('2')){
  {const {EXPECTED}=await import('../scripts/film-person-prepared-loader.mjs');assert.deepEqual(Object.fromEntries(EMPTY_CLASSES.map(item=>[item.name,item.expected])),{...EXPECTED},'the readiness counts equal the loader EXPECTED (no drift)');}
  assert.ok(!out.blockers.includes('empty_class_not_loaded:retention:0/401'),'the superseded 401 is not the retention expectation');
  assert.deepEqual(PRODUCER_WIRING.map(item=>item.name),['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
- assert.equal(PRODUCER_OPERATIONS.size,0,'no producer operation is registered');assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation is registered');assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
  fs.writeFileSync(path.join(root,'today.json'),JSON.stringify(out.blockers));
 }
 
@@ -228,19 +228,23 @@ if(on('5')){
  // a flag-looking edit in the data (a `wired` field) changes nothing: wiring is derived from the receipts registry only
  const flagged=await load(text.replace("site:'epgSync commit (worker.js)',","site:'epgSync commit (worker.js)',wired:true,"),'flag.mjs');
  assert.deepEqual((await flagged.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers,today,'a wired flag has no effect');
- // only registering a real atomic operation changes it: film_mutation clears discovery_admission and the protocol
- const flipped=await load(text.replace("export const PRODUCER_OPERATIONS=operationRegistry([]);","export const PRODUCER_OPERATIONS=operationRegistry([{operation:'film_mutation',readback(){return null;},replay(){return {revision:1};},atomic:true}]);"),'flip.mjs');
- const after=(await flipped.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers;
- assert.deepEqual(today.filter(item=>!after.includes(item)),['receipts_protocol_unregistered','producer_not_wired:discovery_admission'],'registering an operation flips exactly its blockers');
+ // only the registry data changes it: removing the P3c registration restores exactly the protocol and the discovery_admission blockers
+ const unregistered=await load(text.replace(/export const PRODUCER_OPERATIONS=operationRegistry\(\[[^\n]*\]\);/,"export const PRODUCER_OPERATIONS=operationRegistry([]);"),'unregistered.mjs');
+ const without=(await unregistered.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers;
+ assert.deepEqual(without.filter(item=>!today.includes(item)),['receipts_protocol_unregistered','producer_not_wired:discovery_admission'],'registering the operation flips exactly its blockers');
 }
 
 // 6. The registries agree with the repository: a producer marked wired needs the Worker bundle to carry the adapters; receipts registered need the migration; nothing is
 // bundled today; only the producers module imports the registry.
 if(on('6')){
  const bundle=fs.readFileSync('build.mjs','utf8')+(fs.existsSync('scripts/bundle-scope.mjs')?fs.readFileSync('scripts/bundle-scope.mjs','utf8'):'');
- const bundled=/canonical-producers/.test(bundle);
- if(PRODUCER_OPERATIONS.size>0)assert.ok(bundled,'an operation is registered but the Worker bundle does not carry the producers module');
- else assert.ok(!bundled,'no operation is registered: the producers module is not bundled');
+ // The registry itself stays a readiness DATA module and is not bundled; what a registered operation needs is its UNIT in the Worker bundle (the scope the call site uses). Each registered kind names its unit module here.
+ const UNITS={film_mutation:'src/canonical-discovery-admission-producer.js'};
+ assert.ok(!/canonical-producers/.test(bundle),'the readiness registry is not bundled');
+ for(const kind of PRODUCER_OPERATIONS.keys()){
+  assert.ok(UNITS[kind],'a registered kind names its unit module: '+kind);
+  assert.ok(bundle.includes(UNITS[kind]),'a registered operation needs its unit in the Worker bundle: '+kind);
+ }
  const migrations=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name));
  const introduced=migrations.some(name=>fs.readFileSync('migrations/'+name,'utf8').includes(RECEIPTS_PROTOCOL.table));
  assert.ok(introduced,'migration 0019 exists in the repository (applied in production, schema 19)');

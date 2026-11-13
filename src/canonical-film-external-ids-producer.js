@@ -24,7 +24,7 @@ import {mutateFilm} from './canonical-mutations.js';
 import {SOURCE_CHANGED,producerRequestId} from './canonical-producer-adapters.js';
 import {CONTENT_REFUSALS} from './canonical-person-adapters.js';
 import {database,failed,many,one} from './film-person-authority.js';
-import {writerRoute} from './canonical-producers.js';
+import {writerRoute} from './canonical-writer-route.js';
 
 export const FILM_EXTERNAL_IDS_OPERATION='film_external_ids';
 // mutateFilm is capped at 60 statements and one D1 statement binds at most 100 values: six are fixed (fence, revision, redirect and presence assertions, row upsert, bump), the rest is one per added and per removed id.

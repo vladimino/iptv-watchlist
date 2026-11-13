@@ -449,11 +449,13 @@ if(section('11')){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==adapters&&fs.readFileSync(full,'utf8').includes('canonical-producer-adapters'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,['src/canonical-dictionary-producer.js','src/canonical-epg-person-producer.js','src/canonical-epg-producer.js','src/canonical-film-external-ids-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js'],'only the dormant EPG and dictionary-store producer layers, the dormant Person adapters (ADR 0126), the person_mutation unit (ADR 0130) and the film_external_ids unit (ADR 0133) import the adapter');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-adapters'),file+' does not bundle it');
+ assert.deepEqual(importers,['src/canonical-dictionary-producer.js','src/canonical-discovery-admission-producer.js','src/canonical-epg-person-producer.js','src/canonical-epg-producer.js','src/canonical-film-external-ids-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js'],'only the dormant EPG and dictionary-store producer layers, the dormant Person adapters (ADR 0126), the person_mutation unit (ADR 0130) and the film_external_ids unit (ADR 0133) import the adapter');
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-adapters'),file+' does not bundle it');
+ // AIR-374 P3c: the Discovery admission unit needs this module, so build.mjs carries it in ONE named scope (and nowhere else).
+ { const build=fs.readFileSync('build.mjs','utf8'); assert.equal(build.split('src/canonical-producer-adapters.js').length-1,1,'one bundle scope'); assert.ok(build.includes("scopedImports('src/canonical-producer-adapters.js','CanonicalProducerAdapters'"),'the scope is CanonicalProducerAdapters'); }
  const text=fs.readFileSync(path.join(SRC,'canonical-producer-adapters.js'),'utf8');
  const code_=text.replace(/\/\/.*$/gm,'');
- assert.deepEqual([...text.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-film-writers.js','./canonical-producers.js','./canonical-receipts.js','./film-person-authority.js']);
+ assert.deepEqual([...text.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-film-writers.js','./canonical-receipts.js','./canonical-writer-route.js','./film-person-authority.js']);
  assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(code_),'no network, timer, cron or R2 reference');
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the adapter holds no SQL of its own');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('producer-adapters'),'the Worker does not name it');

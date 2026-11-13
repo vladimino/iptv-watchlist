@@ -13,7 +13,7 @@
 // refused when the digest moved. Reconciliation is the origin's own bounded inline pass (E2): no cron, no tick, no global pass.
 // Stored: operation kind, origin, target, digests, revisions, state; no payload, title, name or personal data.
 import {database,failed,many,one} from './film-person-authority.js';
-import {writerRoute} from './canonical-producers.js';
+import {writerRoute} from './canonical-writer-route.js';
 import {RETRY_POLICY,defineOperation,digestOf,receiptedWrite} from './canonical-receipts.js';
 import {readPersonStatePlan,recordPersonState} from './canonical-person-state.js';
 import {mutateFilm} from './canonical-mutations.js';

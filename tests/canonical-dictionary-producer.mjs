@@ -559,7 +559,7 @@ if(section('11')){
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the module holds no SQL of its own');
  assert.ok(!/\b(writeFilmFacts|planFilmFacts|fenced|receiptedWrite)\b/.test(code_),'the writer is reached only through the receipt adapter');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-dictionary-producer'),'the Worker does not name it');
- assert.equal(PRODUCER_OPERATIONS.size,0,'no receipt operation is registered by this change');
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered; this change registers nothing');
  assert.ok(PRODUCER_WIRING.find(item=>item.name==='epg_commit').requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)),'epg_commit stays unwired');
 }
 console.log('canonical-dictionary-producer: ok');

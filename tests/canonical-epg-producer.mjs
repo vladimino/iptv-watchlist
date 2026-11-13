@@ -363,7 +363,7 @@ if(section('7')){
  assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(code_),'no network, timer, cron or R2 reference');
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the module holds no SQL of its own');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-epg-producer'),'the Worker does not name it');
- assert.equal(PRODUCER_OPERATIONS.size,0,'no receipt operation is registered by this change');
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered; this change registers nothing');
  const epg=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epg.requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)),'epg_commit stays unwired (blocker producer_not_wired:epg_commit is true)');
 }

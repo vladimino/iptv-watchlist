@@ -1188,6 +1188,11 @@ export async function upsertAdmissions(env,films,context={}){
   // At least one batch per call, so a caller whose time is already spent still moves.
   if(deadline!==null&&Date.now()>=deadline)break;
  }
+ // AIR-374 P3c: the canonical Film admission of the films this call just wrote. The module is in the Worker scope only (offline imports of this file have none). Below the marker `open` it is ONE marker read and nothing else; at `open` it is
+ // bounded, never throws and never changes this call's result (a unit that could not be written keeps its pending receipt, and the sweep re-finds a current admission without a canonical Film on a later call).
+ if(written.length&&typeof CanonicalDiscoveryAdmission!=='undefined'){
+  try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:Object.fromEntries(entries.map(row=>[row[0],row[1]])),written,deadline:Number.isFinite(context.deadline)?context.deadline:null});}catch{/* discovery keeps its own outcome */}
+ }
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }
 async function readCatalog(env){

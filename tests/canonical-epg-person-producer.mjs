@@ -586,14 +586,14 @@ if(section('10')){
  const strip=value=>value.replace(/\/\/.*$/gm,'');
  const epg=text('canonical-epg-person-producer.js'),adapters=text('canonical-person-adapters.js');
  assert.deepEqual([...epg.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-epg-producer.js','./canonical-person-adapters.js','./canonical-person-mutation-producer.js','./canonical-producer-adapters.js','./film-person-authority.js']);
- assert.deepEqual([...adapters.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-state.js','./canonical-producer-adapters.js','./canonical-producers.js','./canonical-receipts.js','./film-person-authority.js']);
+ assert.deepEqual([...adapters.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-state.js','./canonical-producer-adapters.js','./canonical-receipts.js','./canonical-writer-route.js','./film-person-authority.js']);
  for(const body of [strip(epg),strip(adapters)]){
   assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(body),'no network, timer, cron or R2 reference');
   assert.ok(!/\b(INSERT|UPDATE|DELETE|REPLACE)\b\s+(INTO|FROM)?\s*\w/.test(body),'no write SQL of its own: the canonical writes are the fenced writers');
  }
  assert.ok(/recordPersonState\(/.test(adapters)&&/mutateFilm\(/.test(adapters)&&/receiptMark/.test(adapters),'the writes are the existing writers with the receipt tail');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-epg-person-producer'),'the Worker does not name it');
- assert.equal(PRODUCER_OPERATIONS.size,0,'no receipt operation is registered by this change');
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered; this change registers nothing');
  const epgWiring=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epgWiring.requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)),'epg_commit stays unwired (producer_not_wired:epg_commit remains a blocker)');
  const readiness=await handoffReadiness(envOf(database('prepared')),{now:T});
