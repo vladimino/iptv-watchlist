@@ -1392,6 +1392,8 @@ async function sealCatalogStep(env,run,lease,deadline){
 // (2.4 s entry, 31.4 s pointer, mirrors, copy and discovery intent, 44.0 s commit tail of which the prediction queue
 // refresh was 26.8 s, 6.8 s reply), longer than the 60 s the shortest MCP client waits. Each step below does one of
 // those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
+// AIR-460: the staged payload holds the whole catalog, which only `seal_catalog` reads. The publish, finalize and queue steps drop it
+// the moment it is parsed, so its parsed objects are not held through the pointer, mirrors, copy and intent units.
 async function sealPayload(env,run){
  const id=run.runId;
  epgBoundary(id,'seal_payload_get','enter');
@@ -1403,6 +1405,7 @@ async function sealPayload(env,run){
  epgBoundary(id,'seal_payload_parse','enter',{bytes:text.length});
  const payload=JSON.parse(text);
  epgBoundary(id,'seal_payload_parse','exit');
+ delete payload.catalog;
  return payload;
 }
 // A step is a list of units. The first unit that is not finished always runs, so every call makes progress; no later unit
