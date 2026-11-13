@@ -31,7 +31,7 @@ const step3a=text=>text.split('\n').filter(l=>l.startsWith('3а. '));
 assert.equal(step3a(prompt).length,1);assert.deepEqual(step3a(dry),step3a(prompt),'identical research and assessment instructions');
 const step3b=text=>text.split('\n').filter(l=>l.startsWith('3б. '));
 assert.equal(step3b(prompt).length,1);assert.equal(step3b(dry).length,0,'the frozen A/B procedure does not inherit a new production-only research gate');
-for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN — НЕ READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','ВРЕМЕННЫЙ аудит','НЕ новые поля','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
+for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN — НЕ READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','временного аудита','НЕ поля fingerprint','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
 for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','opposition_competence','НЕ strong','research.attempts','МАССИВ','sources[].usedFor','1–120 Unicode','prediction_batch_validate','Buffer, TextEncoder','НЕ заменяет','не прекращай весь run'])assert.ok(prompt.includes(needle),'production manual closed-schema guard: '+needle);
 for(const [name,value] of [['production',prompt],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must be free of historical ticket/decision IDs');
 assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test(prompt)&&/Для исследования фильмов используй доступные web search/.test(prompt),'IPTV MCP boundary must allow independent film research');
@@ -44,7 +44,7 @@ assert.ok(/prediction_batch_start\(\{trigger:'scheduled', manifestSize\}\)/.test
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
 assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'production submit uses the owned live runId and epoch');
 assert.ok(/prediction_batch_submit\(\{runId:'dry-run',epoch:1,dryRun:true/.test(dry),'separate A/B template retains frozen dry-run submit');
-for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status = not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
+for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status=not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
 for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
