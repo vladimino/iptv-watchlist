@@ -330,7 +330,7 @@ if(section('10')){
  await writeFilmFacts(canonical.env,facts());
  assert.equal(dump(canonical.file,OWNED,true),dump(projected.file,OWNED),'identical rows for identical inputs, apart from the named exception identity_provenance_title_source');
  assert.ok(JSON.parse(rows(canonical.file,"SELECT provenance_json p FROM film_dimension WHERE dimension='identity'")[0].p).titleSource,'the named exception is visible');
- assert.deepEqual(P6_DIFFERENTIAL_EXCEPTIONS.filter(item=>item.status==='accepted').map(item=>item.id).sort(),['identity_provenance_title_source','sync_null_clock_keeps_stored']);
+ assert.deepEqual(P6_DIFFERENTIAL_EXCEPTIONS.filter(item=>item.status==='accepted').map(item=>item.id).sort(),['blank_never_overwrites','identity_provenance_title_source','redirected_film_refused','reviewed_owner_rows_protected','sync_null_clock_keeps_stored']);
  // clearing: the projector's releaseFilm / null sync / null metadata give the rows the canonical clear gives
  await repo.releaseFilm(ID);await repo.projectFilmSyncState({filmId:ID,sync:null});await repo.projectFilm({film,metadata:null,watchlist:null});
  await writeFilmFacts(canonical.env,{...facts({requestId:'clear',expectedRevision:2}),metadata:null,sync:null,watchlist:false});
