@@ -483,7 +483,8 @@ const filmInput=(id,expectedRevision,extra={})=>({id,expectedRevision,at:AT,film
 {
  const mutations=fs.readFileSync('src/canonical-mutations.js','utf8'),authority=fs.readFileSync('src/film-person-authority.js','utf8');
  // AIR-409: only the marker READER is bundled (the catalog film route gates its R2 receipt fallback on it); no mutation module is.
- assert.doesNotMatch(fs.readFileSync('build.mjs','utf8'),/canonical-mutations/);
+ // AIR-374 P3c: the Discovery admission unit needs the fenced writer, so build.mjs carries it in ONE named scope and nowhere else.
+ { const build=fs.readFileSync('build.mjs','utf8'); assert.equal(build.split('src/canonical-mutations.js').length-1,1); assert.ok(build.includes("scopedImports('src/canonical-mutations.js','CanonicalMutations'")); }
  for(const file of ['src/worker.js','src/d1-enrichment.js','src/canonical-repository.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/canonical-mutations/,file);
  for(const file of ['src/d1-enrichment.js','src/canonical-repository.js','src/catalog-d1.js'])assert.doesNotMatch(fs.readFileSync(file,'utf8'),/film-person-authority/,file);
  assert.match(fs.readFileSync('src/worker.js','utf8'),/FilmPersonAuthority\.readAuthority/);
