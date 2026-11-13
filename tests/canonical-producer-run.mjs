@@ -767,7 +767,8 @@ const rowOf=(extra={})=>R.resultRow({...PASS,state:'open',attempts:3,...extra});
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name).replace(/\\/g,'/');if(entry.isDirectory()){if(entry.name!=='node_modules'&&entry.name!=='.git')walk(full);}else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&fs.readFileSync(full,'utf8').includes('canonical-producer-run'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'nothing in src imports the pure producer-run module');
+ // AIR-374 S4-3: the dormant store (src/canonical-producer-store.js) is the one module that turns its decisions into batches; it is itself unimported and unbundled (tests/canonical-producer-store.mjs).
+ assert.deepEqual(importers,['src/canonical-producer-store.js'],'only the dormant store imports the pure producer-run module');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-run'),file+' does not bundle it');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-producer-run'),'the Worker does not name it');
  const text=fs.readFileSync(self,'utf8');
