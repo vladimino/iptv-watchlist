@@ -12,12 +12,13 @@ The store is the only module that writes those two tables. The decisions come fr
 | `commitSlice` | results, counts and cursor in ONE batch | Failure results as decided by `failureWrite` (insert, update or supersede), counts added, new cursor and strike columns, compare-and-set on the run revision. At most 48 statements. |
 | `commitPassComplete` | `pass_state='passed'`, `applied_generation`, `open_at_completion` | The only writer of `applied_generation` (an EPG run: equal to its `source_generation`). |
 | `commitStop` | `pass_state='stopped'`, `stopped_by` | Touches no strike column and no cursor. |
-| `dueResults` | read only | Due live results with retry owner `unit` (open or recoverable), ordered by `next_attempt_at` then key, at most 50. |
+| `dueResults` | read only | Due live results with retry owner `unit` (open or recoverable), ordered by `next_attempt_at` then key, at most 50. The optional `origin` restricts the selection in SQL BEFORE the limit (the retry pass asks for `epg`, so an older dictionary backlog cannot starve it). |
 | `settleResult` | one terminal update | Compare-and-set on state and attempts; a terminal row never reopens. |
 | `readRun`, `latestDictionaryRun`, `liveResult` | read only | A missing table is `producer_store_missing`. |
 | `updateResult` (S4-4) | one in-place update of a live result | A reclassification or a deferred schedule (the patch of `afterRetry` or `retryDecision`), compare-and-set on state and attempts; the identity columns never change, attempts never decrease, a terminal state goes through `settleResult`. |
 | `commitResume` (S4-4) | `pass_state='passing'`, `stopped_by` cleared | A stopped run a later step takes over, compare-and-set on the revision; no cursor, no strike column. A strike or slice write on a `stopped` row is refused by the SQL trigger, so the driver resumes it first. |
-| `latestEpgRun`, `liveMembershipCount` (S4-4) | read only | The newest epg run and the number of live `film_facts` results of origin `epg` (the third input of `canonicalFreshness` and the `open_at_completion` of a pass). |
+| `latestEpgRun`, `liveMembershipCount` (S4-4) | read only | The newest epg run and the number of live `film_facts` results of origin `epg` in ANY run (the third input of `canonicalFreshness` and the `open_at_completion` of a pass); the driver supersedes the earlier-run rows a completed plan covers before it counts. |
+| `earlierLiveResults` (S4-4) | read only | The live results of origin `epg` owned by the unit that belong to OTHER runs, one keyset page (at most 100) in key order; the input of that cross-run supersession. A receipt-owned row is never offered. |
 
 **Dormancy and fences.** Every writer reads the marker once through `writerRoute`; below `open` it returns `{state:'skipped'}` after that read. Every batch starts with the marker fence (`d1`, `open`, the generation read), and the SQL triggers of migration 0020 refuse any write outside `open`, so at `prepared` both tables stay empty even against a code defect.
 

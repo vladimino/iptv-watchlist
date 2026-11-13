@@ -22,7 +22,7 @@ import {
  CLASS,afterRetry,buildPlanEntries,canonicalFreshness,classOfCode,classifyProducerError,dictionaryUnitDigest,failureWrite,ownerReviewGuard,planFingerprint,prereqStamp,resumeIndex,retryDecision,strikeStep,
 } from './canonical-producer-run.js';
 import {
- DUE_LIMIT_MAX,SLICE_STATEMENT_CAP,commitPassComplete,commitResume,commitSlice,commitStop,commitStrike,dueResults,latestEpgRun,liveMembershipCount,liveResult,mintDictionaryRun,openEpgRun,settleResult,updateResult,
+ DUE_LIMIT_MAX,SLICE_STATEMENT_CAP,commitPassComplete,commitResume,commitSlice,commitStop,commitStrike,dueResults,earlierLiveResults,latestEpgRun,liveMembershipCount,liveResult,mintDictionaryRun,openEpgRun,settleResult,updateResult,
 } from './canonical-producer-store.js';
 
 // The step lease of the EPG executor (`LEASE_MS` and `BOUNDARY_MARGIN_MS` of src/epg-orchestration.js; a test pins both numbers to that file).
@@ -31,6 +31,8 @@ export const STEP_LEASE_MARGIN_MS=15000;
 export const MAX_DEADLINE_MS=STEP_LEASE_MS-STEP_LEASE_MARGIN_MS;
 export const MAX_SLICES_CEILING=1000;
 const SLICE_BASE_STATEMENTS=4;
+export const SUPERSEDE_PAGE=50;
+export const SUPERSEDE_MAX_PAGES=20;
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const codeOf=error=>classifyProducerError(error).code;
 const keyOf=unit=>unit.kind+'\u0000'+unit.id;
@@ -94,19 +96,33 @@ export async function buildEpgPlan(env,{runId,at,films=[],departed=[],persons=[]
 // ---------------------------------------------------------------------------------------------------------------------------------
 // One unit: apply it through the existing layer and read the outcome that belongs to it.
 // ---------------------------------------------------------------------------------------------------------------------------------
-// result: the return of an `apply*Units` call over a ONE-unit plan. Returns {type:'done', outcome} | {type:'failed', error} | {type:'stop', code}. A `skipped` answer (the marker moved) and a held code are stops; a thrown unit error is a failure of the
-// unit (classified later); an outcome that is neither proven nor refused (`unknown`, `pending`, a receipt `failed`) is a stop: the receipt owns it and the cursor must not pass it.
+// result: the return of an `apply*Units` call over a ONE-unit plan. Returns {type:'done', outcome} | {type:'failed', error} | {type:'stop', code}. The reply is EVIDENCE and is validated before it is believed: it must be the exact shape of one unit that was
+// visited (`skipped:false`, `cursor:1`, `done:true`, `counts` a plain object of non-negative integers with exactly ONE outcome counted once, `failures` an array that agrees with the count). A `skipped` answer (the marker moved) and a held code are stops; anything
+// malformed, empty, contradictory or unknown is the systemic `canonical_producer_invalid` (fail closed: the cursor does not pass it and nothing is claimed). Only an EXPLICIT outcome is accepted: applied or already applied, a no-op, or a named kept outcome
+// (`absent`, `kept`, `identity_mismatch`); a redirected Film is a refusal; `unknown`, `pending` or a receipt `failed` is an unresolved receipt (a stop, the receipt owns it); a thrown unit error is a failure of the unit (`failed` with one failure).
+const MALFORMED=Object.freeze({type:'stop',code:'canonical_producer_invalid'});
+const KEPT_COUNTS=Object.freeze(['absent','kept','identity_mismatch']);
 export function interpretApply(result){
- if(!plain(result))return {type:'stop',code:'film_person_unavailable'};
+ if(!plain(result))return MALFORMED;
  if(result.skipped===true)return {type:'stop',code:'film_person_not_open'};
- if(typeof result.stoppedBy==='string'&&result.stoppedBy)return {type:'stop',code:codeOf(result.stoppedBy)};
- if(Array.isArray(result.failures)&&result.failures.length)return {type:'failed',error:{code:result.failures[0].code}};
- const counts=plain(result.counts)?result.counts:{};
- if(counts.redirected>0)return {type:'failed',error:{code:'film_person_redirect'}};
- if(counts.unknown>0||counts.pending>0||counts.failed>0)return {type:'stop',code:'receipt_state_conflict'};
- if(counts.applied>0||counts.already>0)return {type:'done',outcome:'applied'};
- if(counts.noop>0)return {type:'done',outcome:'noop'};
- return {type:'done',outcome:'kept'};
+ if(result.skipped!==false)return MALFORMED;
+ if(result.stoppedBy!==null&&result.stoppedBy!==undefined)return typeof result.stoppedBy==='string'&&result.stoppedBy?{type:'stop',code:codeOf(result.stoppedBy)}:MALFORMED;
+ if(!plain(result.counts)||!Array.isArray(result.failures)||result.cursor!==1||result.done!==true)return MALFORMED;
+ const entries=Object.entries(result.counts);
+ if(entries.some(([,value])=>!Number.isInteger(value)||value<0))return MALFORMED;
+ const named=entries.filter(([,value])=>value>0);
+ if(named.length!==1||named[0][1]!==1)return MALFORMED;
+ const failures=result.failures;
+ if(failures.length>1||failures.some(item=>!plain(item)||typeof item.code!=='string'||!item.code))return MALFORMED;
+ const key=named[0][0];
+ if(key==='failed')return failures.length===1?{type:'failed',error:{code:failures[0].code}}:{type:'stop',code:'receipt_state_conflict'};
+ if(failures.length)return MALFORMED;
+ if(key==='applied'||key==='already')return {type:'done',outcome:'applied'};
+ if(key==='noop')return {type:'done',outcome:'noop'};
+ if(KEPT_COUNTS.includes(key))return {type:'done',outcome:'kept'};
+ if(key==='redirected')return {type:'failed',error:{code:'film_person_redirect'}};
+ if(key==='unknown'||key==='pending')return {type:'stop',code:'receipt_state_conflict'};
+ return MALFORMED;
 }
 async function applyOne(env,ctx,entry){
  const unit=ctx.byKey.get(keyOf(entry));
@@ -129,6 +145,25 @@ async function evaluate(env,ctx,entry){
 async function stampFor(env,ctx,entry,code){
  const snapshot=await ctx.prerequisites({env,origin:ctx.origin,code,kind:entry.kind,id:entry.id});
  return prereqStamp(code,snapshot);
+}
+
+// Cross-run supersession (ADR 0128: results covered by a newer run's plan become `superseded` / `newer_run`). One keyset page at a time, one terminal settle per covered row (compare-and-set on state and attempts), at most SUPERSEDE_MAX_PAGES pages.
+async function supersedeEarlierResults(env,{run,entries,now,maxPages}){
+ const covered=new Set(entries.map(keyOf));
+ let after=null,superseded=0;
+ for(let page=0;page<maxPages;page++){
+  const rows=await earlierLiveResults(env,{runKey:run.run_key,after,limit:SUPERSEDE_PAGE});
+  for(const row of rows){
+   if(!covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+   const answer=await settleResult(env,{row,state:'superseded',settledBy:'newer_run',at:now()});
+   if(answer.state==='skipped')throw fail('film_person_not_open');
+   superseded++;
+  }
+  if(rows.length<SUPERSEDE_PAGE)return {complete:true,superseded};
+  const last=rows[rows.length-1];
+  after={run_key:last.run_key,pass_no:last.pass_no,kind:last.kind,unit_id:last.unit_id};
+ }
+ return {complete:false,superseded};
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -212,11 +247,15 @@ async function runSlices(env,ctx){
   await flush();
   if(index<entries.length)return {...base(),state:'partial',reason:deadlineHit?'deadline':'max_slices'};
   if(ctx.origin==='epg'){
+   // Every unit of THIS plan now has a durable outcome. The live results that an EARLIER run left for a unit this plan covers are superseded `newer_run` (the history stays; this run owns the unit now), BEFORE the claim counts what is still open. An earlier live
+   // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
+   const sweep=await supersedeEarlierResults(env,{run,entries,now,maxPages:Number.isInteger(params.supersedeMaxPages)&&params.supersedeMaxPages>=1?params.supersedeMaxPages:SUPERSEDE_MAX_PAGES});
+   if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',supersededEarlier:sweep.superseded};
    const open=await liveMembershipCount(env);
    const answer=await commitPassComplete(env,{run,openAtCompletion:open,at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
    run=answer.run;
-   return {...base(),state:'complete',openAtCompletion:open,appliedGeneration:run.applied_generation};
+   return {...base(),state:'complete',openAtCompletion:open,appliedGeneration:run.applied_generation,supersededEarlier:sweep.superseded};
   }
   return {...base(),state:'complete'};
  }catch(error){
@@ -310,7 +349,7 @@ export async function retryEpgProducerResults(env,params={}){
   if(typeof params.runId!=='string'||!params.runId||typeof params.at!=='string'||!params.at)return {state:'invalid_parameters',field:'run'};
   if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer'};
   const clock=clockOf(params),now=nowOf(params),t0=clock();
-  const rows=await dueResults(env,{now:now(),limit:params.limit});
+  const rows=await dueResults(env,{now:now(),limit:params.limit,origin:'epg'});
   const counts={taken:0,settled:0,superseded:0,abandoned:0,deferred:0,updated:0,unchanged:0,other_origin:0,not_proven:0};
   let plan=null,stopCode=null;
   const ctx={origin:'epg',prerequisites:params.prerequisites,appliers:applierOf(params),applyOptions:applyOptionsOf(params),at:params.at};

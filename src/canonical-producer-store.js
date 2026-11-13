@@ -80,11 +80,12 @@ export async function liveResult(env,{origin,runKey,kind,unitId}){
  return (await one(database(env),'SELECT '+RESULT_COLUMNS+' FROM canonical_producer_unit_result WHERE origin=? AND run_key=? AND kind=? AND unit_id=? AND state IN ('+LIVE_STATES.map(()=>'?').join(',')+')',[origin,runKey,kind,unitId,...LIVE_STATES]))||null;
 }
 // The due LIVE results the retry pass may take: owner `unit`, state open or recoverable, next_attempt_at <= now, ordered by next_attempt_at then key. At most DUE_LIMIT_MAX. Read-only.
-export async function dueResults(env,{now,limit=DUE_LIMIT_MAX}={}){
- if(typeof now!=='string'||!Number.isFinite(Date.parse(now)))throw invalid();
+// `origin` (S4-4, optional) restricts the selection to ONE origin in SQL, BEFORE the limit: a caller that handles one origin never has its bounded budget filled by rows of the other.
+export async function dueResults(env,{now,limit=DUE_LIMIT_MAX,origin}={}){
+ if(typeof now!=='string'||!Number.isFinite(Date.parse(now))||(origin!==undefined&&!ORIGINS.includes(origin)))throw invalid();
  const cap=Math.min(Math.max(Number(limit)||1,1),DUE_LIMIT_MAX);
  try{
-  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE retry_owner='unit' AND state IN ('open','refused_recoverable') AND next_attempt_at<=? ORDER BY next_attempt_at,origin,run_key,pass_no,kind,unit_id LIMIT ?",[now,cap]);
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE retry_owner='unit'"+(origin?' AND origin=?':'')+" AND state IN ('open','refused_recoverable') AND next_attempt_at<=? ORDER BY next_attempt_at,origin,run_key,pass_no,kind,unit_id LIMIT ?",[...(origin?[origin]:[]),now,cap]);
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 
@@ -92,6 +93,16 @@ export async function dueResults(env,{now,limit=DUE_LIMIT_MAX}={}){
 export async function latestEpgRun(env){
  try{return (await one(database(env),"SELECT "+RUN_COLUMNS+" FROM canonical_producer_run WHERE origin='epg' ORDER BY created_at DESC,run_key DESC LIMIT 1"))||null;}
  catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+// S4-4: the LIVE results of origin `epg` that belong to OTHER runs than `runKey` and are owned by the unit (a receipt-owned row settles by evidence), one keyset page at a time in key order: the input of the cross-run supersession a completed pass performs.
+// `after` is the key of the last row of the previous page ({run_key, pass_no, kind, unit_id}) or null. Read-only; at most 100 rows.
+export async function earlierLiveResults(env,{runKey,after=null,limit=50}={}){
+ if(typeof runKey!=='string'||!runKey||!Number.isInteger(limit)||limit<1||limit>100)throw invalid();
+ if(after!==null&&(!plain(after)||typeof after.run_key!=='string'||!Number.isInteger(after.pass_no)||typeof after.kind!=='string'||typeof after.unit_id!=='string'))throw invalid();
+ try{
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE origin='epg' AND run_key<>? AND retry_owner='unit' AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')'+(after?' AND (run_key,pass_no,kind,unit_id)>(?,?,?,?)':'')+' ORDER BY run_key,pass_no,kind,unit_id LIMIT ?',
+   [runKey,...LIVE_STATES,...(after?[after.run_key,after.pass_no,after.kind,after.unit_id]:[]),limit]);
+ }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 // S4-4: the number of LIVE membership-affecting results (kind `film_facts`, origin `epg`, any run): the third input of `canonicalFreshness` and the `open_at_completion` of a pass. Read-only.
 export async function liveMembershipCount(env){
