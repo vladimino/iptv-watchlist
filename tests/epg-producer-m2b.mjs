@@ -41,33 +41,40 @@ async function production(){
  sqlite(file,"INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb:1','role:1',1,'"+T+"'),('person:tmdb:2','role:2',1,'"+T+"'),('person:tmdb:3','role:3',1,'"+T+"');INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('"+ID(1)+"','person:tmdb:1','director',0),('"+ID(1)+"','person:tmdb:2','actor',1),('"+ID(5)+"','person:tmdb:3','actor',0);");
  return file;
 }
-// A reader of the emitted statements: pages of `pageRows` (small here so a table needs several pages), as an authorized operator would paste them.
+// A reader of the emitted statements: a count statement and keyset pages of `pageRows` (small here so a table needs several pages), recorded with their connector metrics, as an authorized operator would paste them.
 function read(file,pageRows=2){
  const tables={};
- for(const statement of emitSql().statements){
-  const all=[];let last=0;
+ for(const item of COPY_PLAN){
+  const count=rows(file,emitSql().statements.find(statement=>statement.id===item.table+'#count').sql)[0];
+  const statement=emitSql().statements.find(statement=>statement.id===item.table+'#page');
+  const pages=[];let last=0;
   for(;;){
    const page=rows(file,statement.sql.replace(/\? ORDER BY rowid LIMIT \?/,last+' ORDER BY rowid LIMIT '+pageRows));
-   for(const row of page){const {_rid,...rest}=row;all.push(rest);last=_rid;}
+   const after=last;
+   if(page.length)last=page[page.length-1]._rid;
+   pages.push({after,last,rows:page,meta:{rows_read:page.length,duration:3}});
    if(page.length<pageRows)break;
   }
-  tables[statement.table]=all;
+  tables[item.table]={count:{n:count.n,maxRowid:count.max_rowid,meta:{rows_read:count.n,duration:4}},pages};
  }
- return {_statementsDigest:emitSql().statementsDigest,_capturedAt:T,tables};
+ return {_statementsDigest:emitSql().statementsDigest,_capturedAt:T,_pageRows:pageRows,tables};
 }
 const dump=file=>JSON.stringify(COPY_PLAN.map(item=>[item.table,rows(file,'SELECT '+item.columns.join(',')+' FROM '+item.table+' ORDER BY '+item.columns.join(','))]));
 
 // 1. The emitted statements.
 {
  const plan=emitSql();
- assert.equal(plan.statements.length,COPY_PLAN.length);
+ assert.equal(plan.statements.length,COPY_PLAN.length*2,'a count statement and a page statement per table');
  for(const statement of plan.statements){
   assertReadOnly(statement.sql);
-  assert.match(statement.sql,/^SELECT rowid AS _rid, [a-z0-9_, ]+ FROM [a-z_]+ WHERE rowid > \? ORDER BY rowid LIMIT \?$/);
-  assert.equal(statement.sql.split('?').length-1,2);
-  assert.ok(statement.pageRows<=CAPS.pageRows&&statement.maxRows<=CAPS.rowsReadPerStatement);
+  if(statement.kind==='page'){
+   assert.match(statement.sql,/^SELECT rowid AS _rid, [a-z0-9_, ]+ FROM [a-z_]+ WHERE rowid > \? ORDER BY rowid LIMIT \?$/);
+   assert.equal(statement.sql.split('?').length-1,2);
+   assert.ok(statement.pageRows<=CAPS.pageRows&&statement.maxRows<=CAPS.rowsReadPerStatement);
+  }else assert.match(statement.sql,/^SELECT COUNT\(\*\) AS n, MAX\(rowid\) AS max_rowid FROM [a-z_]+$/);
  }
  assert.equal(emitSql().statementsDigest,plan.statementsDigest,'the digest is stable');
+ assert.ok(plan.protocol.length===3&&/ONE statement per request/.test(plan.protocol[0])&&/cannot prevent a read/.test(plan.protocol[2]),'the operator protocol is part of the output');
  // the planned columns are exactly the columns of the migrated table, in order
  for(const item of COPY_PLAN)assert.deepEqual(rows(template,'PRAGMA table_info('+item.table+')').map(column=>column.name),item.columns,item.table);
  assert.ok(CAPS.rowsReadTotal<=1500000&&CAPS.rowsReadPerStatement<=300000,'the caps are not above the E6 proposals');
@@ -87,21 +94,21 @@ const dump=file=>JSON.stringify(COPY_PLAN.map(item=>[item.table,rows(file,'SELEC
 const prod=await production();
 const results=read(prod);
 {
- assert.ok(results.tables.film.length===5&&results.tables.person.length===3&&results.tables.film_person_credit.length===3);
+ assert.ok(results.tables.film.pages.length===3&&results.tables.film.count.n===5&&results.tables.person.count.n===3&&results.tables.film_person_credit.count.n===3,'five Films in three pages of two');
  const verdict=verifyResults(results);
  assert.deepEqual([verdict.ok,verdict.refusals],[true,[]]);
  const out=path.join(root,'copy-1.sqlite');
  const loaded=loadCopy(results,out);
  assert.equal(loaded.ok,true);assert.equal(loaded.counts.film,5);
  assert.equal(dump(out),dump(prod),'the planned tables are row-for-row identical');
- assert.deepEqual([verifyCopy(out).ok,verifyCopy(out).counts.foreign_key_violations],[true,0]);
+ assert.deepEqual([verifyCopy(out).ok,verifyCopy(out).representative,verifyCopy(out).counts.foreign_key_violations],[true,true,0]);
  // no output is overwritten
  assert.deepEqual(loadCopy(results,out),{ok:false,refusals:['output_exists']});
  const before=sha(out);
  const run=await runOnCopy(out,{departed:2,at:T,clock:steady()});
  assert.equal(run.copyUnchanged,true);
  assert.equal(sha(out),before,'the copy is byte-identical after the run');
- assert.equal(run.ok,true);
+ assert.equal(run.ok,true);assert.equal(run.representative,true);
  assert.equal(run.report.writes,0);
  assert.deepEqual(run.volume,{films:4,departed:1,creditFilms:1,personRows:2,personStateUnits:'unmeasured'},'the observed Films are the 4 watchlist members; Film 5 is the only Film that left it');
  assert.deepEqual(run.report.byKind.film_facts,{units:5,changed:0,noop:5,absent:0,refused:0,failed:0},'the stored rows replay as no-ops; a release of a Film already off the watchlist is a no-op');
@@ -140,24 +147,63 @@ const results=read(prod);
 // 5. Every refusal of the results file and of the copy.
 {
  const clone=()=>JSON.parse(JSON.stringify(results));
- const refused=(mutate,expected)=>{const copy=clone();mutate(copy);const verdict=verifyResults(copy);assert.equal(verdict.ok,false,expected);assert.ok(verdict.refusals.some(code=>code.startsWith(expected)),expected+' in '+verdict.refusals);};
+ const refused=(mutate,expected,source=results)=>{const copy=JSON.parse(JSON.stringify(source));mutate(copy);const verdict=verifyResults(copy);assert.equal(verdict.ok,false,expected);assert.ok(verdict.refusals.some(code=>code.startsWith(expected)),expected+' in '+verdict.refusals);};
  refused(copy=>{copy._statementsDigest='0'.repeat(64);},'statements_digest_mismatch');
  refused(copy=>{copy._capturedAt='yesterday';},'captured_at_invalid');
+ refused(copy=>{delete copy._pageRows;},'page_rows_invalid');
+ refused(copy=>{copy._pageRows=CAPS.pageRows+1;},'page_rows_invalid');
  refused(copy=>{delete copy.tables;},'tables_missing');
- refused(copy=>{copy.tables.secret_table=[];},'table_not_in_plan');
+ refused(copy=>{copy.tables.secret_table={};},'table_not_in_plan');
  refused(copy=>{delete copy.tables.person;},'table_missing');
- refused(copy=>{copy.tables.film[0].extra='x';},'columns_mismatch');
- refused(copy=>{copy.tables.film[0]={...copy.tables.film[0]};delete copy.tables.film[0].id;},'columns_mismatch');
- refused(copy=>{copy.tables.film[0].original_title={a:1};},'value_not_scalar');
- refused(copy=>{copy.tables.film[0]=5;},'row_not_object');
- // the caps are a parameter so the test needs no million rows: a table over the per-table cap, and a total over the total cap
+ // the page chain: a dropped middle page, a dropped terminal page, a repeated page, reordered pages, an unterminated chain
+ refused(copy=>{copy.tables.film.pages.splice(1,1);},'page_chain_broken');
+ refused(copy=>{copy.tables.film.pages.pop();},'page_unterminated');
+ refused(copy=>{copy.tables.film.pages.splice(1,0,copy.tables.film.pages[1]);},'page_chain_broken');
+ refused(copy=>{const [first,second]=copy.tables.film.pages;copy.tables.film.pages[0]=second;copy.tables.film.pages[1]=first;},'page_chain_broken');
+ refused(copy=>{copy.tables.film.pages[0].rows.pop();},'page_not_full');
+ refused(copy=>{copy.tables.film.pages=[];},'pages_missing');
+ // a populated table emptied: the recorded count and maximum no longer add up (a populated credit table must not pass as empty)
+ refused(copy=>{copy.tables.film_person_credit.pages=[{after:0,last:0,rows:[],meta:{rows_read:0,duration:1}}];},'count_mismatch');
+ refused(copy=>{copy.tables.film_person_credit.pages[copy.tables.film_person_credit.pages.length-1].rows.pop();copy.tables.film_person_credit.pages[copy.tables.film_person_credit.pages.length-1].last=copy.tables.film_person_credit.pages[copy.tables.film_person_credit.pages.length-1].rows.at(-1)?._rid??copy.tables.film_person_credit.pages[copy.tables.film_person_credit.pages.length-1].after;},'count_mismatch');
+ // the recorded maximum rowid must be where the chain ends
+ refused(copy=>{copy.tables.film.count.maxRowid+=1;},'max_rowid_mismatch');
+ refused(copy=>{copy.tables.film.count={n:5,maxRowid:null,meta:{rows_read:5,duration:1}};},'count_invalid');
+ refused(copy=>{copy.tables.person.count.n=-1;},'count_invalid');
+ // rows
+ refused(copy=>{copy.tables.film.pages[0].rows[0].extra='x';},'columns_mismatch');
+ refused(copy=>{delete copy.tables.film.pages[0].rows[0].id;},'columns_mismatch');
+ refused(copy=>{copy.tables.film.pages[0].rows[0].original_title={a:1};},'value_not_scalar');
+ refused(copy=>{copy.tables.film.pages[0].rows[0]=5;},'row_not_object');
+ refused(copy=>{copy.tables.film.pages[0].rows[1]._rid=copy.tables.film.pages[0].rows[0]._rid;},'rowid_order');
+ refused(copy=>{copy.tables.film.pages[0].last+=1;},'page_last_mismatch');
+ // the connector metrics: missing, over a per-statement cap, over a total cap (the caps are a parameter so the test needs no million rows)
+ refused(copy=>{delete copy.tables.film.pages[0].meta;},'meta_missing');
+ refused(copy=>{delete copy.tables.film.count.meta;},'meta_missing');
+ refused(copy=>{copy.tables.film.pages[0].meta={rows_read:'many',duration:1};},'meta_missing');
+ refused(copy=>{copy.tables.film.pages[0].meta.rows_read=CAPS.rowsReadPerStatement+1;},'meta_over_cap');
+ refused(copy=>{copy.tables.film.pages[0].meta.duration=CAPS.msPerStatement+1;},'meta_over_cap');
  {
   const tight=verifyResults(clone(),{...CAPS,rowsReadPerStatement:4});
   assert.equal(tight.ok,false);
-  assert.ok(tight.refusals.includes('rows_over_cap:film')&&!tight.refusals.includes('rows_over_cap:person'),'five Films are over a cap of four, two Persons are not');
+  assert.ok(tight.refusals.includes('rows_over_cap:film')&&!tight.refusals.includes('rows_over_cap:person'),'five Films are over a cap of four, three Persons are not');
   const total=verifyResults(clone(),{...CAPS,rowsReadTotal:10});
-  assert.deepEqual([total.ok,total.refusals],[false,['rows_total_over_cap']]);
+  assert.ok(!total.ok&&total.refusals.includes('rows_total_over_cap')&&total.refusals.includes('meta_total_rows_read_over_cap'));
+  const slow=verifyResults(clone(),{...CAPS,msTotal:10});
+  assert.ok(!slow.ok&&slow.refusals.includes('meta_total_duration_over_cap'));
   assert.equal(verifyResults(clone(),CAPS).ok,true);
+ }
+ // a table that is an exact multiple of the page size ends with an EMPTY short page; a full last page with rows after it is unterminated
+ {
+  const even=read(prod,5);
+  assert.equal(even.tables.film.pages.length,2,'five Films at five a page: one full page and the empty terminal page');
+  assert.equal(verifyResults(even).ok,true);
+  // the recorded count and maximum rowid prove the end, so the empty terminal page is redundant; a full last page with rows MISSING behind it is not
+  const noEmpty=JSON.parse(JSON.stringify(even));noEmpty.tables.film.pages.pop();
+  assert.equal(verifyResults(noEmpty).ok,true);
+  refused(copy=>{copy.tables.film.count.n=6;copy.tables.film.count.maxRowid+=1;},'page_unterminated',noEmpty);
+  const one=read(prod,100);
+  assert.deepEqual([one.tables.film.pages.length,verifyResults(one).ok],[1,true],'one short page');
+  refused(copy=>{copy._pageRows=2;},'page_over_size',one);
  }
  // a refused file is never loaded
  const bad=clone();bad._statementsDigest='1'.repeat(64);
@@ -166,15 +212,33 @@ const results=read(prod);
  assert.equal(fs.existsSync(target),false);
  // the copy verifier: wrong schema version, an unreadable file
  const old=path.join(root,'old.sqlite');sqlite(old,chain.slice(0,-1).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'));
- assert.deepEqual(verifyCopy(old).refusals,['schema_version:20']);
- assert.deepEqual((await runOnCopy(old)).refusals,['schema_version:20'],'a run is refused on a wrong copy');
+ assert.ok(verifyCopy(old).refusals.includes('schema_version:20'));
+ assert.ok((await runOnCopy(old)).refusals.includes('schema_version:20'),'a run is refused on a wrong copy');
  const missing=path.join(root,'missing.sqlite');
  assert.deepEqual(verifyCopy(missing).refusals,['copy_unreadable']);
- // a partial page that splits a pair leaves foreign-key violations: counted, not hidden
- const split=clone();split.tables.film=split.tables.film.slice(1);
- const splitFile=path.join(root,'split.sqlite');
- assert.equal(loadCopy(split,splitFile).ok,true);
- assert.ok(verifyCopy(splitFile).counts.foreign_key_violations>0);
+ // a copy without its manifest, or truncated after the load, is refused (the credit table is the one a silent loss would understate)
+ const plain=path.join(root,'plain.sqlite');fs.copyFileSync(template,plain);
+ assert.ok(verifyCopy(plain).refusals.includes('manifest_missing'));
+ const cut=path.join(root,'cut.sqlite');loadCopy(results,cut);
+ assert.equal(verifyCopy(cut).ok,true);
+ sqlite(cut,'DELETE FROM film_person_credit');
+ assert.deepEqual([verifyCopy(cut).ok,verifyCopy(cut).refusals],[false,['manifest_mismatch:film_person_credit']]);
+ assert.deepEqual((await runOnCopy(cut)).refusals,['manifest_mismatch:film_person_credit'],'a truncated copy never yields a unit-volume report');
+ // a copy with a foreign-key violation is refused; only on request it runs, and then it says it is not representative and not a D-C input
+ const broken=path.join(root,'broken.sqlite');loadCopy(results,broken);
+ sqlite(broken,'PRAGMA foreign_keys=OFF;DELETE FROM film WHERE id = \''+ID(1)+'\'');
+ {
+  sqlite(broken,'PRAGMA foreign_keys=OFF;UPDATE '+'m2b_copy_manifest SET row_count = row_count - 1 WHERE table_name = \'film\'');
+  const refusedCopy=verifyCopy(broken);
+  assert.equal(refusedCopy.ok,false);
+  assert.ok(refusedCopy.refusals.some(code=>code.startsWith('foreign_key_violations:')),refusedCopy.refusals.join(','));
+  const refusedRun=await runOnCopy(broken);
+  assert.equal(refusedRun.ok,false);
+  const allowed=await runOnCopy(broken,{allowInconsistent:true,at:T,clock:steady()});
+  assert.deepEqual([allowed.ok,allowed.representative,allowed.notADCInput],[true,false,true]);
+  assert.ok(allowed.nonrepresentative.some(code=>code.startsWith('foreign_key_violations:')));
+  assert.equal(verifyCopy(broken,{allowInconsistent:true}).representative,false);
+ }
 }
 
 // 6. Static: no apply function or writer, no network, no environment, only the planned imports.
