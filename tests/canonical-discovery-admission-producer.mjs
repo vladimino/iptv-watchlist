@@ -371,6 +371,88 @@ for(const stage of ['legacy','r2','prepared']){
  assert.equal(Number(one(file,'SELECT COUNT(*) FROM film')),0);
 }
 
+// 11. The REAL call path (review of #590): `upsertAdmissions` of src/discovery-authority.js with the module in the global scope, as the Worker bundle has it. (a) The caller's `canonicalDeadline` (else `deadline`) is what reaches the unit; (b) a call with
+// NOTHING written still reaches it (so the bounded sweep and reconcile run); (c) a past budget defers the admission and a later empty call completes it; (d) the hook never changes the call's result and never throws.
+{
+ const Authority=await import(pathToFileURL(path.join(SRC,'discovery-authority.js')).href);
+ const {MemoryBucket}=await import('./memory-bucket.mjs');
+ const film=tmdb=>({id:'tmdb_'+tmdb,tmdbId:String(tmdb),canonicalIdentity:'tmdb:'+tmdb,title:'Admitted '+tmdb});
+ const obs={key:'obs-a',title:'A',normalizedTitle:'a',year:2001,durations:[100],shows:[],seenInLatestSnapshot:true,lastAiring:Date.now()+3600000};
+ async function open(stage='open'){
+  const file=database(stage);
+  assert.equal(sqlite(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1").status,0);
+  const env={...envOf(file),BUCKET:new MemoryBucket(),discoveryLease:null};
+  const taken=await Authority.acquireLease(env,{programmeRunId:null});
+  env.discoveryLease=taken.lease;
+  await Authority.ingestLedger(env,{programmeRunId:'run-hook',handoff:true,lease:taken.lease,items:(async function*(){yield obs;})()});
+  return {file,env,lease:taken.lease};
+ }
+ const previous=globalThis.CanonicalDiscoveryAdmission;
+ try{
+  // (a) and (b) with a spy in the global scope
+  {
+   const {env,lease}=await open();
+   const seen=[];
+   globalThis.CanonicalDiscoveryAdmission={admitDiscoveryFilms:async(_env,options)=>{seen.push(options);}};
+   const result=await Authority.upsertAdmissions(env,{tmdb_1:film(1)},{lease});
+   assert.deepEqual(result.written,['tmdb_1']);
+   assert.deepEqual([seen[0].written,seen[0].deadline,Object.keys(seen[0].films)],[['tmdb_1'],null,['tmdb_1']],'no budget given: none is invented');
+   await Authority.upsertAdmissions(env,{tmdb_2:film(2)},{lease,deadline:5000});
+   assert.equal(seen[1].deadline,5000,'the step deadline is the fallback');
+   await Authority.upsertAdmissions(env,{tmdb_3:film(3)},{lease,deadline:5000,canonicalDeadline:7000});
+   assert.equal(seen[2].deadline,7000,'canonicalDeadline wins');
+   await Authority.upsertAdmissions(env,{tmdb_4:film(4)},{lease,canonicalDeadline:NaN});
+   assert.equal(seen[3].deadline,null,'a non-finite budget is none');
+   // nothing written: the hook still runs, with an empty written list
+   const before=seen.length;
+   const empty=await Authority.upsertAdmissions(env,{},{lease,canonicalDeadline:9000});
+   assert.deepEqual(empty.written,[]);
+   assert.equal(seen.length,before+1,'a call with nothing written still reaches the unit');
+   assert.deepEqual([seen[before].written,seen[before].deadline],[[],9000]);
+   // a throwing hook changes nothing
+   globalThis.CanonicalDiscoveryAdmission={admitDiscoveryFilms:async()=>{throw new Error('boom');}};
+   assert.deepEqual((await Authority.upsertAdmissions(env,{tmdb_5:film(5)},{lease})).written,['tmdb_5']);
+   // no module in scope (offline import): nothing to call
+   delete globalThis.CanonicalDiscoveryAdmission;
+   assert.deepEqual((await Authority.upsertAdmissions(env,{tmdb_6:film(6)},{lease})).written,['tmdb_6']);
+  }
+  // (c) the real unit: a past budget defers the canonical admission (the admission row is stored), a later EMPTY upsert completes it
+  {
+   const {file,env,lease}=await open();
+   globalThis.CanonicalDiscoveryAdmission={...M,admitDiscoveryFilms:(e,o)=>M.admitDiscoveryFilms(e,{...o,routeSkipMs:0,now:()=>T})};
+   const late=await Authority.upsertAdmissions(env,{tmdb_7:film(7),tmdb_8:film(8)},{lease,canonicalDeadline:Date.now()-1});
+   assert.deepEqual(late.written.sort(),['tmdb_7','tmdb_8']);
+   assert.equal(Number(one(file,'SELECT COUNT(*) FROM film')),0,'a spent budget admits nothing canonical');
+   assert.equal(Number(one(file,"SELECT COUNT(*) FROM discovery_admission WHERE state='current'")),2,'the Discovery admission itself is unaffected');
+   const empty=await Authority.upsertAdmissions(env,{},{lease,canonicalDeadline:Date.now()+60000});
+   assert.deepEqual(empty.written,[]);
+   assert.deepEqual(rows(file,'SELECT id FROM film ORDER BY id').map(row=>row.id),[FID(7),FID(8)],'the empty call ran the sweep and admitted both');
+  }
+  // below open the real unit writes nothing through the real call
+  {
+   const {file,env,lease}=await open('prepared');
+   globalThis.CanonicalDiscoveryAdmission={...M,admitDiscoveryFilms:(e,o)=>M.admitDiscoveryFilms(e,{...o,routeSkipMs:0,now:()=>T})};
+   assert.deepEqual((await Authority.upsertAdmissions(env,{tmdb_9:film(9)},{lease,canonicalDeadline:Date.now()+60000})).written,['tmdb_9']);
+   assert.equal(Number(one(file,'SELECT COUNT(*) FROM film')),0);assert.equal(receipts(file).length,0);
+  }
+ }finally{if(previous===undefined)delete globalThis.CanonicalDiscoveryAdmission;else globalThis.CanonicalDiscoveryAdmission=previous;}
+}
+
+// 12. The real Discovery call sites (src/discovery.js): both `upsertAdmissions` calls hand the chunk's budget to the unit, and the chunk's end runs the catch-up once (the one path every Discovery hop takes).
+{
+ const text=fs.readFileSync(path.join(SRC,'discovery.js'),'utf8');
+ const calls=[...text.matchAll(/DiscoveryAuthority\.upsertAdmissions\([^\n]*\)/g)].map(match=>match[0]);
+ assert.equal(calls.length,2,'two production call sites in the paged chunk');
+ for(const call of calls)assert.ok(/\{lease,canonicalDeadline:canonicalLimit\(\)\}/.test(call),'a call site without the canonical budget: '+call);
+ assert.ok(/const canonicalLimit=\(\)=>persistLimit\(\)-writeEstimate\(3\);/.test(text),'the budget is the persist limit minus a write reserve');
+ assert.equal(text.split('CanonicalDiscoveryAdmission.admitDiscoveryFilms').length-1,1,'one catch-up call in the chunk');
+ assert.ok(/typeof CanonicalDiscoveryAdmission!=='undefined'&&Date\.now\(\)<canonicalLimit\(\)\)\{try\{await CanonicalDiscoveryAdmission\.admitDiscoveryFilms\(env,\{films:\{\},written:\[\],deadline:canonicalLimit\(\)\}\)/.test(text),'the catch-up is guarded, bounded by the same budget and never throws');
+ const worker=fs.readFileSync(path.join(SRC,'worker.js'),'utf8');
+ assert.ok(/upsertAdmissions\(env,[^\n]*\{lease,carried,deadline\}/.test(worker),'the catalog step passes its step deadline (the fallback budget)');
+ const authority=fs.readFileSync(path.join(SRC,'discovery-authority.js'),'utf8');
+ assert.ok(!/written\.length&&typeof CanonicalDiscoveryAdmission/.test(authority),'no written-keys gate on the hook');
+}
+
 // 9. Registry and readiness: the atomic `film_mutation` spec is registered, exactly its dependent producer flips, the other kinds are unchanged, and nothing else registers.
 {
  assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation']);

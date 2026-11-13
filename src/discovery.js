@@ -661,6 +661,8 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // The final writes (preview, renewal, status, checkpoint) cost as much as D1 makes a write cost, so the reserve for them
  // grows with the slowest write seen: on a slow D1 the chunk stops storing earlier and still checkpoints inside the budget.
  const persistLimit=()=>t0+PAGED_CHUNK_BUDGET_MS-Math.max(PAGED_CHECKPOINT_RESERVE_MS,PAGED_FINAL_WRITES*(writeCostMs||PAGED_DEFAULT_WRITE_MS));
+ // AIR-374 P3c: the time the canonical Film admission may use inside this chunk: the persist limit minus the cost of three writes (one admission unit is several round trips), so a unit never starts when it could not finish before the checkpoint reserve.
+ const canonicalLimit=()=>persistLimit()-writeEstimate(3);
  const lost=(e,failedAt)=>{if(e?.name==='LeaseLostError')e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt};return e;};
  const heartbeat=async()=>{
   if(!lease||lease.expiresAt-Date.now()>DISCOVERY_LEASE_RENEW_MARGIN_MS)return;
@@ -741,7 +743,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
    const group=filmBatch.slice(index,index+perBatch);
    await heartbeat();
-   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(group.map(key=>[key,films[key]])),{lease})));
+   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(group.map(key=>[key,films[key]])),{lease,canonicalDeadline:canonicalLimit()})));
    if(!wrote)return programmeChanged();
    touchedWritten+=wrote.written.length;
    filmsAttempted+=group.length;
@@ -772,7 +774,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   await heartbeat();
   if(filmEntry){
    if(!await publishedGenerationMatches(env,source.programmeRunId))return 'changed';
-   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[filmEntry[0]]:filmEntry[1]},{lease})));
+   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[filmEntry[0]]:filmEntry[1]},{lease,canonicalDeadline:canonicalLimit()})));
    if(!wrote)return 'changed';
    // An identity that already belongs to another film id is never merged: the chunk stops and backs off.
    if(wrote.refused.length)return 'refused';
@@ -839,6 +841,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // Candidates were waiting and none could be taken before the budget ended: say so, and back off.
  if(!error&&pending.length&&checked===0){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
  timings.tmdbMs=Date.now()-tmdbStarted;
+ // AIR-374 P3c: the catch-up of the canonical Discovery admission, once per completed paged chunk (the one path every Discovery hop runs, with or without a new admission): the origin's own due receipts and the sweep of current movie admissions without a
+ // trusted canonical Film. One cached marker read below the marker `open`; bounded and never throws at `open`; skipped when the chunk has no time left for it.
+ if(typeof CanonicalDiscoveryAdmission!=='undefined'&&Date.now()<canonicalLimit()){try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:{},written:[],deadline:canonicalLimit()});}catch{/* the chunk keeps its own outcome */}}
  // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
  // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
  // The preview is this chunk's scored outcomes. remaining is the SQL actionable set minus what this chunk settled, not the page.

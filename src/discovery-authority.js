@@ -1188,10 +1188,12 @@ export async function upsertAdmissions(env,films,context={}){
   // At least one batch per call, so a caller whose time is already spent still moves.
   if(deadline!==null&&Date.now()>=deadline)break;
  }
- // AIR-374 P3c: the canonical Film admission of the films this call just wrote. The module is in the Worker scope only (offline imports of this file have none). Below the marker `open` it is ONE marker read and nothing else; at `open` it is
- // bounded, never throws and never changes this call's result (a unit that could not be written keeps its pending receipt, and the sweep re-finds a current admission without a canonical Film on a later call).
- if(written.length&&typeof CanonicalDiscoveryAdmission!=='undefined'){
-  try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:Object.fromEntries(entries.map(row=>[row[0],row[1]])),written,deadline:Number.isFinite(context.deadline)?context.deadline:null});}catch{/* discovery keeps its own outcome */}
+ // AIR-374 P3c: the canonical Film admission of the films this call just wrote, and (with nothing written) the bounded own-origin reconcile and sweep. The module is in the Worker scope only (offline imports of this file have none). Below the
+ // marker `open` it is ONE cached marker read and nothing else; at `open` it is bounded, never throws and never changes this call's result. The time budget is the caller's `canonicalDeadline` (the Discovery chunk passes its persist limit minus
+ // a write reserve; it is separate from `deadline`, which stops the admission batches themselves), else `deadline`, else none.
+ if(typeof CanonicalDiscoveryAdmission!=='undefined'){
+  const budget=Number.isFinite(context.canonicalDeadline)?context.canonicalDeadline:Number.isFinite(context.deadline)?context.deadline:null;
+  try{await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:Object.fromEntries(entries.map(row=>[row[0],row[1]])),written,deadline:budget});}catch{/* discovery keeps its own outcome */}
  }
  return {written,refused,batches,reads,remaining:entries.length-index,carried};
 }

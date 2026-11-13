@@ -39,10 +39,17 @@ const MUTANTS=[
  ["revalidate always proceeds", "canonical-discovery-admission-producer.js", "return plan.noop?'superseded':'proceed';", "return 'proceed';"],
  ["every planner error is a missing plan", "canonical-discovery-admission-producer.js", "if(DISCOVERY_ADMISSION_REFUSALS.has(error?.code))return null;throw error;}};\n return defineOperation", "return null;}};\n return defineOperation"],
  ["the replan ignores the current admission", "canonical-discovery-admission-producer.js", "AND state='current'\",[String(tmdbId)]", "\",[String(tmdbId)]"],
- ["the call site is not guarded", "discovery-authority.js", "if(written.length&&typeof CanonicalDiscoveryAdmission!=='undefined'){", "if(written.length){"],
+ ["the call site is not guarded", "discovery-authority.js", "if(typeof CanonicalDiscoveryAdmission!=='undefined'){\n  const budget", "if(true){\n  const budget"],
  ["the call site is not called", "discovery-authority.js", "await CanonicalDiscoveryAdmission.admitDiscoveryFilms(env,{films:", "await (async()=>0)(env,{films:"],
  ["the operation is not registered", "canonical-producers.js", "operationRegistry([discoveryAdmissionOperation({replan:async()=>null})])", "operationRegistry([])"],
- ["the route module never routes to the projector", "canonical-writer-route.js", "if(gate.r2Allowed===true)return {writer:'projector'", "if(false)return {writer:'projector'"]
+ ["the route module never routes to the projector", "canonical-writer-route.js", "if(gate.r2Allowed===true)return {writer:'projector'", "if(false)return {writer:'projector'"],
+ ["the hook is gated on written keys", "discovery-authority.js", "if(typeof CanonicalDiscoveryAdmission!=='undefined'){\n  const budget", "if(written.length&&typeof CanonicalDiscoveryAdmission!=='undefined'){\n  const budget"],
+ ["the caller's budget never reaches the unit", "discovery-authority.js", "const budget=Number.isFinite(context.canonicalDeadline)?context.canonicalDeadline:Number.isFinite(context.deadline)?context.deadline:null;", "const budget=null;"],
+ ["canonicalDeadline is ignored for the step deadline", "discovery-authority.js", "const budget=Number.isFinite(context.canonicalDeadline)?context.canonicalDeadline:Number.isFinite(context.deadline)?context.deadline:null;", "const budget=Number.isFinite(context.deadline)?context.deadline:null;"],
+ ["the grouped batch call site passes no budget", "discovery.js", "Object.fromEntries(group.map(key=>[key,films[key]])),{lease,canonicalDeadline:canonicalLimit()})", "Object.fromEntries(group.map(key=>[key,films[key]])),{lease})"],
+ ["the single-film call site passes no budget", "discovery.js", "{[filmEntry[0]]:filmEntry[1]},{lease,canonicalDeadline:canonicalLimit()})", "{[filmEntry[0]]:filmEntry[1]},{lease})"],
+ ["the budget has no write reserve", "discovery.js", "const canonicalLimit=()=>persistLimit()-writeEstimate(3);", "const canonicalLimit=()=>persistLimit();"],
+ ["the chunk end runs no catch-up", "discovery.js", "if(typeof CanonicalDiscoveryAdmission!=='undefined'&&Date.now()<canonicalLimit()){try{", "if(false){try{"]
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'discovery-adm-mutants-'));
 try{
