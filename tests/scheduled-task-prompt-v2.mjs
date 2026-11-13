@@ -26,9 +26,15 @@ assert.equal(dry.length,Number(statedDry[1]));assert.equal(sha(dry),statedDry[2]
 // 2. The generation steps 4, 5 and 6 are byte-identical in both prompts: an A/B changes grouping only.
 const steps=text=>text.split('\n').filter(l=>/^[456]\. /.test(l));
 assert.equal(steps(prompt).length,3);assert.deepEqual(steps(dry),steps(prompt),'identical generation instructions');
-// 2b. ADR 0132: the research and assessment step 3а is byte-identical in both prompts, carries the experimental budget and every closed assessment key, and never claims Web Search works inside a Task.
+// 2b. ADR 0132 / AIR-450 S5-C: shared research and assessment step 3а plus mandatory research-quality step 3б are byte-identical in both prompts. Web Search availability is never assumed.
 const step3a=text=>text.split('\n').filter(l=>l.startsWith('3а. '));
 assert.equal(step3a(prompt).length,1);assert.deepEqual(step3a(dry),step3a(prompt),'identical research and assessment instructions');
+const step3b=text=>text.split('\n').filter(l=>l.startsWith('3б. '));
+assert.equal(step3b(prompt).length,1);assert.deepEqual(step3b(dry),step3b(prompt),'identical AIR-450 S5-C research quality gate');
+for(const needle of ['ОБЯЗАТЕЛЬНО сделай ВТОРОЙ','OPEN сама по себе НЕ означает READ','concreteExecutionFinding','gateStatus=limited','gateStatus=blocked','ВРЕМЕННЫЙ аудит','НЕ новые поля','search_snippet'])assert.ok(step3b(prompt)[0].includes(needle),'S5-C quality gate: '+needle);
+for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','opposition_competence','НЕ strong','research.attempts','МАССИВ','sources[].usedFor','1–120 Unicode','prediction_batch_validate','Buffer, TextEncoder','НЕ заменяет','не прекращай весь run'])assert.ok(prompt.includes(needle),'production manual closed-schema guard: '+needle);
+assert.ok(!/экспериментальный офлайн-протокол AIR-450/.test(prompt),'production research gate must not describe itself as offline-only');
+assert.ok(!/FROZEN_MANIFEST|tmdb_800815|5bd010a00102b73a9c8bd24ef67cb56ca17f86918aca7d4715de20752e5dca7e/.test(prompt),'production uses only the live batch manifest, never frozen S5-C test inputs');
 for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status = not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
 for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
