@@ -1133,13 +1133,14 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  epgPhase(runId,'seal_stage_plan','exit',{elapsedMs:archiveStarted-planStarted,departures:departures.length,backlog:drain?drain.backlog:0});
  if(departures.length){
   try{
+  epgBoundary(runId,'seal_stage_archive_begin','enter',{items:departures.length});
   const writeId=crypto.randomUUID(),at=new Date().toISOString(),count=start?.segmentCount||LEDGER_ARCHIVE_SEGMENTS,bySegment=new Map();
   for(const record of departures){const segment=ledgerArchiveSegment(record.key,count);if(!bySegment.has(segment))bySegment.set(segment,[]);bySegment.get(segment).push(record);}
   const segments=Array.from({length:count},(_,segment)=>start?.segments?.[segment]||{segment,object:null,sha256:null,items:0,bytes:0});
   for(const [segment,records] of [...bySegment].sort((a,b)=>a[0]-b[0])){
    const readAt=Date.now(),segmentItems=await readLedgerSegment(env,start,segment);tally.readMs+=Date.now()-readAt;
    for(const record of records){const payload=JSON.parse(record.json);if(archivedPayloadNewer(payload,segmentItems[payload.key]?.payload))segmentItems[payload.key]={payload,envelope:{archivedAt:at,archivedFromProgrammeRunId:publishedRunId,archiveWriteId:writeId}};}
-   const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},segmentFence,tally);tally.segments++;tally.bytes+=written.bytes;
+   const object=ledgerArchiveSegmentKey(segment,writeId),written=await writeLedgerSegment(env,object,{schemaVersion:1,segment,writeId,items:segmentItems},segmentFence,tally);tally.segments++;if(tally.segments%16===0)epgBoundary(runId,'seal_stage_archive_segments','exit',{segments:tally.segments,count:bySegment.size,elapsedMs:Date.now()-archiveStarted});tally.bytes+=written.bytes;
    segments[segment]={segment,object,sha256:written.sha256,items:Object.keys(segmentItems).length,bytes:written.bytes};
   }
   manifestId=crypto.randomUUID();
@@ -1294,10 +1295,14 @@ async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,
   else{const encoded=(planned.items||[]).map(item=>encoder.encode(JSON.stringify(item)));itemBytes=encoded.reduce((n,bytes)=>n+bytes.byteLength,0);itemCount=encoded.length;source=(async function*(){for(const bytes of encoded)yield bytes;})();}
   if(!Number.isSafeInteger(itemBytes)||!Number.isSafeInteger(itemCount)||itemBytes<0||itemCount<0)throw new Error('Discovery document length is unknown');
   const key=epgGenerationKey(run.runId,'discovery-latest.json'),emitStarted=Date.now();
+  epgBoundary(run.runId,'seal_stage_emit_begin','enter',{items:itemCount,bytes:itemBytes});
   await putKnownLength(env.BUCKET,key,discoveryDocumentLength(framing,itemBytes,itemCount),discoveryDocumentStream(framing,source),{httpMetadata:{contentType:'application/json'}});
   const stored=await env.BUCKET.head(key);if(!stored?.etag)throw new Error('Generation ledger was not stored');
   epgPhase(run.runId,'seal_stage_emit','exit',{elapsedMs:Date.now()-emitStarted,items:itemCount,bytes:itemBytes});
-  await env.BUCKET.put(sealPayloadKey(run.runId),JSON.stringify({runId:run.runId,report:pending['programme.json'],catalog:pending['discovered-films.json'],watchlist:nextWatchlist,uncertain,fence:publication.fence,expectedProgrammeRunId:publication.programmeRunId??null}),{httpMetadata:{contentType:'application/json'}});
+  const payloadText=JSON.stringify({runId:run.runId,report:pending['programme.json'],catalog:pending['discovered-films.json'],watchlist:nextWatchlist,uncertain,fence:publication.fence,expectedProgrammeRunId:publication.programmeRunId??null});
+  epgBoundary(run.runId,'seal_stage_payload_put','enter',{bytes:payloadText.length});
+  await env.BUCKET.put(sealPayloadKey(run.runId),payloadText,{httpMetadata:{contentType:'application/json'}});
+  epgBoundary(run.runId,'seal_stage_payload_put','exit');
   run.seal={jobId:crypto.randomUUID(),phase:'ledger',sourceKey:key,etag:stored.etag,itemTotal:itemCount,prefixBytes:framing.prefix.byteLength,stagedAt:new Date().toISOString()};
   run.stage='seal';run.updatedAt=new Date().toISOString();delete run.error;
   await saveJSON(env,'sync.json',run);
@@ -1323,10 +1328,12 @@ async function sealLedgerStep(env,run,lease,deadline){
  const stats={batches:0,writeMs:0,items:0,archives:0,archiveMs:0};
  await DiscoveryAuthority.sealBegin(env,{programmeRunId:run.runId,jobId:job.jobId,sourceKey:job.sourceKey,sourceEtag:job.etag,itemTotal:job.itemTotal,startBytes:job.prefixBytes,lease});
  let state=await DiscoveryAuthority.sealState(env);
+ epgBoundary(run.runId,'seal_ledger_begin','exit',{cursor:state.cursorItems,total:state.itemTotal});
  if(state.phase==='items'&&state.cursorItems<state.itemTotal){
   let batch=[],cursor=state.cursorItems,carried=null;
   // AIR-420: after the first batch of a step the next ones carry the fence values instead of reading them again (one D1 round trip a batch).
-  const flush=async()=>{while(batch.length){const at=Date.now();const result=await DiscoveryAuthority.sealWrite(env,{jobId:job.jobId,expectedCursor:cursor,items:batch,lease,carried});stats.batches++;stats.writeMs+=Date.now()-at;stats.items+=result.written;carried=result.carried||null;cursor=result.cursorItems;batch=batch.slice(result.written);if(Date.now()>=deadline&&batch.length)return false;}return true;};
+  const flush=async()=>{while(batch.length){const at=Date.now();const result=await DiscoveryAuthority.sealWrite(env,{jobId:job.jobId,expectedCursor:cursor,items:batch,lease,carried});stats.batches++;stats.writeMs+=Date.now()-at;if(stats.batches%25===0)epgBoundary(run.runId,'seal_ledger_batches','exit',{batches:stats.batches,items:stats.items+result.written,cursor:result.cursorItems,total:state.itemTotal});stats.items+=result.written;carried=result.carried||null;cursor=result.cursorItems;batch=batch.slice(result.written);if(Date.now()>=deadline&&batch.length)return false;}return true;};
+  epgBoundary(run.runId,'seal_ledger_read','enter',{cursor:state.cursorItems,total:state.itemTotal});
   await readSealedItems(env,job,state.cursorBytes,async(item,bytes)=>{
    batch.push({item,bytes});
    if(batch.length>=SEAL_FLUSH_ITEMS){if(!await flush())return false;if(Date.now()>=deadline)return false;}
@@ -1334,6 +1341,7 @@ async function sealLedgerStep(env,run,lease,deadline){
   });
   // The read ended or was stopped: write what is held. A step always writes at least one batch; what the spent time
   // leaves unwritten is read again next step from the cursor.
+  epgBoundary(run.runId,'seal_ledger_read','exit',{cursor,items:stats.items,batches:stats.batches});
   if(batch.length)await flush();
   state=await DiscoveryAuthority.sealState(env);
  }
@@ -1341,8 +1349,10 @@ async function sealLedgerStep(env,run,lease,deadline){
  // At least one archive batch per step, so a step with its time already spent still moves.
  for(;;){
   const at=Date.now();
+  epgBoundary(run.runId,'seal_ledger_archive','enter',{count:stats.archives});
   const result=await DiscoveryAuthority.sealArchive(env,{jobId:job.jobId,lease,limit:500});
   stats.archives++;stats.archiveMs+=Date.now()-at;
+  epgBoundary(run.runId,'seal_ledger_archive','exit',{elapsedMs:Date.now()-at,count:stats.archives});
   if(result.committed)return {done:true,state:await DiscoveryAuthority.sealState(env),stats};
   if(Date.now()>=deadline)return {done:false,state:await DiscoveryAuthority.sealState(env),stats,retiring:result.retiring};
  }
@@ -1350,12 +1360,17 @@ async function sealLedgerStep(env,run,lease,deadline){
 // The catalog is brought up to date by the difference to what D1 holds, a bounded part per step: a step writes what
 // differs and the next step finds what is left, so no cursor is needed.
 async function sealCatalogStep(env,run,lease,deadline){
+ epgBoundary(run.runId,'seal_catalog_payload','enter');
  const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());
+ epgBoundary(run.runId,'seal_catalog_payload','exit');
  const pinned=await pinEpg(env);
+ const mergeStarted=Date.now();
+ epgBoundary(run.runId,'seal_catalog_merge','enter');
  const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId);
  const current=await loadJSON(env,'epg/discovered-films.json')||{};
  const changed=Object.keys(next).filter(id=>JSON.stringify(next[id])!==JSON.stringify(current[id])).sort();
  const stale=Object.keys(current).filter(id=>!Object.hasOwn(next,id));
+ epgBoundary(run.runId,'seal_catalog_merge','exit',{count:changed.length,items:stale.length,elapsedMs:Date.now()-mergeStarted});
  // AIR-422: the films go to upsertAdmissions in flushes; it packs each batch to its caps and carries the generation from one batch to the
  // next, so a batch is one D1 round trip. At least one batch per step, so a step with its time already spent still moves.
  let written=0,batches=0,reads=0,writeMs=0,carried=null;
@@ -1377,7 +1392,19 @@ async function sealCatalogStep(env,run,lease,deadline){
 // (2.4 s entry, 31.4 s pointer, mirrors, copy and discovery intent, 44.0 s commit tail of which the prediction queue
 // refresh was 26.8 s, 6.8 s reply), longer than the 60 s the shortest MCP client waits. Each step below does one of
 // those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
-async function sealPayload(env,run){return JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());}
+async function sealPayload(env,run){
+ const id=run.runId;
+ epgBoundary(id,'seal_payload_get','enter');
+ const object=await env.BUCKET.get(sealPayloadKey(id));
+ epgBoundary(id,'seal_payload_get','exit',{bytes:object?.size});
+ epgBoundary(id,'seal_payload_text','enter');
+ const text=await object.text();
+ epgBoundary(id,'seal_payload_text','exit',{bytes:text.length});
+ epgBoundary(id,'seal_payload_parse','enter',{bytes:text.length});
+ const payload=JSON.parse(text);
+ epgBoundary(id,'seal_payload_parse','exit');
+ return payload;
+}
 // A step is a list of units. The first unit that is not finished always runs, so every call makes progress; no later unit
 // starts once the request's budget has passed, and the step then saves what is finished in `run.seal.units` and answers
 // `continue` in the same phase. A unit answers 'ok' or 'failed' (a thrown error is fatal and keeps the phase). A failed unit
@@ -1546,7 +1573,29 @@ const RATINGS_ATTEMPT_STALE_MS=5*60000;
 // Best effort: a marker that cannot be logged never changes the step.
 // AIR-455: the EPG diagnostic canary collects the phase markers of its own run (a unique run id) through this registry; a production run id is never registered.
 const EPG_PHASE_SINKS=new Map();
-function epgPhase(runId,phase,edge,fields={}){try{const event={event:'epg_phase',runId:runId||null,phase,edge,at:new Date().toISOString(),...fields};console.log(JSON.stringify(event));const sink=EPG_PHASE_SINKS.get(runId);if(sink)sink(event);}catch{}}
+// AIR-462: the correlation of one executor action (`instanceId`, `actStep`, `attemptTraceId`), bound to the run for the duration of the step the
+// action drives. A run has one step at a time (the step lease), so the key is the run, never a shared slot. `attemptTraceId` is a local
+// correlator minted per execution of the `act-N` callback, not a Cloudflare attempt id. Nothing here is persisted.
+const EPG_TRACE=new Map();
+async function withEpgTrace(env,body,work){
+ const runId=env?.epgTrace&&typeof body?.runId==='string'?body.runId:null;
+ if(runId)EPG_TRACE.set(runId,env.epgTrace);
+ try{return await work();}
+ finally{if(runId&&EPG_TRACE.get(runId)===env.epgTrace)EPG_TRACE.delete(runId);}
+}
+// A closed set of boundaries around the large allocations of the staged publication and the only numeric fields they may carry. The counts
+// are allocation proxies (bytes the code already knows), not heap measurements: workerd offers no heap figure to read.
+const EPG_BOUNDARIES=new Set(['seal_stage_archive_begin','seal_stage_archive_segments','seal_stage_emit_begin','seal_stage_payload_put','seal_ledger_begin','seal_ledger_read','seal_ledger_batches','seal_ledger_archive','seal_catalog_payload','seal_catalog_merge','seal_payload_get','seal_payload_text','seal_payload_parse']);
+const EPG_BOUNDARY_FIELDS=['elapsedMs','bytes','items','batches','cursor','total','count','segments'];
+function epgBoundary(runId,boundary,edge,fields={}){
+ try{
+  if(!EPG_BOUNDARIES.has(boundary)||(edge!=='enter'&&edge!=='exit'))return;
+  const event={event:'epg_memory_boundary',runId:runId||null,boundary,edge,at:new Date().toISOString(),...(EPG_TRACE.get(runId)||{})};
+  for(const key of EPG_BOUNDARY_FIELDS){const value=fields[key];if(Number.isSafeInteger(value)&&value>=0)event[key]=value;}
+  console.log(JSON.stringify(event));
+ }catch{}
+}
+function epgPhase(runId,phase,edge,fields={}){try{const event={event:'epg_phase',runId:runId||null,phase,edge,at:new Date().toISOString(),...(EPG_TRACE.get(runId)||{}),...fields};console.log(JSON.stringify(event));const sink=EPG_PHASE_SINKS.get(runId);if(sink)sink(event);}catch{}}
 async function tracedPhase(runId,phase,work,summary=null){
  const started=Date.now();epgPhase(runId,phase,'enter');
  let result;try{result=await work();}catch(e){epgPhase(runId,phase,'error',{elapsedMs:Date.now()-started});throw e;}
@@ -1602,7 +1651,7 @@ async function postSync(env,execution,pathname,body,caller='http'){
   if(gate.reason)return json({runId:body?.runId??null,stage:null,nextAction:gate.nextCatchUpAt?'wait':'stop',reason:gate.reason,error:gate.reason,nextCatchUpAt:gate.nextCatchUpAt??null},409);
   env=gate.env;lease=gate.step||null;
  }
- try{return await postSyncRun(env,execution,pathname,body,caller);}
+ try{return await withEpgTrace(env,body,()=>postSyncRun(env,execution,pathname,body,caller));}
  finally{if(lease)await EpgOrchestration.endStep(env,lease).catch(()=>false);}
 }
 async function postSyncRun(env,execution,pathname,body,caller){
