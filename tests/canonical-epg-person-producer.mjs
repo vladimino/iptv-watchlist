@@ -576,7 +576,7 @@ for(const kind of section('9g')?['person','credits']:[]){
 // 10. Static: dormant. Nothing in src imports the two modules, build.mjs and the Worker do not name them, the EPG layer imports only the adapters and the authority helpers, no network, timer, cron or R2 API, no SQL that changes a table; the
 // adapters import the existing fenced writers and write nothing themselves; readiness stays truthful (no operation registered, epg_commit unwired).
 if(section('10')){
- const selfs=['src/canonical-epg-person-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js'];
+ const selfs=['src/canonical-epg-person-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js','src/canonical-film-external-ids-producer.js'];
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!selfs.includes(full)){const text=fs.readFileSync(full,'utf8');if(/canonical-epg-person-producer|canonical-person-adapters/.test(text))importers.push(full);}}};
  walk('src');
