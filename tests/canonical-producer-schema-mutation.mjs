@@ -58,7 +58,7 @@ const MUTANTS=[
  ['a strike class that is not a code',once(" AND strike_class GLOB '[a-z]*' AND strike_class NOT GLOB '*[^a-z_0-9]*'"," "),'5'],
  ['a run time with a bad character',once(" AND completed_at NOT GLOB '*[^0-9TZ:.-]*'"," "),'5'],
  ['a run time that is too long',once("completed_at IS NULL OR (length(completed_at) BETWEEN 20 AND 32 AND","completed_at IS NULL OR (length(completed_at) >= 20 AND"),'5'],
- ['a run time without the shape',once(" AND completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z'"," "),'5'],
+ ['a run time without the shape',once(" AND substr(completed_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(completed_at, 11, 1) = 'T' AND substr(completed_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(completed_at, -1) = 'Z'"," "),'5'],
  // the result row
  ['a unit-owned open row without a schedule',once(" CHECK (state <> 'open' OR retry_owner = 'receipt' OR next_attempt_at IS NOT NULL),\n",""),'3'],
  ['a receipt-owned row with a schedule',once(" CHECK (retry_owner = 'unit' OR next_attempt_at IS NULL),\n",""),'3'],
