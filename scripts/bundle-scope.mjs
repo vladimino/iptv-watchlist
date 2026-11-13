@@ -41,3 +41,12 @@ export function scopedImports(file,name,preamble){
  if(!exported.length)throw new Error(file+' hands over nothing');
  return 'const '+name+'=(()=>{\n'+preamble+'\n'+source.replace(/^export\s+/gm,'')+'\nreturn {'+exported.join(',')+'};\n})();';
 }
+
+// ADR 0135 (AIR-459). The pure pause contract needs the orchestration policy (Madrid day and instant); both are scoped in front of the Discovery authority, which calls the
+// contract. One definition of these names serves the Worker bundle and every test that loads the authority in a vm.
+export function scopedEpgPriority(){
+ return scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scopedReplacing('src/domain/epg-priority-pause.js','EpgPriorityPause','const {EPG_SCHEDULE,madridDayKey,madridInstant}=OrchestrationPolicy;\n');
+}
+export function scopedDiscoveryAuthority(){
+ return scopedReplacing('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,candidateOwedDay,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\n');
+}

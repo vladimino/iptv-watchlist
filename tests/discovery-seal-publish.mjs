@@ -63,7 +63,7 @@ async function committedOld(file){
  await Authority.releaseLease(env,taken.lease);
 }
 const stepEnv=(file,bkt,hooks={})=>({DB:d1Standin(file,hooks),BUCKET:bkt,discoveryLease:null});
-async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');const lease=await call('acquireDiscoveryLease')(env);assert.ok(lease,'a lease');return lease;}
+async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');const lease=await call('acquireDiscoveryLease')(env,'epg');assert.ok(lease,'a lease');return lease;}
 
 // 1. The ledger is sealed over several steps, with cancellations, from byte offsets in a document with multibyte text.
 {

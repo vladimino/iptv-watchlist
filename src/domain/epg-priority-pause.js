@@ -1,6 +1,7 @@
 // AIR-458 / ADR 0135. Pure admission contract for the EPG-priority Discovery pause.
 // No I/O, no clock and no randomness: callers pass the instant and the facts one D1 batch can see.
-// Nothing in the Worker imports this module. It does not arm a pause, take a lease or authorize a production write.
+// AIR-459: `src/discovery-authority.js` calls this module (bundled in front of it, see `scopedDiscoveryAuthority`). It stays pure: it does not arm a
+// pause, take a lease or write anything. With the `discovery_epg_priority` table absent the caller never asks, so admission is today's.
 // `tablePresent: false` is a verified absence. Any other non-true value is unreadable and fails closed.
 
 import {EPG_SCHEDULE, madridDayKey, madridInstant} from './orchestration-policy.js';
@@ -88,11 +89,17 @@ function publishedFor(facts, dayKey) {
 // At and after today's arming instant the owed date is today, even if yesterday never published.
 // Before that, yesterday remains owed only while its publication and handoff are not both confirmed.
 export function owedDayKey(facts) {
-  const today = madridDayKey(facts.nowMs);
-  if (facts.nowMs >= pauseOpensAt(today)) return today;
-  const yesterday = previousDayKey(today);
-  if (!publishedFor(facts, yesterday)) return yesterday;
+  const candidate = candidateOwedDay(facts.nowMs);
+  if (candidate === madridDayKey(facts.nowMs)) return candidate;
+  if (!publishedFor(facts, candidate)) return candidate;
   return null;
+}
+
+// The one Madrid date a D1 statement can bind: today from today's arming instant, otherwise yesterday. The statement then
+// reads "published for this date, or overridden for it" itself, so a null `owedDayKey` (yesterday already handed off) is the same answer.
+export function candidateOwedDay(nowMs) {
+  const today = madridDayKey(nowMs);
+  return nowMs >= pauseOpensAt(today) ? today : previousDayKey(today);
 }
 
 function decide(admit, reason, owedDayKey, budget, nextCatchUpAt = null) {

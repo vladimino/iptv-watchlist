@@ -69,7 +69,7 @@ const refusedWith=(file,statements,pattern,label)=>{const [errors]=probe(file,[s
 
 // ===== 1. The migration: on top of a complete schema 19, empty, version 20, the exact object set, refusals, no downgrade =====
 if(on(1)){
- assert.deepEqual(chain.slice(-2),['0020_canonical_producer_run.sql','0021_d1_glob_pattern_limit.sql'],'0020 is followed only by 0021, the D1 pattern-limit rebuild (tests/migration-pattern-limit.mjs)');
+ assert.deepEqual(chain.slice(-3),['0020_canonical_producer_run.sql','0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql'],'0020 is followed by 0021, the D1 pattern-limit rebuild (tests/migration-pattern-limit.mjs), then 0022, the inert EPG-priority pause (tests/epg-priority-gate.mjs)');
  assert.equal(Number(one(t20,'SELECT version FROM schema_contract WHERE id=1')),20);
  assert.equal(one(t20,'SELECT note FROM schema_contract WHERE id=1'),'Schema v20: durable canonical producer run and unit result tables (empty). Follows a complete version 19.');
  for(const table of [RUN,RES])assert.equal(Number(one(t20,'SELECT COUNT(*) FROM '+table)),0,table+' starts empty');

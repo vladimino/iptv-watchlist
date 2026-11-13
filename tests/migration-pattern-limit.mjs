@@ -30,7 +30,7 @@ for(const name of files){
  }else assert.deepEqual(long.map(pattern=>Buffer.byteLength(pattern)),[],name+' has no LIKE or GLOB pattern over '+LIMIT+' bytes (D1 error 7500)');
 }
 assert.ok(files.includes('0021_d1_glob_pattern_limit.sql'),'0021 exists');
-assert.equal(files[files.length-1],'0021_d1_glob_pattern_limit.sql','0021 is the last file of the chain');
+assert.deepEqual(files.slice(-2),['0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql'],'0021 is followed only by 0022, the inert EPG-priority pause (tests/epg-priority-gate.mjs)');
 
 // ===== 2. the databases: v20 (the defect still in), v21 (0021 applied), and the pattern scan of the final schema =====
 const upTo=number=>files.filter(name=>Number(name.slice(0,4))<=number);

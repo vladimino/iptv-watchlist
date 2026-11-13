@@ -158,7 +158,8 @@ export function loadCopy(results,outFile,{root=process.cwd()}={}){
  if(!verdict.ok)return {ok:false,refusals:verdict.refusals};
  if(fs.existsSync(outFile))return {ok:false,refusals:['output_exists']};
  const migrations=path.join(root,'migrations');
- const chain=fs.readdirSync(migrations).filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ // The copy models the production schema this tool is pinned to (CAPS.schemaVersion). A later repository migration that is not applied to production (0022, AIR-459) is not part of it.
+ const chain=fs.readdirSync(migrations).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=CAPS.schemaVersion).sort();
  sqlite(outFile,chain.map(name=>fs.readFileSync(path.join(migrations,name),'utf8')).join('\n'));
  const lines=['PRAGMA foreign_keys=OFF;','BEGIN;','CREATE TABLE '+MANIFEST+' (table_name TEXT PRIMARY KEY, row_count INTEGER NOT NULL, max_rowid INTEGER) STRICT;'];
  for(const item of COPY_PLAN){

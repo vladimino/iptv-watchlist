@@ -6,6 +6,7 @@
 // tables. Version 11 without these tables, a bad marker, a loading transfer,
 // or a failed read fails closed and does not serve the R2 ledger.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
+import {discoveryAdmission,pauseRowWrite,candidateOwedDay,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
 const TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 export const DISCOVERY_TABLES=TABLES;
 const FENCE_SQL='UPDATE discovery_cas SET ok=changes() WHERE id=1';
@@ -57,7 +58,7 @@ async function digest(text){
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
  return [...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
-function closed(){return {ready:false,held:false,tables:false,windowTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
+function closed(){return {ready:false,held:false,tables:false,windowTable:false,priorityTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
 // AIR-387. One catalog film by TMDB movie id, for the permanent film page. A bounded read-only lookup: one indexed row
 // (media_kind, tmdb_id), no catalog scan, no write. It answers every state of that identity, so the caller can tell a film
 // that was never admitted from one that was superseded, and it fails closed like `routeRead`: a held cutover, a catalog or
@@ -146,6 +147,61 @@ async function throwIfWindowHeld(env,gate,error){
  if(window.active&&window.state==='held')throw Object.assign(windowError(window),{cause:error});
 }
 
+
+// ADR 0135 (AIR-459): the EPG-priority Discovery pause. INERT: the table `discovery_epg_priority` is optional. With it absent (migration 0022 not applied)
+// every statement below is exactly what it was before, so a deploy changes nothing and there is no flag. With it present, a NEW Discovery admission
+// (an `acquireLease` with no `role`, or any role but `epg`) and the three writers that move the generation without holding the lease are refused inside
+// their own statement. `renewLease` and `role: 'epg'` are never refused. The rules live in `src/domain/epg-priority-pause.js`; the SQL only binds its facts.
+const PRIORITY_TABLE='discovery_epg_priority';
+const PRIORITY_PUBLISHED_SQL="EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.madrid_run_key=? AND e.programme_run_id IS NOT NULL AND e.programme_run_id=a.published_programme_run_id)";
+const PRIORITY_ADMIT_SQL="EXISTS (SELECT 1 FROM discovery_epg_priority p WHERE p.id=1 AND p.state IN ('clear','paused') AND ("+PRIORITY_PUBLISHED_SQL+" OR p.override_day_key=?))";
+// Admission predicate for a statement: published for the candidate day, or overridden for it. A row that is missing or malformed matches nothing.
+function priorityGuard(gate,dayKey,holder){
+ if(!gate?.priorityTable)return ['',[]];
+ if(holder?.id)return [' AND (EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?) OR '+PRIORITY_ADMIT_SQL+')',[holder.id,nowMs(),dayKey,dayKey]];
+ return [' AND '+PRIORITY_ADMIT_SQL,[dayKey,dayKey]];
+}
+// The row arm and the clear. Both carry their own predicate, so they write only where it still holds.
+const PRIORITY_ARM_SQL="UPDATE discovery_epg_priority SET state='paused', owed_day_key=?, override_day_key=NULL WHERE id=1 AND NOT ("+PRIORITY_PUBLISHED_SQL+" OR COALESCE(override_day_key=?,0)) AND NOT (state='paused' AND owed_day_key=? AND override_day_key IS NULL)";
+const PRIORITY_CLEAR_SQL="UPDATE discovery_epg_priority SET state='clear', owed_day_key=NULL, override_day_key=NULL WHERE id=1 AND "+PRIORITY_PUBLISHED_SQL+" AND (state<>'clear' OR override_day_key IS NOT NULL)";
+function priorityRowStatements(write,dayKey){
+ if(write?.state==='paused')return [[PRIORITY_ARM_SQL,[dayKey,dayKey,dayKey,dayKey]]];
+ if(write?.state==='clear')return [[PRIORITY_CLEAR_SQL,[dayKey]]];
+ return [];
+}
+function priorityError(info){const error=failed('discovery_epg_priority');error.priority=info;return error;}
+async function readPriorityFacts(env,nowMs_,context){
+ const db=database(env);
+ const row=await one(db,'SELECT state, owed_day_key AS owedDayKey, override_day_key AS overrideDayKey FROM discovery_epg_priority WHERE id=1');
+ const published=await one(db,'SELECT e.madrid_run_key AS publishedDayKey, e.programme_run_id AS publishedProgrammeRunId, a.published_programme_run_id AS handoffProgrammeRunId FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1');
+ return {tablePresent:true,action:'acquire',role:context.role??null,nowMs:nowMs_,row:row||null,...(published||{}),requestedProgrammeRunId:context.programmeRunId??null};
+}
+// Who holds what, for the answer only (never for a decision): the kind and the expiry. No Film id, no SQL, no continuation body.
+async function readPriorityHold(env,gate,now){
+ const db=database(env);
+ if(gate.windowTable){
+  const window=await readProjectorWindow(env,now);
+  if(window.active&&window.state==='held')return {ownerKind:'projector',holdExpiresAt:window.expiresAt};
+ }
+ const lease=await one(db,'SELECT lease_id, expires_at AS expiresAt, holder_kind AS holderKind FROM discovery_lease WHERE id=1');
+ const expiresAt=Number(lease?.expiresAt);
+ if(lease?.lease_id&&Number.isFinite(expiresAt)&&expiresAt>now)return {ownerKind:lease.holderKind==='epg'?'epg':'discovery',holdExpiresAt:expiresAt};
+ return {ownerKind:'none',holdExpiresAt:null};
+}
+async function priorityBusy(env,gate,decision,now){
+ const hold=await readPriorityHold(env,gate,now);
+ return {kind:'epg_priority',expiresAt:null,owedDayKey:decision.owedDayKey,nextCatchUpAt:decision.nextCatchUpAt,pollMs:DISCOVERY_EPG_PRIORITY_POLL_MS,...hold};
+}
+// A lease-free writer whose batch the pause refused learns why by re-asking the pure contract: a soft, typed refusal (the caller waits);
+// anything else stays the ordinary fence failure.
+async function throwIfPriorityPaused(env,gate,error,context={}){
+ if(!gate?.priorityTable)return;
+ let decision;
+ try{decision=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{return;}
+ if(decision.reason!=='epg_priority')return;
+ throw Object.assign(priorityError(await priorityBusy(env,gate,decision,nowMs())),{cause:error});
+}
+
 export async function readAuthority(env){
  const db=database(env);
  if(!db)return closed();
@@ -169,7 +225,7 @@ export async function readAuthority(env){
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
  const ready=row.mode==='d1'&&row.cutover==='open',held=row.mode==='d1'&&row.cutover==='held';
- return {ready,held,tables:true,windowTable:names.includes('projector_window'),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state};
+ return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state};
 }
 
 function assertOpen(gate){
@@ -1234,7 +1290,7 @@ export async function importSegment(env,segment){
  if(!run)throw failed('discovery_fence');
  const chunks=[];
  let current=[
-  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(gate)[0],[gate.generation,nowMs(),...windowHeldGuard(gate)[1]]],
+  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(gate)[0]+priorityGuard(gate,candidateOwedDay(nowMs()),null)[0],[gate.generation,nowMs(),...windowHeldGuard(gate)[1],...priorityGuard(gate,candidateOwedDay(nowMs()),null)[1]]],
   [FENCE_SQL,[]],
   ['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]],
   ['INSERT INTO discovery_segment (source_key, programme_run_id, residence, r2_key, content_sha256, item_count) VALUES (?,?,\'archive\',?,?,?)',[segment.sourceKey,run,segment.r2Key??null,sha,segment.items.length]],
@@ -1258,14 +1314,14 @@ export async function importSegment(env,segment){
   if(index>0){
    const again=await readAuthority(env);
    chunks[index].unshift([FENCE_SQL,[]]);
-   chunks[index].unshift(['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(again)[0],[again.generation,nowMs(),...windowHeldGuard(again)[1]]]);
+   chunks[index].unshift(['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(again)[0]+priorityGuard(again,candidateOwedDay(nowMs()),null)[0],[again.generation,nowMs(),...windowHeldGuard(again)[1],...priorityGuard(again,candidateOwedDay(nowMs()),null)[1]]]);
    generation=again.generation;
   }
   await commit(db,chunks[index]);
  }
  const end=await readAuthority(env);
  await commit(db,[
-  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(end)[0],[end.generation,nowMs(),...windowHeldGuard(end)[1]]],
+  ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND NOT EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND expires_at>?)'+windowHeldGuard(end)[0]+priorityGuard(end,candidateOwedDay(nowMs()),null)[0],[end.generation,nowMs(),...windowHeldGuard(end)[1],...priorityGuard(end,candidateOwedDay(nowMs()),null)[1]]],
   [FENCE_SQL,[]],
   ['UPDATE discovery_transfer SET state=\'committed\', batches=batches+1 WHERE id=1',[]],
  ]);
@@ -1284,13 +1340,37 @@ export async function acquireLease(env,context={}){
   const live=await one(database(env),'SELECT lease_id FROM discovery_lease WHERE id=1 AND lease_id IS NOT NULL AND expires_at>?',[nowMs()]);
   if(live?.lease_id||!await ledgerSealLoading(env))throw failed('discovery_incomplete');
  }
- if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId)return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
  const id=crypto.randomUUID(),expiresAt=nowMs()+LEASE_TTL_MS;
  const db=database(env);
  const refusal=gate.windowTable?[WINDOW_ACTIVE_SQL,[nowMs()]]:['',[]];
- await commit(db,[['UPDATE discovery_lease SET lease_id=?, expires_at=?, programme_run_id=? WHERE id=1 AND (lease_id IS NULL OR expires_at<=?)'+refusal[0],[id,expiresAt,context.programmeRunId??gate.programmeRunId??null,nowMs(),...refusal[1]]]]);
+ // ADR 0135: only the Discovery side is paused. `role: 'epg'` (the publication, `sealStep` included) is exempt, and a caller that omits `role` is Discovery.
+ const paused=gate.priorityTable&&context.role!=='epg';
+ let decision=null,priority=['',[]],rowStatements=[],dayKey=null;
+ if(paused){
+  const now=nowMs();
+  dayKey=candidateOwedDay(now);
+  const facts=await readPriorityFacts(env,now,context);
+  decision=discoveryAdmission(facts);
+  // An unreadable row, table or id is fail-closed and writes nothing. A foreign programme id is the existing hard conflict.
+  if(decision.reason==='stale_generation')return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
+  if(!decision.admit&&decision.reason!=='epg_priority')throw failed('discovery_epg_priority_evidence');
+  priority=priorityGuard(gate,dayKey,null);
+  rowStatements=priorityRowStatements(pauseRowWrite(facts),dayKey);
+  // The refused first read is not the end of it: the arm below must still run when the row is `clear`, so the batch always carries it.
+  if(!rowStatements.length&&decision.reason==='epg_priority')rowStatements=priorityRowStatements({state:'paused'},dayKey);
+ }
+ // The programme fence. While the pause names itself, the previous id waits as `epg_priority` (ADR 0135 T34), so the mismatch answer is only the unpaused one.
+ if(gate.programmeRunId&&context.programmeRunId&&gate.programmeRunId!==context.programmeRunId&&!(paused&&decision.reason==='epg_priority'))return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
+ const holder=gate.priorityTable?', holder_kind=?':'';
+ await commit(db,[['UPDATE discovery_lease SET lease_id=?, expires_at=?, programme_run_id=?'+holder+' WHERE id=1 AND (lease_id IS NULL OR expires_at<=?)'+refusal[0]+priority[0],[id,expiresAt,context.programmeRunId??gate.programmeRunId??null,...(gate.priorityTable?[context.role==='epg'?'epg':'discovery']:[]),nowMs(),...refusal[1],...priority[1]]],...rowStatements]);
  const row=await one(db,'SELECT lease_id, expires_at, programme_run_id FROM discovery_lease WHERE id=1');
  if(row?.lease_id!==id){
+  // ADR 0135: when the pause is why the lease was not taken, it names itself, ahead of the projector window and the holder.
+  if(paused){
+   let again=decision;
+   if(again.admit){try{again=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{again=null;}}
+   if(again&&again.reason==='epg_priority')return {handled:true,lease:null,busy:await priorityBusy(env,gate,again,nowMs())};
+  }
   // ADR 0103: a requested or held window is its own, typed, absolute-deadline busy; the caller waits until then.
   if(gate.windowTable){
    const window=await readProjectorWindow(env);
@@ -1414,13 +1494,15 @@ export async function writeContinuation(env,record,etag){
  const text=JSON.stringify(record??null);
  const revisionSql=expected==null?'id=1':'id=1 AND revision=?';
  const params=expected==null?[record?.programmeRunId??null,text]:[record?.programmeRunId??null,text,expected];
+ // ADR 0135: the writer that holds the live lease (an in-flight chunk) finishes; a lease-free writer is refused while the pause is open.
+ const gatePriority=priorityGuard(gate,candidateOwedDay(nowMs()),leaseOf(env));
  try{
   await commit(database(env),[
    [`UPDATE discovery_continuation SET programme_run_id=?, payload_json=?, revision=revision+1 WHERE ${revisionSql}`,params],
-   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0],[gate.generation,...windowHeldGuard(gate)[1]]],
+   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0]+gatePriority[0],[gate.generation,...windowHeldGuard(gate)[1],...gatePriority[1]]],
    [FENCE_SQL,[]],
   ]);
- }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);return {handled:true,saved:false};}throw error;}
+ }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);await throwIfPriorityPaused(env,gate,error,{programmeRunId:record?.programmeRunId??null});return {handled:true,saved:false};}throw error;}
  return {handled:true,saved:true};
 }
 export async function readWorkflow(env){
@@ -1477,13 +1559,15 @@ export async function writeWorkflow(env,record,etag){
  const text=JSON.stringify(record??null);
  const where=expected==null?'id=1':'id=1 AND revision=?';
  const params=expected==null?[record?.instanceId??null,record?.programmeRunId??null,Number.isInteger(record?.series)?record.series:null,text]:[record?.instanceId??null,record?.programmeRunId??null,Number.isInteger(record?.series)?record.series:null,text,expected];
+ // ADR 0135: the writer that holds the live lease (an in-flight chunk) finishes; a lease-free writer is refused while the pause is open.
+ const gatePriority=priorityGuard(gate,candidateOwedDay(nowMs()),leaseOf(env));
  try{
   await commit(database(env),[
    [`UPDATE discovery_workflow SET instance_id=?, programme_run_id=?, series=?, payload_json=?, revision=revision+1 WHERE ${where}`,params],
-   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0],[gate.generation,...windowHeldGuard(gate)[1]]],
+   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0]+gatePriority[0],[gate.generation,...windowHeldGuard(gate)[1],...gatePriority[1]]],
    [FENCE_SQL,[]],
   ]);
- }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);return {handled:true,saved:false};}throw error;}
+ }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);await throwIfPriorityPaused(env,gate,error,{programmeRunId:record?.programmeRunId??null});return {handled:true,saved:false};}throw error;}
  return {handled:true,saved:true};
 }
 

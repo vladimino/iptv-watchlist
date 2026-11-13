@@ -23,7 +23,8 @@ const call=code=>vm.runInContext(code,context);
 // The Workflow module is part of the bundle and is not in the offline loader's context: load it as the bundle carries it.
 vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8'),context);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-window-epg-'));
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+// The window protocol is this file's subject. The EPG-priority pause (0022, tests/epg-priority-gate.mjs) is a different gate and would refuse the Discovery-role acquires below by the wall clock.
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
 const file=path.join(root,'e.sqlite');
 {const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);}
 const db=d1Standin(file);
@@ -53,12 +54,13 @@ for(const [name,run] of Object.entries(publishCalls)){
  await assert.rejects(run,error=>error.name==='ProjectorWindowBusy'&&error.busy.state==='held',name+' held');
 }
 
-// 2. Any other missing lease keeps its old behaviour: the generic error, which the step records and the executor counts as before.
+// 2. ADR 0135 (AIR-459): a live Discovery lease is a collision, not a fault of the publication. The publication paths answer it as the structured, non-failure `ResolverBusy` (kind `lease_held`, with the
+// holder's expiry), no longer as the generic error the executor counted as a failure.
 await Authority.releaseProjectorWindow(env,{owner:'p1'});
 {
  const chunk=await Authority.acquireLease(env,{});assert.ok(chunk.lease);
  for(const [name,run] of Object.entries(publishCalls)){
-  await assert.rejects(run,error=>error.name!=='ProjectorWindowBusy'&&/Resolver is writing the catalog/.test(error.message),name+' keeps the generic error for an ordinary lease');
+  await assert.rejects(run,error=>error.name==='ResolverBusy'&&error.busy.kind==='lease_held'&&Number.isFinite(error.busy.expiresAt)&&!/Resolver is writing the catalog/.test(error.message),name+' answers a live lease as a structured busy');
  }
  await Authority.releaseLease({...env,discoveryLease:chunk.lease},chunk.lease);
 }

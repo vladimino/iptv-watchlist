@@ -248,13 +248,13 @@ async function saveScorePreview(env,source,preview,fence=null){if(fence)await fe
 // ADR 0103. `takeDiscoveryLease` answers the lease and, when none was taken, why: a requested or held projector window is the typed
 // busy `{kind:'projector_window',expiresAt}`, which the EPG publication paths turn into a structured wait. `acquireDiscoveryLease`
 // keeps its old shape (the lease or null) for every caller that treats a missing lease as busy.
-async function takeDiscoveryLease(env){
+async function takeDiscoveryLease(env,role=null){
  if(typeof DiscoveryAuthority!=='undefined'){
   const gate=await DiscoveryAuthority.readAuthority(env);
   if(gate.held)throw Object.assign(new Error('discovery_fence'),{code:'discovery_fence',name:'DiscoveryFenceError'});
   if(gate.ready){
    const published=await publishedPointer(env);
-   const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:published?.programmeRunId??null});
+   const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:published?.programmeRunId??null,...(role?{role}:{})});
    if(taken.lease)env.discoveryLease=taken.lease;
    return {lease:taken.lease,busy:taken.busy||null};
   }
@@ -264,7 +264,7 @@ async function takeDiscoveryLease(env){
  const lease={id:crypto.randomUUID(),expiresAt:Date.now()+90000},saved=await env.BUCKET.put(DISCOVERY_LEASE_KEY,JSON.stringify(lease),{onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  return {lease:saved===null?null:lease,busy:null};
 }
-async function acquireDiscoveryLease(env){return (await takeDiscoveryLease(env)).lease;}
+async function acquireDiscoveryLease(env,role=null){return (await takeDiscoveryLease(env,role)).lease;}
 // AIR-154: a chunk renews its lease immediately before every durable write. Renewal fails as soon as
 // another hop holds the lease, so a hop that stalled past the lease TTL cannot write over its successor;
 // expiry therefore means the hop has been silent for a whole TTL, which is the quiescence a resume needs.
@@ -513,8 +513,9 @@ async function catalogPosterHydration(env,body={}){
  const summary={programmeRunId,catalogRecords:counts.all.length,missingPoster:counts.missing.length,verifiedMissing:counts.verified.length,unverifiedMissing:counts.unverified.length,actionable:part.actionable.length,noPosterHeld:part.held.length,identityReview:part.review.length};
  if(dryRun)return json({dryRun:true,enabled:true,...summary,ids:part.actionable.slice(0,CATALOG_POSTER_ID_SAMPLE).map(row=>row.id)});
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return json({error:'TMDB is not configured'},503);
- const lease=await acquireDiscoveryLease(env);
- if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...summary},409);
+ const takenLease=await takeDiscoveryLease(env),lease=takenLease.lease;
+ // ADR 0135: a paused admission keeps the one admin-visible text (`resolver_busy`) and adds the closed reason, so it is a wait and not a fault.
+ if(!lease)return json({dryRun:false,enabled:true,error:'Resolver is writing the catalog',...(takenLease.busy?.kind==='epg_priority'?{reason:'epg_priority',nextCatchUpAt:takenLease.busy.nextCatchUpAt??null}:{}),...summary},409);
  try{
   if(expected){
    const latest=await publishedPointer(env);
@@ -1491,6 +1492,8 @@ async function advanceDiscovery(env,body={}){
  if(!acquired){
   // ADR 0103: a projector window is a busy with its own absolute deadline, so the series waits for it instead of the hourly gate.
   if(takenLease.busy?.kind==='projector_window'&&Number.isFinite(takenLease.busy.expiresAt)){trace.branch='projector_window';return busyOutcome(current,trace,new Date(takenLease.busy.expiresAt).toISOString());}
+  // ADR 0135: the EPG-priority pause is a busy with its own poll time. It is not a failure, a lost lease or a stall, and the poll does not lift it.
+  if(takenLease.busy?.kind==='epg_priority'){trace.branch='epg_priority';trace.epgPriority={owedDayKey:takenLease.busy.owedDayKey??null,ownerKind:takenLease.busy.ownerKind??'none',holdExpiresAt:takenLease.busy.holdExpiresAt??null};return busyOutcome(current,trace,takenLease.busy.nextCatchUpAt??null);}
   trace.branch='lease_lost';return busyOutcome(current,trace);
  }
  // AIR-154 fence: the decision was made on the record read before the lease; another hop may have moved

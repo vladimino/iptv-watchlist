@@ -75,7 +75,7 @@ export function world(){
  return state;
 }
 export const envOf=(state,mode)=>({DB:d1Standin(state.file,{maxBinds:100}),BUCKET:state.bkt,discoveryLease:null,...(mode?{DISCOVERY_LEDGER_MODE:mode}:{})});
-export async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');const lease=await call('acquireDiscoveryLease')(env);assert.ok(lease,'a lease');return lease;}
+export async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_at=1 WHERE id=1');const lease=await call('acquireDiscoveryLease')(env,'epg');assert.ok(lease,'a lease');return lease;}
 
 // The first generation is installed the way a cutover leaves it: one full ledger in the R2 generation copy and the same rows in D1.
 export async function bootstrap(state,day,latest=scan(day)){
@@ -84,7 +84,7 @@ export async function bootstrap(state,day,latest=scan(day)){
  const framing=call('discoveryDocumentFraming')({programmeRunId:id},{}),encoder=new TextEncoder(),encoded=state.full.map(item=>encoder.encode(JSON.stringify(item)));
  await state.bkt.put('epg/generations/'+id+'/discovery-latest.json',call('discoveryDocumentStream')(framing,(async function*(){for(const bytes of encoded)yield bytes;})()));
  const env=envOf(state);
- const taken=await Authority.acquireLease(env,{programmeRunId:null});env.discoveryLease=taken.lease;
+ const taken=await Authority.acquireLease(env,{programmeRunId:null,role:'epg'});env.discoveryLease=taken.lease;
  await Authority.ingestLedger(env,{programmeRunId:id,handoff:true,lease:taken.lease,items:(async function*(){for(const item of state.full)yield item;})()});
  await Authority.releaseLease(env,taken.lease);
  state.published={programmeRunId:id,fence:'g'+(++state.generation)};
