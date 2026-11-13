@@ -20,6 +20,8 @@
 -- the kind of a unit or a cursor against the plan kinds, cursor monotonicity inside a pass, and that a unit digest is source-only.
 -- Fence model, consistent with 0013 and 0019: a row may be inserted or updated ONLY while the marker is d1/open (so at r2, prepared and held both tables stay
 -- empty or frozen); reads are always allowed. Rows are never deleted (trigger); pruning is a later, separately approved decision.
+-- D1 evaluates a LIKE or GLOB pattern of at most 50 bytes (a longer one fails with code 7500, observed on production 13 Nov 2026), so every time CHECK below is
+-- split into short GLOB and substr() tests; the accepted set is unchanged (YYYY-MM-DDTHH:MM:SS, any fraction, Z; 20 to 32 characters; only 0-9 T Z : . -).
 
 INSERT INTO schema_contract (id, version, note)
 SELECT 1, 0, 'refused'
@@ -67,9 +69,9 @@ CREATE TABLE canonical_producer_run (
  open_at_completion INTEGER CHECK (open_at_completion IS NULL OR open_at_completion >= 0),
  marker_generation INTEGER NOT NULL CHECK (marker_generation >= 0),
  revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
- created_at TEXT NOT NULL CHECK (length(created_at) BETWEEN 20 AND 32 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND created_at NOT GLOB '*[^0-9TZ:.-]*'),
- updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 32 AND updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND updated_at NOT GLOB '*[^0-9TZ:.-]*'),
- completed_at TEXT CHECK (completed_at IS NULL OR (length(completed_at) BETWEEN 20 AND 32 AND completed_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND completed_at NOT GLOB '*[^0-9TZ:.-]*')),
+ created_at TEXT NOT NULL CHECK (length(created_at) BETWEEN 20 AND 32 AND substr(created_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(created_at, 11, 1) = 'T' AND substr(created_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(created_at, -1) = 'Z' AND created_at NOT GLOB '*[^0-9TZ:.-]*'),
+ updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 32 AND substr(updated_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(updated_at, -1) = 'Z' AND updated_at NOT GLOB '*[^0-9TZ:.-]*'),
+ completed_at TEXT CHECK (completed_at IS NULL OR (length(completed_at) BETWEEN 20 AND 32 AND substr(completed_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(completed_at, 11, 1) = 'T' AND substr(completed_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(completed_at, -1) = 'Z' AND completed_at NOT GLOB '*[^0-9TZ:.-]*')),
  PRIMARY KEY (origin, run_key),
  CHECK ((cursor_kind IS NULL) = (cursor_id IS NULL)),
  CHECK ((strike_count = 0) = (strike_id IS NULL)),
@@ -100,11 +102,11 @@ CREATE TABLE canonical_producer_unit_result (
  code TEXT NOT NULL CHECK (length(code) BETWEEN 1 AND 80 AND code GLOB '[a-z]*' AND code NOT GLOB '*[^a-z_0-9]*'),
  attempts INTEGER NOT NULL CHECK (attempts BETWEEN 1 AND 16),
  prereq_stamp TEXT CHECK (prereq_stamp IS NULL OR (length(prereq_stamp) = 64 AND prereq_stamp NOT GLOB '*[^0-9a-f]*')),
- next_attempt_at TEXT CHECK (next_attempt_at IS NULL OR (length(next_attempt_at) BETWEEN 20 AND 32 AND next_attempt_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND next_attempt_at NOT GLOB '*[^0-9TZ:.-]*')),
+ next_attempt_at TEXT CHECK (next_attempt_at IS NULL OR (length(next_attempt_at) BETWEEN 20 AND 32 AND substr(next_attempt_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(next_attempt_at, 11, 1) = 'T' AND substr(next_attempt_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(next_attempt_at, -1) = 'Z' AND next_attempt_at NOT GLOB '*[^0-9TZ:.-]*')),
  settled_by TEXT CHECK (settled_by IS NULL OR (length(settled_by) BETWEEN 1 AND 64 AND settled_by GLOB '[a-z]*' AND settled_by NOT GLOB '*[^a-z_0-9]*')),
- created_at TEXT NOT NULL CHECK (length(created_at) BETWEEN 20 AND 32 AND created_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND created_at NOT GLOB '*[^0-9TZ:.-]*'),
- updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 32 AND updated_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND updated_at NOT GLOB '*[^0-9TZ:.-]*'),
- settled_at TEXT CHECK (settled_at IS NULL OR (length(settled_at) BETWEEN 20 AND 32 AND settled_at GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]T[0-2][0-9]:[0-5][0-9]:[0-5][0-9]*Z' AND settled_at NOT GLOB '*[^0-9TZ:.-]*')),
+ created_at TEXT NOT NULL CHECK (length(created_at) BETWEEN 20 AND 32 AND substr(created_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(created_at, 11, 1) = 'T' AND substr(created_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(created_at, -1) = 'Z' AND created_at NOT GLOB '*[^0-9TZ:.-]*'),
+ updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 32 AND substr(updated_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(updated_at, 11, 1) = 'T' AND substr(updated_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(updated_at, -1) = 'Z' AND updated_at NOT GLOB '*[^0-9TZ:.-]*'),
+ settled_at TEXT CHECK (settled_at IS NULL OR (length(settled_at) BETWEEN 20 AND 32 AND substr(settled_at, 1, 10) GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]' AND substr(settled_at, 11, 1) = 'T' AND substr(settled_at, 12, 8) GLOB '[0-2][0-9]:[0-5][0-9]:[0-5][0-9]' AND substr(settled_at, -1) = 'Z' AND settled_at NOT GLOB '*[^0-9TZ:.-]*')),
  PRIMARY KEY (origin, run_key, pass_no, kind, unit_id),
  FOREIGN KEY (origin, run_key) REFERENCES canonical_producer_run (origin, run_key),
  CHECK ((retry_owner = 'receipt') = (request_id IS NOT NULL)),

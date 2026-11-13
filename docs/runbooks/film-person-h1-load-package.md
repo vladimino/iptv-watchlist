@@ -1,5 +1,7 @@
 # Film/Person H1: operator package for the P5 load of the three empty classes (prepared, not executed)
 
+> **Blocked until `0021` is applied (13 Nov 2026).** The first H1 load attempt was refused by D1 (error 7500): `film_rated_admission` and `film_retention` carry a 92-byte `GLOB` time `CHECK` that D1 cannot evaluate, so no INSERT into them can succeed ([evidence](../evidence/d1-migration/air-374-h1-load-refused-glob-limit-2026-11-13.md), nothing was written). The order is `0020`, then [`0021`](film-person-0021-apply.md), then this load on a rebuilt plan; the schema version this page and the verifier expect (19) moves with those applies in a separate PR.
+
 **Role:** the operator package of holdpoint H1 of the [decision pack](film-person-holdpoint-decision-pack.md) for [AIR-374](https://trello.com/c/ha7ais3w): what a fresh source snapshot needs, what the plan artifact must show, how the preflight, the load, the readback and the release are verified, when to STOP, and the two owner GOs that would be requested (a read GO for the snapshot, then a write GO for the load). **This page authorizes nothing and nothing in it has been executed.** It prepares; it never loads. The batch SQL exists only as a private artifact of the loader's `sql` command and is sent only under the second GO. Every number below that describes production is an EXPECTED figure from the 11 Nov 2026 measurement, not a current one.
 
 Tooling, all offline (no network, no D1, no R2, no connector at import or run):
