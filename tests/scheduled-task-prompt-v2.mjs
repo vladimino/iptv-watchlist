@@ -36,7 +36,7 @@ for(const needle of ['РУЧНУЮ проверку','rules.execution.fields','o
 for(const [name,value] of [['production',prompt],['A/B dry-run',dry]])assert.ok(!/\b(?:AIR-\d+|ADR[ -]?\d+|S5-C)\b/.test(value),name+' executable prompt must be free of historical ticket/decision IDs');
 assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test(prompt)&&/Для исследования фильмов используй доступные web search/.test(prompt),'IPTV MCP boundary must allow independent film research');
 assert.ok(/не второй поисковый проход/i.test(prompt),'research gate must not duplicate the search budget');
-assert.ok(/search_snippet допустим БЕЗ прочтения страницы/.test(prompt),'search snippet is not a read article');
+assert.ok(/search_snippet допустим БЕЗ прочтения страницы/.test(prompt)&&/source с access=search_snippet, даже если сама статья не открыта/.test(prompt),'a search snippet is a valid used source without a readable article, but does not count as read content');
 assert.ok(/gateStatus=blocked \(при этом assessment\.research\.status=not_attempted\)/.test(prompt),'unavailable search audit is distinct from assessment research status');
 for(const val of [prompt,dry])assert.ok(/attempted_found, но snippets сами по себе НЕ дают substantive quality gate/.test(val)&&/web_research в sources ЗАПРЕЩЁН/.test(val),'web_research snippets imply attempted_found, not substantive research and not blocked');
 assert.ok(!/другой v2 Task или ещё не выключенный legacy/.test(prompt),'scheduled prompt cannot assume historic enabled state');
