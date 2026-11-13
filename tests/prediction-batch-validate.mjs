@@ -83,14 +83,14 @@ const ids=n=>Array.from({length:n},(_,i)=>'tmdb_'+(i+1));
 // 4. A defect of one item is its own result and never fails the others; the request still answers. No value is echoed.
 {
  const SECRET='SECRETVALUE';
- const items=[{filmId:'tmdb_1',prediction:prediction()},'text',{prediction:prediction()},{filmId:'bad id!',prediction:prediction()},{filmId:'tmdb_5',prediction:prediction(),[SECRET]:1},{filmId:'tmdb_6',fingerprint:'text',prediction:prediction()},{filmId:'tmdb_7'},{filmId:'tmdb_8',prediction:[],metadata:SECRET}];
+ const items=[{filmId:'tmdb_1',prediction:prediction()},'text',{prediction:prediction()},{filmId:'bad id!',prediction:prediction()},{filmId:'tmdb_5',prediction:prediction(),extra:SECRET},{filmId:'tmdb_6',fingerprint:'text',prediction:prediction()},{filmId:'tmdb_7'},{filmId:'tmdb_8',prediction:[],metadata:SECRET}];
  const r=await call('prediction_batch_validate',{items});assert.equal(r.isError,false,r.text.slice(0,200));
  const d=r.data,at=i=>d.results[i];
  assert.equal(at(0).valid,true);
  assert.deepEqual(at(1).itemIssues,[{path:'item',code:'invalid_type'}]);
  assert.deepEqual(at(2).itemIssues,[{path:'item.filmId',code:'required'}]);
  assert.deepEqual(at(3).itemIssues,[{path:'item.filmId',code:'invalid_type'}]);assert.equal(at(3).filmId,null);
- assert.deepEqual(at(4).itemIssues,[{path:'item',code:'invalid_type'}]);
+ assert.deepEqual(at(4).itemIssues,[{path:'item.extra',code:'unknown_field'}],'an undeclared key is named with the submit code; its value is never echoed');
  assert.deepEqual(at(5).itemIssues,[{path:'item.fingerprint',code:'invalid_type'}]);
  assert.deepEqual(at(6).itemIssues,[{path:'item',code:'required'}]);
  assert.deepEqual(at(7).itemIssues.map(x=>x.path).sort(),['item.metadata','item.prediction']);

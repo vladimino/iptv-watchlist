@@ -26,6 +26,16 @@ assert.equal(dry.length,Number(statedDry[1]));assert.equal(sha(dry),statedDry[2]
 // 2. The generation steps 4, 5 and 6 are byte-identical in both prompts: an A/B changes grouping only.
 const steps=text=>text.split('\n').filter(l=>/^[456]\. /.test(l));
 assert.equal(steps(prompt).length,3);assert.deepEqual(steps(dry),steps(prompt),'identical generation instructions');
+// 2b. ADR 0132: the research and assessment step 3а is byte-identical in both prompts, carries the experimental budget and every closed assessment key, and never claims Web Search works inside a Task.
+const step3a=text=>text.split('\n').filter(l=>l.startsWith('3а. '));
+assert.equal(step3a(prompt).length,1);assert.deepEqual(step3a(dry),step3a(prompt),'identical research and assessment instructions');
+for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status = not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
+for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
+assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
+for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
+assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
+assert.ok(!/web search[^.]*доступен и подтверждён/i.test(prompt),'no confirmed Web Search availability claim');
+
 
 // 3. Tool names: every call the texts write exists and stays inside its vocabulary; the forbidden lists stay forbidden.
 const mcp=fs.readFileSync('src/mcp.js','utf8');

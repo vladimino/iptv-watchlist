@@ -12,7 +12,7 @@ Current interface contracts, not a grant of production writer access:
 - [Read-only prediction queue diagnostics](prediction-diagnostics.md)
 - [Read-only per-film prediction, rating and Diary viewing history](film-history.md)
 - [Read-only prediction quality: prospective metrics and calibration](prediction-quality.md)
-- [Prediction assessment contract (Proposed draft, ADR 0132)](prediction-assessment.md)
+- [Prediction assessment contract (Accepted architecture, ADR 0132; implemented in code, no caller)](prediction-assessment.md)
 - [Read-only D1 catalog views: persons, filmographies, duplicate review, and one derived Person identity read](d1-catalog.md)
 - [GET and HEAD read side effects: route inventory, MCP read tools, scenarios and the baseline of the reads that still write](read-side-effects.md)
 - [Owner admin API: pinned programme snapshot, Film/Person search, quality queues, data health, limbo, recovery reads and the guarded reconsideration of one discovery observation](admin.md)

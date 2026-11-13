@@ -211,7 +211,8 @@
            "caller_reported",
            "fingerprint_schema",
            "fingerprint_missing",
-           "prediction_schema"
+           "prediction_schema",
+           "assessment_schema"
           ]
          },
          "issues": {
@@ -305,6 +306,82 @@
          }
         },
         "description": "The film's preflight (prediction_batch_validate) outcome: the last attempt's validity and issues, and 1 or 2 attempts. A diagnostic of the pass, never an input to a rule."
+       },
+       "assessment": {
+        "type": [
+         "object",
+         "null"
+        ],
+        "additionalProperties": false,
+        "required": [
+         "sent",
+         "bytes",
+         "researchStatus",
+         "sources",
+         "webSources",
+         "snippetOnlyWebSources",
+         "conflicts",
+         "attempts",
+         "submitAssessment"
+        ],
+        "properties": {
+         "sent": {
+          "type": "boolean"
+         },
+         "bytes": {
+          "type": [
+           "integer",
+           "null"
+          ],
+          "minimum": 0,
+          "maximum": 3000,
+          "description": "UTF-8 JSON bytes of the assessment the pass sent; null when none was sent."
+         },
+         "researchStatus": {
+          "enum": [
+           "not_attempted",
+           "attempted_blocked",
+           "attempted_no_findings",
+           "attempted_found",
+           null
+          ]
+         },
+         "sources": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6
+         },
+         "webSources": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6
+         },
+         "snippetOnlyWebSources": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 6,
+          "description": "web_research sources whose access is search_snippet: reported, never read."
+         },
+         "conflicts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+         },
+         "attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4
+         },
+         "submitAssessment": {
+          "enum": [
+           "would_write",
+           "not_sent",
+           "not_applicable",
+           null
+          ]
+         }
+        },
+        "description": "Counts about the film's assessment (ADR 0132), never its content or any URL: the assessment text is private and stays out of this record, the report and every log. null when the pass has no assessment protocol."
        }
       }
      }
@@ -681,7 +758,8 @@
        "stoppedReason",
        "cost",
        "failureReasons",
-       "preflight"
+       "preflight",
+       "assessment"
       ],
       "properties": {
        "groupSize": {
@@ -1319,6 +1397,61 @@
          },
          "unresolved": {
           "type": "integer",
+          "minimum": 0
+         }
+        }
+       },
+       "assessment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+         "sent",
+         "withWebSources",
+         "snippetOnly",
+         "withConflicts",
+         "researchFound",
+         "researchBlocked",
+         "bytesMax",
+         "bytesMean"
+        ],
+        "properties": {
+         "sent": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "withWebSources": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "snippetOnly": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "films whose every web_research source is a search snippet"
+         },
+         "withConflicts": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "researchFound": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "researchBlocked": {
+          "type": "integer",
+          "minimum": 0
+         },
+         "bytesMax": {
+          "type": [
+           "integer",
+           "null"
+          ],
+          "minimum": 0
+         },
+         "bytesMean": {
+          "type": [
+           "number",
+           "null"
+          ],
           "minimum": 0
          }
         }

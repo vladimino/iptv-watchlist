@@ -182,11 +182,11 @@ const PREDICTION_RULES={
  mainRisk:{kind:'text',maxLength:220,nullable:true},
  moodLabels:{kind:'text_list',minItems:2,maxItems:4,maxLength:45},
 };
-const ISSUE_CODES=['required','invalid_type','invalid_version','invalid_enum','too_few','too_many','empty','too_long','out_of_range','invalid_step','invalid_ref','too_large'];
+const ISSUE_CODES=['required','invalid_type','invalid_version','invalid_enum','too_few','too_many','empty','too_long','out_of_range','invalid_step','invalid_ref','too_large','unknown_field'];
 const MAX_ISSUES=20;
 // Returns [{path, code}] with path = <root>[.<field>[.<subfield>]] from the rule tables and code from ISSUE_CODES.
 // Field order follows the rule table; a text-list item issue is reported once per field, without the item.
-function ruleIssues(root,rules,value){
+function ruleIssues(root,rules,value,closed){
  const issues=[],add=(path,code)=>{if(issues.length<MAX_ISSUES)issues.push({path,code});};
  if(value===undefined){add(root,'required');return issues;}
  if(!isObject(value)){add(root,'invalid_type');return issues;}
@@ -201,6 +201,8 @@ function ruleIssues(root,rules,value){
   else if(rule.kind==='number'){if(x===undefined)add(path,'required');else if(typeof x!=='number'||!Number.isFinite(x))add(path,'invalid_type');else if(x<rule.min||x>rule.max)add(path,'out_of_range');else if(rule.step&&(x/rule.step)%1!==0)add(path,'invalid_step');}
   else if(rule.kind==='text'){if(x===undefined||x===null){if(!rule.nullable)add(path,'required');}else if(typeof x!=='string')add(path,'invalid_type');else if(!x.trim().length)add(path,'empty');else if(x.length>rule.maxLength)add(path,'too_long');}
  }
+ // Closed contract (ADR 0132): a key the table does not declare is rejected, never copied; the key in the path is sanitised and truncated, its value is never echoed.
+ if(closed)for(const key of Object.keys(value)){if(!Object.hasOwn(rules,key)&&!(closed.ignore||[]).includes(key))add(root+'.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),'unknown_field');}
  return issues;
 }
 function evidenceUrlOk(value){
@@ -332,11 +334,69 @@ function fingerprintIssues(f,metadata){
  if(isObject(f)&&!issues.length&&JSON.stringify(f).length>FINGERPRINT_MAX_CHARS)issues.push({path:'fingerprint',code:'too_large'});
  return issues;
 }
-function predictionIssues(p){return ruleIssues('prediction',PREDICTION_RULES,p);}
+function predictionIssues(p){return ruleIssues('prediction',PREDICTION_RULES,p,{ignore:['confidenceAssessment']});}
+// Only the six declared model fields reach a stored version (ADR 0132); validation has already rejected anything else.
+function pickPrediction(p){const out={};for(const k of Object.keys(PREDICTION_RULES))if(p[k]!==undefined)out[k]=p[k];return out;}
 const issueText=issues=>issues.length?'Invalid '+issues.map(issue=>issue.path+' '+issue.code).join(', '):null;
 function validateFingerprint(f){return issueText(fingerprintIssues(f));}
 function validatePrediction(p){return issueText(predictionIssues(p));}
-function schemaContract(){return {version:1,fingerprint:{rules:FINGERPRINT_RULES,maxChars:FINGERPRINT_MAX_CHARS,evidence:EVIDENCE_CONTRACT},prediction:{rules:PREDICTION_RULES},issueCodes:ISSUE_CODES,issuePath:'<fingerprint|prediction>[.<field>[.<dimension or evidence group>[.<claim>]]]; a list issue names the list, not the item',reportedVia:'POST /api/enrichment/submit results[].validation {stage, reportedBy, issues[]}'};}
+// ADR 0132: the optional per-film assessment of a v2 submit item. Caller content in a closed key set; the Worker checks shape and consistency only and verifies no source.
+const ASSESSMENT_MAX_BYTES=3000;
+const ASSESSMENT_CONTRACT={version:1,required:false,protocols:['batch_v2'],maxSerializedBytes:ASSESSMENT_MAX_BYTES,maxIssues:20,
+ fields:{assessmentVersion:{const:1},ratingBasis:{text:[1,700]},probability4PlusBasis:{text:[1,400]},tasteSignals:{maxItems:5,item:{direction:['supports','against','neutral'],signal:{text:[1,220]},anchor:{text:[1,120],optional:true}}},risks:{maxItems:3,item:{risk:{text:[1,220]},severity:['low','medium','high']}},uncertainties:{maxItems:3,item:{text:[1,220]}},
+  research:{status:['not_attempted','attempted_blocked','attempted_no_findings','attempted_found'],attempts:{maxItems:4,item:{outcome:['blocked','unreadable','irrelevant'],ref:{https:true,optional:true},note:{text:[1,100],optional:true}}}},
+  sources:{maxItems:6,item:{kind:['metadata','model_knowledge','web_research'],ref:{accept:['metadata:synopsis|genres|runtime|credits','model_knowledge','https://… URL']},usedFor:{text:[1,120]},access:{values:['full_text','partial_text','search_snippet'],requiredWhen:'kind=web_research',forbiddenOtherwise:true}}},
+  conflicts:{maxItems:2,item:{topic:{text:[1,120]},positions:{minItems:2,maxItems:3,item:{source:'distinct integer index into sources',stance:{text:[1,160]}}},handling:['kept_unresolved','weighted','not_relied_on']}},
+  model:{status:['reported','unavailable'],reported:{id:{text:[1,80]},version:{text:[1,40],optional:true},effort:{text:[1,20],optional:true}}}},
+ consistency:'research.status attempted_found needs at least one web_research source; every other status forbids one; not_attempted forbids attempts; access only on web_research; conflict positions name distinct valid sources',
+ stored:'immutable create-only R2 object per prediction version; caller content is reported, not confirmed'};
+function assessmentIssues(a,metadata){
+ const issues=[],add=(path,code)=>{if(issues.length<MAX_ISSUES)issues.push({path,code});};
+ if(a===undefined)return issues;
+ if(!isObject(a)){add('assessment','invalid_type');return issues;}
+ let bytes=0;try{bytes=new TextEncoder().encode(JSON.stringify(a)).length;}catch{add('assessment','invalid_type');return issues;}
+ if(bytes>ASSESSMENT_MAX_BYTES){add('assessment','too_large');return issues;}
+ const text=(path,x,max,opt)=>{if(x===undefined){if(!opt)add(path,'required');return;}if(typeof x!=='string')add(path,'invalid_type');else if(!x.trim().length)add(path,'empty');else if(x.length>max)add(path,'too_long');};
+ const closed=(path,x,keys)=>{for(const key of Object.keys(x))if(!keys.includes(key))add(path+'.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),'unknown_field');};
+ const oneOf=(path,x,values,opt)=>{if(x===undefined){if(!opt)add(path,'required');}else if(typeof x!=='string')add(path,'invalid_type');else if(!values.includes(x))add(path,'invalid_enum');};
+ const list=(path,x,min,max)=>{if(x===undefined){add(path,'required');return false;}if(!Array.isArray(x)){add(path,'invalid_type');return false;}if(x.length<min)add(path,'too_few');if(x.length>max){add(path,'too_many');return false;}return true;};
+ closed('assessment',a,['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model']);
+ if(a.assessmentVersion===undefined)add('assessment.assessmentVersion','required');else if(a.assessmentVersion!==1)add('assessment.assessmentVersion','invalid_version');
+ text('assessment.ratingBasis',a.ratingBasis,700);text('assessment.probability4PlusBasis',a.probability4PlusBasis,400);
+ const each=(path,x,min,max,fn)=>{if(list(path,x,min,max)){let bad=false;x.forEach(v=>{if(!isObject(v)){bad=true;}else fn(v);});if(bad)add(path,'invalid_type');}};
+ each('assessment.tasteSignals',a.tasteSignals,0,5,v=>{closed('assessment.tasteSignals',v,['direction','signal','anchor']);oneOf('assessment.tasteSignals.direction',v.direction,['supports','against','neutral']);text('assessment.tasteSignals.signal',v.signal,220);text('assessment.tasteSignals.anchor',v.anchor,120,true);});
+ each('assessment.risks',a.risks,0,3,v=>{closed('assessment.risks',v,['risk','severity']);text('assessment.risks.risk',v.risk,220);oneOf('assessment.risks.severity',v.severity,['low','medium','high']);});
+ if(list('assessment.uncertainties',a.uncertainties,0,3)){if(a.uncertainties.some(v=>typeof v!=='string'))add('assessment.uncertainties','invalid_type');else if(a.uncertainties.some(v=>!v.trim().length))add('assessment.uncertainties','empty');else if(a.uncertainties.some(v=>v.length>220))add('assessment.uncertainties','too_long');}
+ const urlOk=v=>typeof v==='string'&&evidenceUrlOk(v);
+ const sources=Array.isArray(a.sources)?a.sources:[];
+ let webSources=0;
+ each('assessment.sources',a.sources,0,6,v=>{closed('assessment.sources',v,['kind','ref','usedFor','access']);oneOf('assessment.sources.kind',v.kind,['metadata','model_knowledge','web_research']);text('assessment.sources.usedFor',v.usedFor,120);
+  if(v.ref===undefined)add('assessment.sources.ref','required');else if(typeof v.ref!=='string')add('assessment.sources.ref','invalid_type');
+  else if(v.kind==='metadata'){if(!METADATA_REFS.includes(v.ref)||!metadataFactPresent(metadata,v.ref))add('assessment.sources.ref','invalid_ref');}
+  else if(v.kind==='model_knowledge'){if(v.ref!=='model_knowledge')add('assessment.sources.ref','invalid_ref');}
+  else if(v.kind==='web_research'){if(!urlOk(v.ref))add('assessment.sources.ref','invalid_ref');}
+  if(v.kind==='web_research'){webSources++;oneOf('assessment.sources.access',v.access,['full_text','partial_text','search_snippet']);}
+  else if(v.access!==undefined&&v.kind!==undefined)add('assessment.sources.access','invalid_enum');});
+ if(Array.isArray(a.sources)&&new Set(a.sources.filter(isObject).map(v=>v.kind+'|'+v.ref)).size!==a.sources.filter(isObject).length)add('assessment.sources','invalid_ref');
+ if(a.research===undefined)add('assessment.research','required');
+ else if(!isObject(a.research))add('assessment.research','invalid_type');
+ else{const r=a.research;closed('assessment.research',r,['status','attempts']);oneOf('assessment.research.status',r.status,['not_attempted','attempted_blocked','attempted_no_findings','attempted_found']);
+  const attempts=r.attempts;
+  if(attempts!==undefined){if(list('assessment.research.attempts',attempts,0,4)){if(r.status==='not_attempted'&&attempts.length)add('assessment.research.attempts','too_many');let bad=false;for(const v of attempts){if(!isObject(v)){bad=true;continue;}closed('assessment.research.attempts',v,['outcome','ref','note']);oneOf('assessment.research.attempts.outcome',v.outcome,['blocked','unreadable','irrelevant']);if(v.ref!==undefined&&!urlOk(v.ref))add('assessment.research.attempts.ref','invalid_ref');text('assessment.research.attempts.note',v.note,100,true);}if(bad)add('assessment.research.attempts','invalid_type');}}
+  if(Array.isArray(a.sources)&&a.sources.length<=6){if(r.status==='attempted_found'&&webSources===0)add('assessment.sources','too_few');else if(['not_attempted','attempted_blocked','attempted_no_findings'].includes(r.status)&&webSources>0)add('assessment.research.status','invalid_enum');}}
+ each('assessment.conflicts',a.conflicts,0,2,v=>{closed('assessment.conflicts',v,['topic','positions','handling']);text('assessment.conflicts.topic',v.topic,120);oneOf('assessment.conflicts.handling',v.handling,['kept_unresolved','weighted','not_relied_on']);
+  if(list('assessment.conflicts.positions',v.positions,2,3)){const seen=new Set();let bad=false;for(const p of v.positions){if(!isObject(p)){bad=true;continue;}closed('assessment.conflicts.positions',p,['source','stance']);text('assessment.conflicts.positions.stance',p.stance,160);
+    if(p.source===undefined)add('assessment.conflicts.positions.source','required');else if(!Number.isInteger(p.source))add('assessment.conflicts.positions.source','invalid_type');else if(p.source<0||p.source>=sources.length)add('assessment.conflicts.positions.source','out_of_range');else if(seen.has(p.source))add('assessment.conflicts.positions','invalid_ref');else seen.add(p.source);}if(bad)add('assessment.conflicts.positions','invalid_type');}});
+ const m=a.model;
+ if(m===undefined)add('assessment.model','required');
+ else if(!isObject(m))add('assessment.model','invalid_type');
+ else if(m.status===undefined)add('assessment.model.status','required');
+ else if(m.status==='unavailable')closed('assessment.model',m,['status']);
+ else if(m.status==='reported'){closed('assessment.model',m,['status','id','version','effort']);text('assessment.model.id',m.id,80);text('assessment.model.version',m.version,40,true);text('assessment.model.effort',m.effort,20,true);}
+ else add('assessment.model.status',typeof m.status==='string'?'invalid_enum':'invalid_type');
+ return issues;
+}
+function schemaContract(){return {version:1,fingerprint:{rules:FINGERPRINT_RULES,maxChars:FINGERPRINT_MAX_CHARS,evidence:EVIDENCE_CONTRACT},prediction:{rules:PREDICTION_RULES},assessment:ASSESSMENT_CONTRACT,issueCodes:ISSUE_CODES,issuePath:'<fingerprint|prediction|assessment>[.<field>[.<dimension or evidence group>[.<claim>]]]; a list issue names the list, not the item',reportedVia:'POST /api/enrichment/submit results[].validation {stage, reportedBy, issues[]}'};}
 const fingerprintCurrent=f=>!!f&&f.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&!f.invalidatedAt;
 function executionFacet(execution){const out={};if(!execution||typeof execution!=='object')return out;for(const key of GENERAL_EXECUTION){const value=execution[key];if(typeof value==='string'&&EXECUTION[key].includes(value)&&value!=='unknown'&&value!=='not_applicable')out[key]=value;}return out;}
 // The display facet of a usable fingerprint: exact today; exact or compatible when the caller judged it under the transition rule.
@@ -2118,17 +2178,21 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
 const BATCH_GATE_TTL_MS=60000;
 const BATCH_COMMIT_GUARD=Symbol.for('iptv.prediction.commitGuard');
 const BATCH_MODEL_FIELDS=['predictedRating','probability4Plus','confidence','matchSignals','mainRisk','moodLabels'];
-const BATCH_ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash'];
+const BATCH_ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash','assessment'];
+const V5_ITEM_KEYS=['filmId','fingerprint','prediction','failure'];
+// Undeclared item keys are named with the closed-contract code; only a sanitised, truncated key reaches the path, never a value.
+function unknownItemKeyIssues(items,allowed){const issues=[];if(Array.isArray(items))items.forEach((item,i)=>{if(isObject(item))for(const key of Object.keys(item))if(!allowed.includes(key)&&issues.length<MAX_ISSUES)issues.push({path:'items['+i+'].'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});});return issues;}
 const batchPick=(value,keys)=>Object.fromEntries(keys.filter(key=>isObject(value)&&value[key]!==undefined).map(key=>[key,value[key]]));
 // One digest per item over one tuple of reproducible projections (ADR 0122 decision 6): the model-supplied prediction fields (not the Worker's), the fingerprint's content hash
 // (the same one the stored fingerprint carries) and the failure kind. It is recomputable from a committed film, so a replay after a crash is recognized without a receipt store.
 async function batchItemDigest(id,item){
- return contentHash({filmId:id,fingerprint:isObject(item?.fingerprint)?await contentHash({...item.fingerprint,filmId:id}):null,prediction:isObject(item?.prediction)?batchPick(item.prediction,BATCH_MODEL_FIELDS):null,failure:isObject(item?.failure)?String(item.failure.kind||''):null});
+ return contentHash({filmId:id,fingerprint:isObject(item?.fingerprint)?await contentHash({...item.fingerprint,filmId:id}):null,prediction:isObject(item?.prediction)?batchPick(item.prediction,BATCH_MODEL_FIELDS):null,failure:isObject(item?.failure)?String(item.failure.kind||''):null,...(item?.assessment!==undefined?{assessmentSha256:await assessmentSha256(item.assessment)}:{})});
 }
 function validateBatchSubmitBody(body){
  if(!isObject(body)||!isText(body.runId,100)||!Number.isInteger(body.epoch)||body.epoch<1)return json({error:'Invalid runId or epoch'},400);
  if(!Array.isArray(body.items)||!body.items.length||body.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Expected 1–'+BATCH_RUNNER.submitMaxItems+' items'},400);
- for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||Object.keys(item).some(key=>!BATCH_ITEM_KEYS.includes(key))||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure))return json({error:'Invalid item'},400);
+ {const unknown=unknownItemKeyIssues(body.items,BATCH_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
+ for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure)||item.assessment!==undefined&&!isObject(item.assessment))return json({error:'Invalid item'},400);
  if(new Set(body.items.map(item=>String(item.filmId))).size!==body.items.length)return json({error:'Duplicate filmId'},400);
  if(body.dryRun!==true&&body.items.some(item=>item.inputHash!==undefined))return json({error:'inputHash is accepted only with dryRun'},400);
  if(body.items.some(item=>item.inputHash!==undefined&&!/^[0-9a-f]{24}$/.test(String(item.inputHash))))return json({error:'Invalid inputHash'},400);
@@ -2214,18 +2278,22 @@ async function batchSubmitItem(env,ctx,item){
  if(recorded){
   // A different payload for a film this run already settled is a conflict, a failed film included: a failure is not retried in the same run, and only the identical payload is a replay.
   if(recorded.inputDigest!==digest)return {result:{filmId:id,status:'conflict'}};
-  if(recorded.outcome==='validation_failure'){const failure=run.failures[id]||{};return {result:{filmId:id,status:'validation_failure',error:failure.kind||'parse_error',retryable:true,retryAt:failure.retryAt,...(failure.validation?{validation:failure.validation}:{}),replayed:true}};}
-  return {result:{filmId:id,status:recorded.outcome,replayed:true,...(recorded.compatibility?{compatibility:recorded.compatibility}:{})}};
+  const sent=item.assessment!==undefined,replayAssessment=recorded.assessment==='written'||recorded.assessment==='present'?'present':sent?'not_applicable':'not_sent';
+  if(recorded.outcome==='validation_failure'){const failure=run.failures[id]||{};return {result:{filmId:id,status:'validation_failure',error:failure.kind||'parse_error',retryable:true,retryAt:failure.retryAt,...(failure.validation?{validation:failure.validation}:{}),assessment:sent?'not_applicable':'not_sent',replayed:true}};}
+  return {result:{filmId:id,status:recorded.outcome,assessment:replayAssessment,replayed:true,...(recorded.compatibility?{compatibility:recorded.compatibility}:{})}};
  }
  let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null,deferredIndex=null,result=null;
  try{
   const state=await readFilmState(env,id);let fingerprint=state.fingerprint;const genres=source[id]?.genres,stored=state.predictions?.current;
   // The crash window: the prediction was committed by this run but its result was not recorded. The stored record carries this run id and the model fields the request carries.
   if(stored?.runId===run.runId){
-   const same=await contentHash({filmId:id,fingerprint:isObject(item.fingerprint)?fingerprint?.fingerprintHash||null:null,prediction:isObject(item.prediction)?batchPick(stored,BATCH_MODEL_FIELDS):null,failure:isObject(item.failure)?String(item.failure.kind||''):null});
+   const same=await contentHash({filmId:id,fingerprint:isObject(item.fingerprint)?fingerprint?.fingerprintHash||null:null,prediction:isObject(item.prediction)?batchPick(stored,BATCH_MODEL_FIELDS):null,failure:isObject(item.failure)?String(item.failure.kind||''):null,...(item.assessment!==undefined?{assessmentSha256:await assessmentSha256(item.assessment)}:{})});
    if(same!==digest)return {result:{filmId:id,status:'conflict'}};
-   const outcome=run.baseline?.[id]?'recalculated':'created';run.results[id]=outcome;delete run.failures[id];run.submitted[id]={outcome,inputDigest:digest,committedAt:new Date().toISOString()};
-   return {result:{filmId:id,status:outcome,replayed:true},settled:true};
+   // An assessment object the interrupted call did not get to write is written now; one that exists with other content is a conflict and nothing is overwritten.
+   let assessmentStatus='not_sent';
+   if(item.assessment!==undefined&&stored.contentSha256){try{assessmentStatus=await writePredictionAssessment(env,id,{contentSha256:stored.contentSha256,r2Key:stored.r2Key||predictionVersionKey(id,stored.contentSha256)},{recordedAt:new Date().toISOString(),runId:run.runId,trigger:stored.trigger,predictionGeneratedAt:stored.generatedAt,tasteProfile:{version:stored.tasteProfileVersion,hash:stored.tasteProfileHash},fingerprintHash:stored.fingerprintHash},item.assessment);}catch(error){if(error instanceof AssessmentConflict)return {result:{filmId:id,status:'conflict',assessment:'conflict'}};throw error;}}
+   const outcome=run.baseline?.[id]?'recalculated':'created';run.results[id]=outcome;delete run.failures[id];run.submitted[id]={outcome,inputDigest:digest,assessment:assessmentStatus,committedAt:new Date().toISOString()};
+   return {result:{filmId:id,status:outcome,assessment:assessmentStatus,replayed:true},settled:true};
   }
   if(item.failure&&!freshness.state(stored,fingerprint,genres)){failureStage='parse_error';validationStage='caller_reported';reportedBy='caller';issues=[];throw new Error('Reported malformed model response');}
   const usable=f=>freshness.fingerprintUsable(f,genres);
@@ -2236,10 +2304,11 @@ async function batchSubmitItem(env,ctx,item){
   if(!usable(fingerprint)){failureStage='parse_error';validationStage='fingerprint_missing';reportedBy='worker';issues=[{path:'fingerprint',code:'required'}];throw new Error('Current fingerprint required');}
   if(freshness.state(stored,fingerprint,genres)){
    await updateViewIndex(env,id,{prediction:stored,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;
-   run.results[id] ||= 'already_current';delete run.failures[id];run.submitted[id]={outcome:'already_current',inputDigest:digest,committedAt:new Date().toISOString()};result={filmId:id,status:'already_current'};
+   run.results[id] ||= 'already_current';delete run.failures[id];run.submitted[id]={outcome:'already_current',inputDigest:digest,assessment:item.assessment!==undefined?'not_applicable':'not_sent',committedAt:new Date().toISOString()};result={filmId:id,status:'already_current',assessment:item.assessment!==undefined?'not_applicable':'not_sent'};
   }else{
    const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}
-   const submitted={...item.prediction};delete submitted.confidenceAssessment;const at=new Date().toISOString();
+   {const foundAssessment=assessmentIssues(item.assessment,source[id]);if(foundAssessment.length){failureStage='parse_error';validationStage='assessment_schema';reportedBy='worker';issues=foundAssessment;throw new Error('Invalid assessment');}}
+   const submitted=pickPrediction(item.prediction);const at=new Date().toISOString();
    // The record keeps the profile identity the model worked from: the run's, which is not the current one after a change.
    const generated={...submitted,filmId:id,generatedAt:at,tasteProfileVersion:run.tasteProfileVersion,tasteProfileHash:run.tasteProfileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})};
    // The profile moved under the run: the same combined verdict (selective rule, lineage, impact features) decides, film by film. A film the change does not reach is kept; the others are
@@ -2249,16 +2318,20 @@ async function batchSubmitItem(env,ctx,item){
     const verdict=freshness.work(generated,fingerprint,genres);compatibility=batchCompatibilityOf(verdict);
     if(compatibility!=='compatible'){
      if(deferredIndex){await updateViewIndex(env,id,deferredIndex);deferredIndex=null;}
-     run.submitted[id]={outcome:'needs_regeneration',inputDigest:digest,compatibility,committedAt:new Date().toISOString()};
-     return {result:{filmId:id,status:'needs_regeneration',compatibility,...(verdict?.reason?{reason:verdict.reason}:{})},regenerate:id};
+     run.submitted[id]={outcome:'needs_regeneration',inputDigest:digest,compatibility,assessment:item.assessment!==undefined?'not_applicable':'not_sent',committedAt:new Date().toISOString()};
+     return {result:{filmId:id,status:'needs_regeneration',compatibility,assessment:item.assessment!==undefined?'not_applicable':'not_sent',...(verdict?.reason?{reason:verdict.reason}:{})},regenerate:id};
     }
    }
-   const old=stored,history=[...(state.predictions?.history||[])],prediction={...generated,...(await writePredictionVersion(env,id,generated))};
+   const old=stored,history=[...(state.predictions?.history||[])],pointer=await writePredictionVersion(env,id,generated),prediction={...generated,...pointer};
+   // Order: version object, assessment object, guarded D1 commit. A failure here leaves unreferenced objects and an unchanged pointer; the same body replays.
+   let assessmentStatus='not_sent';
+   // A collision with an object of other content is deterministic, not a storage failure: the film is a conflict, nothing is overwritten and the pointer does not move.
+   if(item.assessment!==undefined){try{assessmentStatus=await writePredictionAssessment(env,id,pointer,{recordedAt:at,runId:run.runId,trigger:generated.trigger,predictionGeneratedAt:at,tasteProfile:{version:run.tasteProfileVersion,hash:run.tasteProfileHash},fingerprintHash:fingerprint.fingerprintHash},item.assessment);}catch(error){if(error instanceof AssessmentConflict){if(deferredIndex){await updateViewIndex(env,id,deferredIndex);deferredIndex=null;}return {result:{filmId:id,status:'conflict',assessment:'conflict'}};}throw error;}}
    if(old)history.push({...old,replacedAt:at});
    await batchGuardedCommit(env,ctx,()=>saveJSON(guarded,filmKey(id)+'predictions.json',{current:prediction,history}));
    await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;
-   delete run.failures[id];const outcome=old?'recalculated':'created';run.results[id]=outcome;run.submitted[id]={outcome,inputDigest:digest,...(compatibility?{compatibility}:{}),committedAt:at};
-   result={filmId:id,status:outcome,...(compatibility?{compatibility}:{})};
+   delete run.failures[id];const outcome=old?'recalculated':'created';run.results[id]=outcome;run.submitted[id]={outcome,inputDigest:digest,assessment:assessmentStatus,...(compatibility?{compatibility}:{}),committedAt:at};
+   result={filmId:id,status:outcome,assessment:assessmentStatus,...(compatibility?{compatibility}:{})};
   }
   if(['created','recalculated'].includes(run.results[id]))run.firstSubmitAt||=new Date().toISOString();run.formatFailureStreak=0;
   return {result,settled:true};
@@ -2272,7 +2345,7 @@ async function batchSubmitItem(env,ctx,item){
   run.submitted[id]={outcome:'validation_failure',inputDigest:digest,committedAt:at};
   run.formatFailureStreak=(run.formatFailureStreak||0)+1;if(run.formatFailureStreak>=5)run.systemicStopReason='format_error_storm';
   if(validationStage){const stages=[...(run.itemValidation?.stages||[]),{stage:validationStage,reportedBy}].slice(-8);run.itemValidation={consecutive:run.formatFailureStreak||0,stages};}
-  return {result:{filmId:id,status:'validation_failure',error:failureStage,retryable:true,retryAt,...(validation?{validation}:{})},failure:id};
+  return {result:{filmId:id,status:'validation_failure',error:failureStage,retryable:true,retryAt,...(validation?{validation}:{}),assessment:item.assessment!==undefined?'not_applicable':'not_sent'},failure:id};
  }
 }
 // The retry record of a failed film goes to the queue at once, as in a v5 submit; a concurrent record of the same film can only raise attempts and retryAt, and the run and the answer follow it.
@@ -2418,14 +2491,15 @@ async function batchSubmitDryRun(env,body){
   let liveInput='same';
   if(item.inputHash){const plan=freshness.fingerprintUsable(state.fingerprint,genres)?'prediction_only':'fingerprint_and_prediction',entry={filmId:id,lane:queue?.priority?.[id]?.hot?'hot':'cold',plan,modelMetadata:batchCompact(modelMetadata(film)),...(plan==='prediction_only'?{fingerprint:batchCompact(state.fingerprint)}:{})};liveInput=(await batchFilmInputHash(entry))===item.inputHash?'same':'changed';}
   const current_=state.predictions?.current;
-  if(item.failure){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage:'caller_reported',reportedBy:'caller',issues:[]},liveInput,dryRun:true});continue;}
+  if(item.failure){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage:'caller_reported',reportedBy:'caller',issues:[]},liveInput,assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
   let fingerprint=state.fingerprint;
-  if(freshness.state(current_,fingerprint,genres)){results.push({filmId:id,status:'already_current',liveInput:'not_eligible',dryRun:true});continue;}
+  if(freshness.state(current_,fingerprint,genres)){results.push({filmId:id,status:'already_current',liveInput:'not_eligible',assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
   if(item.fingerprint&&!freshness.fingerprintUsable(fingerprint,genres)){const found=fingerprintIssues(item.fingerprint,modelMetadata(film));if(found.length){issues=found;stage='fingerprint_schema';}else fingerprint={...item.fingerprint,filmId:id,fingerprintHash:await contentHash({...item.fingerprint,filmId:id}),fingerprintSchemaVersion:item.fingerprint.fingerprintSchemaVersion??FINGERPRINT_SCHEMA_VERSION};}
   if(!issues&&!freshness.fingerprintUsable(fingerprint,genres)&&!item.fingerprint){issues=[{path:'fingerprint',code:'required'}];stage='fingerprint_missing';}
   if(!issues){const found=predictionIssues(item.prediction);if(found.length){issues=found;stage='prediction_schema';}}
-  if(issues){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage,reportedBy:'worker',issues},liveInput,dryRun:true});continue;}
-  results.push({filmId:id,status,liveInput,dryRun:true});
+  if(!issues){const found=assessmentIssues(item.assessment,modelMetadata(film));if(found.length){issues=found;stage='assessment_schema';}}
+  if(issues){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage,reportedBy:'worker',issues},liveInput,assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
+  results.push({filmId:id,status,liveInput,assessment:item.assessment!==undefined?'would_write':'not_sent',dryRun:true});
  }
  return json({status:'dry_run',dryRun:true,runId:null,manifestHash:body.manifestHash||null,profile:{version:current.version,hash:current.profileHash},results,...scheduledRunFields()});
 }
@@ -2538,6 +2612,7 @@ async function enrichmentNext(env,body,requestId){
  return json({runId:run.runId,profile:profile.profile,profileVersion:profile.version,profileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,items,pendingCount,batchSize:run.batchSize,deadlineAt:run.deadlineAt||null,modelBatching:predictionRunnerContract().modelBatching});
 }
 async function enrichmentSubmit(env,body,requestId){
+ {const unknown=unknownItemKeyIssues(body?.items,V5_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);if(run.protocol===BATCH_PROTOCOL)return wrongProtocolResponse();if(run.status!=='running')return json({error:'Run already complete',stopReason:run.stopReason||null,mustComplete:!!run.reason},409);if(!Array.isArray(body.items)||!body.items.length||body.items.length>10)return json({error:'Expected 1–10 items'},400);
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(run.systemicStopReason)return json({...runSummary(run),mustComplete:true,stopReason:run.systemicStopReason});
@@ -2559,7 +2634,7 @@ async function enrichmentSubmit(env,body,requestId){
    if(freshness.state(state.predictions?.current,fingerprint,source[id]?.genres)){await updateViewIndex(env,id,{prediction:state.predictions.current,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;run.results[id] ||= 'already_current';delete run.failures[id];results.push({filmId:id,status:'already_current'});}
    // Lineage of a new prediction (AIR-12): the fingerprint's prompt version completes its identity, runId and trigger name the run
    // that produced it. Records written before carry none of the three; readers treat them as unknown, never as the current run.
-   else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const submitted={...item.prediction};delete submitted.confidenceAssessment;const at=new Date().toISOString(),generated={...submitted,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})},old=state.predictions?.current,history=[...(state.predictions?.history||[])];
+   else{const found=predictionIssues(item.prediction);if(found.length){failureStage='parse_error';validationStage='prediction_schema';reportedBy='worker';issues=found;throw new Error('Invalid prediction');}const submitted=pickPrediction(item.prediction);const at=new Date().toISOString(),generated={...submitted,filmId:id,generatedAt:at,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintHash:fingerprint.fingerprintHash,fingerprintSchemaVersion:fingerprint.fingerprintSchemaVersion,fingerprintPromptVersion:fingerprint.fingerprintPromptVersion??1,predictionPromptVersion:PREDICTION_PROMPT_VERSION,runId:run.runId,trigger:run.trigger==='scheduled'?'scheduled':'manual',confidenceAssessment:assessPredictionConfidence({...fingerprint,fingerprintHash:fingerprint.fingerprintHash})},old=state.predictions?.current,history=[...(state.predictions?.history||[])];
     // The version object is written first (write-once, keyed by checksum); a crash before the bundle write leaves an unreferenced object and an unchanged bundle, never a pointer to a missing object.
     const prediction={...generated,...(await writePredictionVersion(env,id,generated))};
     if(old)history.push({...old,replacedAt:at});await saveJSON(env,filmKey(id)+'predictions.json',{current:prediction,history});await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;delete run.failures[id];run.results[id]=old?'recalculated':'created';results.push({filmId:id,status:run.results[id]});}
@@ -2718,6 +2793,21 @@ async function restoreFingerprint(env,id,genres){
  return writeFingerprint(env,id,content,current,'restored',undefined,candidate.fingerprintPromptVersion);
 }
 // Write-once: the key carries the checksum, so an existing object must hold the same bytes. Anything else is a storage conflict and the bundle is left unchanged.
+// ADR 0132: the assessment sidecar. One immutable object per prediction version, created only, written after the version object and before the guarded D1 commit.
+// A request is told apart by the checksum of the canonical caller assessment; the Worker confirms the lineage fields and keeps everything the caller said under callerReported.
+async function assessmentSha256(assessment){return contentHash(assessment);}
+function predictionAssessmentKey(filmId,predictionSha256){return 'enrichment/films/'+encodeURIComponent(String(filmId))+'/predictions/assessments/'+predictionSha256+'.json';}
+class AssessmentConflict extends Error{}
+async function writePredictionAssessment(env,filmId,pointer,confirmed,assessment){
+ const sha=await assessmentSha256(assessment),key=predictionAssessmentKey(filmId,pointer.contentSha256);
+ const {research,sources,conflicts,model,assessmentVersion,...own}=assessment;
+ const body={objectVersion:1,filmId:String(filmId),predictionSha256:pointer.contentSha256,predictionKey:pointer.r2Key,confirmed:{...confirmed,assessmentSha256:sha},callerReported:{model,research,sources,conflicts},assessment:{assessmentVersion,...own}};
+ const saved=await env.BUCKET.put(key,JSON.stringify(body),{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});
+ if(saved!==null)return 'written';
+ const existing=await env.BUCKET.get(key),text=existing?await existing.text():null;let stored=null;try{stored=text?JSON.parse(text):null;}catch{stored=null;}
+ if(stored?.confirmed?.assessmentSha256!==sha||stored?.predictionSha256!==pointer.contentSha256)throw new AssessmentConflict('Prediction assessment object conflicts');
+ return 'present';
+}
 async function writePredictionVersion(env,filmId,prediction){
  const text=predictionVersionText(prediction),sha256=await contentHash(predictionVersionBody(prediction)),key=predictionVersionKey(filmId,sha256);
  const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'},onlyIf:{etagDoesNotMatch:'*'}});

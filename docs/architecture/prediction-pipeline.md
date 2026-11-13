@@ -101,8 +101,8 @@ sequenceDiagram
                         MCP->>Queue: Renew lease, same ownership epoch
                         MCP-->>Client: expiresAt and epoch
                     end
-                    Client->>Client: Generate up to 10 films from the manifest
-                    Client->>MCP: prediction_batch_validate, 1 to 10 candidates, read-only preflight
+                    Client->>Client: Generate up to 10 films from the manifest, each with an optional assessment
+                    Client->>MCP: prediction_batch_validate, 1 to 10 candidates with their assessment, read-only preflight
                     MCP-->>Client: Per-film issues, no storage read or write, no run or lease
                     opt A candidate has issues
                         Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
@@ -111,7 +111,7 @@ sequenceDiagram
                     MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
                     MCP->>MCP: Validate each film, compare profile impact
                     loop Each valid film in order
-                        MCP->>Store: Immutable body, then one D1 batch guarded by lease epoch and gate, then view index
+                        MCP->>Store: Immutable body, then the create-only assessment object when one was sent, then one D1 batch guarded by lease epoch and gate, then view index
                         MCP->>MCP: Save the film result in the run record
                     end
                     MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
@@ -129,6 +129,8 @@ sequenceDiagram
 ```
 
 The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that stops leaves its unsubmitted films in the queue; the next `batch_start` selects them again, and a hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+
+The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-artifact.md), [contract](../reference/api/prediction-assessment.md)) travels only on the batch runner v2 items. Its own immutable R2 object `enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json` is written after the version object and before the guarded D1 commit, so a committed prediction has its assessment when one was sent and a failure before the commit leaves only unreferenced objects. It is a diagnostic: no rule, queue, freshness verdict, D1 row, bundle, view index entry, Event or public response reads or carries it, and the v5 path and `prediction_validate` take none.
 
 ## Queue writes
 
