@@ -1,4 +1,4 @@
-// AIR-463 / ADR 0135: client-configurable manifestSize on prediction_batch_start, and normal prediction_complete
+// AIR-463 / ADR 0136: client-configurable manifestSize on prediction_batch_start, and normal prediction_complete
 // with reason manifest_spent when every selected manifest film is settled while the global queue still has ready films.
 // Offline: sqlite D1 stand-in and in-memory R2. No Cloudflare, model, TMDB, Scheduled Task or production call.
 import assert from 'node:assert/strict';

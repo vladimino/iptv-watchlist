@@ -1,7 +1,7 @@
 # AIR-463: client `manifestSize` and normal `manifest_spent` complete (offline)
 
 **Capture:** 13 November 2026 (UTC), offline Worker code over a sqlite D1 stand-in and an in-memory R2.  
-**Scope:** Contract and regression proof for [ADR 0135](../../adr/0135-prediction-batch-manifest-size-and-spent-complete.md) / [AIR-463](https://trello.com/c/7pGBGSh0). No production read or write, no Scheduled Task operation, no live model run.  
+**Scope:** Contract and regression proof for [ADR 0136](../../adr/0136-prediction-batch-manifest-size-and-spent-complete.md) / [AIR-463](https://trello.com/c/7pGBGSh0). No production read or write, no Scheduled Task operation, no live model run.  
 **Verdict:** Offline PASS for the delivered contract. Production Task enablement remains [AIR-451](https://trello.com/c/NN3N6kRp).
 
 ## What was checked

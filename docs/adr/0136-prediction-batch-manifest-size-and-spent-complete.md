@@ -1,10 +1,11 @@
-# ADR 0135: Batch v2 clients choose manifestSize; spending the selected manifest is a normal complete
+# ADR 0136: Batch v2 clients choose manifestSize; spending the selected manifest is a normal complete
 
 **Status:** Accepted  
 **Original decision date:** 2026-11-13  
 **Recorded at:** 2026-11-13  
 **Approval source:** Owner decision in conversation 13 November 2026 (Europe/Madrid), scoped on [AIR-463](https://trello.com/c/7pGBGSh0); does not rewrite historical [ADR 0122](0122-prediction-batch-runner-v2-dual-protocol.md)  
 **Related work:** [AIR-463](https://trello.com/c/7pGBGSh0); prerequisites [AIR-447](https://trello.com/c/3jrJcvWH), [AIR-448](https://trello.com/c/0Huo5rW6), [AIR-450](https://trello.com/c/VPd21Y9d); successor cutover [AIR-451](https://trello.com/c/NN3N6kRp)  
+**Numbering:** Drafted as 0135 on the AIR-463 branch; renumbered to **0136** on merge with `main` after [ADR 0135](0135-epg-priority-discovery-pause.md) (AIR-458) claimed that number  
 **Supersedes:** None (narrows ADR 0122’s fixed 100-film start selection for clients that opt in; omitted `manifestSize` keeps the ADR 0122 default)  
 **Superseded by:** None
 

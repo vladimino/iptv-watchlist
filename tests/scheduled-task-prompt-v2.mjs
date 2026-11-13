@@ -176,7 +176,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  assert.deepEqual(flagged,[[badContent,['prediction.predictedRating out_of_range']]],'the preflight caught the bad candidate before any submit, with its issue');assert.equal(preflights,1,'one preflight per flush');
  const refused=await w.call('prediction_complete',{runId});assert.equal(refused.isError,true);assert.match(JSON.stringify(refused.data),/Queue not empty/,'a reasonless complete is refused while ready films remain');
  const done=await w.call('prediction_complete',{runId,reason:'manifest_spent'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
- // AIR-463 / ADR 0135: spending the selected manifest is a normal complete, not a partial time_budget stop.
+ // AIR-463 / ADR 0136: spending the selected manifest is a normal complete, not a partial time_budget stop.
  assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.ok(done.data.title!=='Прогнозы приостановлены');
  assert.ok((done.data.hotRemaining||0)+(done.data.coldRemaining||0)>0,'global outstanding remains after a short run');
  const eventKeys=()=>[...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+runId);

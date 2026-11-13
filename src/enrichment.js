@@ -1520,7 +1520,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
 const QUEUE_STALE_LIMIT_MS=12*3600000;
 const CATALOG_FENCE_ATTEMPTS=3;
 const SETTLED_STATUSES=['created','recalculated','already_current'];
-// A selected manifest film is spent when submit settled it (created/recalculated/already_current) or recorded a per-film retry failure. deferred_budget, needs_regeneration and unsubmitted slots are not spent (ADR 0135).
+// A selected manifest film is spent when submit settled it (created/recalculated/already_current) or recorded a per-film retry failure. deferred_budget, needs_regeneration and unsubmitted slots are not spent (ADR 0136).
 const manifestFilmSpent=(run,id)=>SETTLED_STATUSES.includes(run.results?.[id])||!!run.failures?.[id];
 const manifestFullySpent=run=>Array.isArray(run?.selectedIds)&&run.selectedIds.length>0&&run.selectedIds.every(id=>manifestFilmSpent(run,id));
 const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(queue.pending)&&Array.isArray(queue.hotPending)&&Array.isArray(queue.coldPending)&&!!queue.priority&&typeof queue.priority==='object'&&Number.isInteger(queue.priorityCount);
@@ -1961,7 +1961,7 @@ function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
 async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true}){
  if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
 }
-// ---- Batch runner v2: batch_start (ADR 0122 + ADR 0135). One request returns one self-sufficient manifest of at most the client-requested manifestSize (default and ceiling BATCH_RUNNER.maxManifestFilms). ----
+// ---- Batch runner v2: batch_start (ADR 0122 + ADR 0136). One request returns one self-sufficient manifest of at most the client-requested manifestSize (default and ceiling BATCH_RUNNER.maxManifestFilms). ----
 // It runs beside the v5 runner on the same queue, runner lease, retry records and persistence. `batch_submit` is a separate delivery.
 const BATCH_PROTOCOL='batch_v2';
 const BATCH_MANIFEST_FORMAT='compact-1';
@@ -1974,7 +1974,7 @@ const batchBlocked=(code,extra={})=>json({status:'blocked',reason:code,code,...e
 const batchLimits=()=>({maxManifestFilms:BATCH_RUNNER.maxManifestFilms,maxManifestBytes:BATCH_RUNNER.maxManifestBytes,generationSizeDefault:BATCH_RUNNER.generationSizeDefault,generationSizeRange:BATCH_RUNNER.generationSizeRange,submitMaxItems:BATCH_RUNNER.submitMaxItems,submitMaxBodyBytes:BATCH_RUNNER.submitMaxBodyBytes,callBudgetMs:BATCH_RUNNER.callBudgetMs});
 // Lossless: an absent key reads as null. Nothing else of a film's metadata or stored fingerprint is shortened.
 const batchCompact=value=>Array.isArray(value)?value.map(batchCompact):isObject(value)?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==null&&v!==undefined).map(([k,v])=>[k,batchCompact(v)])):value;
-// Client-requested selection cap (ADR 0135). Omitted → server ceiling 100. Not an integer in 1..maxManifestFilms → 400, no writes. generationSize / submitBatchSize stay client/prompt parameters and are never derived from this.
+// Client-requested selection cap (ADR 0136). Omitted → server ceiling 100. Not an integer in 1..maxManifestFilms → 400, no writes. generationSize / submitBatchSize stay client/prompt parameters and are never derived from this.
 function resolveManifestSize(body){
  if(!isObject(body)||body.manifestSize===undefined)return {size:BATCH_RUNNER.maxManifestFilms};
  if(!Number.isInteger(body.manifestSize)||body.manifestSize<1||body.manifestSize>BATCH_RUNNER.maxManifestFilms)return {error:json({error:'Invalid manifestSize'},400)};
@@ -2682,12 +2682,12 @@ async function enrichmentComplete(env,body,requestId){
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
- // ADR 0135: spending every selected manifest film is a normal complete for batch_v2 even when the global queue still has ready films. Unsubmitted / deferred_budget slots fail closed; profile/contract/lease stops stay as they are.
+ // ADR 0136: spending every selected manifest film is a normal complete for batch_v2 even when the global queue still has ready films. Unsubmitted / deferred_budget slots fail closed; profile/contract/lease stops stay as they are.
  if(body.reason==='manifest_spent'){
   if(run.protocol!==BATCH_PROTOCOL)return json({error:'manifest_spent is accepted only for a batch_v2 run'},400);
   if(!manifestFullySpent(run))return json({error:'Manifest not spent; continue submit',code:'manifest_not_spent',runId:run.runId,unspent:run.selectedIds.filter(id=>!manifestFilmSpent(run,id))},409);
  }
- // Fence profile and contract drift for reasonless complete and for manifest_spent: a change after the last submit must not be reported as a normal spent success (ADR 0135). The caller then completes with reason profile_changed / runner_aborted.
+ // Fence profile and contract drift for reasonless complete and for manifest_spent: a change after the last submit must not be reported as a normal spent success (ADR 0136). The caller then completes with reason profile_changed / runner_aborted.
  const fenceDrift=!body.reason||body.reason==='manifest_spent';
  const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&fenceDrift)return json({error:'Profile changed; start a new run'},409);
  if(fenceDrift&&await runContractChanged(run))return contractChangedResponse();
@@ -2705,7 +2705,7 @@ async function enrichmentComplete(env,body,requestId){
    return await mutatePredictionQueue(env,current=>{if(queueAdvanceGate(current,report,profile,context.registry))return recordRunRetries(current,run)?current:null;settleQueueFilms(current,succeeded);current.trigger='batch_complete';return amend(current);},'batch_complete',stored);});}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
-  // ADR 0135: a short batch that spent its selected manifest records stopReason manifest_spent (not time_budget, not a false queue_empty) while still reporting the real global outstanding counters.
+  // ADR 0136: a short batch that spent its selected manifest records stopReason manifest_spent (not time_budget, not a false queue_empty) while still reporting the real global outstanding counters.
   if(queue&&!run.reason&&!pending)run.stopReason=body.reason==='manifest_spent'?'manifest_spent':(queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty');
  }
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
