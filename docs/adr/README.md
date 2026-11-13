@@ -2,6 +2,12 @@
 
 ADRs document durable accepted choices, not live feature flags, operational permissions or observations. See [template](template.md), [documentation governance](../README.md) and [evidence registry](../evidence/README.md).
 
+## Proposed decisions awaiting owner review
+
+| ADR | Status | Scope |
+| --- | --- | --- |
+| [0132 — Versioned prediction assessments accompany predictions into R2](0132-versioned-prediction-assessment.md) | **Proposed**, 2026-11-13; NOT accepted or implemented | Caller-reported model provenance, film-specific research/rationale, immutable R2 assessment per prediction version, strict zero-write dry-run; owner review required before coding | 
+
 ## Accepted records
 
 | ADR | Status | Decision and evidence |
