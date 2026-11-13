@@ -65,17 +65,31 @@ try{
  fs.cpSync('src',path.join(dir,'src'),{recursive:true});
  for(const file of ['scripts/schema-preflight.mjs','scripts/epg-producer-dry-run.mjs','tests/d1-standin.mjs','tests/sqlite-session.mjs'])fs.copyFileSync(file,path.join(dir,file));
  const place=(name,text)=>{const file=path.join(dir,'scripts','epg-producer-m2b.'+name+'.mjs');fs.writeFileSync(file,text);return file;};
+ // A kill counts only when the TEST ASSERTION about the altered rule failed. A setup failure (a fixture that already exists, a missing file, a locked database) or any other error is not a kill: it would mean the mutants die before the altered rule is tested.
+ const SETUP=/EEXIST|ENOENT|no such file or directory|CANTOPEN|database is locked|EBUSY/i;
  const run=async file=>{
-  try{await check(await import(pathToFileURL(file).href),file);return 'passed';}
+  try{await check(await import(pathToFileURL(file).href),file);return {state:'passed'};}
   catch(error){
    // a mutant that does not even load, or breaks on a name, is BROKEN, not killed
    assert.ok(!(error instanceof SyntaxError||error instanceof ReferenceError||error?.code==='ERR_MODULE_NOT_FOUND'),'broken mutant '+file+': '+String(error?.message).slice(0,300));
-   return 'failed';
+   return {state:'failed',error};
   }
  };
- assert.equal(await run(place('base',original)),'passed','the unmutated copy passes the whole test');
- const survivors=[];
- for(const [index,[name,from,to]] of MUTANTS.entries())if(await run(place('m'+index,original.replace(from,()=>to)))==='passed')survivors.push(name);
+ // sanity controls: the UNMUTATED module passes twice in a row in this one process (no state is left behind), and a semantically neutral change survives
+ assert.equal((await run(place('base',original))).state,'passed','the unmutated copy passes the whole test');
+ assert.equal((await run(place('base-again',original))).state,'passed','the unmutated copy passes a second time in the same process');
+ const neutral=original.replace("const IDENT=/^[a-z_][a-z0-9_]*$/;","const IDENT=/^[a-z_][a-z0-9_]*$/;const NEUTRAL_MARKER=1;");
+ assert.notEqual(neutral,original);
+ assert.equal((await run(place('neutral',neutral))).state,'passed','a neutral change survives: the control that a kill is not a harness failure');
+ const survivors=[],invalid=[];
+ for(const [index,[name,from,to]] of MUTANTS.entries()){
+  const result=await run(place('m'+index,original.replace(from,()=>to)));
+  if(result.state==='passed'){survivors.push(name);continue;}
+  const error=result.error;
+  if(process.env.M2B_MUTATION_REASONS)console.log(String(index).padStart(2)+' '+name+' => '+String(error?.message).split('\n')[0].slice(0,110));
+  if(error?.code!=='ERR_ASSERTION'||SETUP.test(String(error?.message)))invalid.push(name+': '+String(error?.code||error?.name)+' '+String(error?.message).split('\n')[0].slice(0,120));
+ }
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
+ assert.deepEqual(invalid,[],'mutants killed by something other than the assertion about the altered rule: '+invalid.join(' | '));
  console.log('epg-producer-m2b-mutation: ok ('+MUTANTS.length+' mutants killed)');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
