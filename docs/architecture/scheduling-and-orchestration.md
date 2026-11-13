@@ -79,6 +79,48 @@ sequenceDiagram
 
 Migration `0007` is applied and the prediction marker is `d1`, so the live branch is D1 mutable state with immutable R2 bodies. The `r2` branch documents the prior and rollback behavior ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The hourly task stays enabled on the same `:20` Europe/Madrid schedule, and Stage A is unchanged. Stage B of the external prompt requests `fingerprint.evidence` on a new `fingerprint_and_prediction` item and passes that film's metadata into `prediction_validate` when an item cites a metadata token ([hourly evidence instruction](../reference/scheduled-tasks.md#fingerprint-evidence-instruction-in-the-live-hourly-task-air-335-2026-11-03)). The diagram above is the same validate and submit path. Worker fingerprint versions stay at 1.
 
+### Planned: four independent hourly Predictions v2 Tasks (AIR-451, not installed)
+
+**Planned design only.** As of this page no v2 Task exists in the ChatGPT registry, none is enabled and none has run; the live producer is still described under [Hourly prediction pipeline](#hourly-prediction-pipeline) and the Cloudflare cron and Workflows above are unchanged. Nothing here creates, edits, enables or runs a Task ([authorization](../process/authorization-and-escalation.md#chatgpt-scheduled-task-authorization)). The rollout is [AIR-451](https://trello.com/c/NN3N6kRp); the contract is [ADR 0122](../adr/0122-prediction-batch-runner-v2-dual-protocol.md) and [ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md).
+
+Four hourly Tasks, offset by 15 minutes, each one bounded invocation: A `:00`, B `:15`, C `:30`, D `:45` (Europe/Madrid). They are four hourly recurrences, not one 15-minute recurrence. The Tasks share no memory and no orchestration; the only coordination is the one D1 queue and the one runner lease.
+
+```mermaid
+sequenceDiagram
+    participant Sched as ChatGPT Scheduler, planned A to D
+    participant Task as One v2 Task invocation
+    participant MCP as Worker MCP
+    participant D1 as D1 queue and lease
+    Sched->>Task: Nominal slot, may be early or late
+    Task->>MCP: prediction_batch_start with manifestSize 5
+    MCP->>D1: Acquire the one runner lease or read the holder
+    alt Another run holds the lease
+        MCP-->>Task: already_running
+        Note over Task: No adoption, no complete, the slot is lost
+    else Nothing eligible or blocked
+        MCP-->>Task: noop or blocked, no run and no Event
+    else Run created
+        MCP-->>Task: Manifest of up to 5 films, runId, epoch
+        loop Until every selected film is settled
+            Task->>Task: Research and predict one film into the buffer
+            opt Buffer holds 5 items, next item would pass 56 KiB, or end of manifest
+                Task->>MCP: prediction_batch_validate then prediction_batch_submit
+                MCP->>D1: Commit per film, settle queue, renew lease
+                MCP-->>Task: Per-film results, replay same body after a lost answer
+            end
+        end
+        alt All selected films settled
+            Task->>MCP: prediction_complete with reason manifest_spent
+            MCP->>D1: Normal complete Event once, release lease
+        else Unsettled films, deferred_budget, profile or contract drift, or lease lost
+            Note over Task,MCP: Existing fail-closed semantics, no manifest_spent, lease expires or systemic stop
+        end
+    end
+    Note over Sched,D1: Overlap gives already_running for the later Task, retries stay in the queue, no manual make-up
+```
+
+Boundaries: legacy v5 stays disabled for the whole cutover; the Worker never reads the Task registry; `IPTV Scheduled Task Drift` is not changed by this plan; a fifth Task (`:00/:12/:24/:36/:48`) is out of scope until measured jitter and limits are reviewed and needs its own owner GO. Rollout order after this documentation is merged: one one-off canary Task, then that same Task rescheduled to `:00`, then `:15/:30/:45`, each a separate owner GO ([runbook](../runbooks/prediction-operations.md#planned-rollout-of-four-hourly-v2-tasks-air-451)).
+
 ### Read-only Scheduled Task registry drift
 
 The drift monitor now peeks **one** Task, the hourly Predictions Task. The *Peek Daily EPG Task by ID* step below belongs to the earlier two-Task scope (AIR-377): the Daily EPG Task is retired and disabled and is no longer audited. The updated scope is [AIR-406](https://trello.com/c/PPe2fFcu); the diagram is not redrawn here.
