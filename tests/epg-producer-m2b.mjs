@@ -1,6 +1,6 @@
 // AIR-374 M2b step 0: the offline tooling of the dry run on a local copy (scripts/epg-producer-m2b.mjs), on the sqlite3-CLI D1 stand-in. Covered: the emitted statements are read-only keyset pages over exactly the planned columns, the plan covers every table
 // the M2 harness really reads, the pasted pages load into an identical copy that the harness plans like the original, every refusal of the results file, the copy verification, the run leaves the copy byte-identical and its report holds counts and timings
-// only, and the script imports no apply function or writer. No Worker, R2, D1 or Cloudflare access. M2B_SCRIPT points the file at a mutant copy (tests/epg-producer-m2b-mutation.mjs).
+// only, and the script imports no apply function or writer. No Worker, R2, D1 or Cloudflare access. M2B_SCRIPT points the file at a mutant copy; the mutation runner (tests/epg-producer-m2b-mutation.mjs) calls check() on every mutant in one process.
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import fs from 'node:fs';
@@ -13,8 +13,8 @@ import {applyEpgUnits,planEpgUnits} from '../src/canonical-epg-producer.js';
 import {dryRun} from '../scripts/epg-producer-dry-run.mjs';
 import {assertReadOnly} from '../scripts/schema-preflight.mjs';
 
-const M2B=await import(pathToFileURL(path.resolve(process.env.M2B_SCRIPT||'scripts/epg-producer-m2b.mjs')).href);
-const {CAPS,COPY_PLAN,emitSql,verifyResults,loadCopy,verifyCopy,inputsFromCopy,runOnCopy}=M2B;
+// The functions under test are bound by check(): the mutation runner calls it in ONE process for every mutant, so the module graph is loaded once (a process per mutant cost about a second of CPU each).
+let CAPS,COPY_PLAN,emitSql,verifyResults,loadCopy,verifyCopy,inputsFromCopy,runOnCopy;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-m2b-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -61,6 +61,8 @@ function read(file,pageRows=2){
 }
 const dump=file=>JSON.stringify(COPY_PLAN.map(item=>[item.table,rows(file,'SELECT '+item.columns.join(',')+' FROM '+item.table+' ORDER BY '+item.columns.join(','))]));
 
+export async function check(M2B,scriptPath='scripts/epg-producer-m2b.mjs'){
+({CAPS,COPY_PLAN,emitSql,verifyResults,loadCopy,verifyCopy,inputsFromCopy,runOnCopy}=M2B);
 // 1. The emitted statements.
 {
  const plan=emitSql();
@@ -243,7 +245,7 @@ const results=read(prod);
 
 // 6. Static: no apply function or writer, no network, no environment, only the planned imports.
 {
- const text=fs.readFileSync(process.env.M2B_SCRIPT||'scripts/epg-producer-m2b.mjs','utf8').replace(/\/\/.*$/gm,'');
+ const text=fs.readFileSync(scriptPath,'utf8').replace(/\/\/.*$/gm,'');
  assert.ok(!/\b(applyFilmFacts|applyEpgUnits|applyEpgPersonUnits|applyPersonMutation|applyPersonState|applyFilmCredits|receiptedWrite|writeFilmFacts|mutateFilm|mutatePerson|reconcile\w*)\b/.test(text),'no apply function or writer');
  assert.ok(!/\b(fetch|setTimeout|setInterval|BUCKET|process\.env|child_process|execSync|spawn|cloudflare)\b/i.test(text),'no network, timer, environment or process');
  assert.deepEqual([...text.matchAll(/from '([^']+)'/g)].map(match=>match[1]).sort(),['../tests/d1-standin.mjs','../tests/sqlite-session.mjs','./epg-producer-dry-run.mjs','./schema-preflight.mjs','node:crypto','node:fs','node:path','node:url']);
@@ -251,4 +253,10 @@ const results=read(prod);
  assert.ok(!/\bwriteFileSync|appendFile|createWriteStream\b/.test(text));
  for(const file of ['build.mjs','package.json','wrangler.jsonc'])assert.ok(!fs.readFileSync(file,'utf8').includes('epg-producer-m2b'),file+' does not carry the tool');
 }
-console.log('epg-producer-m2b: ok');
+}
+
+if(process.argv[1]&&pathToFileURL(path.resolve(process.argv[1])).href===import.meta.url){
+ const scriptPath=process.env.M2B_SCRIPT||'scripts/epg-producer-m2b.mjs';
+ await check(await import(pathToFileURL(path.resolve(scriptPath)).href),scriptPath);
+ console.log('epg-producer-m2b: ok');
+}

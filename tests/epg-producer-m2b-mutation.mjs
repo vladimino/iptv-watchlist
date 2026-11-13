@@ -1,10 +1,11 @@
 // AIR-374 M2b step 0: mutation check of the offline copy tooling (scripts/epg-producer-m2b.mjs), in the pattern of tests/epg-producer-dry-run-mutation.mjs. Each mutant is a copy of the script (with its src/, scripts/ and tests/ helpers beside it)
-// with ONE rule removed or inverted; tests/epg-producer-m2b.mjs, pointed at the copy through M2B_SCRIPT, must FAIL on it. A surviving mutant is a rule no test depends on; a mutant that does not load is BROKEN. The copies live OUTSIDE the repository tree.
+// with ONE rule removed or inverted; the check() of tests/epg-producer-m2b.mjs, run on the mutant in this process, must FAIL on it. A surviving mutant is a rule no test depends on; a mutant that does not load is BROKEN. The copies live OUTSIDE the repository tree.
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {pathToFileURL} from 'node:url';
+import {check} from './epg-producer-m2b.mjs';
 
 const MUTANTS=[
  ["the statements digest is not checked", "results._statementsDigest!==plan.statementsDigest", "false"],
@@ -59,25 +60,22 @@ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'m2b-mutants-'));
 try{
  const original=fs.readFileSync('scripts/epg-producer-m2b.mjs','utf8');
  for(const [name,from] of MUTANTS)assert.equal(original.split(from).length,2,'the mutation text of "'+name+'" must occur exactly once');
- const run=file=>new Promise(resolve=>{
-  const child=spawn(process.execPath,['tests/epg-producer-m2b.mjs'],{env:{...process.env,M2B_SCRIPT:file},stdio:['ignore','ignore','pipe']});
-  let err='';child.stderr.on('data',chunk=>{err+=chunk;});
-  child.on('close',code=>{assert.ok(!/SyntaxError|ReferenceError|ERR_MODULE_NOT_FOUND/.test(err),'broken mutant '+file+': '+err.slice(0,300));resolve(code);});
- });
- // each copy sits in its own directory with its own scripts/, src/ and tests/ helpers, so its relative imports resolve; migrations are read from the working directory
- const place=(index,text)=>{
-  const base=path.join(dir,'m'+index);
-  fs.mkdirSync(path.join(base,'scripts'),{recursive:true});fs.mkdirSync(path.join(base,'tests'),{recursive:true});
-  fs.cpSync('src',path.join(base,'src'),{recursive:true});
-  for(const file of ['scripts/schema-preflight.mjs','scripts/epg-producer-dry-run.mjs','tests/d1-standin.mjs','tests/sqlite-session.mjs'])fs.copyFileSync(file,path.join(base,file));
-  const file=path.join(base,'scripts','epg-producer-m2b.mjs');
-  fs.writeFileSync(file,text);
-  return file;
+ // ONE tree with its own src/, scripts/ and tests/ helpers, so the relative imports of a mutant resolve and the module graph is loaded once; every mutant is a sibling file of scripts/. The test body runs in THIS process for each mutant, one after the other.
+ fs.mkdirSync(path.join(dir,'scripts'),{recursive:true});fs.mkdirSync(path.join(dir,'tests'),{recursive:true});
+ fs.cpSync('src',path.join(dir,'src'),{recursive:true});
+ for(const file of ['scripts/schema-preflight.mjs','scripts/epg-producer-dry-run.mjs','tests/d1-standin.mjs','tests/sqlite-session.mjs'])fs.copyFileSync(file,path.join(dir,file));
+ const place=(name,text)=>{const file=path.join(dir,'scripts','epg-producer-m2b.'+name+'.mjs');fs.writeFileSync(file,text);return file;};
+ const run=async file=>{
+  try{await check(await import(pathToFileURL(file).href),file);return 'passed';}
+  catch(error){
+   // a mutant that does not even load, or breaks on a name, is BROKEN, not killed
+   assert.ok(!(error instanceof SyntaxError||error instanceof ReferenceError||error?.code==='ERR_MODULE_NOT_FOUND'),'broken mutant '+file+': '+String(error?.message).slice(0,300));
+   return 'failed';
+  }
  };
- assert.equal(await run(place('base',original)),0,'the unmutated copy passes the whole test');
- const queue=MUTANTS.map(([name,from,to],index)=>({name,file:place(index,original.replace(from,()=>to))}));
+ assert.equal(await run(place('base',original)),'passed','the unmutated copy passes the whole test');
  const survivors=[];
- await Promise.all(Array.from({length:4},async()=>{while(queue.length){const item=queue.shift();const code=await run(item.file);if(code===0)survivors.push(item.name);}}));
+ for(const [index,[name,from,to]] of MUTANTS.entries())if(await run(place('m'+index,original.replace(from,()=>to)))==='passed')survivors.push(name);
  assert.deepEqual(survivors,[],'mutants that no test kills: '+survivors.join(', '));
  console.log('epg-producer-m2b-mutation: ok ('+MUTANTS.length+' mutants killed)');
 }finally{fs.rmSync(dir,{recursive:true,force:true});}
