@@ -84,17 +84,54 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  const start=await batch(w,{manifestSize:5});assert.equal(start.data.films.length,5);
  await submitAll(w,start.data);
  const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
- assert.equal(done.status,200); assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');
+ assert.equal(done.status,200);assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');
  assert.equal(done.data.stage,'complete');assert.ok(done.data.title!=='Прогнозы приостановлены');
  assert.equal(done.data.selectedCount,5);assert.equal(done.data.manifestSize,5);assert.equal(done.data.protocol,'batch_v2');
- assert.equal(done.data.added+done.data.updated,5);
+ assert.equal(done.data.added+done.data.updated,5);assert.equal(done.data.failed,0);
+ assert.ok((done.data.hotRemaining||0)+(done.data.coldRemaining||0)>0,'truthful global outstanding');
+ const eventKeys=()=>[...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId);
+ assert.equal(eventKeys().length,1,'exactly one persisted completion Event');
+ const event=eventKeys()[0][1];
+ assert.equal(event.stopReason,'manifest_spent');assert.equal(event.stage,'complete');
+ assert.equal(event.selectedCount,5);assert.equal(event.added+event.updated,5);assert.equal(event.failed,0);
+ assert.ok((event.hotRemaining||0)+(event.coldRemaining||0)>0);
  // Lease is released (expiresAt 0): the next short start must succeed.
  const next=await batch(w,{manifestSize:5});assert.equal(next.status,200,JSON.stringify(next.data).slice(0,200));assert.equal(next.data.status,'running');
  const again=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
  assert.equal(again.status,200);assert.equal(again.data.status,'complete');assert.equal(again.data.stopReason,'manifest_spent');
- // Stop-event object is for partial/systemic stops; a normal complete stores the event on the run — no partial stop title.
+ assert.equal(again.data.selectedCount,5);assert.equal(again.data.added+again.data.updated,5);
+ assert.equal(eventKeys().length,1,'replay does not create a second Event key');
+ assert.equal(eventKeys()[0][1].stopReason,'manifest_spent');
+ assert.deepEqual({stopReason:eventKeys()[0][1].stopReason,stage:eventKeys()[0][1].stage,selectedCount:eventKeys()[0][1].selectedCount,added:eventKeys()[0][1].added,updated:eventKeys()[0][1].updated,failed:eventKeys()[0][1].failed},{stopReason:event.stopReason,stage:event.stage,selectedCount:event.selectedCount,added:event.added,updated:event.updated,failed:event.failed});
  const stopRec=w.records.get('enrichment/stop-events/'+start.data.runId+'.json');
  assert.ok(!stopRec||stopRec.event?.stage!=='partial','no false paused stop Event');
+}
+
+// 4b. Profile or contract drift after the last submit fences manifest_spent (not a false normal complete).
+{
+ const w=await ready(12);await reconcile(w);
+ const start=await batch(w,{manifestSize:3});await submitAll(w,start.data);
+ const next={version:2,profileHash:'p2',profile:{ratingScale:'Whole stars'}};
+ w.records.set('enrichment/profile/versions/2.json',next);
+ await (await import('../src/prediction-d1.js')).saveMutable(w.env,'enrichment/profile/current.json',next);
+ const drift=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(drift.status,409);assert.match(String(drift.data.error||''),/Profile changed/);
+ assert.ok(![...w.records.entries()].some(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId&&v?.stopReason==='manifest_spent'),'no spent Event after profile drift');
+ const systemic=await w.api('complete',{runId:start.data.runId,reason:'profile_changed'});
+ assert.equal(systemic.status,200);assert.equal(systemic.data.status,'partial');assert.equal(systemic.data.stopReason,'profile_changed');
+}
+{
+ const w=await ready(8);await reconcile(w);
+ const start=await batch(w,{manifestSize:2});await submitAll(w,start.data);
+ // Mutate the run's recorded contract binding so complete sees a drift without changing live constants.
+ const doc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+start.data.runId+"'")[0].d);
+ doc.predictionPromptVersion=99;
+ sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+start.data.runId+"'");
+ const drift=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(drift.status,409);assert.equal(drift.data.code,'contract_changed');
+ assert.ok(![...w.records.entries()].some(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId&&v?.stopReason==='manifest_spent'),'no spent Event after contract drift');
+ const systemic=await w.api('complete',{runId:start.data.runId,reason:'runner_aborted'});
+ assert.equal(systemic.status,200);assert.equal(systemic.data.status,'partial');assert.equal(systemic.data.stopReason,'runner_aborted');
 }
 
 // 5. Fail closed: unsubmitted slots refuse manifest_spent; reasonless complete still refuses while ready films remain; time_budget stays the old partial path.

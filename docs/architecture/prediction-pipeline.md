@@ -101,27 +101,34 @@ sequenceDiagram
                         MCP->>Queue: Renew lease, same ownership epoch
                         MCP-->>Client: expiresAt and epoch
                     end
-                    Client->>Client: Generate up to generationSize films from the manifest, each with an optional assessment
-                    Client->>MCP: prediction_batch_validate, 1 to 10 candidates with their assessment, read-only preflight
-                    MCP-->>Client: Per-film issues, no storage read or write, no run or lease
-                    opt A candidate has issues
-                        Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
-                    end
-                    Client->>MCP: prediction_batch_submit, 1 to 10 items, runId and epoch
-                    MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
-                    MCP->>MCP: Validate each film, compare profile impact
-                    loop Each valid film in order
-                        MCP->>Store: Immutable body, then the create-only assessment object when one was sent, then one D1 batch guarded by lease epoch and gate, then view index
-                        MCP->>MCP: Save the film result in the run record
-                    end
-                    MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
-                    MCP-->>Client: Per-film results, partial success, a replay of the same body recovers a crash
-                    opt Profile changed
-                        MCP-->>Client: compatible films kept, impacted or unknown films needs_regeneration with no retry record
+                    Client->>Client: Generate up to generationSize films (template 1) into a submit buffer
+                    opt Buffer reaches submitBatchSize (template 5) or 56 KiB, or end of manifest
+                        Client->>MCP: prediction_batch_validate, buffer candidates with assessment, read-only preflight
+                        MCP-->>Client: Per-film issues, no storage read or write, no run or lease
+                        opt A candidate has issues
+                            Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
+                        end
+                        Client->>MCP: prediction_batch_submit, buffer items (1 to submitBatchSize), runId and epoch
+                        MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
+                        MCP->>MCP: Validate each film, compare profile impact
+                        loop Each valid film in order
+                            MCP->>Store: Immutable body, then the create-only assessment object when one was sent, then one D1 batch guarded by lease epoch and gate, then view index
+                            MCP->>MCP: Save the film result in the run record
+                        end
+                        MCP->>Queue: One queue settlement for the call, clear the gate, renew lease
+                        MCP-->>Client: Per-film results, partial success, a replay of the same body recovers a crash
+                        Client->>Client: Clear the submit buffer and continue
                     end
                 end
-                Client->>MCP: prediction_complete with reason manifest_spent
-                MCP->>Queue: Normal complete Event, release lease (global queue may still have ready films)
+                alt Profile or contract drift after the last submit
+                    Client->>MCP: prediction_complete with reason manifest_spent
+                    MCP-->>Client: 409 Profile/Contract changed (fenced; not a false normal complete)
+                    Client->>MCP: prediction_complete with systemic reason profile_changed or runner_aborted
+                    MCP->>Queue: Partial stop Event, release lease
+                else Manifest spent with matching profile and contract
+                    Client->>MCP: prediction_complete with reason manifest_spent
+                    MCP->>Queue: Normal complete Event once, release lease (global queue may still have ready films)
+                end
             end
         end
     end

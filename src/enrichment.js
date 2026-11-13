@@ -2687,8 +2687,10 @@ async function enrichmentComplete(env,body,requestId){
   if(run.protocol!==BATCH_PROTOCOL)return json({error:'manifest_spent is accepted only for a batch_v2 run'},400);
   if(!manifestFullySpent(run))return json({error:'Manifest not spent; continue submit',code:'manifest_not_spent',runId:run.runId,unspent:run.selectedIds.filter(id=>!manifestFilmSpent(run,id))},409);
  }
- const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
- if(!body.reason&&await runContractChanged(run))return contractChangedResponse();
+ // Fence profile and contract drift for reasonless complete and for manifest_spent: a change after the last submit must not be reported as a normal spent success (ADR 0135). The caller then completes with reason profile_changed / runner_aborted.
+ const fenceDrift=!body.reason||body.reason==='manifest_spent';
+ const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&fenceDrift)return json({error:'Profile changed; start a new run'},409);
+ if(fenceDrift&&await runContractChanged(run))return contractChangedResponse();
  if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){let queue;try{queue=await atStage('queue_refresh',async()=>currentPredictionQueue(env,await loadJSON(env,'programme.json'),profile,'completion_check'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
  const states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id)));let created=0,recalculated=0,pending=0;
  const freshness=await predictionFreshness(env,profile),source=freshness.needsGenres?await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{}:{};
