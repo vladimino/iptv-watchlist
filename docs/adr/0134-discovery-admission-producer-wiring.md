@@ -1,9 +1,9 @@
 # ADR 0134: The Discovery admission producer is wired inside `upsertAdmissions` (P3c, `film_mutation`, bounded, never throws, sweep)
 
-**Status:** Proposed 2026-11-13. The owner chose design variant A in the delivery conversation of 13 Nov 2026 ([AIR-374](https://trello.com/c/ha7ais3w)); the Controller review of PR #590 requires the owner's explicit acceptance of the FINAL corrected design (inline admission, budget, recurring catch-up and cached skip) before the guarded merge, then this status and the index become Accepted. The code is dormant below the marker `open`; nothing here authorizes a production write, the H2 marker flip or a flag.  
+**Status:** Accepted 2026-11-13 as DESIGN. The owner explicitly accepted the FINAL corrected design in PR #590 review on 13 Nov 2026, including inline Discovery admission, the propagated canonical time budget, bounded recurring catch-up sweep and cached projector-route skip. This is design approval only; below the Film/Person marker `open` the writer remains dormant, and acceptance does not authorize production natural writes, the H2 marker flip, a flag or any other production mutation.  
 **Original decision date:** 2026-11-13  
 **Recorded at:** 2026-11-13  
-**Approval source:** Owner answer "A, делай" to the one architecture question of the Executor (where the canonical Film admission runs relative to the Discovery chunk budgets), 13 Nov 2026. The sweep, the cached skip and the call shape below were proposed by the Executor within that answer and still need the independent review.  
+**Approval source:** Owner initially chose placement variant A on 13 Nov 2026; after independent Controller review of PR #590 and correction of the missing real-path time budget and recurring catch-up trigger (HEAD `9fbbc701`), the owner explicitly accepted ADR 0134 and authorized the Controller to update the document and merge PR #590 on 13 Nov 2026.  
 **Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [ADR 0126](0126-epg-producer-layer-person-credits.md) (decision 2: the kind `film_mutation` belongs to the Discovery admission), [ADR 0119](0119-durable-canonical-write-receipts.md), [ADR 0123](0123-producer-receipt-adapter-film-facts.md), [ADR 0133](0133-film-external-ids-producer-unit.md)  
 **Supersedes:** None  
 **Superseded by:** None
