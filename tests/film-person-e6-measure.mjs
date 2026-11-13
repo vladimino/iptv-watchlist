@@ -194,6 +194,7 @@ assert.equal(verify([]).ok,false);
 assert.deepEqual(verify('x').refusals,['results_not_an_object']);
 // stop rules
 refused(c=>{c.schema[0].results[0].version=18;},'schema_version:18');
+refused(c=>{c.schema[0].results[0].version=20;},'schema_version:20');
 refused(c=>{c.film_person_marker[0].results[0].cutover='held';},'film_person_held');
 refused(c=>{c.epg_authority[0].results[0].mode='r2';},'epg_authority_not_d1_open:r2/open');
 refused(c=>{c.epg_authority[0].results[0].cutover='held';},'epg_authority_not_d1_open:d1/held');
