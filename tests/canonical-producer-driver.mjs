@@ -75,7 +75,7 @@ const STAMP_SNAPSHOT={no_identity_row:{film:{id:ID(1),revision:1},identity:null}
 const prerequisites=async({code})=>{if(!STAMP_SNAPSHOT[code])throw Object.assign(new Error('x'),{code:'film_person_unavailable'});return STAMP_SNAPSHOT[code];};
 const params=(over={})=>{
  const film=over.film||scripted();
- return {runId:'R1',sourceGeneration:GEN,at:T,films:films(5),sliceSize:2,maxSlicesPerRun:10,sliceDeadlineMs:60000,prerequisites,now:mkNow(),appliers:{film:film.apply},...over};
+ return {runId:'R1',sourceGeneration:GEN,at:T,films:films(5),sliceSize:2,maxSlicesPerRun:10,sliceDeadlineMs:60000,prerequisites,now:mkNow(),generationOrder:(a,b)=>a<b?-1:a>b?1:0,appliers:{film:film.apply},...over};
 };
 
 // 1. Required parameters, no default; the deadline sits inside the step lease with its margin. Nothing is read.
@@ -704,6 +704,145 @@ const retry=(file,over={})=>retryEpgProducerResults(envOf(file),{...params(over)
  assert.equal((await readCanonicalFreshness(benv,{publishedGeneration:'gen-286'})).freshness,'lagging');
  const done=await runEpgProducerPass(benv,params({runId:'R2',sourceGeneration:'gen-286',films:films(60),sliceSize:50,film:scripted(),now:mkNow('2026-11-14T11:00:00.000Z')}));
  assert.deepEqual([done.state,done.openAtCompletion],['complete',0]);
+}
+
+// 16e. Provenance: only a run PROVEN earlier is superseded. A delayed older pass that completes after a newer run recorded a refusal leaves that refusal live; an order that cannot be proven fails the sweep closed.
+{
+ const refuse=()=>scripted({[ID(1)]:()=>FAIL('film_person_bounded')});
+ const file=database('open'),env=envOf(file);
+ // generation 286 runs first and records a live refusal; the delayed generation 285 pass then completes
+ await runEpgProducerPass(env,params({runId:'R2',sourceGeneration:'gen-286',film:refuse()}));
+ const delayed=await runEpgProducerPass(env,params({runId:'R1',sourceGeneration:'gen-285',film:scripted(),now:mkNow('2026-11-14T10:00:00.000Z')}));
+ assert.deepEqual([delayed.state,delayed.supersededEarlier],['complete',0],'a later run is never superseded by an earlier one');
+ assert.deepEqual(results(file).map(row=>[row.run_key,row.state,row.settled_by]),[['epg:R2','refused_permanent',null]],'the newer result stays LIVE');
+ assert.equal((await readCanonicalFreshness(env,{publishedGeneration:'gen-286'})).freshness,'lagging','the delayed pass claims only its own generation');
+ // the positive direction, with the same ordering function, still supersedes
+ const forward=database('open'),fenv=envOf(forward);
+ await runEpgProducerPass(fenv,params({runId:'R1',sourceGeneration:'gen-285',film:refuse()}));
+ assert.equal((await runEpgProducerPass(fenv,params({runId:'R2',sourceGeneration:'gen-286',film:scripted(),now:mkNow('2026-11-14T10:00:00.000Z')}))).supersededEarlier,1);
+ // an order that cannot be proven (none, a throw, equal, unordered) never supersedes and never claims
+ for(const order of [undefined,()=>{throw new Error('x');},()=>0,()=>null,()=>'earlier']){
+  const f=database('open'),e=envOf(f);
+  await runEpgProducerPass(e,params({runId:'R1',sourceGeneration:'gen-285',film:refuse()}));
+  const out=await runEpgProducerPass(e,params({runId:'R2',sourceGeneration:'gen-286',film:scripted(),generationOrder:order,now:mkNow('2026-11-14T10:00:00.000Z')}));
+  assert.deepEqual([out.state,out.reason,out.detail],['partial','supersession_pending','order_unproven'],String(order));
+  assert.equal(results(f)[0].state,'refused_permanent');
+  assert.equal(rows(f,"SELECT applied_generation FROM canonical_producer_run WHERE run_key='epg:R2'")[0].applied_generation,null);
+ }
+ // an uncovered row never needs an order
+ const free=database('open'),genv=envOf(free);
+ await runEpgProducerPass(genv,params({runId:'R1',sourceGeneration:'gen-285',film:refuse()}));
+ const narrow=await runEpgProducerPass(genv,params({runId:'R2',sourceGeneration:'gen-286',films:films(5).filter((_,i)=>i!==1),film:scripted(),generationOrder:undefined,now:mkNow('2026-11-14T10:00:00.000Z')}));
+ assert.equal(narrow.state,'complete');
+}
+
+// 16f. The remaining deadline holds through the whole supersession and before the claim: no write and no claim after it, and the next step resumes.
+{
+ const fail60=scripted(Object.fromEntries(Array.from({length:60},(_,i)=>[ID(i),()=>FAIL('film_person_bounded')])));
+ const file=database('open');
+ await runEpgProducerPass(envOf(file),params({runId:'R1',sourceGeneration:'gen-285',films:films(60),sliceSize:50,film:fail60}));
+ let time=0;
+ const slow=envOf(file,{onBatch:async statements=>{if(statements.some(item=>/'newer_run'/.test(item.text)))time=1e9;}});
+ const out=await runEpgProducerPass(slow,params({runId:'R2',sourceGeneration:'gen-286',films:films(60),sliceSize:50,film:scripted(),clock:()=>time,now:mkNow('2026-11-14T10:00:00.000Z')}));
+ assert.deepEqual([out.state,out.reason,out.detail,out.supersededEarlier],['partial','supersession_pending','deadline',1],'one settlement, then nothing');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM canonical_producer_unit_result WHERE settled_by='newer_run'")[0].n,1,'no write after the deadline');
+ assert.equal(rows(file,"SELECT applied_generation FROM canonical_producer_run WHERE run_key='epg:R2'")[0].applied_generation,null,'no claim after the deadline');
+ const next=await runEpgProducerPass(envOf(file),params({runId:'R2',sourceGeneration:'gen-286',films:films(60),sliceSize:50,film:scripted(),now:mkNow('2026-11-14T11:00:00.000Z')}));
+ assert.deepEqual([next.state,next.openAtCompletion,next.supersededEarlier],['complete',0,59],'the next step resumes and finishes');
+ // the deadline reached when the last unit is committed: no sweep, no claim
+ const late=database('open');
+ let clock2=0;
+ const env2=envOf(late,{onBatch:async statements=>{if(statements.some(item=>/n_applied=n_applied\+/.test(item.text)))clock2=1e9;}});
+ const cut=await runEpgProducerPass(env2,params({film:scripted(),clock:()=>clock2,films:films(3),sliceSize:5}));
+ assert.deepEqual([cut.state,cut.reason],['partial','deadline']);
+ assert.equal(runRow(late).applied_generation,null);
+ assert.equal((await runEpgProducerPass(envOf(late),params({film:scripted(),films:films(3),sliceSize:5}))).state,'complete');
+ // the bound of the sweep is a reviewed constant: a larger override cannot raise it, a smaller one lowers it
+ const pages=database('open'),penv=envOf(pages);
+ await runEpgProducerPass(penv,params({runId:'R1',sourceGeneration:'gen-285',films:films(60),sliceSize:50,film:fail60}));
+ const capped=await runEpgProducerPass(penv,params({runId:'R2',sourceGeneration:'gen-286',films:films(60),sliceSize:50,film:scripted(),supersedeMaxPages:1e9,now:mkNow('2026-11-14T10:00:00.000Z')}));
+ assert.equal(capped.state,'complete');
+  assert.deepEqual([D.supersedeBound(1e9),D.supersedeBound(3),D.supersedeBound(undefined),D.supersedeBound(0),D.supersedeBound(1.5)],[20,3,20,20,20]);
+ assert.deepEqual([D.sameRunBound(1e9),D.sameRunBound(10),D.sameRunBound(undefined),D.sameRunBound(-1)],[200,10,200,200]);
+ assert.ok(D.SUPERSEDE_MAX_PAGES===20&&D.SUPERSEDE_PAGE===50&&D.SAME_RUN_LIVE_LIMIT===200,'the reviewed constants');
+ // the deadline reached on the LAST settlement of a sweep: no keyset read after it, no claim; and reached on the 50th of two pages: no read of the second page
+ const three=database('open');
+ const fail3=scripted(Object.fromEntries(Array.from({length:3},(_,i)=>[ID(i),()=>FAIL('film_person_bounded')])));
+ await runEpgProducerPass(envOf(three),params({runId:'R1',sourceGeneration:'gen-285',films:films(3),sliceSize:5,film:fail3}));
+ let t3=0,settled=0;
+ const env3=envOf(three,{onBatch:async statements=>{if(statements.some(item=>/'newer_run'/.test(item.text))&&++settled===3)t3=1e9;}});
+ const last=await runEpgProducerPass(env3,params({runId:'R2',sourceGeneration:'gen-286',films:films(3),sliceSize:5,film:scripted(),clock:()=>t3,now:mkNow('2026-11-14T10:00:00.000Z')}));
+ assert.deepEqual([last.state,last.reason],['partial','deadline'],'the deadline after the last settlement blocks the claim');
+ assert.equal(rows(three,"SELECT applied_generation FROM canonical_producer_run WHERE run_key='epg:R2'")[0].applied_generation,null);
+ const paged=database('open');
+ await runEpgProducerPass(envOf(paged),params({runId:'R1',sourceGeneration:'gen-285',films:films(60),sliceSize:50,film:fail60}));
+ let t4=0,n4=0;const reads=[];
+ const env4=envOf(paged,{onBatch:async statements=>{if(statements.some(item=>/'newer_run'/.test(item.text))&&++n4===50)t4=1e9;},onQuery:async text=>{if(/\)>\(/.test(text))reads.push(text);}});
+ const out4=await runEpgProducerPass(env4,params({runId:'R2',sourceGeneration:'gen-286',films:films(60),sliceSize:50,film:scripted(),clock:()=>t4,now:mkNow('2026-11-14T10:00:00.000Z')}));
+ assert.deepEqual([out4.detail,out4.supersededEarlier,reads.length],['deadline',50,0],'no read after the deadline');
+}
+
+// 16g. The obsolete live result of the SAME run (an earlier pass) is settled in the batch that passes the unit, when the unit succeeds; history stays, a receipt-owned row is never settled, a refusal that persists keeps its row.
+{
+ // pass 1 records a refusal and stops partway; the fingerprint changes; pass 2 applies the unit (same digest: settled `applied`)
+ const file=database('open'),env=envOf(file);
+ const p1=await runEpgProducerPass(env,params({film:scripted({[ID(1)]:()=>FAIL('film_person_bounded')}),maxSlicesPerRun:1}));
+ assert.equal(p1.state,'partial');assert.equal(results(file)[0].state,'refused_permanent');
+ const changed=films(5);changed[3]={id:ID(3),facts:{film:{contractVersion:1,originalTitle:'changed'}}};
+ const p2=await runEpgProducerPass(env,params({film:scripted(),films:changed}));
+ assert.deepEqual([p2.state,p2.passNo,p2.openAtCompletion],['complete',2,0]);
+ assert.deepEqual(results(file).map(row=>[row.pass_no,row.state,row.settled_by]),[[1,'settled','applied']],'the old row is terminal history');
+ assert.equal((await readCanonicalFreshness(env,{publishedGeneration:GEN})).freshness,'current');
+ // the unit's source changed too: superseded `source_changed`; a recoverable row is `prerequisite_resolved`; a kept outcome is `kept_outcome`
+ const kept=database('open'),kenv=envOf(kept);
+ await runEpgProducerPass(kenv,params({film:scripted({[ID(1)]:()=>FAIL('film_person_bounded'),[ID(2)]:()=>FAIL('no_identity_row')}),maxSlicesPerRun:1,sliceSize:3}));
+ const next=films(5);next[4]={id:ID(4),facts:{film:{contractVersion:1,originalTitle:'changed'}}};next[1]={id:ID(1),facts:{film:{contractVersion:1,originalTitle:'moved'}}};
+ const fin=await runEpgProducerPass(kenv,params({film:scripted({[ID(2)]:()=>({skipped:false,cursor:1,done:true,counts:{...ZERO,kept:1},failures:[],stoppedBy:null})}),films:next,sliceSize:3}));
+ assert.equal(fin.state,'complete');
+ assert.deepEqual(results(kept).map(row=>[row.unit_id,row.state,row.settled_by]),[[ID(1),'superseded','source_changed'],[ID(2),'settled','kept_outcome']]);
+ // a named kept code thrown by a layer takes the same path
+ const thrown=database('open'),tenv=envOf(thrown);
+ await runEpgProducerPass(tenv,params({film:scripted({[ID(1)]:()=>FAIL('film_person_bounded')}),maxSlicesPerRun:1}));
+ const t5=films(5);t5[4]={id:ID(4),facts:{film:{contractVersion:1,originalTitle:'changed'}}};
+ assert.equal((await runEpgProducerPass(tenv,params({film:scripted({[ID(1)]:()=>FAIL('owner_kept')}),films:t5}))).state,'complete');
+ assert.deepEqual(results(thrown).map(row=>[row.state,row.settled_by]),[['settled','kept_outcome']]);
+ // a recoverable row whose prerequisite is repaired is `prerequisite_resolved`
+ const rec=database('open'),renv=envOf(rec);
+ await runEpgProducerPass(renv,params({film:scripted({[ID(2)]:()=>FAIL('no_identity_row')}),maxSlicesPerRun:1,sliceSize:3}));
+ const next2=films(5);next2[4]={id:ID(4),facts:{film:{contractVersion:1,originalTitle:'changed'}}};
+ assert.equal((await runEpgProducerPass(renv,params({film:scripted(),films:next2,sliceSize:3}))).state,'complete');
+ assert.deepEqual(results(rec).map(row=>[row.state,row.settled_by]),[['settled','prerequisite_resolved']]);
+ // a refusal that persists keeps its one live row; a receipt-owned row is preserved
+ const keep=database('open'),keenv=envOf(keep);
+ await runEpgProducerPass(keenv,params({film:scripted({[ID(1)]:()=>FAIL('film_person_bounded')}),maxSlicesPerRun:1}));
+ assert.equal(sqlite(keep,"INSERT INTO canonical_producer_unit_result (origin,run_key,pass_no,kind,unit_id,fingerprint,unit_digest,state,retry_owner,request_id,code,attempts,prereq_stamp,next_attempt_at,settled_by,created_at,updated_at,settled_at) VALUES ('epg','epg:R1',1,'film_facts','"+ID(2)+"','"+hex('b')+"','"+hex('c')+"','open','receipt','req-1','receipt_conflict',1,NULL,NULL,NULL,'"+T+"','"+T+"',NULL);").status,0);
+ const changed2=films(5);changed2[4]={id:ID(4),facts:{film:{contractVersion:1,originalTitle:'changed'}}};
+ const again=await runEpgProducerPass(keenv,params({film:scripted({[ID(1)]:()=>FAIL('film_person_bounded')}),films:changed2}));
+ assert.deepEqual([again.state,again.openAtCompletion],['complete',2]);
+ assert.deepEqual(results(keep).map(row=>[row.unit_id,row.retry_owner,row.state]),[[ID(1),'unit','refused_permanent'],[ID(2),'receipt','open']],'the refusal that persists and the receipt-owned row stay live');
+ assert.equal((await readCanonicalFreshness(keenv,{publishedGeneration:GEN})).freshness,'partial');
+}
+{
+ // more live rows than the one read holds: every success is looked up exactly
+ const file=database('open'),env=envOf(file);
+ const fail=scripted(Object.fromEntries(Array.from({length:60},(_,i)=>[ID(i),()=>FAIL('film_person_bounded')])));
+ await runEpgProducerPass(env,params({films:films(60),sliceSize:50,maxSlicesPerRun:1,film:fail}));
+ assert.equal(count(file,'canonical_producer_unit_result'),50);
+ const changed=films(60);changed[59]={id:ID(59),facts:{film:{contractVersion:1,originalTitle:'changed'}}};
+ const limits=[];
+ const counted=envOf(file,{onQuery:async text=>{const match=/ORDER BY pass_no,kind,unit_id LIMIT (\d+)/.exec(text);if(match)limits.push(Number(match[1]));}});
+ const out=await runEpgProducerPass(counted,params({films:changed,sliceSize:50,sameRunLiveLimit:10,film:scripted()}));
+ assert.deepEqual([out.state,out.openAtCompletion,limits],['complete',0,[11]],'the one read of the held rows is bounded by the cap plus one');
+ assert.equal(rows(file,"SELECT COUNT(*) AS n FROM canonical_producer_unit_result WHERE state IN ('settled','superseded')")[0].n,50,'every obsolete row is terminal history');
+ assert.equal((await readCanonicalFreshness(env,{publishedGeneration:GEN})).freshness,'current');
+ // the one-read bound can only be lowered
+ const wide=database('open'),wenv=envOf(wide);
+ await runEpgProducerPass(wenv,params({film:scripted({[ID(1)]:()=>FAIL('film_person_bounded')}),maxSlicesPerRun:1}));
+ const c3=films(5);c3[4]={id:ID(4),facts:{film:{contractVersion:1,originalTitle:'changed'}}};
+ assert.equal((await runEpgProducerPass(wenv,params({film:scripted(),films:c3,sameRunLiveLimit:1e9}))).state,'complete');
+ assert.equal(results(wide)[0].state,'settled');
+ assert.equal((await S.liveRunResults(wenv,{origin:'epg',runKey:'epg:R1'})).length,0);
+ await assert.rejects(()=>S.liveRunResults(wenv,{origin:'epg',runKey:'epg:R1',limit:501}),error=>error.code==='film_person_invalid');
 }
 
 // 17. Static: dormant. Nothing imports the driver; it is not bundled; it does not import the Worker; no network, timer, cron, R2 or flag; it writes no table itself.

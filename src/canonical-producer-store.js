@@ -95,13 +95,21 @@ export async function latestEpgRun(env){
  catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 // S4-4: the LIVE results of origin `epg` that belong to OTHER runs than `runKey` and are owned by the unit (a receipt-owned row settles by evidence), one keyset page at a time in key order: the input of the cross-run supersession a completed pass performs.
-// `after` is the key of the last row of the previous page ({run_key, pass_no, kind, unit_id}) or null. Read-only; at most 100 rows.
+// `after` is the key of the last row of the previous page ({run_key, pass_no, kind, unit_id}) or null. Each row carries `run_source_generation`, the published generation of the run it belongs to: the store does NOT say which run is earlier (the order of generations is not
+// a property of a string or of a creation time), the caller proves it. Read-only; at most 100 rows.
 export async function earlierLiveResults(env,{runKey,after=null,limit=50}={}){
  if(typeof runKey!=='string'||!runKey||!Number.isInteger(limit)||limit<1||limit>100)throw invalid();
  if(after!==null&&(!plain(after)||typeof after.run_key!=='string'||!Number.isInteger(after.pass_no)||typeof after.kind!=='string'||typeof after.unit_id!=='string'))throw invalid();
  try{
-  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE origin='epg' AND run_key<>? AND retry_owner='unit' AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')'+(after?' AND (run_key,pass_no,kind,unit_id)>(?,?,?,?)':'')+' ORDER BY run_key,pass_no,kind,unit_id LIMIT ?',
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+",(SELECT p.source_generation FROM canonical_producer_run p WHERE p.origin=canonical_producer_unit_result.origin AND p.run_key=canonical_producer_unit_result.run_key) AS run_source_generation FROM canonical_producer_unit_result WHERE origin='epg' AND run_key<>? AND retry_owner='unit' AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')'+(after?' AND (run_key,pass_no,kind,unit_id)>(?,?,?,?)':'')+' ORDER BY run_key,pass_no,kind,unit_id LIMIT ?',
    [runKey,...LIVE_STATES,...(after?[after.run_key,after.pass_no,after.kind,after.unit_id]:[]),limit]);
+ }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+// S4-4: the LIVE results of ONE run (any pass, any owner), at most `limit` rows in key order: what a pass has to settle when it re-observes a unit it already recorded a failure for. Read-only.
+export async function liveRunResults(env,{origin,runKey,limit=200}={}){
+ if(!ORIGINS.includes(origin)||typeof runKey!=='string'||!runKey||!Number.isInteger(limit)||limit<1||limit>500)throw invalid();
+ try{
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE origin=? AND run_key=? AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+') ORDER BY pass_no,kind,unit_id LIMIT ?',[origin,runKey,...LIVE_STATES,limit]);
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 // S4-4: the number of LIVE membership-affecting results (kind `film_facts`, origin `epg`, any run): the third input of `canonicalFreshness` and the `open_at_completion` of a pass. Read-only.

@@ -19,10 +19,10 @@ import {digestOf,filmFactsDigest,producerRouteOpen,resolveReleaseInput} from './
 import {PERSON_MUTATION_OPERATION,personMutationDigest} from './canonical-person-mutation-producer.js';
 import {unitDigest} from './canonical-person-adapters.js';
 import {
- CLASS,afterRetry,buildPlanEntries,canonicalFreshness,classOfCode,classifyProducerError,dictionaryUnitDigest,failureWrite,ownerReviewGuard,planFingerprint,prereqStamp,resumeIndex,retryDecision,strikeStep,
+ CLASS,afterRetry,keyOfRow,buildPlanEntries,canonicalFreshness,classOfCode,classifyProducerError,dictionaryUnitDigest,failureWrite,ownerReviewGuard,planFingerprint,prereqStamp,resumeIndex,retryDecision,strikeStep,
 } from './canonical-producer-run.js';
 import {
- DUE_LIMIT_MAX,SLICE_STATEMENT_CAP,commitPassComplete,commitResume,commitSlice,commitStop,commitStrike,dueResults,earlierLiveResults,latestEpgRun,liveMembershipCount,liveResult,mintDictionaryRun,openEpgRun,settleResult,updateResult,
+ DUE_LIMIT_MAX,SLICE_STATEMENT_CAP,commitPassComplete,commitResume,commitSlice,commitStop,commitStrike,dueResults,earlierLiveResults,latestEpgRun,liveMembershipCount,liveResult,liveRunResults,mintDictionaryRun,openEpgRun,settleResult,updateResult,
 } from './canonical-producer-store.js';
 
 // The step lease of the EPG executor (`LEASE_MS` and `BOUNDARY_MARGIN_MS` of src/epg-orchestration.js; a test pins both numbers to that file).
@@ -33,6 +33,10 @@ export const MAX_SLICES_CEILING=1000;
 const SLICE_BASE_STATEMENTS=4;
 export const SUPERSEDE_PAGE=50;
 export const SUPERSEDE_MAX_PAGES=20;
+export const SAME_RUN_LIVE_LIMIT=200;
+// The two bounds a caller may only LOWER (a test seam): a larger or invalid value is the reviewed constant.
+export const supersedeBound=value=>Number.isInteger(value)&&value>=1?Math.min(value,SUPERSEDE_MAX_PAGES):SUPERSEDE_MAX_PAGES;
+export const sameRunBound=value=>Number.isInteger(value)&&value>=1?Math.min(value,SAME_RUN_LIVE_LIMIT):SAME_RUN_LIVE_LIMIT;
 const plain=value=>!!value&&typeof value==='object'&&!Array.isArray(value);
 const codeOf=error=>classifyProducerError(error).code;
 const keyOf=unit=>unit.kind+'\u0000'+unit.id;
@@ -147,23 +151,41 @@ async function stampFor(env,ctx,entry,code){
  return prereqStamp(code,snapshot);
 }
 
-// Cross-run supersession (ADR 0128: results covered by a newer run's plan become `superseded` / `newer_run`). One keyset page at a time, one terminal settle per covered row (compare-and-set on state and attempts), at most SUPERSEDE_MAX_PAGES pages.
-async function supersedeEarlierResults(env,{run,entries,now,maxPages}){
+// Cross-run supersession (ADR 0128: results covered by a newer run's plan become `superseded` / `newer_run`). Only a result of a run that is PROVEN earlier is superseded: `order(earlierGeneration, laterGeneration)` is the caller's authoritative ordering of
+// published generations (-1 earlier, 1 later); a row of a later run is left alone (it is not this run's to settle), and a covered row whose order cannot be proven (no ordering, a throw, an equal or unordered answer) fails the sweep closed (nothing superseded for it,
+// no claim). One keyset page at a time, one terminal settle per row (compare-and-set on state and attempts), at most `maxPages` pages, and the remaining deadline is checked before EVERY read and EVERY write.
+async function supersedeEarlierResults(env,{run,entries,now,maxPages,order,expired}){
  const covered=new Set(entries.map(keyOf));
- let after=null,superseded=0;
+ let after=null,superseded=0,unproven=false;
  for(let page=0;page<maxPages;page++){
+  if(expired())return {complete:false,superseded,reason:'deadline'};
   const rows=await earlierLiveResults(env,{runKey:run.run_key,after,limit:SUPERSEDE_PAGE});
   for(const row of rows){
    if(!covered.has(keyOf({kind:row.kind,id:row.unit_id})))continue;
+   let verdict=null;
+   try{verdict=typeof order==='function'?await order(row.run_source_generation,run.source_generation):null;}catch{verdict=null;}
+   if(verdict===1)continue;
+   if(verdict!==-1){unproven=true;continue;}
+   if(expired())return {complete:false,superseded,reason:'deadline'};
    const answer=await settleResult(env,{row,state:'superseded',settledBy:'newer_run',at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
    superseded++;
   }
-  if(rows.length<SUPERSEDE_PAGE)return {complete:true,superseded};
+  if(rows.length<SUPERSEDE_PAGE)return unproven?{complete:false,superseded,reason:'order_unproven'}:{complete:true,superseded};
   const last=rows[rows.length-1];
   after={run_key:last.run_key,pass_no:last.pass_no,kind:last.kind,unit_id:last.unit_id};
  }
- return {complete:false,superseded};
+ return {complete:false,superseded,reason:'max_pages'};
+}
+
+// The obsolete live result of the SAME run (an earlier pass of it) for a unit that has now succeeded (applied, a verified no-op, a named kept outcome): the settle that goes in the same batch as the cursor move. A receipt-owned row is never settled here (an unresolved
+// receipt belongs to its owner), a changed digest is `superseded` / `source_changed`, the same digest is `settled` after the unit's own proof. Returns the `supersede` write of `commitSlice` or null.
+function obsoleteWrite(row,entry,outcome,at){
+ if(!row||row.retry_owner!=='unit')return null;
+ const same=row.unit_digest===entry.unitDigest;
+ const state=same?'settled':'superseded';
+ const settledBy=!same?'source_changed':outcome==='kept'?'kept_outcome':row.state==='refused_recoverable'?'prerequisite_resolved':'applied';
+ return {supersede:{key:keyOfRow(row),patch:{state,settled_by:settledBy,settled_at:at,updated_at:at}}};
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -177,6 +199,7 @@ const emptyCounts=()=>({applied:0,noop:0,kept:0,failed:0});
 async function runSlices(env,ctx){
  const {params,entries}=ctx,clock=clockOf(params),now=nowOf(params);
  const t0=clock();
+ const expired=()=>clock()-t0>=params.sliceDeadlineMs;
  let run=ctx.run,index=ctx.startIndex,slices=0,deadlineHit=false,commitFailed=false;
  let folded=runFields(run);
  const total=emptyCounts();
@@ -207,22 +230,41 @@ async function runSlices(env,ctx){
    if(answer.state==='skipped')throw fail('film_person_not_open');
    run=answer.run;
   }
+  // The live results this run already holds (an earlier pass of it): a unit that now succeeds settles its obsolete row in the slice batch. At most SAME_RUN_LIVE_LIMIT are read once; more than that and every success is looked up exactly.
+  const cap=sameRunBound(params.sameRunLiveLimit);
+  const held=await liveRunResults(env,{origin:ctx.origin,runKey:run.run_key,limit:cap+1});
+  const overflow=held.length>cap;
+  const heldRows=new Map(held.slice(0,cap).map(row=>[keyOf({kind:row.kind,id:row.unit_id}),row]));
+  const obsolete=async(unit,entry,outcome)=>{
+   if(!overflow&&heldRows.size===0)return null;
+   const row=overflow?await liveResult(env,{origin:ctx.origin,runKey:run.run_key,kind:unit.kind,unitId:unit.id}):heldRows.get(keyOf(unit))||null;
+   const write=obsoleteWrite(row,entry,outcome,now());
+   if(write)heldRows.delete(keyOf(unit));
+   return write;
+  };
+  const attach=async write=>{
+   const cost=writeCost(write);
+   if(pending.cost+cost>SLICE_STATEMENT_CAP)await flush();
+   pending.writes.push(write);pending.cost+=cost;
+  };
   while(index<entries.length&&slices<params.maxSlicesPerRun&&!deadlineHit){
    let inSlice=0;
    while(index<entries.length&&inSlice<params.sliceSize){
-    if(clock()-t0>=params.sliceDeadlineMs){deadlineHit=true;break;}
+    if(expired()){deadlineHit=true;break;}
     const entry=entries[index];
     const unit={kind:entry.kind,id:entry.id};
     const verdict=await evaluate(env,ctx,entry);
     if(verdict.type==='stop'){await flush();return await stop(verdict.code);}
     if(verdict.type==='done'){
      folded={...folded,...strikeStep(folded,{type:'unit_done',unit}).run};
+     const settle=await obsolete(unit,entry,verdict.outcome);
+     if(settle)await attach(settle);
      pending.counts[verdict.outcome==='applied'?'applied':verdict.outcome==='noop'?'noop':'kept']++;
      pending.last=unit;index++;inSlice++;continue;
     }
     const step=strikeStep(folded,{type:'unit_failed',unit:{...unit,digest:entry.unitDigest},error:verdict.error});
     if(step.action==='stop'){await flush();return await stop(step.run.stopped_by);}
-    if(step.action==='unit_done'){folded={...folded,...step.run};pending.counts.kept++;pending.last=unit;index++;inSlice++;continue;}
+    if(step.action==='unit_done'){folded={...folded,...step.run};const settle=await obsolete(unit,entry,'kept');if(settle)await attach(settle);pending.counts.kept++;pending.last=unit;index++;inSlice++;continue;}
     if(step.action==='strike'){
      // The count rises in its own commit (the cursor does not move with it); the step ends and the next one re-attempts the unit.
      await flush();
@@ -249,8 +291,11 @@ async function runSlices(env,ctx){
   if(ctx.origin==='epg'){
    // Every unit of THIS plan now has a durable outcome. The live results that an EARLIER run left for a unit this plan covers are superseded `newer_run` (the history stays; this run owns the unit now), BEFORE the claim counts what is still open. An earlier live
    // result of a unit this plan does not cover stays live: it keeps blocking `current` and is never discarded silently (bounded: a sweep that cannot finish does not claim).
-   const sweep=await supersedeEarlierResults(env,{run,entries,now,maxPages:Number.isInteger(params.supersedeMaxPages)&&params.supersedeMaxPages>=1?params.supersedeMaxPages:SUPERSEDE_MAX_PAGES});
-   if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',supersededEarlier:sweep.superseded};
+   // The remaining deadline holds through the whole sweep and before the claim: no write and no claim after it; the next step resumes (the cursor is already past the last unit).
+   if(expired())return {...base(),state:'partial',reason:'deadline'};
+   const sweep=await supersedeEarlierResults(env,{run,entries,now,order:params.generationOrder,expired,maxPages:supersedeBound(params.supersedeMaxPages)});
+   if(!sweep.complete)return {...base(),state:'partial',reason:'supersession_pending',detail:sweep.reason,supersededEarlier:sweep.superseded};
+   if(expired())return {...base(),state:'partial',reason:'deadline',supersededEarlier:sweep.superseded};
    const open=await liveMembershipCount(env);
    const answer=await commitPassComplete(env,{run,openAtCompletion:open,at:now()});
    if(answer.state==='skipped')throw fail('film_person_not_open');
