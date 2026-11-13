@@ -580,7 +580,8 @@ if(section('10')){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!selfs.includes(full)){const text=fs.readFileSync(full,'utf8');if(/canonical-epg-person-producer|canonical-person-adapters/.test(text))importers.push(full);}}};
  walk('src');
- assert.deepEqual(importers.filter(file=>file!=='src/canonical-epg-person-producer.js'),[],'nothing in src imports them');
+ // AIR-374 S4-4: the dormant driver (src/canonical-producer-driver.js) composes it; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
+ assert.deepEqual(importers.filter(file=>file!=='src/canonical-epg-person-producer.js'),['src/canonical-producer-driver.js'],'only the dormant driver imports them');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!/canonical-epg-person-producer|canonical-person-adapters/.test(fs.readFileSync(file,'utf8')),file+' does not bundle them');
  const text=name=>fs.readFileSync(path.join(SRC,name),'utf8');
  const strip=value=>value.replace(/\/\/.*$/gm,'');

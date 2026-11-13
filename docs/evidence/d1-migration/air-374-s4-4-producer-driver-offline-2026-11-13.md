@@ -1,0 +1,31 @@
+# AIR-374 S4-4: producer driver, offline verification (13 Nov 2026)
+
+**Scope:** offline code and tests on the sqlite3-CLI D1 stand-in with the real migration chain (the tables, CHECKs and triggers of 0020) and the real S4-3 store; the unit appliers (`apply*Units`) are scripted, because their own tests live with them. No production, R2, D1, Cloudflare, flag, Task, migration or marker access. Counts only.
+
+**Delivered:** `src/canonical-producer-driver.js` ([reference](../../reference/data/producer-driver.md)), dormant, not bundled, imports nothing from `worker.js`. `runEpgProducerPass`, `runDictionaryProducerPass`, `retryEpgProducerResults`, `readCanonicalFreshness` and `readerDecision`. Four additions to the store, each needed by the driver and none changing an existing function: `updateResult`, `commitResume`, `latestEpgRun`, `liveMembershipCount` ([store reference](../../reference/data/producer-run-store.md)).
+
+**Verified (`tests/canonical-producer-driver.mjs`, 17 sections, each a scenario of the ADR 0128 failure-mode table against real durable state)**
+
+- Required parameters with no default; the deadline bound is the step lease minus its margin (285 000 ms, pinned to the numbers in `src/epg-orchestration.js`); a refused call reads nothing.
+- Below `open` (legacy, `r2`, `prepared`): exactly the marker read, no applier, no resolver, no owner-review read, nothing written; `held` is a named error.
+- The happy pass in slices, the claim only at completion, a second call is a no-op; mixed outcomes are counted by kind.
+- A pass killed before the slice commit (an injected batch failure) revisits the unacknowledged units and loses none; a lost answer after the commit resumes after the committed cursor and revisits nothing; a partial pass is never `current`.
+- A database outage over five repeated steps leaves the cursor and the strike count unchanged and writes no result; a store that goes down mid-pass is a stop that could not be recorded, nothing thrown.
+- Poison unit: strike 1, strike 2 (each its own commit), the third proven failure writes the result and moves the cursor in one batch and the pass continues; a success mid-count clears the strike; a systemic failure at count 1 touches no strike column; another class restarts at 1; the two re-plan-first codes are applied once more before they count.
+- Named refusals are durable at first observation without a strike, a recoverable one carries its stamp; an unreadable or malformed stamp and an unclassified code stop the pass; planner refusals (a malformed unit, more than 50 credits) are results and the rest of the plan survives.
+- Plan change (replay, `pass_no` + 1); scenario A (same digest keeps its one live row, a changed digest supersedes it first, both durable, a terminal row never reopens); a concurrent step loses the compare-and-set and writes nothing partial; a moved marker, a `skipped` answer and an unresolved receipt stop the pass without passing the cursor; a stop inside a slice commits the durable prefix; fifty refused units are split under the 48-statement cap; the deadline ends the pass with the durable prefix.
+- Exception isolation: thrown planners, appliers, clocks and readers (and a missing table) end as `{state:'error'}` or a recorded stop, with no message in the result.
+- Retry pass: not due (no apply), due and applied (settled `applied`), a no-op as proof, an unproven outcome settles nothing, still failing (attempts + 1, same row), reclassified to a permanent refusal (never retried), changed source (`source_changed`), left plan (`left_plan`), attempts used up (`retry_exhausted`), a recoverable refusal with an unchanged stamp (one read, no attempt, schedule moved), a changed stamp applied through the same writers with no source change (`prerequisite_resolved`), a systemic failure stops it, the reconcile is isolated.
+- Dictionary pass: the resolver and the owner-review check run before the planner and the mint; an ambiguity from the snapshot is a permanent refusal, one from mutable identity a recoverable one; an owner entry that is present but not materialised (or unreadable) never reaches the writer; a check that cannot run stops the pass before anything is minted; a resume revisits nothing; a reused version of another plan is never resumed.
+- Freshness at the consumer boundary: no run, passing, stopped, backwards and newer publication are `lagging`; passed with a live membership result is `partial`; an unreadable store is `unknown`; a membership reader refuses on all three, a display reader returns the explicit state.
+- Static dormancy: no importer, not bundled, no `worker.js`, no network, timer, R2, flag or SQL write of its own.
+
+**Results:** `tests/canonical-producer-driver.mjs` passes; `tests/canonical-producer-driver-mutation.mjs` kills 59 mutants (52 in the driver, 7 in the store additions), one process per mutant, the unmutated test run twice and a neutral mutant that survives. The first run of the mutation check had five survivors, each closed by a test (the dormant release read, the resolver and owner-review spies, the prefix commit on a layer stop, the stored `open_at_completion`, the retry exception path). The existing importer allowlists of the pure module, the store and the receipts module were extended by the driver, and nothing else.
+
+**Findings while building it (offline, ours to fix or decide)**
+
+- A resumed run stays `stopped` and the SQL trigger then refuses every strike write; S4-3 had no way to leave `stopped`. `commitResume` is the narrow fix.
+- `apply*Units` do not expose the receipt request id, so no `receipt`-owned result row is written; an unresolved receipt is a fail-closed stop and the own-origin reconcile resolves it. Whether a layer should return the request id is a question for the Controller.
+- A Film that is a release of a Film that is not stored is left out of the plan, so storing it later changes the fingerprint and replays the pass.
+
+**Not done / limits:** the D-C decision (slice size, `maxSlicesPerRun`, deadline, ceiling, lag SLA), the wiring in `epgSync` (S5-1), the M2/M2b/M3 measurements. The driver cost of a slice in D1 is not measured (the stand-in is not a cost model). The retry pass handles origin `epg` only. Nothing here authorizes a production operation.

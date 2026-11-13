@@ -88,6 +88,19 @@ export async function dueResults(env,{now,limit=DUE_LIMIT_MAX}={}){
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 
+// S4-4: the newest run of origin `epg` (by creation time, then key), or null. Read-only; the input of `canonicalFreshness`.
+export async function latestEpgRun(env){
+ try{return (await one(database(env),"SELECT "+RUN_COLUMNS+" FROM canonical_producer_run WHERE origin='epg' ORDER BY created_at DESC,run_key DESC LIMIT 1"))||null;}
+ catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+// S4-4: the number of LIVE membership-affecting results (kind `film_facts`, origin `epg`, any run): the third input of `canonicalFreshness` and the `open_at_completion` of a pass. Read-only.
+export async function liveMembershipCount(env){
+ try{
+  const row=await one(database(env),"SELECT COUNT(*) AS n FROM canonical_producer_unit_result WHERE origin='epg' AND kind='film_facts' AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')',[...LIVE_STATES]);
+  return Number(row?.n??0);
+ }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+
 // ---- run lifecycle ----
 const INSERT_EPG="INSERT INTO canonical_producer_run (origin,run_key,source_generation,pass_no,plan_version,fingerprint,unit_count,pass_state,marker_generation,revision,created_at,updated_at) VALUES ('epg',?,?,1,?,?,?,'passing',?,1,?,?) ON CONFLICT(origin,run_key) DO NOTHING";
 // Create or resume the run of one EPG event. input: {runKey (the EPG event id), sourceGeneration (the published generation the plan was built from), planVersion?, fingerprint, units (the ORDERED entries the fingerprint covers), at}.
@@ -215,4 +228,31 @@ export async function settleResult(env,{row,state,settledBy,at}={}){
  await commit(env,gate,[fence(gate),
   ["UPDATE canonical_producer_unit_result SET state=?,settled_by=?,settled_at=?,updated_at=?,next_attempt_at=NULL WHERE origin=? AND run_key=? AND pass_no=? AND kind=? AND unit_id=? AND state=? AND attempts=?",[state,settledBy,at,at,key.origin,key.run_key,key.pass_no,key.kind,key.unit_id,row.state,row.attempts]],changesOne()],'cas');
  return {state:'committed'};
+}
+
+// S4-4: the in-place move of ONE live result (a reclassification or a deferred schedule), compare-and-set on its state and attempts; the identity columns and the owner never change. `patch` is the patch of `afterRetry` ('update') or
+// `retryDecision` ('defer'); a terminal state goes through `settleResult`. Returns {state:'committed'} or {state:'skipped'} below `open`; a row another path moved is `producer_cas_lost`.
+const PATCH_KEYS=['state','code','attempts','prereq_stamp','next_attempt_at','updated_at'];
+export async function updateResult(env,{row,patch,at}={}){
+ if(!plain(row)||!LIVE_STATES.includes(row.state)||!plain(patch)||typeof at!=='string'||Object.keys(patch).some(key=>!PATCH_KEYS.includes(key)))throw invalid();
+ const next={...row,...patch};
+ if(!LIVE_STATES.includes(next.state)||!Number.isInteger(next.attempts)||next.attempts<row.attempts)throw invalid();
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ const key=keyOfRow(row);
+ await commit(env,gate,[fence(gate),
+  ['UPDATE canonical_producer_unit_result SET state=?,code=?,attempts=?,prereq_stamp=?,next_attempt_at=?,updated_at=? WHERE origin=? AND run_key=? AND pass_no=? AND kind=? AND unit_id=? AND attempts=? AND state=?',
+   [next.state,next.code,next.attempts,next.prereq_stamp??null,next.next_attempt_at??null,patch.updated_at??at,key.origin,key.run_key,key.pass_no,key.kind,key.unit_id,row.attempts,row.state]],changesOne()],'cas');
+ return {state:'committed'};
+}
+
+// S4-4: a stopped pass that a later step takes over is `passing` again (a strike or slice write on a `stopped` row is refused by the SQL trigger, which keeps a stop from touching a strike). ONE compare-and-set that touches only the state and
+// `stopped_by`: no cursor, no strike column, no count. A run that is not `stopped` is refused (`film_person_invalid`: the caller reads the run first).
+export async function commitResume(env,{run,at}={}){
+ if(!plain(run)||run.pass_state!=='stopped'||typeof at!=='string')throw invalid();
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ await commit(env,gate,[fence(gate),casRun(run),
+  ["UPDATE canonical_producer_run SET pass_state='passing',stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=? AND pass_state='stopped'",[at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
+ return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }

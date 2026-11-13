@@ -462,7 +462,8 @@ for(const stage of ['legacy','r2','prepared']){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&/canonical-person-mutation-producer/.test(fs.readFileSync(full,'utf8')))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,['src/canonical-epg-person-producer.js']);
+ // AIR-374 S4-4: the dormant driver also imports it (for the digest of a person_mutation unit); it is itself unimported and unbundled.
+ assert.deepEqual(importers,['src/canonical-epg-person-producer.js','src/canonical-producer-driver.js']);
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!/canonical-person-mutation-producer/.test(fs.readFileSync(file,'utf8')),file+' does not bundle it');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-person-mutation-producer'));
  const body=fs.readFileSync(path.join(SRC,'canonical-person-mutation-producer.js'),'utf8').replace(/\/\/.*$/gm,'');

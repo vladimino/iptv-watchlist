@@ -1,6 +1,6 @@
 # Producer run store (S4-3, dormant)
 
-**Status:** implemented as dormant offline code on 13 Nov 2026 ([ADR 0128](../../adr/0128-epg-canonical-producer-durable-execution.md), Accepted as design). Nothing imports it, the Worker bundle does not carry it and nothing calls it; the pass driver (S4-4) and the `epgSync` wiring (S5-1) do not exist yet. Source of truth: `src/canonical-producer-store.js` and the tables of migration 0020 (`canonical_producer_run`, `canonical_producer_unit_result`, applied to the production D1 on 13 Nov 2026).
+**Status:** implemented as dormant offline code on 13 Nov 2026 ([ADR 0128](../../adr/0128-epg-canonical-producer-durable-execution.md), Accepted as design). Nothing imports it, the Worker bundle does not carry it and nothing calls it; the dormant [pass driver](producer-driver.md) (S4-4) is its one importer and the `epgSync` wiring (S5-1) does not exist yet. Source of truth: `src/canonical-producer-store.js` and the tables of migration 0020 (`canonical_producer_run`, `canonical_producer_unit_result`, applied to the production D1 on 13 Nov 2026).
 
 The store is the only module that writes those two tables. The decisions come from the pure module `src/canonical-producer-run.js` (S4-1); the store turns each into one fenced D1 batch.
 
@@ -15,6 +15,9 @@ The store is the only module that writes those two tables. The decisions come fr
 | `dueResults` | read only | Due live results with retry owner `unit` (open or recoverable), ordered by `next_attempt_at` then key, at most 50. |
 | `settleResult` | one terminal update | Compare-and-set on state and attempts; a terminal row never reopens. |
 | `readRun`, `latestDictionaryRun`, `liveResult` | read only | A missing table is `producer_store_missing`. |
+| `updateResult` (S4-4) | one in-place update of a live result | A reclassification or a deferred schedule (the patch of `afterRetry` or `retryDecision`), compare-and-set on state and attempts; the identity columns never change, attempts never decrease, a terminal state goes through `settleResult`. |
+| `commitResume` (S4-4) | `pass_state='passing'`, `stopped_by` cleared | A stopped run a later step takes over, compare-and-set on the revision; no cursor, no strike column. A strike or slice write on a `stopped` row is refused by the SQL trigger, so the driver resumes it first. |
+| `latestEpgRun`, `liveMembershipCount` (S4-4) | read only | The newest epg run and the number of live `film_facts` results of origin `epg` (the third input of `canonicalFreshness` and the `open_at_completion` of a pass). |
 
 **Dormancy and fences.** Every writer reads the marker once through `writerRoute`; below `open` it returns `{state:'skipped'}` after that read. Every batch starts with the marker fence (`d1`, `open`, the generation read), and the SQL triggers of migration 0020 refuse any write outside `open`, so at `prepared` both tables stay empty even against a code defect.
 
