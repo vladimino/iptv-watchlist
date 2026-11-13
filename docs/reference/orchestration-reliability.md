@@ -179,6 +179,18 @@ Default stall thresholds: EPG 2 h after its due time without a published date; R
 
 The EPG progress count includes the ledger cursor of the seal (as a share of the item total inside the `ledger` phase), so `lastDurableProgressAt` moves while a seal writes observations and stops when it does not. A ledger step logs `batches`, `writeMs`, `items`, `archives` and `archiveMs` in its `epg_phase` exit event; `writeMs / batches` is the D1 round trip of that Workflow instance ([evidence](../evidence/d1-migration/air-420-seal-ledger-round-trips-2026-11-10.md)).
 
+### EPG correlation and memory-boundary markers (AIR-462)
+
+Passive, best-effort log lines that tie a Workflow `act-N` callback to the phases it drove. They write nothing to R2 or D1, add no endpoint, flag, cron or Task, and a logging failure never changes a result.
+
+- `epg_act` (`edge` `enter`, `exit` or `error`): `at`, `runKey` (a date or `null`), `instanceId`, `actStep` (`act-N`), `attemptTraceId`, and on `exit` `elapsedMs` and `kind` (`continue`, `sleep`, `stop`). `attemptTraceId` is minted per execution of the callback, so a platform retry of the same `act-N` has another id; it is a local correlator, **not** a Cloudflare attempt id.
+- `epg_phase` lines of the step an action drives carry the same `instanceId`, `actStep` and `attemptTraceId`. The trace is bound to the run only while that step runs (the step lease allows one), and a step without a trace (an external caller, the start request) logs as before.
+- `epg_memory_boundary` (`edge` `enter` or `exit`): a closed set of `boundary` names (`seal_stage_archive_begin`, `seal_stage_archive_segments` every 16th segment, `seal_stage_emit_begin`, `seal_stage_payload_put`, `seal_ledger_begin`, `seal_ledger_read`, `seal_ledger_batches` every 25th batch, `seal_ledger_archive`, `seal_catalog_payload`, `seal_catalog_merge`, `seal_payload_get`, `seal_payload_text`, `seal_payload_parse`) and only non-negative integer fields from `elapsedMs`, `bytes`, `items`, `batches`, `cursor`, `total`, `count`, `segments`. `bytes` of `seal_payload_text` and `seal_stage_payload_put` is the string length in UTF-16 code units. These are sizes the code already knows, **allocation proxies, not heap or isolate measurements**: workerd offers no heap figure and none is read.
+
+Pairing rule. Paired boundaries log `enter` and a matching `exit` when the operation completes, and no `exit` when it throws: `seal_payload_get`, `seal_payload_text`, `seal_payload_parse`, `seal_stage_payload_put`, `seal_ledger_read`, `seal_ledger_archive`, `seal_catalog_payload`, `seal_catalog_merge`. One-sided milestones are never a pair: `seal_stage_archive_begin` and `seal_stage_emit_begin` (`enter` only; the matching `epg_phase` exit or error of `seal_stage_archive` and `seal_stage` closes them), `seal_ledger_begin`, `seal_ledger_batches` and `seal_stage_archive_segments` (`exit` only, progress points). `epg_act` logs `exit` when the action returns and `error` (no `exit`, no error text) when it rejects; the Workflow still receives the unchanged `act_failed` sleep result.
+
+A few dozen lines per action, none per observation or film. The last line of an attempt that was killed is its last confirmed point, not the instruction that killed it: a line written just before death can be lost, and a long synchronous allocation shows only as the gap after its `enter`.
+
 ## Deterministic negative test catalogue
 
 Every domain delivery implements the rows that apply to it, against an injected clock, random source and storage double, with no network. Each test asserts the class, the budget change, the writes made (or none) and the read model.
