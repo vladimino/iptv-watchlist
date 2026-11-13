@@ -79,7 +79,7 @@ for(const [file,text] of texts){
 // receiver fails, so a write that the primitive list cannot see by name cannot arrive silently.
 // AIR-402: index, group, sequence and merged are the in-memory lookups of the view build (src/domain/film-person-reader.js, orderedFilmIndex and its caller): Maps built from the view, never storage.
 // AIR-442: scope.values is the Map of one prediction request's own scope (src/enrichment.js, createRequestScope): what the step itself read or wrote, never storage.
-const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','skipUntil']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage
+const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','EPG_TRACE','skipUntil']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage
 const receivers=new Map();
 for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0-9_$.]*)\.(put|delete|createMultipartUpload|resumeMultipartUpload)\(/g)){
  const who=m[1],method=m[2];

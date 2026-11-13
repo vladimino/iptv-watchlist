@@ -1146,7 +1146,7 @@ async function eventOutboxStatus(env){
 const PREDICTION_STEP_NAMES=['start','next','submit','heartbeat','complete'];
 const CALLER_FAULT_ORIGINS=['worker_http','transport','model_provider','orchestrator','unknown'];
 const EXTERNAL_STOPS=['api_error','model_unavailable','model_error','external_termination'];
-const NORMAL_COMPLETE=['queue_empty','eligible_queue_empty','parse_error','retry_backoff'];
+const NORMAL_COMPLETE=['queue_empty','eligible_queue_empty','parse_error','retry_backoff','manifest_spent'];
 const FAULT_REASONS=['quota','model_unavailable','api_error','storage_error','lease_lost','format_error_storm','profile_changed','lease_expired','external_termination','model_error','runner_aborted','time_budget','priority_changed'];
 function safeRequestId(value){return typeof value==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(value)?value:null;}
 function predictionRequestId(request){return safeRequestId(request?.headers?.get?.('X-Request-Id'))||crypto.randomUUID();}
@@ -1520,6 +1520,9 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
 const QUEUE_STALE_LIMIT_MS=12*3600000;
 const CATALOG_FENCE_ATTEMPTS=3;
 const SETTLED_STATUSES=['created','recalculated','already_current'];
+// A selected manifest film is spent when submit settled it (created/recalculated/already_current) or recorded a per-film retry failure. deferred_budget, needs_regeneration and unsubmitted slots are not spent (ADR 0136).
+const manifestFilmSpent=(run,id)=>SETTLED_STATUSES.includes(run.results?.[id])||!!run.failures?.[id];
+const manifestFullySpent=run=>Array.isArray(run?.selectedIds)&&run.selectedIds.length>0&&run.selectedIds.every(id=>manifestFilmSpent(run,id));
 const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(queue.pending)&&Array.isArray(queue.hotPending)&&Array.isArray(queue.coldPending)&&!!queue.priority&&typeof queue.priority==='object'&&Number.isInteger(queue.priorityCount);
 // Why a persisted queue cannot be advanced as it is (null: it can). The same inputs a rebuild stamps into the queue.
 function queueAdvanceGate(queue,report,profile,registry){
@@ -1958,7 +1961,7 @@ function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
 async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true}){
  if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
 }
-// ---- Batch runner v2: batch_start (ADR 0122). One request returns one self-sufficient manifest of at most BATCH_RUNNER.maxManifestFilms films. ----
+// ---- Batch runner v2: batch_start (ADR 0122 + ADR 0136). One request returns one self-sufficient manifest of at most the client-requested manifestSize (default and ceiling BATCH_RUNNER.maxManifestFilms). ----
 // It runs beside the v5 runner on the same queue, runner lease, retry records and persistence. `batch_submit` is a separate delivery.
 const BATCH_PROTOCOL='batch_v2';
 const BATCH_MANIFEST_FORMAT='compact-1';
@@ -1971,14 +1974,22 @@ const batchBlocked=(code,extra={})=>json({status:'blocked',reason:code,code,...e
 const batchLimits=()=>({maxManifestFilms:BATCH_RUNNER.maxManifestFilms,maxManifestBytes:BATCH_RUNNER.maxManifestBytes,generationSizeDefault:BATCH_RUNNER.generationSizeDefault,generationSizeRange:BATCH_RUNNER.generationSizeRange,submitMaxItems:BATCH_RUNNER.submitMaxItems,submitMaxBodyBytes:BATCH_RUNNER.submitMaxBodyBytes,callBudgetMs:BATCH_RUNNER.callBudgetMs});
 // Lossless: an absent key reads as null. Nothing else of a film's metadata or stored fingerprint is shortened.
 const batchCompact=value=>Array.isArray(value)?value.map(batchCompact):isObject(value)?Object.fromEntries(Object.entries(value).filter(([,v])=>v!==null&&v!==undefined).map(([k,v])=>[k,batchCompact(v)])):value;
+// Client-requested selection cap (ADR 0136). Omitted → server ceiling 100. Not an integer in 1..maxManifestFilms → 400, no writes. generationSize / submitBatchSize stay client/prompt parameters and are never derived from this.
+function resolveManifestSize(body){
+ if(!isObject(body)||body.manifestSize===undefined)return {size:BATCH_RUNNER.maxManifestFilms};
+ if(!Number.isInteger(body.manifestSize)||body.manifestSize<1||body.manifestSize>BATCH_RUNNER.maxManifestFilms)return {error:json({error:'Invalid manifestSize'},400)};
+ return {size:body.manifestSize};
+}
 function validateBatchStartBody(body){
  if(!isObject(body)||body.scope!=='watchlist_all'||(body.mode!==undefined&&body.mode!=='queued'))return json({error:'Invalid scope or mode'},400);
  if(body.trigger!==undefined&&body.trigger!=='scheduled'&&body.trigger!=='manual')return json({error:'Invalid trigger'},400);
  if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
  if(body.dryRun!==undefined&&typeof body.dryRun!=='boolean')return json({error:'Invalid dryRun'},400);
+ const size=resolveManifestSize(body);if(size.error)return size.error;
  if(body.pin!==undefined){
   if(body.dryRun!==true)return json({error:'pin is accepted only with dryRun'},400);
-  if(!isObject(body.pin)||!Array.isArray(body.pin.filmIds)||!body.pin.filmIds.length||body.pin.filmIds.length>BATCH_RUNNER.maxManifestFilms||body.pin.filmIds.some(id=>!isText(id,100)))return json({error:'Invalid pin'},400);
+  // pin.filmIds must not silently truncate to manifestSize: more pinned ids than the requested (or default) size is an invalid request.
+  if(!isObject(body.pin)||!Array.isArray(body.pin.filmIds)||!body.pin.filmIds.length||body.pin.filmIds.length>size.size||body.pin.filmIds.some(id=>!isText(id,100)))return json({error:'Invalid pin'},400);
  }
  return null;
 }
@@ -1989,15 +2000,17 @@ async function batchRequiresD1(env){
 }
 // Films for one manifest, read-only: the stored queue's ready ids in queue order, each with its admission and stored state. A film whose admission is gone or whose
 // prediction is already current is not delivered (no stored usable work is regenerated); it is reported so that the real start can settle it out of the queue.
-async function batchSelection(env,{profile,report,queue,pin=null}){
+async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUNNER.maxManifestFilms}){
+ const cap=Math.min(Math.max(1,Number.isInteger(limit)?limit:BATCH_RUNNER.maxManifestFilms),BATCH_RUNNER.maxManifestFilms);
  const freshness=await predictionFreshness(env,profile),items=[],skipped={missingAdmission:[],alreadyCurrent:[]},notEligible=[];
  const queued=new Set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])]),ready=queueReadyIds(queue),readySet=new Set(ready);
  let rest;
  if(pin){rest=[];for(const id of [...new Set(pin.filmIds.map(String))]){if(!queued.has(id))notEligible.push({filmId:id,reason:'not_queued'});else if(!readySet.has(id))notEligible.push({filmId:id,reason:'retry_backoff'});else rest.push(id);}}
  else rest=[...ready];
  let scanned=0;
- while(items.length<BATCH_RUNNER.maxManifestFilms&&rest.length&&scanned<BATCH_SCAN_LIMIT){
-  const slots=BATCH_RUNNER.maxManifestFilms-items.length;
+ // Read only as many film payloads as the client-requested cap needs: do not load a full 100-film payload set when the caller asked for five.
+ while(items.length<cap&&rest.length&&scanned<BATCH_SCAN_LIMIT){
+  const slots=cap-items.length;
   let chunk;
   if(pin)chunk=rest.splice(0,slots);
   else{chunk=queueBatchIds(queue,rest,slots);if(!chunk.length)break;const taken=new Set(chunk);rest=rest.filter(id=>!taken.has(id));}
@@ -2010,7 +2023,7 @@ async function batchSelection(env,{profile,report,queue,pin=null}){
    items.push({filmId:id,lane:queue.priority?.[id]?.hot?'hot':'cold',plan,film,state});
   });
  }
- return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length}};
+ return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length},manifestSize:cap};
 }
 // The manifest body, serialized once for its size and its hash. `runId` and `lease` are placeholders in a preflight (same width as the real values).
 const batchFilmInputHash=async film=>(await contentHash({filmId:film.filmId,lane:film.lane,plan:film.plan,modelMetadata:film.modelMetadata,fingerprintHash:film.fingerprint?.fingerprintHash||null})).slice(0,24);
@@ -2031,20 +2044,20 @@ const batchOverflow=(manifest,extra={})=>batchBlocked('manifest_too_large',{byte
 const batchBytes=value=>new TextEncoder().encode(JSON.stringify(value)).length;
 // The fields that follow the manifest in the answer. A preflight measures the answer with the widest values these can take, so a manifest that passes it cannot grow past the
 // limit when the real values are added; the exact answer is measured again before anything is persisted and before it is sent.
-const batchPlaceholderExtras=(selection,dryRun)=>({queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
-const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:99999999,queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
+const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:selection.items.length,queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
 // Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
 // A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
 async function batchPreflight(env,body){
- const dryRun=body.dryRun===true,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
+ const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
  if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
  if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return {response:json({error:'No completed programme snapshot'},409)};
  const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry);
- if(why)return {profile,report,stale:why,revision};
+ if(why)return {profile,report,stale:why,revision,manifestSize};
  try{
-  const selection=await batchSelection(env,{profile,report,queue:stored,pin:body.pin||null});
+  const selection=await batchSelection(env,{profile,report,queue:stored,pin:body.pin||null,limit:manifestSize});
   const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
-  return {profile,report,queue:stored,revision,selection,manifest,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
+  return {profile,report,queue:stored,revision,selection,manifest,manifestSize,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
  }catch(error){
   if(CATALOG_HELD_CODES.includes(error?.code))return {response:catalogHeldResponse(error.code)};
   throw error;
@@ -2159,7 +2172,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
     if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
     const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();
-    const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(item=>item.filmId),batchIds:selected.map(item=>item.filmId),selectionKind:Object.fromEntries(selected.map(item=>[item.filmId,item.lane])),baseline:Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null])),failures:{},results:{}};
+    const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(item=>item.filmId),batchIds:selected.map(item=>item.filmId),selectionKind:Object.fromEntries(selected.map(item=>[item.filmId,item.lane])),baseline:Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null])),failures:{},results:{}};
     await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)])));
     await atStage('run_save',()=>savePredictionRun(env,run));
     await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,null));
@@ -2669,25 +2682,33 @@ async function enrichmentComplete(env,body,requestId){
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
  if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
- const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&!body.reason)return json({error:'Profile changed; start a new run'},409);
- if(!body.reason&&await runContractChanged(run))return contractChangedResponse();
+ // ADR 0136: spending every selected manifest film is a normal complete for batch_v2 even when the global queue still has ready films. Unsubmitted / deferred_budget slots fail closed; profile/contract/lease stops stay as they are.
+ if(body.reason==='manifest_spent'){
+  if(run.protocol!==BATCH_PROTOCOL)return json({error:'manifest_spent is accepted only for a batch_v2 run'},400);
+  if(!manifestFullySpent(run))return json({error:'Manifest not spent; continue submit',code:'manifest_not_spent',runId:run.runId,unspent:run.selectedIds.filter(id=>!manifestFilmSpent(run,id))},409);
+ }
+ // Fence profile and contract drift for reasonless complete and for manifest_spent: a change after the last submit must not be reported as a normal spent success (ADR 0136). The caller then completes with reason profile_changed / runner_aborted.
+ const fenceDrift=!body.reason||body.reason==='manifest_spent';
+ const profile=await loadJSON(env,profileKey);if(profile?.profileHash!==run.tasteProfileHash&&fenceDrift)return json({error:'Profile changed; start a new run'},409);
+ if(fenceDrift&&await runContractChanged(run))return contractChangedResponse();
  if(run.mode==='queued'&&(!body.reason||['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason))&&!run.systemicStopReason){let queue;try{queue=await atStage('queue_refresh',async()=>currentPredictionQueue(env,await loadJSON(env,'programme.json'),profile,'completion_check'));}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queueReadyIds(queue).some(id=>!run.failures[id]))return json({error:'Queue not empty; continue next',runId:run.runId,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining},409);}
  const states=await Promise.all(run.selectedIds.map(id=>readFilmState(env,id)));let created=0,recalculated=0,pending=0;
  const freshness=await predictionFreshness(env,profile),source=freshness.needsGenres?await loadJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json')||{}:{};
- for(let i=0;i<states.length;i++){const s=states[i],p=s.predictions?.current,id=run.selectedIds[i];if(p?.generatedAt&&p.generatedAt!==run.baseline[id]&&p.tasteProfileHash===run.tasteProfileHash&&p.predictionPromptVersion===run.predictionPromptVersion){run.baseline[id]?recalculated++:created++;if(!['created','recalculated'].includes(run.results?.[id]))run.results[id]=run.baseline[id]?'recalculated':'created';}else if(!run.failures[id]&&!freshness.state(p,s.fingerprint,source[id]?.genres))pending++;}
- created=Object.values(run.results).filter(x=>x==='created').length;recalculated=Object.values(run.results).filter(x=>x==='recalculated').length;const failed=Object.keys(run.failures).length;run.counts={created,recalculated,failed,pending};run.reason=['queue_empty','eligible_queue_empty','parse_error'].includes(body.reason)?null:safePredictionReason(body.reason||run.interruption);run.reason=run.systemicStopReason||run.reason;run.stopReason=run.reason||(failed?'eligible_queue_empty':pending?'external_termination':'queue_empty');run.status=pending||run.reason?'partial':'complete';run.completedAt=new Date().toISOString();
+ for(let i=0;i<states.length;i++){const s=states[i],p=s.predictions?.current,id=run.selectedIds[i];if(p?.generatedAt&&p.generatedAt!==run.baseline[id]&&p.tasteProfileHash===run.tasteProfileHash&&p.predictionPromptVersion===run.predictionPromptVersion){run.baseline[id]?recalculated++:created++;if(!['created','recalculated'].includes(run.results?.[id]))run.results[id]=run.baseline[id]?'recalculated':'created';}else if(!run.failures[id]&&!freshness.state(p,s.fingerprint,source[id]?.genres)&&!SETTLED_STATUSES.includes(run.results?.[id]))pending++;}
+ created=Object.values(run.results).filter(x=>x==='created').length;recalculated=Object.values(run.results).filter(x=>x==='recalculated').length;const failed=Object.keys(run.failures).length;run.counts={created,recalculated,failed,pending};run.reason=['queue_empty','eligible_queue_empty','parse_error','manifest_spent'].includes(body.reason)?null:safePredictionReason(body.reason||run.interruption);run.reason=run.systemicStopReason||run.reason;run.stopReason=run.reason||(failed?'eligible_queue_empty':pending?'external_termination':'queue_empty');run.status=pending||run.reason?'partial':'complete';run.completedAt=new Date().toISOString();
  const summary=runSummary(run);let hotRemaining=null,coldRemaining=null,remaining=pending;
  if(run.mode==='queued'){
   // Retries, the batch summary and the counter go into the rebuild's own conditional write; the counter moves once per run.
-  const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason,perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
+  const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason||(body.reason==='manifest_spent'?'manifest_spent':null),perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
   const succeeded=Object.entries(run.results||{}).filter(([,status])=>SETTLED_STATUSES.includes(status)).map(([id])=>id);let queue;try{queue=await atStage('queue_refresh',async()=>{const report=await loadJSON(env,'programme.json'),stored=await currentPredictionQueue(env,report,profile,'batch_complete');if(!stored)return null;const context=await advanceContext(env,report,profile);
    // Under the gate on the queue this write actually mutates: a queue rebuilt for another generation meanwhile keeps its own settlement, `lastBatch` and counters; only this run's retries (which only grow) are added to it.
    return await mutatePredictionQueue(env,current=>{if(queueAdvanceGate(current,report,profile,context.registry))return recordRunRetries(current,run)?current:null;settleQueueFilms(current,succeeded);current.trigger='batch_complete';return amend(current);},'batch_complete',stored);});}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
-  if(queue&&!run.reason&&!pending)run.stopReason=queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty';
+  // ADR 0136: a short batch that spent its selected manifest records stopReason manifest_spent (not time_budget, not a false queue_empty) while still reporting the real global outstanding counters.
+  if(queue&&!run.reason&&!pending)run.stopReason=body.reason==='manifest_spent'?'manifest_spent':(queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty');
  }
- const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
+ const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,discoveryRead,lease,eventOutbox]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovery-status.json').then(value=>({value}),()=>({value:null,unavailable:true})),loadJSON(env,RUNNER_LEASE_KEY),eventOutboxStatus(env)]);const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:queue?(queue.hotCount||0)+(queue.coldCount||0):report?eligibleEnrichmentFilms(report).length:0,pendingCount:queue?.pendingCount??null,discovery:discoveryRead.value||null,...(discoveryRead.unavailable?{discoveryStatus:'unavailable'}:{}),queue,eventOutbox};}
 async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
