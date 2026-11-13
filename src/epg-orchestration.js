@@ -299,15 +299,27 @@ const EpgOrchestration=(()=>{
  const ledgerShare=seal=>{const total=Number(seal?.itemTotal),cursor=Number(seal?.cursor);return seal?.phase==='ledger'&&total>0&&cursor>0?Math.min(998,Math.floor(cursor/total*998)):0;};
  const progressCount=run=>run?(STAGE_RANK[run.stage]??0)*1000000+(run.stage==='metadata'?(run.cursor??0):0)+(run.stage==='seal'?(SEAL_RANK[run.seal?.phase]??0)*1000+ledgerShare(run.seal):0):0;
  const advanced=(run,previous)=>!!run&&!!previous&&previous.runId===run.runId&&progressCount(run)>(previous.count??0);
+// AIR-464: the Madrid day a sync run was frozen for. `sync.json.runKey` (when the run carries one) and the frozen `startedAt` must both be
+// well formed and agree; a missing legacy key falls back to `startedAt`, a malformed or contradicting key has no day (null, fail closed).
+const DAY_KEY=/^\d{4}-\d{2}-\d{2}$/;
+function frozenDay(run){
+ if(!run||typeof run!=='object')return null;
+ const at=Date.parse(run.startedAt),fromStart=Number.isFinite(at)?dayOf(at):null;
+ if(fromStart===null)return null;
+ if(run.runKey===undefined||run.runKey===null)return fromStart;
+ if(typeof run.runKey!=='string'||!DAY_KEY.test(run.runKey)||fromStart!==run.runKey)return null;
+ return run.runKey;
+}
  async function body(response){try{return await response.json();}catch{return {};}}
 
  // The EPG work of one action: a start, or one existing step. Returns what happened and never swallows a write it may have made.
  async function drive(fe,control,{now}){
   const runKey=control.runKey;
   let run=await loadJSON(fe,'sync.json');
-  const started=run&&Number.isFinite(Date.parse(run.startedAt))?dayOf(Date.parse(run.startedAt)):null;
+  const started=frozenDay(run);
   // Read-after-unknown: a run of this Madrid date that already completed is the success, whoever drove it.
   if(run?.stage==='complete'&&started===runKey&&!run.error)return {finished:true,runId:run.runId,run,published:run.runId};
+  if(run&&run.stage==='seal'&&started===null)return {failure:{code:'evidence_contradictory'}};
   const usable=run&&(run.stage==='seal'||(['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<EXTERNAL_FRESH_MS));
   if(!usable){
    const reply=await body(await postSync(fe,null,'/api/sync/start',{},'internal'));
@@ -328,7 +340,12 @@ const EpgOrchestration=(()=>{
   }
   if(reply.reason==='programme_changed'||reply.discovery?.reason==='programme_changed')return {...base,failure:{code:'stale_generation_write'}};
   if(reply.state==='error'||reply.discovery?.state==='error')return {...base,failure:{code:'step_failed'}};
-  if(reply.stage==='complete'||after?.stage==='complete')return {...base,finished:true,published:after?.runId||run.runId};
+  if(reply.stage==='complete'||after?.stage==='complete'){
+   // AIR-464: a run adopted from another Madrid day (ADR 0092 resume) publishes that day, not this control's day. Its completion never
+   // certifies this control; the next action finds a complete run of another day, which is not usable, and starts this day's run.
+   if(started!==runKey)return {...base,note:'foreign_run_sealed'};
+   return {...base,finished:true,published:after?.runId||run.runId};
+  }
   return base;
  }
  async function writeControl(env,adm,next){
@@ -534,7 +551,7 @@ const EpgOrchestration=(()=>{
   const {dayKey,dueAt}=policy().dailyDue(now,schedule());
   let run=null;
   try{run=await loadJSON(env,'sync.json');}catch{run=null;}
-  const started=run&&Number.isFinite(Date.parse(run.startedAt))?dayOf(Date.parse(run.startedAt)):null;
+  const started=frozenDay(run);
   const doneToday=(c.runKey===dayKey&&!!c.doneAt)||(started===dayKey&&run?.stage==='complete'&&!run.error);
   let liveness=null;
   if(m.mode==='cloudflare'&&c.instanceId&&['starting','running','waiting'].includes(c.phase)&&typeof env?.EPG_WORKFLOW?.get==='function'){
