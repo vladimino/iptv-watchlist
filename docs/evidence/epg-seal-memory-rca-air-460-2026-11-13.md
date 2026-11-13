@@ -43,3 +43,9 @@ It does not prove that the production `exceededMemory` is fixed, and it must not
 4. **Controlled replay with the seal_stage step first** in a workerd harness. workerd locally does not enforce the 128 MiB limit, so this ranks, it does not reproduce.
 
 Documentation impact: this evidence file and its index entry. No change to architecture diagrams, reference or runbooks: runtime topology, persistent data flow and the failure contract are unchanged.
+
+## Status update, 13 Nov 2026 (after the measurements above)
+
+The measurements and conclusions above are unchanged. Option 1 (phase markers) was delivered separately as [AIR-462](https://trello.com/c/w73gROBl), [PR #596](https://github.com/vladimino/iptv-watchlist/pull/596), merged into `main` on 13 Nov 2026: `epg_act` correlation of `act-N` attempts and bounded `epg_memory_boundary` markers (see [the AIR-462 evidence](orchestration/air-462-epg-oom-phase-tracing-2026-11-13.md)). This PR is merged with that `main` and keeps both its `epg_memory_boundary` markers in `sealPayload` and the `delete payload.catalog` change. Deployment of #596 is confirmed by its own post-merge CI, not by this document.
+
+The markers are instrumentation, not a heap measurement and not a causal explanation: the memory mechanism of the two production deaths remains unknown, and options 2 to 4 and the sequential `seal_stage` replay remain NOT DONE and undecided. Next gate: read-only analysis of a subsequent natural EPG Workflow run, stitching the Workflow history with the new trace logs as described in the [monitoring runbook](../runbooks/monitoring.md#epg-workflow-attempt-correlation-air-462). No manual production run and no further memory work is requested here.
