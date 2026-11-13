@@ -171,6 +171,19 @@ function round(x){return Math.round(x*1e4)/1e4;}
  try{buildReport([p1,bad2]);assert.fail('expected a refusal');}catch(e){assert.equal(e.code,'invalid_input');assert.ok(!e.message.includes('SECRETKIND'));}
 }
 
+// 4e2. Assessment counts (ADR 0132): presence, size and research outcome only; the report holds no text and no URL, and an out-of-bound size is refused.
+{
+ const ids=['a','b','c','d'],p1=pass(1,ids,()=>pred(3,.5)),p2=pass(2,ids,()=>pred(3,.5));
+ const asm=(bytes,status,web,snip,conflicts)=>({sent:true,bytes,researchStatus:status,sources:web+1,webSources:web,snippetOnlyWebSources:snip,conflicts,attempts:0,submitAssessment:'would_write'});
+ p2.films[0].assessment=asm(2100,'attempted_found',2,2,0);p2.films[1].assessment=asm(2900,'attempted_found',2,1,1);p2.films[2].assessment=asm(1200,'attempted_blocked',0,0,0);p2.films[3].assessment={sent:false,bytes:null,researchStatus:null,sources:0,webSources:0,snippetOnlyWebSources:0,conflicts:0,attempts:0,submitAssessment:'not_sent'};
+ const r=buildReport([p1,p2]);
+ assert.deepEqual(r.perSize[1].assessment,{sent:3,withWebSources:2,snippetOnly:1,withConflicts:1,researchFound:2,researchBlocked:1,bytesMax:2900,bytesMean:2066.6667});
+ assert.deepEqual(r.perSize[0].assessment,{sent:0,withWebSources:0,snippetOnly:0,withConflicts:0,researchFound:0,researchBlocked:0,bytesMax:null,bytesMean:null});assert.deepEqual(check(schema.$defs.report,r),[]);
+ const bad=pass(2,ids,()=>pred(3,.5));bad.films[0].assessment=asm(3001,'attempted_found',1,0,0);
+ try{buildReport([p1,bad]);assert.fail('expected a refusal');}catch(e){assert.ok(e instanceof AbReportError);assert.equal(e.code,'invalid_input');}
+ const leak=pass(2,ids,()=>pred(3,.5));leak.films[0].assessment={...asm(100,'attempted_found',1,0,0),note:'PRIVATE-TEXT'};
+ try{buildReport([p1,leak]);assert.fail('expected a refusal');}catch(e){assert.equal(e.code,'invalid_input');assert.ok(!e.message.includes('PRIVATE-TEXT'));}
+}
 // 4f. A film's receipt is a submit call, never a preflight call, even when both are in the same group with distinct callIds; one global callId sequence is accepted.
 {
  const ids=['a','b','c','d'],base1=()=>pass(1,ids,()=>pred(3,.5));

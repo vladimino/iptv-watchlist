@@ -155,4 +155,17 @@ let firstDigest;
  const v5=await w.api('submit',{runId:'none',items:[{filmId:f1,prediction:w.prediction,assessment:asm()}]});assert.equal(v5.status,400);same(v5.data.issues,[{path:'items[0].assessment',code:'unknown_field'}]);
  const mcp=await call('prediction_submit',{runId:m.runId,items:[{filmId:f1,prediction:w.prediction,assessment:asm()}]});assert.equal(mcp.isError,true);
 }
+// 10. The group limit: ten films with a full-size assessment exceed the 56 KiB request bound and are refused whole with nothing checked; the same films in two groups of five pass. Generation size and call size are independent.
+{
+ const LIMIT=56*1024,enc=x=>new TextEncoder().encode(JSON.stringify(x)).length;
+ const full=()=>({assessmentVersion:1,ratingBasis:'r'.repeat(700),probability4PlusBasis:'p'.repeat(400),tasteSignals:Array.from({length:5},(_,i)=>({direction:'supports',signal:'s'.repeat(215)+i})),risks:[{risk:'k'.repeat(100),severity:'low'}],uncertainties:['u'.repeat(100)],research:{status:'not_attempted'},sources:[{kind:'model_knowledge',ref:'model_knowledge',usedFor:'u'.repeat(60)}],conflicts:[],model:{status:'reported',id:'synthetic-model'}});
+ const bytes=enc(full());assert.ok(bytes<=3000&&bytes>2900,'the test assessment is near the cap: '+bytes);
+ const fat=()=>({...w.fingerprint,strengths:Array.from({length:6},(_,i)=>'a'.repeat(400)+i),risks:Array.from({length:6},(_,i)=>'b'.repeat(400)+i)});
+ const items=n=>Array.from({length:n},(_,i)=>({filmId:'g'+i,fingerprint:fat(),prediction:w.prediction,assessment:full()}));
+ const ten=items(10),tenBytes=enc({items:ten});assert.ok(tenBytes>LIMIT,'ten films with assessments are over the bound: '+tenBytes);
+ const refused=await call('prediction_batch_validate',{items:ten});assert.equal(refused.isError,true);assert.ok(/byte limit/.test(refused.text));
+ const five=items(5),fiveBytes=enc({items:five});assert.ok(fiveBytes<LIMIT,'five fit: '+fiveBytes);
+ const ok=await call('prediction_batch_validate',{items:five});assert.equal(ok.isError,false,ok.text.slice(0,200));assert.equal(ok.data.counts.valid,5);
+ console.log('group bounds: assessment '+bytes+' B, ten films '+tenBytes+' B (refused), five films '+fiveBytes+' B (accepted)');
+}
 console.log('prediction-assessment: closed validation with every code, dry run and preflight parity, create-only sidecar and its order, replay, conflict, fault, crash window and privacy passed');
