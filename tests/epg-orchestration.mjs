@@ -317,33 +317,82 @@ function runner(h,{startAt}){
 }
 
 // 7a. AIR-464: a Workflow of today adopts yesterday's durable seal (ADR 0092). Finishing it never certifies today's control; the next
-// action starts today's run, and only that completion sets doneAt.
-{
- const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+// action starts today's run, and only that completion sets doneAt. Every variant of the frozen provenance of the adopted seal.
+async function adopt({sync,startAt='2026-11-08T16:00:00Z',runKey='2026-11-08',metadataSteps=1,snapshots=null}){
+ const h=cloudflare({pipeline:pipeline({metadataSteps})});
  const {epg,env,state}=h;
- const due=Date.parse('2026-11-08T16:00:00Z');
- state.sync={runId:'old',stage:'seal',startedAt:at(due-20*H),updatedAt:at(due-1*H),seal:{phase:'queue'}};
+ const due=Date.parse(startAt);
+ state.sync=sync(due);
  const r=runner(h,{startAt:due});
+ const original=r.step.do;
+ r.step.do=async(name,fn)=>{const out=await original(name,fn);if(snapshots&&name.startsWith('act'))snapshots.push({name,out,control:await control(h)});return out;};
  assert.equal((await epg.ensure(env,{now:due})).started,true);
- const outcome=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
- eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_0'});
- const done=await control(h);
- assert.equal(done.publishedRunId,'run-1','only the run of today certifies the control');
- const paths=state.calls.map(c=>c.pathname);
- assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,'today run starts once, after the old seal');
- assert.ok(paths.indexOf('/api/sync/start')>0);
+ const outcome=await epg.run(env,{runKey,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ return {h,state,outcome,r,paths:state.calls.map(c=>c.pathname)};
 }
-// 7a2. A seal with no frozen start fails closed and never completes the control.
+const oldSeal=extra=>due=>({runId:'old',stage:'seal',startedAt:at(due-20*H),updatedAt:at(due-1*H),seal:{phase:'queue'},...extra});
+{
+ for(const extra of [{},{runKey:'2026-11-07'}]){
+  const snaps=[];
+  const {h,state,outcome,paths}=await adopt({sync:oldSeal(extra),snapshots:snaps});
+  eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_0'});
+  const first=snaps[0];
+  assert.equal(first.out.kind,'continue','the foreign seal completes as continue, not stop:complete');
+  assert.equal(first.control.doneAt,null,'no false doneAt after the foreign seal');
+  assert.equal(first.control.publishedRunId,null,'no false publishedRunId after the foreign seal');
+  assert.notEqual(first.control.phase,'done');
+  assert.equal(state.sync.stage,'complete');
+  const done=await control(h);
+  assert.equal(done.publishedRunId,'run-1','only the run of today certifies the control');
+  assert.ok(done.doneAt);
+  assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,'exactly one successor start');
+  assert.ok(paths.indexOf('/api/sync/start')>0,'the successor starts after the old seal step');
+ }
+}
+// 7a2. Malformed, contradicting or missing frozen provenance fails closed: the old seal is not stepped, nothing is certified.
+for(const [label,extra] of [['malformed runKey',{runKey:'tomorrow'}],['non-string runKey',{runKey:20261108}],['runKey contradicts startedAt',{runKey:'2026-11-08'}],['no frozen day',{startedAt:undefined}]]){
+ const snaps=[];
+ const {h,state,paths}=await adopt({sync:due=>oldSeal(extra)(due),snapshots:snaps});
+ const c=await control(h);
+ assert.equal(c.doneAt,null,label+': no doneAt');
+ assert.notEqual(c.publishedRunId,'old',label+': the foreign run is not published for this control');
+ assert.equal(c.failure?.code,'evidence_contradictory',label+': classified');
+ assert.ok(!paths.includes('/api/sync/epg'),label+': the old seal is not stepped');
+ assert.equal(state.sync.runId,'old',label+': the old run is untouched');
+}
+// 7a3. A same-day seal with a matching frozen runKey keeps the normal completion.
+{
+ const {h,paths}=await adopt({sync:due=>({runId:'old',stage:'seal',runKey:'2026-11-08',startedAt:at(due-1*H),updatedAt:at(due-1*H),seal:{phase:'queue'}})});
+ const c=await control(h);
+ assert.equal(c.publishedRunId,'old');assert.ok(c.doneAt);
+ assert.ok(!paths.includes('/api/sync/start'),'no second run on the normal same-day path');
+}
+// 7a4. Midnight and DST rollover: a seal frozen at 23:30 Madrid before the autumn DST end (2026-10-25) is the previous Madrid day, and
+// after the shift the same instant boundary does not relabel it.
+{
+ const snaps=[];
+ const {h,paths}=await adopt({startAt:'2026-10-25T16:00:00Z',runKey:'2026-10-25',sync:due=>({runId:'old',stage:'seal',startedAt:'2026-10-24T21:30:00Z',updatedAt:at(due-1*H),seal:{phase:'queue'}}),snapshots:snaps});
+ assert.equal(snaps[0].out.kind,'continue');assert.equal(snaps[0].control.doneAt,null);
+ assert.equal((await control(h)).publishedRunId,'run-1');
+ assert.equal(paths.filter(p=>p==='/api/sync/start').length,1);
+}
+// 7a5. Interruption after the old seal published but before the control CAS, and read-after-unknown: the control still shows no
+// foreign certification, and a replayed action neither re-steps the old run nor starts a second successor.
 {
  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
  const {epg,env,state}=h;
  const due=Date.parse('2026-11-08T16:00:00Z');
- state.sync={runId:'old',stage:'seal',updatedAt:at(due-1*H),seal:{phase:'queue'}};
+ state.sync={runId:'old',stage:'complete',startedAt:at(due-20*H),updatedAt:at(due-1*H)};
  const r=runner(h,{startAt:due});
  await epg.ensure(env,{now:due});
- await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
- assert.ok(!(await control(h)).doneAt||(await control(h)).publishedRunId!=='old');
- assert.ok(!state.calls.some(c=>c.pathname==='/api/sync/epg'&&c.body?.runId==='old'));
+ const outcome=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_0'});
+ const paths=state.calls.map(c=>c.pathname);
+ assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,'a complete run of another day is never the success; one successor starts');
+ assert.equal((await control(h)).publishedRunId,'run-1');
+ const replay=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},runner(h,{startAt:r.clock()}).step,{now:()=>r.clock(),clock:()=>r.clock(),random:()=>0.5});
+ assert.equal(replay.reason,'complete');
+ assert.equal(state.calls.filter(c=>c.pathname==='/api/sync/start').length,1,'a replay starts nothing');
 }
 // 7b. ADR 0103: a projector window of up to 300 s answers `busy` (kind projector_window) at the EPG stage and again at the seal. The same
 // run waits to each deadline, charges no failure or retry budget, starts no second run and publishes once. The pipeline throws if a step
