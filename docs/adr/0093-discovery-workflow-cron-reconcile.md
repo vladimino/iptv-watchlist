@@ -51,4 +51,4 @@ Reversible: code. Not reverted by code rollback: a Workflow instance, the execut
 
 ## Follow-ups
 
-Production activation and prompt cutover remain gated on [AIR-324](https://trello.com/c/kNtaEbm8). Flag removal is [AIR-325](https://trello.com/c/Q416Mx7v).
+Production activation and prompt cutover remain gated on [AIR-324](https://trello.com/c/kNtaEbm8). Flag removal is [AIR-325](https://trello.com/c/Q416Mx7v). Accepted [ADR 0135](0135-epg-priority-discovery-pause.md) adds a refusal: while the EPG-priority pause is open, reconcile does not create an instance. That record is Accepted, not implemented and not activated, and changes no runtime behaviour.

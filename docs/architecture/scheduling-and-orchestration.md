@@ -141,6 +141,32 @@ The projector's strict generation pin cannot pass while Discovery writes about s
 
 **Marker fence on every batch ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md)).** Every `on` run reads the `film_person_authority` marker first (not `r2`/`prepared`: deferred `authority_unavailable`), and every per-entity and grouped write batch asserts mode, `cutover='open'` and generation inside the batch, so a marker move fails the batch whole (`authority_moved`).
 
+### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), Accepted, not implemented, not activated)
+
+Nothing in this section runs. The Worker does not import `src/domain/epg-priority-pause.js`, and there is no pause row in production. The sequence is the shape recorded for the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid by a predicate on the lease write, with no business TTL and no cron at that minute. `sealArchive` moves the Discovery pin first and does not lift the pause. `publishGeneration` later switches the pointer and writes `published_epg_authority.madrid_run_key` from `sync.json.runKey`, frozen when that sync run started. A later Workflow that resumes the seal does not relabel the day with its own `runKey`. The day is not `published_at` and not the live orchestration control. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here. GitHub's own SVG of this figure is a reviewer's check of the blob; a headless session does not run GitHub's Mermaid enricher.
+
+```mermaid
+sequenceDiagram
+    participant Disc as Discovery admission
+    participant D1 as D1
+    participant EPG as EPG publication
+    Note over Disc,EPG: Accepted, not live. No business TTL. No 16:55 cron.
+    Disc->>D1: New acquire after 16:55, pointer unchanged
+    D1-->>Disc: Lease unchanged. epg_priority, no failure
+    Note over D1: Second statement sets paused while the predicate holds
+    Note over Disc: In-flight renew skips the predicate
+    EPG->>D1: Acquire while a holder is live
+    D1-->>EPG: lease_held, no failure
+    Note over EPG: Holder finishes or the 90 s lease expires
+    EPG->>D1: Acquire, exempt from the pause
+    Note over D1: sealArchive moves the pin. Pointer stays previous.
+    EPG->>D1: publishGeneration moves the pointer and clears the row if the pin matches
+    Disc->>D1: Previous programme id acquire
+    D1-->>Disc: stale_generation, no lease
+    Disc->>D1: Published programme id acquire
+    D1-->>Disc: admitted
+```
+
 ## The separate ratings pipeline
 
 **EPG executor (AIR-348, active).** [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md) (Accepted) adds a Cloudflare EPG Workflow that drives the existing `/api/sync/*` steps in-process after an owner-approved three-step switch (`external`, `switching`, `cloudflare`; epoch fence asserted inside the D1 pointer batch). The switch is done: `epg_status` read `mode=cloudflare`, epoch 1, and the first natural run was accepted on 8 November 2026 ([evidence](../evidence/orchestration/epg-first-natural-run-air-348-2026-11-08.md)); the Daily Task is disabled. The diagram below shows the retired Daily Task and is retained as the rollback flow. The hourly cron calls an inert `EpgOrchestration.ensure` next to the projector, Ratings `ensure`, the Discovery reconcile and the monitor, each independent and none sharing a lease; the cron expression is `0 * * * *` since the separate owner-approved AIR-348 change (it was `37 * * * *`). The Ratings Cloudflare executor shares the 17:00 Europe/Madrid logical due time ([ADR 0101](../adr/0101-ratings-logical-due-time-1700.md), which supersedes the 17:30 of ADR 0090 in that one respect); the diagram below shows the legacy Ratings Task and is unchanged.
