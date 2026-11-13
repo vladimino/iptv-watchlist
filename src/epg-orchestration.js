@@ -305,9 +305,10 @@ const EpgOrchestration=(()=>{
  async function drive(fe,control,{now}){
   const runKey=control.runKey;
   let run=await loadJSON(fe,'sync.json');
-  const started=run&&Number.isFinite(Date.parse(run.startedAt))?dayOf(Date.parse(run.startedAt)):null;
+  const started=run&&/^\d{4}-\d{2}-\d{2}$/.test(String(run.runKey||''))?run.runKey:run&&Number.isFinite(Date.parse(run.startedAt))?dayOf(Date.parse(run.startedAt)):null;
   // Read-after-unknown: a run of this Madrid date that already completed is the success, whoever drove it.
   if(run?.stage==='complete'&&started===runKey&&!run.error)return {finished:true,runId:run.runId,run,published:run.runId};
+  if(run&&run.stage==='seal'&&started===null)return {failure:{code:'evidence_contradictory'}};
   const usable=run&&(run.stage==='seal'||(['metadata','epg'].includes(run.stage)&&Number.isFinite(Date.parse(run.updatedAt||''))&&now-Date.parse(run.updatedAt)<EXTERNAL_FRESH_MS));
   if(!usable){
    const reply=await body(await postSync(fe,null,'/api/sync/start',{},'internal'));
@@ -328,7 +329,12 @@ const EpgOrchestration=(()=>{
   }
   if(reply.reason==='programme_changed'||reply.discovery?.reason==='programme_changed')return {...base,failure:{code:'stale_generation_write'}};
   if(reply.state==='error'||reply.discovery?.state==='error')return {...base,failure:{code:'step_failed'}};
-  if(reply.stage==='complete'||after?.stage==='complete')return {...base,finished:true,published:after?.runId||run.runId};
+  if(reply.stage==='complete'||after?.stage==='complete'){
+   // AIR-464: a run adopted from another Madrid day (ADR 0092 resume) publishes that day, not this control's day. Its completion never
+   // certifies this control; the next action finds a complete run of another day, which is not usable, and starts this day's run.
+   if(started!==runKey)return {...base,note:'foreign_run_sealed'};
+   return {...base,finished:true,published:after?.runId||run.runId};
+  }
   return base;
  }
  async function writeControl(env,adm,next){

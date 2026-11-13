@@ -316,6 +316,35 @@ function runner(h,{startAt}){
  assert.equal(model.health,'healthy');assert.equal(model.published,'run-1');assert.equal(model.mode,'cloudflare');assert.equal(model.sideEffects,'none');
 }
 
+// 7a. AIR-464: a Workflow of today adopts yesterday's durable seal (ADR 0092). Finishing it never certifies today's control; the next
+// action starts today's run, and only that completion sets doneAt.
+{
+ const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+ const {epg,env,state}=h;
+ const due=Date.parse('2026-11-08T16:00:00Z');
+ state.sync={runId:'old',stage:'seal',startedAt:at(due-20*H),updatedAt:at(due-1*H),seal:{phase:'queue'}};
+ const r=runner(h,{startAt:due});
+ assert.equal((await epg.ensure(env,{now:due})).started,true);
+ const outcome=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_0'});
+ const done=await control(h);
+ assert.equal(done.publishedRunId,'run-1','only the run of today certifies the control');
+ const paths=state.calls.map(c=>c.pathname);
+ assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,'today run starts once, after the old seal');
+ assert.ok(paths.indexOf('/api/sync/start')>0);
+}
+// 7a2. A seal with no frozen start fails closed and never completes the control.
+{
+ const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+ const {epg,env,state}=h;
+ const due=Date.parse('2026-11-08T16:00:00Z');
+ state.sync={runId:'old',stage:'seal',updatedAt:at(due-1*H),seal:{phase:'queue'}};
+ const r=runner(h,{startAt:due});
+ await epg.ensure(env,{now:due});
+ await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ assert.ok(!(await control(h)).doneAt||(await control(h)).publishedRunId!=='old');
+ assert.ok(!state.calls.some(c=>c.pathname==='/api/sync/epg'&&c.body?.runId==='old'));
+}
 // 7b. ADR 0103: a projector window of up to 300 s answers `busy` (kind projector_window) at the EPG stage and again at the seal. The same
 // run waits to each deadline, charges no failure or retry budget, starts no second run and publishes once. The pipeline throws if a step
 // comes before the deadline it was given, so the wait is proved by the run finishing, not assumed.
