@@ -38,6 +38,7 @@ assert.ok(/Для операций с IPTV используй ТОЛЬКО/.test
 assert.ok(/не второй поисковый проход/i.test(prompt),'research gate must not duplicate the search budget');
 assert.ok(/search_snippet допустим БЕЗ прочтения страницы/.test(prompt),'search snippet is not a read article');
 assert.ok(/gateStatus=blocked \(при этом assessment\.research\.status=not_attempted\)/.test(prompt),'unavailable search audit is distinct from assessment research status');
+for(const val of [prompt,dry])assert.ok(/attempted_found, но snippets сами по себе НЕ дают substantive quality gate/.test(val)&&/web_research в sources ЗАПРЕЩЁН/.test(val),'web_research snippets imply attempted_found, not substantive research and not blocked');
 assert.ok(!/другой v2 Task или ещё не выключенный legacy/.test(prompt),'scheduled prompt cannot assume historic enabled state');
 assert.ok(!/FROZEN_MANIFEST|tmdb_800815|5bd010a00102b73a9c8bd24ef67cb56ca17f86918aca7d4715de20752e5dca7e/.test(prompt),'production uses only the live batch manifest, never frozen S5-C test inputs');
 assert.ok(/prediction_batch_start\(\{trigger:'scheduled', manifestSize\}\)/.test(prompt),'production starts its own scheduled batch manifest');
