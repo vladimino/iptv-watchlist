@@ -1,6 +1,6 @@
 # AIR-450: what the submit paths do today with extra prediction content (13 Nov 2026)
 
-**Status: offline measurement on the real Worker code over a sqlite D1 stand-in and an in-memory R2; no production read or write, no model call, no Scheduled Task.** It is the factual base of [ADR 0132](../../adr/0132-prediction-assessment-artifact.md) (Proposed) and of the [prediction assessment contract draft](../../reference/api/prediction-assessment.md). The fixtures are synthetic; nothing of the experiment's films, manifest, profile, fingerprints or predictions appears here.
+**Status: offline measurement on the real Worker code over a sqlite D1 stand-in and an in-memory R2; no production read or write, no model call, no Scheduled Task.** It is the factual base of [ADR 0132](../../adr/0132-prediction-assessment-artifact.md) (Accepted) and of the [prediction assessment contract](../../reference/api/prediction-assessment.md). The fixtures are synthetic; nothing of the experiment's films, manifest, profile, fingerprints or predictions appears here.
 
 ## Question
 
