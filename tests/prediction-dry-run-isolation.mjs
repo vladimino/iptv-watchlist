@@ -69,6 +69,16 @@ const by=Object.fromEntries(m1.data.results.map(x=>[x.filmId,x]));
 assert.equal(by[pick[0]].status,'would_write');assert.equal(by[pick[2]].status,'validation_failure');assert.equal(by[pick[3]].status,'validation_failure');assert.equal(by.tmdb_9999.status,'not_eligible');
 for(const id of pick.slice(0,2))assert.equal((await dry({items:items([id])})).data.results[0].status,'would_write');
 {const r=(await dry({items:items([predicted[0]])})).data.results[0];assert.equal(r.status,'already_current');assert.equal(r.liveInput,'not_eligible','a film that already has a current prediction is reported as current and never regenerated');}
+// ADR 0132: a dry run with an assessment validates it and reports what a real submit would do, while every write stays a fault (the same isolation as above).
+{
+ const a={assessmentVersion:1,ratingBasis:'basis',probability4PlusBasis:'basis',tasteSignals:[],risks:[],uncertainties:[],research:{status:'not_attempted'},sources:[],conflicts:[],model:{status:'unavailable'}};
+ const withA=(ids,x=a)=>items(ids).map(i=>({...i,assessment:x}));
+ const r=await dry({items:[...withA([pick[0]]),...withA([predicted[0]]),...withA([pick[1]],{...a,extra:1})]});assert.equal(r.isError,false,JSON.stringify(r.data).slice(0,300));
+ const got=r.data.results.map(x=>[x.status,x.assessment]);
+ assert.equal(JSON.stringify(got),JSON.stringify([['would_write','would_write'],['already_current','not_applicable'],['validation_failure','not_applicable']]));
+ assert.equal(r.data.results[2].validation.stage,'assessment_schema');assert.equal(JSON.stringify(r.data.results[2].validation.issues),JSON.stringify([{path:'assessment.extra',code:'unknown_field'}]));
+ assert.equal(JSON.stringify((await dry({items:withA([pick[0]])})).data),JSON.stringify((await dry({items:withA([pick[0]])})).data),'a repeated trial answers the same');
+}
 // mismatches: another manifest hash, a changed contract, a malformed hash, no runId, epoch 0
 const other=await dry({items:items([pick[0]]),manifestHash:'f'.repeat(64)});assert.equal(other.isError,false);
 assert.equal((await dry({items:items([pick[0]]),manifestHash:'xyz'})).isError,true);

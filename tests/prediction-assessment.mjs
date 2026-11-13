@@ -108,6 +108,7 @@ let firstDigest;
  assert.deepEqual(Object.keys(body.confirmed).sort(),['assessmentSha256','fingerprintHash','predictionGeneratedAt','recordedAt','runId','tasteProfile','trigger']);
  assert.deepEqual(Object.keys(body.callerReported).sort(),['conflicts','model','research','sources']);assert.deepEqual(Object.keys(body.assessment).sort(),['assessmentVersion','probability4PlusBasis','ratingBasis','risks','tasteSignals','uncertainties']);
  assert.equal(body.callerReported.model.id,'synthetic-model');assert.equal(body.confirmed.runId,m.runId);
+ console.log('sidecar object: '+new TextEncoder().encode(JSON.stringify(body)).length+' B for a caller assessment of '+new TextEncoder().encode(JSON.stringify(asm())).length+' B');
  assert.ok(!dumpAll().includes(SECRET),'no assessment text in D1, the bundle, the view index, Events or any other object');
  assert.ok(!w.logs.join('\n').includes(SECRET),'no assessment text in any log line');
  firstDigest=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0].d).submitted;
