@@ -449,7 +449,7 @@ if(section('11')){
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==adapters&&fs.readFileSync(full,'utf8').includes('canonical-producer-adapters'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,['src/canonical-dictionary-producer.js','src/canonical-epg-person-producer.js','src/canonical-epg-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js'],'only the dormant EPG and dictionary-store producer layers, the dormant Person adapters (ADR 0126) and the person_mutation unit (ADR 0130) import the adapter');
+ assert.deepEqual(importers,['src/canonical-dictionary-producer.js','src/canonical-epg-person-producer.js','src/canonical-epg-producer.js','src/canonical-film-external-ids-producer.js','src/canonical-person-adapters.js','src/canonical-person-mutation-producer.js'],'only the dormant EPG and dictionary-store producer layers, the dormant Person adapters (ADR 0126), the person_mutation unit (ADR 0130) and the film_external_ids unit (ADR 0133) import the adapter');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-adapters'),file+' does not bundle it');
  const text=fs.readFileSync(path.join(SRC,'canonical-producer-adapters.js'),'utf8');
  const code_=text.replace(/\/\/.*$/gm,'');

@@ -7,7 +7,7 @@
 // Owner decision of 13 Nov 2026 (AIR-374, Trello comment 6af6e6bb4d9194f1238e6f98): ACCEPT credits_not_pruned_by_the_planner, updated_at_is_write_time, held_localization_not_recorded,
 // noop_write_keeps_updated_at, canonical_identity_requires_trusted_tmdb and credit_ordinals_kept (and, in the Film writers list, blank_never_overwrites, reviewed_owner_rows_protected and
 // redirected_film_refused). external_ids_not_pruned_by_the_planner stays `draft`: it is a mandatory FIX before the H2 marker flip (a stale external id can break identity resolution), and
-// the producer delivery that owns the change removes or deactivates the dropped ids, with a test, instead of the owner accepting the difference. Acceptance changes no runtime behaviour.
+// the producer delivery that owns the change removes the dropped ids, with a test, instead of the owner accepting the difference: that unit is `film_external_ids` (ADR 0133, dormant); the exception stays `draft` until a producer is wired to call it. Acceptance changes no runtime behaviour.
 export const EXTRA_EXCEPTIONS=Object.freeze([
  {id:'credits_not_pruned_by_the_planner',status:'accepted',area:'film_person_credit',rule:'The projector rewrites the whole credit list of a Film from its source; the canonical planner only upserts, so a credit the source dropped stays until an explicit removal.'},
  {id:'external_ids_not_pruned_by_the_planner',status:'draft',area:'film_external_id',rule:'The projector replaces the full external id set of a Film; the canonical planner only upserts, so an id the source dropped stays until an explicit removal.'},
