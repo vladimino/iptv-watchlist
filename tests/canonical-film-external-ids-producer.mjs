@@ -79,7 +79,18 @@ const OPEN={origin:'epg',event:'epg:run-1',now:()=>T};
  const many=count=>Array.from({length:count},(_,i)=>({scheme:'imdb',value:'tt'+i}));
  assert.equal(filmExternalIdsContent(unit({externalIds:many(FILM_EXTERNAL_IDS_PER_UNIT_MAX)})).externalIds.length,FILM_EXTERNAL_IDS_PER_UNIT_MAX);
  assert.throws(()=>filmExternalIdsContent(unit({externalIds:many(FILM_EXTERNAL_IDS_PER_UNIT_MAX+1)})),code('film_person_bounded'));
- assert.equal(filmExternalIdsContent(unit({externalIds:undefined})).externalIds.length,0,'an empty source set is explicit and valid');
+ // The source set must be an explicitly PRESENT own array: `[]` is an intentional empty set, but a missing, undefined, null or non-array field is a malformed or partial input, never "the source has no ids".
+ assert.equal(filmExternalIdsContent(unit({externalIds:[]})).externalIds.length,0,'an explicit empty array is the intentional empty source set');
+ {
+  const {externalIds:_omitted,...omitted}=unit();
+  assert.ok(!Object.hasOwn(omitted,'externalIds'));
+  assert.throws(()=>filmExternalIdsContent(omitted),code('film_person_invalid'),'omitted');
+  assert.throws(()=>filmExternalIdsContent(unit({externalIds:undefined})),code('film_person_invalid'),'undefined');
+  assert.throws(()=>filmExternalIdsContent(unit({externalIds:null})),code('film_person_invalid'),'null');
+  assert.throws(()=>filmExternalIdsContent(unit({externalIds:{}})),code('film_person_invalid'),'an object');
+  assert.throws(()=>filmExternalIdsContent(Object.assign(Object.create({externalIds:[]}),omitted)),code('film_person_invalid'),'an inherited property is not an own property');
+  await assert.rejects(()=>filmExternalIdsDigest(omitted),code('film_person_invalid'));
+ }
  assert.ok(FILM_EXTERNAL_IDS_REFUSALS.has('film_person_identity_conflict')&&FILM_EXTERNAL_IDS_REFUSALS.has('identity_collision')&&FILM_EXTERNAL_IDS_REFUSALS.has('film_person_redirect'));
 }
 
@@ -125,6 +136,31 @@ for(const stage of ['legacy','r2','prepared']){
  const otherEvent=await applyFilmExternalIds(env,{...OPEN,event:'epg:run-2',input:unit({at:'2031-01-01T00:00:00.000Z'})});
  assert.equal(otherEvent.state,'noop');assert.notEqual(otherEvent.requestId,out.requestId,'the event is part of the request id');
  assert.equal(dump(file),snapshot2);
+}
+
+// 3b. A malformed or PARTIAL input never prunes: with the marker `open` and stored ids in the owned scheme, an input whose `externalIds` is omitted, undefined, null or not an array is refused `film_person_invalid` BEFORE any receipt or batch; the
+// stored ids, the Film, the revision and the receipts are unchanged and no batch reached the database. Only an explicit `[]` is the empty source set.
+{
+ const file=database('open'),env=envOf(file);
+ seedFilm(file,1,{identity:'tmdb:603',ids:[['tmdb','603',1,0],['imdb','tt1'],['imdb','tt2'],['letterboxd','abc',1,0]]});
+ const before=dump(file);
+ const {externalIds:_omitted,...omitted}=unit({schemes:['imdb']});
+ for(const [label,input] of [['omitted',omitted],['undefined',unit({schemes:['imdb'],externalIds:undefined})],['null',unit({schemes:['imdb'],externalIds:null})],['a string',unit({schemes:['imdb'],externalIds:'tt1'})],['an object',unit({schemes:['imdb'],externalIds:{}})],['inherited',Object.assign(Object.create({externalIds:[]}),omitted)]]){
+  await assert.rejects(()=>applyFilmExternalIds(env,{...OPEN,input}),code('film_person_invalid'),label);
+  await assert.rejects(()=>planFilmExternalIds(env,input),code('film_person_invalid'),label+' (plan)');
+  assert.equal(dump(file),before,label+': nothing changed');assert.equal(env.DB.calls.batches,0,label+': no batch reached the database');
+  assert.equal(one(file,'SELECT COUNT(*) FROM canonical_write_receipt'),0,label+': no receipt');assert.deepEqual(pairs(file),['imdb:tt1','imdb:tt2','letterboxd:abc','tmdb:603'],label+': every stored id is still there');
+ }
+ // the reconcile path treats a re-plan that omits the field as a moved or malformed source, never as an empty one
+ const target={kind:'film',id:FID(1)},digest=await filmExternalIdsDigest(unit({schemes:['imdb'],externalIds:[]}));
+ const receipt={operation:'film_external_ids',target,contentDigest:digest,requestId:'epg:film_external_ids:x'};
+ assert.equal(await filmExternalIdsOperation({replan:async()=>omitted}).revalidate(env,receipt),'stale');
+ assert.deepEqual(await filmExternalIdsOperation({replan:async()=>omitted}).readback(env,target,receipt),{disposition:'abandon',errorClass:'producer_source_changed'},'a re-plan without the field has no digest: a typed abandon, never an empty source');
+ await assert.rejects(()=>filmExternalIdsOperation({replan:async()=>omitted}).replay(env,receipt,{requestId:receipt.requestId,attempt:2,target,currentRevision:0}),code('film_person_invalid'));
+ assert.equal(dump(file),before);assert.equal(env.DB.calls.batches,0);
+ // and the intentional empty set still prunes, so the distinction is the whole point
+ assert.equal((await applyFilmExternalIds(env,{...OPEN,input:unit({schemes:['imdb'],externalIds:[]})})).state,'applied');
+ assert.deepEqual(pairs(file),['letterboxd:abc','tmdb:603']);
 }
 
 // 4. An EMPTY source set with owned schemes removes every stored id of those schemes (explicit), and only those; a stored id the source still lists keeps its trust, conflict flag and provenance; a Film with nothing to change is a no-op.

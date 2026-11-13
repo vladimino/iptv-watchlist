@@ -7,7 +7,7 @@
 // WHY A NEW KIND. `film_mutation` is also the kind of the Discovery admission and ADR 0126 decision 2 keeps one registry spec per kind, so the Film external-id unit has its own closed kind, `film_external_ids`, exactly as `person_mutation` has its own.
 // WHAT THE UNIT OWNS. Not the whole external-id set of a Film (other writers add ids too: the Letterboxd id of a rated admission, owner ids), but the ids of the SCHEMES THE SOURCE OWNS. The input names them (`schemes`, non-empty) and every source id
 // must be in one of them. Inside those schemes the unit makes the Film's stored set equal to the source set (add what is missing, remove what the source dropped); an id of any other scheme is never touched. An empty source set with a non-empty
-// `schemes` therefore removes every stored id of those schemes, which is the only way an id can leave, and it is explicit.
+// `schemes` therefore removes every stored id of those schemes, which is the only way an id can leave, and it is explicit: `externalIds` must be present as an own array property, so `[]` means "the source lists none" while an omitted, undefined or null field is refused `film_person_invalid`.
 // WHAT IT NEVER REMOVES OR WRITES (typed refusals BEFORE any receipt, never a silent skip):
 //   - an id the Film's identity stands on: the trusted tmdb id of `film.canonical_identity` (`tmdb:<n>`) and the tmdb id of the Film's rated admission (`film_rated_admission.tmdb`). A source that drops one is refused `film_person_identity_conflict`; the owner or
 //     the dictionary decides that, a producer does not. Silent loss of a primary identity is not acceptable.
@@ -41,14 +41,16 @@ const keyOf=(scheme,value)=>JSON.stringify([scheme,String(value)]);
 // {schemes:[...] (a set, sorted), externalIds:[{scheme,value,trusted,conflicting,provenance}] (a set, sorted)}. The write clock `at` is not content.
 export function filmExternalIdsContent(input){
  if(!plain(input)||typeof input.id!=='string'||!input.id.startsWith('film:')||input.id.length<=5)throw failed('film_person_invalid');
- if(!Array.isArray(input.schemes)||!input.schemes.length||(input.externalIds!==undefined&&!Array.isArray(input.externalIds)))throw failed('film_person_invalid');
+ // The source set must be PRESENT and an array (an own property): `[]` is an intentional, authoritative empty set and prunes the owned schemes, but an omitted, undefined or null `externalIds` is a malformed or partial input and is refused before any
+ // receipt, read-for-write or batch. A missing field is never read as "the source has no ids".
+ if(!Array.isArray(input.schemes)||!input.schemes.length||!Object.hasOwn(input,'externalIds')||!Array.isArray(input.externalIds))throw failed('film_person_invalid');
  const schemes=[];
  for(const scheme of input.schemes){
   if(typeof scheme!=='string'||!SCHEME.test(scheme)||schemes.includes(scheme))throw failed('film_person_invalid');
   schemes.push(scheme);
  }
  const externalIds=[],seen=new Set();
- for(const item of input.externalIds||[]){
+ for(const item of input.externalIds){
   if(!plain(item)||!filled(item.scheme)||!schemes.includes(item.scheme)||!(typeof item.value==='string'||typeof item.value==='number')||!filled(String(item.value)))throw failed('film_person_invalid');
   const key=keyOf(item.scheme,item.value);
   if(seen.has(key))throw failed('film_person_invalid');
