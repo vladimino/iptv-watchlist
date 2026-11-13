@@ -102,7 +102,7 @@ const FILE_SITES={
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:12,wrapper:47,dynamic:33},
+ 'src/enrichment.js':{r2:13,wrapper:47,dynamic:33}, // ADR 0132: +1 create-only put of the prediction assessment sidecar; it is no projector input (the projector reads film state, the bundle and the view index, never predictions/assessments/)
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},

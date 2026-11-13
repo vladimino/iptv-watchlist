@@ -47,6 +47,8 @@ The historical archive is not live production. Offline import receipts, schema c
 
 The prediction family is portable only when every prediction record links an immutable version object. Records written before that rule were linked by a one-time, separately approved materialization inside the Worker (planned from a fenced snapshot, written under the prediction writer lease) that stayed within `worker <--> r2`; see [ADR-0026](../adr/0026-historical-prediction-version-materialization.md). It ran on 28 October 2026, before the backfill and not as part of it, and its route is retired ([ADR 0050](../adr/0050-retire-prediction-materialization-route.md)).
 
+The batch runner v2 may also write one create-only R2 object per prediction version, `enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json` ([ADR 0132](../adr/0132-prediction-assessment-artifact.md)): a private per-film diagnostic that stays inside `worker <--> r2`, adds no D1 row, pointer, index or projector input (the D1 enrichment projector never reads that prefix) and is read only through the controlled read-only R2 snapshot export, whose full-bucket listing includes the prefix. This changes no node or arrow above.
+
 A fingerprint or prediction bundle stored under a retired Film id, whose survivor holds its own newer payload, is not imported: the importer records it as superseded by the canonical payload and leaves the object in R2 ([ADR-0029](../adr/0029-superseded-redirect-payloads.md)). This is a ledger rule inside the offline import and changes no node or arrow above.
 
 Two R2 families stay R2-only and add no row ([ADR 0061](../adr/0061-discovery-observation-index-and-reconsider.md)):

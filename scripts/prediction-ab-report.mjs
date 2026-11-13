@@ -75,6 +75,9 @@ const prob=f=>f.prediction&&Number.isFinite(f.prediction.probability4Plus)?f.pre
 const int=x=>Number.isInteger(x)?x:null;
 
 // Preflight outcome per film (prediction_batch_validate): counts only. A film is invalid at its first attempt when it needed a second attempt or never became valid.
+// Assessment counts per pass (ADR 0132): presence, size and research outcome only; no text, no URL.
+const assessmentCounts=films=>{const a=films.map(f=>f.assessment).filter(x=>x&&x.sent),b=a.map(x=>x.bytes).filter(Number.isInteger);return {sent:a.length,withWebSources:a.filter(x=>x.webSources>0).length,snippetOnly:a.filter(x=>x.webSources>0&&x.snippetOnlyWebSources===x.webSources).length,withConflicts:a.filter(x=>x.conflicts>0).length,researchFound:a.filter(x=>x.researchStatus==='attempted_found').length,researchBlocked:a.filter(x=>x.researchStatus==='attempted_blocked').length,bytesMax:b.length?Math.max(...b):null,bytesMean:b.length?round(b.reduce((x,y)=>x+y,0)/b.length):null};};
+
 const preflightCounts=films=>{const p=films.filter(f=>f.preflight);return {checked:p.length,invalidFirst:p.filter(f=>f.preflight.attempts>1||!f.preflight.valid).length,recovered:p.filter(f=>f.preflight.attempts>1&&f.preflight.valid).length,unresolved:p.filter(f=>!f.preflight.valid).length};};
 
 export function buildReport(results,{truth=null,modelLabel=null}={}){
@@ -108,7 +111,7 @@ export function buildReport(results,{truth=null,modelLabel=null}={}){
   const t=r.telemetry,tok=t.tokens,q=t.quota;
   const row={groupSize:size,films:films.length,statuses,comparableFilms:okFilms.length,
    excluded:{liveInputChanged:d.changed,staleProfile:d.stale,notValid:films.filter(f=>!validStatus(f)).length},
-   preflight:preflightCounts(films),
+   preflight:preflightCounts(films),assessment:assessmentCounts(films),
    failureReasons:Object.fromEntries(FAILURE_REASONS.map(k=>[k,films.filter(f=>f.submitStatus==='validation_failure'&&(f.failureReason||'unspecified')===k).length])),
    validShare:round(okFilms.length/films.length),sizeRefusals:r.calls.filter(c=>!c.ok).length,profileMismatchCalls:d.mismatchCalls,stoppedReason:r.stoppedReason??null,
    cost:{mcpCalls:r.calls.length,preflightCalls:r.calls.filter(c=>c.kind==='preflight').length,bodyBytes:{total:allOf(bodyBytes)?sum(bodyBytes):null,max:allOf(bodyBytes)?Math.max(...bodyBytes):null},toolMs:allOf(toolMs)?sum(toolMs):null,generationMs:allOf(genMs)?sum(genMs):null,wallMs:int(t.wallMs),
