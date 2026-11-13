@@ -16,6 +16,10 @@ The dormant Film external-id producer unit of [ADR 0133](../../adr/0133-film-ext
 
 The Controller review of the first revision found a blocking safety defect: `externalIds` omitted or undefined was read as an empty source set, so a partial producer input would have planned the removal of every id of the owned schemes (the first revision even asserted that behaviour). Fixed: `externalIds` must be an own array property (`[]` stays the intentional empty set); an omitted, undefined, null, non-array or inherited value is refused `film_person_invalid` before any receipt or batch. Tests: the positive case was replaced by negatives, a new open-marker section proves that stored ids, the Film, the revision, the receipts and the batch calls stay unchanged for six malformed inputs, a re-plan without the field is a typed abandon, and the explicit `[]` still prunes; three mutants cover the rule.
 
+## ADR acceptance
+
+The Controller review required the owner's explicit acceptance of the design choices of ADR 0133 (the first revision marked it Proposed). The owner accepted it on the pull request on 13 Nov 2026 as design approval for the dormant unit; the status is now Accepted. It authorizes no producer wiring, production mutation or H2 marker flip.
+
 ## Not done, not verified
 
 - No producer calls the unit: the call site and the source of the owned schemes and ids in `epgSync` are not decided; that is the EPG producer wiring.
