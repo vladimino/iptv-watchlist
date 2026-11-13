@@ -82,7 +82,7 @@ A fenced call answers `external_writer_fenced` and writes nothing. While the mod
 - Steps: metadata, watchlist, programme download and parse, scan, publication, tail. The XML is streamed in bounded steps and never held whole.
 - Publication is the atomic D1 switch of `programmeRunId`. A failure before it leaves the earlier generation published. After it, reading the pointer decides: if it names this run, the run is published and only the tail remains.
 - Mirror repair writes R2 compatibility mirrors only from the currently published D1 generation. A failed mirror is retried as a tail step and never unpublishes.
-- At most one successful publication per Madrid date. Publication queues the Discovery intent and does not wait for Discovery.
+- At most one successful publication per Madrid date. Publication queues the Discovery intent and does not run Discovery. Proposed [ADR 0135](../adr/0135-epg-priority-discovery-pause.md) lets the publication soft-busy-wait for a live Discovery lease without spending the failure budget; that wait is not implemented.
 - **Implementation (AIR-348, [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md), inert).** `EpgOrchestration` (`src/epg-orchestration.js`): the logical due time is `EPG_SCHEDULE` 17:00 Europe/Madrid; the run key is the Madrid date; the Workflow instance id is `epg_<YYYYMMDD>_<series>`; one action is one existing `/api/sync/start` or `/api/sync/metadata|epg` step called in-process; durable progress is a sync-run checkpoint that moved forward in the same run (stage, metadata cursor, seal phase) or a completed run; a seal `busy` answer sleeps until its own `nextCatchUpAt`; a run of the same date that already completed is the success whoever drove it. The mode and control documents are the `mode` and `control` rows of `epg_orchestration_document`; every published-EPG pointer or replacement batch asserts the `mode` revision it was admitted with (`epgFence`). The external path answers HTTP 409 `switch_in_progress` or `external_writer_fenced`. Read model: the `orchestration` object of `GET /api/status` (MCP `epg_status`). Failure mapping: a `409` run-id conflict is `owner_conflict`, a generation changed under the run is `stale_generation_write`, an unfinished D1 seal that `sync.json` does not name is `evidence_contradictory` (all unsafe, a domain quarantine until the owner clears it); a source, timeout or 5xx failure is transient and resumes the same run after the cooldown.
 
 ### Discovery
@@ -122,6 +122,16 @@ Every authoritative D1 commit carries the epoch and mode it was admitted under a
 | R2 write without a transactional fence | Admission recheck, lease TTL bound, idempotent by construction; never the evidence of progress | Ratings removal events (event key); EPG raw XML (content digest) and R2 mirrors (derived only from the currently published D1 generation); Discovery archive or side objects |
 
 An unknown outcome of an R2 write is read back by key and compared (byte length and SHA-256, or event key) before anything is repeated; unreadable is `evidence_unreadable`. The contract does not claim immediate exclusivity at the epoch increment: exclusivity holds once the drain is verified.
+
+## EPG-priority Discovery pause (proposed, [ADR 0135](../adr/0135-epg-priority-discovery-pause.md))
+
+Not implemented and not activated. The pure contract is `src/domain/epg-priority-pause.js`; the Worker does not import it. While its table is absent, admission is unchanged.
+
+Discovery admission of a new lease closes five minutes before the EPG due instant (16:55 Europe/Madrid while the due time is 17:00) and stays closed until the owed Madrid date is published and `published_programme_run_id` equals that `programmeRunId`. There is no business TTL. An in-flight holder may renew; a new acquire, a reconcile create, a rollover and a manual or admin lease may not. EPG's own acquire is exempt. A failed, quarantined, stalled or missing EPG run keeps the pause; the existing EPG `late` / `stalled` read model and the end-of-day alert are the escalation, and Discovery health for this wait is `waiting`. An owner override admits Discovery for the named owed date only.
+
+The refusal is one D1 statement on the lease (and on the lease-free generation writers), not a check followed by a later write. A 60 s poll tells the caller when to look again and does not lift the pause. Expected contention (`epg_priority`, `projector_window`, `lease_held`, `lost_race`) does not change `consecutive`, `total` or `cooldownUntil` and is not `step_failed`, `unknown` or HTTP 502. When the pause and a projector window both apply, the reason is `epg_priority`, so the window deadline is not the end of the pause. The projector window's own 300 s deadline is unchanged. D1 errors and held or loading authority stay fail-closed. After the handoff, a lease request for any other `programmeRunId` is `stale_generation`.
+
+The diagnostic fields are the reason, the owed date, the lease owner kind (`discovery`, `projector`, `epg`, `none`) and the hold expiry. No Film id, SQL or continuation body.
 
 ## Discovery intent after an EPG publication
 
@@ -205,6 +215,17 @@ Every domain delivery implements the rows that apply to it, against an injected 
 | T28 | Intent write with unknown outcome, then duplicate recovery by `ensure` and by the EPG fast path | Read-back finds the receipt; the second creator loses the CAS and attaches; exactly one series 0 for `programmeRunId`; no second chunk run |
 | T29 | Intent reconstruction with a held, `loading` or unreadable Discovery marker | Nothing written; `authority_held` or `authority_loading` quarantine; EPG unaffected |
 | T30 | Published generation already processed to a terminal outcome | `ensure` does not re-queue it |
+| T31 | Discovery acquire at or after 16:55 Madrid while today's publication is unconfirmed, including when the pause row is still `clear` | `epg_priority`, `wait`; no budget change; no new lease; the same statement arms `paused` |
+| T32 | In-flight holder renews during the pause | renewal allowed; no new admission |
+| T33 | Pause row missing or malformed while the table exists | `evidence_unreadable`, fail-closed; no lease. Table absent: admission unchanged |
+| T34 | Publication pointer committed, Discovery pin not equal | pause stays; no new lease |
+| T35 | Pointer and pin match for the owed day | row `clear` in that batch; only the new `programmeRunId` may acquire; the previous id is `stale_generation` |
+| T36 | Failed, quarantined or stalled EPG, or the due trigger created no instance | pause stays; no TTL; EPG health stays `late` / `stalled` / quarantined; Discovery health is `waiting` |
+| T37 | Midnight, then the next 16:55, with the owed day still unconfirmed | pause stays; the owed date rolls at the next arming instant; an override for the previous date does not apply |
+| T38 | Owner override for the owed date | admission opens for that date only; clearing it closes admission; nothing is published |
+| T39 | Projector window and the pause both active | Discovery waits as `epg_priority`; the window deadline does not lift the pause; EPG soft-busies for the hold it actually met, with no failure budget |
+| T40 | D1 error, or authority held or `loading`, during the pause | fail-closed, as T11; the pause does not swallow it |
+| T41 | Reconcile, rollover, successor create, or manual/admin acquire during the pause | no new instance and no new lease; the in-flight chunk is not killed |
 
 ## Rollout and rollback
 

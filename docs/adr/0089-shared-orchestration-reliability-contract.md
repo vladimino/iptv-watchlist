@@ -175,4 +175,4 @@ Accepting this record approves the architecture only. It does not authorize any 
 
 ## Follow-ups
 
-[AIR-347](https://trello.com/c/j2Ua76yv) (Ratings), [AIR-324](https://trello.com/c/kNtaEbm8) (Discovery), [AIR-348](https://trello.com/c/PUrlzMuH) (EPG) and [AIR-349](https://trello.com/c/VUyampoh) (monitoring) implement and accept this contract. Their status is in Trello.
+[AIR-347](https://trello.com/c/j2Ua76yv) (Ratings), [AIR-324](https://trello.com/c/kNtaEbm8) (Discovery), [AIR-348](https://trello.com/c/PUrlzMuH) (EPG) and [AIR-349](https://trello.com/c/VUyampoh) (monitoring) implement and accept this contract. Their status is in Trello. Proposed [ADR 0135](0135-epg-priority-discovery-pause.md) qualifies the sentence that EPG does not wait for Discovery: EPG still does not run a Discovery chunk, and it may soft-busy-wait for a live Discovery lease. That record is not accepted and changes no runtime behaviour.

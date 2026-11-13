@@ -141,6 +141,30 @@ The projector's strict generation pin cannot pass while Discovery writes about s
 
 **Marker fence on every batch ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md)).** Every `on` run reads the `film_person_authority` marker first (not `r2`/`prepared`: deferred `authority_unavailable`), and every per-entity and grouped write batch asserts mode, `cutover='open'` and generation inside the batch, so a marker move fails the batch whole (`authority_moved`).
 
+### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), proposed, not live)
+
+Nothing in this section runs. The Worker does not import `src/domain/epg-priority-pause.js`, and there is no pause row in production. The sequence is the accepted shape of the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid and stays closed, with no business TTL, until the owed EPG generation is published and the Discovery pin matches that `programmeRunId`. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here.
+
+```mermaid
+sequenceDiagram
+    participant Clock as Madrid clock
+    participant D1 as D1 pause and pointer
+    participant Disc as Discovery admission
+    participant EPG as EPG publication
+    Note over Clock,EPG: Proposed, not live. No business TTL.
+    Clock->>D1: 16:55 Europe/Madrid arms paused
+    Disc->>D1: New chunk acquire
+    D1-->>Disc: epg_priority wait, no failure
+    Note over Disc: In-flight chunk may renew and finish
+    EPG->>D1: Publish when the lease is free
+    D1-->>EPG: Live lease is busy, not a failure
+    EPG->>D1: Pointer and pin commit, row clear
+    Disc->>D1: Old programme id acquire
+    D1-->>Disc: stale_generation, no lease
+    Disc->>D1: New programme id acquire
+    D1-->>Disc: admitted
+```
+
 ## The separate ratings pipeline
 
 **EPG executor (AIR-348, active).** [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md) (Accepted) adds a Cloudflare EPG Workflow that drives the existing `/api/sync/*` steps in-process after an owner-approved three-step switch (`external`, `switching`, `cloudflare`; epoch fence asserted inside the D1 pointer batch). The switch is done: `epg_status` read `mode=cloudflare`, epoch 1, and the first natural run was accepted on 8 November 2026 ([evidence](../evidence/orchestration/epg-first-natural-run-air-348-2026-11-08.md)); the Daily Task is disabled. The diagram below shows the retired Daily Task and is retained as the rollback flow. The hourly cron calls an inert `EpgOrchestration.ensure` next to the projector, Ratings `ensure`, the Discovery reconcile and the monitor, each independent and none sharing a lease; the cron expression is `0 * * * *` since the separate owner-approved AIR-348 change (it was `37 * * * *`). The Ratings Cloudflare executor shares the 17:00 Europe/Madrid logical due time ([ADR 0101](../adr/0101-ratings-logical-due-time-1700.md), which supersedes the 17:30 of ADR 0090 in that one respect); the diagram below shows the legacy Ratings Task and is unchanged.
