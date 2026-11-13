@@ -122,12 +122,12 @@ sequenceDiagram
                 end
                 alt Profile or contract drift after the last submit
                     Client->>MCP: prediction_complete with reason manifest_spent
-                    MCP-->>Client: 409 Profile/Contract changed (fenced; not a false normal complete)
+                    MCP-->>Client: 409 Profile or Contract changed — fenced, not a false normal complete
                     Client->>MCP: prediction_complete with systemic reason profile_changed or runner_aborted
                     MCP->>Queue: Partial stop Event, release lease
                 else Manifest spent with matching profile and contract
                     Client->>MCP: prediction_complete with reason manifest_spent
-                    MCP->>Queue: Normal complete Event once, release lease (global queue may still have ready films)
+                    MCP->>Queue: Normal complete Event once, release lease — global queue may still have ready films
                 end
             end
         end
