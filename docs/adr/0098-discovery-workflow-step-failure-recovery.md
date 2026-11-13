@@ -33,7 +33,7 @@ Revert the code. The cron path and the records are unchanged by this decision.
 
 ## Follow-ups
 
-Proposed [ADR 0135](0135-epg-priority-discovery-pause.md) adds a refusal in front of the successor create: while the EPG-priority pause is open, the wake does not open an instance, and the pause is not a step failure. That record is not accepted and changes no runtime behaviour.
+Accepted [ADR 0135](0135-epg-priority-discovery-pause.md) adds a refusal in front of the successor create: while the EPG-priority pause is open, the wake does not open an instance, and the pause is not a step failure. That record is Accepted, not implemented and not activated, and changes no runtime behaviour.
 
 ## Unsupported assumptions
 

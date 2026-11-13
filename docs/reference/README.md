@@ -3,7 +3,7 @@
 This section describes **currently implemented contracts**, not historical rollout verdicts or action approvals. Source and authorized runtime must be rechecked before operational claims.
 
 - [Production Scheduled Tasks](scheduled-tasks.md) — expected external task schedules, MCP permissions, sequencing and validation; check live registry for current settings. Draft post-cutover Daily and Hourly texts and the proposed single-Task Drift text: [scheduled-task-prompts](scheduled-task-prompts/daily-epg-no-discovery.md), [drift-hourly-only](scheduled-task-prompts/drift-hourly-only.md), and the proposed batch runner v2 Predictions text [hourly-predictions-batch-v2](scheduled-task-prompts/hourly-predictions-batch-v2.md) (none of them is the live registry).
-- [Orchestration reliability](orchestration-reliability.md) — shared contract for Cloudflare-executed EPG, Discovery and Ratings: failure classes, budgets, ownership elements, read model and negative tests. The EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md)) is proposed and not activated.
+- [Orchestration reliability](orchestration-reliability.md) — shared contract for Cloudflare-executed EPG, Discovery and Ratings: failure classes, budgets, ownership elements, read model and negative tests. The EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md)) is Accepted, not implemented and not activated.
 - [Runtime feature flags](feature-flags.md) — effective modes, defaults, interactions and dated production evidence.
 - [API](api/README.md) — MCP, enrichment, prediction runner, diagnostics.
 - [Domain](domain/README.md) — Film/Person identity, scored acceptance, candidate discovery, the data health issue model and the derived taxonomy.

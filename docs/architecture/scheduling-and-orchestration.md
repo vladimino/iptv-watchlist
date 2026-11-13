@@ -141,7 +141,7 @@ The projector's strict generation pin cannot pass while Discovery writes about s
 
 **Marker fence on every batch ([ADR 0116](../adr/0116-projector-marker-and-generation-fence-on-every-batch.md)).** Every `on` run reads the `film_person_authority` marker first (not `r2`/`prepared`: deferred `authority_unavailable`), and every per-entity and grouped write batch asserts mode, `cutover='open'` and generation inside the batch, so a marker move fails the batch whole (`authority_moved`).
 
-### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), proposed, not live)
+### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), Accepted, not implemented, not activated)
 
 Nothing in this section runs. The Worker does not import `src/domain/epg-priority-pause.js`, and there is no pause row in production. The sequence is the shape recorded for the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid by a predicate on the lease write, with no business TTL and no cron at that minute. `sealArchive` moves the Discovery pin first and does not lift the pause. `publishGeneration` later switches the pointer and writes `published_epg_authority.madrid_run_key` from `sync.json.runKey`, frozen when that sync run started. A later Workflow that resumes the seal does not relabel the day with its own `runKey`. The day is not `published_at` and not the live orchestration control. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here. GitHub's own SVG of this figure is a reviewer's check of the blob; a headless session does not run GitHub's Mermaid enricher.
 
@@ -150,7 +150,7 @@ sequenceDiagram
     participant Disc as Discovery admission
     participant D1 as D1
     participant EPG as EPG publication
-    Note over Disc,EPG: Proposed, not live. No business TTL. No 16:55 cron.
+    Note over Disc,EPG: Accepted, not live. No business TTL. No 16:55 cron.
     Disc->>D1: New acquire after 16:55, pointer unchanged
     D1-->>Disc: Lease unchanged. epg_priority, no failure
     Note over D1: Second statement sets paused while the predicate holds
