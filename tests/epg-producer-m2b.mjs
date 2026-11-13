@@ -34,14 +34,18 @@ const facts=title=>({film:{contractVersion:1,originalTitle:title,source:'tmdb'},
 const steady=()=>{let t=0;return ()=>(t+=2);};
 let n=0;
 // The "production" stand-in: the real writer stored five Films, plus Person and credit rows.
+// The seeded file does not depend on the tool under test (the writer of src/ stores the rows), so it is built ONCE per process and copied per use: the mutation runner calls check() for every mutant.
+let seededFile=null;
 async function production(){
- const file=path.join(work,'prod-'+(n++)+'.sqlite');fs.copyFileSync(template,file);
+ if(seededFile){const copy=path.join(work,'prod-'+(n++)+'.sqlite');fs.copyFileSync(seededFile,copy);return copy;}
+ const file=path.join(root,'seeded.sqlite');fs.copyFileSync(template,file);
  for(const s of ["UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;","UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1","UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1","INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+T+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+EMPTY+"','"+EMPTY+"','"+T+"');"])sqlite(file,s);
  const list=[1,2,3,4,5].map(k=>({id:ID(k),facts:{...facts('Title '+k),watchlist:k!==5}}));
  const applied=await applyEpgUnits({DB:d1Standin(file)},{plan:planEpgUnits({runId:'seed',at:T,films:list}),now:()=>T});
  assert.equal(applied.counts.applied,5);
  sqlite(file,"INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ('person:tmdb:1','role:1',1,'"+T+"'),('person:tmdb:2','role:2',1,'"+T+"'),('person:tmdb:3','role:3',1,'"+T+"');INSERT INTO film_person_credit (film_id,person_id,role,ordinal) VALUES ('"+ID(1)+"','person:tmdb:1','director',0),('"+ID(1)+"','person:tmdb:2','actor',1),('"+ID(5)+"','person:tmdb:3','actor',0);");
- return file;
+ seededFile=file;
+ return production();
 }
 // A reader of the emitted statements: a count statement and keyset pages of `pageRows` (small here so a table needs several pages), recorded with their connector metrics, as an authorized operator would paste them.
 function read(file,pageRows=2){

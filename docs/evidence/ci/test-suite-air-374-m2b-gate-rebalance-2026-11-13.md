@@ -1,6 +1,6 @@
 # AIR-374 M2b: the shard 3 runtime gate (180 s) and the follow-up rebalance (13 Nov 2026)
 
-**Captured:** 2026-11-13, from the retained CI logs of PR #593 (CI/CD run 43483457532, three jobs of one run, plus the Controller's recorded rerun). **Nothing was run in production.** The numbers are wall and summed file time of the `Run tests` step, read from the job logs.
+**Captured:** 2026-11-13, from the retained CI logs of PR #593 (CI/CD runs 43483457532, 43486898627 and 43490089489, three jobs each, plus the Controller's recorded rerun). **Nothing was run in production.** The numbers are wall and summed file time of the `Run tests` step, read from the job logs.
 
 ## Measured (HEAD `b2ce385`, before this follow-up)
 
@@ -23,14 +23,21 @@ Both shard 3 attempts were over the 180 s gate. The earlier HEAD `62194bf` measu
 
 `scripts/run-tests.mjs` weights only (scheduling): `canonical-producer-run-mutation.mjs` 6 to 25, `canonical-producer-schema-mutation.mjs` 18 to 40, `epg-producer-m2b-mutation.mjs` 9 (after 32 and 11 in intermediate commits: 9 gives the most even split when the file is planned at about 25 s), and six small adjustments found by a search that minimises the largest shard of the observed per-file times (each weight kept within a factor of two of its observed share, so the weights do not chase noise). The two serial-only files keep their solo-time weights.
 
-## Prediction (not a measurement) and the first exact-HEAD readback
+## Measured after the follow-ups
 
-The Controller's readback of the CI run on `286672e` (which still had the invalid short-circuited runner, so about 10 to 15 s cheaper in its shard than the corrected one): `Run tests` 120 s in shard 1 and 139 s in shard 3 (shard 2 was still running at that readback); shard 3 was 183 and 202 s on the previous HEAD. The corrected runner is to be measured on the next exact-HEAD run.
+| HEAD | Shard 1 wall (s) | Shard 2 wall (s) | Shard 3 wall (s) | Summed file time per shard (s) | Note |
+| --- | --- | --- | --- | --- | --- |
+| `62194bf` (first run) | not recorded | not recorded | 190.5 | not recorded | over the gate |
+| `b2ce385` | 160.9 | 155.1 | 183.3 and 201.7 (rerun) | 963 / 863 / 1,050 | shard 3 over the gate twice |
+| `286672e` (weights tuned on one run, invalid one-process runner) | 120.7 | 195.5 | 138.5 | 722 / 1,101 / 775 | the pressure moved to shard 2; the prediction of 948 / 950 / 949 s did not hold |
+| `65237a4` (corrected runner) | 164.3 | 178.8 | 179.3 | 984 / 999 / 1,026 | all three under 180 s, shard 3 by 0.7 s: a margin of practically zero |
 
-Using the observed per-file times of the three jobs as the truth (the M2b runner planned at 25 s) and replaying the planner on the new weights: the summed file time per shard is 958 / 950 / 949 s (before: 963 / 863 / 1,050 s). With the observed ratio of wall to summed time (about 0.174) the largest shard is predicted near 167 s. That is under the 180 s gate, but with a margin of about 8 percent: the second shard 3 attempt was 10 percent slower than the first on the same HEAD, so a slow runner can still exceed the gate. The summed file time of the whole suite (2,876 s over three shards) is the structural cause; rebalancing cannot lower it.
+**Why the prediction failed.** The per-file times of one run are not constant: a file runs 1.2 to 1.5 times slower in a heavy shard and up to twice as fast in a light one (for example `discovery-decisions-read.mjs` 54.7 s in shard 1 and 83.5 s in shard 2, `prediction-batch-start.mjs` 52.3 and 73.1 s). Equalising the sum of the times of one run therefore does not equalise the next run; shares of a job's own total hide the absolute scale and cannot show it either. What the three shards had in common at `65237a4` is about 3,000 s of summed file time for 180 s of wall: the suite is at the capacity of three shards, and rebalancing cannot lower it.
+
+**The corrected M2b mutation runner** measured 45.9 s in the CI run of `65237a4` (about 16 s alone locally, 39 s in a full local run); a later commit builds the seeded fixture once per process and brings it to about 12 s alone. In CI the runner remains one of the files that compete for the CPU.
 
 ## Limits
 
 - The per-file times come from one run (three jobs) plus the Controller's second shard 3 attempt, not from the 30-job mean of the earlier recalibration.
-- The real result is the exact-HEAD CI run of the follow-up commit; this page states the prediction and is to be completed with that run's `Run tests` wall times.
+- The margin under the gate is practically zero at `65237a4` (0.7 s in shard 3); a slower runner (the second attempt of `b2ce385` was 10 percent slower than the first) exceeds it. The result of the commit that follows is a further data point, not a proof of stability.
 - If the gate is exceeded again, the options that keep all coverage are: a fourth shard (changes the CI workflow, the three-shard rule of the delivery process and the deploy dependency, so an owner decision), or optimising the heaviest older files (`generation-stage.mjs` 121.7 s, `epg-r2-known-length.mjs` about 100 s, `film-person-e6-measure-mutation.mjs` 95.4 s, `film-person-prepared-loader-mutation.mjs` 85.8 s). Neither is done here.
