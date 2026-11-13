@@ -1,6 +1,7 @@
 // AIR-458 / ADR 0135. Pure admission contract for the EPG-priority Discovery pause.
-// No I/O, no clock and no randomness: callers pass the instant and the facts a single D1 statement can see.
+// No I/O, no clock and no randomness: callers pass the instant and the facts one D1 batch can see.
 // Nothing in the Worker imports this module. It does not arm a pause, take a lease or authorize a production write.
+// `tablePresent: false` is a verified absence. Any other non-true value is unreadable and fails closed.
 
 import {EPG_SCHEDULE, madridDayKey, madridInstant} from './orchestration-policy.js';
 
@@ -42,6 +43,22 @@ function previousDayKey(dayKey) {
   return madridDayKey(madridInstant(dayKey, 12, 0) - 24 * 3600000);
 }
 
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function programmeId(value) {
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+// A paused row must name a real owed date. An override, when present, must be a real date too.
+// Anything else is unreadable: it must not be treated as "no override".
+function rowUsable(row) {
+  if (!row || (row.state !== 'clear' && row.state !== 'paused')) return false;
+  if (row.owedDayKey != null && !DAY.test(row.owedDayKey)) return false;
+  if (row.state === 'paused' && !DAY.test(row.owedDayKey || '')) return false;
+  if (row.overrideDayKey != null && !DAY.test(row.overrideDayKey)) return false;
+  return true;
+}
+
 function handoffConfirmed(facts) {
   const id = facts.publishedProgrammeRunId;
   return typeof facts.publishedDayKey === 'string' && facts.publishedDayKey !== ''
@@ -76,21 +93,31 @@ function waitForPublication(owed, nowMs) {
 // `renew` is the current holder's own extension and is not a new admission.
 // `role: 'epg'` is the publication, which the pause exists to let through.
 export function discoveryAdmission(facts) {
-  if (facts.tablePresent !== true) return decide(true, 'inert', null, 'none');
   // A missing role is Discovery. Only an explicit `epg` acquire is the publication exemption.
+  // Renewal and the EPG acquire do not consult the pause table: an in-flight chunk may finish, and the publication must proceed.
   const role = facts.role == null ? 'discovery' : facts.role;
-  if (role === 'epg' && facts.action === 'acquire') return decide(true, 'epg_publication', owedDayKey(facts), 'none');
-  if (facts.action === 'renew') return decide(true, 'in_flight', owedDayKey(facts), 'none');
+  if (role === 'epg' && facts.action === 'acquire') return decide(true, 'epg_publication', null, 'none');
+  if (facts.action === 'renew') return decide(true, 'in_flight', null, 'none');
+  // Verified absence is today's behaviour. Unknown, null or an unreadable introspection is not absence.
+  if (facts.tablePresent === false) return decide(true, 'inert', null, 'none');
+  if (facts.tablePresent !== true) return decide(false, 'evidence_unreadable', null, 'fail_closed');
   if (role !== 'discovery' || facts.action !== 'acquire') return decide(false, 'evidence_unreadable', null, 'fail_closed');
-  if (!facts.row || (facts.row.state !== 'clear' && facts.row.state !== 'paused')) return decide(false, 'evidence_unreadable', null, 'fail_closed');
+  if (!rowUsable(facts.row)) return decide(false, 'evidence_unreadable', null, 'fail_closed');
   const owed = owedDayKey(facts);
+  const publishedId = programmeId(facts.publishedProgrammeRunId);
+  const requested = facts.requestedProgrammeRunId;
+  // The published-generation fence is not waived by the pause or by an override.
+  if (typeof requested === 'string' && requested !== '' && publishedId && requested !== publishedId) {
+    return decide(false, 'stale_generation', owed, 'fail_closed');
+  }
   const override = owed != null && facts.row.overrideDayKey === owed;
   const blocking = owed != null && !publishedFor(facts, owed) && !override
     && (facts.row.state === 'paused' || facts.nowMs >= pauseOpensAt(owed));
   if (blocking) return waitForPublication(owed, facts.nowMs);
-  if (owed != null && !publishedFor(facts, owed) && override) return decide(true, 'owner_override', owed, 'none');
-  if (handoffConfirmed(facts) && facts.requestedProgrammeRunId && facts.requestedProgrammeRunId !== facts.publishedProgrammeRunId) {
-    return decide(false, 'stale_generation', owed, 'fail_closed');
+  if (owed != null && !publishedFor(facts, owed) && override) {
+    // Override admits only the programme id the pointer already names. A missing or foreign id stays closed.
+    if (!publishedId || requested !== publishedId) return decide(false, 'evidence_unreadable', owed, 'fail_closed');
+    return decide(true, 'owner_override', owed, 'none');
   }
   return decide(true, owed && publishedFor(facts, owed) ? 'published' : 'clear', owed, 'none');
 }
@@ -98,7 +125,7 @@ export function discoveryAdmission(facts) {
 // The row write that belongs in the same D1 batch as the decision. Null means the batch does not touch the row.
 // The result never carries an expiry: a business pause is not a TTL.
 export function pauseRowWrite(facts) {
-  if (facts.tablePresent !== true || !facts.row || (facts.row.state !== 'clear' && facts.row.state !== 'paused')) return null;
+  if (facts.tablePresent !== true || !rowUsable(facts.row)) return null;
   const owed = owedDayKey(facts);
   if (owed && publishedFor(facts, owed)) {
     if (facts.row.state === 'clear' && facts.row.overrideDayKey == null) return null;

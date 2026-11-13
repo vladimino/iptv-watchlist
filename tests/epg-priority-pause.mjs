@@ -101,6 +101,23 @@ assert.equal(owedDayKey(base({nowMs: at('2026-10-26', 10, 0), ...published('2026
   const inert = base({nowMs, ...published('2026-11-12'), tablePresent: false, row: null});
   assert.equal(discoveryAdmission(inert).reason, 'inert');
   assert.equal(pauseRowWrite(inert), null);
+  for (const tablePresent of [undefined, null, 'unknown']) {
+    const unread = base({nowMs, ...published('2026-11-12'), tablePresent, row: null});
+    assert.equal(discoveryAdmission(unread).reason, 'evidence_unreadable', String(tablePresent));
+    assert.equal(discoveryAdmission(unread).admit, false);
+  }
+  // The publication does not wait on an unreadable pause table.
+  assert.equal(discoveryAdmission(base({nowMs, role: 'epg', tablePresent: undefined, row: null})).reason, 'epg_publication');
+}
+
+// The Discovery pin moves in sealArchive, before the published pointer. That lag does not lift the pause.
+{
+  const nowMs = at('2026-11-13', 17, 20);
+  const lag = base({nowMs, publishedDayKey: '2026-11-12', publishedProgrammeRunId: 'old', handoffProgrammeRunId: 'new', row: row('paused', '2026-11-13'), requestedProgrammeRunId: 'old'});
+  assert.equal(discoveryAdmission(lag).reason, 'epg_priority');
+  assert.equal(pauseRowWrite(lag), null);
+  const foreign = base({...lag, requestedProgrammeRunId: 'new'});
+  assert.equal(discoveryAdmission(foreign).reason, 'stale_generation');
 }
 
 // No EPG instance and a failed day do not open admission: publication of the owed day is simply unconfirmed.
@@ -127,13 +144,21 @@ assert.equal(owedDayKey(base({nowMs: at('2026-10-26', 10, 0), ...published('2026
   assert.deepEqual(pauseRowWrite(rolled), {state: 'paused', owedDayKey: '2026-11-14', overrideDayKey: null});
 }
 
-// An override admits only the owed day it names. Clearing it closes admission again. It does not publish.
+// An override admits only the owed day it names, and only the programme id the pointer already names.
 {
   const nowMs = at('2026-11-13', 18, 30);
-  const open = base({nowMs, ...published('2026-11-12'), row: row('paused', '2026-11-13', '2026-11-13')});
+  const current = 'prog-2026-11-12';
+  const open = base({nowMs, ...published('2026-11-12', current), row: row('paused', '2026-11-13', '2026-11-13'), requestedProgrammeRunId: current});
   assert.equal(discoveryAdmission(open).reason, 'owner_override');
   assert.equal(pauseRowWrite(open), null);
-  const shut = base({nowMs, ...published('2026-11-12'), row: row('paused', '2026-11-13', null)});
+  const stale = base({nowMs, ...published('2026-11-12', current), row: row('paused', '2026-11-13', '2026-11-13'), requestedProgrammeRunId: 'foreign'});
+  assert.equal(discoveryAdmission(stale).reason, 'stale_generation');
+  assert.equal(discoveryAdmission(stale).budget, 'fail_closed');
+  for (const requestedProgrammeRunId of [null, '', 0]) {
+    const unknown = base({nowMs, ...published('2026-11-12', current), row: row('paused', '2026-11-13', '2026-11-13'), requestedProgrammeRunId});
+    assert.equal(discoveryAdmission(unknown).reason, 'evidence_unreadable', String(requestedProgrammeRunId));
+  }
+  const shut = base({nowMs, ...published('2026-11-12', current), row: row('paused', '2026-11-13', null), requestedProgrammeRunId: current});
   assert.equal(discoveryAdmission(shut).reason, 'epg_priority');
 }
 
@@ -162,6 +187,8 @@ assert.equal(preferredBusy([]), null);
 {
   const nowMs = at('2026-11-13', 12, 0);
   assert.equal(discoveryAdmission(base({nowMs, ...published('2026-11-12'), row: {state: 'held'}})).reason, 'evidence_unreadable');
+  assert.equal(discoveryAdmission(base({nowMs, ...published('2026-11-12'), row: {state: 'paused', owedDayKey: '13 Nov', overrideDayKey: null}})).reason, 'evidence_unreadable');
+  assert.equal(discoveryAdmission(base({nowMs, ...published('2026-11-12'), row: {state: 'paused', owedDayKey: '2026-11-13', overrideDayKey: 'today'}})).reason, 'evidence_unreadable');
   assert.equal(discoveryAdmission(base({nowMs, ...published('2026-11-12'), role: 'admin'})).reason, 'evidence_unreadable');
   const omitted = base({nowMs: at('2026-11-13', 17, 0), ...published('2026-11-12'), row: row('paused', '2026-11-13')});
   delete omitted.role;
