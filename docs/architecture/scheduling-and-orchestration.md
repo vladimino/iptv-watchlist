@@ -143,7 +143,7 @@ The projector's strict generation pin cannot pass while Discovery writes about s
 
 ### EPG-priority Discovery pause ([ADR 0135](../adr/0135-epg-priority-discovery-pause.md), proposed, not live)
 
-Nothing in this section runs. The Worker does not import `src/domain/epg-priority-pause.js`, and there is no pause row in production. The sequence is the accepted shape of the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid and stays closed, with no business TTL, until the owed EPG generation is published and the Discovery pin matches that `programmeRunId`. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here.
+Nothing in this section runs. The Worker does not import `src/domain/epg-priority-pause.js`, and there is no pause row in production. The sequence is the shape recorded for the owner decision on [AIR-458](https://trello.com/c/RrtTkNg1): new Discovery admission closes at 16:55 Europe/Madrid and stays closed, with no business TTL, until the owed EPG generation is published and the Discovery pin matches that `programmeRunId`. An in-flight chunk may finish. EPG does not run Discovery; it may wait, without a failure count, while a Discovery lease is live. The projector window is a separate hold and is not drawn here.
 
 ```mermaid
 sequenceDiagram
