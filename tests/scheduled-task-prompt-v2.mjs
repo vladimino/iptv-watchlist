@@ -143,36 +143,37 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,0);
 }
 
-// 5b. The scheduled loop through the real MCP tools: one start, groups of at most 10, 100 films at most, per-film failures do not stop the run, a lost answer is replayed, then the bounded stop.
+// 5b. The scheduled loop through the real MCP tools: one start with the template manifestSize=5 (AIR-463), groups of at most 5, per-film failures do not stop the run, a lost answer is replayed, then a normal manifest_spent complete while ready films remain.
 {
  const w=await world(130);
- const start=await w.call('prediction_batch_start',{trigger:'scheduled'});assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));
- const manifest=start.data;assert.equal(manifest.films.length,100,'the manifest stops at 100 films');
+ const start=await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5});assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));
+ const manifest=start.data;assert.equal(manifest.films.length,5,'the template selects five films');assert.equal(manifest.manifestSize,5);assert.equal(manifest.filmsSelected,5);
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
- assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled'})).data.status,'already_running','a second start never adopts the run');
- const ids=manifest.films.map(f=>f.filmId),badParse=ids[13],badContent=ids[27];
+ assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
+ const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];
  const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
  const seen={};let groups=0;
  let preflights=0,flagged=[];
- for(let i=0;i<ids.length;i+=10){
-  let items=ids.slice(i,i+10).map(itemFor);groups++;
+ for(let i=0;i<ids.length;i+=5){
+  let items=ids.slice(i,i+5).map(itemFor);groups++;
   // step 7: the preflight before the submit. A candidate it flags that real knowledge cannot repair is reported as a failure item (bounded: at most one re-preflight of corrected films, none needed here)
   const candidates=items.filter(it=>!it.failure);
   if(candidates.length){const pre=await w.call('prediction_batch_validate',{items:candidates});preflights++;assert.ok(!pre.isError,JSON.stringify(pre.data).slice(0,200));
    for(const res of pre.data.results)if(!res.valid){flagged.push([res.filmId,res.prediction.issues.concat(res.fingerprint.issues).map(x=>x.path+' '+x.code)]);items=items.map(it=>it.filmId===res.filmId?{filmId:res.filmId,failure:{kind:'parse_error'}}:it);}}
   const r=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));
-  if(i===30){const again=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(again.data.results.every(x=>x.replayed===true),'replay by the same body');}
+  if(i===0){const again=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(again.data.results.every(x=>x.replayed===true),'replay by the same body');}
   for(const x of r.data.results)seen[x.status]=(seen[x.status]||0)+1;
   epoch=r.data.epoch||epoch;
  }
- assert.equal(groups,10);assert.equal(seen.created,98);assert.equal(seen.validation_failure,2,'two failure items did not stop the run');
- assert.deepEqual(flagged,[[badContent,['prediction.predictedRating out_of_range']]],'the preflight caught the bad candidate before any submit, with its issue');assert.equal(preflights,10,'one preflight per group');
+ assert.equal(groups,1);assert.equal(seen.created,3);assert.equal(seen.validation_failure,2,'two failure items did not stop the run');
+ assert.deepEqual(flagged,[[badContent,['prediction.predictedRating out_of_range']]],'the preflight caught the bad candidate before any submit, with its issue');assert.equal(preflights,1,'one preflight per group');
  const refused=await w.call('prediction_complete',{runId});assert.equal(refused.isError,true);assert.match(JSON.stringify(refused.data),/Queue not empty/,'a reasonless complete is refused while ready films remain');
- const done=await w.call('prediction_complete',{runId,reason:'time_budget'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
- // The unavoidable current behaviour the owner must decide on: the bounded stop is a partial stop with a stop Event, although every selected film was written.
- assert.equal(done.data.status,'partial');assert.equal(done.data.stopReason,'time_budget');assert.equal(done.data.title,'Прогнозы приостановлены');
- const event=w.records.get('enrichment/stop-events/'+runId+'.json')?.event;assert.ok(event,'a stop Event is recorded');assert.equal(event.stage,'partial');assert.equal(event.title,'Прогнозы приостановлены');assert.equal(event.stopReason,'time_budget');
- assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,98,'all valid films were written');
+ const done=await w.call('prediction_complete',{runId,reason:'manifest_spent'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
+ // AIR-463 / ADR 0135: spending the selected manifest is a normal complete, not a partial time_budget stop.
+ assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.ok(done.data.title!=='Прогнозы приостановлены');
+ assert.ok((done.data.hotRemaining||0)+(done.data.coldRemaining||0)>0,'global outstanding remains after a short run');
+ const stopRec=w.records.get('enrichment/stop-events/'+runId+'.json');assert.ok(!stopRec||stopRec.event?.stage!=='partial','no false paused stop Event');
+ assert.equal(sql(w.file,'SELECT COUNT(*) AS n FROM prediction_pointer')[0].n,3,'all valid films were written');
 }
 
 // 5c. A profile that moves between passes: following the dry-run prompt (step 7) a pass compares the answer's profile hash with the manifest's, stops with profile_moved and marks the rest not_submitted;

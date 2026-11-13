@@ -111,7 +111,7 @@ assert.ok(liveFilms.length>0);
 {
  const tools=vm.runInContext('MCP_TOOLS',w.ctx),named=n=>tools.find(t=>t.name===n);
  for(const n of ['prediction_start','prediction_next','prediction_submit','prediction_heartbeat','prediction_complete','prediction_validate']){const p=named(n).inputSchema.properties||{};assert.ok(!('dryRun' in p)&&!('pin' in p)&&!('manifestHash' in p),n+' has no dry-run argument');}
- assert.deepEqual(Object.keys(named('prediction_batch_start').inputSchema.properties).sort(),['capacity','dryRun','pin','trigger']);
+ assert.deepEqual(Object.keys(named('prediction_batch_start').inputSchema.properties).sort(),['capacity','dryRun','manifestSize','pin','trigger']);
  const contract=vm.runInContext('predictionRunnerContract()',w.ctx);assert.equal(contract.pipelineVersion,5);assert.equal(contract.modelBatching.enabled,false);assert.equal(contract.modelBatching.readyFingerprintsPerCall,1);
 }
 console.log('prediction-dry-run-isolation ok');
