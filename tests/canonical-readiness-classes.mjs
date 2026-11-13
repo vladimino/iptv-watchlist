@@ -38,8 +38,8 @@ function check(mod){
  // The blocker strings below are the ones tests/canonical-handoff-readiness.mjs asserts handoffReadiness emits for its error and invalid-reader fixtures.
  for(const item of ['empty_class_unreadable:retirement','empty_class_unreadable:retention'])assert.equal(mod.classOfBlocker(item),'operational_state',item);
  for(const item of ['reader_class_invalid:x','reader_exception_marked_moved:some_reader'])assert.equal(mod.classOfBlocker(item),'registry_code',item);
- assert.equal(mod.classOfBlocker('empty_class_not_loaded:retention:0/401'),'data_load');
- assert.equal(mod.classOfBlocker('empty_class_not_loaded:retention:500/401'),'data_load');
+ assert.equal(mod.classOfBlocker('empty_class_not_loaded:retention:0/398'),'data_load');
+ assert.equal(mod.classOfBlocker('empty_class_not_loaded:retention:500/398'),'data_load');
  assert.equal(mod.classOfBlocker('reader_not_moved:x'),'read_move');
  {const mixed=mod.classifyBlockers(['empty_class_unreadable:a','empty_class_not_loaded:b:0/1','reader_class_invalid:c','reader_exception_marked_moved:d','reader_not_moved:e']);
   assert.deepEqual(mixed.byClass,{registry_code:['reader_class_invalid:c','reader_exception_marked_moved:d'],data_load:['empty_class_not_loaded:b:0/1'],owner_exception:[],read_move:['reader_not_moved:e'],operational_state:['empty_class_unreadable:a'],unclassified:[]});}

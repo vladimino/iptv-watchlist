@@ -60,10 +60,12 @@ export const PRODUCER_OPERATIONS=operationRegistry([]);
 // ADR 0117 owner decision 5 / ADR 0119: durable cross-domain receipts inside the existing D1. The protocol is "registered" only when PRODUCER_OPERATIONS holds at least one atomic operation
 // (derived, never a flag); the schema and the baseline are read from the database.
 export const RECEIPTS_PROTOCOL=Object.freeze({table:'canonical_write_receipt',minSchema:RECEIPT_MIN_VERSION});
-// ADR 0117 owner decision 2: the three classes loaded while `prepared` (counts accepted by the owner on 11 Nov 2026).
+// ADR 0117 owner decision 2: the three classes loaded while `prepared`. Counts: the H1 set of the offline prepared loader's EXPECTED (708 / 398 / 4; retention was 401 at the 11 Nov 2026
+// acceptance and 398 after the owner's 12 Nov 2026 snapshot decision, PR #580). src/ must not import scripts/, so the number is repeated here and tests/canonical-handoff-readiness.mjs asserts it equals the loader's EXPECTED.
+// It deliberately differs from the retention cap (401) of the historical cutover record (accepted-discrepancies module), which is not rewritten.
 export const EMPTY_CLASSES=Object.freeze([
  Object.freeze({name:'ratedAdmission',table:'film_rated_admission',expected:708}),
- Object.freeze({name:'retention',table:'film_retention',expected:401}),
+ Object.freeze({name:'retention',table:'film_retention',expected:398}),
  Object.freeze({name:'retirement',table:'tmdb_retirement_decision',expected:4}),
 ]);
 const ROLES=new Set(['director','actor']);
