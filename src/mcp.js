@@ -186,7 +186,7 @@ function mcpBatchCandidate(item,index){
  const out={index,filmId:null,valid:false,itemIssues:[],fingerprint:{checked:false,issues:[]},prediction:{checked:false,issues:[]},assessment:{checked:false,issues:[]}};
  if(!mcpIsObject(item)){out.itemIssues.push({path:'item',code:'invalid_type'});return out;}
  if(typeof item.filmId==='string'&&/^[a-zA-Z0-9_-]{1,80}$/.test(item.filmId))out.filmId=item.filmId;else out.itemIssues.push({path:'item.filmId',code:item.filmId===undefined?'required':'invalid_type'});
- if(Object.keys(item).some(key=>!['filmId','fingerprint','prediction','assessment','metadata'].includes(key)))out.itemIssues.push({path:'item',code:'invalid_type'});
+ for(const key of Object.keys(item))if(!['filmId','fingerprint','prediction','assessment','metadata'].includes(key))out.itemIssues.push({path:'item.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});
  for(const key of ['fingerprint','prediction','assessment','metadata'])if(item[key]!==undefined&&!mcpIsObject(item[key]))out.itemIssues.push({path:'item.'+key,code:'invalid_type'});
  if(item.fingerprint===undefined&&item.prediction===undefined)out.itemIssues.push({path:'item',code:'required'});
  if(out.itemIssues.length)return out;

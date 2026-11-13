@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 
 const w=await flowWorld({films:6});
+sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','A crew plans a robbery and a detective closes in.','$.genres',json('[\"Crime\",\"Thriller\"]'),'$.runtime',120,'$.directors',json('[\"A Director\"]'),'$.actors',json('[\"An Actor\"]'))");
 assert.equal((await w.api('queue/reconcile',{})).status,200);
 vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
 const call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.structuredContent||null,text:res.content?.[0]?.text||''};};
@@ -79,7 +80,7 @@ const mutate=fn=>{const a=base();fn(a);return a;};
 }
 
 const ids=async()=>{const r=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled'});assert.equal(r.status,200);return r.data;};
-const m=await ids(),[f1,f2,f3,f4,f5]=m.films.map(f=>f.filmId);
+const m=await ids(),[f1,f2,f3,f4,f5,f6]=m.films.map(f=>f.filmId);
 const asmKeys=()=>[...w.records.keys()].filter(k=>/\/predictions\/assessments\//.test(k));
 const verKeys=()=>[...w.records.keys()].filter(k=>/\/predictions\/versions\//.test(k));
 const submit=(items,extra={})=>w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items,...extra});
@@ -168,5 +169,29 @@ let firstDigest;
  const five=items(5),fiveBytes=enc({items:five});assert.ok(fiveBytes<LIMIT,'five fit: '+fiveBytes);
  const ok=await call('prediction_batch_validate',{items:five});assert.equal(ok.isError,false,ok.text.slice(0,200));assert.equal(ok.data.counts.valid,5);
  console.log('group bounds: assessment '+bytes+' B, ten films '+tenBytes+' B (refused), five films '+fiveBytes+' B (accepted)');
+}
+
+// 11. Review findings. (a) A prediction-only candidate whose assessment cites a metadata token passes the preflight when the film metadata is sent, is refused without it, and the dry-run submit (which holds the film's own metadata) accepts it.
+{
+ const a=base();a.sources=[{kind:'metadata',ref:'metadata:synopsis',usedFor:'premise'}];a.conflicts=[];a.research={status:'not_attempted'};
+ const withMeta=await call('prediction_batch_validate',{items:[{filmId:'f1',prediction:w.prediction,assessment:a,metadata}]});assert.equal(withMeta.data.results[0].valid,true);
+ const without=await call('prediction_batch_validate',{items:[{filmId:'f1',prediction:w.prediction,assessment:a}]});same(without.data.results[0].assessment.issues,[{path:'assessment.sources.ref',code:'invalid_ref'}]);
+ const dry=await submit([item(f6,a)],{dryRun:true});assert.equal(dry.status,200);same([dry.data.results[0].status,dry.data.results[0].assessment],['would_write','would_write']);
+}
+// (b) A collision with an object of other content on the first submit of a version is a conflict, not a storage error: nothing is overwritten and no pointer is committed.
+{
+ const put=w.env.BUCKET.put.bind(w.env.BUCKET);let planted=null;
+ w.env.BUCKET.put=async(k,body,...r)=>{if(!planted&&/\/assessments\//.test(k)){planted=k;await put(k,JSON.stringify({objectVersion:1,confirmed:{assessmentSha256:'0'.repeat(64)},predictionSha256:'x'}),{httpMetadata:{contentType:'application/json'}});}return put(k,body,...r);};
+ const r=await submit([item(f6,asm())]);w.env.BUCKET.put=put;
+ assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));same([r.data.results[0].status,r.data.results[0].assessment],['conflict','conflict']);
+ assert.ok(planted);assert.equal((()=>{const v=w.records.get(planted);const t=typeof v==='string'?v:JSON.stringify(v?.body??v);const o=JSON.parse(t);return (typeof o==='string'?JSON.parse(o):o).confirmed.assessmentSha256;})(),'0'.repeat(64),'the existing object is untouched');
+ assert.equal(sql(w.file,"SELECT film_id FROM prediction_pointer WHERE film_id='"+f6+"'").length,0);
+}
+// (c) Preflight and submit give the same verdict for an undeclared item key: unknown_field with a sanitised item path; metadata stays a valid preflight-only key.
+{
+ const pre=await call('prediction_batch_validate',{items:[{filmId:'f1',prediction:w.prediction,'bad key':1,metadata}]});
+ same(pre.data.results[0].itemIssues,[{path:'item.bad_key',code:'unknown_field'}]);assert.equal(pre.data.results[0].valid,false);
+ const sub=await submit([{...item(f1),'bad key':1}]);same(sub.data.issues,[{path:'items[0].bad_key',code:'unknown_field'}]);
+ assert.equal((await call('prediction_batch_validate',{items:[{filmId:'f1',prediction:w.prediction,metadata}]})).data.results[0].valid,true);
 }
 console.log('prediction-assessment: closed validation with every code, dry run and preflight parity, create-only sidecar and its order, replay, conflict, fault, crash window and privacy passed');

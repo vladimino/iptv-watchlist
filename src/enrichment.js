@@ -2325,7 +2325,8 @@ async function batchSubmitItem(env,ctx,item){
    const old=stored,history=[...(state.predictions?.history||[])],pointer=await writePredictionVersion(env,id,generated),prediction={...generated,...pointer};
    // Order: version object, assessment object, guarded D1 commit. A failure here leaves unreferenced objects and an unchanged pointer; the same body replays.
    let assessmentStatus='not_sent';
-   if(item.assessment!==undefined)assessmentStatus=await writePredictionAssessment(env,id,pointer,{recordedAt:at,runId:run.runId,trigger:generated.trigger,predictionGeneratedAt:at,tasteProfile:{version:run.tasteProfileVersion,hash:run.tasteProfileHash},fingerprintHash:fingerprint.fingerprintHash},item.assessment);
+   // A collision with an object of other content is deterministic, not a storage failure: the film is a conflict, nothing is overwritten and the pointer does not move.
+   if(item.assessment!==undefined){try{assessmentStatus=await writePredictionAssessment(env,id,pointer,{recordedAt:at,runId:run.runId,trigger:generated.trigger,predictionGeneratedAt:at,tasteProfile:{version:run.tasteProfileVersion,hash:run.tasteProfileHash},fingerprintHash:fingerprint.fingerprintHash},item.assessment);}catch(error){if(error instanceof AssessmentConflict){if(deferredIndex){await updateViewIndex(env,id,deferredIndex);deferredIndex=null;}return {result:{filmId:id,status:'conflict',assessment:'conflict'}};}throw error;}}
    if(old)history.push({...old,replacedAt:at});
    await batchGuardedCommit(env,ctx,()=>saveJSON(guarded,filmKey(id)+'predictions.json',{current:prediction,history}));
    await updateViewIndex(env,id,{prediction,fingerprintHash:fingerprint.fingerprintHash,fingerprint:fingerprintFacet(fingerprint,true),impactFeatures:fingerprintImpactFacet(fingerprint)});deferredIndex=null;
