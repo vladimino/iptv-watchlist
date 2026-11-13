@@ -369,6 +369,27 @@ for(const stage of ['epg','seal']){
  assert.ok(driven.length>0&&driven.every(c=>c.trace&&c.trace.instanceId==='epg_20261107_0'&&/^act-\d+$/.test(c.trace.actStep)&&/^trace-\d+$/.test(c.trace.attemptTraceId)),'the driven step carries the trace of its action');
 }
 
+// 7c. AIR-462: an action that rejects logs `error` and no `exit`, with no raw error text, and the Workflow still gets the unchanged `act_failed` sleep.
+{
+ const lines=[];const realLog=console.log;console.log=line=>{lines.push(String(line));};
+ const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const r=runner(h,{startAt:due});
+ let seen=null;
+ try{
+  await h.epg.ensure(h.env,{now:due});
+  let nowCalls=0;const flaky=()=>{if(++nowCalls===1)throw new Error('SECRET clock text');return r.clock();};
+  const stepper={...r.step,async do(name,fn){const value=await r.step.do(name,fn);if(name==='act-0')seen=value;throw new Error('stop the loop after the first action');}};
+  await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},stepper,{now:flaky,clock:r.clock,random:()=>0.5,traceId:()=>'trace-x'}).catch(()=>{});
+ }finally{console.log=realLog;}
+ const acts=lines.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(e=>e?.event==='epg_act');
+ assert.deepEqual(acts.map(e=>e.edge),['enter',acts[1].edge].slice(0,1).concat([acts[1].edge]));
+ assert.equal(acts[1].edge,'error','a throw inside the action makes it reject');
+ assert.doesNotMatch(lines.join('\n'),/SECRET/,'no raw error text is logged');
+ if(acts[1].edge==='error')assert.ok(!acts.some(e=>e.edge==='exit'&&e.actStep==='act-0'),'a rejected action has no exit');
+ assert.ok(seen&&seen.kind,'the Workflow still receives a result');
+}
+
 // 8. Read-after-unknown: a run of this date that already completed (someone else drove it, or the control write was lost) is the
 // success. The executor starts nothing and publishes nothing.
 {

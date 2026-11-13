@@ -418,8 +418,11 @@ const EpgOrchestration=(()=>{
   const began=Date.now();
   log('enter');
   try{
-   const result=await act(env,{...ctx,trace}).catch(()=>({kind:'sleep',until:ctx.now()+60000,reason:'act_failed'}));
-   log('exit',{elapsedMs:Date.now()-began,kind:['continue','sleep','stop'].includes(result?.kind)?result.kind:null});
+   let rejected=false;
+   const result=await act(env,{...ctx,trace}).catch(()=>{rejected=true;return {kind:'sleep',until:ctx.now()+60000,reason:'act_failed'};});
+   // A rejected action logs `error` and no `exit`; the recovery result below is unchanged.
+   if(rejected)log('error',{elapsedMs:Date.now()-began});
+   else log('exit',{elapsedMs:Date.now()-began,kind:['continue','sleep','stop'].includes(result?.kind)?result.kind:null});
    return result;
   }catch(error){log('error',{elapsedMs:Date.now()-began});throw error;}
  }

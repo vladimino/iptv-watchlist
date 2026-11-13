@@ -87,4 +87,88 @@ const boundaries=()=>events('epg_memory_boundary');
  // Batch milestones are every 25th batch and archive milestones every 16th segment: a few dozen lines a run, none per observation or film.
  assert.match(worker,/stats\.batches%25===0/);assert.match(worker,/tally\.segments%16===0/);
 }
+
+const trail=()=>lines.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(e=>e&&(e.event==='epg_memory_boundary'||e.event==='epg_phase')).map(e=>(e.boundary||e.phase)+':'+e.edge);
+
+// 6. A payload that does not parse: the decode finished, the parse entered and never exited, and the underlying error is the one thrown.
+{
+ const bucket={async get(){return {size:4,async text(){return '{bad';}};}};
+ lines.length=0;
+ await assert.rejects(()=>call('sealPayload')({BUCKET:bucket},{runId:'run-p'}),SyntaxError);
+ assert.deepEqual(trail().slice(-2),['seal_payload_text:exit','seal_payload_parse:enter']);
+ assert.ok(!trail().includes('seal_payload_parse:exit'));
+}
+
+// 7. The ledger step: a completed read is a matching pair, the milestones are bounded, and a failure in the stream or in a D1 write leaves the read's enter alone.
+{
+ const real={readSealedItems:context.readSealedItems,DiscoveryAuthority:context.DiscoveryAuthority};
+ const run={runId:'run-l',seal:{jobId:'j',sourceKey:'k',etag:'e',itemTotal:24000,prefixBytes:1}};
+ const state=(cursorItems=0)=>({phase:'items',cursorItems,cursorBytes:0,itemTotal:24000});
+ let writes=0,failWrite=false,failStream=false,total=24000;
+ context.DiscoveryAuthority={
+  async sealBegin(){},async sealState(){return state(writes>=1&&!failWrite&&!failStream?total:0);},
+  async sealWrite(env,{items,expectedCursor}){if(failWrite)throw new Error('d1 write failed');writes++;return {written:items.length,cursorItems:expectedCursor+items.length,carried:null};},
+  async sealArchive(){return {committed:true};},
+ };
+ context.readSealedItems=async(env,job,offset,visit)=>{if(failStream)throw new Error('stream failed');for(let i=0;i<total;i++)if(await visit({key:'k'+i},10)===false)return;};
+ try{
+  lines.length=0;
+  const out=await call('sealLedgerStep')({},run,{},Date.now()+1e9);
+  assert.equal(out.done,true);
+  const t=trail();
+  assert.deepEqual(t.filter(x=>x.startsWith('seal_ledger_read')),['seal_ledger_read:enter','seal_ledger_read:exit'],'a completed read is a pair');
+  assert.deepEqual(t.filter(x=>x.startsWith('seal_ledger_archive')),['seal_ledger_archive:enter','seal_ledger_archive:exit']);
+  const milestones=boundaries().filter(e=>e.boundary==='seal_ledger_batches');
+  assert.equal(milestones.length,Math.floor(writes/25),'one milestone line per 25 batches ('+writes+' batches)');
+  assert.ok(writes>=50&&lines.length<20,'sixty batches log '+lines.length+' lines');
+  // The stream fails: the read was entered and never exited, the error is the stream's.
+  failStream=true;writes=0;lines.length=0;
+  await assert.rejects(()=>call('sealLedgerStep')({},run,{},Date.now()+1e9),/stream failed/);
+  assert.deepEqual(trail().filter(x=>x.startsWith('seal_ledger')),['seal_ledger_begin:exit','seal_ledger_read:enter']);
+  // A D1 write fails inside the read: the same last confirmed point, the write error is preserved, no archive was entered.
+  failStream=false;failWrite=true;writes=0;lines.length=0;
+  await assert.rejects(()=>call('sealLedgerStep')({},run,{},Date.now()+1e9),/d1 write failed/);
+  assert.deepEqual(trail().filter(x=>x.startsWith('seal_ledger')),['seal_ledger_begin:exit','seal_ledger_read:enter']);
+ }finally{Object.assign(context,real);}
+}
+
+// 8. The catalog step: the merge is a pair and the payload exit carries no count (nothing is enumerated for the log).
+{
+ const real={pinEpg:context.pinEpg,loadJSON:context.loadJSON,DiscoveryAuthority:context.DiscoveryAuthority};
+ context.pinEpg=async env=>env;context.loadJSON=async()=>({});
+ context.DiscoveryAuthority={ownsKey(){return false;},async upsertAdmissions(env,films){return {written:Object.keys(films),refused:[],batches:1,reads:0,remaining:0};}};
+ const catalog={tmdb_1:{id:'tmdb_1',tmdbId:'1',canonicalIdentity:'tmdb:1'},tmdb_2:{id:'tmdb_2',tmdbId:'2',canonicalIdentity:'tmdb:2'}};
+ const bucket={async get(key){return {async text(){return JSON.stringify({runId:'run-c',catalog});},async json(){return {};}};}};
+ try{
+  lines.length=0;
+  await call('sealCatalogStep')({BUCKET:bucket},{runId:'run-c'},{},Date.now()+1e9);
+  assert.deepEqual(trail(),['seal_catalog_payload:enter','seal_catalog_payload:exit','seal_catalog_merge:enter','seal_catalog_merge:exit']);
+  assert.equal(boundaries().find(e=>e.boundary==='seal_catalog_payload'&&e.edge==='exit').count,undefined);
+  assert.equal(boundaries().find(e=>e.boundary==='seal_catalog_merge'&&e.edge==='exit').count,2);
+  assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/epgBoundary\([^\n]*Object\.(keys|values|entries)\(/,'no marker enumerates an object for its count');
+ }finally{Object.assign(context,real);}
+}
+
+// 9. The publish pointer: a failing commit leaves the unit's enter without an exit, the error is preserved and nothing after the pointer ran.
+{
+ const real={PublishedEpg:context.PublishedEpg};
+ const events=[];
+ context.PublishedEpg={
+  async currentGeneration(){return {programmeRunId:'run-old',phase:'published',fence:'f0'};},
+  async publishGeneration(){throw new Error('pointer commit failed');},
+  async writeMirrors(){events.push('mirrors');return true;},
+ };
+ const text=JSON.stringify({report:{films:[]},watchlist:{films:[]},uncertain:[],fence:'f0',expectedProgrammeRunId:'run-old'});
+ const bucket={async get(){return {size:text.length,async text(){return text;}};},async put(){events.push('put');return {etag:'e'};}};
+ try{
+  lines.length=0;
+  const run={runId:'run-pp',seal:{jobId:'j',phase:'publish'}};
+  await assert.rejects(()=>call('sealPublishStep')({BUCKET:bucket},run,{},Infinity),/pointer commit failed/);
+  const t=trail();
+  assert.equal(t[t.length-1],'seal_publish_pointer:error','the failed unit logs an error edge');
+  assert.ok(!t.includes('seal_publish_pointer:exit')&&!t.includes('seal_publish_mirrors:enter'));
+  assert.ok(!events.includes('mirrors'),'no later unit ran');
+  assert.equal(run.seal.phase,'publish');
+ }finally{Object.assign(context,real);}
+}
 console.log('epg trace boundaries ok');

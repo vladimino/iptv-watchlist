@@ -1341,6 +1341,7 @@ async function sealLedgerStep(env,run,lease,deadline){
   });
   // The read ended or was stopped: write what is held. A step always writes at least one batch; what the spent time
   // leaves unwritten is read again next step from the cursor.
+  epgBoundary(run.runId,'seal_ledger_read','exit',{cursor,items:stats.items,batches:stats.batches});
   if(batch.length)await flush();
   state=await DiscoveryAuthority.sealState(env);
  }
@@ -1361,13 +1362,15 @@ async function sealLedgerStep(env,run,lease,deadline){
 async function sealCatalogStep(env,run,lease,deadline){
  epgBoundary(run.runId,'seal_catalog_payload','enter');
  const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());
- epgBoundary(run.runId,'seal_catalog_payload','exit',{count:Object.keys(payload.catalog||{}).length});
+ epgBoundary(run.runId,'seal_catalog_payload','exit');
  const pinned=await pinEpg(env);
+ const mergeStarted=Date.now();
+ epgBoundary(run.runId,'seal_catalog_merge','enter');
  const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId);
  const current=await loadJSON(env,'epg/discovered-films.json')||{};
  const changed=Object.keys(next).filter(id=>JSON.stringify(next[id])!==JSON.stringify(current[id])).sort();
  const stale=Object.keys(current).filter(id=>!Object.hasOwn(next,id));
- epgBoundary(run.runId,'seal_catalog_merge','exit',{count:changed.length,items:stale.length});
+ epgBoundary(run.runId,'seal_catalog_merge','exit',{count:changed.length,items:stale.length,elapsedMs:Date.now()-mergeStarted});
  // AIR-422: the films go to upsertAdmissions in flushes; it packs each batch to its caps and carries the generation from one batch to the
  // next, so a batch is one D1 round trip. At least one batch per step, so a step with its time already spent still moves.
  let written=0,batches=0,reads=0,writeMs=0,carried=null;
