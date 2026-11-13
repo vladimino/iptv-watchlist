@@ -1,6 +1,6 @@
-# Film/Person migration 0021: owner GO and apply procedure (prepared, not applied)
+# Film/Person migration 0021: owner GO and apply procedure (applied 13 Nov 2026)
 
-**Status:** prepared offline for [AIR-374](https://trello.com/c/ha7ais3w) (H1). **Nothing has been applied.** This page and [`migrations/0021_d1_glob_pattern_limit.sql`](../../migrations/0021_d1_glob_pattern_limit.sql) authorize nothing: applying it to production D1 `iptv` is a separate owner GO under [authorization](../process/authorization-and-escalation.md) (a schema change, so L3 unless the owner classifies it otherwise). Every value that describes production is a dated observation and must be re-read live before the GO.
+**Status:** prepared offline for [AIR-374](https://trello.com/c/ha7ais3w) (H1). **Applied to production D1 `iptv` on 13 Nov 2026 (about 08:40 UTC) as one execution after the owner GO, after `0020`; schema version 21, readback as expected ([evidence](../evidence/d1-migration/air-374-h1-load-2026-11-13.md)). The H1 load followed on the same day. The procedure below is kept as written and does not authorize a second apply.** This page and [`migrations/0021_d1_glob_pattern_limit.sql`](../../migrations/0021_d1_glob_pattern_limit.sql) authorize nothing: applying it to production D1 `iptv` is a separate owner GO under [authorization](../process/authorization-and-escalation.md) (a schema change, so L3 unless the owner classifies it otherwise). Every value that describes production is a dated observation and must be re-read live before the GO.
 
 ## 1. Why it exists, and what it is
 
