@@ -95,6 +95,14 @@ export function owedDayKey(facts) {
   return null;
 }
 
+// The facts a D1 statement binds so that the day decision itself runs inside the write, on the database clock (ADR 0135 decision 4): today's Madrid date,
+// the previous one, and today's arming instant. The statement owes `today` from `armAt` on and `previous` before it, exactly as `owedDayKey` does; a clock
+// that crosses `armAt` between this read and the write can only move the answer toward `today`, which is the closed side.
+export function admissionBounds(nowMs) {
+  const today = madridDayKey(nowMs);
+  return {today, previous: previousDayKey(today), armAt: pauseOpensAt(today)};
+}
+
 // The one Madrid date a D1 statement can bind: today from today's arming instant, otherwise yesterday. The statement then
 // reads "published for this date, or overridden for it" itself, so a null `owedDayKey` (yesterday already handed off) is the same answer.
 export function candidateOwedDay(nowMs) {

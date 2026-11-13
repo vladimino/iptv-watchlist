@@ -48,5 +48,5 @@ export function scopedEpgPriority(){
  return scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scopedReplacing('src/domain/epg-priority-pause.js','EpgPriorityPause','const {EPG_SCHEDULE,madridDayKey,madridInstant}=OrchestrationPolicy;\n');
 }
 export function scopedDiscoveryAuthority(){
- return scopedReplacing('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,candidateOwedDay,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\n');
+ return scopedReplacing('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\n');
 }

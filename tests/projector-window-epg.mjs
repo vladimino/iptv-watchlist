@@ -54,13 +54,12 @@ for(const [name,run] of Object.entries(publishCalls)){
  await assert.rejects(run,error=>error.name==='ProjectorWindowBusy'&&error.busy.state==='held',name+' held');
 }
 
-// 2. ADR 0135 (AIR-459): a live Discovery lease is a collision, not a fault of the publication. The publication paths answer it as the structured, non-failure `ResolverBusy` (kind `lease_held`, with the
-// holder's expiry), no longer as the generic error the executor counted as a failure.
+// 2. Any other missing lease keeps its old behaviour: the generic error, which the step records and the executor counts as before.
 await Authority.releaseProjectorWindow(env,{owner:'p1'});
 {
  const chunk=await Authority.acquireLease(env,{});assert.ok(chunk.lease);
  for(const [name,run] of Object.entries(publishCalls)){
-  await assert.rejects(run,error=>error.name==='ResolverBusy'&&error.busy.kind==='lease_held'&&Number.isFinite(error.busy.expiresAt)&&!/Resolver is writing the catalog/.test(error.message),name+' answers a live lease as a structured busy');
+  await assert.rejects(run,error=>error.name!=='ProjectorWindowBusy'&&/Resolver is writing the catalog/.test(error.message),name+' keeps the generic error for an ordinary lease');
  }
  await Authority.releaseLease({...env,discoveryLease:chunk.lease},chunk.lease);
 }
@@ -215,6 +214,32 @@ await Authority.releaseProjectorWindow(env,{owner:'p1'});
  catch(error){reachedWork=error.name!=='ProjectorWindowBusy'&&error.message!=='projector_window';}
  assert.equal(reachedWork,true,'the same run goes on to the EPG work after the window');
  assert.equal(JSON.parse(await (await bucket.get('sync.json')).text()).runId,'run-1','the same run id');
+}
+
+// 3. ADR 0135 (AIR-459), table PRESENT (0022 applied to a throwaway file): a live Discovery lease is a collision, not a fault of the publication, so the publication paths answer it as the
+// structured, non-failure `ResolverBusy` (kind `lease_held`, with the holder's expiry). With the table absent (every case above) the generic error is unchanged: that is the inert boundary.
+{
+ const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const file22=path.join(root,'e22.sqlite');
+ const made=sqliteSync(['-bail',file22],{input:'PRAGMA foreign_keys=ON;\n'+all.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+ if(made.status!==0)throw new Error(made.stderr||'migration failed');
+ const db22=d1Standin(file22);
+ db22.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
+ const holderUntil=Date.now()+60000;
+ db22.sql("UPDATE discovery_lease SET lease_id='other-chunk', expires_at="+holderUntil+", programme_run_id='run-1', holder_kind='discovery' WHERE id=1");
+ const env22={DB:db22,BUCKET:new MemoryBucket(),discoveryLease:null};
+ assert.equal((await Authority.readAuthority(env22)).priorityTable,true);
+ const calls22={
+  publishD1Generation:()=>call('publishD1Generation')(env22,'run-1',{},null,null,{phase:'published',programmeRunId:'run-0',fence:'f'}),
+  publishEpgGeneration:()=>call('publishEpgGeneration')(env22,'run-1',{}),
+ };
+ for(const [name,run] of Object.entries(calls22)){
+  await assert.rejects(run,error=>error.name==='ResolverBusy'&&error.busy.kind==='lease_held'&&error.busy.expiresAt===holderUntil&&!/Resolver is writing the catalog/.test(error.message),name+' answers a live lease as a structured busy when the table exists');
+ }
+ // The externally visible sync step answer is a structured wait, never a counted failure.
+ const answer=await call('windowBusyResponse')({runId:'run-1',stage:'epg',remaining:0,failures:[]},{kind:'lease_held',expiresAt:holderUntil});
+ assert.equal(answer.discovery.nextAction,'wait');assert.equal(answer.discovery.busyKind,'lease_held');assert.equal(answer.failures,0);
+ assert.ok(Date.parse(answer.discovery.nextCatchUpAt)<=Date.now()+Authority.LEASE_TTL_MS+5000);
 }
 
 console.log('Projector window, EPG and Workflow (ADR 0103): the three publication paths raise one typed busy for a window and keep the generic error for any other missing lease; the sync step answers a structured non-failure busy to the absolute deadline before any heavy work and without persisting an error; the seal step does the same with its own kind and no TTL cap; the executor reads the answer as a wait; the Workflow state write is refused softly with no stall or recovery charge');

@@ -18,7 +18,18 @@ import {sqliteSync} from './sqlite-session.mjs';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-priority-gate-'));
 const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
 let databases=0;
-const migrated=(upTo=22,opts={})=>{
+// The write fence reads the DATABASE clock (`PRIORITY_DB_NOW_SQL`). The stand-in replaces it with the frozen test clock when the statement is built, and `crossAt` moves both the
+// database clock and `Date.now()` to a later instant AFTER the Worker's pre-read and BEFORE the batch runs: a deterministic read-to-write boundary crossing.
+const DB_NOW="(CAST(strftime('%s','now') AS INTEGER)*1000+CAST(substr(strftime('%f','now'),4,3) AS INTEGER))";
+let crossAt=null,beforeBatch=null;
+const standinOptions={
+ rewrite:sql=>sql.split(DB_NOW).join('('+String(clock)+')'),
+ onBatch:async statements=>{
+  if(beforeBatch){const hook=beforeBatch;beforeBatch=null;await hook();}
+  if(crossAt!==null){const from='('+String(clock)+')',to='('+String(crossAt)+')';for(const item of statements)item.text=item.text.split(from).join(to);clock=crossAt;crossAt=null;}
+ },
+};
+const migrated=(upTo=22,opts=standinOptions)=>{
  const file=path.join(root,'g-'+(databases++)+'.sqlite');
  const sql='PRAGMA foreign_keys=ON;\n'+files.filter(name=>Number(name.slice(0,4))<=upTo).map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n');
  const result=sqliteSync(['-bail',file],{input:sql,encoding:'utf8'});
@@ -107,6 +118,61 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  assert.equal(leaseRow(db).leaseId,null,'no lease row changed');
  assert.equal(generation(db),generationBefore);
  for(const [h,m] of [[17,0],[18,30],[19,59]]){at(D2,h,m);assert.equal((await take(env)).busy.kind,'epg_priority',h+':'+m+' still paused: no business TTL');}
+}
+
+// P0 (review of #605): the close time and the programme fence are enforced INSIDE the lease UPDATE, not by the pre-read.
+// (1) The Worker reads at 16:54:59.5, yesterday's publication admits; the database clock is past 16:55 when the UPDATE runs: no lease, and the pause names itself.
+{
+ const {db}=armed();
+ const env=envFor(db);
+ at(D2,16,54);
+ clock+=59500;
+ crossAt=madridInstant(D2,16,55)+1000;
+ const crossed=await take(env);
+ assert.equal(crossed.lease,null,'a chunk admitted on yesterday\'s publication across the boundary is refused at the write');
+ assert.equal(crossed.busy.kind,'epg_priority');
+ assert.equal(leaseRow(db).leaseId,null);
+ assert.deepEqual(row(db),{state:'paused',owed:D2,override:null},'the boundary crossing armed the row in the same batch');
+ // Before the boundary on the database clock too: admitted.
+ const {db:early}=armed();
+ at(D2,16,54);
+ clock+=59500;
+ assert.ok((await take(envFor(early))).lease,'both clocks before 16:55: admitted');
+}
+// (2) Override fence: the pre-read approves run-1 under an override for today; the pointer moves to run-2 before the UPDATE. The override still names today, but it admits only the id
+// the pointer names AT THE WRITE: no lease for the old run.
+{
+ const {db}=armed();
+ const env=envFor(db);
+ at(D2,16,56);
+ await take(env);
+ db.sql("UPDATE discovery_epg_priority SET override_day_key='"+D2+"' WHERE id=1");
+ beforeBatch=()=>{db.sql("UPDATE published_epg_authority SET programme_run_id='run-2' WHERE id=1");};
+ const raced=await take(env,{programmeRunId:'run-1'});
+ assert.equal(raced.lease,null,'the override cannot lease a run the pointer no longer names');
+ assert.equal(leaseRow(db).leaseId,null);
+}
+// (3) Published fence: yesterday published and pinned for run-1; both move to run-2 between the pre-read and the UPDATE. A request for run-1 is not admitted for run-2's pointer.
+{
+ const {db}=armed();
+ const env=envFor(db);
+ at(D2,10,0);
+ beforeBatch=()=>{db.sql("UPDATE published_epg_authority SET programme_run_id='run-2' WHERE id=1");db.sql("UPDATE discovery_authority SET programme_run_id='run-2', published_programme_run_id='run-2' WHERE id=1");};
+ const raced=await take(env,{programmeRunId:'run-1'});
+ assert.equal(raced.lease,null,'a stale programme id is refused by the statement itself');
+}
+// (4) The lease-free writers carry the same bound clock and id: a continuation for a stale programme, or across the boundary, is refused inside its own statement.
+{
+ const {db}=armed();
+ at(D2,16,54);
+ clock+=59500;
+ const generationBefore=generation(db);
+ crossAt=madridInstant(D2,16,55)+1000;
+ await assert.rejects(Authority.writeWorkflow(envFor(db),{schemaVersion:1,instanceId:'i-race',programmeRunId:'run-1',series:0},undefined),error=>error.code==='discovery_epg_priority'||error.code==='discovery_fence');
+ assert.equal(generation(db),generationBefore,'no generation move across the boundary');
+ at(D2,10,0);
+ assert.equal((await Authority.writeContinuation(envFor(db),{stage:'running',programmeRunId:'run-9'},undefined)).saved,false,'a lost fence is `saved: false`, as before');
+ assert.equal(generation(db),generationBefore,'a continuation for another programme is refused');
 }
 
 // T32. The in-flight holder renews during the pause; renewLease carries no predicate; no new admission. EPG's own acquire (and sealStep) is exempt.
@@ -435,6 +501,11 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  const worker=fs.readFileSync('src/worker.js','utf8');
  assert.match(worker,/takeDiscoveryLease\(env,'epg'\)/,'the publication paths take the lease as the EPG role');
  assert.equal([...worker.matchAll(/takeDiscoveryLease\(env[^)]*\)/g)].length,1,'only the publication helper takes the lease in the Worker');
+ // Inert boundary (review of #605): nothing keyed on the pause is live while the table is absent. The structured EPG busy, the frozen `runKey` and the pointer stamp all wait for the table.
+ assert.match(worker,/\(taken\.busy\?\.kind==='lease_held'\|\|taken\.busy\?\.kind==='lost_race'\)&&await epgPausePresent\(env\)\)throw new ResolverBusy/);
+ assert.match(worker,/await epgPausePresent\(env\)\?\{runKey:OrchestrationPolicy\.madridDayKey/);
+ assert.match(worker,/typeof EpgPriorityPause==='undefined'\|\|!await epgPausePresent\(env\)\)return null/);
+ assert.match(fs.readFileSync('src/published-epg.js','utf8'),/const paused=stage\.phase==='published'&&stage\.pausePresent===true/);
  const admin=fs.readFileSync('src/admin/discovery-recovery.js','utf8');
  assert.doesNotMatch(admin,/acquireDiscoveryLease\(env,'epg'\)/,'admin and manual paths are Discovery, never `epg`');
  assert.doesNotMatch(source,/expires_at\s*=\s*\(SELECT[^)]*discovery_epg_priority/,'no expiry on the pause');

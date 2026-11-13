@@ -80,11 +80,46 @@ export async function liveResult(env,{origin,runKey,kind,unitId}){
  return (await one(database(env),'SELECT '+RESULT_COLUMNS+' FROM canonical_producer_unit_result WHERE origin=? AND run_key=? AND kind=? AND unit_id=? AND state IN ('+LIVE_STATES.map(()=>'?').join(',')+')',[origin,runKey,kind,unitId,...LIVE_STATES]))||null;
 }
 // The due LIVE results the retry pass may take: owner `unit`, state open or recoverable, next_attempt_at <= now, ordered by next_attempt_at then key. At most DUE_LIMIT_MAX. Read-only.
-export async function dueResults(env,{now,limit=DUE_LIMIT_MAX}={}){
- if(typeof now!=='string'||!Number.isFinite(Date.parse(now)))throw invalid();
+// `origin` (S4-4, optional) restricts the selection to ONE origin in SQL, BEFORE the limit: a caller that handles one origin never has its bounded budget filled by rows of the other.
+export async function dueResults(env,{now,limit=DUE_LIMIT_MAX,origin}={}){
+ if(typeof now!=='string'||!Number.isFinite(Date.parse(now))||(origin!==undefined&&!ORIGINS.includes(origin)))throw invalid();
  const cap=Math.min(Math.max(Number(limit)||1,1),DUE_LIMIT_MAX);
  try{
-  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE retry_owner='unit' AND state IN ('open','refused_recoverable') AND next_attempt_at<=? ORDER BY next_attempt_at,origin,run_key,pass_no,kind,unit_id LIMIT ?",[now,cap]);
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE retry_owner='unit'"+(origin?' AND origin=?':'')+" AND state IN ('open','refused_recoverable') AND next_attempt_at<=? ORDER BY next_attempt_at,origin,run_key,pass_no,kind,unit_id LIMIT ?",[...(origin?[origin]:[]),now,cap]);
+ }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+
+// S4-4: the run of origin `epg` that answers for ONE published generation, or null. The generation is the authoritative input; nothing here orders generations or runs by time or by name. When several runs exist for the same generation (distinct events that
+// published it), the answer is deterministic: the more advanced state first (passed, which is the only state that holds the applied claim, then passing, stopped, superseded), then the higher revision, then the run key as a last, arbitrary but stable tie-break. Read-only; the input of `canonicalFreshness`.
+export async function epgRunForGeneration(env,{sourceGeneration}={}){
+ if(typeof sourceGeneration!=='string'||!sourceGeneration)throw invalid();
+ try{return (await one(database(env),"SELECT "+RUN_COLUMNS+" FROM canonical_producer_run WHERE origin='epg' AND source_generation=? ORDER BY CASE pass_state WHEN 'passed' THEN 3 WHEN 'passing' THEN 2 WHEN 'stopped' THEN 1 ELSE 0 END DESC,revision DESC,run_key ASC LIMIT 1",[sourceGeneration]))||null;}
+ catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+// S4-4: the LIVE results of origin `epg` that belong to OTHER runs than `runKey` and are owned by the unit (a receipt-owned row settles by evidence), one keyset page at a time in key order: the input of the cross-run supersession a completed pass performs.
+// `after` is the key of the last row of the previous page ({run_key, pass_no, kind, unit_id}) or null. Each row carries `run_source_generation`, the published generation of the run it belongs to: the store does NOT say which run is earlier (the order of generations is not
+// a property of a string or of a creation time), the caller proves it. Read-only; at most 100 rows.
+export async function earlierLiveResults(env,{runKey,after=null,limit=50}={}){
+ if(typeof runKey!=='string'||!runKey||!Number.isInteger(limit)||limit<1||limit>100)throw invalid();
+ if(after!==null&&(!plain(after)||typeof after.run_key!=='string'||!Number.isInteger(after.pass_no)||typeof after.kind!=='string'||typeof after.unit_id!=='string'))throw invalid();
+ try{
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+",(SELECT p.source_generation FROM canonical_producer_run p WHERE p.origin=canonical_producer_unit_result.origin AND p.run_key=canonical_producer_unit_result.run_key) AS run_source_generation FROM canonical_producer_unit_result WHERE origin='epg' AND run_key<>? AND retry_owner='unit' AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')'+(after?' AND (run_key,pass_no,kind,unit_id)>(?,?,?,?)':'')+' ORDER BY run_key,pass_no,kind,unit_id LIMIT ?',
+   [runKey,...LIVE_STATES,...(after?[after.run_key,after.pass_no,after.kind,after.unit_id]:[]),limit]);
+ }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+// S4-4: the LIVE results of ONE run (any pass, any owner), one keyset page of at most `limit` rows in key order (`after` is the key {pass_no, kind, unit_id} of the last row of the previous page): what a pass has to settle when it re-observes a unit it already recorded a failure for. Read-only.
+export async function liveRunResults(env,{origin,runKey,after=null,limit=200}={}){
+ if(!ORIGINS.includes(origin)||typeof runKey!=='string'||!runKey||!Number.isInteger(limit)||limit<1||limit>500)throw invalid();
+ if(after!==null&&(!plain(after)||!Number.isInteger(after.pass_no)||typeof after.kind!=='string'||typeof after.unit_id!=='string'))throw invalid();
+ try{
+  return await many(database(env),"SELECT "+RESULT_COLUMNS+" FROM canonical_producer_unit_result WHERE origin=? AND run_key=? AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')'+(after?' AND (pass_no,kind,unit_id)>(?,?,?)':'')+' ORDER BY pass_no,kind,unit_id LIMIT ?',[origin,runKey,...LIVE_STATES,...(after?[after.pass_no,after.kind,after.unit_id]:[]),limit]);
+ }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
+}
+// S4-4: the number of LIVE membership-affecting results (kind `film_facts`, origin `epg`, any run): the third input of `canonicalFreshness` and the `open_at_completion` of a pass. Read-only.
+export async function liveMembershipCount(env){
+ try{
+  const row=await one(database(env),"SELECT COUNT(*) AS n FROM canonical_producer_unit_result WHERE origin='epg' AND kind='film_facts' AND state IN ("+LIVE_STATES.map(()=>'?').join(',')+')',[...LIVE_STATES]);
+  return Number(row?.n??0);
  }catch(error){throw /no such table/i.test(String(error?.message))?failed('producer_store_missing',error):failed('producer_run_unreadable',error);}
 }
 
@@ -215,4 +250,31 @@ export async function settleResult(env,{row,state,settledBy,at}={}){
  await commit(env,gate,[fence(gate),
   ["UPDATE canonical_producer_unit_result SET state=?,settled_by=?,settled_at=?,updated_at=?,next_attempt_at=NULL WHERE origin=? AND run_key=? AND pass_no=? AND kind=? AND unit_id=? AND state=? AND attempts=?",[state,settledBy,at,at,key.origin,key.run_key,key.pass_no,key.kind,key.unit_id,row.state,row.attempts]],changesOne()],'cas');
  return {state:'committed'};
+}
+
+// S4-4: the in-place move of ONE live result (a reclassification or a deferred schedule), compare-and-set on its state and attempts; the identity columns and the owner never change. `patch` is the patch of `afterRetry` ('update') or
+// `retryDecision` ('defer'); a terminal state goes through `settleResult`. Returns {state:'committed'} or {state:'skipped'} below `open`; a row another path moved is `producer_cas_lost`.
+const PATCH_KEYS=['state','code','attempts','prereq_stamp','next_attempt_at','updated_at'];
+export async function updateResult(env,{row,patch,at}={}){
+ if(!plain(row)||!LIVE_STATES.includes(row.state)||!plain(patch)||typeof at!=='string'||Object.keys(patch).some(key=>!PATCH_KEYS.includes(key)))throw invalid();
+ const next={...row,...patch};
+ if(!LIVE_STATES.includes(next.state)||!Number.isInteger(next.attempts)||next.attempts<row.attempts)throw invalid();
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ const key=keyOfRow(row);
+ await commit(env,gate,[fence(gate),
+  ['UPDATE canonical_producer_unit_result SET state=?,code=?,attempts=?,prereq_stamp=?,next_attempt_at=?,updated_at=? WHERE origin=? AND run_key=? AND pass_no=? AND kind=? AND unit_id=? AND attempts=? AND state=?',
+   [next.state,next.code,next.attempts,next.prereq_stamp??null,next.next_attempt_at??null,patch.updated_at??at,key.origin,key.run_key,key.pass_no,key.kind,key.unit_id,row.attempts,row.state]],changesOne()],'cas');
+ return {state:'committed'};
+}
+
+// S4-4: a stopped pass that a later step takes over is `passing` again (a strike or slice write on a `stopped` row is refused by the SQL trigger, which keeps a stop from touching a strike). ONE compare-and-set that touches only the state and
+// `stopped_by`: no cursor, no strike column, no count. A run that is not `stopped` is refused (`film_person_invalid`: the caller reads the run first).
+export async function commitResume(env,{run,at}={}){
+ if(!plain(run)||run.pass_state!=='stopped'||typeof at!=='string')throw invalid();
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ await commit(env,gate,[fence(gate),casRun(run),
+  ["UPDATE canonical_producer_run SET pass_state='passing',stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=? AND pass_state='stopped'",[at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
+ return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }
