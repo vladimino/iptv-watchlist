@@ -2,6 +2,8 @@
 
 **Captured:** 2026-11-13, about 14:45-15:10 UTC. **Method:** read-only telemetry queries (`POST /accounts/{id}/workers/observability/telemetry/query`, views `events` and `invocations`, service `iptv`) through the Cloudflare API connector, under the owner's chat GO of 13 Nov 2026 (`GO на M2b/M3, только чтение`, repeated "GO все еще в силе"). The queries read logs and wrote nothing; no EPG run, Workflow instance, flag, Task or marker was touched. This GO covered this read only. Counts and timings only: no run id, request id, film id or payload is recorded here.
 
+**Status of this read: a BASELINE, not the current state.** The window (6 to 12 Nov) precedes the performance fixes of 8 and 11 Nov and the restoration of `DISCOVERY_LEDGER_MODE=bounded` on 12 Nov (owner statement of 13 Nov, not verified here), so the memory outcomes below describe the earlier behaviour. The next natural EPG run is the representative measurement and is to be read passively (logs only, no run started by the reader); it supersedes this file for D-C.
+
 **Window and limits.** The telemetry keeps about 7 days: the oldest EPG event found is 2026-11-06 16:04 UTC and the newest 2026-11-12 16:32 UTC (the daily run of 13 Nov 16:00 UTC had not happened at capture time). A single point-in-time read of the retained logs, not an independent replay. The `invocations` view does not name the Workflow class, so a Workflow invocation cannot be attributed to the EPG Workflow rather than Discovery or Ratings by this read.
 
 ## What the EPG phases cost (events `epg_phase`, edge `exit`, `elapsedMs`)
