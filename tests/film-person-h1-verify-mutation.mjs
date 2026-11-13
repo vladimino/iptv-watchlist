@@ -11,7 +11,7 @@ const source='scripts/film-person-h1-verify.mjs';
 const original=fs.readFileSync(source,'utf8');
 const MUTANTS=[
  ['read-only guard',"sql:assertReadOnly(sql)","sql"],
- ['schema version constant',"export const SCHEMA_VERSION=19;","export const SCHEMA_VERSION=20;"],
+ ['schema version constant',"export const SCHEMA_VERSION=21;","export const SCHEMA_VERSION=22;"],
  ['marker generation constant',"export const MARKER_GENERATION=1;","export const MARKER_GENERATION=2;"],
  ['lease margin constant',"export const MIN_LEASE_REMAINING_MS=15*60000;","export const MIN_LEASE_REMAINING_MS=0;"],
  ['envelope failure',"if(out===null){refusals.push('result_failed:'+id);return null;}","if(out===null)return [];"],
