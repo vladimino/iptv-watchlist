@@ -1377,7 +1377,9 @@ async function sealCatalogStep(env,run,lease,deadline){
 // (2.4 s entry, 31.4 s pointer, mirrors, copy and discovery intent, 44.0 s commit tail of which the prediction queue
 // refresh was 26.8 s, 6.8 s reply), longer than the 60 s the shortest MCP client waits. Each step below does one of
 // those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
-async function sealPayload(env,run){return JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());}
+// AIR-460: the staged payload holds the whole catalog, which only `seal_catalog` reads. The publish, finalize and queue steps drop it
+// the moment it is parsed, so its parsed objects are not held through the pointer, mirrors, copy and intent units.
+async function sealPayload(env,run){const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());delete payload.catalog;return payload;}
 // A step is a list of units. The first unit that is not finished always runs, so every call makes progress; no later unit
 // starts once the request's budget has passed, and the step then saves what is finished in `run.seal.units` and answers
 // `continue` in the same phase. A unit answers 'ok' or 'failed' (a thrown error is fatal and keeps the phase). A failed unit

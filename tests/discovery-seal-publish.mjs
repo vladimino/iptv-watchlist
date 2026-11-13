@@ -498,4 +498,12 @@ for(const mode of ['document','emit']){
  await context.sealFinalizeStep(env,resume);
  assert.equal(resume.seal.phase,'queue');same(evs,['handover','watchlist','scan','scan','events']);
 }
+// AIR-460: the publish, finalize and queue steps read the staged payload without its catalog (only `seal_catalog` reads that, from the object).
+{
+ const bkt=bucket();
+ await bkt.put('epg/seal/run-c/payload.json',JSON.stringify({runId:'run-c',report:{films:[]},catalog:{tmdb_1:{id:'tmdb_1'}},watchlist:{films:[]},uncertain:[],fence:'g'}));
+ const payload=await call('sealPayload')({BUCKET:bkt},{runId:'run-c'});
+ assert.equal(payload.catalog,undefined,'the catalog is dropped when the payload is parsed');
+ assert.deepEqual(payload.report,{films:[]});assert.equal(payload.fence,'g');
+}
 console.log('discovery seal publish ok');
