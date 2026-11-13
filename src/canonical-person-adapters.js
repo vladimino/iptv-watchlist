@@ -171,4 +171,10 @@ async function applyUnit(operation,env,{origin,event,input,replan,now,policy=RET
 export const applyPersonState=(env,options)=>applyUnit(PERSON_STATE_OPERATION,env,options);
 // input: {id:'film:...', at, credits:[{personId, role}]}.
 export const applyFilmCredits=(env,options)=>applyUnit(FILM_CREDITS_OPERATION,env,options);
+// AIR-374 M2: the READ-ONLY plan of one unit ({absent, noop, revision, ...}), for the offline dry-run harness (scripts/epg-producer-dry-run.mjs). It reads the stored rows and writes nothing; it throws what the planner throws.
+export async function planUnit(operation,env,input){
+ const spec=KINDS[operation];
+ if(!spec)throw failed('film_person_invalid');
+ return spec.plan(env,input);
+}
 export const APPLY_UNIT={[PERSON_STATE_OPERATION]:applyPersonState,[FILM_CREDITS_OPERATION]:applyFilmCredits};
