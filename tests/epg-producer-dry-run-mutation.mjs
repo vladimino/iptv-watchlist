@@ -21,7 +21,13 @@ const MUTANTS=[
  ["the changed share has a wrong denominator", "Number((changed/total).toFixed(4))", "Number((changed/(total+1)).toFixed(4))"],
  ["the report claims writes", "writes:0,", "writes:units.length,"],
  ["the report names the units", "writes:0,", "writes:0,ids:units.map(unit=>unit.id),"],
- ["a thrown write refusal is swallowed", "if(code==='dry_run_write_refused')throw error;", ""]
+ ["a thrown write refusal is swallowed", "if(code==='dry_run_write_refused')throw error;", ""],
+ ["the planner refusals are left out of the fingerprint", "buildPlanEntries({units:entries,refused:refusedPlanner})", "buildPlanEntries({units:entries,refused:[]})"],
+ ["a unit without a digest is not reported missing", "else missing.unresolved_release++;", ";"],
+ ["a refused unit is not reported missing", "missing.unit_refused++;}", "}"],
+ ["a failed unit is not reported missing", "missing.unit_failed++;}", "}"],
+ ["a build failure is reported complete", "buildError=typeof error?.code==='string'?error.code:'unclassified';", "buildError=null;"],
+ ["an incomplete measurement is reported complete", "complete:buildError===null&&missingTotal===0", "complete:buildError===null"]
 ];
 const dir=fs.mkdtempSync(path.join(os.tmpdir(),'dry-run-mutants-'));
 try{

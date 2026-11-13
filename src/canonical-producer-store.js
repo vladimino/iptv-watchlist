@@ -100,6 +100,8 @@ export async function openEpgRun(env,{runKey,sourceGeneration,planVersion=PRODUC
  await commit(env,gate,[fence(gate),[INSERT_EPG,[runKey,sourceGeneration,planVersion,fingerprint,units.length,gate.generation,at,at]]],'cas');
  const stored=await readRun(env,{origin:'epg',runKey});
  if(!stored)throw failed('producer_run_unreadable');
+ // The source generation is part of the run identity (ADR 0128): an existing run of this event that was planned for another generation is never resumed or replayed (the claim written at pass completion would name the wrong generation).
+ if(stored.source_generation!==sourceGeneration)throw failed('producer_source_generation_mismatch');
  const created=stored.revision===1&&stored.created_at===at&&stored.fingerprint===fingerprint&&stored.pass_no===1&&stored.cursor_id===null;
  const decision=resumeDecision({stored,fingerprint,units});
  if(decision.action==='resume')return {state:created?'created':'resume',run:stored,startIndex:decision.startIndex};

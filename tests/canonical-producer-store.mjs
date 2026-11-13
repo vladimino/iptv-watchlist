@@ -109,6 +109,20 @@ for(const stage of ['legacy','r2','prepared']){
  await assert.rejects(open(file,{units:unitsOf(3),fingerprint:await fingerprintOf(unitsOf(3)),at:T2}),code('producer_cas_lost'));
  assert.equal((await readRun(envOf(file),{origin:'epg',runKey:'run-1'})).pass_no,1);
 }
+{
+ // an INCOMPLETE run of another source generation is refused before any mutation, with the same and with a changed fingerprint
+ const file=database(),units=unitsOf(3),env=envOf(file);
+ const created=await open(file,{units});
+ await commitSlice(env,{run:created.run,next:{cursor_kind:'film_facts',cursor_id:units[0].id},counts:{applied:1},at:T2});
+ const before=dump(file);
+ await assert.rejects(open(file,{units,sourceGeneration:'gen-286',at:T2}),code('producer_source_generation_mismatch'));
+ const changed=unitsOf(4);
+ await assert.rejects(open(file,{units:changed,fingerprint:await fingerprintOf(changed),sourceGeneration:'gen-286',at:T2}),code('producer_source_generation_mismatch'));
+ assert.equal(dump(file),before,'no pass, cursor, claim or revision change');
+ const run=await readRun(env,{origin:'epg',runKey:'run-1'});
+ assert.deepEqual([run.source_generation,run.pass_no,run.cursor_id,run.applied_generation],[GEN,1,units[0].id,null]);
+ assert.equal((await open(file,{units,at:T2})).state,'resume','the same generation still resumes');
+}
 
 {
  // a replay clears an ACTIVE strike and the cursor with it

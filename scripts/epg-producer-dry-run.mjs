@@ -52,6 +52,7 @@ export async function dryRun({env,runId='dry-run',at,films=[],departed=[],person
  const byKind={},refusedByCode={},failedByCode={},latency=[],reads=[];
  const bucket=kind=>byKind[kind]||(byKind[kind]=emptyKind());
  const entries=[];
+ const missing={unresolved_release:0,unit_refused:0,unit_failed:0};
  for(const unit of units){
   const row=bucket(unit.kind);row.units++;
   const q0=counter.queries,t0=clock();
@@ -67,26 +68,30 @@ export async function dryRun({env,runId='dry-run',at,films=[],departed=[],person
    if(plan.absent)row.absent++;else if(plan.noop)row.noop++;else row.changed++;
    // the unit digest the fingerprint covers (a release unit that resolved to no stored Film has none)
    if(digestInput){
-    try{entries.push({kind:unit.kind,id:unit.id,unitDigest:unit.kind==='film_facts'?await filmFactsDigest(digestInput):unit.kind===PERSON_MUTATION_OPERATION?await personMutationDigest(unit.input):await unitDigest(unit.kind,unit.input)});}catch{/* undigestable: counted by the planner as refused or failed elsewhere */}
-   }
+    // an undigestable input throws into the catch below and is counted there (unit_refused or unit_failed), never skipped
+    entries.push({kind:unit.kind,id:unit.id,unitDigest:unit.kind==='film_facts'?await filmFactsDigest(digestInput):unit.kind===PERSON_MUTATION_OPERATION?await personMutationDigest(unit.input):await unitDigest(unit.kind,unit.input)});
+   }else missing.unresolved_release++;
   }catch(error){
    const code=typeof error?.code==='string'?error.code:'unclassified';
    if(code==='dry_run_write_refused')throw error;
-   if(/^(film_person_(invalid|redirect|reference|bounded)|identity_collision|person_role_collision|film_person_identity_conflict)$/.test(code)){row.refused++;refusedByCode[code]=(refusedByCode[code]||0)+1;}
-   else{row.failed++;failedByCode[code]=(failedByCode[code]||0)+1;}
+   if(/^(film_person_(invalid|redirect|reference|bounded)|identity_collision|person_role_collision|film_person_identity_conflict)$/.test(code)){row.refused++;refusedByCode[code]=(refusedByCode[code]||0)+1;missing.unit_refused++;}
+   else{row.failed++;failedByCode[code]=(failedByCode[code]||0)+1;missing.unit_failed++;}
   }
   latency.push(Number((clock()-t0).toFixed(3)));
   reads.push(counter.queries-q0);
  }
  for(const item of refusedPlanner){bucket(item.kind).refused++;refusedByCode[item.code]=(refusedByCode[item.code]||0)+1;}
- // the cost of the plan fingerprint over the digests of the planned units (the planner refusals are entries too)
- let fingerprintMs=null,fingerprintEntries=0;
+ // the cost of the plan fingerprint over EXACTLY the producer's ordered plan entries: the digested units plus every planner refusal (source-only digest and code, ADR 0128). A unit that has no digest (refused or failed while planned, a release with no stored
+ // Film, an undigestable input) is NOT silently dropped: it is counted in `missing` and the measurement is reported `complete:false`, never as a smaller apparently valid fingerprint.
+ let fingerprintMs=null,fingerprintEntries=0,buildError=null;
  try{
   const f0=clock();
-  const ordered=await buildPlanEntries({units:entries.filter(entry=>/^[0-9a-f]{64}$/.test(entry.unitDigest)),refused:[]});
+  const ordered=await buildPlanEntries({units:entries,refused:refusedPlanner});
   await planFingerprint({origin:'epg',event:'epg:'+runId,units:ordered});
   fingerprintMs=Number((clock()-f0).toFixed(3));fingerprintEntries=ordered.length;
- }catch{fingerprintMs=null;}
+ }catch(error){fingerprintMs=null;fingerprintEntries=0;buildError=typeof error?.code==='string'?error.code:'unclassified';}
+ const missingTotal=Object.values(missing).reduce((sum,count)=>sum+count,0);
+ const fingerprint={entries:fingerprintEntries,ms:fingerprintMs,complete:buildError===null&&missingTotal===0,missing:{...missing,total:missingTotal},error:buildError};
  const total=units.length;
  const changed=Object.values(byKind).reduce((sum,row)=>sum+row.changed,0);
  return {
@@ -94,7 +99,7 @@ export async function dryRun({env,runId='dry-run',at,films=[],departed=[],person
   byKind,refusedByCode,failedByCode,
   changed,changedShare:total?Number((changed/total).toFixed(4)):null,
   latencyMs:summarize(latency),d1ReadsPerUnit:summarize(reads),
-  planMs:Number(planMs.toFixed(3)),fingerprint:{entries:fingerprintEntries,ms:fingerprintMs},
+  planMs:Number(planMs.toFixed(3)),fingerprint,
   writes:0,
  };
 }

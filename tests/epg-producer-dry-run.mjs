@@ -77,9 +77,36 @@ const steady=()=>{let t=0;return ()=>(t+=2);};
  const out=await dryRun({env:{DB:d1Standin(file)},...inputs,clock:steady()});
  assert.equal(out.latencyMs.n,6);
  assert.ok(out.latencyMs.p50>0&&out.latencyMs.max>=out.latencyMs.p50&&out.d1ReadsPerUnit.max>=out.d1ReadsPerUnit.p50&&out.d1ReadsPerUnit.total>0);
- assert.ok(out.planMs>0&&out.fingerprint.ms>0&&out.fingerprint.entries>=4,'the plan and the fingerprint are timed over the digested units');
+ assert.ok(out.planMs>0&&out.fingerprint.ms>0,'the plan and the fingerprint are timed');
+ // 4 digested units (Film 1, Film 2, two Persons) + 1 planner refusal (Film 3) = 5 entries; the release with no stored Film and the refused credit have no digest: reported, never dropped silently
+ assert.equal(out.fingerprint.entries,5,'the digested units AND the planner refusal are plan entries');
+ assert.deepEqual([out.fingerprint.complete,out.fingerprint.missing.unresolved_release,out.fingerprint.missing.unit_refused,out.fingerprint.missing.total,out.fingerprint.error],[false,1,1,2,null]);
  const again=await dryRun({env:{DB:d1Standin(file)},...inputs,clock:steady()});
  assert.deepEqual(again,out,'the same input and the same clock give the same report');
+}
+
+// 2b. The fingerprint measurement covers exactly the producer's ordered plan entries, planner refusals included, and an incomplete measurement is never reported as a full one.
+{
+ const file=await seeded();
+ const clean={...inputs,films:[{id:ID(1),facts:facts('A')},{id:ID(2),facts:facts('B')}],departed:[],credits:[]};
+ const base=await dryRun({env:{DB:d1Standin(file)},...clean,clock:steady()});
+ assert.deepEqual([base.fingerprint.complete,base.fingerprint.entries,base.fingerprint.missing.total],[true,4,0],'a plan with every digest is a complete measurement');
+ const withRefusal=await dryRun({env:{DB:d1Standin(file)},...clean,films:[...clean.films,{id:ID(3),facts:'malformed'}],clock:steady()});
+ assert.equal(withRefusal.planned.refusedByPlanner,1);
+ assert.deepEqual([withRefusal.fingerprint.complete,withRefusal.fingerprint.entries],[true,base.fingerprint.entries+1],'a planner refusal is one more plan entry in the count and the fingerprint');
+ // every unit fails while planned (a read error, not a write): nothing is digested, the measurement is incomplete and says why
+ const broken={DB:{prepare:()=>{throw new Error('read failed');}}};
+ const failed=await dryRun({env:broken,...clean,clock:steady()});
+ assert.equal(failed.fingerprint.complete,false);
+ assert.ok(failed.fingerprint.missing.unit_failed>0&&failed.fingerprint.missing.total===failed.fingerprint.missing.unit_failed+failed.fingerprint.missing.unit_refused+failed.fingerprint.missing.unresolved_release);
+ assert.ok(failed.fingerprint.entries<base.fingerprint.entries,'a smaller fingerprint is flagged incomplete, not a valid smaller measurement');
+ // a failure while the fingerprint itself is being built is reported, never a complete figure: the clock throws on the call that starts the fingerprint timer (the last call but one)
+ let calls=0;const counting=()=>{calls++;return calls*2;};
+ await dryRun({env:{DB:d1Standin(file)},...clean,clock:counting});
+ const total=calls;let seen=0;
+ const faulty=()=>{seen++;if(seen===total-1)throw Object.assign(new Error('clock'),{code:'clock_broke'});return seen*2;};
+ const broke=await dryRun({env:{DB:d1Standin(file)},...clean,clock:faulty});
+ assert.deepEqual([broke.fingerprint.complete,broke.fingerprint.ms,broke.fingerprint.entries,broke.fingerprint.error],[false,null,0,'clock_broke']);
 }
 
 // 3. The report holds counts and timings only: no id, title, name or payload.

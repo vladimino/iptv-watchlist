@@ -11,6 +11,7 @@ import {sqliteSync} from './sqlite-session.mjs';
 const MUTANTS=[
  ["the route gate is ignored", "canonical-producer-store.js", "return route.writer==='canonical'?{open:true,generation:route.generation}:{open:false};", "return {open:true,generation:route.generation};"],
  ["the create is not insert-or-ignore", "canonical-producer-store.js", "ON CONFLICT(origin,run_key) DO NOTHING", ""],
+ ["an existing run of another source generation is resumed or replayed", "canonical-producer-store.js", "if(stored.source_generation!==sourceGeneration)throw failed('producer_source_generation_mismatch');", ""],
  ["an equal fingerprint is not resumed", "canonical-producer-store.js", "if(decision.action==='resume')return", "if(false)return"],
  ["the replay keeps the strike count", "canonical-producer-store.js", "strike_count=0,pass_state='passing',stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin='epg'", "pass_state='passing',stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin='epg'"],
  ["a lost compare-and-set is not named", "canonical-producer-store.js", "if(!stored||stored.revision!==run.revision)return failed('producer_cas_lost',error);", ""],
