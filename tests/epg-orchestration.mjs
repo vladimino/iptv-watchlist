@@ -74,7 +74,7 @@ function load({sync,pipeline,authority={ready:true},workflow=null,db}){
  context.loadJSON=async(env,key)=>key==='sync.json'?(state.sync?JSON.parse(JSON.stringify(state.sync)):null):null;
  context.PublishedEpg={readAuthority:async()=>{if(state.authority.throws)throw new Error('unavailable');return state.authority;},repairMirrors:async()=>({mirrored:true,aligned:true,wrote:false})};
  context.postSync=async(env,execution,pathname,body,caller)=>{
-  state.calls.push({pathname,body,caller,fence:env?.epgFence??null});
+  state.calls.push({pathname,body,caller,fence:env?.epgFence??null,trace:env?.epgTrace??null});
   const reply=await pipeline(pathname,body,state,env);
   return {status:reply.status??200,json:async()=>reply.body??{}};
  };
@@ -336,6 +336,37 @@ for(const stage of ['epg','seal']){
  assert.ok(r.clock()-due>=2*300000,stage+': the clock reached both deadlines');
  const model=await epg.readModel(env,r.clock());
  assert.equal(model.health,'healthy');assert.equal(model.published,'run-1');
+}
+
+// 7b. AIR-462: every `act-N` callback logs `epg_act` enter and exit with a local attemptTraceId, a retry of the same step gets another id, and the
+// trace reaches the step the action drives through the per-action env (never a shared slot). The lines carry no free text.
+{
+ const lines=[];const realLog=console.log;console.log=line=>{lines.push(String(line));};
+ let ids=0;let result;
+ const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const r=runner(h,{startAt:due});
+ try{
+  await h.epg.ensure(h.env,{now:due});
+  // The first execution of act-0 is retried by the platform: the stand-in runs the callback twice for that step name.
+  const baseDo=r.step.do;let retried=false;
+  r.step.do=async(name,fn)=>{if(name==='act-0'&&!retried){retried=true;try{await baseDo.call(r.step,name,async()=>{await fn();throw new Error('killed after the work, before the result was stored');});}catch{}}return baseDo.call(r.step,name,fn);};
+  result=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5,traceId:()=>'trace-'+(++ids)});
+ }finally{console.log=realLog;}
+ eq(result,{stopped:true,reason:'complete',instanceId:'epg_20261107_0'});
+ const acts=lines.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(e=>e?.event==='epg_act');
+ assert.ok(acts.length>=4);
+ const first=acts.filter(e=>e.actStep==='act-0');
+ assert.deepEqual([...new Set(first.map(e=>e.attemptTraceId))],['trace-1','trace-2'],'each execution of act-0 has its own attemptTraceId');
+ for(const e of acts){
+  assert.deepEqual(Object.keys(e).filter(k=>!['event','edge','at','runKey','instanceId','actStep','attemptTraceId','elapsedMs','kind'].includes(k)),[],'a closed set of fields');
+  assert.equal(e.instanceId,'epg_20261107_0');assert.equal(e.runKey,'2026-11-07');assert.ok(['enter','exit','error'].includes(e.edge));
+  if(e.kind!==undefined)assert.ok([null,'continue','sleep','stop'].includes(e.kind));
+ }
+ const enters=acts.filter(e=>e.edge==='enter').length,exits=acts.filter(e=>e.edge==='exit').length;
+ assert.equal(enters,exits,'every callback that returned logged its exit');
+ const driven=h.state.calls.filter(c=>c.pathname!=='/api/sync/start');
+ assert.ok(driven.length>0&&driven.every(c=>c.trace&&c.trace.instanceId==='epg_20261107_0'&&/^act-\d+$/.test(c.trace.actStep)&&/^trace-\d+$/.test(c.trace.attemptTraceId)),'the driven step carries the trace of its action');
 }
 
 // 8. Read-after-unknown: a run of this date that already completed (someone else drove it, or the control write was lost) is the

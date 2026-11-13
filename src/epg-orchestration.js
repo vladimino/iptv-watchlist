@@ -72,7 +72,7 @@ const EpgOrchestration=(()=>{
   const ok=!doc.malformed&&v&&typeof v==='object'&&!Array.isArray(v)&&v.schemaVersion===1&&v.budget&&Number.isInteger(v.budget.consecutive)&&Number.isInteger(v.budget.total);
   return {record:ok?v:null,revision:doc.revision,stored:true,malformed:!ok};
  }
- const fencedEnv=(env,revision,step=null)=>({...env,epgFence:{revision},...(step?{epgStep:step}:{})});
+ const fencedEnv=(env,revision,step=null,trace=null)=>({...env,epgFence:{revision},...(step?{epgStep:step}:{}),...(trace?{epgTrace:trace}:{})});
  async function authorityState(env){
   if(typeof PublishedEpg==='undefined')return {ready:false,error:false};
   try{const a=await PublishedEpg.readAuthority(env);return {ready:a.ready===true,error:false};}
@@ -354,7 +354,7 @@ const EpgOrchestration=(()=>{
   const taken=await acquireStep(env,{kind:'executor',modeRevision:adm.modeRevision,now}).catch(()=>({busy:true,until:now+policy().COOLDOWNS_MS[0]}));
   if(taken.reason)return {kind:'stop',reason:taken.reason};
   if(taken.busy)return {kind:'sleep',until:Math.max(taken.until,now+SLEEP_FLOOR_MS),reason:'step_lease_held'};
-  const fe=fencedEnv(env,adm.modeRevision,taken.step);
+  const fe=fencedEnv(env,adm.modeRevision,taken.step,ctx.trace||null);
   let outcome;
   try{outcome=await drive(fe,control,{now});}
   catch(error){outcome={failure:{code:classifyThrown(error)}};}
@@ -401,13 +401,27 @@ const EpgOrchestration=(()=>{
     await step.do(name('cap'),()=>stopInstance(env,ctx,'step_cap'));
     return {stopped:true,reason:'step_cap',instanceId:id};
    }
-   const result=await step.do(name('act'),()=>act(env,ctx).catch(()=>({kind:'sleep',until:ctx.now()+60000,reason:'act_failed'})));
+   const actStep=name('act');
+   const result=await step.do(actStep,()=>tracedAct(env,ctx,actStep,hooks));
    if(result.kind==='stop'){
     await step.do(name('stopped'),()=>stopInstance(env,ctx,result.reason));
     return {stopped:true,reason:result.reason,instanceId:id};
    }
    if(result.kind==='sleep')await step.sleepUntil(name('sleep'),new Date(Math.max(result.until,ctx.now()+SLEEP_FLOOR_MS)));
   }
+ }
+ // AIR-462: one line when an `act-N` callback starts, one when it returns or throws. A callback killed by the platform leaves the enter line alone.
+ // Every execution of the callback, a retry included, mints its own `attemptTraceId`; the id is a local correlator, not Cloudflare's attempt id.
+ async function tracedAct(env,ctx,actStep,hooks={}){
+  const trace={instanceId:ctx.id,actStep,attemptTraceId:hooks.traceId?hooks.traceId():crypto.randomUUID()};
+  const log=(edge,fields={})=>{try{console.log(JSON.stringify({event:'epg_act',edge,at:new Date().toISOString(),runKey:/^\d{4}-\d{2}-\d{2}$/.test(String(ctx.runKey))?ctx.runKey:null,...trace,...fields}));}catch{}};
+  const began=Date.now();
+  log('enter');
+  try{
+   const result=await act(env,{...ctx,trace}).catch(()=>({kind:'sleep',until:ctx.now()+60000,reason:'act_failed'}));
+   log('exit',{elapsedMs:Date.now()-began,kind:['continue','sleep','stop'].includes(result?.kind)?result.kind:null});
+   return result;
+  }catch(error){log('error',{elapsedMs:Date.now()-began});throw error;}
  }
  async function stopInstance(env,ctx,reason){
   try{
