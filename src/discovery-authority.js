@@ -7,7 +7,10 @@
 // or a failed read fails closed and does not serve the R2 ledger.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
-import {slotEligibility,decisionAnchor,slotMinutes} from './domain/slot-evidence.js';
+import {slotEligibility,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
+export const planRevalidation=revalidationPlan;
+export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
+export const decisionAfterRevalidation=revalidatedDecision;
 const TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 export const DISCOVERY_TABLES=TABLES;
 const FENCE_SQL='UPDATE discovery_cas SET ok=changes() WHERE id=1';
@@ -1210,7 +1213,7 @@ export async function assignObservationSlots(env,spec,context={}){
  const pending=[];
  for(const slot of slots){
   if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
-  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},observation.confirmed_tmdb_id).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift'});continue;}
+  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},observation.confirmed_tmdb_id).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift',minutes:slotMinutes(slot.startMs,slot.endMs)});continue;}
   pending.push(slot);
  }
  if(!pending.length)return result;
