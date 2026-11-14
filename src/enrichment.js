@@ -1932,6 +1932,11 @@ function projectedDiagnostic(row,now=Date.now()){
 }
 async function persistExpiredDiagnostic(env,itemKey,row,now=Date.now()){
  if(!leaseExpiredDiagnostic(row,now))return;
+ // The diagnostic row's leaseExpiredAt is not authority while this run still holds the live runner lease
+ // (heartbeat renews the lease before savePredictionRun / diagnosticCheckpoint). A stale timestamp must not
+ // interrupt the live holder from another run's prediction_complete sweep.
+ const lease=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(lease?.runId===row.runId&&lease.expiresAt>now)return;
  const run=await checkedRun(env,row.runId);
  if(run&&['running','interrupted'].includes(run.status)){
   if(run.status==='interrupted'&&run.stopReason==='lease_expired'&&row.state==='interrupted')return;

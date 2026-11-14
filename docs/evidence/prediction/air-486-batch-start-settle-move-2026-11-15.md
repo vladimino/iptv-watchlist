@@ -6,7 +6,7 @@
 
 ## What changed
 
-`settleExpiredDiagnostics` is no longer awaited on `prediction_batch_start` or v5 `prediction_start`. Those starts still recover the single `recoveredRunId`, write this run’s diagnostics, deliver the bounded event outbox, and return. Historic `enrichment/run-diagnostics/` settlement runs inside `prediction_complete` under the existing `predictionWriter`: **10 keys** per successful complete (including an idempotent complete of an already finished run), same cursor object, try/catch so list/get/put failure does not fail the complete, wrap-around when the last page stores `cursor: null`.
+`settleExpiredDiagnostics` is no longer awaited on `prediction_batch_start` or v5 `prediction_start`. Those starts still recover the single `recoveredRunId`, write this run’s diagnostics, deliver the bounded event outbox, and return. Historic `enrichment/run-diagnostics/` settlement runs inside `prediction_complete` under the existing `predictionWriter`: **10 keys** per successful complete (including an idempotent complete of an already finished run), same cursor object, try/catch so list/get/put failure does not fail the complete, wrap-around when the last page stores `cursor: null`. Before mutating a `running` diagnostic, the writer reads the current runner lease and leaves the row unchanged when that run is still the live holder, so a delayed diagnostic checkpoint after heartbeat cannot be interrupted by another run’s complete.
 
 No new scheduler, Task, flag or `waitUntil`. `already_running` still names the holder and does not adopt. `deliverPendingEvents` stays on start (capped outbox, no prefix list).
 

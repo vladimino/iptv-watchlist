@@ -25,7 +25,7 @@ sequenceDiagram
     else New run
         MCP->>Queue: Acquire lease
         MCP->>R2: Persist interrupted state for the recovered lease holder only
-        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys, cursor enrichment/run-diagnostics-settle.json. GET /api/enrichment/status, GET /api/enrichment/runs and MCP enrichment_status project an expired lease from the diagnostic row and the clock. They write nothing. Event delivery stays on GET /api/events until AIR-416.
+        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys, cursor enrichment/run-diagnostics-settle.json. A live runner lease holder is not interrupted from a stale diagnostic timestamp. GET status/runs and MCP enrichment_status project expiry and write nothing. Event delivery is on prediction_start under the writer lease; GET /api/events writes nothing.
         loop While eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
@@ -50,6 +50,7 @@ sequenceDiagram
         end
         Client->>MCP: prediction_complete when required
         MCP->>Queue: Record completion in a conditional write of the stored queue, release lease
+        MCP->>R2: Settle at most 10 expired diagnostic rows; skip the live lease holder
     end
 ```
 
