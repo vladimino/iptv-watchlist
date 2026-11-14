@@ -88,34 +88,34 @@ async function forEachJsonArrayItems(chunks,field,onItem){
  const source=chunks[Symbol.asyncIterator]();
  const pull=async min=>{while(buf.length-pos<min&&!eof){const step=await source.next();if(step.done){eof=true;break;}if(step.value)buf+=step.value;}};
  const compact=()=>{if(pos>262144){buf=buf.slice(pos);pos=0;}};
- const need=async n=>{if(buf.length-pos<n)await pull(n);};
- const skipWs=async()=>{while(true){await need(1);if(pos>=buf.length)return;const c=buf[pos];if(c!==' '&&c!=='\n'&&c!=='\r'&&c!=='\t')return;pos++;}};
+ // Inline checks, not an awaited helper: an async `need(1)` per character allocated a promise per byte (AIR-460).
+ const skipWs=async()=>{while(true){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)return;const c=buf[pos];if(c!==' '&&c!=='\n'&&c!=='\r'&&c!=='\t')return;pos++;}};
  const fail=()=>{throw new Error('Discovery ledger JSON is incomplete');};
- const skipString=async()=>{if(buf[pos]!=='"')fail();pos++;while(true){await need(1);if(pos>=buf.length)fail();const c=buf[pos++];if(c==='\\'){await need(1);if(pos>=buf.length)fail();const e=buf[pos++];if(e==='u'){await need(4);if(buf.length-pos<4)fail();pos+=4;}}else if(c==='"')return;}};
+ const skipString=async()=>{if(buf[pos]!=='"')fail();pos++;while(true){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const c=buf[pos++];if(c==='\\'){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const e=buf[pos++];if(e==='u'){(buf.length-pos<4&&await pull(4));if(buf.length-pos<4)fail();pos+=4;}}else if(c==='"')return;}};
  const scanValue=async()=>{
-  await need(1);if(pos>=buf.length)fail();const c=buf[pos];
+  (buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const c=buf[pos];
   if(c==='"'){await skipString();return;}
-  if(c==='{'||c==='['){let depth=0;while(true){await need(1);if(pos>=buf.length)fail();const ch=buf[pos++];if(ch==='"'){pos--;await skipString();continue;}if(ch==='{'||ch==='[')depth++;else if(ch==='}'||ch===']'){depth--;if(depth===0)return;}}}
+  if(c==='{'||c==='['){let depth=0;while(true){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const ch=buf[pos++];if(ch==='"'){pos--;await skipString();continue;}if(ch==='{'||ch==='[')depth++;else if(ch==='}'||ch===']'){depth--;if(depth===0)return;}}}
   while(true){if(pos>=buf.length){if(eof)return;await pull(1);if(pos>=buf.length)return;}const ch=buf[pos];if(ch===','||ch===']'||ch==='}'||ch<=' ')return;pos++;}
  };
- await skipWs();await need(1);if(pos>=buf.length||buf[pos]!=='{')fail();pos++;
+ await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length||buf[pos]!=='{')fail();pos++;
  const wrapper={};let first=true,sawField=false;
  while(true){
-  await skipWs();await need(1);if(pos>=buf.length)fail();
+  await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();
   if(buf[pos]==='}'){pos++;break;}
-  if(!first){if(buf[pos]!==',')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();}
+  if(!first){if(buf[pos]!==',')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();}
   first=false;
   if(buf[pos]!=='"')fail();
   const keyStart=pos;await skipString();const key=JSON.parse(buf.slice(keyStart,pos));
-  await skipWs();await need(1);if(pos>=buf.length||buf[pos]!==':')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();
+  await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length||buf[pos]!==':')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();
   if(key===field){
    if(sawField||buf[pos]!=='[')fail();
    sawField=true;
    pos++;let itemFirst=true;
    while(true){
-    await skipWs();await need(1);if(pos>=buf.length)fail();
+    await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();
     if(buf[pos]===']'){pos++;break;}
-    if(!itemFirst){if(buf[pos]!==',')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();}
+    if(!itemFirst){if(buf[pos]!==',')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();}
     itemFirst=false;const start=pos;await scanValue();const slice=buf.slice(start,pos);compact();await onItem(JSON.parse(slice));
    }
   }else{const start=pos;await scanValue();wrapper[key]=JSON.parse(buf.slice(start,pos));compact();}
