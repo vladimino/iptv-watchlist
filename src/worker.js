@@ -280,9 +280,9 @@ function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
   return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId)&&(!relaxed||aliasFar(key,tmdbId,film.year));
  };
 }
-// ADR 0142 decision 11: Finds and the film page take their showings from the same completed read as the programme, so the three cannot disagree about a showing. The completed
-// programme lists the rows Discovery assigned (`catalogFilms` for Films outside the watchlist, `films` for members). They are added to the record's own shows; nothing is
-// replaced until the availability fields of the record are retired after the consumer audit (decision 13).
+// ADR 0142 decisions 11 and 13: under an authoritative D1 published run, Finds and the film page take the showings of a Film EXCLUSIVELY from the completed programme read (member
+// `films` and non-member `catalogFilms`, matched by TMDB id). An absent Film is zero showings; the shows of the admission payload are never a second source, even for the pinned
+// run. Outside D1 (R2 authority) the record's own shows stay as before.
 function completedShowsByTmdb(programme){
  const out=new Map();
  for(const entry of [...(programme?.films||[]),...(programme?.catalogFilms||[])]){
@@ -291,21 +291,20 @@ function completedShowsByTmdb(programme){
  }
  return out;
 }
-function withCompletedShows(film,completed,programmeRunId){
- const extra=film?.tmdbId==null?null:completed.get(String(film.tmdbId));
- if(!extra?.length||!programmeRunId)return film;
- const own=film.showsProgrammeRunId===programmeRunId&&Array.isArray(film.shows)?film.shows:[];
- return {...film,shows:dedupeShows([...own,...extra]),showsProgrammeRunId:programmeRunId};
+function withCompletedShows(film,completed,programmeRunId,completedOnly){
+ if(!completedOnly||!film||typeof film!=='object')return film;
+ const shows=film.tmdbId==null?[]:dedupeShows(completed?.get(String(film.tmdbId))||[]);
+ return {...film,shows,showsProgrammeRunId:programmeRunId};
 }
-function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,completedOnly=false,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map(),orderOf=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const bridge={index,metadata,watchlist,programme,catalog},consumedTmdb=catalogConsumedTmdb(bridge),watchlistTmdb=catalogWatchlistTmdb(bridge);
  const letterboxdFor=catalogLetterboxdUrls({metadata,watchlist,programme,catalog}),hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
  const byIdentity=new Map();
- const completed=programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map();
+ const completed=completedOnly&&programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map();
  for(const record of Object.values(catalog||{})){
-  const film=record&&typeof record==='object'?withCompletedShows(record,completed,programmeRunId):record;
+  const film=withCompletedShows(record,completed,programmeRunId,completedOnly);
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
   const id=String(film.id),identity=film.canonicalIdentity;
   if(excluded.has(id)||excluded.has(identity))continue;
@@ -347,8 +346,8 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
 // for the current profile and fingerprint, shows only when the record's shows were written by the pinned generation (zero shows is a valid
 // answer), a Letterboxd link only when stored records prove it. No write, no fetch.
 const CATALOG_FILM_TMDB=/^[1-9]\d{0,11}$/;
-function catalogFilmPage({film:stored,programmeRunId,index,profile,metadata,watchlist,programme,freshness,now}){
- const film=withCompletedShows(stored,programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map(),programmeRunId);
+function catalogFilmPage({film:stored,programmeRunId,completedOnly=false,index,profile,metadata,watchlist,programme,freshness,now}){
+ const film=withCompletedShows(stored,completedOnly&&programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map(),programmeRunId,completedOnly);
  const id=String(film.id),tmdbId=String(film.tmdbId),item=index?.[id],artwork=catalogPosters(metadata)(film);
  const letterboxdUrl=catalogLetterboxdUrls({metadata,watchlist,programme,catalog:{[id]:film}})(film);
  const current=!!(profile&&item?.prediction&&freshness.indexed(item,film));
@@ -472,7 +471,7 @@ async function catalogFilmRoute(env,tmdbId){
  const runId=programme?.runId&&programme.runId===pinnedRunId?pinnedRunId:null;
  if(pinnedRunId&&!runId&&!degraded.includes('programme'))degraded.push('programme');
  const freshness=profile?await optional('freshness',()=>predictionFreshness(env,profile)):null;
- const page=catalogFilmPage({film:found.film,programmeRunId:runId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
+ const page=catalogFilmPage({film:found.film,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
  return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
@@ -560,7 +559,7 @@ async function catalogAvailableRoute(env){
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to an in-memory copy. GET /api/enrichment/view uses the same overlay and neither persists it.
  const seeded=overlayRatingsSeed(index);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,completedOnly:publication.authority==='d1'&&!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
