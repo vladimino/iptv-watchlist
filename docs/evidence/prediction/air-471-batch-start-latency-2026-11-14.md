@@ -2,7 +2,7 @@
 
 **Capture:** 14 November 2026 (UTC), offline: the real Worker code over a sqlite D1 stand-in and an in-memory R2, counted by the `prediction_step_timing` instrumentation (`tests/prediction-batch-start-budget.mjs`). "main" is `f314b339` (the commit this change branches from).
 **Scope:** code, tests, instrumentation and docs of [AIR-471](https://trello.com/c/rFBAixZe), follow-up of the [AIR-468 RCA](air-468-batch-start-rca-2026-11-14.md). No production read or write, no Scheduled Task, no `prediction_batch_start` against production.
-**Verdict:** Offline D1 reduction and parity with the baseline demonstrated (one deliberate difference below). The card's clean-path target of at most 60 D1 calls is **not met** (82; R2 is within the 60 at 48); the gate is left unmet and awaits an owner decision (accept this as a bounded first improvement, or approve a further optimization). Production latency is not measured here and is not claimed.
+**Verdict:** Offline D1 reduction and parity with the baseline demonstrated (one deliberate difference below). The card's clean-path target of at most 60 D1 calls is **not met** (82; R2 is within the 60 at 48); on 14 Nov 2026 the owner accepted 131 -> 82 D1 calls and 48 R2 calls as a sufficient first optimization and made the 60 D1 target a non-blocking stretch target; post-lease revalidation, lease fencing, CAS, input checks and telemetry correctness must not be relaxed to improve counters. Production latency is not measured here and is not claimed.
 
 ## What changed
 
