@@ -172,11 +172,13 @@ assert.equal(anonymous.response.status,403);
 assert.equal(anonymous.body.error.code,-32001);
 
 const listed=await context.worker.fetch(new Request(SITE+'/mcp',{method:'POST',headers,body:JSON.stringify(rpc(2,'tools/list',{}))}),env());
+const PREFLIGHT_ISSUE_SHAPE='"items":{"type":"object","properties":{"path":{"type":"string","maxLength":120},"code":{"type":"string","enum":["required","invalid_type","invalid_version","invalid_enum","too_few","too_many","empty","too_long","out_of_range","invalid_step","invalid_ref","too_large","unknown_field"]}},"required":["path","code"],"additionalProperties":false}';
 const tools=(await listed.json()).result.tools;
 for(const tool of tools){
  assert.equal(tool.inputSchema.additionalProperties,false,tool.name);
  const properties=JSON.stringify(tool.inputSchema.properties||{});
- assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
+ assert.doesNotMatch(properties.replace(PREFLIGHT_ISSUE_SHAPE,''),/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
+ if(tool.name==='prediction_batch_submit'){assert.ok(properties.includes(PREFLIGHT_ISSUE_SHAPE),'AIR-472: the claimed issue shape is published, a validation path and code and nothing else');assert.equal((properties.match(/"path"/g)||[]).length,2,'the only "path" in the schema is the preflight issue shape (properties and required)');}
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
 for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending']){
