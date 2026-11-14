@@ -145,4 +145,28 @@ for(const dir of ['src','scripts']){
   assert.doesNotMatch(text,/minute\s*[:=]\s*37\b|getUTCMinutes\(\)\s*===?\s*37\b|:37\b/,dir+'/'+name+' does not assume the :37 minute');
  }
 }
+
+// 4b. Behavioural timing of the real handler with stubbed members (AIR-482).
+{
+ const body=handler.slice(0,handler.lastIndexOf('}')+1).replace(/^async scheduled/,'return async function scheduled');
+ const run=async(reconcileImpl,{advance=false}={})=>{
+  const starts=[];let waited=null;
+  const makeFn=new Function('reconcileDiscoveryWorkflow','runD1EnrichmentProjection','RatingsOrchestration','EpgOrchestration','Monitor','SCHEDULED_RECONCILE_HEAD_MS','setTimeout',body.replace(/,\s*$/,'')+'');
+  const rec=name=>()=>{starts.push(name);return Promise.resolve();};
+  const timers=[];
+  const fake=(fn,ms)=>{timers.push({fn,ms});return timers.length;};
+  const h=makeFn(()=>{starts.push('reconcile');return reconcileImpl();},rec('projector'),{ensure:rec('ratings')},{ensure:rec('epg')},{run:rec('monitor')},45000,fake);
+  await h({scheduledTime:1},{},{waitUntil:p=>{waited=p;}});
+  return {starts,waited,timers};
+ };
+ let r=await run(()=>Promise.resolve());
+ await r.waited;assert.deepEqual(r.starts,['reconcile','projector','ratings','epg','monitor'],'fast success: reconcile first, each member exactly once');
+ r=await run(()=>Promise.reject(new Error('boom')));
+ await r.waited;assert.equal(r.starts.length,5,'rejection never blocks the others');assert.equal(r.starts.filter(x=>x==='projector').length,1);
+ let release;r=await run(()=>new Promise(res=>{release=res;}));
+ await new Promise(res=>setImmediate(res));assert.deepEqual(r.starts,['reconcile'],'others wait while reconcile is pending');
+ assert.equal(r.timers[0].ms,45000,'bounded head start');r.timers[0].fn();
+ await new Promise(res=>setImmediate(res));assert.equal(r.starts.length,5,'after the deadline the others start exactly once while reconcile is still pending');
+ release();await r.waited;assert.equal(r.starts.length,5,'waitUntil settles after reconcile finishes, no restart');
+}
 console.log('cron-schedule-simulation: ok (configured cron '+current+', compared with the former 37 * * * *)');
