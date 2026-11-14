@@ -52,21 +52,23 @@ The values above are **platform limits**. The measured runtime costs live elsewh
 | Unit cost on the offline stand-in: 14 round trips unchanged, 38 applied (Film-facts only) | `UNIT_COST` in `scripts/film-person-e6-measure.mjs` | Offline stand-in, not a production figure |
 | Worker to D1 round-trip time, `changedShare`, Person and credit applied cost | [D-C decision pack](../../runbooks/film-person-d-c-decision-pack.md), gap table | **Not measured** |
 
-## What the limits imply for the producer pass (arithmetic, not measurement)
+## What the limits imply for the producer pass (conditional scenarios, not measurements)
 
-A pass spends D1 calls, and D1 calls are subrequests. The documented budget is 10,000 per Workflow instance by default. The statement counts below are the local counts of the [AIR-465 synthetic-at-scale measurement](air-465-m2b-synthetic-scale-2026-11-14.md) (a model at the E6 aggregate scale on a local stand-in, not a production figure). A statement count is an UPPER bound on subrequests: statements issued in one `batch` are one query against the D1 limit, and the harness does not say how many of the planner's reads the Worker would batch.
+A pass spends D1 calls, and D1 calls are subrequests. The documented budget is 10,000 per Workflow instance by default. Whether a producer pass exceeds it is decided only by the **actual** D1, batch and R2 request counts of the pass plus the existing consumption of the instance that runs it. None of those is measured: statements issued in one `batch()` are one query against the D1 limit, the planner statement counts below say nothing about batching, and they omit the requests of the EPG step and of the pass itself, so they are neither a lower nor a complete upper bound. The figures are an **unbatched, stand-in scenario** only (every planner statement counted as one subrequest), from the local [AIR-465 synthetic-at-scale measurement](air-465-m2b-synthetic-scale-2026-11-14.md), which is a model at the E6 aggregate scale and not a production figure.
 
-| Quantity | Value | Basis |
-| --- | --- | --- |
-| Full generation-shaped plan, every unit a no-op | 30,999 statements for 7,240 units (397 `film_facts`, 6,452 `person_mutation`, 391 `film_credits`); at least 4 instance budgets | AIR-465: 391 x 9 + 6 x 18 + 6,452 x 4 + 391 x 4; 30,999 / 10,000 rounded up |
-| Heavier modelled cohort, every unit a no-op | 61,890 statements for 14,474 units; at least 7 instance budgets | AIR-465 elevated run |
-| First pass, lower bound | 397 Film-facts units applied at 38 round trips each (15,086), 391 credit units and 6,452 Person units at the no-op price of 4 (27,372): 42,458, at least 5 instance budgets. The applied cost of a Person or credit unit is **not measured** and can be far above 4 | stand-in unit costs plus AIR-465 |
-| Film-facts-only plan of about 397 units | 5,558 unchanged (fits one budget); 15,086 applied (does not) | 397 x 14 and 397 x 38 |
-| Units per invocation, whatever the unit cost | 7,240 units need at least 8 invocations at a ceiling of 1,000 | 7,240 / 1,000 rounded up |
+| Scenario (stand-in, unbatched) | Units | Planner statements | Ratio to a budget of 10,000 |
+| --- | --- | --- | --- |
+| Full generation-shaped plan, every unit a no-op | 7,240 (397 `film_facts`, 6,452 `person_mutation`, 391 `film_credits`) | 30,999 | about 3.1 |
+| Heavier modelled cohort, every unit a no-op | 14,474 | 61,890 | about 6.2 |
+| Film-facts-only plan, every unit unchanged / every unit applied (stand-in unit costs of 14 and 38 round trips) | about 397 | 5,558 / 15,086 | about 0.56 / 1.5 |
 
-Two consequences, both conditional on the assumptions named here:
+No first-pass figure is given: the applied cost of a Person or credit unit is not measured, so no bound for it exists on this page.
 
-1. The subrequest budget is per **instance**, so one instance that loops over many steps still spends one budget. A producer pass that must walk the full plan needs either a raised `limits.subrequests` (a top-level change touching every Workflow) or a chain of instances. Which of the two is a design decision, not made here.
+One count needs no assumption: at a ceiling of 1,000 units per invocation, 7,240 units need **at least 8 invocations** (7,240 / 1,000, rounded up), whatever the unit cost.
+
+What the documented limits establish, and what they leave open:
+
+1. The budget is per **instance**: one instance that loops over many steps spends one budget. Whether a pass fits one budget, needs a raised `limits.subrequests` (a top-level change touching every Workflow) or needs a chain of instances depends on the measured request counts and is not decided here.
 2. A producer step placed inside the existing EPG instance shares the EPG instance's budget. How much of the 10,000 the EPG commit itself spends is not established (D1 calls per step are not measured).
 
 ## Not verified here
