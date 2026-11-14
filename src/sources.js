@@ -373,6 +373,25 @@ function programmeWithWatchlist(report,watchlist){
  return {...report,films,people:peopleCatalog(films)};
 }
 
+// ADR 0142 decision 11 (presentation). `report.catalogFilms` are identity-only entries of the completed read. Film data comes from the current catalog record of the same TMDB id; an
+// entry without such a record is not presented as a Film and is counted. A catalog that could not be read (`catalog` null) never touches `films`: the part is stated as unavailable.
+const CATALOG_AVAILABILITY_FIELDS=['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt'];
+function presentCatalogFilms(report,catalog){
+ const entries=Array.isArray(report?.catalogFilms)?report.catalogFilms:[];
+ if(!entries.length){const {catalogFilms,...rest}=report||{};return rest;}
+ if(!catalog||typeof catalog!=='object'||Array.isArray(catalog))return {...report,catalogFilms:[],catalogPart:{state:'unavailable',entries:entries.length}};
+ const records=new Map(Object.values(catalog).filter(item=>item&&typeof item==='object'&&item.tmdbId!=null&&item.canonicalIdentity==='tmdb:'+item.tmdbId).map(item=>[String(item.tmdbId),item]));
+ const films=[];let unpresented=0;
+ for(const entry of entries){
+  const record=entry.tmdbId==null?null:records.get(String(entry.tmdbId));
+  if(!record||entry.canonicalIdentity!=='tmdb:'+record.tmdbId){unpresented++;continue;}
+  const data={...record};for(const field of CATALOG_AVAILABILITY_FIELDS)delete data[field];
+  const shows=entry.shows||[];
+  films.push({...data,id:entry.id,tmdbId:String(record.tmdbId),canonicalIdentity:entry.canonicalIdentity,shows,availableUntil:shows.length?availabilityDeadline({shows}):null,onWatchlist:false});
+ }
+ return {...report,catalogFilms:films,catalogPart:{state:'ok',entries:entries.length,presented:films.length,unpresented}};
+}
+
 // Canonical titles are independent of EPG presence and language. Match stable IDs only.
 const REVIEWED_TITLES=new Map((typeof FILM_TITLE_DICTIONARY==='undefined'?[]:FILM_TITLE_DICTIONARY).map(f=>[String(f.id),f]));
 function reviewedTitle(film){const match=REVIEWED_TITLES.get(String(film.id));return match&&(!film.tmdbId||!match.tmdbId||String(film.tmdbId)===String(match.tmdbId))?match:null;}
