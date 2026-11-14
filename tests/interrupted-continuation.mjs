@@ -1,4 +1,5 @@
-import {engineStep} from './support/engine-step.mjs';
+// ENGINE-LEVEL test: the chunk engine is driven through tests/support/engine-chunk-driver.mjs, not through a production HTTP path.
+import {engineChunkDriver} from './support/engine-chunk-driver.mjs';
 // A step invocation that the platform ends without a response (for example `exceededMemory`) runs no further
 // code: no catch, no outcome write, no lease release. These cases model that by a storage write that never
 // settles, so the step after it never runs, and check what the next explicit step and the read-only views do:
@@ -38,8 +39,8 @@ const execution={waitUntil(){}};
 const origin='https://iptv.vladimino.workers.dev',headers={'Content-Type':'application/json'};
 const post=async(path,body)=>{const response=await worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);return {status:response.status,data:await response.json()};};
 const status=async()=>(await worker.fetch(new Request(origin+'/api/enrichment/pipeline/status'),env,execution)).json();
-const step=engineStep(context,env);
-const resolve=body=>engineStep(context,env,{route:'/api/enrichment/discovery/resolve',runId:null,extra:{...body,force:body.chunks!==0}})();
+const step=engineChunkDriver(context,env);
+const resolve=body=>engineChunkDriver(context,env,{route:'/api/enrichment/discovery/resolve',runId:null,extra:{...body,force:body.chunks!==0}})();
 // Starts a step that is killed at the selected write: the returned promise never settles, as for a killed invocation.
 async function killedStep(at){hang=at;const dead=step();dead.catch(()=>{});for(let i=0;i<200&&hang;i++)await new Promise(resolve=>setTimeout(resolve,0));assert.equal(hang,null,'the step reached the write it dies at');return {dead};}
 const iso=ms=>new Date(ms).toISOString();

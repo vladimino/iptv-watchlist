@@ -1,4 +1,5 @@
-import {engineStep} from './support/engine-step.mjs';
+// ENGINE-LEVEL test: the chunk engine is driven through tests/support/engine-chunk-driver.mjs, not through a production HTTP path.
+import {engineChunkDriver} from './support/engine-chunk-driver.mjs';
 // AIR-154: a `running` continuation whose resolver lease has expired is an orphan (its hop ended between
 // the chunk and the checkpoint). The next explicit step settles it from the persisted chunk result and
 // resumes the same generation without repeating or dropping progress; a live writer stays busy; a
@@ -26,8 +27,8 @@ const execution={waitUntil(){}};
 const origin='https://iptv.vladimino.workers.dev',headers={'Content-Type':'application/json'};
 const post=async(path,body)=>{const response=await worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);return {status:response.status,data:await response.json()};};
 const status=async()=>(await worker.fetch(new Request(origin+'/api/enrichment/pipeline/status'),env,execution)).json();
-const step=engineStep(context,env);
-const resolve=body=>engineStep(context,env,{route:'/api/enrichment/discovery/resolve',runId:null,extra:{...body,force:body.chunks!==0}})();
+const step=engineChunkDriver(context,env);
+const resolve=body=>engineChunkDriver(context,env,{route:'/api/enrichment/discovery/resolve',runId:null,extra:{...body,force:body.chunks!==0}})();
 const now=Date.now(),iso=ms=>new Date(ms).toISOString();
 const ORPHAN='4b9bc7c5-c429-460b-87a5-e4adf2d4fbe8',GENERATION='a30f67e9-3a11-4f65-b9ec-ccdadfcedbfe';
 const continuation=()=>records.get('epg/resolver-continuation.json');

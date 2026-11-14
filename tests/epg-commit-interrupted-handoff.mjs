@@ -1,4 +1,5 @@
-import {engineStep} from './support/engine-step.mjs';
+// ENGINE-LEVEL test: the chunk engine is driven through tests/support/engine-chunk-driver.mjs, not through a production HTTP path.
+import {engineChunkDriver} from './support/engine-chunk-driver.mjs';
 // AIR-199: the production shape of 27 Oct 2026. The EPG commit published a new generation (pointer and generation
 // files) and the invocation then ended (Workers `exceededMemory`) before `queueDiscovery`. A retry of the same commit
 // took the resume path, saved the sync run as `complete` and ended the same way, still before `queueDiscovery`. The
@@ -32,7 +33,7 @@ const OLD='23570366-0000-4000-8000-000000000000',NEW='b2699929-0000-4000-8000-00
 const post=async(path,body)=>{const response=await worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);return {status:response.status,data:await response.json()};};
 const read=async path=>(await worker.fetch(new Request(origin+path),env,execution)).json();
 // AIR-325: a step on a complete run only delegates over HTTP; the chunk engine is driven the way the retired external step drove it.
-const chunkStep=engineStep(context,env,{runId:NEW});
+const chunkStep=engineChunkDriver(context,env,{runId:NEW});
 const step=()=>records.get('sync.json')?.stage==='complete'?chunkStep():post('/api/sync/epg',{runId:NEW});
 const now=Date.now(),iso=ms=>new Date(ms).toISOString();
 const continuation=()=>records.get('epg/resolver-continuation.json');

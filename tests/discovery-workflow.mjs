@@ -1103,4 +1103,33 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
  }
 }
 
+// AIR-325 integration acceptance through the real entrypoints. A killed hop leaves a `running` record with an expired lease.
+// The real HTTP step must not mutate it or run a chunk; the Workflow settles it, and a repeated interruption fails closed in the Workflow.
+{
+ const ORPHAN='4b9bc7c5-c429-460b-87a5-e4adf2d4fbe8';
+ context.advanceDiscovery=realAdvance;
+ const orphan=(patch={})=>{
+  seed();elect();
+  set('epg/resolver-continuation.json',{stage:'running',reason:null,at:iso,hopId:ORPHAN,remainingChunks:5,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION,...patch});
+  set('epg/resolver-lease.json',{id:ORPHAN,expiresAt:now-1000});
+  creates.length=0;puts.length=0;
+ };
+ orphan();
+ const stored=JSON.stringify(continuation()),leaseBefore=JSON.stringify(records.get('epg/resolver-lease.json'));
+ for(const [path,body] of [['/api/sync/epg',{runId:'sync-1'}],['/api/enrichment/discovery/resolve',{}],['/api/enrichment/discovery/resolve',{recovery:'interrupted'}]]){
+  const answered=await post(path,body);
+  assert.equal(answered.status,200,path);assert.equal(decided(),0,path+' ran no chunk');
+  assert.equal(JSON.stringify(continuation()),stored,path+' did not touch the orphan record');
+  assert.equal(JSON.stringify(records.get('epg/resolver-lease.json')),leaseBefore,path+' did not take the lease');
+ }
+ orphan();
+ const settled=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+ assert.ok(decided()>0,'the Workflow ran the chunk: '+JSON.stringify(settled));
+ assert.notEqual(continuation().hopId,ORPHAN,'the orphan was settled by the Workflow engine');
+ orphan({interruptions:1});
+ const failedClosed=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+ assert.equal(decided(),0,'a repeated interruption runs no chunk in the Workflow: '+JSON.stringify(failedClosed));
+ assert.equal(continuation().reason,'interrupted');assert.equal(continuation().interruptions,2);
+}
+
 console.log('Discovery workflow: retired selector ignored, delegated requests, fail-closed without Workflow admission, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');

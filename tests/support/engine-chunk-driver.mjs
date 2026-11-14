@@ -1,7 +1,10 @@
 import vm from 'node:vm';
-// AIR-325: no HTTP route runs a Discovery chunk any more; the Workflow drives the engine. Tests that cover the chunk engine
-// and its diagnostics drive the same entry points the retired external step used.
-export function engineStep(context,env,{route='/api/sync/epg',runId='sync-1',caller='http',branch='continuation',extra={}}={}){
+// ENGINE-LEVEL ONLY (AIR-325). No HTTP route, MCP tool or entrypoint runs a Discovery chunk any more; only the Workflow does.
+// This helper rebuilds the wrapper of the RETIRED external step (continuationStep, diagnostics ring, checkpoint marker) around
+// the same advanceDiscovery engine the Workflow calls, so engine unit tests keep their coverage of leases, orphans, interruptions and
+// the diagnostics vocabulary. It is not a production path and proves nothing about HTTP behaviour. Integration acceptance is in
+// tests/discovery-workflow.mjs (real HTTP no-mutation/delegation/refusal and the Workflow entrypoint) and tests/interrupted-recovery.mjs.
+export function engineChunkDriver(context,env,{route='/api/sync/epg',runId='sync-1',caller='http',branch='continuation',extra={}}={}){
  const f=name=>vm.runInContext(name,context);
  return async()=>{
   const started=Date.now(),step=f('continuationStep')(caller,route,runId);

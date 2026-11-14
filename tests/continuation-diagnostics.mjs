@@ -1,4 +1,5 @@
-import {engineStep} from './support/engine-step.mjs';
+// ENGINE-LEVEL test: the chunk engine is driven through tests/support/engine-chunk-driver.mjs, not through a production HTTP path.
+import {engineChunkDriver} from './support/engine-chunk-driver.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -54,7 +55,7 @@ const baseEnv=()=>({BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:TOKEN,TMDB_REQUEST_
 async function http(path,method,payload,env=baseEnv()){
  // AIR-325: the HTTP step only delegates; the chunk engine and its diagnostics are driven the way the retired external step drove them.
  if(path==='/api/sync/epg'&&method==='POST'&&payload?.runId===RUN&&records.get('sync.json')?.stage==='complete'){
-  try{const result=await engineStep(context,env,{runId:RUN})();return {status:result.status,body:result.data};}
+  try{const result=await engineChunkDriver(context,env,{runId:RUN})();return {status:result.status,body:result.data};}
   catch(error){return {status:502,body:{error:error.message}};}
  }
  const response=await worker.fetch(new Request(SITE+path,{method,headers:{'Content-Type':'application/json'},body:payload===undefined?undefined:JSON.stringify(payload)}),env,execution);
@@ -316,7 +317,7 @@ assert.equal((await http('/api/enrichment/pipeline/status','GET')).body.continua
 
 // 13. The HTTP resolve route and the internal entrypoint record their own callers and routes.
 seed();
-const resolve=await engineStep(context,baseEnv(),{route:'/api/enrichment/discovery/resolve',runId:null,branch:'resolve',extra:{force:true}})();
+const resolve=await engineChunkDriver(context,baseEnv(),{route:'/api/enrichment/discovery/resolve',runId:null,branch:'resolve',extra:{force:true}})();
 resolve.body=resolve.data;
 assert.equal(resolve.status,200);
 assert.equal(resolve.body.diagnostic.branch,'chunk');
@@ -327,7 +328,7 @@ assert.equal(diag().recent[0].branch,'resolve');
 assert.equal(diag().recent[0].runId,null);
 assert.equal(diag().recent[0].runIdShape,null);
 seed();
-const internal=await engineStep(context,baseEnv(),{route:'/api/enrichment/discovery/resolve',runId:null,caller:'internal',branch:'resolve',extra:{chunks:0,force:false}})();
+const internal=await engineChunkDriver(context,baseEnv(),{route:'/api/enrichment/discovery/resolve',runId:null,caller:'internal',branch:'resolve',extra:{chunks:0,force:false}})();
 const internalBody=internal.data;
 assert.equal(internal.status,200);
 assert.equal(internalBody.diagnostic.branch,'report_only');
