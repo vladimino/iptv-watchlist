@@ -586,7 +586,13 @@ async function ensurePublishedDiscoveryIntent(env,programmeRunId){
   return {ok:true,reconstructed:false};
  }
  try{await queueDiscovery(env,'epg_committed',programmeRunId);}
- catch{return {ok:false,reason:'intent_uncertain'};}
+ catch(error){
+  const code=error?.code;
+  if(code==='discovery_window')return {ok:false,reason:'projector_window',windowUntil:error.window?.expiresAt??null};
+  if(code==='discovery_epg_priority')return {ok:false,reason:'epg_priority',windowUntil:priorityWindow(error).expiresAt};
+  if(code==='discovery_fence'||code==='authority_held')return {ok:false,reason:'authority_held'};
+  return {ok:false,reason:'intent_uncertain'};
+ }
  const after=(await readContinuation(env)).record;
  if(!after||after.programmeRunId!==programmeRunId)return {ok:false,reason:after?.programmeRunId?'stale_generation':'intent_unconfirmed'};
  if(after.reason==='programme_changed'||discoveryContract(after).nextAction==='stop')return {ok:false,reason:'stopped'};
@@ -608,7 +614,7 @@ async function ensureDiscoveryWorkflow(env){
   if(!admitted.ok)return {started:false,reason:admitted.reason};
   const programmeRunId=admitted.programmeRunId;
   const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
-  if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
+  if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId,...(intent.windowUntil!==undefined?{windowUntil:intent.windowUntil}:{})};
   const state=await readWorkflowState(env),current=state.record;
   const same=current?.programmeRunId===programmeRunId;
   if(same&&current.instanceId&&['starting','running','waiting'].includes(current.phase))return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
@@ -642,7 +648,7 @@ async function reconcileDiscoveryWorkflowAttempt(env,options={}){
  if(!admitted.ok)return {started:false,reason:admitted.reason};
  const programmeRunId=admitted.programmeRunId;
  const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
- if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
+ if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId,...(intent.windowUntil!==undefined?{windowUntil:intent.windowUntil}:{})};
  const binding=env.DISCOVERY_WORKFLOW;
  const state=await readWorkflowState(env),current=state.record;
  const same=current?.programmeRunId===programmeRunId&&current.instanceId;
