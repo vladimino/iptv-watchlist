@@ -1,0 +1,278 @@
+{
+ "ok": true,
+ "label": "synthetic-at-scale",
+ "productionSample": false,
+ "authoritativeParity": false,
+ "changedShareMeaning": "harness comparison against rows this fixture wrote; not the production changedShare",
+ "personState": "unmeasured",
+ "environment": {
+  "node": "v22.23.4",
+  "platform": "linux",
+  "arch": "x64",
+  "cpus": 4,
+  "sqlite": "3.45.1 2024-01-30 16:01:20 e876e51a0ed5c5b3126f52e532044363a014bc594cfefa87ffb5b82257ccalt1 (64-bit)"
+ },
+ "summary": {
+  "seed": "m2b-synthetic-e6-2026-11-14",
+  "clock": "2026-11-14T00:00:00.000Z",
+  "films": 10044,
+  "persons": 53623,
+  "credits": 107064,
+  "dimensions": 34936,
+  "watchlistFilms": 391,
+  "elevatedFilms": 391,
+  "metadataRows": 399,
+  "syncRows": 399,
+  "watchlistCreditRows": 8600,
+  "watchlistPersons": 6452,
+  "watchlistCreditMin": 11,
+  "watchlistCreditMax": 26,
+  "elevatedCreditRows": 8600,
+  "elevatedPersons": 6452,
+  "departedSteady": 6,
+  "departedElevated": 6,
+  "absentDeparted": 3,
+  "zeroCreditFilms": 1846,
+  "nullTitles": 566,
+  "nullYearMetadata": 98,
+  "missingExternalIds": 1932,
+  "conflictingExternalIds": 169,
+  "maxCreditsPerFilm": 50,
+  "personsWithoutCredits": 2035,
+  "localizationSources": 7521,
+  "redirects": 20,
+  "modelled": true,
+  "productionSample": false
+ },
+ "steady": {
+  "volume": {
+   "films": 391,
+   "departed": 6,
+   "creditFilms": 391,
+   "personRows": 6452,
+   "personStateUnits": "unmeasured"
+  },
+  "representative": true,
+  "notADCInput": false,
+  "report": {
+   "planned": {
+    "units": 7240,
+    "refusedByPlanner": 0,
+    "filmUnits": 397,
+    "personAndCreditUnits": 6843
+   },
+   "byKind": {
+    "film_facts": {
+     "units": 397,
+     "changed": 0,
+     "noop": 397,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    },
+    "person_mutation": {
+     "units": 6452,
+     "changed": 0,
+     "noop": 6452,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    },
+    "film_credits": {
+     "units": 391,
+     "changed": 0,
+     "noop": 391,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    }
+   },
+   "refusedByCode": {},
+   "failedByCode": {},
+   "changed": 0,
+   "changedShare": 0,
+   "latencyMs": {
+    "n": 7240,
+    "total": 2163.996,
+    "p50": 0.233,
+    "p90": 0.475,
+    "p99": 0.945,
+    "max": 9.168
+   },
+   "d1ReadsPerUnit": {
+    "n": 7240,
+    "total": 30999,
+    "p50": 4,
+    "p90": 4,
+    "p99": 9,
+    "max": 18
+   },
+   "planMs": 17.835,
+   "fingerprint": {
+    "entries": 7240,
+    "ms": 23.499,
+    "complete": true,
+    "missing": {
+     "unresolved_release": 0,
+     "unit_refused": 0,
+     "unit_failed": 0,
+     "total": 0
+    },
+    "error": null
+   },
+   "writes": 0
+  },
+  "timing": {
+   "wallMs": 2828,
+   "cpuUserMs": 1738.1,
+   "cpuSystemMs": 542.7
+  }
+ },
+ "absent": {
+  "storedDeparted": 6,
+  "unknownIds": 3,
+  "report": {
+   "planned": {
+    "units": 9,
+    "refusedByPlanner": 0,
+    "filmUnits": 9,
+    "personAndCreditUnits": 0
+   },
+   "byKind": {
+    "film_facts": {
+     "units": 9,
+     "changed": 0,
+     "noop": 6,
+     "absent": 3,
+     "refused": 0,
+     "failed": 0
+    }
+   },
+   "refusedByCode": {},
+   "failedByCode": {},
+   "changed": 0,
+   "changedShare": 0,
+   "latencyMs": {
+    "n": 9,
+    "total": 20.162,
+    "p50": 1.615,
+    "p90": 4.745,
+    "p99": 4.745,
+    "max": 4.745
+   },
+   "d1ReadsPerUnit": {
+    "n": 9,
+    "total": 135,
+    "p50": 18,
+    "p90": 18,
+    "p99": 18,
+    "max": 18
+   },
+   "planMs": 0.091,
+   "fingerprint": {
+    "entries": 6,
+    "ms": 0.105,
+    "complete": false,
+    "missing": {
+     "unresolved_release": 3,
+     "unit_refused": 0,
+     "unit_failed": 0,
+     "total": 3
+    },
+    "error": null
+   },
+   "writes": 0
+  },
+  "timing": {
+   "wallMs": 78.6,
+   "cpuUserMs": 58.9,
+   "cpuSystemMs": 46.7
+  }
+ },
+ "elevated": {
+  "returnedSteadyDeparted": 6,
+  "returnedExpected": 6,
+  "volume": {
+   "films": 782,
+   "departed": 6,
+   "creditFilms": 782,
+   "personRows": 12904,
+   "personStateUnits": "unmeasured"
+  },
+  "representative": true,
+  "report": {
+   "planned": {
+    "units": 14474,
+    "refusedByPlanner": 0,
+    "filmUnits": 788,
+    "personAndCreditUnits": 13686
+   },
+   "byKind": {
+    "film_facts": {
+     "units": 788,
+     "changed": 0,
+     "noop": 788,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    },
+    "person_mutation": {
+     "units": 12904,
+     "changed": 0,
+     "noop": 12904,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    },
+    "film_credits": {
+     "units": 782,
+     "changed": 0,
+     "noop": 782,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    }
+   },
+   "refusedByCode": {},
+   "failedByCode": {},
+   "changed": 0,
+   "changedShare": 0,
+   "latencyMs": {
+    "n": 14474,
+    "total": 3789.516,
+    "p50": 0.221,
+    "p90": 0.394,
+    "p99": 0.735,
+    "max": 5.089
+   },
+   "d1ReadsPerUnit": {
+    "n": 14474,
+    "total": 61890,
+    "p50": 4,
+    "p90": 4,
+    "p99": 9,
+    "max": 18
+   },
+   "planMs": 21.587,
+   "fingerprint": {
+    "entries": 14474,
+    "ms": 33.747,
+    "complete": true,
+    "missing": {
+     "unresolved_release": 0,
+     "unit_refused": 0,
+     "unit_failed": 0,
+     "total": 0
+    },
+    "error": null
+   },
+   "writes": 0
+  },
+  "timing": {
+   "wallMs": 4439.2,
+   "cpuUserMs": 2439.8,
+   "cpuSystemMs": 826.6
+  }
+ },
+ "limits": "Local planning cost and unit counts on a modelled catalog. Not production latency, not D1 CPU or write cost, not a Worker to D1 round trip, not Workflow limits, and not person_state."
+}
