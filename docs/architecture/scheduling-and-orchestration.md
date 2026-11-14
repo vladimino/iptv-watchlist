@@ -209,6 +209,30 @@ sequenceDiagram
     D1-->>Disc: admitted
 ```
 
+### Proposed: seal in a successor instance over split staged objects ([ADR 0144](../adr/0144-epg-commit-seal-execution-boundary-and-split-staged-payload.md), Proposed, not implemented)
+
+Nothing here runs today: one instance still runs `epg_commit` and the seal. The diagram is the proposed shape only. The successor is **not** claimed to get a fresh isolate. Staged objects are written before the manifest, and the manifest is the commit marker.
+
+```mermaid
+sequenceDiagram
+    participant P as Producing instance
+    participant R2 as R2 staged objects
+    participant C as D1 control document
+    participant S as Successor instance
+    participant H as Hourly ensure
+    P->>R2: Write report, catalog, watchlist, uncertain
+    P->>R2: Write manifest last (commit marker)
+    P->>C: CAS claim names successor id and sealed run
+    P->>S: create() with deterministic id
+    Note over P: Ends normally. Takes no more step leases.
+    S->>C: Admit against claim and mode revision
+    S->>R2: Read only the objects the phase needs, check length and hash
+    S->>C: Seal phases and publish exactly once
+    Note over H,S: If create() is lost or the successor dies before the pointer
+    H->>C: Read claim, status, lease
+    H->>S: Re-create the same deterministic id
+```
+
 ## The separate ratings pipeline
 
 **EPG executor (AIR-348, active).** [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md) (Accepted) adds a Cloudflare EPG Workflow that drives the existing `/api/sync/*` steps in-process after an owner-approved three-step switch (`external`, `switching`, `cloudflare`; epoch fence asserted inside the D1 pointer batch). The switch is done: `epg_status` read `mode=cloudflare`, epoch 1, and the first natural run was accepted on 8 November 2026 ([evidence](../evidence/orchestration/epg-first-natural-run-air-348-2026-11-08.md)); the Daily Task is disabled. The diagram below shows the retired Daily Task and is retained as the rollback flow. The hourly cron calls an inert `EpgOrchestration.ensure` next to the projector, Ratings `ensure`, the Discovery reconcile and the monitor, each independent and none sharing a lease; the cron expression is `0 * * * *` since the separate owner-approved AIR-348 change (it was `37 * * * *`). The Ratings Cloudflare executor shares the 17:00 Europe/Madrid logical due time ([ADR 0101](../adr/0101-ratings-logical-due-time-1700.md), which supersedes the 17:30 of ADR 0090 in that one respect); the diagram below shows the legacy Ratings Task and is unchanged.
