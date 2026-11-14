@@ -15,6 +15,14 @@ Contract introduced by [AIR-188](https://trello.com/c/XQQVS3KG). It separates tw
 - an unmatched, ambiguous or catalog-only programme is dropped before it reaches discovery, the uncertain list or `rawCandidates`;
 - no weekly queue of discovery, resolver or prediction work is created, and `stats.discoveryCandidates` does not grow with the week.
 
+## One owner per slot
+
+A broadcast slot is addressed by `(channel_id, start_ms)` within a run ([ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 1, AIR-480). `scanEPG` records the owner of every retained slot: one watchlist or catalog Film, or one Discovery observation key.
+
+- The same owner repeated on a slot is ignored, so a feed that lists a programme twice gives one show.
+- Two different owners on one slot are both discarded after the stream: the slot is removed from the Film and from the observation, and a Film or observation left with no slot is not retained. There is no first-wins.
+- `stats.duplicate_slot` carries the complete number of discarded slots. The `uncertain` list is a diagnostic sample capped at 100 entries and carries these slots with the reason `duplicate_slot`; `stats.uncertain` counts the ordinary uncertain matches only. The count is the measure, not the list.
+
 Only shows that really exist in the XMLTV feed are stored. Nothing is generated or extrapolated. Channels whose feed is shallower simply have fewer future shows; the published `stats.epgEnd` is the feed's last show start.
 
 ## Published generation
