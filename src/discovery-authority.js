@@ -1384,8 +1384,9 @@ export async function acquireLease(env,context={}){
  if(row?.lease_id!==id){
   // ADR 0135: when the pause is why the lease was not taken, it names itself, ahead of the projector window and the holder.
   if(paused){
-   let again=decision;
-   if(again.admit){try{again=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{again=null;}}
+   // The pre-read is a snapshot, whatever it said: the pointer and the pin can move before the write, so the answer is always read again. `epg_priority` survives only while it is still true.
+   let again;
+   try{again=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{again=null;}
    // A hard conflict is never softened to contention: a request for a programme the pointer no longer names is the stale-generation fence (ADR 0135 decision 6), also under an
    // override, and unreadable evidence fails closed. Both are decided before `lease_held` / `lost_race`.
    if(again==null)throw failed('discovery_epg_priority_evidence');

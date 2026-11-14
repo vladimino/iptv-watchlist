@@ -164,6 +164,25 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  assert.equal(raced.busy.kind,'generation_mismatch','ordinary publication: stale_generation, not lost_race');
  assert.notEqual(raced.busy.kind,'lost_race');
 }
+// (3b) The race that starts PAUSED: the pre-read says `epg_priority` for run-1, then the publication lands (pointer and pin move to run-2, stamped for today) before the statement.
+// The old decision must not be returned: a request for run-1 is now the hard stale-generation fence, not another soft wait.
+{
+ const {db}=armed();
+ const env=envFor(db);
+ at(D2,16,56);
+ beforeBatch=()=>{
+  db.sql("UPDATE published_epg_authority SET programme_run_id='run-2', madrid_run_key='"+D2+"' WHERE id=1");
+  db.sql("UPDATE discovery_authority SET programme_run_id='run-2', published_programme_run_id='run-2' WHERE id=1");
+ };
+ const raced=await take(env,{programmeRunId:'run-1'});
+ assert.equal(raced.lease,null);
+ assert.equal(raced.busy.kind,'generation_mismatch','a paused pre-read does not survive a publication that landed before the write');
+ assert.notEqual(raced.busy.kind,'epg_priority');
+ // Control: with nothing moving, the same paused request stays the soft wait.
+ const {db:still}=armed();
+ at(D2,16,56);
+ assert.equal((await take(envFor(still),{programmeRunId:'run-1'})).busy.kind,'epg_priority');
+}
 // (4) The lease-free writers carry the same bound clock and id: a continuation for a stale programme, or across the boundary, is refused inside its own statement.
 {
  const {db}=armed();
