@@ -14,7 +14,7 @@ import {pathToFileURL} from 'node:url';
 import {sqliteSync} from '../tests/sqlite-session.mjs';
 import {d1Standin} from '../tests/d1-standin.mjs';
 import {dryRun} from './epg-producer-dry-run.mjs';
-import {COPY_PLAN,inputsFromCopy,runOnCopy,verifyCopy} from './epg-producer-m2b.mjs';
+import {CAPS,COPY_PLAN,inputsFromCopy,runOnCopy,verifyCopy} from './epg-producer-m2b.mjs';
 
 export const E6_TARGETS=Object.freeze({
  seed:'m2b-synthetic-e6-2026-11-14',
@@ -302,7 +302,8 @@ export function writeSynthetic(file,targets,{root=process.cwd()}={}){
  if(fs.existsSync(file))throw new Error('output_exists');
  const layout=buildLayout(targets);
  const migrations=path.join(root,'migrations');
- const chain=fs.readdirSync(migrations).filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ // The catalog is the schema the harness is pinned to. A later file that production has not applied (0022, AIR-459) is not part of it.
+ const chain=fs.readdirSync(migrations).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=CAPS.schemaVersion).sort();
  sqlite(file,chain.map(name=>fs.readFileSync(path.join(migrations,name),'utf8')).join('\n'));
  const t=layout.targets;
  const clock=q(t.clock);
@@ -343,7 +344,9 @@ export function writeSynthetic(file,targets,{root=process.cwd()}={}){
  sqlite(file,manifest.join('\n'));
  const verdict=verifyCopy(file);
  if(!verdict.ok||!verdict.representative)throw new Error('synthetic copy refused: '+verdict.refusals.join(','));
- return {ok:true,summary:layout.summary,counts:verdict.counts,digest:layoutDigest(layout)};
+ const version=sqlJson(file,'SELECT version FROM schema_contract WHERE id = 1')[0]?.version;
+ if(Number(version)!==CAPS.schemaVersion)throw new Error('synthetic schema '+version);
+ return {ok:true,summary:layout.summary,counts:verdict.counts,digest:layoutDigest(layout),schemaVersion:Number(version)};
 }
 
 function round(ms){return Number(ms.toFixed(1));}

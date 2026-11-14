@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {E6_TARGETS,buildLayout,layoutDigest,measureSynthetic,writeSynthetic} from '../scripts/epg-producer-m2b-synthetic.mjs';
+import {CAPS} from '../scripts/epg-producer-m2b.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-m2b-synthetic-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
@@ -62,6 +63,7 @@ const SMALL={
  const file=path.join(root,'small.sqlite');
  const written=writeSynthetic(file,SMALL);
  assert.equal(written.ok,true);
+ assert.equal(written.schemaVersion,CAPS.schemaVersion);
  assert.equal(written.counts.foreign_key_violations,0);
  const measured=await measureSynthetic(file,SMALL,{root});
  assert.equal(measured.ok,true);
