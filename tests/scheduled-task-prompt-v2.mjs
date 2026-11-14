@@ -1,6 +1,6 @@
 // AIR-449: the proposed Predictions batch runner v2 Scheduled Task prompt, its dry-run prompt and the A/B contract. The files are documentation only (no live Task exists), so this test keeps honest:
 // the stated lengths and SHA-256, the tool names the texts mention, the generation steps shared byte for byte by both prompts, the exact MCP calls (through the real MCP tool handler, offline),
-// the sample/result schema, the dry-run write freeze over group sizes 1 to 10, and the real partial-stop semantics of the bounded run. No model, network, production or Scheduled Task is involved.
+// the sample/result schema, the dry-run write freeze over group sizes 1 to 10, and the real partial-stop semantics of the bounded run. No model, network, production or Scheduled Task operation is involved.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -47,6 +47,15 @@ assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'produ
 assert.ok(/prediction_batch_submit\(\{runId:'dry-run',epoch:1,dryRun:true/.test(dry),'separate A/B template retains frozen dry-run submit');
 for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status=not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
 for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
+// AIR-481 / ADR 0143: same-URL authors are retained in the assessment without duplicating sources.
+for(const text of [prompt,dry]){const research=step3a(text)[0];
+ assert.ok(research.includes('positions 2–3 {source: индекс в sources, author? 1–80, stance 1–160}')&&research.includes('ОДИН URL')&&research.includes('настоящих разных author'),'same-page independently authored disagreements survive as two attributed positions');
+ assert.ok(research.includes('sources(kind,ref) всегда уникальны'),'the source URL is stored once');
+ assert.ok(!research.includes('baseline без интернета')&&research.includes('без отдельного metadata-only baseline'),'production prediction rationale is the assessment, not a second baseline score');
+ assert.ok(research.includes('по языку, стране и эпохе фильма'),'source choice adapts to language and era');
+}
+assert.ok(step3b(prompt)[0].includes('concreteExecutionFinding')&&!step3b(prompt)[0].includes('изменение от baseline'),'the production gate preserves per-film finding but not a mandatory baseline delta');
+assert.ok(prompt.includes('валидные индексы positions (повтор source только с настоящими разными author, по 1–80 символов)'),'manual preflight permits the accepted ADR 0143 repeated source index with genuine distinct authors');
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
 assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
