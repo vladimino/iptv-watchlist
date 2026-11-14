@@ -55,6 +55,7 @@ for(const text of [prompt,dry]){const research=step3a(text)[0];
  assert.ok(research.includes('по языку, стране и эпохе фильма'),'source choice adapts to language and era');
 }
 assert.ok(step3b(prompt)[0].includes('concreteExecutionFinding')&&!step3b(prompt)[0].includes('изменение от baseline'),'the production gate preserves per-film finding but not a mandatory baseline delta');
+assert.ok(prompt.includes('валидные индексы positions (повтор source только с настоящими разными author, по 1–80 символов)'),'manual preflight permits the accepted ADR 0143 repeated source index with genuine distinct authors');
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
 assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
