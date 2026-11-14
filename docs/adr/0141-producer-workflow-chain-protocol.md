@@ -1,6 +1,6 @@
 # ADR 0141: The Producer Workflow chain has one epoch-fenced owner per published generation, hands over by a durable claim before `create()`, pins every write to the latest published generation inside the write batch, and recovers only through the hourly EPG reconciliation
 
-**Status:** **Proposed** (revision 2 after independent architecture review; design proposal for owner review, it stays Proposed until the owner resolves the options and accepts the finished protocol; no code, migration, Workflow, configuration, flag, schedule or production operation is authorized by this record)
+**Status:** **Proposed** (amended after independent and owner design reviews; design proposal for owner review, it stays Proposed until the owner resolves the options and accepts the finished protocol; no code, migration, Workflow, configuration, flag, schedule or production operation is authorized by this record)
 **Original decision date:** unknown (proposal; not yet decided)
 **Recorded at:** 2026-11-14
 **Approval source:** not yet approved. The scope of this proposal was authorized by the owner decision of 14 November 2026 09:29 UTC on [AIR-374](https://trello.com/c/ha7ais3w#comment-6af82a03b5debcfad1f75466) (analysis, design and a documentation-only pull request; implementation, wiring, Workflow, cron, flag, limit, D1, R2 and migration changes are NOT authorized and need their own approvals after this protocol is accepted)
@@ -33,17 +33,73 @@ What the platform documents (checked against the Cloudflare documentation search
 
 ## Decision (proposal)
 
-### D0. What "current" means: the input identity **[proposal, derived from code]**
+### D0. Three concepts, which couplings are required, and what "current" means **[proposal; evidence marked per row]**
 
-The published authority has TWO counters that matter. `programme_run_id` names the published programme. `generation` is a monotone integer that rises on EVERY change of published content: a publication (`commitPublish`, `src/published-epg.js:302` to `304`), a legacy publish (`src/published-epg.js:586`) and a same-programme replacement (`commitReplace`, which also deletes and re-copies the programme and watchlist rows IN PLACE under the same `programme_run_id`, `src/published-epg.js:318` to `343`). A plan built from the published rows is therefore built from one **input identity** `I = (programme_run_id P, authority generation g)` read together with the rows. `I` is "current" exactly while the authority says `mode='d1'`, `cutover='open'`, `programme_run_id=P` and `generation=g`.
+The first revisions of this record treated the published authority counter as the version of every canonical projection (`source_generation := P:g`, a new run and a full pass per increment). The owner design review asked for a proof of which couplings are actually needed. This section separates three concepts and then derives, from code, which coupling each one needs.
 
-Consequences, stated because the first revision got them wrong:
+**D0.1 Three concepts that must not be merged.**
 
-- A pin on `programme_run_id` alone does NOT say that a plan is current: a replacement keeps `P` and changes the rows under it. The pin of this record is on `I`.
-- `canonical_producer_run.source_generation` (immutable run identity; `openEpgRun` throws `producer_source_generation_mismatch` for another value, `src/canonical-producer-store.js:139`) and `applied_generation` (`pass_state='passed'` claim, never replayed, `src/canonical-producer-store.js:143`) are compared as STRINGS with the published generation by `canonicalFreshness` (`src/canonical-producer-run.js:420`). The run identity must therefore carry `g`: **`source_generation := P || ':' || g`** and the run key carries it as well (`run_key := <EPG event id>@<g>`; length limit 160, `migrations/0020_canonical_producer_run.sql` line 46). A replacement then yields a NEW input identity, a NEW run row and `lagging` until its pass completes, instead of a stale `passed` run that still reads `current`. Fingerprint drift remains the handling of changes that do NOT move `I` (metadata cache, prerequisites), as in ADR 0128.
-- Every reader that compares freshness (the [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md)) must pass the same identity string. That is a consequence S5-1 must carry (V-14, T-11).
-- Replacing a `passed` run is not "replay": it is a new run for a new identity, so `openEpgRun`'s refusal to replay a completed applied claim stays untouched and correct.
-- Any `generation` change is conservatively treated as a new input identity, including a watchlist-only replacement. Narrowing this per replacement kind is an optimisation that needs its own proof and is not proposed.
+| Concept | What it is | Identifiers and fields (code-derived unless marked) | Compared by |
+| --- | --- | --- | --- |
+| **(i) Canonical identity and durable facts** | The Film and Person a fact is about, and the facts themselves. Stable whatever the EPG publication version. | Unit ids `film:*` and `person:*` (`src/canonical-epg-producer.js`, the `film:` prefix check in `planEpgUnits`); entity rows and the per-entity revision `canonical_revision`, asserted by `REVISION` in every writer batch (`src/canonical-mutations.js:21`, `88` to `92`) | `REVISION` (per entity), never by `P` or `g` |
+| **(ii) Source snapshot identity and the latest-source fence** | The identity of the published input a PLAN was built from: `S = (P, g)`, `P = programme_run_id`, `g = authority generation`. It says what a planned write was derived from and whether that source is still the latest. | `published_epg_authority.programme_run_id`, `.generation`, `.watchlist_generation` (`src/published-epg.js:164` to `195`); the chain's `input_generation`; `:expectedInputGeneration` in `GATE` (D4); the snapshot label of a run | `GATE` and `RETRY_GATE`, in the write batch (safety) |
+| **(iii) Projection completion and freshness** | Whether the projection-relevant work of the plan built from a snapshot has been completely applied. | `canonical_producer_run`: `fingerprint` (a digest of the ordered unit digests, event, plan version and origin, `src/canonical-producer-run.js:114` to `125`), `pass_state`, `applied_generation`, `open_at_completion`; the live `film_facts` results (`liveMembershipCount`, `src/canonical-producer-store.js:119`); `canonicalFreshness` (`src/canonical-producer-run.js:413` to `422`) | `canonicalFreshness` and `readerDecision` (readers) |
+
+`P` and `g` never change a Film or Person id, a unit id, a request id (`producerRequestId` takes event, target and content digest, `src/canonical-producer-adapters.js:65`) or a durable fact. The snapshot label of a run is a label for concept (iii)'s claim: "the plan built from snapshot S was applied". It is not a version of the Film or the Person.
+
+**D0.2 Change-impact matrix (what each publication or replacement does, from code).**
+
+| Change | What the code does | Can the producer's projection change? | Does a completed pass stay valid? | What makes a planned write stale |
+| --- | --- | --- | --- | --- |
+| `commitPublish`, phase `published` (new `P`) | moves `programme_run_id`, `generation`+1 and `watchlist_generation`+1 (`src/published-epg.js:302`, `303`); inserts the whole new generation rows | Yes: a new programme and membership | No: it is another snapshot and another EPG event | `P` moved: every write planned from the old `P` |
+| `commitPublish`, phase other than `published` (withheld) | `generation`+1 only (`src/published-epg.js:304`); the pointed `P` rows are not touched (the staged rows belong to the other target) | No: the pointed rows are unchanged (derived from the statements above) | Yes in substance: the plan of the same rows is equal | `generation` moved: conservative (the fence rejects a write whose projection would be identical) |
+| `commitReplace(kind='programme')` through `patchProgramme`, called by Discovery's `attachWatchlistShowing` (`src/discovery.js:605` to `623`, per matched Film at `820` and `978`) | `generation`+1, `watchlist_generation` unchanged (`src/published-epg.js:318` to `343`); rewrites the programme document, the `programme` members and ALL shows of `P` in place. The patched Film item gets `canonicalIdentity`, merged `aliases`, merged shows and `hotEnteredAt` (`src/discovery.js:307` to `312`) | Depends on the wiring: identity and aliases are Film facts, showings and `hotEnteredAt` are not among the digested content keys (`CONTENT_KEYS` is `film`, `evidence`, `dimensions`, `localization`, `metadata`, `sync`, `watchlist`, `src/canonical-producer-adapters.js:36`). Which published fields the S5-1 wiring maps into those keys is **unknown** (the planner takes injected inputs) | Only if the recomputed plan fingerprint is equal | `generation` moved |
+| `commitReplace(kind='watchlist')` through `saveWatchlist`, called by `persistWatchlist` after an EPG sync when the list changed (`src/worker.js:711`) | `generation`+1 and `watchlist_generation`+1; rewrites the watchlist document and the `watchlist` members, no shows | Yes, it MAY: a Film added to or removed from the list changes `watchlist` of its `film_facts` unit and the `departed` release set (`planEpgUnits`, `src/canonical-epg-producer.js`); film entries of the list may also change | Only if the recomputed plan fingerprint is equal | `generation` moved |
+| Inputs OUTSIDE the published rows: the metadata and sync objects, the dictionary store, TMDB retirements, prerequisites stamps, Discovery state | None of these moves the authority counters. They enter the plan only through the injected inputs, so they are in the plan fingerprint when a plan is computed; refusal prerequisites are compared by the lazily revalidated `prereq_stamp` (ADR 0128), not by the fingerprint | Yes | A pass that already completed is NOT re-evaluated when only these change: the claim is about the plan of its snapshot. A run that is still `passing` replays by fingerprint drift (`resumeDecision`, `src/canonical-producer-run.js:152` to `159`) | Nothing (no authority change); this is today's behaviour and is not changed here |
+
+The consequence the review asked to prove: **a `g` increment does not by itself change the projection.** Whether it does is decided by one existing, code-supported test, the plan fingerprint, which is a digest of exactly the projection-relevant unit digests. No static classification of replacement kinds is needed, and none is proposed: a watchlist-only replacement is NOT declared irrelevant (it may change membership) and a programme-only replacement is NOT declared relevant (it may change nothing the plan digests).
+
+**D0.3 Safety is not recomputation policy. What each needs.**
+
+- **Safety needs `S` per write, nothing more.** A write planned from snapshot `S0` must not land after the source moved, because its content may differ from what the new snapshot would write. The fence is `GATE` with the caller's `:expectedInputGeneration` (D4). It needs no run identity: it compares the authority with the plan's own identity. It stays exactly as designed; no fence is weakened to save work. Fencing on `P` alone is rejected (a watchlist removal after planning would let the old plan re-assert membership; rejected in the first review).
+- **No false `current` needs a label that changes when the source moves.** `canonicalFreshness` compares the claim `applied_generation` with the published generation string (`src/canonical-producer-run.js:420`), and `epgRunForGeneration` returns a `passed` run before a `passing` one for the same label (`src/canonical-producer-store.js:94` to `98`). With the label equal to `P` alone, a `passed` claim of an old plan would keep matching after a plan-changing replacement. A reader that cannot replan must therefore be able to tell, from the authority row alone, that the claim is about an older snapshot: the label carries `g` (`P:g`, as the existing pointer fence already carries `d1:<generation>:<programme_run_id>`, `src/published-epg.js:201`). The label is for READERS and for the claim; it is not a new version of any Film or Person.
+- **Recomputation is a separate policy: when must the units be applied again?** Only when the plan changed. The Accepted schema fixes how a completed claim can be superseded: a `passed` run is never updated again (`canonical_producer_run_applied_once`, migration 0020 lines 199 to 204), `source_generation` and `run_key` are immutable (lines 172 to 177) and a new row must be inserted `passing` with `pass_no` 1 and no cursor (`canonical_producer_run_insert_shape`, lines 145 to 150). So a changed plan after `passed` can ONLY be a new run row; and an UNCHANGED plan after `passed` can be re-labelled by a new run row inserted in shape and then updated to `passed` by the same UPDATE that `commitPassComplete` already uses, in ONE batch (no trigger forbids an INSERT followed by that UPDATE; **unverified on a real D1 until tested**, V-23).
+
+**D0.4 Options evaluated.**
+
+| Option | Rule | Safety | No false `current` | Complexity and scope | Worst-case forward progress |
+| --- | --- | --- | --- | --- | --- |
+| **A** (the previous revision) | label `P:g`; every increment opens a new run row and a full pass | yes | yes | runKey must differ from the plan event (today `openEpgRun` takes `runKey:event`, `src/canonical-producer-driver.js:357`), reader label change, generation ordering of the label; no schema or trigger change | any increment during a pass restarts it: it completes only in a window of one full pass without ANY increment, including increments that change nothing the plan digests |
+| **B** (fence only, label `P`) | `S` is only a fence; the run and claim stay per `P`; a passed run is re-validated by a stamp outside the run row | yes | **no**: the old `passed` claim keeps matching label `P`, and `epgRunForGeneration` prefers it over a newer run of the same `P`; closing that needs a reader that also reads a stamp and a lineage label, a wider reader change than A | stamp storage plus lineage plus the same ordering gap (two runs with one label cannot be ordered by `order(a, b)`, `src/canonical-producer-driver.js:175`) | as C for unchanged plans, but it is not safe |
+| **C** (recommended for the owner to consider) | label `P:g` as in A, plus **ATTEST**: after a replan at the new snapshot, when the plan fingerprint equals the fingerprint of the earlier `passed` run of the same event, one batch inserts a `passed` run for `P:g1` and visits NO unit; when it differs or the earlier run is unfinished, a new run `P:g1` runs the full pass (ADR 0140 S-A, unchanged) | yes | yes | A plus one store writer (ATTEST) and tests; no schema or trigger change; the event must be constant across labels (run key `event@g`), so the fingerprint can be equal | plan-equal increments after `passed` cost one replan and one batch; plan-changing increments still restart the pass (inherent to S-A without a delta engine); increments during an unfinished pass still restart it |
+| **D** (policy, complementary to A, B and C) | start or continue the pass only when no Discovery attach or watchlist save is in flight (hard yield to Discovery instead of the soft yield of T-4) | yes | yes | one more signal (V-13) | removes the main known source of increments from the pass window at the cost of delaying the pass behind Discovery |
+| **E** (rejected) | `S` fence on `P` only | **no** | no | smallest | n/a |
+| **F** (not proposed) | carry the cursor of an UNFINISHED run into the run of the new label when the fingerprint is equal | yes if the results ledger is carried | yes | needs a proof that the cross-run supersede sweep (`supersedeEarlierResults`, `src/canonical-producer-driver.js:161` to `192`) does not settle, as `newer_run`, live results of units the new run never visited; the INSERT then UPDATE of the cursor is also unverified. A speculative delta engine is not proposed | would also survive plan-equal increments during a pass |
+
+**D0.5 Conclusion (a recommendation, not a decision).** `(P, g)` IS warranted as the per-write fence and chain pin (concept ii) and as the label readers compare (so that no stale claim reads `current`). A NEW FULL RUN FOR EVERY INCREMENT is NOT warranted: Option C keeps the label and the fence and re-labels an unchanged plan by ATTEST. Option A remains the fallback and a correct design on its own. The owner may also choose A and measure first; nothing in this record forces C. Option D is a separate scheduling choice (T-4, T-14).
+
+**D0.6 Cost and liveness, with evidence levels.**
+
+- **Code-derived structure:** Discovery attaches showings film by film and each attach is one `commitReplace(programme)` and one generation increment (`src/discovery.js:605` to `623`, `820`, `978`); the Discovery series opens as soon as the generation is published ([ADR 0030](0030-discovery-queued-at-publication.md)); a watchlist save is one increment per changed list (`src/worker.js:711`). So increments overlap the producer pass window by design.
+- **Model (not measured):** the synthetic plan has 7,240 units and needs at least 8 invocations at a ceiling of 1,000 units ([AIR-465](../evidence/d1-migration/air-465-m2b-synthetic-scale-2026-11-14.md), [ADR 0140](0140-producer-workflow-adaptive-successor-chain.md)); the 30,999 prepared statements of that model are APPLY costs, not the cost of re-visiting a unit that is already applied. A unit whose facts are already stored is a no-op that opens no batch (`applyFilmFacts`, `src/canonical-producer-adapters.js:142`, `153`, `prePlanFilmFacts` at `72`), but its read cost per unit is **unknown**, as is the cost of building the plan.
+- **Unknown:** the real frequency of increments per kind (the authority keeps counters, not a history; replacements leave no row), the real pass duration, the fraction of increments that change the plan fingerprint.
+- **Liveness statement.** Let `T` be the time one full pass needs and `G` the gap between increments that the design treats as restarting. The pass completes only if some window of length `T` contains no restarting increment. Under A every increment restarts; under C only increments that change the plan fingerprint (or any increment during an unfinished pass, since F is not proposed). The chain can therefore restart perpetually and keep freshness `lagging` when restarting increments arrive faster than `T`, and no design inside this record's limits (no delta engine, no weakened fence) can promise otherwise. What is bounded: the rebase cap (`PARAM-rebase-cap`) stops a live owner, the chain REOPENs at most once per hourly tick, and the canonical projection still converges, because every unit that is visited and applied is durable even when the claim never completes. What must be measured to size the risk: increments per hour per kind (a counts-only delta of `generation` and `watchlist_generation` sampled at the hourly tick needs no new writer, V-21), the plan-fingerprint change rate across consecutive snapshots, the plan-build cost and the no-op re-visit cost per unit (V-22).
+
+**D0.7 Correctness across transitions (Option C).**
+
+| Scenario | No stale write | No false `current` | No silent missed update | Eventual completion |
+| --- | --- | --- | --- | --- |
+| New `P` | the chain of the old `P` fails `GATE` (`P` moved) | the new label has no claim until its pass completes | the new plan is built from the new snapshot | needs a window without restarting increments |
+| Same `P`, `g` moves, no producer-relevant change, run `passed` | no run is active; a retry is refused by `RETRY_GATE` on the moved identity | label `P:g1` has no claim: `lagging` until ATTEST (one replan, one batch, no unit visited) | plan equal by fingerprint, so nothing is missed | one short instance |
+| Watchlist add or remove | the old plan's writes fail `GATE` | the old claim has label `P:g0`: not `current` for `P:g1` | the new plan has the changed `watchlist` units and `departed` set: fingerprint differs, new full pass | as above |
+| A Film or Person attribute or credit change through published rows | as above | as above | as above | as above |
+| The same change through inputs outside the published rows | no authority change, no fence event | the claim stays for its label (today's behaviour) | picked up by fingerprint drift while `passing`, otherwise by the next EPG run (unchanged, stated, not new) | n/a |
+| Change before the pass, during it, after `passed` | before: the plan already includes it; during: write fails `GATE`, REBASE, replan, new run; after: REOPEN, replan, ATTEST or new run | label guarantees it | fingerprint compare decides | as above |
+| REBASE and a stale in-flight step | the step's own `:g` fails `GATE` | n/a | n/a | n/a |
+| Retry pass | `RETRY_GATE` pins the retry plan's own identity and excludes a live chain | its results of an older label are superseded only by the sweep with proven ordering | n/a | n/a |
+| Unfinished pass | the unfinished run's writes fail `GATE`; its row is left | no claim for the new label until the new run completes | the new run replans everything | needs a restart-free window |
+
+**Existing-contract checks.** `canonicalFreshness` and `readCanonicalFreshness` take the published generation as a string and compare by equality (`src/canonical-producer-run.js:413` to `422`, `src/canonical-producer-driver.js:476` to `483`): the label `P:g` needs no change to them, only the string the readers pass (V-14). `inputProvenanceOk` requires `provenance.publishedGeneration === sourceGeneration` (`src/canonical-producer-driver.js:211`): the sealed provenance must state the label `P:g` it was sealed for, taken from the same validated snapshot (D0a). [ADR 0137](0137-left-plan-settlement-from-sealed-newer-input.md) requires a monotone ordering of generations supplied by the caller; the authority `generation` is one integer that every publish and replace increments in the same fenced batch (`src/published-epg.js:302` to `304`, `318` to `343`), so ordering two labels is a numeric comparison of `g`, not a string comparison and not an ordering of programmes (V-19: no revert or import path may lower it). ATTEST does not run the sweep (no unit visited, nothing newly observed): live results of the earlier run stay live, which is what they are. ADR 0140's full-pass and generation-fence direction is preserved.
 
 ### D0a. Input snapshot binding: an invariant, not a wiring detail **[proposal]**
 
@@ -117,13 +173,14 @@ Every transition is ONE batch `[FENCE, <authority predicate>, UPDATE chain ... W
 | Transition | Who | State predicate and extra assertions | Effect |
 | --- | --- | --- | --- |
 | **a. TAKEOVER** | hourly reconcile | `owner_state IN ('pending','active')` AND `lease_expires_at + BOUNDARY_MARGIN < now` (Worker clock); authority `(P, :g_now)` with the SAME `P`; NO condition on the old `input_generation` | `input_generation=:g_now`, epoch+1, `pending`, new claim window, `takeover_count+1` |
-| **b. REBASE** | the owner, in its path | owner assertion with expected identity `:g_old`; authority `(P, :g_new)` with `g_new > :g_old`; `chain.input_generation = :g_old` | `input_generation=:g_new`, epoch and nonce unchanged, `rebase_count+1`; the owner builds a NEW fence object for `g_new`, replans (D0a) and opens run `P:g_new` through `openEpgRun`. Past `PARAM-rebase-cap` the chain is `stopped` (`producer_input_unstable`) |
+| **b. REBASE** | the owner, in its path | owner assertion with expected identity `:g_old`; authority `(P, :g_new)` with `g_new > :g_old`; `chain.input_generation = :g_old` | `input_generation=:g_new`, epoch and nonce unchanged, `rebase_count+1`; the owner builds a NEW fence object for `g_new` and replans (D0a). If the new plan fingerprint equals the earlier `passed` run of the same event it ATTESTs (row j); otherwise it opens run `P:g_new` through `openEpgRun` and runs the full pass (an unfinished earlier run is left as it is). Past `PARAM-rebase-cap` the chain is `stopped` (`producer_input_unstable`) |
 | **c. RELAUNCH** | hourly reconcile | `owner_state='released'`; authority `(P, :g_now)`; no hard priority signal (read first; where one SQL predicate on one table expresses it, the same predicate is asserted in the batch, otherwise the relaunched owner re-checks at its first invocation boundary and yields again at the cost of one claim, V-13); NO condition on the old `input_generation` | `input_generation=:g_now`, epoch+1, `pending`, new claim window, `relaunch_count+1`. Its predicate is disjoint from TAKEOVER's (`released` vs `pending`/`active`) |
-| **d. REOPEN** | hourly reconcile | `owner_state IN ('complete','stopped')` AND authority `(P, :g_now)` with `g_now > chain.input_generation` | `input_generation=:g_now`, epoch+1, `pending`, pass counters reset, `reopen_count+1` |
+| **d. REOPEN** | hourly reconcile | `owner_state IN ('complete','stopped')` AND authority `(P, :g_now)` with `g_now > chain.input_generation` | `input_generation=:g_now`, epoch+1, `pending`, pass counters reset, `reopen_count+1`; the new instance replans and ATTESTs or runs the full pass exactly as after REBASE |
 | **e. YIELD** | the owner | owner assertion WITH expected identity `:g` (`c.input_generation = :g`); no authority condition, so a yield stays writable when the input moved | `released`, epoch unchanged. A late YIELD built for an old identity after a REBASE fails (`input_generation` differs) |
 | **f. COMPLETE** | the owner | the SAME batch as `commitPassComplete`: `GATE` with expected identity `:g` | `complete` |
 | **g. STOP** | the owner | owner assertion with expected identity `:g`; no authority condition | `stopped` with a named code. A late STOP built for an old identity after a REBASE fails |
 | **h. SUPERSEDE** | hourly reconcile | a non-terminal chain row whose `programme_run_id` is not the published `P` | `superseded` (hygiene; safety rests on `GATE`). The older run row is left untouched (no new writer) |
+| **j. ATTEST** (Option C of D0.4) | the owner, after a replan at the current snapshot | ONE batch: `[FENCE, GATE(:g_new), assert the earlier run R0 of the same event exists with revision `:r0`, `pass_state='passed'` and `fingerprint = :f` (the fingerprint of the plan just built under D0a), INSERT run R1 (`source_generation = P:g_new`, run key `<event>@g_new`, the same fingerprint, plan version and unit count, `passing`, `pass_no` 1, as the insert trigger requires), UPDATE R1 to `passed` with `applied_generation = source_generation`, `open_at_completion = :n`, `completed_at`, chain `complete`, assert `changes()`]`. No unit is visited and no receipt is written | R1 is a `passed` claim for the new label; R0 is untouched. Whether D1 accepts the INSERT and the UPDATE in one batch is unverified (V-23); if it does not, ATTEST is not available and Option A applies |
 
 **Stale-input recovery with no live owner (bounded).** After a same-programme replacement the chain is recovered by exactly one reconciler batch per state: `pending` or `active` with an expired lease by TAKEOVER, `released` by RELAUNCH, `complete` or `stopped` by REOPEN. None compares against the old `input_generation`, each pins `:g_now` atomically, and each takes a fresh epoch, so no state is stuck. Replacement before CLAIM: the instance re-reads and claims at `g_now` (D2 C1); if it never starts, the claim window ends and TAKEOVER pins `g_now`. Replacement plus death: TAKEOVER. Replacement plus YIELD: RELAUNCH. A live owner is never taken over only because its input is stale: it REBASEs at its next failed batch, and the reconciler waits for its lease. A TAKEOVER that races an owner's REBASE is one compare-and-set on the same `revision`: if TAKEOVER wins, the owner's next batch fails on the epoch and it ends; if REBASE wins, the TAKEOVER's compare-and-set fails and it re-reads.
 
@@ -229,7 +286,7 @@ The hourly `EpgOrchestration.ensure` (`src/epg-orchestration.js:483` to `487`; t
 | F10 | TAKEOVER races an owner's slice commit | revision bumped | takeover's `revision=:r` fails | the reconciler sees a live lease next read | compare-and-set on the old revision |
 | F11 | Lease lost while the owner is alive but stalled (skew beyond the margin, slow D1) | takeover committed, or not | the owner's next batch fails `GATE`, or it stops at `expires-margin` | the owner ends; the takeover owner continues | the epoch, not the clock, fences; waste is at most the unit in flight |
 | F12 | Step or message redelivery (replay) | the same | step results are cached; CLAIM, HANDOFF and slice commits are read-back idempotent | none | the nonce comes from a checkpointed step; the revision CAS resumes the cursor; the create step sees `exists` |
-| F13 | Fingerprint drift inside the run (an input that does NOT move `I`) | run row replays with `pass_no+1` | `openEpgRun` at the start of an invocation, under `GATE` | the same owner continues from the start; `PARAM-replay-cap` replays end in `stopped` (`producer_fingerprint_unstable`) | ADR 0128 semantics; the chain row is untouched |
+| F13 | Fingerprint drift inside an unfinished run (an input that does NOT move `S`, for example the metadata object) | run row replays with `pass_no+1` | `openEpgRun` at the start of an invocation, under `GATE` | the same owner continues from the start; `PARAM-replay-cap` replays end in `stopped` (`producer_fingerprint_unstable`) | ADR 0128 semantics; the chain row is untouched |
 | F14 | A newer programme is published during the chain | `programme_run_id` moved | the next producer batch fails `GATE` and rolls back | the stale owner ends; SUPERSEDE; LAUNCH for the new programme | the gate is asserted in the write batch: no read-then-write window |
 | F15 | Marker or authority leaves `d1`/`open` | unchanged | `FENCE` or `GATE` fails | the chain ends; no launch while not open | fail closed; code rollback never touches authority |
 | F16 | D1 batch fails transiently in HANDOFF, TAKEOVER, RELAUNCH or REOPEN | batch is atomic: unchanged | the batch error | in-instance bounded retry, else the next tick | a failed `batch()` leaves no partial transition |
@@ -239,9 +296,9 @@ The hourly `EpgOrchestration.ensure` (`src/epg-orchestration.js:483` to `487`; t
 | F20 | Priority yield | `released` | reconciler read | RELAUNCH when the signal is clear | the cursor is durable |
 | F21 | **CLAIM commits, its result is lost** | `active`, epoch `e`, nonce `n` | the retried claim step | the retry reuses the checkpointed `n`, its batch fails, the read-back finds its own epoch, instance and nonce: owner | the nonce is fixed before the mutation (D2 C0 to C2) |
 | F22 | HANDOFF commits, its result is lost | `pending`, epoch `e+1` | the retried step | its read-back finds `id(P,e+1)` and proceeds to create | D2 H2 |
-| F23 | Same-programme replacement between planning and a unit write | `generation` moved | the unit batch fails `GATE` | REBASE: the owner re-reads inputs at `g'`, opens run `P:g'`; the old run row stays | the gate pins `I`, not only `P` |
-| F24 | Replacement between the last unit and `commitPassComplete` | `generation` moved | the pass-complete batch fails `GATE` | the run is NOT `passed`; REBASE as F23 | the claim is written only under the identity it was built for |
-| F25 | Replacement AFTER `passed` and chain `complete` | run `passed` for `P:g`; authority `(P, g')` | the reconciler sees `g' > input_generation` | REOPEN; freshness reads `lagging` for `P:g'` meanwhile | identity-string freshness (D0); no replay of an applied claim |
+| F23 | Same-programme replacement between planning and a unit write | `generation` moved | the unit batch fails `GATE` | REBASE: the owner re-reads inputs at `g'`, replans; the plan differs (full pass of a new run `P:g'`), or it is equal and the earlier run is unfinished (a new run `P:g'` from the start, Option F not proposed); the old run row stays | the fence pins `S`, not only `P` |
+| F24 | Replacement between the last unit and `commitPassComplete` | `generation` moved | the pass-complete batch fails `GATE` | the run is NOT `passed`; REBASE as F23 | the claim is written only under the snapshot it was built for |
+| F25 | Replacement AFTER `passed` and chain `complete` | run `passed` for label `P:g`; authority `(P, g')` | the reconciler sees `g' > input_generation` | REOPEN, replan: plan equal, ATTEST (no unit visited); plan different, new run `P:g'` and full pass. Freshness reads `lagging` for `P:g'` until then | the label changes with `g`, so the old claim cannot read `current`; no replay of an applied claim |
 | F26 | Direct retry pass while a chain is `pending` or `active` (live or expired lease) | chain `pending`/`active` | `RETRY_GATE` | refused `producer_chain_active` | D4a |
 | F27 | Direct retry pass against a chain that is `complete`, `released` or `stopped`, authority unchanged | no live owner | `RETRY_GATE` passes | the retry applies and settles under per-row compare-and-set | D4a |
 | F28 | Direct retry pass after a newer publication or replacement | authority moved | `RETRY_GATE` fails | refused; older results await the sweep | D4a |
@@ -254,6 +311,10 @@ The hourly `EpgOrchestration.ensure` (`src/epg-orchestration.js:483` to `487`; t
 | F35 | Replacement while the chain is `released` | `released` | the hourly tick | RELAUNCH pinned to `g_now` | D3c |
 | F36 | Replacement between the pre-read and the post-read of plan inputs, or between pages | `generation` moved | the post-read differs from `g0` | the plan is discarded and nothing is applied; REBASE and replan | D0a |
 | F37 | Retry pass against an `active` chain whose lease EXPIRED and a late in-flight chain batch | `active` | the retry's `RETRY_GATE` and the chain's `GATE` | the retry is refused; a late chain batch commits only while the row is `active`, and then the retry cannot commit | D4a: exclusion by state, independent of time |
+| F38 | ATTEST batch races a second replacement | `generation` moved again | `GATE(:g_new)` fails inside the ATTEST batch | nothing is written; REBASE and replan at the newer snapshot | the attest claim is only written for the snapshot it was planned from |
+| F39 | ATTEST and the earlier run `R0` changed (a retry settled a result, a pass replayed) between the read and the batch | `R0` revision moved | the `R0` revision or fingerprint assertion fails | nothing is written; replan, then ATTEST or a new run | the claim copies a fingerprint that is asserted in the same batch |
+| F40 | ATTEST commits, its result is lost | `passed` run `R1`, chain `complete` | the retried step | its read-back finds `R1` passed at its label and the chain `complete` at `g_new` | idempotent read-back, as F21 |
+| F41 | Plan fingerprint equal but the earlier run is `passing` or `stopped` | `R0` unfinished | the compare in the replan | no ATTEST (only a `passed` run is attested); a new run `P:g_new` from the start | Option F is not proposed; a carried cursor needs the results-ledger proof of D0.4 |
 
 ### D8. Mermaid diagrams **[proposal]**
 
@@ -270,7 +331,7 @@ stateDiagram-v2
     active --> pending: TAKEOVER after lease expiry, pins current identity (epoch+1)
     active --> released: YIELD to EPG or Discovery
     released --> pending: RELAUNCH when clear, pins current identity (epoch+1)
-    active --> complete: pass-complete batch
+    active --> complete: pass-complete batch, or ATTEST for an unchanged plan
     active --> stopped: named systemic stop
     complete --> pending: REOPEN after a replacement (epoch+1)
     stopped --> pending: REOPEN after a replacement (epoch+1)
@@ -343,14 +404,17 @@ sequenceDiagram
     E->>D: commitReplace: generation g to g+1, same programme_run_id
     O->>D: next batch: GATE false (generation moved), rolls back
     Note over O,D: a redelivered step built for the old identity also fails GATE after the REBASE
-    O->>D: REBASE: input_generation g+1, GATE owner only
-    O->>D: openEpgRun for identity P:g+1, GATE
-    Note over O,D: pass-complete under GATE can only land for the identity it was built for
+    O->>D: REBASE: input_generation g+1, owner at expected g
+    O->>O: replan at g+1, compare the plan fingerprint
+    O->>D: openEpgRun for label P:g+1 under GATE, full pass (plan changed or run unfinished)
+    Note over O,D: pass-complete under GATE can only land for the snapshot it was built from
     O->>D: pass-complete batch and chain complete
     E->>D: commitReplace again: generation g+2
     H->>D: reads complete with input g+1, authority g+2
     H->>D: REOPEN: epoch+1 pending, input g+2
     H->>O: create id(P,epoch+1)
+    O->>O: replan at g+2: fingerprint equals the passed run
+    O->>D: ATTEST batch: passed run for P:g+2, no unit visited
 ```
 
 The successor decision rule of D5:
@@ -380,7 +444,10 @@ flowchart TD
 - **I-10** The hand-off reserve is never spent by an invocation.
 - **I-11** `passed` on the run row and `complete` on the chain row are set in one batch, under `GATE`, for the identity the run was built for.
 - **I-12** SUPERSEDE is hygiene; safety rests on `GATE`.
-- **I-13** An applied claim (`passed`) is never replayed or reopened; a replacement creates a new input identity and a new run row. `source_generation` and `applied_generation` carry `g`.
+- **I-13** An applied claim (`passed`) is never replayed or reopened (Accepted triggers, migration 0020 lines 199 to 204); a changed plan after `passed` is a NEW run row for the new label, and an unchanged plan is re-labelled only by ATTEST.
+- **I-20** The write fence (concept ii) and the run identity (concept iii) are different: `GATE` compares the caller's own `S` with the authority; the run label exists for readers and for the claim and never decides whether a write is admitted.
+- **I-21** An ATTEST claim is written only in one batch that asserts `GATE` at the snapshot the plan was built from AND that the earlier `passed` run still has the same fingerprint and revision; it never visits a unit and never changes a Film or Person.
+- **I-22** `P` and `g` never enter a Film id, a Person id, a unit id, a request id or a durable fact.
 - **I-14** The `claim_nonce` of an instance is fixed by a checkpointed step before its CLAIM mutation and never regenerated.
 - **I-15** Every writer reachable from the producer takes a required, typed fence; a missing or wrong-kind fence refuses before any statement. The direct retry pass is admitted only by `RETRY_GATE` (current identity and no live chain) and never by the chain `OWNER`.
 - **I-16** RELAUNCH, TAKEOVER and REOPEN have disjoint state predicates and each takes a new epoch by a compare-and-set, so concurrent reconcilers cannot both win. Every (re)start transition pins the CURRENT identity atomically and never depends on the old `input_generation`, so no nonterminal state is stuck after a replacement.
@@ -404,9 +471,9 @@ Offline tests (S5-1 acceptance; each names the rows it covers):
 10. T-10 The reconciliation: every row of the D6 table, never throws, bounded reads and writes, never calls the retry pass, adds no schedule.
 11. T-11 Statement budgets: the new base statements fit `SLICE_STATEMENT_CAP` 48 and `MUTATION_STATEMENT_CAP` 60 at the chosen sizes (V-10).
 12. T-12 Static audit: no producer path reaches a writer except through the typed fence and `producerWrite`; the chain writes nothing in the EPG executor documents.
-13. T-13 **Replacement racing unit applies**: `commitReplace` between planning and a unit batch; the batch fails `GATE`, nothing is written, REBASE opens run `P:g'` (F23).
-14. T-14 **Replacement racing pass-complete**: replace before `commitPassComplete`: the run does not become `passed`; replace after it: the run stays `passed` for `P:g`, freshness for `P:g'` is `lagging`, REOPEN launches a new chain epoch (F24, F25).
-15. T-15 **Replace after passed**: `canonicalFreshness` with the identity string reads `lagging`, never `current`, for the replaced input; no replay of an applied claim (F25, I-13).
+13. T-13 **Replacement racing unit applies**: `commitReplace` between planning and a unit batch; the batch fails `GATE`, nothing is written, REBASE and replan, then a new run `P:g'` or ATTEST by D0.4 (F23).
+14. T-14 **Replacement racing pass-complete**: replace before `commitPassComplete`: the run does not become `passed`; replace after it: the run stays `passed` for `P:g`, freshness for `P:g'` is `lagging`, REOPEN launches a new chain epoch, and the replan ATTESTs (equal plan) or opens a new run (different plan) (F24, F25, I-13, I-21).
+15. T-15 **Replace after passed**: `canonicalFreshness` with the label reads `lagging`, never `current`, for the replaced snapshot until ATTEST or a new pass completes; no replay of an applied claim (F25, I-13).
 16. T-16 **RELAUNCH**: released chain, priority clear and not clear, a race with a concurrent reconcile and with TAKEOVER, a relaunch against a moved input (F20, I-16).
 17. T-17 **Direct retry pass**: against a live chain (refused `producer_chain_active`), a `complete`/`released`/`stopped` chain, a `superseded` chain and a moved `programme_run_id` or `generation` (refused, nothing written); a retry in flight when a chain claims fails on its next batch; the retry still works with no chain row at all (F26 to F28).
 18. T-18 **Negative fence tests**: a producer write with no fence, a wrong-kind fence, a stale epoch, a moved programme and a moved `generation` is refused with the named code and leaves the database unchanged, for every store writer and every unit kind (F29).
@@ -415,7 +482,12 @@ Offline tests (S5-1 acceptance; each names the rows it covers):
 21. T-21 **No-owner replacement recovery**: replacement before CLAIM (the instance re-claims at `g_now`; the instance that never starts is taken over), replacement plus owner death (TAKEOVER), replacement plus YIELD (RELAUNCH), and replacement racing an active REBASE (one winner on `revision`, the loser re-reads) (F32 to F35, I-16).
 22. T-22 **Expired lease and the retry pass**: an `active` chain with an expired lease and no TAKEOVER refuses the retry (`producer_chain_active`); a late in-flight chain batch after the retry was refused still commits only under the owner's `GATE`; no interleaving lets both commit (F37, I-18).
 23. T-23 **Plan snapshot binding**: replacement between the pre-read and the first page, between pages, and between the last page and the post-read: the plan is discarded and nothing is applied; replacement after the post-read is refused by the write batch; the plan label is always the pre-read identity (F36, I-17).
-24. T-24 **Generation ordering and left-plan with `P:g`**: the caller-supplied `generationOrder` orders identities by programme order and then `g` and returns `-1`, `1` or an unproven answer, never a string comparison; `inputProvenanceOk` requires `provenance.publishedGeneration` to equal the composite identity; the ADR 0137 `left_plan` settlement still happens only with sealed newer input and a proven earlier run, across both a new programme and a replacement (V-14, T-11).
+24. T-24 **Generation ordering and left-plan with the label `P:g`**: the caller-supplied `generationOrder` compares the numeric `g` of the two labels (`-1`, `1`, or an unproven answer for a malformed label), never a string comparison and never an ordering of programmes; `inputProvenanceOk` requires `provenance.publishedGeneration` to equal the label of the snapshot validated under D0a; the ADR 0137 `left_plan` settlement still happens only with sealed newer input and a proven earlier run, across a new programme and across a replacement; an ATTEST run triggers no sweep (V-14, V-19).
+25. T-25 **Change-impact matrix**: for each row of D0.2 (publish, withheld publish, programme replacement, watchlist replacement, input outside the published rows) a recomputed fingerprint is equal or different exactly as the matrix states, over fixtures with an added and a removed watchlist Film, a shows-only programme patch, an identity or alias patch, a withheld publish and a metadata-only change (V-20).
+26. T-26 **ATTEST**: equal fingerprint and `passed` earlier run: R1 `passed`, no unit applier called, no receipt written, R0 untouched; different fingerprint, unfinished earlier run, moved `R0` revision and moved `generation`: nothing written (F38 to F41); a Film or Person row is byte-identical before and after (I-21, I-22).
+27. T-27 **Same-`g` increments without a plan change** after `passed`, repeated: each is one replan and one batch and no unit visit; the number of units visited is zero (cost evidence, with V-22).
+28. T-28 **Perpetual restart bound**: increments injected faster than a pass in a model clock: the chain stops by `PARAM-rebase-cap`, REOPENs only at the hourly tick, canonical rows converge for the visited units and freshness stays `lagging` (the liveness statement of D0.6, stated as a test of the bound, not of completion).
+29. T-29 **Run key and event**: the run key is `event@g` and the plan event stays constant across labels; two labels of one event yield equal fingerprints for equal units and the request ids are the same, so already-applied units remain `already` (V-24).
 
 A bounded shadow measurement (counts only; any production operation is separately approved) closes V-3 to V-8 before a default is chosen.
 
@@ -441,7 +513,7 @@ Numbers and short codes per invocation and per transition, no ids, keys or conte
 | A Durable Object lock | Not reused | new binding and product, a `wrangler.jsonc` change out of scope; the project's own primitive is the D1 batch fence |
 | Platform id uniqueness plus `instanceStatus` | Not sufficient | does not fence a stale instance after a takeover; status is never proof (F18) |
 
-Reused: the batch-transaction primitive (`assertSql`, `src/canonical-mutations.js:19`), the marker fence, the run-row CAS, the lease constants and margin rule of the EPG executor, the deterministic-id and state-before-create pattern, the hourly tick. New: one table, `GATE` and `RETRY_GATE`, the typed fence, the identity string, the reconciliation step and the instance meter. All new schema is a proposal; this record applies none.
+Reused: the batch-transaction primitive (`assertSql`, `src/canonical-mutations.js:19`), the marker fence, the run-row CAS, the lease constants and margin rule of the EPG executor, the deterministic-id and state-before-create pattern, the hourly tick. New: one table, `GATE` and `RETRY_GATE`, the typed fence, the snapshot label, ATTEST (if the owner chooses Option C), the reconciliation step and the instance meter. All new schema is a proposal; this record applies none.
 
 ## Alternatives considered
 
@@ -463,7 +535,7 @@ Reused: the batch-transaction primitive (`assertSql`, `src/canonical-mutations.j
 
 - Exclusive ownership and input-identity fencing become facts of one D1 batch, not caller discipline or platform state.
 - Cost: one table, one trigger set, one added `GATE` statement per unit batch and about three per slice batch (gate, lease renewal and its assertion); whether the caps still fit is V-10.
-- The identity string `P:g` changes the run identity, every freshness reader (V-14) and two pieces the driver takes from its caller: the monotone ordering of published generations used by the supersede sweep (`order(row.run_source_generation, run.source_generation)`, `src/canonical-producer-driver.js:175`, and [ADR 0137](0137-left-plan-settlement-from-sealed-newer-input.md) point 3: a string comparison is not proof) and the provenance check (`inputProvenanceOk`, line 211, `provenance.publishedGeneration===sourceGeneration`). Both must understand the composite. A replacement now reads `lagging` until a new pass completes, which is the truthful state. This is visible as an owner choice (T-11), not accepted tacitly.
+- The label `P:g` (Option C) changes the run label, the string every freshness reader passes (V-14) and two pieces the driver takes from its caller: the monotone ordering of published generations used by the supersede sweep (`order(row.run_source_generation, run.source_generation)`, `src/canonical-producer-driver.js:175`, and [ADR 0137](0137-left-plan-settlement-from-sealed-newer-input.md) point 3), which becomes a numeric comparison of `g` (V-19), and the provenance check (`inputProvenanceOk`, line 211). The run key must differ from the plan event (today `runKey:event`, `src/canonical-producer-driver.js:357`) so that labels of one event can have equal fingerprints. One run row per label accrues (rows per increment, not measured). A replacement reads `lagging` until its pass completes or an ATTEST lands, which is the truthful state. This is an owner choice (T-9, T-11), not accepted tacitly.
 - The explicit retry pass is refused while a chain is live; that is a behavioural restriction of an approved call, kept fail-closed and offered as an owner choice (T-12).
 - The worst-case recovery of a dead chain is about an hour, and repeated deaths multiply it.
 - The meter adds a counting proxy and a hand-off reserve that reduce usable instance budget by design.
@@ -471,7 +543,7 @@ Reused: the batch-transaction primitive (`assertSql`, `src/canonical-mutations.j
 
 ## Options for the owner (the recommendation is mine, nothing is chosen)
 
-These are options with a recommendation for the owner to decide after the correctness design above. None is approved by this record.
+These are options with a recommendation for the owner to decide after the correctness design above. None is approved by this record. Option ids `T-n` here and test ids `T-n` in D10 are separate numberings.
 
 | # | Decision | Recommendation (not a choice) |
 | --- | --- | --- |
@@ -483,24 +555,31 @@ These are options with a recommendation for the owner to decide after the correc
 | T-6 | Meter strictness before measurement | The more conservative of calls and statements |
 | T-7 | A systemic stop is terminal for its input identity, or relaunches with backoff | Terminal; a new input identity REOPENs |
 | T-8 | Dormancy by binding and marker only, or an extra flag | Binding and marker only; a flag if the owner wants a separate off switch |
-| T-9 | Run identity string `P:g` and run key `<event>@<g>` | Yes (needed so a replacement is a new identity) |
+| T-9 | Label of the claim: `P:g` per snapshot (Options A and C), or `P` alone (Option B, rejected on safety and false-current grounds in D0.4) | `P:g` |
 | T-10 | The chain never calls the unit retry pass | Keep explicit, as ADR 0128 decided |
-| T-11 | `source_generation := P:g` (affects every freshness reader, the generation ordering and the provenance check) versus keeping `source_generation=P` plus a chain-level reader check | `P:g` (readers stay on one comparison); needs the reader change V-14 and test T-24 |
+| T-11 | Freshness readers pass `P:g` (and the generation ordering and the provenance check use it), versus a reader that also consults a stamp (Option B) | `P:g`; needs V-14, V-19 and tests T-24, T-27 |
 | T-12 | Retry pass: (A) refused while a chain is `pending` or `active`, independent of time; (B) the retry first wins an atomic epoch-fenced claim of its own that fences out the former owner; (C) allowed with the identity gate only (per-row compare-and-set remains) | A (simplest to prove; it blocks the retry for the rest of the pass and, with the reconciliation off, until a forward writer ends the chain) |
-| T-13 | Any `generation` change reopens, or a per-replacement-kind narrowing | Any change (no proof for a narrower rule) |
+| T-13 | Any `generation` change replans, or a per-replacement-kind narrowing | Any change replans; the fingerprint, not a static class of change, decides whether units are visited (no proof for a narrower rule, and a watchlist-only change may alter membership) |
+| T-14 | Recomputation: (A) full pass per label, (C) A plus ATTEST for an unchanged plan after `passed`, (D) A or C plus a hard yield to Discovery and watchlist saves, (F) a carried cursor for an unfinished run | C, with D decided separately under T-4; F only after the results-ledger proof; A is the correct fallback if ATTEST cannot be verified (V-23) |
 
-## Owner decision pack (still material; ordered by importance; recommendations are not choices)
+## Owner decision: what is and is not being approved
 
-| # | Decision | Options | Recommendation | Consequence of each |
+**Plain language.** A Film or a Person is the same Film or Person whatever EPG version was published; nothing here changes an id or a durable fact. Two different questions were mixed in earlier revisions, and this record now separates them:
+
+1. **Safety:** a write that was planned from an older published snapshot must never land after a newer snapshot appeared. The proposal keeps this exactly as designed (the write checks the snapshot it was planned from, in the same database batch). This is NOT being traded for speed.
+2. **Recomputation:** does a new published snapshot force every unit to be applied again? The evidence says no. Whether the work must be repeated is decided by one existing test, the plan fingerprint, not by a rule about which kind of publication happened.
+
+**What the owner is asked to choose (recommendation first).**
+
+| # | Decision | Options | Recommendation | Consequence |
 | --- | --- | --- | --- | --- |
-| 1 | **Run identity and freshness: `source_generation := P:g` (T-9, T-11)** | (a) `P:g`, run key `<event>@<g>`; (b) keep `source_generation=P` and add a chain-level reader check | (a) | (a) a replacement is a new run and reads `lagging` until its pass completes; every freshness reader (V-14), the generation ordering (ADR 0137 point 3) and the provenance check must understand the composite (T-24). (b) keeps run identity but a `passed` run reads `current` for replaced rows unless EVERY reader consults the chain too: a wider and easier-to-miss reader change |
-| 2 | **Explicit retry pass while a chain exists (T-12)** | (A) refused while `pending`/`active`, time-independent; (B) retry wins its own epoch-fenced claim; (C) identity gate only | (A) | (A) simplest to prove; blocks the retry for the rest of the pass, up to hours, and indefinitely if the reconciliation is off until a forward writer ends the chain. (B) retry always possible but needs claim, release and a hand-off rule. (C) allows interleaving with a late owner batch (rejected by the review unless the owner accepts per-row compare-and-set alone) |
-| 3 | **Ownership storage (T-1)** | new `canonical_producer_chain` table; owner columns on the run row | new table | new table: one migration, ownership exists before the plan, run schema untouched. Columns: no new table but needs a placeholder run row at launch and relaxes Accepted constraints |
-| 4 | **Launch and recovery latency (T-2, T-3)** | hourly reconciliation only; also a best-effort post-commit call in the EPG tail | hourly only first | hourly only: no change to the EPG path, first start up to about an hour after publication and up to about an hour per death. The fast path cuts the first-start delay but touches the EPG executor's code path |
-| 5 | **Priority yield (T-4)** | hard to EPG and soft to Discovery with a one-invocation floor; hard to both | hard to EPG, soft to Discovery | the floor prevents starvation at the cost of some Discovery contention; hard to both can starve the pass |
-| 6 | **Stopped chain and any-`generation` reopen (T-7, T-13)** | stop terminal per identity, REOPEN on a new identity; or automatic relaunch with backoff. Any `generation` change reopens, or narrower per replacement kind | terminal per identity; any change reopens | no hot loop and a truthful state; a watchlist-only replacement also costs a plan; a forward writer for a stuck chain is a follow-up |
-| 7 | **Measurement and dormancy (T-6, T-8)** | conservative meter (more cautious of calls and statements); extra flag or binding and marker only | conservative; binding and marker only | conservative may hand over earlier than needed until V-3 is measured; no flag means no separate off switch beyond the marker or the binding |
-| 8 | **GATE statements and retry boundary (T-5, T-10)** | `GATE` on unit writes and store writes; the chain never calls the retry pass | as designed | one added statement per unit batch and about three per slice batch, subject to V-10; the retry pass stays explicit |
+| 1 | **How a new snapshot is treated (T-14, T-9, T-11, T-13)** | **A** a new run and full pass per snapshot label; **C** A, plus ATTEST: an unchanged plan after `passed` is re-labelled by one batch with no unit visited; **F** also carry the cursor of an unfinished run (not proposed) | **C** | A is simple and correct but restarts a pass on every increment, including increments that change nothing the plan digests. C avoids that for the steady case after `passed`, adds one store writer and tests, needs the readers to pass `P:g` (V-14), a numeric `g` ordering for ADR 0137 (V-19) and an ATTEST batch D1 must accept (V-23); if V-23 fails, A applies unchanged. Neither changes any Film or Person id |
+| 2 | **Readers of freshness (T-11)** | pass `P:g`; or a reader that also reads a stamp | `P:g` | the label is what lets a reader see that an old claim is about an older snapshot, with no replan; `P` alone would let an old claim keep reading `current` |
+| 3 | **Pass versus Discovery and watchlist saves (T-4, D0.4 option D)** | soft yield to Discovery (a one-invocation floor); hard yield to Discovery and watchlist saves | decide after the increments are measured (V-21) | hard yield removes the main known source of restarts from the pass window and delays the pass behind Discovery; soft yield risks repeated restarts. Evidence level: structure from code, frequency unknown |
+
+**Not being approved here.** No code, migration, Workflow, schedule, flag or production operation; no change to ADR 0140, 0128, 0137 or their Accepted contracts (C needs none: the Accepted run triggers are used as written); no delta engine; no weakened fence. **All other options stay open** and are listed unchanged in the table above: T-1 storage, T-2 and T-3 launch and recovery latency, T-5 gate statements, T-6 meter strictness, T-7 stopped chains, T-8 dormancy, T-10 retry pass boundary, T-12 retry exclusion.
+
+**What is not known.** Real frequency of increments per kind, real pass duration, the fraction of increments that change the plan fingerprint, plan-build cost and no-op re-visit cost per unit, which published fields the wiring maps into the Film facts, whether ATTEST works in one D1 batch. These are measurement obligations (V-20 to V-24), not assumptions of the design.
 
 ## Verification obligations (nothing below is established)
 
@@ -516,11 +595,17 @@ These are options with a recommendation for the owner to decide after the correc
 - **V-11** Whether a running instance keeps its starting code version across a deploy.
 - **V-12** Clock skew between Worker isolates against the 15 second margin (safety does not depend on it; waste does).
 - **V-13** The exact predicates of the ADR 0135, projector-window and Discovery-lease priority signals, and whether one of them is expressible as an in-batch SQL predicate.
-- **V-14** What string every freshness reader passes as `publishedGeneration` today (the callers are not wired) and that all of them can adopt `P:g`.
+- **V-14** What string every freshness reader passes as `publishedGeneration` today (the callers are not wired) and that all of them can adopt the label `P:g` (the existing pointer fence already carries `d1:<generation>:<programme_run_id>`, `src/published-epg.js:201`).
 - **V-15** That a returned `step.do` result is durably checkpointed before the next step starts and is the value seen by a retried later step (documented platform behaviour is not asserted here).
 - **V-16** That a `JOIN` inside one `assertSql` condition is accepted by D1 inside a batch and counts as one statement.
 - **V-17** That no writer other than `commitPublish`, `commitReplace` and the legacy publish changes the published programme rows without a `generation` increment in the same batch (the snapshot argument of D0a depends on it).
 - **V-18** That the reads of D0a steps 1 to 3 see the primary's committed state in order (read replication, session bookmarks).
+- **V-19** That the authority `generation` is monotone over every path, including any revert, import or restore (`revertPublished`, `importPublished`, `src/published-epg.js:560` and `666`), so a numeric comparison of `g` is a valid ADR 0137 ordering.
+- **V-20** Which published fields the S5-1 wiring maps into the digested Film and Person facts (the planner takes injected inputs); the matrix of D0.2 states the dependence and the fixture test T-25 proves it once the wiring exists.
+- **V-21** The real frequency of increments per kind. The authority keeps counters, not a history, and a replacement leaves no row; a counts-only sample of `generation` and `watchlist_generation` at the hourly tick would measure it without a new writer.
+- **V-22** The cost of building the plan and of re-visiting an already-applied unit (a no-op read per unit); the AIR-465 statements are apply costs.
+- **V-23** That D1 accepts, in one batch, an INSERT of a run in shape followed by the UPDATE to `passed` (the triggers of migration 0020 allow it as written; not run on D1).
+- **V-24** That a run key `event@g` distinct from the plan event is accepted by the driver and store with no other change (today `runKey:event`, `src/canonical-producer-driver.js:357`; run key length limit 160).
 
 ## Parameters (values need measurement; none is chosen here)
 
@@ -536,11 +621,12 @@ This record authorizes nothing: no migration, code, Workflow, cron, flag, `wrang
 - **Review:** independent architecture review of revision 1 on [PR #618](https://github.com/vladimino/iptv-watchlist/pull/618#pullrequestreview-5903555042); this revision answers its six blockers and the optional-gate finding.
 - **Implementation:** none.
 - **Dated verification:** none. The platform behaviours quoted in Context were read from the Cloudflare documentation search on 14 Nov 2026; they are not measurements of this Worker.
-- **Uncertainty:** V-1 to V-18 above.
+- **Uncertainty:** V-1 to V-24 above.
 
 ## Follow-ups
 
 - S5-1 implementation card: migration proposal, store, `head` and typed-fence changes, driver wiring, reconciliation step, meter and the tests of D10 (after acceptance and its own approvals).
 - A bounded shadow measurement for V-3 to V-8 and the parameters.
-- The D-C numbers, the lag number and the freshness-reader identity change (V-14).
+- The D-C numbers, the lag number, the freshness-reader label change (V-14) and, if Option C is chosen, ATTEST (store writer, tests, V-23).
+- A counts-only measurement of authority increments per kind and of plan fingerprint stability across consecutive snapshots (V-21, V-22) before any recomputation or yield decision is made final.
 - A named forward writer for a `stopped` chain (not designed here).
