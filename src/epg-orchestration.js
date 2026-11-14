@@ -330,7 +330,8 @@ function frozenDay(run){
   const response=await postSync(fe,null,path,{runId:run.runId},'internal');
   const reply=await body(response);
   const after=await loadJSON(fe,'sync.json');
-  const base={runId:run.runId,run:after,reply};
+  // AIR-484 / ADR 0144: this very action moved the run from the EPG stage into the seal. Only that observed transition hands the seal over.
+  const base={runId:run.runId,run:after,reply,sealed:run.stage!=='seal'&&after?.stage==='seal'&&after.seal?.phase==='ledger'};
   if(response.status===409)return {...base,failure:{code:'owner_conflict'}};
   if(response.status>=400)return {...base,failure:{code:response.status===429?'rate_limited':response.status>=500?'upstream_5xx':'step_failed'}};
   const wait=reply.discovery?.state==='busy'||reply.state==='busy';
@@ -362,7 +363,8 @@ function frozenDay(run){
   const control=adm.control;
   if(control.doneAt)return {kind:'stop',reason:'complete'};
   if(control.quarantine)return {kind:'stop',reason:'quarantined'};
-  if(dayOf(now)!==runKey)return {kind:'stop',reason:'day_rolled'};
+  // AIR-484: a successor that holds the claim of an unfinished seal finishes it after midnight; any other instance of a rolled day stops.
+  if(dayOf(now)!==runKey&&!(await sealClaimPending(env,control)).pending)return {kind:'stop',reason:'day_rolled'};
   const cooling=Date.parse(control.cooldownUntil||'');
   if(Number.isFinite(cooling)&&cooling>now)return {kind:'sleep',until:cooling,reason:'cooldown'};
   const clock=ctx.clock||(()=>Date.now()),began=clock();
@@ -394,6 +396,14 @@ function frozenDay(run){
    next.checkpoint={key,phase:outcome.run?.stage??null,runId:outcome.run?.runId??null,count:progressCount(outcome.run)};
    if(outcome.finished){next.doneAt=iso(now);next.phase='done';next.publishedRunId=outcome.published??null;}else next.phase=outcome.wake?'waiting':'running';
    result=outcome.finished?{kind:'stop',reason:'complete'}:outcome.wake?{kind:'sleep',until:outcome.wake,reason:outcome.note||'wait'}:{kind:'continue',reason:null};
+   // AIR-484 / ADR 0144 part A: the durable `stage: seal` was read back by `drive`. The claim names the next series and is written before
+   // the successor is created; a normal hand-off is progress, never a failure, and this instance takes no further step lease.
+   if(outcome.sealed&&!outcome.finished&&!outcome.wake&&outcome.runId){
+    const toSeries=series+1;
+    next.handoff={sealRunId:outcome.runId,fromSeries:series,toSeries,at:iso(now)};
+    next.series=toSeries;next.instanceId=instanceId(runKey,toSeries);next.phase='starting';next.nextWakeAt=null;
+    result={kind:'handoff',runKey,series:toSeries,epoch};
+   }
   }
   let committed;
   try{committed=await writeControl(env,adm,next);}
@@ -424,7 +434,32 @@ function frozenDay(run){
     await step.do(name('stopped'),()=>stopInstance(env,ctx,result.reason));
     return {stopped:true,reason:result.reason,instanceId:id};
    }
+   if(result.kind==='handoff'){
+    const created=await step.do(name('handoff'),()=>createSuccessor(env,result));
+    return {stopped:true,reason:'seal_handoff',instanceId:id,successor:created?.id??null};
+   }
    if(result.kind==='sleep')await step.sleepUntil(name('sleep'),new Date(Math.max(result.until,ctx.now()+SLEEP_FLOOR_MS)));
+  }
+ }
+// AIR-484 / ADR 0144: is a seal claimed by this control record still unfinished? A claim is pending while `sync.json` holds the
+ // claimed run at `stage: seal`. An unreadable run document is reported, never read as "no claim".
+ async function sealClaimPending(env,control){
+  const claimed=control?.handoff?.sealRunId;
+  if(typeof claimed!=='string'||!claimed||control.doneAt)return {pending:false};
+  let run;
+  try{run=await loadJSON(env,'sync.json');}catch{return {pending:false,unreadable:true};}
+  return {pending:run?.runId===claimed&&run.stage==='seal',run};
+ }
+ // The successor of a hand-off. An id that already exists is an attach; an unknown outcome is read back before anything is concluded and,
+ // when it stays unproven, left to the hourly `ensure`, which recovers by the observed status. A terminal id is never created again.
+ async function createSuccessor(env,{runKey,series,epoch}){
+  const id=instanceId(runKey,series);
+  try{await env.EPG_WORKFLOW.create({id,params:{runKey,series,epoch}});return {created:true,id};}
+  catch(error){
+   if(createError(error)==='exists')return {attached:true,id};
+   const status=await instanceStatus(env.EPG_WORKFLOW,id);
+   if(ALIVE.includes(status)||status==='complete')return {attached:true,id};
+   return {uncertain:true,id};
   }
  }
  // AIR-462: one line when an `act-N` callback starts, one when it returns or throws. A callback killed by the platform leaves the enter line alone.
@@ -497,15 +532,21 @@ function frozenDay(run){
   if(authority.error)return {started:false,reason:'d1_unavailable'};
   if(!authority.ready)return {started:false,reason:'authority_held'};
   const {dayKey,due,dueAt}=policy().dailyDue(now,schedule());
-  if(!due)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
   let stored;
-  try{stored=await readControl(env);}catch{return {started:false,reason:'d1_unavailable'};}
-  if(stored.malformed)return {started:false,reason:'checkpoint_malformed'};
+  // AIR-484: before today's start is even considered, a claimed seal that is still unfinished (of any Madrid day) is recovered first.
+  // The control record is read before the due check only to look for a claim; without one the not-due answer is unchanged.
+  try{stored=await readControl(env);}catch{return due?{started:false,reason:'d1_unavailable'}:{started:false,reason:'not_due',dueAt:iso(dueAt)};}
+  if(stored.malformed)return due?{started:false,reason:'checkpoint_malformed'}:{started:false,reason:'not_due',dueAt:iso(dueAt)};
   let control=stored.record;
+  const claimState=control.handoff?await sealClaimPending(env,control):{pending:false};
+  if(claimState.unreadable)return {started:false,reason:'evidence_unreadable'};
+  const claim=claimState.pending?control.runKey:null;
+  if(!due&&!claim)return {started:false,reason:'not_due',dueAt:iso(dueAt)};
   if(control.quarantine?.scope==='domain')return {started:false,reason:'quarantined',scope:'domain'};
+  const runKey=claim??dayKey;
   let series=0,budget=policy().emptyBudget(),carry={};
   const write=(record)=>casDoc(env,'control',stored.stored?stored.revision:null,record,mode.revision);
-  if(control.runKey===dayKey){
+  if(claim||control.runKey===dayKey){
    if(control.doneAt)return {started:false,reason:'complete'};
    if(control.quarantine)return {started:false,reason:'quarantined',scope:'run'};
    const cooling=Date.parse(control.cooldownUntil||'');
@@ -513,26 +554,36 @@ function frozenDay(run){
     const status=await instanceStatus(env.EPG_WORKFLOW,control.instanceId);
     if(ALIVE.includes(status))return {started:false,reason:'in_progress',instanceId:control.instanceId};
     if(status==='unknown')return {started:false,reason:'status_unknown',instanceId:control.instanceId};
-    const code=status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
+    // A claimed seal whose successor reports `complete` while sync.json still says `seal` is contradictory evidence: fail closed.
+    const code=claim&&status==='complete'?'evidence_contradictory':status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
+    if(claim&&status==='absent'&&Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
     const applied=policy().applyFailure(control.budget,{code},{now,phase:control.checkpoint?.phase??null,checkpoint:control.checkpoint?.key??null,random});
-    control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,phase:'stopped',stopReason:code,updatedAt:iso(now)};
+    const keepStarting=claim&&status==='absent';
+    control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:policy().failureClass(code),code},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,phase:keepStarting?'starting':'stopped',stopReason:code,updatedAt:iso(now)};
     if(!await write(control))return {started:false,reason:'write_conflict'};
+    if(code==='evidence_contradictory')return {started:false,reason:'evidence_contradictory',instanceId:control.instanceId};
     if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
+    if(keepStarting){
+     // The claim names this id already: the same id is created (idempotent) or attached, never a new one for a create that never landed.
+     const created=await createSuccessor(env,{runKey,series:control.series,epoch:mode.record.epoch});
+     if(created.uncertain)return {started:false,reason:'create_uncertain',instanceId:control.instanceId};
+     return {started:true,attached:!created.created,instanceId:control.instanceId,runKey,series:control.series};
+    }
     return {started:false,reason:'cooldown',until:applied.cooldownUntil,recorded:code};
    }
    if(Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
-   series=(control.series??0)+1;budget=control.budget;carry={failure:control.failure,lastDurableProgressAt:control.lastDurableProgressAt,runId:control.runId,checkpoint:control.checkpoint};
+   series=(control.series??0)+1;budget=control.budget;carry={failure:control.failure,lastDurableProgressAt:control.lastDurableProgressAt,runId:control.runId,checkpoint:control.checkpoint,...(claim?{handoff:{...control.handoff,toSeries:series}}:{})};
   }
-  const id=instanceId(dayKey,series);
-  const next={...emptyControl(),...carry,schemaVersion:1,runKey:dayKey,series,instanceId:id,epoch:mode.record.epoch,phase:'starting',budget,updatedAt:iso(now)};
+  const id=instanceId(runKey,series);
+  const next={...emptyControl(),...carry,schemaVersion:1,runKey,series,instanceId:id,epoch:mode.record.epoch,phase:'starting',budget,updatedAt:iso(now)};
   if(!await write(next))return {started:false,reason:'write_conflict'};
   try{
-   await env.EPG_WORKFLOW.create({id,params:{runKey:dayKey,series,epoch:mode.record.epoch}});
-   return {started:true,attached:false,instanceId:id,runKey:dayKey,series};
+   await env.EPG_WORKFLOW.create({id,params:{runKey,series,epoch:mode.record.epoch}});
+   return {started:true,attached:false,instanceId:id,runKey,series};
   }catch(error){
-   if(createError(error)==='exists')return {started:true,attached:true,instanceId:id,runKey:dayKey,series};
+   if(createError(error)==='exists')return {started:true,attached:true,instanceId:id,runKey,series};
    const status=await instanceStatus(env.EPG_WORKFLOW,id);
-   if(ALIVE.includes(status)||status==='complete')return {started:true,attached:true,instanceId:id,runKey:dayKey,series};
+   if(ALIVE.includes(status)||status==='complete')return {started:true,attached:true,instanceId:id,runKey,series};
    const applied=policy().applyFailure(budget,{code:'create_uncertain'},{now,random});
    const failed={...next,phase:'stopped',stopReason:'create_uncertain',budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:'transient',code:'create_uncertain'},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null};
    const reread=await readControl(env);
@@ -571,8 +622,8 @@ function frozenDay(run){
    owner:{kind:'workflow',instanceId:c.instanceId,liveness},lastDurableProgressAt:c.lastDurableProgressAt,dueAt:iso(dueAt),nextWakeAt:c.nextWakeAt||(now>=dueAt?null:iso(dueAt)),
    syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null}:null,seal,publication,
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
-   cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,health,sideEffects:'none'};
+   cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null}}:{}),health,sideEffects:'none'};
  }
- return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount};
+ return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
 })();
 async function runEpgWorkflow(env,payload,step){return EpgOrchestration.run(env,payload,step);}

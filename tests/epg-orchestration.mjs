@@ -290,6 +290,13 @@ function runner(h,{startAt}){
  return {step,log,clock:()=>now,advance:ms=>{now+=ms;}};
 }
 
+// AIR-484: run an instance and then every successor it hands the seal to, the way the Workflow does.
+async function follow(epg,env,r,runKey,extra={}){
+ let outcome=await epg.run(env,{runKey,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5,...extra});
+ for(let series=1;outcome.reason==='seal_handoff';series++)outcome=await epg.run(env,{runKey,series,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5,...extra});
+ return outcome;
+}
+
 // 7. A whole run: start, metadata, EPG, a busy seal, publication, handoff. One Madrid date, one publication.
 {
  const h=cloudflare({pipeline:pipeline({metadataSteps:2,busyOnce:true})});
@@ -297,8 +304,14 @@ function runner(h,{startAt}){
  const due=Date.parse('2026-11-07T16:00:00Z');
  const r=runner(h,{startAt:due});
  const created=await epg.ensure(env,{now:due});assert.equal(created.started,true);
- const outcome=await epg.run(env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
- eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261107_0'});
+ const handoff=await epg.run(env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ // AIR-484 / ADR 0144: the producing instance ends at the durable `stage: seal` and the next series finishes the seal.
+ eq(handoff,{stopped:true,reason:'seal_handoff',instanceId:'epg_20261107_0',successor:'epg_20261107_1'});
+ assert.equal(h.wf.creates.at(-1).id,'epg_20261107_1');eq(h.wf.creates.at(-1).params,{runKey:'2026-11-07',series:1,epoch:1});
+ const claimed=await control(h);
+ assert.equal(claimed.handoff.sealRunId,'run-1');assert.equal(claimed.series,1);assert.equal(claimed.failure,null);assert.equal(claimed.budget.consecutive,0,'a normal hand-off spends no failure budget');
+ const outcome=await epg.run(env,{runKey:'2026-11-07',series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261107_1'});
  const done=await control(h);
  assert.equal(done.phase,'stopped'.length?done.phase:'');assert.ok(done.doneAt);assert.equal(done.publishedRunId,'run-1');assert.equal(done.runId,'run-1');
  assert.equal(done.failure,null);assert.ok(done.lastDurableProgressAt);
@@ -327,7 +340,9 @@ async function adopt({sync,startAt='2026-11-08T16:00:00Z',runKey='2026-11-08',me
  const original=r.step.do;
  r.step.do=async(name,fn)=>{const out=await original(name,fn);if(snapshots&&name.startsWith('act'))snapshots.push({name,out,control:await control(h)});return out;};
  assert.equal((await epg.ensure(env,{now:due})).started,true);
- const outcome=await epg.run(env,{runKey,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ let outcome=await epg.run(env,{runKey,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ // AIR-484: a seal this instance starts itself is handed to the next series; follow it so the whole day is observed.
+ for(let series=1;outcome.reason==='seal_handoff';series++)outcome=await epg.run(env,{runKey,series,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
  return {h,state,outcome,r,paths:state.calls.map(c=>c.pathname)};
 }
 const oldSeal=extra=>due=>({runId:'old',stage:'seal',startedAt:at(due-20*H),updatedAt:at(due-1*H),seal:{phase:'queue'},...extra});
@@ -335,7 +350,7 @@ const oldSeal=extra=>due=>({runId:'old',stage:'seal',startedAt:at(due-20*H),upda
  for(const extra of [{},{runKey:'2026-11-07'}]){
   const snaps=[];
   const {h,state,outcome,paths}=await adopt({sync:oldSeal(extra),snapshots:snaps});
-  eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_0'});
+  eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_1'});
   const first=snaps[0];
   assert.equal(first.out.kind,'continue','the foreign seal completes as continue, not stop:complete');
   assert.equal(first.control.doneAt,null,'no false doneAt after the foreign seal');
@@ -395,13 +410,15 @@ for(const [label,extra] of [['malformed runKey',{runKey:'tomorrow'}],['non-strin
  state.sync={runId:'old',stage:'complete',startedAt:at(due-20*H),updatedAt:at(due-1*H)};
  const r=runner(h,{startAt:due});
  await epg.ensure(env,{now:due});
- const outcome=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
- eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_0'});
+ const outcome=await follow(epg,env,r,'2026-11-08');
+ eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261108_1'});
  const paths=state.calls.map(c=>c.pathname);
  assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,'a complete run of another day is never the success; one successor starts');
  assert.equal((await control(h)).publishedRunId,'run-1');
- const replay=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},runner(h,{startAt:r.clock()}).step,{now:()=>r.clock(),clock:()=>r.clock(),random:()=>0.5});
+ const replay=await epg.run(env,{runKey:'2026-11-08',series:1,epoch:1},runner(h,{startAt:r.clock()}).step,{now:()=>r.clock(),clock:()=>r.clock(),random:()=>0.5});
  assert.equal(replay.reason,'complete');
+ const stale=await epg.run(env,{runKey:'2026-11-08',series:0,epoch:1},runner(h,{startAt:r.clock()}).step,{now:()=>r.clock(),clock:()=>r.clock(),random:()=>0.5});
+ assert.equal(stale.reason,'not_owner','the producing instance is fenced out after the hand-off');
  assert.equal(state.calls.filter(c=>c.pathname==='/api/sync/start').length,1,'a replay starts nothing');
 }
 // 7b. ADR 0103: a projector window of up to 300 s answers `busy` (kind projector_window) at the EPG stage and again at the seal. The same
@@ -413,8 +430,8 @@ for(const stage of ['epg','seal']){
  const due=Date.parse('2026-11-07T16:00:00Z');
  const r=runner(h,{startAt:due});
  await epg.ensure(env,{now:due});
- const outcome=await epg.run(env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
- eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261107_0'});
+ const outcome=await follow(epg,env,r,'2026-11-07');
+ eq(outcome,{stopped:true,reason:'complete',instanceId:'epg_20261107_1'});
  const done=await control(h);
  assert.equal(done.failure,null,stage+': a window wait charges no failure');
  assert.equal(done.publishedRunId,'run-1');assert.equal(done.runId,'run-1',stage+': the same run');
@@ -439,22 +456,22 @@ for(const stage of ['epg','seal']){
   // The first execution of act-0 is retried by the platform: the stand-in runs the callback twice for that step name.
   const baseDo=r.step.do;let retried=false;
   r.step.do=async(name,fn)=>{if(name==='act-0'&&!retried){retried=true;try{await baseDo.call(r.step,name,async()=>{await fn();throw new Error('killed after the work, before the result was stored');});}catch{}}return baseDo.call(r.step,name,fn);};
-  result=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5,traceId:()=>'trace-'+(++ids)});
+  result=await follow(h.epg,h.env,r,'2026-11-07',{traceId:()=>'trace-'+(++ids)});
  }finally{console.log=realLog;}
- eq(result,{stopped:true,reason:'complete',instanceId:'epg_20261107_0'});
+ eq(result,{stopped:true,reason:'complete',instanceId:'epg_20261107_1'});
  const acts=lines.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(e=>e?.event==='epg_act');
  assert.ok(acts.length>=4);
- const first=acts.filter(e=>e.actStep==='act-0');
+ const first=acts.filter(e=>e.actStep==='act-0'&&e.instanceId==='epg_20261107_0');
  assert.deepEqual([...new Set(first.map(e=>e.attemptTraceId))],['trace-1','trace-2'],'each execution of act-0 has its own attemptTraceId');
  for(const e of acts){
   assert.deepEqual(Object.keys(e).filter(k=>!['event','edge','at','runKey','instanceId','actStep','attemptTraceId','elapsedMs','kind'].includes(k)),[],'a closed set of fields');
-  assert.equal(e.instanceId,'epg_20261107_0');assert.equal(e.runKey,'2026-11-07');assert.ok(['enter','exit','error'].includes(e.edge));
-  if(e.kind!==undefined)assert.ok([null,'continue','sleep','stop'].includes(e.kind));
+  assert.ok(['epg_20261107_0','epg_20261107_1'].includes(e.instanceId));assert.equal(e.runKey,'2026-11-07');assert.ok(['enter','exit','error'].includes(e.edge));
+  if(e.kind!==undefined)assert.ok([null,'continue','sleep','stop','handoff'].includes(e.kind));
  }
  const enters=acts.filter(e=>e.edge==='enter').length,exits=acts.filter(e=>e.edge==='exit').length;
  assert.equal(enters,exits,'every callback that returned logged its exit');
  const driven=h.state.calls.filter(c=>c.pathname!=='/api/sync/start');
- assert.ok(driven.length>0&&driven.every(c=>c.trace&&c.trace.instanceId==='epg_20261107_0'&&/^act-\d+$/.test(c.trace.actStep)&&/^trace-\d+$/.test(c.trace.attemptTraceId)),'the driven step carries the trace of its action');
+ assert.ok(driven.length>0&&driven.every(c=>c.trace&&/^epg_20261107_[01]$/.test(c.trace.instanceId)&&/^act-\d+$/.test(c.trace.actStep)&&/^trace-\d+$/.test(c.trace.attemptTraceId)),'the driven step carries the trace of its action');
 }
 
 // 7c. AIR-462: an action that rejects logs `error` and no `exit`, with no raw error text, and the Workflow still gets the unchanged `act_failed` sleep.
@@ -485,7 +502,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({sync:{runId:'earlier',stage:'complete',startedAt:at(due+5*MIN),updatedAt:at(due+9*MIN)},pipeline:()=>{throw new Error('the pipeline must not be called');}});
  await h.epg.ensure(h.env,{now:due+20*MIN});
  const r=runner(h,{startAt:due+20*MIN});h.state.now=r.clock;
- const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
  assert.equal(outcome.reason,'complete');assert.equal(h.state.calls.length,0);
  assert.equal((await control(h)).publishedRunId,'earlier');
 }
@@ -504,7 +521,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:(...args)=>flaky(...args)});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
  assert.equal(outcome.reason,'complete');
  assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1,'the retry resumes the same run, it does not start another');
  assert.ok(r.log.some(n=>n.startsWith('sleep')));
@@ -516,7 +533,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:pipeline({metadataSteps:0,fail:{at:2,reply:{status:409,body:{error:'Run id mismatch'}}}})});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
  assert.notEqual(outcome.reason,'complete');
  const rec=await control(h);assert.ok(rec.quarantine,'an unsafe failure quarantines');assert.equal(rec.failure.class,'unsafe');assert.equal(rec.failure.code,'owner_conflict');
  eq(start(await h.epg.ensure(h.env,{now:due+H})),{started:false,reason:'quarantined',scope:'domain'});
@@ -532,7 +549,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:pipeline({metadataSteps:0,fail:{at:2,reply:{body:{runId:'run-1',stage:'seal',discovery:{state:'error',reason:'programme_changed'}}}}})});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ await follow(h.epg,h.env,r,'2026-11-07');
  const rec=await control(h);assert.equal(rec.failure.code,'stale_generation_write');assert.ok(rec.quarantine);
 }
 {
@@ -541,7 +558,7 @@ for(const stage of ['epg','seal']){
  const h=cloudflare({pipeline:async()=>{throw new Error('Watchlist fetch: network down');}});
  const r=runner(h,{startAt:due});
  await h.epg.ensure(h.env,{now:due});
- const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
  assert.notEqual(outcome.reason,'complete');
  const rec=await control(h);assert.ok(rec.quarantine,'the retry budget is bounded');assert.equal(rec.budget.consecutive,Policy.BUDGET_CAPS.consecutive);
  assert.equal(h.state.calls.length,Policy.BUDGET_CAPS.consecutive,'exactly the budget, no more');
@@ -865,7 +882,7 @@ for(const stage of ['epg','seal']){
   const h=cloudflare({pipeline:flaky});
   const r=runner(h,{startAt:due});
   await h.epg.ensure(h.env,{now:due});
-  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const outcome=await follow(h.epg,h.env,r,'2026-11-07');
   assert.equal(outcome.reason,'complete','an unreadable guard read does not stop the instance');
   assert.ok(r.log.some(n=>n.startsWith('sleep')),'it cooled down and retried');
   assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1,'the retry resumes the same run');
@@ -879,7 +896,7 @@ for(const stage of ['epg','seal']){
   const h=cloudflare({pipeline:fenced});
   const r=runner(h,{startAt:due});
   await h.epg.ensure(h.env,{now:due});
-  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const outcome=await follow(h.epg,h.env,r,'2026-11-07');
   assert.equal(outcome.stopped,true);assert.equal(outcome.reason,'epoch_mismatch');
  }
  // (b2) AIR-444: a step that ran past its 5-minute lease (the 11 Nov 2026 `seal_stage` took 348 s) is fenced by the lease, not by an epoch change. It
@@ -893,7 +910,7 @@ for(const stage of ['epg','seal']){
   const r=runner(h,{startAt:due});
   await h.epg.ensure(h.env,{now:due});
   const modeBefore=await h.epg.readMode(h.env);
-  const outcome=await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const outcome=await follow(h.epg,h.env,r,'2026-11-07');
   assert.equal(outcome.stopped,true,String(detail));assert.equal(outcome.reason,expected,'the stop for '+String(detail));
   assert.equal((await h.epg.readMode(h.env)).record.epoch,modeBefore.record.epoch,'the epoch did not change');
   const rec=await control(h);assert.equal(rec.quarantine??null,null,'the stop writes no quarantine, exactly as an epoch stop did: '+String(detail));
@@ -912,7 +929,9 @@ for(const stage of ['epg','seal']){
   const successor=await epg.ensure(env,{now:due+10*MIN,random:()=>0.5});
   assert.equal(successor.started,true);assert.equal(successor.instanceId,'epg_20261107_1');
   const r=runner(h,{startAt:due+10*MIN});
-  const outcome=await epg.run(env,{runKey:'2026-11-07',series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  let outcome=await epg.run(env,{runKey:'2026-11-07',series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(outcome.reason,'seal_handoff');
+  outcome=await epg.run(env,{runKey:'2026-11-07',series:2,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
   assert.equal(outcome.reason,'complete');
   assert.ok((await control(h)).doneAt,'the day is done once');
   eq(start(await epg.ensure(env,{now:due+11*MIN})),{started:false,reason:'complete'});
@@ -966,9 +985,71 @@ for(const stage of ['epg','seal']){
  const due=Date.parse('2026-11-07T16:00:00Z');
  const r=runner(h,{startAt:due});
  await epg.ensure(env,{now:due});
- await epg.run(env,{runKey:'2026-11-07',series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+ await follow(epg,env,r,'2026-11-07');
  const model=plain(await epg.readModel(env,r.clock()+2*H));
  assert.equal(model.health,'healthy');assert.equal(model.seal,null);
  assert.ok(model.publication.publishedAt&&model.publication.latencyMs>=0&&model.publication.overdueMs===null,'a published day reports its latency');
+}
+// AIR-484 / ADR 0144 part A: recovery of a claimed seal by the hourly ensure, by observed status, across the Madrid day roll.
+{
+ const day='2026-11-07',due0=Date.parse('2026-11-07T16:00:00Z'),nextDue=Date.parse('2026-11-08T16:00:00Z');
+ async function claimed(){
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.reason,'seal_handoff');assert.equal(h.state.sync.stage,'seal');
+  return {h,r};
+ }
+ {// a live successor is waited for, also after midnight, and today's run is not started
+  const {h,r}=await claimed();
+  const seen=await h.epg.ensure(h.env,{now:nextDue});
+  eq(seen,{started:false,reason:'in_progress',instanceId:'epg_20261107_1',mirrors:seen.mirrors});
+  assert.equal(h.wf.creates.length,2);
+ }
+ {// the create never landed (absent): the same id is created again, no new series, no failure class beyond the budget record
+  const {h}=await claimed();
+  h.wf.instances.delete('epg_20261107_1');
+  const seen=await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
+  assert.equal(seen.started,true);assert.equal(seen.instanceId,'epg_20261107_1');assert.equal(h.wf.creates.at(-1).id,'epg_20261107_1');
+  assert.equal((await control(h)).runKey,day,'the claimed day keeps priority over today');
+ }
+ {// errored: recorded against the budget with a cooldown, then a new recovery series of the same claimed day
+  const {h}=await claimed();
+  h.wf.instances.set('epg_20261107_1','errored');
+  const seen=await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
+  assert.equal(seen.reason,'cooldown');assert.equal(seen.recorded,'instance_errored');
+  const next=await h.epg.ensure(h.env,{now:nextDue+30*MIN,random:()=>0.5});
+  assert.equal(next.started,true);assert.equal(next.instanceId,'epg_20261107_2');assert.equal(next.runKey,day);
+  const rec=await control(h);assert.equal(rec.handoff.sealRunId,'run-1');assert.equal(rec.handoff.toSeries,2);
+ }
+ {// a terminal successor is never re-created under the same id
+  const {h}=await claimed();
+  h.wf.instances.set('epg_20261107_1','terminated');
+  await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
+  await h.epg.ensure(h.env,{now:nextDue+30*MIN,random:()=>0.5});
+  assert.equal(h.wf.creates.filter(c=>c.id==='epg_20261107_1').length,1);
+ }
+ {// complete while the run document still says seal: contradictory evidence, fail closed, nothing created
+  const {h}=await claimed();
+  h.wf.instances.set('epg_20261107_1','complete');
+  const seen=await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
+  assert.equal(seen.reason,'evidence_contradictory');
+  assert.equal(h.wf.creates.length,2);
+ }
+ {// the claimed successor finishes the seal after midnight and never certifies today's run
+  const {h}=await claimed();
+  const r2=runner(h,{startAt:nextDue});
+  const out=await h.epg.run(h.env,{runKey:day,series:1,epoch:1},r2.step,{now:r2.clock,clock:r2.clock,random:()=>0.5});
+  eq(out,{stopped:true,reason:'complete',instanceId:'epg_20261107_1'});
+  assert.equal(h.state.sync.stage,'complete');
+  const rec=await control(h);assert.equal(rec.runKey,day);
+ }
+ {// without a claim a rolled day still stops, as before
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  await h.epg.ensure(h.env,{now:due0});
+  const late=runner(h,{startAt:nextDue});
+  eq(await h.epg.run(h.env,{runKey:day,series:0,epoch:1},late.step,{now:late.clock,clock:late.clock}),{stopped:true,reason:'day_rolled',instanceId:'epg_20261107_0'});
+ }
 }
 console.log('epg-orchestration: ok');
