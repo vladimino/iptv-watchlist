@@ -1,6 +1,6 @@
 # AIR-485: offline comparison of EPG seal staging layouts, 14 November 2026
 
-Offline only: Node v22.23.4, the Worker bundle loaded in-process, the D1 stand-in on a local SQLite file with every migration applied, a file-backed R2 stand-in. Synthetic data, no private payloads. No production read or write, no Workflow, Discovery, TMDB, flag, lease, Task, R2, D1 or Access action. Tree: `origin/main` at `f5c57498` (after [PR #635](https://github.com/vladimino/iptv-watchlist/pull/635)); the same run at `962dc37d` gave the same figures within 1-2 MiB. **Operational authority: none.** Design input for [ADR 0145](../../adr/0145-epg-seal-d1-aware-staged-publication.md) (Proposed).
+Offline only: Node v22.23.4, the Worker bundle loaded in-process, the D1 stand-in on a local SQLite file with every migration applied, a file-backed R2 stand-in. Synthetic data, no private payloads. No production read or write, no Workflow, Discovery, TMDB, flag, lease, Task, R2, D1 or Access action. Tree: `origin/main` at `f5c57498` (after [PR #635](https://github.com/vladimino/iptv-watchlist/pull/635)); the same run at `962dc37d` gave the same figures within 1-2 MiB. **Operational authority: none.** Design input for [ADR 0145](../../adr/0145-epg-seal-publication-only-staging.md) (Proposed).
 
 Reproduce: `npm ci && node scripts/epg-seal-staging-bench.mjs` (about 130 s; `--out file.json` writes the rows below; `--only C:catalog` runs one cell).
 
@@ -67,6 +67,16 @@ Notes on the table:
 - **One D1 catalog read (A1).** It halves the D1 read volume of `seal_catalog` (16 to 8 MiB, 25 to 13 reads) and its wall time (981 to 517 ms), but does not lower the peak. The first read's objects are garbage before the second read is parsed, so the peak is one read, not two. It is worth having for D1 load and time, not for memory.
 - **C+.** It lowers `seal_publish` further (31 to 18 MiB, 2,077 to 12 statements) only by doing the same staging work in another step. That step's peak was not measured; inferred, it is about today's pointer unit, since it builds the same chunks from the same report.
 
+## Final layout after ADR 0142 decision 13 (D), derived
+
+Layout D is assessed for the owner's order, in which ADR 0142 decision 13 (M5) reaches `main` first. D stages only C's `publication.json`, with no catalog, no `availability.json` and no `seal_catalog` phase.
+
+- **Not a separate run.** D's object is byte for byte C's `bench/C/payload.json`, so D's `seal_publish`, `seal_finalize` and `seal_queue` are the C rows above: 31, 18 and 18 MiB, with 3.6 MiB of R2 read per step.
+- **No catalog step.** D has no `seal_catalog`, so the A0 63 MiB step, its 14.2 MiB R2 read and its 8-16 MiB of D1 reads disappear.
+- **D1 writes come from M5, not from D.** That the 9,226 admission writes per run disappear follows from M5 removing the availability writes.
+- **Why `seal_catalog` has no work after M5 (code reading of `epgSync` at `00d3f162`).** The staged catalog is `replaceCatalogAvailability(cache, ...)` over the scan-time D1 read, and the scan gets copies of the cached Films. Without the availability writes, the staged catalog equals the scan-time copy of D1, so the phase has nothing of its own to write.
+- **M5 status.** At `00d3f162`, M5 is not delivered: `epgSync` still calls `replaceCatalogAvailability`.
+
 ## Inferred, not measured
 
 - **`seal_stage` serialisation.** Its write transient shrinks with the staged bytes: one `JSON.stringify` of 14.2 MiB in A0 against 3.6 + 0.8 MiB in C. Cyrillic text makes these two-byte V8 strings, roughly twice their UTF-8 length. That step also holds the scan residue; its heap was not measured here.
@@ -78,4 +88,4 @@ Notes on the table:
 - **workerd accounting.** Node V8 heap is not the workerd 128 MiB isolate accounting, which also counts buffers and native memory. The figures rank layouts; they are not isolate headroom.
 - **No OOM fix claimed.** The 14 November OOMs were in `seal_ledger` and at `seal_publish_copy` ([AIR-462 correlation](air-462-epg-oom-natural-run-2026-11-14.md)). `seal_ledger` streams only the generation ledger and reads no payload, so **no layout here changes it**. For `seal_publish_copy`, every layout already holds `report` and `watchlist` (A0 deletes the catalog after parsing). C lowers the step's entry peak and the garbage it leaves, not what is resident during the copy.
 - **Production sizes.** No production payload was read: the card allows offline work only. The catalog churn, the airing share and the number of seal steps per run are taken from the cited dated evidence, not re-measured.
-- **Concurrent D1 changes.** The behaviour when D1 rows change between the scan and `seal_catalog` is a code reading (see ADR 0145). The benchmark covers only the unchanged case.
+- **Concurrent D1 changes.** The behaviour when D1 rows change between the scan and `seal_catalog` is a code reading (see ADR 0145). The benchmark covers only the unchanged case. In layout D the question disappears, because the seal writes no catalog.
