@@ -7,9 +7,22 @@
 // or a failed read fails closed and does not serve the R2 ledger.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
+import {slotEligibility,decisionAnchor,slotMinutes} from './domain/slot-evidence.js';
 const TABLES=['discovery_authority','discovery_cas','discovery_transfer','discovery_lease','discovery_continuation','discovery_status','discovery_checkpoint','discovery_workflow','discovery_observation','discovery_observation_show','discovery_decision','discovery_decision_history','discovery_admission','discovery_segment','discovery_score','discovery_intent'];
 export const DISCOVERY_TABLES=TABLES;
 const FENCE_SQL='UPDATE discovery_cas SET ok=changes() WHERE id=1';
+// ADR 0142 decision 4: an assigned row (`basis = 'discovery'`, `match_reason` = the observation key) of the published run lives only while the stored
+// decision of its observation is `verified` with the TMDB identity of the Film the row names. A decision write that changes that identity (the status
+// leaves `verified`, the TMDB id or the Film changes) ends its batch with this statement, so the rows go in the same batch as the decision and a batch
+// that fails as a whole removes nothing. Rows of any other EPG run are historical and stay.
+const ASSIGNED_ROWS_DELETE="DELETE FROM published_epg_show WHERE programme_run_id=(SELECT programme_run_id FROM published_epg_authority WHERE id=1) AND basis='discovery' AND match_reason=?";
+function assignedIdentity(decision){
+ if(!decision||typeof decision!=='object'||decision.status!=='verified'||decision.tmdbId==null||mediaKind(decision)!=='movie')return null;
+ return String(decision.tmdbId)+'|'+String(decision.filmId??'');
+}
+function assignedRowsDelete(key,previous,next){
+ return assignedIdentity(previous)===assignedIdentity(next)&&previous?[]:[[ASSIGNED_ROWS_DELETE,[key]]];
+}
 export const LEASE_TTL_MS=90000;
 export const STATEMENT_CAP=40;
 export const INDEX_CAP=3000;
@@ -341,7 +354,9 @@ async function writeDecisions(env,map,gate,context){
   const observation=await one(db,'SELECT evidence_key FROM discovery_observation WHERE source_key=\'active\' AND residence=\'active\' AND observation_key=?',[key]);
   if(!observation)throw failed('discovery_fence');
   if(decision.evidenceKey!=null&&observation.evidence_key!=null&&observation.evidence_key!==decision.evidenceKey)throw failed('discovery_fence');
-  prepared.push({key,decision,hash,kind});
+  let previous=null;
+  try{const stored=await one(db,'SELECT payload_json FROM discovery_decision WHERE observation_key=?',[key]);previous=stored?JSON.parse(stored.payload_json):null;}catch{previous=null;}
+  prepared.push({key,decision,hash,kind,previous});
  }
  if(gate.transfer==='loading')throw failed('discovery_incomplete');
  await commit(db,[
@@ -362,6 +377,7 @@ async function writeDecisions(env,map,gate,context){
    const addition=[
     ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[row.key,row.key,gate.generation,new Date().toISOString(),'resolver_chunk',JSON.stringify(row.decision),row.key,row.hash]],
     ['INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(observation_key) DO UPDATE SET programme_run_id=excluded.programme_run_id, generation=excluded.generation, status=excluded.status, attempts=excluded.attempts, evidence_key=excluded.evidence_key, terminal_reason=excluded.terminal_reason, retry_at=excluded.retry_at, tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, film_id=excluded.film_id, decision_hash=excluded.decision_hash, payload_json=excluded.payload_json',[row.key,gate.programmeRunId,gate.generation+1,row.decision.status??null,Number.isInteger(row.decision.attempts)?row.decision.attempts:null,row.decision.evidenceKey??null,row.decision.terminalReason??null,row.decision.retryAt??null,row.decision.tmdbId==null?null:String(row.decision.tmdbId),row.decision.tmdbId==null?null:row.kind,row.decision.filmId??null,row.hash,JSON.stringify(row.decision)]],
+    ...assignedRowsDelete(row.key,row.previous,row.decision),
    ];
    if(pending.length+addition.length+2>STATEMENT_CAP)await flush();
    pending.push(...addition);
@@ -1123,6 +1139,7 @@ export async function writeDecisionDelta(env,changes,context={}){
     ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[key,key,generation,at,'resolver_chunk',JSON.stringify(next),key,hash]],
     ['INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(observation_key) DO UPDATE SET programme_run_id=excluded.programme_run_id, generation=excluded.generation, status=excluded.status, attempts=excluded.attempts, evidence_key=excluded.evidence_key, terminal_reason=excluded.terminal_reason, retry_at=excluded.retry_at, tmdb_id=excluded.tmdb_id, media_kind=excluded.media_kind, film_id=excluded.film_id, decision_hash=excluded.decision_hash, payload_json=excluded.payload_json',[key,gate.programmeRunId,generation,next.status??null,Number.isInteger(next.attempts)?next.attempts:null,evidence,next.terminalReason??null,next.retryAt??null,next.tmdbId==null?null:String(next.tmdbId),next.tmdbId==null?null:kind,next.filmId??null,hash,JSON.stringify(next)]],
     [FENCE_SQL,[]],
+    ...assignedRowsDelete(key,previous,next),
    ]);
    gate={...gate,generation};
    written.push(key);
@@ -1139,6 +1156,83 @@ export async function writeDecisionDelta(env,changes,context={}){
   }
  }
  return {written,skipped};
+}
+// ADR 0142 decisions 4 and 5. One assigned row per eligible slot of a verified observation, inserted into the existing `published_epg_show` by a statement that writes only if
+// every guard still holds inside that statement: the published authority is `d1` / `open` and points at `P`; the stored decision of the observation is `verified`, a movie,
+// has that TMDB id and the exact hash the writer read; the observation is an active, current observation of `P`; the Film has a record in `P` (a `programme` member, or the
+// catalog id `tmdb_<id>` with a current admission); and no row of any Film holds the slot. The coordinates are copied from the observation's slot row. The batch runs under the
+// Discovery lease and fence: it moves `discovery_authority.generation` and never the published generation, the document or the members.
+const SLOT_INSERT_SQL="INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) SELECT ?, ?, s.channel_id, s.start_ms, s.end_ms, s.channel, NULL, 'discovery', ? FROM discovery_observation o JOIN discovery_observation_show s ON s.source_key=o.source_key AND s.observation_key=o.observation_key WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND o.programme_run_id=? AND o.observation_key=? AND s.channel_id=? AND s.start_ms=? AND s.end_ms IS ? AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open' AND programme_run_id=?) AND EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND status='verified' AND media_kind='movie' AND tmdb_id=? AND decision_hash=? AND film_id=?) AND (EXISTS (SELECT 1 FROM published_epg_member WHERE programme_run_id=? AND kind='programme' AND film_id=?) OR (?=('tmdb_'||?) AND EXISTS (SELECT 1 FROM discovery_admission WHERE film_id=? AND media_kind='movie' AND tmdb_id=? AND state='current'))) AND NOT EXISTS (SELECT 1 FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?)";
+const SLOT_BATCH=STATEMENT_CAP-2;
+function slotInsert(run,film,key,tmdb,hash,slot){
+ return [SLOT_INSERT_SQL,[run,film,key,run,key,slot.channelId,slot.startMs,slot.endMs,run,key,tmdb,hash,film,run,film,film,tmdb,film,tmdb,run,slot.channelId,slot.startMs]];
+}
+// ADR 0142 decision 4: `published_epg_member` has no TMDB column, so the link between a member and its TMDB id comes from the sealed programme document of the run.
+// The document of one run never changes while the pointer guard holds, so the small id map is kept for the last run read.
+let sealedMembers={db:null,run:null,map:new Map()};
+async function sealedMemberTmdb(db,run){
+ if(sealedMembers.db===db&&sealedMembers.run===run)return sealedMembers.map;
+ const rows=await many(db,"SELECT ordinal, payload_json FROM published_epg_document WHERE programme_run_id=? AND kind='programme' ORDER BY ordinal",[run]);
+ const map=new Map();
+ try{
+  const document=rows.length?JSON.parse(rows.map(row=>row.payload_json).join('')):null;
+  for(const film of Array.isArray(document?.films)?document.films:[])if(film?.id!=null&&film.tmdbId!=null)map.set(String(film.id),String(film.tmdbId));
+ }catch{return new Map();}
+ sealedMembers={db,run,map};
+ return map;
+}
+export async function assignObservationSlots(env,spec,context={}){
+ const lease=context.lease||leaseOf(env);
+ if(!lease)throw failed('discovery_lease');
+ const db=database(env),key=String(spec?.observationKey??'');
+ const outcomes={assigned:0,present:0,evidence_drift:0,slot_taken:0,film_absent:0,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0};
+ const result={assigned:[],skipped:[],outcomes,reason:null};
+ const stop=reason=>{result.reason=reason;return result;};
+ let gate=await readAuthority(env);
+ assertOpen(gate);
+ const published=await one(db,"SELECT programme_run_id FROM published_epg_authority WHERE id=1 AND mode='d1' AND cutover='open'");
+ const run=published?.programme_run_id??null;
+ if(!run||(spec.programmeRunId&&spec.programmeRunId!==run)){outcomes.stale_run++;return stop('stale_run');}
+ const row=await one(db,'SELECT payload_json, decision_hash, status, media_kind, tmdb_id, film_id FROM discovery_decision WHERE observation_key=?',[key]);
+ let decision=null;
+ try{decision=row?JSON.parse(row.payload_json):null;}catch{decision=null;}
+ if(!row||!decision||row.status!=='verified'||row.media_kind!=='movie'||!row.film_id||!row.tmdb_id){outcomes.decision_changed++;return stop('decision_changed');}
+ const observation=await one(db,"SELECT confirmed_tmdb_id, programme_run_id, seen_in_latest FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key=?",[key]);
+ if(!observation||observation.seen_in_latest!==1){outcomes.observation_inactive++;return stop('observation_inactive');}
+ if(observation.programme_run_id!==run){outcomes.stale_run++;return stop('stale_run');}
+ const film=String(row.film_id),tmdb=String(row.tmdb_id);
+ const member=await one(db,"SELECT 1 AS present FROM published_epg_member WHERE programme_run_id=? AND kind='programme' AND film_id=?",[run,film]);
+ let filmPresent;
+ if(member)filmPresent=(await sealedMemberTmdb(db,run)).get(film)===tmdb;
+ else filmPresent=!!await one(db,"SELECT 1 AS present FROM discovery_admission WHERE film_id=? AND media_kind='movie' AND tmdb_id=? AND state='current' AND ?=('tmdb_'||?)",[film,tmdb,film,tmdb]);
+ const slots=(await many(db,"SELECT channel_id, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? ORDER BY ordinal",[key])).map(item=>({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms}));
+ const held=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ const pending=[];
+ for(const slot of slots){
+  if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
+  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},observation.confirmed_tmdb_id).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift'});continue;}
+  pending.push(slot);
+ }
+ if(!pending.length)return result;
+ if(!filmPresent){outcomes.film_absent+=pending.length;for(const slot of pending)result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'film_absent'});return stop('film_absent');}
+ const hash=row.decision_hash;
+ for(let index=0;index<pending.length;index+=SLOT_BATCH){
+  const group=pending.slice(index,index+SLOT_BATCH);
+  await commit(db,[
+   fence(gate,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
+   [FENCE_SQL,[]],
+   ...group.map(slot=>slotInsert(run,film,key,tmdb,hash,slot)),
+  ]);
+  gate={...gate,generation:gate.generation+1};
+ }
+ const after=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
+ for(const slot of pending){
+  if(after.get(slot.channelId+':'+slot.startMs)===film){outcomes.assigned++;result.assigned.push({channelId:slot.channelId,startMs:slot.startMs});continue;}
+  const holder=await one(db,'SELECT film_id FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?',[run,slot.channelId,slot.startMs]);
+  const reason=holder?'slot_taken':'decision_changed';
+  outcomes[reason]++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason});
+ }
+ return result;
 }
 // Admissions the chunk made or touched, in batches. Each batch is behind the lease and generation fence; a film whose
 // identity (media kind and TMDB id) already belongs to another film id is refused, never merged. A refusal leaves the
@@ -1704,6 +1798,7 @@ async function commitOwnerWrite(env,spec,previous){
   ['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[spec.key,spec.key,gate.generation,new Date().toISOString(),spec.writer||'owner',JSON.stringify(spec.next),spec.key,spec.expectedHash]],
   ['UPDATE discovery_decision SET programme_run_id=?, generation=?, status=?, attempts=?, evidence_key=?, terminal_reason=?, retry_at=?, tmdb_id=?, media_kind=?, film_id=?, decision_hash=?, payload_json=? WHERE observation_key=? AND decision_hash=?',[gate.programmeRunId,gate.generation+1,spec.next.status??null,Number.isInteger(spec.next.attempts)?spec.next.attempts:null,spec.next.evidenceKey??null,spec.next.terminalReason??null,spec.next.retryAt??null,spec.next.tmdbId==null?null:String(spec.next.tmdbId),spec.next.tmdbId==null?null:kind,spec.next.filmId??null,nextHash,JSON.stringify(spec.next),spec.key,spec.expectedHash]],
   [FENCE_SQL,[]],
+  ...assignedRowsDelete(spec.key,previous,spec.next),
   ['UPDATE discovery_intent SET state=\'receipt\', receipt_json=?, generation=? WHERE idempotency_key=? AND state=\'running\'',[JSON.stringify(receipt),gate.generation+1,spec.idempotencyKey]],
   [FENCE_SQL,[]],
  ]);
