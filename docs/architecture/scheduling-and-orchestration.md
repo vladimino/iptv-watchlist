@@ -167,7 +167,7 @@ sequenceDiagram
     end
     opt Workflow binding and D1 admission pass
         Cron->>Worker: reconcileDiscoveryWorkflow
-        Note over Worker,D1: Reads only unless a missing intent or a dead instance needs one create. No chunk, no TMDB. A projector_window refusal is retried in this tick after the window expiry (AIR-428); each attempt is logged.
+        Note over Worker,D1: Reads only unless a missing intent or a dead instance needs one create. No chunk, no TMDB. A projector_window refusal is retried in this tick after the window expiry (AIR-428), and each attempt is logged.
     end
 ```
 
