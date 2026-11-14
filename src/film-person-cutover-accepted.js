@@ -36,7 +36,7 @@ export const OPERATOR_COPY_PERMISSION=freeze({
 });
 // The D1 tables the Discovery Workflow keeps writing during a copy. They are copied last, re-read by one resync request, and they are the ONLY statements that
 // may differ between the three production reads (see operatorCopyReasons).
-export const DISCOVERY_COPY_TABLES=Object.freeze(['discovery_authority','discovery_lease','discovery_transfer','discovery_admission','discovery_decision']);
+export const DISCOVERY_COPY_TABLES=Object.freeze(['discovery_authority','discovery_lease','discovery_transfer','discovery_admission','discovery_decision','published_epg_show']);
 // The gate statements of the projector-input capture (its GATE_STATEMENTS constant), by id. A test pins this list to that constant.
 export const GATE_IDS=Object.freeze(['schema','marker','fence','baseline','lease','window','discovery','discoveryLease','published','owner']);
 // THE TABLES OF THE REVIEWED COPY PLAN, in copy order: the one source of both the connector tool's plan and the statement set this gate requires. It is every

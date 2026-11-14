@@ -229,7 +229,7 @@ async function adminD1Programme(env){
  if(!live)return null;
  const run=typeof live.programmeRunId==='string'&&ADMIN_RUN_ID.test(live.programmeRunId)?live.programmeRunId:null;
  if(!run)return {error:'programme_unavailable'};
- const body=await PublishedEpg.readDocument(env,run,'programme');
+ const body=typeof PublishedEpg.readCompletedProgramme==='function'?await PublishedEpg.readCompletedProgramme(env,run):await PublishedEpg.readDocument(env,run,'programme');
  if(!body||body.runId!==run)return {error:'programme_unavailable'};
  const again=await PublishedEpg.currentGeneration(env);
  if(!again||again.fence!==live.fence||again.programmeRunId!==run)return {moved:true};

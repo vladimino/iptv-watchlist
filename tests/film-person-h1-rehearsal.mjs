@@ -111,7 +111,7 @@ const planned=cliConnector(['plan','--out',planDir,'--lease-id',CONNECTOR_LEASE]
 assert.equal(planned.status,0,planned.stderr);
 const planFile=path.join(planDir,'plan.json');
 const plan=JSON.parse(fs.readFileSync(planFile,'utf8'));
-assert.equal(plan.copyTables.length,39);
+assert.equal(plan.copyTables.length,40);
 {
  // the eight tables of the loader's STATE_STATEMENTS are all in the copy plan, and the two functions run here hold no write statement
  const tables=Object.values(L.STATE_STATEMENTS).map(text=>text.match(/\bFROM (\w+)/)[1]);
