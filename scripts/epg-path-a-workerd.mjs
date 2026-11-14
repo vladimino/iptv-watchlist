@@ -135,12 +135,25 @@ export async function measure({baseline,departures,returns}){
   rssMiB:{idle:mib(idle.rss),peakDuringSeal:mib(peak),increaseOverIdle:mib(peak-idle.rss),afterSeal:mib(after.rss),highWaterProcess:mib(after.hwm)}};
 }
 
+export function assessResult(result){
+ const problems=[];
+ if(!result||typeof result!=='object')return ['no result'];
+ if(result.error)problems.push('request failed');
+ if(!result.answer)problems.push('no answer');
+ else if(result.answer.sealError)problems.push('stageSealedGeneration threw');
+ if(!(result.workerdProcesses>0))problems.push('no workerd process sampled');
+ if(!result.verified||result.verified.error||result.verified.exact!==true)problems.push('count invariants not verified');
+ return problems;
+}
+
 export async function main(argv){
  const [command,...rest]=argv,flag=(name,fallback)=>{const i=rest.indexOf(name);return i<0?fallback:rest[i+1];};
  if(command!=='measure')throw new Error('usage: measure --baseline <dir> [--departures N --returns N]');
  const baseline=flag('--baseline');
  assert.ok(baseline&&path.isAbsolute(baseline),'--baseline must be an absolute directory made by epg-path-a-feasibility.mjs build');
  const result=await measure({baseline,departures:Number(flag('--departures',2000)),returns:Number(flag('--returns',200))});
- console.log(JSON.stringify(result));
+ const problems=assessResult(result);
+ console.log(JSON.stringify(problems.length?{...result,failed:problems}:result));
+ return problems.length?1:0;
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===SELF)main(process.argv.slice(2)).then(()=>process.exit(0)).catch(error=>{console.error(error);process.exit(1);});
+if(process.argv[1]&&path.resolve(process.argv[1])===SELF)main(process.argv.slice(2)).then(code=>process.exit(code)).catch(error=>{console.error(error);process.exit(1);});
