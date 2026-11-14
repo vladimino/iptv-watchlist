@@ -1133,13 +1133,13 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
 }
 
 // AIR-483: the real queueDiscovery -> replaceContinuation path, with only the D1 authority boundary refusing the write.
-// Incident shape: a persisted paused/programme_changed checkpoint of the still-published, pinned generation and a nonempty backlog.
+// Incident shape: a persisted paused/programme_changed checkpoint (remainingChunks 0) of the still-published, pinned generation.
 {
  const OTHER_RUN='99999999-9999-4999-8999-999999999999';
  const refusal=(code,extra={})=>Object.assign(new Error(code),{code},extra);
  let refuseWith=null,refusedWrites=0;
  const incident=(options={})=>{
-  seed({stage:'complete',remaining:9790,reason:'programme_changed',...options});
+  seed({stage:'complete',remaining:0,reason:'programme_changed',...options});
   env.DISCOVERY_EXECUTOR='workflow';
   armWorkflowAdmission(GENERATION);
   context.DiscoveryAuthority.writeContinuation=async()=>{if(refuseWith){refusedWrites++;throw refuseWith;}return {handled:false};};
@@ -1160,9 +1160,30 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
  const out=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async()=>{waits.push('wait');if(++ticks===1)refuseWith=null;}});
  assert.equal(out.started,true,JSON.stringify(out));assert.equal(waits.length,1);assert.ok(refusedWrites>=1);
  assert.equal(creates.length,1);assert.equal(creates[0].params.programmeRunId,GENERATION);assert.equal(creates[0].params.series,0);
- assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);assert.equal(continuation().remainingChunks,9790>12?continuation().remainingChunks:12);
+ assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);assert.equal(continuation().remainingChunks,12);
  const again=await scheduled();
  assert.equal(creates.length,1,'a later tick attaches or waits and never creates a second instance: '+JSON.stringify(again));
+
+ // Incident shape with owner state: series 9 stopped with reason programme_changed. Held window -> typed retry -> intent readback -> durable
+ // recovery arm (recovery_waiting) -> once due, exactly one successor series 10; the published and pinned generation never changes.
+ incident();
+ set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:9,instanceId:'discovery_'+GENERATION.replace(/[^0-9A-Za-z]/g,'').slice(0,32)+'_9',phase:'stopped',updatedAt:iso,waitingUntil:null,reason:'programme_changed',chunksThisInstance:3,lastProgress:null,recovery:null});
+ refuseWith=refusal('discovery_window',{window:{expiresAt:Date.now()+1000,state:'held'}});
+ waits.length=0;
+ let released=0;
+ const armed9=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async()=>{waits.push('wait');if(++released===1)refuseWith=null;}});
+ assert.equal(armed9.reason,'recovery_waiting',JSON.stringify(armed9));assert.equal(waits.length,1);assert.equal(creates.length,0);
+ assert.equal(continuation().reason,'epg_committed');
+ assert.equal(records.get('epg/discovery-workflow.json').series,9);assert.ok(records.get('epg/discovery-workflow.json').recovery?.dueAt);
+ const stillWaiting=await scheduled();
+ assert.equal(stillWaiting.reason,'recovery_waiting');assert.equal(creates.length,0);
+ records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()-1000).toISOString();
+ const successor10=await scheduled();
+ assert.equal(successor10.started,true,JSON.stringify(successor10));assert.equal(successor10.series,10);
+ assert.equal(creates.length,1);assert.equal(creates[0].params.series,10);assert.equal(creates[0].params.programmeRunId,GENERATION);
+ await scheduled();
+ assert.equal(creates.length,1,'no second successor');
+ assert.equal(records.get('epg/published-generation.json').programmeRunId,GENERATION);
 
  // A window that stays held is bounded to RECONCILE_WINDOW_ATTEMPTS attempts and never creates an instance.
  incident();
