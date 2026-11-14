@@ -209,6 +209,32 @@ sequenceDiagram
     D1-->>Disc: admitted
 ```
 
+### Planned: seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), Accepted as design; implementation tracked in AIR-484, not delivered)
+
+**Current state:** one instance still runs `epg_commit` and the seal. **Planned state** is the diagram. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. The staged payload is today's single `epg/seal/<runId>/payload.json`, unchanged; its format belongs to AIR-485. A pending claim, even of a previous Madrid day, takes priority over today's start.
+
+```mermaid
+sequenceDiagram
+    participant P as Producing instance
+    participant R2 as R2 payload.json
+    participant C as D1 control document
+    participant S as Successor instance
+    participant H as Hourly ensure
+    P->>R2: Store payload.json and save sync.json at stage seal
+    P->>C: CAS claim, next series, no failure recorded
+    P->>S: create() with the next series id
+    Note over P: Ends normally. Takes no more step leases.
+    S->>C: Admit against claim and mode revision
+    S->>R2: Read payload.json as today
+    S->>C: Seal phases and publish exactly once
+    Note over H,S: Claim pending while sync.json still says seal
+    H->>C: Read claim and successor status
+    Note left of H: Absent or unknown, create the same id or attach
+    Note left of H: Alive, wait
+    H->>C: Errored or terminated, CAS to a new recovery series
+    Note left of H: Complete while still seal, fail closed
+```
+
 ## The separate ratings pipeline
 
 **EPG executor (AIR-348, active).** [ADR 0100](../adr/0100-epg-cloudflare-workflow-executor.md) (Accepted) adds a Cloudflare EPG Workflow that drives the existing `/api/sync/*` steps in-process after an owner-approved three-step switch (`external`, `switching`, `cloudflare`; epoch fence asserted inside the D1 pointer batch). The switch is done: `epg_status` read `mode=cloudflare`, epoch 1, and the first natural run was accepted on 8 November 2026 ([evidence](../evidence/orchestration/epg-first-natural-run-air-348-2026-11-08.md)); the Daily Task is disabled. The diagram below shows the retired Daily Task and is retained as the rollback flow. The hourly cron calls an inert `EpgOrchestration.ensure` next to the projector, Ratings `ensure`, the Discovery reconcile and the monitor, each independent and none sharing a lease; the cron expression is `0 * * * *` since the separate owner-approved AIR-348 change (it was `37 * * * *`). The Ratings Cloudflare executor shares the 17:00 Europe/Madrid logical due time ([ADR 0101](../adr/0101-ratings-logical-due-time-1700.md), which supersedes the 17:30 of ADR 0090 in that one respect); the diagram below shows the legacy Ratings Task and is unchanged.
