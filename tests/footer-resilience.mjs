@@ -9,7 +9,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
-import {scoped} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
 import * as PublishedEpgModule from '../src/published-epg.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-footer-resilience-'));
@@ -34,7 +34,7 @@ function worldFor({d1=true}={}){
  const world=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,clearTimeout,ASSETS:{},INITIAL_PERSONAL_RATINGS:{},
   console:{error:(...args)=>logs.push(args.join(' ')),log(){},warn(){}},fetch:async input=>{fetches.push(String(input instanceof Request?input.url:input));return new Response('unexpected',{status:599});}});
  vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),world);
- if(d1){vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scoped('src/discovery-authority.js','DiscoveryAuthority'),world);}
+ if(d1){vm.runInContext(scoped('src/published-epg.js','PublishedEpg'),world);vm.runInContext(scopedEpgPriority(),world);vm.runInContext(scopedDiscoveryAuthority(),world);}
  for(const file of ['src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),world);
  return world;
 }

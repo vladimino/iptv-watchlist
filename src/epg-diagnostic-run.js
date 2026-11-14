@@ -337,7 +337,7 @@ const EpgDiagnosticRun=(()=>{
   // With the Discovery authority of the diagnostic domain in D1, the ledger of the generation is loaded the way a handoff loads it, by the real writer, so that the Discovery lease
   // and its fences work on the same generation as in production. Marker last.
   {
-   const taken=await DiscoveryAuthority.acquireLease(ctxEnv,{programmeRunId:null});
+   const taken=await DiscoveryAuthority.acquireLease(ctxEnv,{programmeRunId:null,role:'epg'});
    if(!taken.lease)return {refused:'discovery_lease_unavailable'};
    ctxEnv.discoveryLease=taken.lease;
    try{await DiscoveryAuthority.ingestLedger(ctxEnv,{programmeRunId:id,handoff:true,lease:taken.lease,items:(async function*(){for(const item of dataset.baseline.items)yield item;})()});}

@@ -13,6 +13,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import * as Authority from '../src/discovery-authority.js';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
+import {scopedEpgPriority} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -23,7 +24,8 @@ const call=code=>vm.runInContext(code,context);
 // The Workflow module is part of the bundle and is not in the offline loader's context: load it as the bundle carries it.
 vm.runInContext(fs.readFileSync('src/discovery-workflow.js','utf8'),context);
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-window-epg-'));
-const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+// The window protocol is this file's subject. The EPG-priority pause (0022, tests/epg-priority-gate.mjs) is a different gate and would refuse the Discovery-role acquires below by the wall clock.
+const files=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
 const file=path.join(root,'e.sqlite');
 {const result=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+files.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});if(result.status!==0)throw new Error(result.stderr);}
 const db=d1Standin(file);
@@ -213,6 +215,72 @@ await Authority.releaseProjectorWindow(env,{owner:'p1'});
  catch(error){reachedWork=error.name!=='ProjectorWindowBusy'&&error.message!=='projector_window';}
  assert.equal(reachedWork,true,'the same run goes on to the EPG work after the window');
  assert.equal(JSON.parse(await (await bucket.get('sync.json')).text()).runId,'run-1','the same run id');
+}
+
+// 3. ADR 0135 (AIR-459), table PRESENT (0022 applied to a throwaway file): a live Discovery lease is a collision, not a fault of the publication, so the publication paths answer it as the
+// structured, non-failure `ResolverBusy` (kind `lease_held`, with the holder's expiry). With the table absent (every case above) the generic error is unchanged: that is the inert boundary.
+{
+ const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const file22=path.join(root,'e22.sqlite');
+ const made=sqliteSync(['-bail',file22],{input:'PRAGMA foreign_keys=ON;\n'+all.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n'),encoding:'utf8'});
+ if(made.status!==0)throw new Error(made.stderr||'migration failed');
+ const db22=d1Standin(file22);
+ db22.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
+ const holderUntil=Date.now()+60000;
+ db22.sql("UPDATE discovery_lease SET lease_id='other-chunk', expires_at="+holderUntil+", programme_run_id='run-1', holder_kind='discovery' WHERE id=1");
+ const env22={DB:db22,BUCKET:new MemoryBucket(),discoveryLease:null};
+ assert.equal((await Authority.readAuthority(env22)).priorityTable,true);
+ const calls22={
+  publishD1Generation:()=>call('publishD1Generation')(env22,'run-1',{},null,null,{phase:'published',programmeRunId:'run-0',fence:'f'}),
+  publishEpgGeneration:()=>call('publishEpgGeneration')(env22,'run-1',{}),
+ };
+ for(const [name,run] of Object.entries(calls22)){
+  await assert.rejects(run,error=>error.name==='ResolverBusy'&&error.busy.kind==='lease_held'&&error.busy.expiresAt===holderUntil&&!/Resolver is writing the catalog/.test(error.message),name+' answers a live lease as a structured busy when the table exists');
+ }
+ // The externally visible sync step answer is a structured wait, never a counted failure.
+ const answer=await call('windowBusyResponse')({runId:'run-1',stage:'epg',remaining:0,failures:[]},{kind:'lease_held',expiresAt:holderUntil});
+ assert.equal(answer.discovery.nextAction,'wait');assert.equal(answer.discovery.busyKind,'lease_held');assert.equal(answer.failures,0);
+ assert.ok(Date.parse(answer.discovery.nextCatchUpAt)<=Date.now()+Authority.LEASE_TTL_MS+5000);
+}
+
+// 4. Unreadable presence is not absence (review of #605). Schema 22 with the authority read failing: no new run is started and no publication stamps a NULL day; the structured busy is not
+// invented either. Schema 21 (verified absent) keeps going exactly as before: no presence error and no `runKey` on a run.
+{
+ const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const build=(name,upTo)=>{
+  const f=path.join(root,name);
+  const made=sqliteSync(['-bail',f],{input:'PRAGMA foreign_keys=ON;\n'+all.filter(n=>Number(n.slice(0,4))<=upTo).map(n=>fs.readFileSync('migrations/'+n,'utf8')).join('\n'),encoding:'utf8'});
+  if(made.status!==0)throw new Error(made.stderr||'migration failed');
+  return f;
+ };
+ vm.runInContext(scopedEpgPriority(),context);// the bundle carries the pause contract; the offline loader does not
+ let failing=false;
+ const faulty=f=>d1Standin(f,{rewrite:sql=>failing&&/FROM schema_contract/.test(sql)?'SELEC broken':sql});
+ const f22=build('e22-fault.sqlite',22);
+ const db22=faulty(f22);
+ db22.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
+ const bucket22=new MemoryBucket();
+ const env22={DB:db22,BUCKET:bucket22,discoveryLease:null};
+ failing=true;
+ const before=fetches;
+ await assert.rejects(()=>call('beginSync')(env22),error=>error.code==='epg_priority_presence_unreadable'&&error.status===503,'beginSync fails closed on an unreadable presence');
+ assert.equal(await bucket22.get('sync.json'),null,'no run was persisted without its frozen key');
+ assert.equal(await bucket22.get('watchlist-ingest.json'),null,'the failure is not recorded as a watchlist failure');
+ assert.equal(fetches,before,'the source was not fetched');
+ await assert.rejects(()=>call('publicationRunKey')(env22,{runId:'run-1',runKey:'2026-11-13'},'run-1'),error=>error.code==='epg_priority_presence_unreadable','no publication stamps a NULL day on an unreadable presence');
+ failing=false;
+ // Readable and present: the frozen day is stamped for the run it belongs to, and for no other run.
+ assert.equal(await call('publicationRunKey')(env22,{runId:'run-1',runKey:'2026-11-13'},'run-1'),'2026-11-13');
+ assert.equal(await call('publicationRunKey')(env22,{runId:'run-0',runKey:'2026-11-13'},'run-1'),null,'another run\'s key is never stamped');
+ // Schema 21, verified absent: today's behaviour. No presence error, no frozen key, no stamp.
+ const db21=faulty(build('e21-inert.sqlite',21));
+ db21.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
+ const bucket21=new MemoryBucket();
+ const env21={DB:db21,BUCKET:bucket21,discoveryLease:null};
+ failing=false;// a healthy read of a v21 database is the VERIFIED absence; only an unreadable answer is unknown
+ await assert.rejects(()=>call('beginSync')(env21),error=>error.code!=='epg_priority_presence_unreadable','schema 21 does not stop on the presence read: it goes on to the source fetch as before');
+ assert.equal(await call('publicationRunKey')(env21,{runId:'run-1',runKey:'2026-11-13'},'run-1'),null,'schema 21 stamps nothing');
+ failing=false;
 }
 
 console.log('Projector window, EPG and Workflow (ADR 0103): the three publication paths raise one typed busy for a window and keep the generic error for any other missing lease; the sync step answers a structured non-failure busy to the absolute deadline before any heavy work and without persisting an error; the seal step does the same with its own kind and no TTL cap; the executor reads the answer as a wait; the Workflow state write is refused softly with no stall or recovery charge');

@@ -679,6 +679,8 @@ async function beginSync(env){
  if(current&&['metadata','epg'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
  // A job in D1 that sync.json does not name cannot be continued by a new run and is never reset silently.
  if(await sealedPublishAvailable(env)){const durable=await DiscoveryAuthority.sealState(env);if(durable.supported&&['items','archive'].includes(durable.phase))throw Object.assign(new Error('discovery_seal_unfinished'),{status:409,code:'discovery_seal_unfinished'});}
+ // ADR 0135: a run created while the pause table exists carries its frozen `runKey`. Unreadable presence is not absence: no new run is started on it (an unfinished run was returned above).
+ const pausePresent=await requirePausePresence(env);
  try{
  const sources=sourceConfig(env),watchlistObservedAt=new Date().toISOString();let url=sources.watchlist,pages=0,total=null;const films=new Map();
  while(url){const p=parseWatchlist(await getHTML(url));pages++;if(pages>100)throw new Error('Watchlist pagination limit exceeded');if(!Number.isInteger(p.total))throw new Error('Watchlist total not found');if(total===null)total=p.total;if(total!==p.total)throw new Error('Watchlist changed during synchronization; retry');if(p.films.length===0&&total>0)throw new Error('Watchlist page has no films');for(const f of p.films){if(films.has(f.id))throw new Error('Duplicate film across pages; retry');films.set(f.id,f);}if(p.next&&!new RegExp('^/'+sources.letterboxdUsername+'/watchlist/page/\\d+/$').test(p.next))throw new Error('Unexpected pagination URL');url=p.next?'https://letterboxd.com'+p.next:null;}
@@ -689,7 +691,7 @@ async function beginSync(env){
  if(gate.active&&current)await flushRemovalHandover(env,current);
  const carried=!gate.active&&current?{...(current.removalRefs?{removalRefs:current.removalRefs}:{}),...(current.removalLookups?{removalLookups:current.removalLookups}:{})}:{};
  const lastEpgPublishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(current,null):null;
- const run={runId:crypto.randomUUID(),startedAt:new Date().toISOString(),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
+ const startedNow=new Date();const run={runId:crypto.randomUUID(),startedAt:startedNow.toISOString(),...(typeof OrchestrationPolicy!=='undefined'&&pausePresent?{runKey:OrchestrationPolicy.madridDayKey(startedNow.getTime())}:{}),updatedAt:new Date().toISOString(),stage:pending.length?'metadata':'epg',watchlist:all,pending,...carried,cursor:0,remaining:pending.length,pages,watchlistObservedAt,failures:[],...(current?.ratingObservedAt?{ratingObservedAt:current.ratingObservedAt}:{}),...(lastEpgPublishedAt?{lastEpgPublishedAt}:{})};await saveJSON(env,'sync.json',run);await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,failedAt:null,lastSuccessAt:run.startedAt});return {runId:run.runId,stage:run.stage,watchlistCount:total,pages,remaining:run.remaining};
  }catch(e){const previous=await loadJSON(env,'sync.json'),ingest=await loadJSON(env,'watchlist-ingest.json'),lastSuccessAt=previous?.stage==='complete'&&!previous.error?previous.updatedAt:ingest?.lastSuccessAt||null;await saveJSON(env,'watchlist-ingest.json',{schemaVersion:1,code:'watchlist_failed',failedAt:new Date().toISOString(),lastSuccessAt});throw e;}
 }
 async function metadataSync(env,run){
@@ -1158,6 +1160,14 @@ async function planDiscoveryLedger(env,{runId,latest,mode,lease,pointerEtag,publ
  if(emit)return {emit,holder:sourceHolder,ledger:ledgerOut,itemBytes:collected.itemBytes,itemCount:collected.itemCount};
  return {items,ledger:ledgerOut};
 }
+// ADR 0135 (AIR-459): the Madrid day stamped on the pointer is the sync run's own frozen `runKey` (written once by `beginSync`), never the adopting Workflow's
+// day, `published_at` or a mutable control key. No frozen key, or no pause module in this scope, stamps nothing: the pointer still publishes and the pause stays closed.
+async function publicationRunKey(env,run,runId){
+ if(typeof EpgPriorityPause==='undefined'||!await requirePausePresence(env))return null;
+ const source=run??await loadJSON(env,'sync.json');
+ const day=EpgPriorityPause.publicationDay({syncRunKey:source?.runId===runId?source.runKey:null});
+ return day.ok?day.dayKey:null;
+}
 // `ledger` (AIR-220): `{latest, meta, mode}` lets the generation's discovery ledger be planned under this lease, fenced on the
 // published pointer read here; without it `files` already carry the ledger (full mode, unchanged).
 async function publishD1Generation(env,runId,files,ledger,watchlist,publication){
@@ -1174,7 +1184,7 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
   if(!live||live.fence!==publication.fence)throw new Error('EPG generation changed during publish');
   const programme=files['programme.json'];
   const list=watchlist||{updatedAt:programme?.updatedAt||null,films:[]};
-  const result=await PublishedEpg.publishGeneration(env,{programmeRunId:runId,phase:'published',publishedAt:programme?.updatedAt||null,expectedProgrammeRunId:publication.programmeRunId,programme,watchlist:list});
+  const result=await PublishedEpg.publishGeneration(env,{programmeRunId:runId,phase:'published',publishedAt:programme?.updatedAt||null,expectedProgrammeRunId:publication.programmeRunId,madridRunKey:await publicationRunKey(env,null,runId),programme,watchlist:list});
   let mirrored=false;
   try{mirrored=await PublishedEpg.writeMirrors(env,{programmeRunId:runId,programme,watchlist:list,phase:'published'});}catch{mirrored=false;}
   try{await copyEpgGeneration(env,runId);}catch{}
@@ -1233,10 +1243,26 @@ const SEAL_CATALOG_FLUSH=2000;
 // non-failure `busy` answer whose `nextCatchUpAt` is the window's absolute deadline. Nothing is persisted on the run for it: no
 // `run.error`, no retry budget, no stage change. Any other missing lease keeps the old error.
 class ProjectorWindowBusy extends Error{constructor(busy){super('projector_window');this.name='ProjectorWindowBusy';this.busy=busy;}}
+// ADR 0135 (AIR-459): a live Discovery lease, or a lost race for it, is a collision with another writer and not a fault of the publication. The
+// publication paths answer it as a structured, non-failure busy as well; only a missing busy answer keeps the old generic error.
+class ResolverBusy extends Error{constructor(busy){super(busy.kind);this.name='ResolverBusy';this.busy=busy;}}
+// Inert until `discovery_epg_priority` exists (migration 0022, not applied). Three answers, never two: `true` (the table is there), `false` (verified absent, or the Discovery
+// authority is not on D1 at all: today's behaviour) and `null` (the read failed: UNKNOWN, which is not absence). A run-creating or stamping path must fail closed on `null`.
+async function epgPausePresence(env){
+ if(typeof DiscoveryAuthority==='undefined')return false;
+ try{return (await DiscoveryAuthority.readAuthority(env)).priorityTable===true;}catch{return null;}
+}
+async function requirePausePresence(env){
+ const present=await epgPausePresence(env);
+ if(present===null)throw Object.assign(new Error('epg_priority_presence_unreadable'),{status:503,code:'epg_priority_presence_unreadable'});
+ return present;
+}
 async function leaseOrWindowBusy(env){
- const taken=await takeDiscoveryLease(env);
+ // The publication is the EPG side: `role: 'epg'` is exempt from the Discovery pause.
+ const taken=await takeDiscoveryLease(env,'epg');
  if(taken.lease)return taken.lease;
  if(taken.busy?.kind==='projector_window'&&Number.isFinite(taken.busy.expiresAt))throw new ProjectorWindowBusy(taken.busy);
+ if((taken.busy?.kind==='lease_held'||taken.busy?.kind==='lost_race')&&await epgPausePresence(env)===true)throw new ResolverBusy(taken.busy);
  throw new Error('Resolver is writing the catalog');
 }
 // A window that is already requested or held is known before the heavy EPG work starts, so the step answers busy without it.
@@ -1248,8 +1274,12 @@ async function epgWindowPrecheck(env){
  if(window.active)throw new ProjectorWindowBusy({kind:'projector_window',expiresAt:window.expiresAt,state:window.state});
 }
 function windowBusyResponse(run,busy,now=Date.now()){
- const until=Math.max(busy.expiresAt+SEAL_BUSY_MARGIN_MS,now+1000);
- return {runId:run.runId,stage:run.stage,remaining:run.remaining??0,failures:run.failures?.length??0,discovery:{state:'busy',remainingChunks:null,nextAction:'wait',reason:'busy',busyKind:'projector_window',at:new Date(now).toISOString(),nextCatchUpAt:new Date(until).toISOString(),nextScheduledRunAt:null,retryAt:null,retryAfterSec:Math.ceil((until-now)/1000),programmeRunId:run.runId}};
+ // `projector_window`: the window's own absolute deadline. `lease_held`: the holder's expiry, never more than one lease TTL away. `lost_race`: a short fixed wait.
+ const raw=Number(busy.expiresAt),finite=Number.isFinite(raw)&&raw>0;
+ const kind=busy.kind==='lease_held'?(finite?'lease_held':'lost_race'):busy.kind==='lost_race'?'lost_race':'projector_window';
+ const bounded=kind==='projector_window'?raw+SEAL_BUSY_MARGIN_MS:kind==='lease_held'?Math.min(raw,now+DiscoveryAuthority.LEASE_TTL_MS)+SEAL_BUSY_MARGIN_MS:now+SEAL_BUSY_LOST_RACE_MS;
+ const until=Math.max(bounded,now+1000);
+ return {runId:run.runId,stage:run.stage,remaining:run.remaining??0,failures:run.failures?.length??0,discovery:{state:'busy',remainingChunks:null,nextAction:'wait',reason:'busy',busyKind:kind,at:new Date(now).toISOString(),nextCatchUpAt:new Date(until).toISOString(),nextScheduledRunAt:null,retryAt:null,retryAfterSec:Math.ceil((until-now)/1000),programmeRunId:run.runId}};
 }
 const SEAL_BUSY_MARGIN_MS=3000;
 const SEAL_BUSY_LOST_RACE_MS=5000;
@@ -1453,7 +1483,7 @@ async function sealPublishStep(env,run,lease,deadline=Infinity){
    if(!already){
     if(!live||live.fence!==payload.fence)throw new Error('EPG generation changed during publish');
     await saveJSON(env,epgGenerationKey(run.runId,'programme.json'),report);
-    await PublishedEpg.publishGeneration(env,{programmeRunId:run.runId,phase:'published',publishedAt:report?.updatedAt||null,expectedProgrammeRunId:payload.expectedProgrammeRunId,programme:report,watchlist:payload.watchlist});
+    await PublishedEpg.publishGeneration(env,{programmeRunId:run.runId,phase:'published',publishedAt:report?.updatedAt||null,expectedProgrammeRunId:payload.expectedProgrammeRunId,madridRunKey:await publicationRunKey(env,run,run.runId),programme:report,watchlist:payload.watchlist});
    }
    return 'ok';
   }},
@@ -1513,7 +1543,7 @@ async function sealStep(env,run,entryAt=Date.now()){
  // The lease is taken without the published pointer's programme: once the ledger is committed the discovery authority
  // is on the new run while the pointer still names the old one until the publish step, and the job's own fence (its id and
  // cursor, checked in every batch) is what protects these steps.
- const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:null});
+ const taken=await DiscoveryAuthority.acquireLease(env,{programmeRunId:null,role:'epg'});
  const lease=taken?.lease||null;
  if(lease)env.discoveryLease=lease;
  if(!lease)return sealBusyResponse(run,taken);
@@ -1676,7 +1706,7 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run,entryAt);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
- try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){if(e instanceof ProjectorWindowBusy){step.branch='projector_window';step.discovery=discoverySummary(windowBusyResponse(run,e.busy).discovery);return json(windowBusyResponse(run,e.busy));}run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
+ try{const result=await epgSync(env,run);if(result.stage!=='complete')return json(result);const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){if(e instanceof ProjectorWindowBusy||e instanceof ResolverBusy){step.branch=e instanceof ResolverBusy?'resolver_busy':'projector_window';step.discovery=discoverySummary(windowBusyResponse(run,e.busy).discovery);return json(windowBusyResponse(run,e.busy));}run.error=e.message;run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}
 }
 async function epgSync(env,run){
  await epgStepGuard(env);

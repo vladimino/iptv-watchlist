@@ -284,11 +284,23 @@ function claimStillHeld(stage,claim,now,ttl){
  const stamp=new Date(now).toISOString();
  return ['UPDATE published_epg_stage SET claim_expires_at=?, updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\' AND claim_expires_at>?',[now+ttl,stamp,stage.id,stage.owner,claim.nonce,claim.generation,now]];
 }
+// ADR 0135 (AIR-459). With `discovery_epg_priority` absent (migration 0022 not applied) the pointer statement is byte for byte today's. With it present, the same
+// UPDATE that moves `programme_run_id` also writes `madrid_run_key` (the sync run's frozen day; NULL when it has none), and the same batch clears the pause row when the
+// Discovery pin already names this run and the stamped day is the owed or overridden date. The batch never writes the pin. If the pin is behind, the row stays `paused`
+// and a later batch (the replay branch below, or the next Discovery acquire) clears it once both name the run.
+const PAUSE_CLEAR_SQL="UPDATE discovery_epg_priority SET state='clear', owed_day_key=NULL, override_day_key=NULL WHERE id=1 AND (state<>'clear' OR override_day_key IS NOT NULL) AND EXISTS (SELECT 1 FROM published_epg_authority e, discovery_authority a WHERE e.id=1 AND a.id=1 AND e.programme_run_id=? AND a.published_programme_run_id=e.programme_run_id AND e.madrid_run_key IS NOT NULL AND (e.madrid_run_key=discovery_epg_priority.owed_day_key OR e.madrid_run_key=discovery_epg_priority.override_day_key))";
+async function pausePresent(db){
+ const row=await one(db,"SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='discovery_epg_priority'");
+ return !!row;
+}
 async function commitPublish(db,stage,claim,authority,expected,now,ttl){
  const stamp=new Date(now).toISOString();
  const generation=stage.expectedGeneration??authority.generation;
+ const paused=stage.phase==='published'&&stage.pausePresent===true;
  const move=stage.phase==='published'
-  ?['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,generation,expected]]
+  ?paused
+   ?['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1, madrid_run_key=? WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,stage.madridRunKey??null,generation,expected]]
+   :['UPDATE published_epg_authority SET programme_run_id=?, generation=generation+1, watchlist_generation=watchlist_generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND programme_run_id IS ?',[stage.target,generation,expected]]
   :['UPDATE published_epg_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=?',[generation]];
  await fenced(db,[
   ...epgFenceStatements(stage.epgFence),
@@ -296,6 +308,7 @@ async function commitPublish(db,stage,claim,authority,expected,now,ttl){
   [FENCE_SQL,[]],
   move,
   [FENCE_SQL,[]],
+  ...(paused?[[PAUSE_CLEAR_SQL,[stage.target]]]:[]),
   ['INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES (?,?,?,?,?)',[stage.target,stage.phase,stage.publishedAt,stage.sha,stamp]],
   ...copyStatements(stage.target,stage.id),
   ['UPDATE published_epg_stage SET state=\'published\', updated_at=? WHERE programme_run_id=? AND owner_token=? AND claim_nonce=? AND claim_generation=? AND state=\'validated\'',[stamp,stage.id,stage.owner,claim.nonce,claim.generation]],
@@ -342,7 +355,7 @@ async function stageCommit(db,spec,options){
   ...spec.logical.documents,
  ];
  const chunks=pack(spec.stageId,rows,options.chunkStatements||CHUNK_STATEMENTS,options.chunkBytes||CHUNK_BYTES);
- const stage={id:spec.stageId,target:spec.target,phase:spec.phase,sha:spec.sha,publishedAt:spec.publishedAt??null,chunks:chunks.length,members:spec.logical.members.length,shows:spec.logical.shows.length,documents:spec.logical.documents.length,owner,expectedGeneration:spec.expectedGeneration??null};
+ const stage={id:spec.stageId,target:spec.target,phase:spec.phase,sha:spec.sha,publishedAt:spec.publishedAt??null,chunks:chunks.length,members:spec.logical.members.length,shows:spec.logical.shows.length,documents:spec.logical.documents.length,owner,expectedGeneration:spec.expectedGeneration??null,madridRunKey:spec.madridRunKey??null,pausePresent:spec.phase==='published'?await pausePresent(db):false};
  const claim=await ensureClaim(db,stage,now,ttl,owner);
  if(!claim.done){
   for(let index=0;index<chunks.length;index++)await writeChunk(db,{...stage,owner},chunks[index],index,claim,now,ttl);
@@ -387,10 +400,12 @@ export async function publishGeneration(env,input,options={}){
  if(existing){
   if(existing.phase!==phase||existing.sha!==sha)throw failed('published_epg_conflict');
   const authority=await readAuthority(db);
+  // ADR 0135: a repeated pointer publication is the replay branch, not a second publish. It may still clear a pause the first batch could not (pin behind then).
+  if(phase==='published'&&authority.programmeRunId===programmeRunId&&await pausePresent(db))await db.batch([db.prepare(PAUSE_CLEAR_SQL).bind(programmeRunId)]);
   return {programmeRunId,phase,replay:true,pointed:authority.programmeRunId===programmeRunId,authoritative:true};
  }
  const logical=logicalRows(programme,watchlist,programmeText,watchlistText);
- const authority=await stageCommit(db,{stageId:programmeRunId,target:programmeRunId,phase,sha,publishedAt:input.publishedAt??programme?.updatedAt??null,expected:input.expectedProgrammeRunId??null,logical},options);
+ const authority=await stageCommit(db,{stageId:programmeRunId,target:programmeRunId,phase,sha,publishedAt:input.publishedAt??programme?.updatedAt??null,expected:input.expectedProgrammeRunId??null,madridRunKey:/^\d{4}-\d{2}-\d{2}$/.test(input.madridRunKey||'')?input.madridRunKey:null,logical},options);
  if(phase==='published'&&authority.programmeRunId!==programmeRunId)throw failed('published_epg_fence');
  return {programmeRunId,phase,replay:false,pointed:phase==='published',authoritative:true,generation:authority.generation};
 }

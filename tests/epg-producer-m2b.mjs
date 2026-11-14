@@ -20,7 +20,7 @@ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-m2b-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/* best effort */}});
 const sqlite=(file,text,json=false)=>{const r=sqliteSync([...(json?['-json']:[]),'-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});assert.equal(r.status,0,r.stderr);return r.stdout;};
 const rows=(file,sql)=>{const out=sqlite(file,sql+';',true).trim();return out?JSON.parse(out):[];};
-const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const chain=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))<=21).sort();
 const template=path.join(root,'template.sqlite'); // read-only after it is built: shared by every check()
 // Every check() works in a FRESH directory of its own (set at its start and removed at its end), so a second call in the same process, as the mutation runner makes, never meets a file the first one left behind.
 let work=root;
