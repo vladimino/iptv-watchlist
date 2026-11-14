@@ -131,8 +131,7 @@ assert.match(handler,/Promise\.allSettled\(\[/);
 for(const member of ['runD1EnrichmentProjection(','RatingsOrchestration.ensure(','EpgOrchestration.ensure(','reconcileDiscoveryWorkflow(','Monitor.run(']){
  assert.ok(handler.includes(member),member+' is a member of the tick');
 }
-// AIR-482: the Discovery reconcile and its hourly report start alone and the other members start when it settles or after a bounded head start, so a
-// later member's memory peak cannot kill the close; a rejected reconcile never blocks the others.
+// AIR-482: the Discovery reconcile and its hourly report start alone and the other members start when it settles or after a bounded head start, as a best-effort mitigation (a close still pending at the deadline overlaps the others and is not isolated); a rejected reconcile never blocks the others.
 assert.ok(handler.indexOf('reconcileDiscoveryWorkflow(')<handler.indexOf('runD1EnrichmentProjection('),'reconcile starts before the projector');
 assert.match(handler,/SCHEDULED_RECONCILE_HEAD_MS/);
 assert.doesNotMatch(handler,/lease|acquire/i,'no shared lease between the members');
@@ -150,17 +149,17 @@ for(const dir of ['src','scripts']){
 {
  const body=handler.slice(0,handler.lastIndexOf('}')+1).replace(/^async scheduled/,'return async function scheduled');
  const run=async(reconcileImpl,{advance=false}={})=>{
-  const starts=[];let waited=null;
-  const makeFn=new Function('reconcileDiscoveryWorkflow','runD1EnrichmentProjection','RatingsOrchestration','EpgOrchestration','Monitor','SCHEDULED_RECONCILE_HEAD_MS','setTimeout',body.replace(/,\s*$/,'')+'');
+  const starts=[];let waited=null,cleared=0;
+  const makeFn=new Function('reconcileDiscoveryWorkflow','runD1EnrichmentProjection','RatingsOrchestration','EpgOrchestration','Monitor','SCHEDULED_RECONCILE_HEAD_MS','setTimeout','clearTimeout',body.replace(/,\s*$/,'')+'');
   const rec=name=>()=>{starts.push(name);return Promise.resolve();};
   const timers=[];
   const fake=(fn,ms)=>{timers.push({fn,ms});return timers.length;};
-  const h=makeFn(()=>{starts.push('reconcile');return reconcileImpl();},rec('projector'),{ensure:rec('ratings')},{ensure:rec('epg')},{run:rec('monitor')},45000,fake);
+  const h=makeFn(()=>{starts.push('reconcile');return reconcileImpl();},rec('projector'),{ensure:rec('ratings')},{ensure:rec('epg')},{run:rec('monitor')},45000,fake,()=>{cleared++;});
   await h({scheduledTime:1},{},{waitUntil:p=>{waited=p;}});
-  return {starts,waited,timers};
+  return {starts,waited,timers,get cleared(){return cleared;}};
  };
  let r=await run(()=>Promise.resolve());
- await r.waited;assert.deepEqual(r.starts,['reconcile','projector','ratings','epg','monitor'],'fast success: reconcile first, each member exactly once');
+ await r.waited;assert.deepEqual(r.starts,['reconcile','projector','ratings','epg','monitor'],'fast success: reconcile first, each member exactly once');assert.equal(r.cleared,1,'the unused head-start timer is cancelled');
  r=await run(()=>Promise.reject(new Error('boom')));
  await r.waited;assert.equal(r.starts.length,5,'rejection never blocks the others');assert.equal(r.starts.filter(x=>x==='projector').length,1);
  let release;r=await run(()=>new Promise(res=>{release=res;}));
