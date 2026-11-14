@@ -91,9 +91,9 @@ The reviewer's read-only registry read of the v2 Task A (`6af7a2d8369081918b79bb
 
 Recommendation (owner-approved direction from the review): one atomic Worker implementation that combines option 1 with focused observability, not telemetry first and a second fix later. An early `already_running` may be reordered before the preflight only if refusal precedence, no foreign run adoption and the diagnostics row are preserved. Option 2 only with a separate ADR and owner decision.
 
-## 7. Proposed next card (for owner GO)
+## 7. Follow-up card
 
-**One atomic card: Worker `batch_start` latency optimization plus focused observability.** Scope: sections 5 (items 1 and 2) and 6 (option 1). Acceptance:
+Tracked as [AIR-471](https://trello.com/c/rFBAixZe) (owner-approved on 14 Nov 2026). **One atomic card: Worker `batch_start` latency optimization plus focused observability.** Scope: sections 5 (items 1 and 2) and 6 (option 1). Acceptance:
 
 - Separate counting-fixture budgets for the **current-queue path** and the **refresh/settle path** (including the unbounded `batchSelection` call in `batchRefreshQueue`), for `manifestSize=5`; the budgets are set from the fixture measurements, not guessed here.
 - Deterministic tests for concurrent starts, changed film metadata/state between preflight and lease, `queue_changed`, `manifest_too_large`, lease and CAS fencing, and an early `already_running` that keeps refusal precedence, adopts no foreign run and keeps the diagnostics row.
