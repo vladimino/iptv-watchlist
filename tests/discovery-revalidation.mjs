@@ -44,7 +44,7 @@ const migrated=()=>{
 const sql=(file,text)=>{const result=sqliteSync(['-json','-bail',file],{input:text+';',encoding:'utf8',maxBuffer:1<<28});if(result.status!==0)throw new Error(result.stderr);const out=result.stdout.trim();return out?JSON.parse(out):[];};
 const RUN='run-reval',MIN=60000,START=Date.now()+3600000;
 
-async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0}){
+async function world({durations,decision,movieRuntime=96,failFetch=false,fillers=0,cachedRuntime=90}){
  const file=migrated();
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  const setup={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null};
@@ -69,7 +69,7 @@ async function world({durations,decision,movieRuntime=96,failFetch=false,fillers
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const name of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(name,'utf8'),context);
- const report={films:[{id:'member-1',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:90,canonicalIdentity:'tmdb:101',shows:[]}]};
+ const report={films:[{id:'member-1',tmdbId:'101',title:'Film R',original:'Film R',year:2001,runtime:cachedRuntime,canonicalIdentity:'tmdb:101',shows:[]}]};
  const chunk=async()=>{
   const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
   try{
@@ -153,6 +153,37 @@ const movieCalls=fetched=>fetched.filter(pathname=>pathname.includes('/movie/'))
  assert.equal(movieCalls(fetched),0);
  assert.equal(JSON.stringify(decisionOf(file)),before,'nothing recorded');
  assert.equal(result.revalidation.revalidated+result.revalidation.revalidation_failed,0);
+}
+
+// G. The fresh detail is the runtime evidence: the cached Film says 90, TMDB now says 180, the slot is 180. The duration becomes an anchor and no failure is consumed.
+{
+ const {file,chunk}=await world({durations:[90,180],decision:verified({anchor:[90]}),cachedRuntime:90,movieRuntime:180});
+ const result=await chunk();
+ assert.equal(result.revalidation.revalidated,1,JSON.stringify(result.revalidation));
+ const decision=decisionOf(file);
+ assert.deepEqual(decision.anchor,[90,180]);assert.deepEqual(decision.failedDurations,[]);
+ assert.equal(rowsOf(file).length,2);
+}
+// H. Fresh detail that genuinely disagrees keeps the failure valid.
+{
+ const {file,chunk}=await world({durations:[90,180],decision:verified({anchor:[90]}),cachedRuntime:90,movieRuntime:90});
+ const result=await chunk();
+ assert.equal(result.revalidation.revalidation_failed,1,JSON.stringify(result.revalidation));
+ assert.deepEqual(decisionOf(file).failedDurations,[180]);assert.equal(rowsOf(file).length,1);
+}
+// I. The transition to exhaustion (example 38): eleven failures and two new drifted durations. Only the first is evaluated, it is the twelfth, the second is not; later chunks make no call.
+{
+ const eleven=[100,101,102,103,104,105,106,107,108,109,110];
+ const {file,chunk,fetched}=await world({durations:[90,150,160],decision:verified({anchor:[90],failedDurations:eleven}),movieRuntime:90});
+ const first=await chunk();
+ assert.equal(first.revalidation.revalidation_failed,1,JSON.stringify(first.revalidation));
+ assert.equal(first.revalidation.revalidation_exhausted,1);
+ assert.deepEqual(decisionOf(file).failedDurations,[...eleven,150],'160 was not evaluated');
+ const calls=movieCalls(fetched);
+ const later=await chunk();
+ assert.equal(movieCalls(fetched),calls,'no automatic call after the twelfth failure');
+ assert.equal(later.revalidation.revalidation_exhausted,1);
+ assert.deepEqual(decisionOf(file).failedDurations,[...eleven,150]);
 }
 
 console.log('discovery revalidation ok');

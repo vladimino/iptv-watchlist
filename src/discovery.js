@@ -892,7 +892,8 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    try{
     const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
     const known=knownScorerCandidates(aliasIndex,candidate);
-    const scorerCandidates=known.some(row=>String(row.tmdbId)===String(movie.id))?known:[...known,{...searchHitCandidate(movie),runtime:movie.runtime??null}];
+    // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
+    const scorerCandidates=known.some(row=>String(row.tmdbId)===String(movie.id))?known.map(row=>String(row.tmdbId)===String(movie.id)?{...row,runtime:movie.runtime??row.runtime??null}:row):[...known,{...searchHitCandidate(movie),runtime:movie.runtime??null}];
     const reconfirmed=[],failed=[];let proposed=null;
     for(const duration of plan.todo){
      if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)break;
