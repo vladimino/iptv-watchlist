@@ -85,4 +85,50 @@ const claim={kind:'parse_error',reason:'insufficient_evidence',preflight:{issues
  assert.deepEqual(pointers(w),[],'nothing written');
 }
 
+// 4. AIR-487: the three production run identities are the legacy string digest, not a claimed reason.
+{
+ const {createHash}=await import('node:crypto');
+ const canonical=value=>{if(Array.isArray(value))return value.map(canonical);if(value&&typeof value==='object'&&!Array.isArray(value))return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])]));return value;};
+ const digest=value=>createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+ const observed={
+  tmdb_514684:'c2cf9bd49958ecb507e89a441fcacc85c290159826fade722a38a300f5b73de5',
+  tmdb_492618:'67412d8c9b15ad69a8bd23605e90b53af5c7b8a478d9c9eadb5bc89ddc63fea3',
+  tmdb_262733:'b114b7735a0e7be74f974bc39759e3e56e67d53d61159ce2a29ef519023578ec',
+ };
+ for(const [id,want] of Object.entries(observed)){
+  const legacy=digest({filmId:id,fingerprint:null,prediction:null,failure:'parse_error'});
+  assert.equal(legacy,want,'production inputDigest is the AIR-472 legacy failure identity for '+id);
+  for(const reason of ['insufficient_evidence','preflight_validation_failed','json_unparseable','request_too_large']){
+   assert.notEqual(digest({filmId:id,fingerprint:null,prediction:null,failure:{kind:'parse_error',reason}}),want,'a stored claim would not match '+id);
+  }
+ }
+}
+
+// 5. AIR-487: invalid claim 400 writes nothing; a following legacy item is what production stored; mixed neighbours continue; json_unparseable / request_too_large claims differ; schema-invalid candidates do not bypass.
+{
+ const w=await ready(8);const m=await start(w),pick=ids(m);
+ const refused=await submit(w,m,[{filmId:pick[0],failure:{kind:'parse_error',reason:'not_a_reason'}}]);
+ assert.equal(refused.status,400);assert.equal(Object.keys(run(w,m).submitted||{}).length,0);
+ const fallback=await submit(w,m,[{filmId:pick[0],failure:{kind:'parse_error'}}]);
+ assert.equal(fallback.status,200);assert.equal(fallback.data.results[0].status,'validation_failure');
+ assert.deepEqual(fallback.data.results[0].validation,{stage:'caller_reported',reportedBy:'caller',issues:[]});
+ assert.equal(run(w,m).submitted[pick[0]].inputDigest,'24961787fcb62b0bd6dce25a84361a53741f2c75ffa4d4c89e35832f80845424');
+ const mixed=await submit(w,m,[
+  {filmId:pick[1],failure:{kind:'parse_error'}},
+  {filmId:pick[2],failure:{kind:'parse_error',reason:'json_unparseable'}},
+  {filmId:pick[3],failure:{kind:'parse_error',reason:'request_too_large'}},
+  {filmId:pick[4],fingerprint:w.fingerprint,prediction:w.prediction},
+  {filmId:pick[5],fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}},
+ ]);
+ assert.equal(mixed.status,200,JSON.stringify(mixed.data).slice(0,300));
+ const by=Object.fromEntries(mixed.data.results.map(x=>[x.filmId,x]));
+ assert.equal(by[pick[1]].validation.stage,'caller_reported');assert.equal(by[pick[1]].validation.claimed,undefined);
+ assert.deepEqual(by[pick[2]].validation.claimed,{reason:'json_unparseable'});
+ assert.deepEqual(by[pick[3]].validation.claimed,{reason:'request_too_large'});
+ assert.notEqual(run(w,m).submitted[pick[2]].inputDigest,run(w,m).submitted[pick[1]].inputDigest);
+ assert.equal(by[pick[4]].status,'created','a valid neighbour in a mixed batch continues');
+ assert.ok(by[pick[5]].status!=='created');assert.equal(by[pick[5]].validation.reportedBy,'worker');
+ assert.deepEqual(pointers(w),[pick[4]]);
+}
+
 console.log('prediction-caller-failure-claim: ok');
