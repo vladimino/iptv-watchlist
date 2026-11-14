@@ -67,6 +67,7 @@ function open(stopAt=names.length,{onBatch=null}={}){
   if(name==='0008_published_epg_authority')db.sql(fs.readFileSync('migrations/0007_prediction_authority.sql','utf8'));
   db.sql(fs.readFileSync('migrations/'+name+'.sql','utf8'));
  }
+ if(stopAt>=names.length)db.sql('CREATE TABLE IF NOT EXISTS discovery_authority (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL); INSERT OR IGNORE INTO discovery_authority VALUES (1,0)');
  return db;
 }
 const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
