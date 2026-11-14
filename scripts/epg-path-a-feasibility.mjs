@@ -11,6 +11,7 @@
 // space is capped at --heap-mb, while sampling heap, external memory and RSS. Everything measured here is Node and a sqlite stand-in, never a Cloudflare isolate.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import readline from 'node:readline';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -59,22 +60,42 @@ export function fileBucket(dir,{chunk=65536}={}){
  const currentEtag=key=>etags.get(key)||'f'+fs.statSync(name(key)).size;
  const store={puts:[],gets:[],bytesWritten:0,bytesRead:0,
   async put(key,value,options={}){
-   const bytes=await readBody(value),exists=fs.existsSync(name(key)),c=options.onlyIf;
+   const exists=fs.existsSync(name(key)),c=options.onlyIf;
    if(c?.etagDoesNotMatch==='*'&&exists)return null;
    if(c?.etagMatches&&(!exists||c.etagMatches!==currentEtag(key)))return null;
-   fs.writeFileSync(name(key),bytes);etags.set(key,'e'+(++revision));store.puts.push(key);store.bytesWritten+=bytes.length;
+   // A stream is written to disk chunk by chunk (as R2 receives a known-length body), never concatenated; it becomes visible only when complete.
+   const temp=name(key)+'.part';let written=0;
+   if(value&&typeof value.getReader==='function'){
+    const handle=fs.openSync(temp,'w');
+    try{const reader=value.getReader();for(;;){const step=await reader.read();if(step.done)break;fs.writeSync(handle,step.value);written+=step.value.length;}}
+    finally{fs.closeSync(handle);}
+    fs.renameSync(temp,name(key));
+   }else{const bytes=await readBody(value);fs.writeFileSync(temp,bytes);fs.renameSync(temp,name(key));written=bytes.length;}
+   etags.set(key,'e'+(++revision));store.puts.push(key);store.bytesWritten+=written;
    return {etag:etags.get(key)};
   },
   async head(key){return fs.existsSync(name(key))?{etag:currentEtag(key),size:fs.statSync(name(key)).size}:null;},
   async delete(key){fs.rmSync(name(key),{force:true});etags.delete(key);},
-  async list({prefix='',limit=1000}={}){return {objects:fs.readdirSync(dir).map(decodeURIComponent).filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false};},
+  async list({prefix='',limit=1000}={}){return {objects:fs.readdirSync(dir).filter(file=>!file.endsWith('.part')).map(decodeURIComponent).filter(key=>key.startsWith(prefix)).sort().slice(0,limit).map(key=>({key})),truncated:false};},
   async get(key,options={}){
    if(!fs.existsSync(name(key)))return null;
    store.gets.push(key);
    const file=name(key),size=fs.statSync(file).size,offset=options.range?.offset??0,etag=currentEtag(key);
    const read=()=>{const bytes=fs.readFileSync(file).subarray(offset);store.bytesRead+=bytes.length;return bytes;};
-   return {etag,size,text:async()=>read().toString('utf8'),json:async()=>JSON.parse(read().toString('utf8')),
-    body:new ReadableStream({start(controller){const bytes=read();for(let at=0;at<bytes.length;at+=chunk)controller.enqueue(new Uint8Array(bytes.subarray(at,at+chunk)));controller.close();}})};
+   // The body is demand-driven: one bounded chunk is read from disk per pull, so a consumer that stops pulling holds one chunk, never the object.
+   let position=offset,handle=null;
+   const body=new ReadableStream({
+    pull(controller){
+     handle??=fs.openSync(file,'r');
+     const buffer=Buffer.allocUnsafe(Math.min(chunk,Math.max(1,size-position)));
+     const n=position>=size?0:fs.readSync(handle,buffer,0,buffer.length,position);
+     if(n===0){fs.closeSync(handle);handle=null;controller.close();return;}
+     position+=n;store.bytesRead+=n;
+     controller.enqueue(new Uint8Array(buffer.buffer,buffer.byteOffset,n));
+    },
+    cancel(){if(handle!==null){fs.closeSync(handle);handle=null;}},
+   },{highWaterMark:1});
+   return {etag,size,text:async()=>read().toString('utf8'),json:async()=>JSON.parse(read().toString('utf8')),body};
   },
  };
  return store;
@@ -98,7 +119,7 @@ const envOf=(state)=>({DB:d1Standin(state.file,{maxBinds:100}),BUCKET:state.buck
 
 // ---- build -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 async function build({dir,active,archived,itemBytes}){
- fs.rmSync(dir,{recursive:true,force:true});fs.mkdirSync(dir,{recursive:true});
+ fs.mkdirSync(dir,{recursive:true});
  const state={file:path.join(dir,'d1.sqlite'),bucket:fileBucket(path.join(dir,'r2')),published:null};
  database(state.file);
  const context=worker(state),call=code=>context.eval?context.eval(code):null;
@@ -145,18 +166,32 @@ function archiveSummary(state){
  return {manifestId:pointer.manifestId,segments:manifest.segmentCount,items:manifest.totals.items,bytes:manifest.totals.bytes};
 }
 
-const lines=file=>fs.readFileSync(file,'utf8').split('\n').filter(Boolean);
+// A bounded line reader: one line in flight, nothing else retained.
+async function* lines(file){
+ const reader=readline.createInterface({input:fs.createReadStream(file,{encoding:'utf8',highWaterMark:64*1024}),crlfDelay:Infinity});
+ for await(const line of reader)if(line)yield line;
+}
 // ---- measure: copy the baseline, run the real seal stage once in a heap-capped fresh process ------------------------------------------------------------------------------------
 function measure({dir,departures,returns,heapMb,keep}){
  const work=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-path-a-'));
  fs.cpSync(dir,work,{recursive:true});
  const started=Date.now();
  const result=spawnSync(process.execPath,['--expose-gc',`--max-old-space-size=${heapMb}`,SELF,'child','--dir',work,'--departures',String(departures),'--returns',String(returns)],{encoding:'utf8',maxBuffer:1<<26});
- const stdout=(result.stdout||'').trim().split('\n').filter(Boolean).pop()||'';
- let report=null;try{report=JSON.parse(stdout);}catch{report=null;}
+ const out=(result.stdout||'').trim().split('\n').filter(Boolean).map(line=>{try{return JSON.parse(line);}catch{return null;}}).filter(Boolean);
+ const report=out.find(entry=>entry.sealed)||null,phases=out.filter(entry=>entry.phase);
+ const lastPhase=phases.length?phases[phases.length-1].phase:null;
  const oom=/heap out of memory|JavaScript heap|Allocation failed/i.test(result.stderr||'');
- console.log(JSON.stringify({command:'measure',heapMb,departures,returns,exit:result.status,signal:result.signal,oom,wallMs:Date.now()-started,report,stderrTail:oom?(result.stderr||'').split('\n').slice(0,3).join(' | ').slice(0,300):(result.stderr||'').slice(-300)}));
- if(!keep)fs.rmSync(work,{recursive:true,force:true});
+ // The semantic check runs in this unconstrained parent, after the capped process has ended, so verification cannot add to the measured heap.
+ const verified=report?verifySeal(work,report):null;
+ console.log(JSON.stringify({command:'measure',verified,heapMb,departures,returns,exit:result.status,signal:result.signal,oom,failedAfterPhase:report?null:lastPhase,phases,wallMs:Date.now()-started,report,stderrTail:oom?(result.stderr||'').split('\n').slice(0,3).join(' | ').slice(0,300):(result.stderr||'').slice(-300)}));
+ if(!keep&&path.basename(work).startsWith('iptv-path-a-')&&path.dirname(work)===os.tmpdir())fs.rmSync(work,{recursive:true,force:true});
+}
+function verifySeal(work,report){
+ const r2=path.join(work,'r2'),read=key=>JSON.parse(fs.readFileSync(path.join(r2,encodeURIComponent(key)),'utf8'));
+ const doc=read('epg/generations/'+RUN(3)+'/discovery-latest.json'),manifest=read('epg/discovery-archive/v1/manifests/'+read(POINTER).manifestId+'.json');
+ const expected=report.activeBefore-report.departures+report.returns;
+ return {expectedItems:expected,scanItems:report.scanItems,ledgerItemsAfter:doc.items.length,upsertedKeys:(manifest.upsertedKeys||[]).length,departures:report.departures,archiveItemsAfter:manifest.totals.items,
+  exact:report.scanItems===expected&&doc.items.length===expected&&(manifest.upsertedKeys||[]).length===report.departures};
 }
 async function child({dir,departures,returns}){
  const vm=await import('node:vm');
@@ -166,37 +201,37 @@ async function child({dir,departures,returns}){
  const stage=run('stageSealedGeneration'),keyOf=run('discoveryCandidateKey');
  global.gc?.();
  const idle=process.memoryUsage();
+ const mibOf=m=>({heapUsed:Math.round(m.heapUsed/MIB*10)/10,external:Math.round(m.external/MIB*10)/10,arrayBuffers:Math.round(m.arrayBuffers/MIB*10)/10,rss:Math.round(m.rss/MIB*10)/10});
+ const phase=(name,extra={})=>{console.log(JSON.stringify({phase:name,memoryMiB:mibOf(process.memoryUsage()),...extra}));};
+ phase('before_read');
  const peak={heapUsed:0,external:0,arrayBuffers:0,rss:0};
  const sample=()=>{const m=process.memoryUsage();for(const name of Object.keys(peak))peak[name]=Math.max(peak[name],m[name]);};
  const timer=setInterval(sample,10);
  // The scan, materialized as the plain array the planner expects: the active ledger without the departures, plus the returned payloads.
  const everyN=Math.max(1,Math.floor(base.activeItems/Math.max(1,departures)));
  let scan=[];let departed=0,index=0;
- for(const line of lines(path.join(dir,'scan.ndjson'))){
+ for await(const line of lines(path.join(dir,'scan.ndjson'))){
   const item=JSON.parse(line);
   if(departed<departures&&index%everyN===0){departed++;index++;continue;}
   index++;scan.push(item);
  }
  let returned=0;
- for(const line of lines(path.join(dir,'returns.ndjson'))){if(returned>=returns)break;scan.push(JSON.parse(line));returned++;}
- sample();const scanLoaded=process.memoryUsage();
+ for await(const line of lines(path.join(dir,'returns.ndjson'))){if(returned>=returns)break;scan.push(JSON.parse(line));returned++;}
+ sample();phase('after_load',{scanItems:scan.length});
+ global.gc?.();const scanLoaded=process.memoryUsage();phase('after_gc_retained_scan',{scanItems:scan.length});
  const id=RUN(3),at=new Date(Date.UTC(2026,9,21,12)).toISOString();
  await state.bucket.put('sync.json',JSON.stringify({runId:id,stage:'epg',startedAt:at,updatedAt:at}));
  const runDoc={runId:id,stage:'epg',startedAt:at,watchlist:[],events:[]};
  sqliteSync(['-bail',state.file],{input:'UPDATE discovery_lease SET expires_at=1 WHERE id=1;',encoding:'utf8'});
- const env=envOf(state),scanSize=scan.length,started=Date.now();
+ const env=envOf(state),scanSize=scan.length,started=Date.now();phase('seal_start');const loadPeak={...peak};for(const name of Object.keys(peak))peak[name]=0;
  await stage(env,runDoc,{holder:{discovery:scan},meta:{programmeRunId:id,updatedAt:at},pending:{'programme.json':{runId:id,updatedAt:at},'discovered-films.json':{}},nextWatchlist:{updatedAt:at,films:[]},uncertain:[],publication:{programmeRunId:base.programmeRunId,phase:'published',fence:base.fence}});
- const stageMs=Date.now()-started;
+ const stageMs=Date.now()-started;phase('seal_done');
  clearInterval(timer);sample();
  scan=null;
- const doc=JSON.parse(fs.readFileSync(path.join(dir,'r2',encodeURIComponent('epg/generations/'+id+'/discovery-latest.json')),'utf8'));
- const pointer=JSON.parse(fs.readFileSync(path.join(dir,'r2',encodeURIComponent(POINTER)),'utf8'));
- const manifest=JSON.parse(fs.readFileSync(path.join(dir,'r2',encodeURIComponent('epg/discovery-archive/v1/manifests/'+pointer.manifestId+'.json')),'utf8'));
  const mib=n=>Math.round(n/MIB*10)/10;
- console.log(JSON.stringify({scanItems:scanSize,expectedItems:base.activeItems-departed+returned,ledgerItemsAfter:doc.items.length,upsertedKeys:(manifest.upsertedKeys||[]).length,departures:departed,returns:returned,archiveItemsAfter:manifest.totals.items,
-  stageMs,r2:{puts:state.bucket.puts.length,gets:state.bucket.gets.length,bytesWritten:state.bucket.bytesWritten,bytesRead:state.bucket.bytesRead},
-  memoryMiB:{idle:{heapUsed:mib(idle.heapUsed),rss:mib(idle.rss)},afterScanLoaded:{heapUsed:mib(scanLoaded.heapUsed),external:mib(scanLoaded.external),rss:mib(scanLoaded.rss)},
-   peak:{heapUsed:mib(peak.heapUsed),external:mib(peak.external),arrayBuffers:mib(peak.arrayBuffers),rss:mib(peak.rss)},heapSizeLimit:mib(v8.getHeapStatistics().heap_size_limit)},keyOf:typeof keyOf}));
+ console.log(JSON.stringify({sealed:true,scanItems:scanSize,departures:departed,returns:returned,activeBefore:base.activeItems,stageMs,r2:{puts:state.bucket.puts.length,gets:state.bucket.gets.length,bytesWritten:state.bucket.bytesWritten,bytesRead:state.bucket.bytesRead},
+  memoryMiB:{idle:{heapUsed:mib(idle.heapUsed),rss:mib(idle.rss)},retainedScan:{heapUsed:mib(scanLoaded.heapUsed),external:mib(scanLoaded.external),rss:mib(scanLoaded.rss)},
+   loadPeak:{heapUsed:mib(loadPeak.heapUsed),rss:mib(loadPeak.rss)},sealPeak:{heapUsed:mib(peak.heapUsed),external:mib(peak.external),arrayBuffers:mib(peak.arrayBuffers),rss:mib(peak.rss)},heapSizeLimit:mib(v8.getHeapStatistics().heap_size_limit)},keyOf:typeof keyOf}));
 }
 const active0=(rest,flag)=>Number(flag('--active',42156));
 // The published active ledger (the scan a dataset would hold) as NDJSON, and a pool of archive-only payloads for returns, written by the unconstrained builder so the measured process
@@ -213,11 +248,30 @@ function writeReplayInputs(dir,state,pool){
  fs.writeFileSync(path.join(dir,'returns.ndjson'),returns.map(item=>JSON.stringify(item)).join('\n')+'\n');
  fs.writeFileSync(path.join(dir,'baseline.json'),JSON.stringify({programmeRunId:state.published.programmeRunId,fence:state.published.fence,activeItems:doc.items.length,returnsPool:returns.length}));
 }
+// `build` writes only into a scratch directory this tool may own: inside the OS temp directory, never inside or above the checkout, no symlink on the way, and either absent or
+// EMPTY. It never removes anything; a non-empty directory is refused and left as it is.
+export function scratchDirectory(dir){
+ assert.ok(typeof dir==='string'&&path.isAbsolute(dir),'--dir must be an absolute scratch directory');
+ const resolved=path.resolve(dir),tmp=fs.realpathSync(os.tmpdir()),repo=fs.realpathSync(REPO);
+ let probe=resolved;const missing=[];
+ while(!fs.existsSync(probe)){missing.push(path.basename(probe));const parent=path.dirname(probe);assert.ok(parent!==probe,'--dir has no existing ancestor');probe=parent;}
+ const real=fs.realpathSync(probe),expected=path.resolve(probe);
+ assert.equal(real,expected,'--dir must not pass through a symlink');
+ const target=path.join(real,...missing.reverse());
+ assert.ok(target.startsWith(tmp+path.sep),'--dir must be inside the OS temp directory');
+ assert.ok(!(target===repo||target.startsWith(repo+path.sep)||repo.startsWith(target+path.sep)),'--dir must not be inside or above the repository');
+ if(fs.existsSync(target)){
+  assert.ok(fs.statSync(target).isDirectory(),'--dir must be a directory');
+  assert.equal(fs.readdirSync(target).length,0,'--dir must be empty: it is never cleared');
+ }
+ return target;
+}
 export async function main(argv){
  const [command,...rest]=argv,flag=(name,fallback)=>{const i=rest.indexOf(name);return i<0?fallback:rest[i+1];};
  const dir=flag('--dir');
  assert.ok(dir&&path.isAbsolute(dir),'--dir must be an absolute scratch directory');
  if(command==='build'){
+  scratchDirectory(dir);
   const started=Date.now(),result=await build({dir,active:Number(flag('--active',42156)),archived:Number(flag('--archived',40213)),itemBytes:Number(flag('--item-bytes',1200))});
   result.state.dir=dir;
   const activeScan=syntheticScan(0,active0(rest,flag),{day:1,itemBytes:Number(flag('--item-bytes',1200))});

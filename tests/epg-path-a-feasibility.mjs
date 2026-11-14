@@ -18,14 +18,32 @@ assert.equal(built.archive.segments,64);
 
 const measured=run(['measure','--dir',dir,'--departures','40','--returns','10','--heap-mb','512']);
 assert.equal(measured.exit,0);
-const report=measured.report;
-assert.equal(report.departures,40);
-assert.equal(report.returns,10);
-assert.equal(report.scanItems,report.expectedItems);
-assert.equal(report.ledgerItemsAfter,report.expectedItems);
-assert.equal(report.upsertedKeys,40);
-assert.equal(report.archiveItemsAfter,340);
-assert.ok(report.memoryMiB.peak.heapUsed>0);
+assert.ok(measured.report);
+const verified=measured.verified;
+assert.equal(verified.exact,true);
+assert.equal(measured.report.departures,40);
+assert.equal(measured.report.returns,10);
+assert.equal(verified.scanItems,verified.expectedItems);
+assert.equal(verified.ledgerItemsAfter,verified.expectedItems);
+assert.equal(verified.upsertedKeys,40);
+assert.equal(verified.archiveItemsAfter,340);
+assert.ok(measured.report.memoryMiB.sealPeak.heapUsed>0);
+assert.ok(measured.phases.some(entry=>entry.phase==='after_gc_retained_scan'),'the retained-scan baseline is recorded after a gc');
+assert.equal(measured.failedAfterPhase,null);
+
+// build never clears anything: a non-empty directory is refused and left as it was; the checkout and paths outside the temp directory are refused.
+const occupied=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-path-a-occupied-'));
+fs.writeFileSync(path.join(occupied,'keep.txt'),'precious');
+const refused=spawnSync(process.execPath,[...tool,'build','--dir',occupied,'--active','10','--archived','10'],{encoding:'utf8'});
+assert.notEqual(refused.status,0);
+assert.equal(fs.readFileSync(path.join(occupied,'keep.txt'),'utf8'),'precious');
+assert.deepEqual(fs.readdirSync(occupied),['keep.txt']);
+fs.rmSync(occupied,{recursive:true,force:true});
+for(const bad of [path.resolve('.'),path.resolve('scripts'),os.homedir(),'/']){
+ const r=spawnSync(process.execPath,[...tool,'build','--dir',bad],{encoding:'utf8'});
+ assert.notEqual(r.status,0,bad);
+}
+assert.ok(fs.existsSync('scripts/epg-path-a-feasibility.mjs'));
 
 assert.throws(()=>run(['measure','--dir','relative/dir']));
 console.log('epg-path-a-feasibility ok');
