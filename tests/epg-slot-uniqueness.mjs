@@ -46,6 +46,34 @@ assert.equal(gamma.airings,1);
 assert.equal(gamma.firstAiring,now+9*H);assert.equal(gamma.lastAiring,now+9*H);
 assert.equal(conflict.uncertain.filter(item=>item.reason==='duplicate_slot').length,1);
 
+// A contested slot leaves no identity evidence on a surviving observation (180 minutes contested, 90 minutes retained), in both feed orders.
+const evidence=async(contestedFirst)=>{
+ const contested=`<programme channel="one" start="${stamp(now+3*H)}" stop="${stamp(now+3*H+180*60000)}"><title>GAMMA UNKNOWN TITLE</title><desc>Contested description</desc></programme>`;
+ const rival=programme('Alpha Film 2001',3);
+ const kept=`<programme channel="one" start="${stamp(now+6*H)}" stop="${stamp(now+6*H+90*60000)}"><title>Gamma Unknown Title</title></programme>`;
+ return scan(contestedFirst?[contested,rival,kept]:[kept,rival,contested],watchlist);
+};
+for(const contestedFirst of [true,false]){
+ const result=await evidence(contestedFirst);
+ const candidate=result.discovery.find(item=>item.normalizedTitle==='gamma unknown title');
+ assert.equal(result.stats.duplicate_slot,1);
+ assert.deepEqual(starts(candidate.shows),[6]);
+ assert.equal(candidate.duration,90,'the representative duration comes from the retained slot');
+ assert.deepEqual(plain(candidate.rawTitles),['Gamma Unknown Title'],'the title form of the removed slot is gone');
+ assert.equal(candidate.description,null,'the description of the removed slot is gone');
+ assert.equal(candidate.firstAiring,now+6*H);assert.equal(candidate.lastAiring,now+6*H);assert.equal(candidate.airings,1);
+}
+
+// An observation that keeps several slots takes its evidence from the first retained one.
+const several=await scan([
+ `<programme channel="one" start="${stamp(now+2*H)}" stop="${stamp(now+2*H+180*60000)}"><title>Gamma Unknown Title</title></programme>`,
+ programme('Alpha Film 2001',2),
+ `<programme channel="one" start="${stamp(now+5*H)}" stop="${stamp(now+5*H+95*60000)}"><title>Gamma Unknown Title</title><desc>Kept description</desc></programme>`,
+ `<programme channel="one" start="${stamp(now+8*H)}" stop="${stamp(now+8*H+90*60000)}"><title>Gamma Unknown Title</title></programme>`,
+],watchlist);
+const retained=several.discovery.find(item=>item.normalizedTitle==='gamma unknown title');
+assert.equal(retained.duration,95);assert.equal(retained.description,'Kept description');assert.equal(retained.airings,2);assert.equal(retained.firstAiring,now+5*H);
+
 // The same start on another channel is another slot.
 const channels=await scan([programme('Alpha Film 2001',3,'one'),programme('Gamma Unknown Title',3,'two')],watchlist);
 assert.equal(channels.stats.duplicate_slot,0);
