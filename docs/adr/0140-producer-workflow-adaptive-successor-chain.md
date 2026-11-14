@@ -1,9 +1,9 @@
 # ADR 0140: A separate Producer Workflow completes the full EPG producer pass as repeated bounded invocations of one run, in an adaptive chain of instances
 
-**Status:** Proposed
-**Original decision date:** 2026-11-14 (owner direction; this record is the design, not an acceptance)
+**Status:** **Accepted as DESIGN** (2026-11-14, owner-approved architectural direction; implementation and production remain separately gated)
+**Original decision date:** 2026-11-14 (architectural direction approved by owner; accepted as design)
 **Recorded at:** 2026-11-14
-**Approval source:** Owner direction of 14 November 2026 (Europe/Madrid) on [AIR-374](https://trello.com/c/ha7ais3w), comment "Owner decision | AIR-374 / S-A + W3 direction after AIR-465": the direction is agreed for the NEXT ADR; it is explicitly not a GO for code, Cloudflare configuration or production activation. This ADR becomes Accepted only by a separate owner decision
+**Approval source:** Owner decision of 14 November 2026 (Europe/Madrid) on [AIR-374](https://trello.com/c/ha7ais3w), comment "Owner decision | AIR-374 / S-A + W3 direction after AIR-465": S-A + W3 with adaptive successors approved. The owner explicitly confirmed acceptance of ADR 0140 as design and authorized a status-only direct-main correction in the project conversation on 14 November 2026. This does NOT authorize code, Cloudflare configuration or production activation.
 **Related work:** [AIR-374](https://trello.com/c/ha7ais3w), [AIR-465](https://trello.com/c/OMe41E89), [ADR 0128](0128-epg-canonical-producer-durable-execution.md), [ADR 0137](0137-left-plan-settlement-from-sealed-newer-input.md), [ADR 0098](0098-discovery-workflow-step-failure-recovery.md) (the successor-ownership precedent), [ADR 0100](0100-epg-cloudflare-workflow-executor.md), [ADR 0135](0135-epg-priority-discovery-pause.md), [M1 evidence](../evidence/d1-migration/air-374-m1-workflow-limits-2026-11-14.md), [synthetic measurement](../evidence/d1-migration/air-465-m2b-synthetic-scale-2026-11-14.md), [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md), [D-C decision pack](../runbooks/film-person-d-c-decision-pack.md), [S5-1 gate evidence](../evidence/d1-migration/air-374-s5-1-nextaction-gate-2026-11-13.md)
 **Supersedes:** None. It qualifies, and does not rewrite, one sentence of [ADR 0128](0128-epg-canonical-producer-durable-execution.md) decision 8 (the cadence line "never driven by a cron, tick or Task"): recovery of an interrupted chain may use the existing hourly reconciliation (below), and no new schedule is added
 **Superseded by:** None
@@ -18,7 +18,7 @@ The [S5-1 gate evidence](../evidence/d1-migration/air-374-s5-1-nextaction-gate-2
 
 ## Decision
 
-This record states the architectural direction the owner agreed for the design. Each point is a boundary or an invariant; none selects a numerical value.
+This accepted DESIGN records the architectural direction the owner agreed. Each point is a boundary or an invariant; none selects a numerical value or authorizes implementation.
 
 1. **S-A is the basis for completing the full pass.** The pass is completed by repeated bounded invocations of the SAME EPG run: the durable cursor resumes while the recomputed fingerprint is equal, a fingerprint change inside the run replays safely from the start, and every write stays generation-fenced. Permanent `lagging` is not accepted as the steady state. The meaning of the full plan and the semantics of `canonicalFreshness` are not changed.
 2. **The pass runs in a separate Producer Workflow, started only after the EPG publication has committed.** Its failures are fully isolated from the publication stage and from the failure budget of the EPG executor ([ADR 0128](0128-epg-canonical-producer-durable-execution.md) guardrail G6). A producer error is recorded in the producer store and the read model and is never reported to the EPG executor as a step failure.
@@ -61,7 +61,7 @@ This record states the architectural direction the owner agreed for the design. 
 
 - The full plan can complete across several invocations without a new run identity, so `current` stays reachable and means what [ADR 0128](0128-epg-canonical-producer-durable-execution.md) says it means.
 - New complexity: a second Workflow, a successor protocol with its own ownership and recovery, and a reconciliation step; the design must show it adds no failure path to the publication.
-- The hourly reconciliation gains one more responsibility. It is not a new schedule, but it qualifies the cadence line of decision 8 of ADR 0128 and needs the owner's explicit acceptance.
+- The architectural use of the existing hourly reconciliation for chain recovery (not the unit retry pass) is accepted by the owner. It is not a new schedule; the exact reconciliation and recovery implementation remains subject to S5-1 review and separate rollout gates.
 - A large amount of what the design needs is unmeasured (round trips, batching, instance consumption, D1 contention). The reports of decision 6 are how it becomes measurable, and the D-C numbers wait for them.
 - An ELIGIBLE provisional title of a Film that is new to a generation can reach the title readers only after its Film-facts unit has been applied, not at publication. Whether a given Film gets one is not guaranteed: reviewed and owner localization rows are preserved, there may be no eligible source, and presentation also needs a matching trusted TMDB claim. Assigning those readers a mode stays with the wiring PR.
 
