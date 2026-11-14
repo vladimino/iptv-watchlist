@@ -9,8 +9,8 @@
 //   node scripts/epg-path-a-workerd.mjs measure --baseline /tmp/<that-dir> [--departures 2000 --returns 200]
 //
 // What is and is not measured. workerd runs the same V8 as Cloudflare production, but a local workerd does not enforce the 128 MB isolate limit and its accounting is the host process: the
-// tool samples the RSS and the high-water RSS of the workerd child process from /proc while the seal runs and reports the increase over the idle, warmed-up process. That is an upper
-// bound on what the isolate adds (it includes the runtime's own buffers and the local R2 and D1 emulation, which production does not charge to the isolate), not Cloudflare's number.
+// tool samples the RSS and the high-water RSS of the workerd child process from /proc while the seal runs and reports the increase over the idle, warmed-up process. Host-process RSS is not
+// a bound on isolate memory: it combines Miniflare/workerd, the local D1 and R2 emulation and proxy runtime allocations, and it is not Cloudflare's number.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
