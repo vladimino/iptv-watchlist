@@ -209,24 +209,23 @@ sequenceDiagram
     D1-->>Disc: admitted
 ```
 
-### Proposed: seal in a successor instance over split staged objects ([ADR 0144](../adr/0144-epg-commit-seal-execution-boundary-and-split-staged-payload.md), Proposed, not implemented)
+### Planned: seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), Accepted as design; implementation tracked in AIR-484, not delivered)
 
-Nothing here runs today: one instance still runs `epg_commit` and the seal. The diagram is the proposed shape only. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. Staged objects are written before the manifest, and the `sync.json` save with `seal.layout: split` is the commit point. A pending claim, even of a previous Madrid day, takes priority over today's start.
+**Current state:** one instance still runs `epg_commit` and the seal. **Planned state** is the diagram. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. The staged payload is today's single `epg/seal/<runId>/payload.json`, unchanged; its format belongs to AIR-485. A pending claim, even of a previous Madrid day, takes priority over today's start.
 
 ```mermaid
 sequenceDiagram
     participant P as Producing instance
-    participant R2 as R2 staged objects
+    participant R2 as R2 payload.json
     participant C as D1 control document
     participant S as Successor instance
     participant H as Hourly ensure
-    P->>R2: Write report, catalog, watchlist, uncertain, manifest last
-    P->>R2: Save sync.json with seal layout split (commit point)
+    P->>R2: Store payload.json and save sync.json at stage seal
     P->>C: CAS claim, next series, no failure recorded
     P->>S: create() with the next series id
     Note over P: Ends normally. Takes no more step leases.
     S->>C: Admit against claim and mode revision
-    S->>R2: Read only the objects the phase needs, check length and hash
+    S->>R2: Read payload.json as today
     S->>C: Seal phases and publish exactly once
     Note over H,S: Claim pending while sync.json still says seal
     H->>C: Read claim and successor status
