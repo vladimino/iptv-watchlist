@@ -33,7 +33,7 @@ A JSON `POST` to `MONITOR_WEBHOOK_URL` with only these fields: `source` (`iptv-m
 
 ## Issue keys
 
-`epg_stale`, `epg_failed`, `epg_authority`, `epg_resource_limit`, `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch`, `discovery_executor_invalid`, `discovery_quarantined`, `discovery_resource_limit`, `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open`, `ratings_resource_limit`, `predictions_stale`, `predictions_backlog_growing`, and `<stream>_unreadable` when a source cannot be read.
+`epg_stale`, `epg_failed`, `epg_authority`, `epg_resource_limit`, `discovery_stalled`, `discovery_executor_stalled`, `discovery_generation_mismatch`, `discovery_quarantined`, `discovery_resource_limit`, `ratings_stalled`, `ratings_quarantined`, `ratings_failed_permanent`, `ratings_switch_open`, `ratings_resource_limit`, `predictions_stale`, `predictions_backlog_growing`, and `<stream>_unreadable` when a source cannot be read.
 
 ## Thresholds
 

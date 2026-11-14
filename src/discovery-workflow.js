@@ -1,6 +1,6 @@
 // AIR-323 / ADR 0083, AIR-324 / ADR 0093. Durable Discovery continuation. One bounded chunk per step.
-// Only DISCOVERY_EXECUTOR=workflow calls create(). The existing Worker cron may call reconcileDiscoveryWorkflow;
-// that path is a no-op while the mode is external. No workflows[].schedules. The executor record follows the
+// The Workflow is the permanent Discovery executor. The existing Worker cron may call reconcileDiscoveryWorkflow;
+// that path is a no-op without admission. No workflows[].schedules. The executor record follows the
 // discovery marker: D1 when it is d1, otherwise R2 (AIR-320).
 const DISCOVERY_WORKFLOW_STATE_KEY='epg/discovery-workflow.json';
 const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
@@ -149,7 +149,6 @@ async function deliverDiscoveryOutbox(env){
 // outbox at its limit) leaves the accumulator as it is: the deltas then appear in the next report, whose `from` says how far back it reaches.
 async function closeHourlyDiscoveryReport(env,outcome,options){
  if(options?.scheduled!==true||!Number.isFinite(options.now))return {closed:false,reason:'not_scheduled'};
- if(discoveryExecutorMode(env)!=='workflow')return {closed:false,reason:'not_workflow'};
  await deliverDiscoveryReportFaults(env);
  const hourMs=Math.floor(options.now/3600000)*3600000,hourKey=discoveryHourStamp(hourMs),at=new Date(hourMs).toISOString();
  const generationOf=record=>outcome?.programmeRunId||record?.programmeRunId||null;
@@ -445,9 +444,8 @@ function workflowReadoutFacts(stored,liveness,now){
 // Pure. The external hourly contract stays in continuationDecision; a future chunk_budget is renewed here only
 // when the saved status proves this generation still has work.
 function workflowPlan(input){
- const {mode,published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites,used}=input||{};
+ const {published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites,used}=input||{};
  const spent=(used||0)>=DISCOVERY_WORKFLOW_INVOCATION_BUDGET;
- if(mode!=='workflow')return {action:'stop',reason:'executor_not_workflow'};
  if((uncertainWrites||0)>=DISCOVERY_WORKFLOW_WRITE_LIMIT)return {action:'stop',reason:'write_uncertain'};
  if(!pinned||!published||pinned!==published||(record&&record.programmeRunId!==pinned))return {action:'stop',reason:'stale_generation'};
  if(!record)return {action:'stop',reason:'no_continuation'};
@@ -475,7 +473,7 @@ async function workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,us
  const stored=await readContinuation(env);
  const lease=await loadJSON(env,'epg/resolver-lease.json');
  const last=await loadJSON(env,'epg/discovery-status.json');
- return {mode:discoveryExecutorMode(env),published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
+ return {published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
 }
 async function settleWorkflowIfOwner(env,ownId,patch){
  let state=await readWorkflowState(env);
@@ -560,9 +558,6 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  }
 }
 async function discoveryWorkflowAdmission(env){
- const mode=discoveryExecutorMode(env);
- if(mode==='external')return {ok:false,reason:'external'};
- if(mode!=='workflow')return {ok:false,reason:'invalid'};
  if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return {ok:false,reason:'workflow_unavailable'};
  if(typeof DiscoveryAuthority==='undefined')return {ok:false,reason:'authority_not_ready'};
  let gate;

@@ -111,7 +111,7 @@ assert.equal(bounded.gets.filter(key=>key.startsWith('epg/discovery-archive/')).
 // 4. A discovery chunk reads no archive object either (TMDB is unreachable here, so the chunk errors after its reads).
 bounded.gets.length=0;
 bounded.set('epg/resolver-continuation.json',{stage:'paused',reason:'epg_committed',at:new Date().toISOString(),hopId:null,remainingChunks:12,nextCatchUpAt:null,retryAt:null,programmeRunId:published(bounded)});
-await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/discovery/resolve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:2})}),{...statusEnv,TMDB_API_READ_ACCESS_TOKEN:'t',TMDB_REQUEST_INTERVAL_MS:0},{waitUntil(){}});
+try{await call('advanceDiscovery')({...statusEnv,TMDB_API_READ_ACCESS_TOKEN:'t',TMDB_REQUEST_INTERVAL_MS:0},{limit:2,force:true});}catch{}
 assert.ok(bounded.gets.some(key=>key.includes('discovery-latest.json')),'the chunk read the active ledger');
 assert.equal(bounded.gets.filter(key=>key.startsWith('epg/discovery-archive/')).length,0,'the chunk reads no archive object');
 

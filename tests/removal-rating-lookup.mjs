@@ -215,7 +215,7 @@ assert.deepEqual(plain(saved.removalLookups),[film('crash')],'the hand-over surv
 assert.equal(records.has(QUEUE),false,'nothing was queued');
 const step={caller:'http',diagnostic:{}};
 try{await ctx.syncStep(env,'/api/sync/epg',{runId:'run-2'},step);}catch{}
-assert.equal(step.branch,'continuation');
+assert.equal(step.branch,'delegated');
 assert.equal(records.has(QUEUE),false,'the continuation does not look up or enqueue');
 saved=records.get('sync.json');
 assert.deepEqual(plain(saved.removalLookups),[film('crash')]);

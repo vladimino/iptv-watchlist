@@ -161,7 +161,6 @@ assert.deepEqual(unmet.report.flags.filter(item=>item.requires).map(item=>item.n
 const consumer={
  LIFECYCLE_LOCALIZATION:'metadataLocalizationMode(env)',
  DISCOVERY_LEDGER_MODE:'discoveryLedgerMode(env)',
- DISCOVERY_EXECUTOR:'discoveryExecutorMode(env)',
 };
 const samples=[undefined,'',' ','on','inline','separate',' separate','separate ','Separate','SEPARATE',' on','on ','On','ON','off','selective','Selective','strict','bounded','frozen','full','external','workflow','Workflow','x',1,true,null,{},'on:metadata','shadow:metadata','on:metadata,shadow:metadata','shadow:metadata,on:metadata','on:epg','on:metadata,on:epg'];
 const reportOf=vm.runInContext('featureFlagReport',context);

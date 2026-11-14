@@ -1,3 +1,5 @@
+// ENGINE-LEVEL test: the chunk engine is driven through tests/support/engine-chunk-driver.mjs, not through a production HTTP path.
+import {engineChunkDriver} from './support/engine-chunk-driver.mjs';
 // AIR-199: the production shape of 27 Oct 2026. The EPG commit published a new generation (pointer and generation
 // files) and the invocation then ended (Workers `exceededMemory`) before `queueDiscovery`. A retry of the same commit
 // took the resume path, saved the sync run as `complete` and ended the same way, still before `queueDiscovery`. The
@@ -30,7 +32,9 @@ const origin='https://iptv.vladimino.workers.dev',headers={'Content-Type':'appli
 const OLD='23570366-0000-4000-8000-000000000000',NEW='b2699929-0000-4000-8000-000000000000',OLD_HOP='33333333-4444-4555-8666-777777777777';
 const post=async(path,body)=>{const response=await worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);return {status:response.status,data:await response.json()};};
 const read=async path=>(await worker.fetch(new Request(origin+path),env,execution)).json();
-const step=()=>post('/api/sync/epg',{runId:NEW});
+// AIR-325: a step on a complete run only delegates over HTTP; the chunk engine is driven the way the retired external step drove it.
+const chunkStep=engineChunkDriver(context,env,{runId:NEW});
+const step=()=>records.get('sync.json')?.stage==='complete'?chunkStep():post('/api/sync/epg',{runId:NEW});
 const now=Date.now(),iso=ms=>new Date(ms).toISOString();
 const continuation=()=>records.get('epg/resolver-continuation.json');
 const ring=()=>records.get('epg/resolver-continuation-diagnostics.json')?.recent||[];
@@ -83,7 +87,7 @@ assert.equal(records.get('sync.json').stage,'epg');
 //    kept as it is (full budget, `epg_committed`), and nothing else is republished.
 let r=await step();
 assert.equal(r.status,200);assert.equal(r.data.stage,'complete');
-assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,'epg_committed');assert.equal(r.data.discovery.remainingChunks,12);assert.equal(r.data.discovery.nextAction,'continue');assert.equal(r.data.discovery.programmeRunId,NEW);
+assert.equal(r.data.discovery.state,'paused');assert.equal(r.data.discovery.reason,'delegated');assert.equal(r.data.discovery.remainingChunks,12);assert.equal(r.data.discovery.nextAction,'wait');assert.equal(r.data.discovery.programmeRunId,NEW);
 assert.equal(continuation().programmeRunId,NEW);assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().hopId,null);
 const commitEntry=ring().find(entry=>entry.route==='/api/sync/epg'&&entry.phase==='completed');
 assert.equal(commitEntry.branch,'epg_commit');assert.equal(commitEntry.runStage,'epg');assert.deepEqual(commitEntry.diagnostic,{},'the commit branch never enters advanceDiscovery');

@@ -37,7 +37,7 @@ const Monitor=(()=>{
   return {authority,publishedRunId,publishedAt,runError:!!run?.error&&run.stage!=='complete',resourceLimit:/1102|exceeded.*(memory|cpu)|memory limit/i.test(text),stage:run?.stage||null};
  });
  const discoveryFacts=(env,now,pubRunId)=>guarded(async()=>{
-  const executor=typeof discoveryExecutorMode==='function'?discoveryExecutorMode(env):'external';
+  const executor='workflow';
   const [continuation,lease,last]=await Promise.all([loadJSON(env,'epg/resolver-continuation.json'),loadJSON(env,'epg/resolver-lease.json'),loadJSON(env,'epg/discovery-status.json')]);
   const health=typeof continuationHealth==='function'?continuationHealth(continuation,lease,last,now,pubRunId)?.status||null:null;
   let readout=null;
