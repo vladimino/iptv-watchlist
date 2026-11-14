@@ -11,17 +11,18 @@ process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{/*
 const SMALL={
  seed:'m2b-synthetic-small',
  clock:'2026-11-14T00:00:00.000Z',
- films:24,persons:40,credits:80,dimensions:30,
+ films:24,persons:80,credits:98,dimensions:30,
  watchlistFilms:6,metadataRows:8,syncRows:8,
  creditedPersons:10,watchlistCreditRows:16,watchlistCreditMin:2,watchlistCreditMax:4,
  elevatedFilms:6,elevatedCreditRows:14,elevatedPersons:8,elevatedCreditMin:2,elevatedCreditMax:4,
  departedSteady:2,departedElevated:2,absentDeparted:2,
- creditCap:50,largeCreditFilms:1,largeCreditSize:8,restCreditMax:6,
+ creditCap:50,largeCreditFilms:1,largeCreditSize:50,restCreditMax:6,
 };
 
 // 1. The E6 layout hits the sanitized aggregates and stays inside the credit-unit cap. Two builds are the same plan.
 {
  const first=buildLayout(E6_TARGETS),second=buildLayout(E6_TARGETS);
+ assert.equal(layoutDigest(first),'af5f4d6094ad283ee5ca688da8ba718c789a267977dc121bb25fe243fd4f4ea1');
  assert.equal(layoutDigest(first),layoutDigest(second));
  const s=first.summary;
  assert.equal(s.films,10044);
@@ -88,6 +89,28 @@ const SMALL={
  assert.ok(measured.elevated.volume.personRows>measured.steady.volume.personRows);
  assert.equal(measured.elevated.report.changed,0);
  assert.equal(measured.elevated.report.writes,0);
+ assert.equal(measured.elevated.watchlistManifest.consistent,true);
+ assert.equal(measured.elevated.watchlistManifest.rowCount,12);
+ assert.equal(measured.elevated.watchlistManifest.maxRowid,measured.elevated.watchlistManifest.recordedMaxRowid);
+ const stress=measured.creditCapStress;
+ assert.equal(stress.e6Cohort,false);
+ assert.equal(stress.creditsPerFilm,50);
+ assert.equal(stress.volume.films,1);
+ assert.equal(stress.volume.departed,0);
+ assert.equal(stress.volume.creditFilms,1);
+ assert.equal(stress.volume.personRows,50);
+ assert.equal(stress.watchlistManifest.consistent,true);
+ assert.equal(stress.watchlistManifest.rowCount,1);
+ assert.equal(stress.report.changed,0);
+ assert.equal(stress.report.writes,0);
+ assert.equal(stress.report.byKind.film_facts.units,1);
+ assert.equal(stress.report.byKind.film_facts.noop,1);
+ assert.equal(stress.report.byKind.film_credits.units,1);
+ assert.equal(stress.report.byKind.film_credits.noop,1);
+ assert.equal(stress.report.byKind.person_mutation.units,50);
+ assert.equal(stress.report.byKind.person_mutation.noop,50);
+ assert.equal(stress.report.byKind.person_state,undefined);
+ assert.equal(stress.report.d1ReadsPerUnit.total,1*9+50*4+1*4);
  assert.equal(JSON.stringify(measured).includes('film:'),false);
  assert.equal(JSON.stringify(measured).includes('person:'),false);
  assert.equal(JSON.stringify(measured).includes('Synthetic'),false);

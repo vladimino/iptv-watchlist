@@ -16,7 +16,7 @@ ADR 0128 gate M2b is the offline harness run on a verified copy of the canonical
 
 1. **Measurement input.** The M2b measurement of unit volume, statements prepared, and local planning and fingerprint cost uses a deterministic sqlite catalog generated from the repository migrations. The catalog's Film, Person, credit and dimension totals, and the watchlist cohort's credit and Person totals, are the sanitized E6 aggregates. The placement of those rows is a model. It is not a production sample and not production parity.
 2. **What one run closes.** It reports units by kind for `film_facts`, `person_mutation` and `film_credits`, including departed Films and the absence and return of that departed set, on the ordinary generation-shaped cohort and on a heavier modelled cohort. It reports local timings and statement counts only.
-3. **What one run does not close.** It does not measure production `changedShare` (a no-op on this catalog means the fixture matched itself), `person_state` (the harness does not build that unit), Worker-to-D1 round-trip time, D1 CPU or write cost, or Workflow platform limits. It does not set `sliceSize`, `maxSlicesPerRun`, the slice deadline, the per-run ceiling or the lag SLA. Those stay an owner decision after a real natural pass.
+3. **What one run does not close.** It does not measure production `changedShare` (a no-op on this catalog means the fixture matched itself), `person_state` (the harness does not build that unit), Worker-to-D1 round-trip time, D1 CPU or write cost, or Workflow platform limits. It does not set `sliceSize`, `maxSlicesPerRun`, the slice deadline, the per-run ceiling or the lag SLA. A no-op is still one unit, so it does not make a 1,000-unit ceiling cover the 7,240-unit plan. Those parameters, and any full-plan completion strategy, stay a separate owner decision. This record does not choose one and does not add a catch-up design.
 4. **Production copy.** The full-table reader stays blocked and is not the default path. Choosing among its historical delivery options is not a prerequisite for this measurement or for considering a provisional D-C decision. A later small production sample, if one is justified, is a separate operation-specific GO and must include departed Films and the Persons and credits of the sampled Films.
 5. **Out of scope.** No production read or write, no wiring of the producer, no migration, flag, Task or marker change. The runtime data flow is unchanged, so this record adds no diagram.
 
@@ -29,7 +29,7 @@ ADR 0128 gate M2b is the offline harness run on a verified copy of the canonical
 ## Consequences
 
 - A provisional D-C discussion can use the synthetic unit counts and the local statement counts, labelled as modelled, alongside the E6 aggregates and the M3 timings.
-- A deadline, a ceiling that covers the whole plan, and an L1 completion promise still need a natural pass. The synthetic steady plan is 7,240 units before `person_state`; none of the pack's ceilings covers that count in one generation.
+- A deadline, a ceiling that covers the whole plan, and an L1 completion promise still need a natural pass and a separate decision. The synthetic steady plan is 7,240 units before `person_state`. Option B's ceiling of 1,000 does not cover that count, and a no-op does not reduce it. The decision pack keeps B as a Film-only illustration, not a recommended full-plan option.
 - The blocked full-table reader and its digests remain in the runbook as history.
 
 ## Recovery and migration boundary
@@ -40,7 +40,7 @@ This ADR authorizes no production operation. Rollback of the generator and the d
 
 - **Original decision:** [AIR-465](https://trello.com/c/OMe41E89), 14 November 2026
 - **Implementation:** the generator `scripts/epg-producer-m2b-synthetic.mjs` and `tests/epg-producer-m2b-synthetic.mjs` in the delivery pull request
-- **Dated verification:** [synthetic measurement](../evidence/d1-migration/air-465-m2b-synthetic-scale-2026-11-14.md), 2026-11-14 00:18 UTC, counts only
+- **Dated verification:** [synthetic measurement](../evidence/d1-migration/air-465-m2b-synthetic-scale-2026-11-14.md), remeasured 2026-11-14 00:50 UTC, counts only
 - **Uncertainty:** production `changedShare`, `person_state`, Worker-to-D1 round trip, D1 write cost, Workflow limits
 
 ## Follow-ups

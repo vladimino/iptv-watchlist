@@ -19,6 +19,8 @@ Two loads are measured on that one catalog:
 
 Departed Films are part of both plans. The observed set is not reduced to the watchlist.
 
+**Credit-cap stress, separate from both cohorts.** The catalog also holds Films at the 50-credit unit cap, outside the watchlist and outside the elevated cohort. `measure` observes one of those Films alone, through the same harness, and labels the result as not the E6 cohort. On the dated run that Film planned 52 units (1 `film_facts`, 50 `person_mutation`, 1 `film_credits`) and prepared 213 statements. The other cap Films are not part of that scenario.
+
 - **Absence.** The steady departed ids plus three ids the store does not hold, planned as Film units only. The missing ids are `absent` and the fingerprint is `complete: false` (`unresolved_release`). A missing Film is not reported as a successful release.
 - **Return.** The elevated run puts the steady departed Films onto the watchlist. They are observed units on that run and are not released again. On the dated run, 6 of 6 returned.
 

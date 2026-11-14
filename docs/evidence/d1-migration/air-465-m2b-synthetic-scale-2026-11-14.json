@@ -93,11 +93,11 @@
    "changedShare": 0,
    "latencyMs": {
     "n": 7240,
-    "total": 2163.996,
-    "p50": 0.233,
-    "p90": 0.475,
-    "p99": 0.945,
-    "max": 9.168
+    "total": 1968.367,
+    "p50": 0.221,
+    "p90": 0.385,
+    "p99": 0.897,
+    "max": 8.998
    },
    "d1ReadsPerUnit": {
     "n": 7240,
@@ -107,10 +107,10 @@
     "p99": 9,
     "max": 18
    },
-   "planMs": 17.835,
+   "planMs": 16.038,
    "fingerprint": {
     "entries": 7240,
-    "ms": 23.499,
+    "ms": 22.162,
     "complete": true,
     "missing": {
      "unresolved_release": 0,
@@ -123,9 +123,9 @@
    "writes": 0
   },
   "timing": {
-   "wallMs": 2828,
-   "cpuUserMs": 1738.1,
-   "cpuSystemMs": 542.7
+   "wallMs": 2577.2,
+   "cpuUserMs": 1527.5,
+   "cpuSystemMs": 526.6
   }
  },
  "absent": {
@@ -154,11 +154,11 @@
    "changedShare": 0,
    "latencyMs": {
     "n": 9,
-    "total": 20.162,
-    "p50": 1.615,
-    "p90": 4.745,
-    "p99": 4.745,
-    "max": 4.745
+    "total": 15.113,
+    "p50": 1.216,
+    "p90": 4.6,
+    "p99": 4.6,
+    "max": 4.6
    },
    "d1ReadsPerUnit": {
     "n": 9,
@@ -168,10 +168,10 @@
     "p99": 18,
     "max": 18
    },
-   "planMs": 0.091,
+   "planMs": 0.064,
    "fingerprint": {
     "entries": 6,
-    "ms": 0.105,
+    "ms": 0.083,
     "complete": false,
     "missing": {
      "unresolved_release": 3,
@@ -184,9 +184,9 @@
    "writes": 0
   },
   "timing": {
-   "wallMs": 78.6,
-   "cpuUserMs": 58.9,
-   "cpuSystemMs": 46.7
+   "wallMs": 63.1,
+   "cpuUserMs": 41.1,
+   "cpuSystemMs": 24.4
   }
  },
  "elevated": {
@@ -200,6 +200,13 @@
    "personStateUnits": "unmeasured"
   },
   "representative": true,
+  "watchlistManifest": {
+   "rowCount": 782,
+   "maxRowid": 782,
+   "recordedRowCount": 782,
+   "recordedMaxRowid": 782,
+   "consistent": true
+  },
   "report": {
    "planned": {
     "units": 14474,
@@ -239,11 +246,11 @@
    "changedShare": 0,
    "latencyMs": {
     "n": 14474,
-    "total": 3789.516,
-    "p50": 0.221,
-    "p90": 0.394,
-    "p99": 0.735,
-    "max": 5.089
+    "total": 3563.967,
+    "p50": 0.211,
+    "p90": 0.344,
+    "p99": 0.701,
+    "max": 5
    },
    "d1ReadsPerUnit": {
     "n": 14474,
@@ -253,10 +260,10 @@
     "p99": 9,
     "max": 18
    },
-   "planMs": 21.587,
+   "planMs": 19.434,
    "fingerprint": {
     "entries": 14474,
-    "ms": 33.747,
+    "ms": 32.863,
     "complete": true,
     "missing": {
      "unresolved_release": 0,
@@ -269,10 +276,104 @@
    "writes": 0
   },
   "timing": {
-   "wallMs": 4439.2,
-   "cpuUserMs": 2439.8,
-   "cpuSystemMs": 826.6
+   "wallMs": 4193.3,
+   "cpuUserMs": 2292.9,
+   "cpuSystemMs": 837.9
   }
  },
- "limits": "Local planning cost and unit counts on a modelled catalog. Not production latency, not D1 CPU or write cost, not a Worker to D1 round trip, not Workflow limits, and not person_state."
+ "creditCapStress": {
+  "label": "one rest film at the credit-unit cap, observed alone; not the E6 watchlist cohort and not its credit distribution",
+  "e6Cohort": false,
+  "creditsPerFilm": 50,
+  "filmsAtCapInCatalog": 30,
+  "watchlistManifest": {
+   "rowCount": 1,
+   "maxRowid": 1,
+   "recordedRowCount": 1,
+   "recordedMaxRowid": 1,
+   "consistent": true
+  },
+  "volume": {
+   "films": 1,
+   "departed": 0,
+   "creditFilms": 1,
+   "personRows": 50,
+   "personStateUnits": "unmeasured"
+  },
+  "representative": true,
+  "report": {
+   "planned": {
+    "units": 52,
+    "refusedByPlanner": 0,
+    "filmUnits": 1,
+    "personAndCreditUnits": 51
+   },
+   "byKind": {
+    "film_facts": {
+     "units": 1,
+     "changed": 0,
+     "noop": 1,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    },
+    "person_mutation": {
+     "units": 50,
+     "changed": 0,
+     "noop": 50,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    },
+    "film_credits": {
+     "units": 1,
+     "changed": 0,
+     "noop": 1,
+     "absent": 0,
+     "refused": 0,
+     "failed": 0
+    }
+   },
+   "refusedByCode": {},
+   "failedByCode": {},
+   "changed": 0,
+   "changedShare": 0,
+   "latencyMs": {
+    "n": 52,
+    "total": 28.172,
+    "p50": 0.214,
+    "p90": 0.582,
+    "p99": 9.476,
+    "max": 9.476
+   },
+   "d1ReadsPerUnit": {
+    "n": 52,
+    "total": 213,
+    "p50": 4,
+    "p90": 4,
+    "p99": 9,
+    "max": 9
+   },
+   "planMs": 0.215,
+   "fingerprint": {
+    "entries": 52,
+    "ms": 0.166,
+    "complete": true,
+    "missing": {
+     "unresolved_release": 0,
+     "unit_refused": 0,
+     "unit_failed": 0,
+     "total": 0
+    },
+    "error": null
+   },
+   "writes": 0
+  },
+  "timing": {
+   "wallMs": 564,
+   "cpuUserMs": 402.9,
+   "cpuSystemMs": 126.1
+  }
+ },
+ "limits": "Local planning cost and unit counts on a modelled catalog. The credit-cap stress is one film, not the observed cohort. Not production latency, not D1 CPU or write cost, not a Worker to D1 round trip, not Workflow limits, and not person_state."
 }

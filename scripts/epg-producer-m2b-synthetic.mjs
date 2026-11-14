@@ -383,10 +383,46 @@ async function filmOnly(file,{films,departed,at}){
  return {copyUnchanged:true,report:publicReport(report),timing:stop(),timingMeans:'local sqlite stand-in; film units only, persons and credits not re-planned'};
 }
 
+function sqlJson(file,text){
+ const result=sqliteSync(['-json','-bail',file],{input:text,encoding:'utf8',maxBuffer:1<<20});
+ if(result.status!==0)throw new Error((result.stderr||'sqlite failed').trim().slice(0,300));
+ const out=String(result.stdout||'').trim();
+ return out?JSON.parse(out):[];
+}
+
+// verifyCopy compares row_count only. A membership edit also moves MAX(rowid), so both manifest fields are rewritten from the table.
+function refreshWatchlistManifest(file){
+ sqlite(file,"UPDATE m2b_copy_manifest SET row_count = (SELECT COUNT(*) FROM watchlist_film), max_rowid = (SELECT MAX(rowid) FROM watchlist_film) WHERE table_name = 'watchlist_film';");
+}
+
+export function watchlistManifest(file){
+ const row=sqlJson(file,"SELECT (SELECT COUNT(*) FROM watchlist_film) AS n, (SELECT MAX(rowid) FROM watchlist_film) AS max_rowid, (SELECT row_count FROM m2b_copy_manifest WHERE table_name = 'watchlist_film') AS recorded_n, (SELECT max_rowid FROM m2b_copy_manifest WHERE table_name = 'watchlist_film') AS recorded_max;")[0];
+ const maxRowid=row.max_rowid===null?null:Number(row.max_rowid);
+ const recordedMaxRowid=row.recorded_max===null?null:Number(row.recorded_max);
+ return {rowCount:Number(row.n),maxRowid,recordedRowCount:Number(row.recorded_n),recordedMaxRowid,consistent:Number(row.n)===Number(row.recorded_n)&&maxRowid===recordedMaxRowid};
+}
+
+function requireWatchlistManifest(file){
+ const manifest=watchlistManifest(file);
+ if(!manifest.consistent)throw new Error('watchlist manifest does not match the table');
+ return manifest;
+}
+
 function addMembership(source,dest,ids,clock){
  fs.copyFileSync(source,dest);
  const inserts=ids.map(id=>'INSERT INTO watchlist_film (film_id,updated_at) VALUES ('+q(id)+','+q(clock)+');').join('\n');
- sqlite(dest,'BEGIN;\n'+inserts+'\nUPDATE m2b_copy_manifest SET row_count = row_count + '+ids.length+" WHERE table_name = 'watchlist_film';\nCOMMIT;\n");
+ sqlite(dest,'BEGIN;\n'+inserts+'\nCOMMIT;\n');
+ refreshWatchlistManifest(dest);
+ return requireWatchlistManifest(dest);
+}
+
+// One observed Film, nothing else on the watchlist. Used for the credit-cap stress, which is not a generation cohort.
+function replaceWatchlist(source,dest,ids,clock){
+ fs.copyFileSync(source,dest);
+ const inserts=ids.map(id=>'INSERT INTO watchlist_film (film_id,updated_at) VALUES ('+q(id)+','+q(clock)+');').join('\n');
+ sqlite(dest,'BEGIN;\nDELETE FROM watchlist_film;\n'+inserts+'\nCOMMIT;\n');
+ refreshWatchlistManifest(dest);
+ return requireWatchlistManifest(dest);
 }
 
 // Steady generation, elevated generation (the steady departed cohort returned onto the watchlist), and an absence scenario of departed ids the store does not hold.
@@ -401,9 +437,12 @@ export async function measureSynthetic(file,targets,{root=os.tmpdir()}={}){
  const steady=await guardedRun(file,{departed:layout.targets.departedSteady,at});
  const absent=await filmOnly(file,{films:[],departed:[...layout.departedIds,...layout.absentIds],at});
  const elevatedFile=path.join(root,'m2b-synthetic-elevated-'+process.pid+'.sqlite');
- let elevated;
+ const stressFile=path.join(root,'m2b-synthetic-credit-cap-'+process.pid+'.sqlite');
+ let elevated,creditCapStress;
+ const capFilm=layout.films.filter(film=>film.cohort==='rest'&&film.credits.length===layout.targets.creditCap).sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0)[0];
+ if(!capFilm)throw new Error('credit-cap stress has no rest film at the unit cap');
  try{
-  addMembership(file,elevatedFile,layout.elevatedIds,at);
+  const elevatedManifest=addMembership(file,elevatedFile,layout.elevatedIds,at);
   const elevatedInputs=inputsFromCopy(elevatedFile,{departed:layout.targets.departedElevated});
   const observed=new Set(elevatedInputs.films.map(film=>film.id));
   const departed=new Set(elevatedInputs.departed);
@@ -412,11 +451,20 @@ export async function measureSynthetic(file,targets,{root=os.tmpdir()}={}){
   elevated=await guardedRun(elevatedFile,{departed:layout.targets.departedElevated,at});
   elevated.returnedSteadyDeparted=returned;
   elevated.returnedExpected=layout.departedIds.length;
- }finally{try{fs.rmSync(elevatedFile,{force:true});}catch{/* the copy is a measurement scratch */}}
- const leak=JSON.stringify({steady:steady.report,absent:absent.report,elevated:elevated.report});
+  elevated.watchlistManifest=elevatedManifest;
+  const stressManifest=replaceWatchlist(file,stressFile,[capFilm.id],at);
+  creditCapStress=await guardedRun(stressFile,{departed:0,at});
+  creditCapStress.watchlistManifest=stressManifest;
+  creditCapStress.creditsPerFilm=capFilm.credits.length;
+  creditCapStress.filmsAtCapInCatalog=layout.films.filter(film=>film.credits.length===layout.targets.creditCap).length;
+ }finally{
+  try{fs.rmSync(elevatedFile,{force:true});}catch{/* the copy is a measurement scratch */}
+  try{fs.rmSync(stressFile,{force:true});}catch{/* the copy is a measurement scratch */}
+ }
+ const leak=JSON.stringify({steady:steady.report,absent:absent.report,elevated:elevated.report,creditCapStress:creditCapStress.report});
  if(/film:|person:|Synthetic/.test(leak))throw new Error('a measurement report contains an id or a title');
  return {
-  ok:steady.ok===true&&elevated.ok===true&&steady.representative===true&&elevated.representative===true,
+  ok:steady.ok===true&&elevated.ok===true&&creditCapStress.ok===true&&steady.representative===true&&elevated.representative===true&&creditCapStress.representative===true,
   label:'synthetic-at-scale',
   productionSample:false,
   authoritativeParity:false,
@@ -426,8 +474,19 @@ export async function measureSynthetic(file,targets,{root=os.tmpdir()}={}){
   summary:layout.summary,
   steady:{volume:steady.volume,representative:steady.representative,notADCInput:steady.notADCInput===true,report:steady.report,timing:steady.timing},
   absent:{storedDeparted:layout.departedIds.length,unknownIds:layout.absentIds.length,report:absent.report,timing:absent.timing},
-  elevated:{returnedSteadyDeparted:elevated.returnedSteadyDeparted,returnedExpected:elevated.returnedExpected,volume:elevated.volume,representative:elevated.representative,report:elevated.report,timing:elevated.timing},
-  limits:'Local planning cost and unit counts on a modelled catalog. Not production latency, not D1 CPU or write cost, not a Worker to D1 round trip, not Workflow limits, and not person_state.',
+  elevated:{returnedSteadyDeparted:elevated.returnedSteadyDeparted,returnedExpected:elevated.returnedExpected,volume:elevated.volume,representative:elevated.representative,watchlistManifest:elevated.watchlistManifest,report:elevated.report,timing:elevated.timing},
+  creditCapStress:{
+   label:'one rest film at the credit-unit cap, observed alone; not the E6 watchlist cohort and not its credit distribution',
+   e6Cohort:false,
+   creditsPerFilm:creditCapStress.creditsPerFilm,
+   filmsAtCapInCatalog:creditCapStress.filmsAtCapInCatalog,
+   watchlistManifest:creditCapStress.watchlistManifest,
+   volume:creditCapStress.volume,
+   representative:creditCapStress.representative,
+   report:creditCapStress.report,
+   timing:creditCapStress.timing,
+  },
+  limits:'Local planning cost and unit counts on a modelled catalog. The credit-cap stress is one film, not the observed cohort. Not production latency, not D1 CPU or write cost, not a Worker to D1 round trip, not Workflow limits, and not person_state.',
  };
 }
 
