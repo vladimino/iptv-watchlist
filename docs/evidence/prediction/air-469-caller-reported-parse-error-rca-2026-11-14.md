@@ -5,15 +5,17 @@ Read-only analysis of `main` at `f314b339`. No production write, run, retry, Tas
 ## Scope and evidence limits
 
 - Run `cc70c949-b61d-4e1e-818b-63d7a9b02697` (batch runner v2, `manifestSize=5`), about 07:00 Madrid (06:00 UTC) on 14 Nov 2026.
-- Facts about the run come from the AIR-469 card (owner-verified production readout). This session could **not** re-read them: `prediction_film_diagnostics` for both films failed with an MCP OAuth token error ("could not issue a new access token right now"), and no exact-key R2 read was attempted. Status of every production-side column below is therefore "as reported on the card, not re-verified here".
+- The retry records of both films were re-read on 14 Nov 2026 about 08:59 UTC through the read-only `prediction_film_diagnostics` MCP tool. Run-level facts (`manifestSize`, sibling films, `formatFailureStreak`) are still taken from the AIR-469 card and were not re-read; `inputDigest` was not re-read (it lives in `run.submitted`, outside that tool).
 - The caller payload of the two films was never persisted (see telemetry gap). Nothing below reconstructs it.
 
 ## Per-film table
 
 | Film | Run | Stored outcome | Provenance | `validation` | `inputDigest` | Cause status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `tmdb_957601` | `cc70c949` | `failed`, `submitted.outcome=validation_failure`, retryable `parse_error` | caller (`reportedBy=caller`) | `stage=caller_reported`, `issues=[]` | not re-read (stored in `run.submitted`) | Worker rejection: **disproved** by code path. Client-side reason: **not proven** (no trace) |
-| `tmdb_192305` | `cc70c949` | same | caller | same | not re-read | same |
+| `tmdb_957601` | `cc70c949` | retry `parse_error`, scope `item`, attempts 1, failed 06:04:31Z, retryAt 07:04:31Z (verified) | caller (`reportedBy=caller`, verified) | `stage=caller_reported`, `issues=[]` (verified) | not re-read | Worker rejection: **disproved** (stored provenance is `caller`, plus code path). Client-side reason: **not proven** (no trace) |
+| `tmdb_192305` | `cc70c949` | retry `parse_error`, scope `item`, attempts 1, failed 06:05:00Z, retryAt 07:05:00Z (verified) | caller (verified) | same (verified) | not re-read | same |
+
+Both films currently have no fingerprint and no prediction (`fingerprint_missing`, `prediction not_recorded`), lane `hot`, `eligibleNow=true`; the retryAt has passed, so they wait for the next run.
 
 ## What the code proves
 
