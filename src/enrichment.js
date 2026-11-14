@@ -2232,7 +2232,21 @@ function unknownItemKeyIssues(items,allowed){const issues=[];if(Array.isArray(it
 // AIR-472: the optional, caller-supplied account of why a film is reported as failed. Closed vocabulary, bounded, never free text. It is a client claim (reportedBy=caller), not Worker telemetry:
 // the Worker did not necessarily see the preflight the caller echoes, and it never validates a candidate through this branch.
 const CALLER_FAILURE_REASONS=['preflight_validation_failed','insufficient_evidence','json_unparseable','request_too_large'];
-const CALLER_FAILURE_ISSUE_PATH=/^(fingerprint|prediction|assessment)(\.[A-Za-z0-9_]{1,40}){0,4}$/;
+const CALLER_ASSESSMENT_PATHS=['assessment','assessment.assessmentVersion','assessment.ratingBasis','assessment.probability4PlusBasis','assessment.tasteSignals','assessment.tasteSignals.signal','assessment.tasteSignals.anchor','assessment.tasteSignals.direction','assessment.risks','assessment.risks.risk','assessment.risks.severity','assessment.uncertainties','assessment.research','assessment.research.status','assessment.research.attempts','assessment.research.attempts.ref','assessment.sources','assessment.sources.kind','assessment.sources.ref','assessment.sources.access','assessment.sources.usedFor','assessment.conflicts','assessment.conflicts.positions','assessment.conflicts.positions.source','assessment.model','assessment.model.status'];
+let callerFailurePaths=null;
+// The paths the Worker's own validators can report, built from the contract constants: a path outside this set is not a preflight path and is never stored or shown.
+function callerFailurePathAllowed(path){
+ if(typeof path!=='string')return false;
+ if(!callerFailurePaths){
+  const set=new Set(['fingerprint','prediction','fingerprint.evidence','fingerprint.evidence.plotMechanics','fingerprint.evidence.execution',...CALLER_ASSESSMENT_PATHS]);
+  for(const key of Object.keys(FINGERPRINT_RULES))set.add('fingerprint.'+key);
+  for(const key of Object.keys(EXECUTION)){set.add('fingerprint.execution.'+key);set.add('fingerprint.evidence.execution.'+key);}
+  for(const key of MECHANICS)set.add('fingerprint.evidence.plotMechanics.'+key);
+  for(const key of BATCH_MODEL_FIELDS)set.add('prediction.'+key);
+  callerFailurePaths=set;
+ }
+ return callerFailurePaths.has(path);
+}
 function callerFailureIssues(failure){
  if(!isObject(failure))return [{path:'failure',code:'invalid_type'}];
  const issues=[];
@@ -2247,7 +2261,7 @@ function callerFailureIssues(failure){
    else if(p.issues.length>MAX_ISSUES)issues.push({path:'failure.preflight.issues',code:'too_many'});
    else p.issues.forEach((issue,i)=>{
     if(!isObject(issue)||Object.keys(issue).some(key=>key!=='path'&&key!=='code')){issues.push({path:'failure.preflight.issues['+i+']',code:'invalid_type'});return;}
-    if(typeof issue.path!=='string'||!CALLER_FAILURE_ISSUE_PATH.test(issue.path))issues.push({path:'failure.preflight.issues['+i+'].path',code:'invalid_ref'});
+    if(!callerFailurePathAllowed(issue.path))issues.push({path:'failure.preflight.issues['+i+'].path',code:'invalid_ref'});
     if(!ISSUE_CODES.includes(issue.code))issues.push({path:'failure.preflight.issues['+i+'].code',code:'invalid_enum'});
    });
   }

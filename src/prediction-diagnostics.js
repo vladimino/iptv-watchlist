@@ -64,7 +64,7 @@ const CALLER_CLAIM_REASONS=['preflight_validation_failed','insufficient_evidence
 function predictionDiagnosticClaim(claimed){
  if(!claimed||typeof claimed!=='object')return null;
  const reason=CALLER_CLAIM_REASONS.includes(claimed.reason)?claimed.reason:null;
- const issues=Array.isArray(claimed.preflightIssues)?claimed.preflightIssues.filter(issue=>issue&&typeof issue==='object'&&typeof issue.path==='string'&&/^(fingerprint|prediction|assessment)(\.[A-Za-z0-9_]{1,40}){0,4}$/.test(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):null;
+ const issues=Array.isArray(claimed.preflightIssues)?claimed.preflightIssues.filter(issue=>issue&&typeof issue==='object'&&callerFailurePathAllowed(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):null;
  if(!reason&&!issues)return null;
  return {provenance:'caller_claim',reason,preflightIssues:issues};
 }

@@ -28,7 +28,7 @@ const claim={kind:'parse_error',reason:'insufficient_evidence',preflight:{issues
  assert.deepEqual(queue(w).retries[pick[1]].validation.claimed,by[pick[1]].validation.claimed,'the retry record carries the claim');
  assert.equal(stored.formatFailureStreak,0,'the existing streak rule is unchanged: a created film after the failures resets it');assert.equal(stored.failures[pick[1]].kind,'parse_error');assert.equal(stored.failures[pick[1]].retryable,true);
  // replay: the identical claim, with the issues in another order, is the same identity
- const two={kind:'parse_error',reason:'preflight_validation_failed',preflight:{issues:[{path:'fingerprint.evidence',code:'too_few'},{path:'prediction.moodLabels',code:'required'}]}};
+ const two={kind:'parse_error',reason:'preflight_validation_failed',preflight:{issues:[{path:'fingerprint.evidence',code:'too_few'},{path:'prediction.moodLabels',code:'required'},{path:'fingerprint.evidence.plotMechanics.heist',code:'too_few'},{path:'assessment.sources.ref',code:'invalid_ref'}]}};
  const sw=await submit(w,m,[{filmId:pick[3],failure:two}]);assert.equal(sw.data.results[0].status,'validation_failure');
  const reordered={...two,preflight:{issues:[...two.preflight.issues].reverse()}};
  assert.equal((await submit(w,m,[{filmId:pick[3],failure:reordered}])).data.results[0].replayed,true,'canonical order: a reordered identical claim replays');
@@ -55,7 +55,12 @@ const claim={kind:'parse_error',reason:'insufficient_evidence',preflight:{issues
   {kind:'parse_error',preflight:{issues:[{path:'https://example.com/x',code:'too_few'}]}},
   {kind:'parse_error',preflight:{issues:[{path:'fingerprint.evidence',code:'made_up'}]}},
   {kind:'parse_error',preflight:{issues:[{path:'secret.thing',code:'too_few'}]}},
-  {kind:'parse_error',preflight:{issues:Array.from({length:21},(_,i)=>({path:'fingerprint.f'+i,code:'too_few'}))}},
+  {kind:'parse_error',preflight:{issues:[{path:'fingerprint.notARealField',code:'too_few'}]}},
+  {kind:'parse_error',preflight:{issues:[{path:'fingerprint.evidence.group0.claim',code:'too_few'}]}},
+  {kind:'parse_error',preflight:{issues:[{path:'fingerprint.evidence.execution.notADim',code:'too_few'}]}},
+  {kind:'parse_error',preflight:{issues:[{path:'prediction.secretField',code:'too_few'}]}},
+  {kind:'parse_error',preflight:{issues:[{path:'assessment.research.invented',code:'too_few'}]}},
+  {kind:'parse_error',preflight:{issues:Array.from({length:21},()=>({path:'fingerprint.moodLabels',code:'too_few'}))}},
  ];
  for(const failure of bad){
   const r=await submit(w,m,[{filmId:pick[0],failure}]);
@@ -63,8 +68,8 @@ const claim={kind:'parse_error',reason:'insufficient_evidence',preflight:{issues
  }
  assert.equal(Object.keys(run(w,m).submitted||{}).length,0,'nothing was recorded');assert.deepEqual(pointers(w),[]);
  const ok=await submit(w,m,[{filmId:pick[0],failure:{kind:'parse_error',reason:'json_unparseable'}}]);assert.equal(ok.status,200);assert.deepEqual(ok.data.results[0].validation.claimed,{reason:'json_unparseable'});
- const max=await submit(w,m,[{filmId:pick[1],failure:{kind:'parse_error',reason:'preflight_validation_failed',preflight:{issues:Array.from({length:20},(_,i)=>({path:'fingerprint.evidence.group'+i+'.claim',code:'too_few'}))}}}]);
- assert.equal(max.status,200);assert.equal(max.data.results[0].validation.claimed.preflightIssues.length,20);
+ const max=await submit(w,m,[{filmId:pick[1],failure:{kind:'parse_error',reason:'preflight_validation_failed',preflight:{issues:Array.from({length:20},()=>({path:'fingerprint.evidence.execution.pace',code:'too_few'}))}}}]);
+ assert.equal(max.status,200);assert.equal(max.data.results[0].validation.claimed.preflightIssues.length,1,'equal issues are deduplicated');
 }
 
 // 3. A candidate is still validated by the Worker: a claim on an item that also carries an invalid prediction does not bypass the schema, and a failure item never writes.
