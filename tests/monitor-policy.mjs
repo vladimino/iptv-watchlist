@@ -54,7 +54,6 @@ const keys=result=>result.issues.map(item=>item.key);
  // Retry backoff in the future (retryAt) is waiting even with an old last chunk.
  assert.equal(P.evaluateDiscovery({...base,lastChunkFinishedAt:at(now-8*H),continuation:rec({at:at(now-8*H),retryAt:at(now+30*MIN)})},now).state,'waiting');
  // Owner conditions and the Workflow instance.
- assert.equal(P.evaluateDiscovery({...base,executor:'invalid',continuation:null},now).state,'needs_owner');
  const quarantined=P.evaluateDiscovery({...base,executor:'workflow',readout:{stalled:false,quarantined:true},continuation:rec({nextCatchUpAt:at(now+10*MIN)})},now);
  assert.equal(quarantined.state,'needs_owner');assert.deepEqual(keys(quarantined),['discovery_quarantined']);
  const wfStalled=P.evaluateDiscovery({...base,executor:'workflow',readout:{stalled:true,quarantined:false},continuation:rec({nextCatchUpAt:at(now-20*MIN)})},now);

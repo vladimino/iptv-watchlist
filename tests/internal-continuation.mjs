@@ -27,7 +27,9 @@ async function drain(){while(background.length)await background.shift();}
 
 const origin='https://iptv.vladimino.workers.dev';
 const browserHeaders={'Content-Type':'application/json',Cookie:'CF_Authorization=browser-session','Cf-Access-Jwt-Assertion':'header.payload.signature','OAI-Sites-Authorization':'Bearer legacy-site-token'};
-const call=(path,body,{headers=browserHeaders,execution=invocation()}={})=>worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);
+const httpCall=(path,body,{headers=browserHeaders,execution=invocation()}={})=>worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);
+// AIR-325: the HTTP route only delegates now; the engine the Workflow runs is driven directly.
+const call=async(path,body,options)=>path==='/api/enrichment/discovery/resolve'&&!options?.headers?.Origin?new Response(JSON.stringify(await vm.runInContext('advanceDiscovery',context)(env,{...body,force:body?.chunks!==0}))):httpCall(path,body,options);
 const now=Date.now();
 function seed(count){
  records.clear();etags.clear();hops.length=0;fetches.length=0;puts=[];
@@ -171,7 +173,7 @@ epgResponse=()=>new Response(`<tv><channel id="c1"><display-name>Кино</displ
 fetches.length=0;const scanHops=[];
 response=await call('/api/enrichment/discovery/scan',{},{execution:invocation({loopback:async(input,init)=>{scanHops.push({url:input,body:JSON.parse(init.body)});return new Response('{}');}})});
 assert.equal(response.status,200);const scanBody=await response.json();assert.equal(scanBody.scanned,1);await drain();
-assert.equal(scanBody.discovery.state,'paused');assert.equal(scanBody.discovery.reason,'scan_committed');assert.equal(scanBody.discovery.remainingChunks,12);assert.equal(scanBody.discovery.nextAction,'continue');
+assert.equal(scanBody.discovery.state,'paused');assert.equal(scanBody.discovery.reason,'delegated');assert.equal(scanBody.discovery.remainingChunks,12);assert.equal(scanBody.discovery.nextAction,'wait');
 assert.deepEqual(scanHops,[]);assert.equal(continuation().reason,'scan_committed');assert.deepEqual(fetches,['https://epg.test/guide.xml']);
 const epgUrl=env.EPG_XML_URL;delete env.EPG_XML_URL;
 response=await call('/api/enrichment/discovery/scan',{});assert.equal(response.status,502);assert.match((await response.json()).error,/EPG_XML_URL is not configured/);
@@ -183,11 +185,11 @@ vm.runInContext("epgSync=async()=>({runId:'sync-1',stage:'complete'})",context);
 const syncHops=[];
 response=await call('/api/sync/epg',{runId:'sync-1'},{execution:invocation({loopback:async(input,init)=>{syncHops.push({url:input,body:JSON.parse(init.body),headers:Object.keys(init.headers)});return new Response('{}');}})});
 assert.equal(response.status,200);const syncBody=await response.json();await drain();
-assert.equal(syncBody.stage,'complete');assert.equal(syncBody.discovery.state,'paused');assert.equal(syncBody.discovery.reason,'epg_committed');assert.equal(syncBody.discovery.remainingChunks,12);assert.equal(syncBody.discovery.nextAction,'continue');
+assert.equal(syncBody.stage,'complete');assert.equal(syncBody.discovery.state,'paused');assert.equal(syncBody.discovery.reason,'delegated');assert.equal(syncBody.discovery.remainingChunks,12);assert.equal(syncBody.discovery.nextAction,'wait');
 assert.deepEqual(syncHops,[]);assert.equal(continuation().reason,'epg_committed');assert.deepEqual(fetches,[]);
 records.get('sync.json').stage='complete';records.get('sync.json').ratingPending=['public-films-list'];
 const discoveryStep=await (await call('/api/sync/epg',{runId:'sync-1'})).json();
-assert.equal(discoveryStep.stage,'complete');assert.equal(discoveryStep.ratingsPending,true);assert.equal(discoveryStep.discovery.state,'complete');assert.equal(discoveryStep.discovery.nextAction,'stop');
+assert.equal(discoveryStep.stage,'complete');assert.equal(discoveryStep.ratingsPending,true);assert.equal(discoveryStep.delegated,true);assert.equal(discoveryStep.discovery.nextAction,'wait');
 assert.deepEqual(fetches,[],'a discovery step does not retry Letterboxd');
 
 // Runtime contract: the bundle exports the entrypoint, ctx.exports is on by date, and no Sites credential remains in the Worker.

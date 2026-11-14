@@ -58,7 +58,6 @@ export function evaluateEpg(facts, now, {dailyDue}) {
 export function evaluateDiscovery(facts, now) {
   if (!facts || facts.error) return unreadable('discovery', 'Discovery');
   const issues = [];
-  if (facts.executor === 'invalid') issues.push(issue('discovery_executor_invalid', 'needs_owner', 'discovery', 'DISCOVERY_EXECUTOR holds an invalid value'));
   if (facts.readout?.quarantined) issues.push(issue('discovery_quarantined', 'needs_owner', 'discovery', 'The Discovery executor retry budget is exhausted and the run is quarantined'));
   const record = facts.continuation || null;
   const backlog = !!record && (record.remainingChunks > 0 || record.stage === 'running' || record.reason === 'chunk_budget');
