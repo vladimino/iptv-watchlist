@@ -2,6 +2,14 @@
 
 ADRs document durable accepted choices, not live feature flags, operational permissions or observations. See [template](template.md), [documentation governance](../README.md) and [evidence registry](../evidence/README.md).
 
+## Proposed records
+
+Pending proposals. An entry moves to the accepted table below only after the owner's explicit decision on the ADR itself.
+
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0140 — A separate Producer Workflow completes the full EPG producer pass as repeated bounded invocations of one run, in an adaptive chain of instances](0140-producer-workflow-adaptive-successor-chain.md) | **Proposed** 2026-11-14 (owner direction on [AIR-374](https://trello.com/c/ha7ais3w), not an acceptance; design only, no code, Workflow, configuration or production operation) | S-A and W3 direction; qualifies one cadence sentence of [ADR 0128](0128-epg-canonical-producer-durable-execution.md) decision 8; [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md) |
+
 ## Accepted records
 
 | ADR | Status | Decision and evidence |
