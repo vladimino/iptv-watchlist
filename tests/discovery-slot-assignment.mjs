@@ -28,8 +28,9 @@ assert.equal(slotMinutes(0,90*MIN),90);assert.equal(slotMinutes(0,0),null);
 assert.deepEqual(evidenceKeyDurations('film a|2001|90|c:1,c:2'),[90]);
 assert.deepEqual(evidenceKeyDurations('film a|2001|90,180|c:1'),[90,180]);
 assert.deepEqual(evidenceKeyDurations('a|b film|2001|90|c:1'),[90],'only the title part may contain a separator');
-assert.deepEqual(decisionAnchor({status:'verified',evidenceKey:'film a|2001|90|c:1'}),[90],'an earlier decision with one recorded duration keeps it');
-assert.deepEqual(decisionAnchor({status:'verified',evidenceKey:'film a|2001|90,180|c:1'}),[],'two recorded durations give no anchor');
+assert.deepEqual(decisionAnchor({status:'verified',identitySource:'tmdb_detail',evidenceKey:'film a|2001|90|c:1'}),[90],'an earlier decision with one recorded duration keeps it');
+assert.deepEqual(decisionAnchor({status:'verified',identitySource:'known_epg_alias',evidenceKey:'film a|2001|90|c:1'}),[],'a known_epg_alias decision never infers an anchor');
+assert.deepEqual(decisionAnchor({status:'verified',identitySource:'tmdb_detail',evidenceKey:'film a|2001|90,180|c:1'}),[],'two recorded durations give no anchor');
 assert.deepEqual(decisionAnchor({status:'verified',anchor:[96,90,90],evidenceKey:'film a|2001|90,180|c:1'}),[90,96],'a recorded anchor wins and is normalized');
 const slot=minutes=>({start:0,end:minutes*MIN});
 const verified=extra=>({status:'verified',tmdbId:'101',filmId:'f1',identitySource:'tmdb_detail',anchor:[90],...extra});
@@ -47,7 +48,7 @@ assert.equal(slotEligibility(verified({anchor:[90,96]}),slot(107)).eligible,fals
 const shows=(...items)=>items.map(([channelId,hours,minutes])=>({channelId,channel:'Channel '+channelId,start:START+hours*3600000,end:START+hours*3600000+minutes*MIN}));
 const obs=(key,extra={})=>({key,title:'Film '+key,normalizedTitle:'film '+key,year:2001,durations:[90],shows:shows(['c',1,90]),seenInLatestSnapshot:true,lastAiring:START+3600000,...extra});
 
-async function setup(items,{member=true}={}){
+async function setup(items,{member=true,sealedTmdb='101'}={}){
  const file=migrated();
  sql(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
  const env={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null};
@@ -56,6 +57,7 @@ async function setup(items,{member=true}={}){
  await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease:taken.lease,items:(async function*(){for(const item of items)yield item;})()});
  sql(file,`INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('${RUN}','published','2026-11-15T10:00:00Z','x','2026-11-15T10:00:00Z')`);
  if(member)sql(file,`INSERT INTO published_epg_member (programme_run_id, kind, ordinal, film_id) VALUES ('${RUN}','programme',0,'member-1')`);
+ if(member)sql(file,`INSERT INTO published_epg_document (programme_run_id, kind, ordinal, payload_json) VALUES ('${RUN}','programme',0,'${JSON.stringify({runId:RUN,films:[{id:'member-1',tmdbId:sealedTmdb,shows:[]}]})}')`);
  sql(file,`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
  return {file,env};
 }
@@ -186,6 +188,53 @@ const write=async(env,item,next,previous=null)=>Authority.writeDecisionDelta(env
  sql(file,"DELETE FROM published_epg_show WHERE programme_run_id='"+RUN+"'");
  sql(file,"UPDATE published_epg_authority SET programme_run_id='run-next', generation=8");
  assert.equal((await Authority.assignObservationSlots(env,{observationKey:'y'})).reason,'stale_run','the next run is not touched by the old assignment');
+ assert.equal(rows(file).length,0);
+}
+
+// 8. Review fixes: removal is scoped to the published run, follows the TMDB identity, and a member must carry the decision's TMDB id in the sealed document.
+{
+ const item=obs('h',{shows:shows(['c',1,90])});
+ const {file,env}=await setup([item]);
+ const decision=verifiedDecision(item);
+ await write(env,item,decision);
+ await Authority.assignObservationSlots(env,{observationKey:'h'});
+ sql(file,"INSERT INTO published_epg_generation (programme_run_id, phase, published_at, payload_sha256, created_at) VALUES ('run-old','published','2026-11-01T10:00:00Z','x','2026-11-01T10:00:00Z')");
+ sql(file,"INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) VALUES ('run-old','member-1','c',1,2,'C',NULL,'discovery','h')");
+ const rejected={status:'rejected',attempts:1,evidenceKey:decision.evidenceKey};
+ await write(env,item,rejected,decision);
+ assert.equal(rows(file).filter(row=>row.match_reason==='h').length,1,'only the published run loses its rows; a historical run keeps its own');
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM published_epg_show WHERE programme_run_id='run-old'")[0].n,1);
+}
+{
+ const item=obs('t');
+ const {file,env}=await setup([item]);
+ const decision=verifiedDecision(item);
+ await write(env,item,decision);
+ await Authority.assignObservationSlots(env,{observationKey:'t'});
+ assert.equal(rows(file).length,1);
+ await write(env,item,verifiedDecision(item,{tmdbId:'102',canonicalIdentity:'tmdb:102'}),decision);
+ assert.equal(rows(file).length,0,'a TMDB identity change with the same Film id removes the rows');
+ const again=verifiedDecision(item,{tmdbId:'102',canonicalIdentity:'tmdb:102'});
+ await Authority.assignObservationSlots(env,{observationKey:'t'});
+ assert.equal(rows(file).length,0,'member-1 carries TMDB 101 in the sealed document, so the 102 decision is refused');
+ void again;
+}
+{
+ const item=obs('m');
+ const {file,env}=await setup([item],{sealedTmdb:'555'});
+ await write(env,item,verifiedDecision(item));
+ const result=await Authority.assignObservationSlots(env,{observationKey:'m'});
+ assert.equal(result.reason,'film_absent');
+ assert.equal(rows(file).length,0,'a member whose sealed TMDB id differs from the decision gets no row');
+}
+{
+ const item=obs('k');
+ const {file,env}=await setup([item]);
+ const alias=verifiedDecision(item,{identitySource:'known_epg_alias'});
+ delete alias.anchor;
+ await write(env,item,alias);
+ const result=await Authority.assignObservationSlots(env,{observationKey:'k'});
+ assert.equal(result.outcomes.evidence_drift,1,'a known_epg_alias decision does not infer an anchor from its evidence key');
  assert.equal(rows(file).length,0);
 }
 

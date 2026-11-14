@@ -619,6 +619,32 @@ function verifiedAnchor(env,source,candidate,candidates,observation,movie,decisi
  }
  return anchor;
 }
+// ADR 0142 decision 15: only the R2-authority fallback of the old attach stays. Under D1 authority the guarded slot insert after the decision owns the showing and nothing
+// here writes the programme document or moves the published generation.
+async function attachWatchlistShowing(env,seenRunId,filmId,candidate,fence=null){
+ if(!await publishedGenerationMatches(env,seenRunId))return false;
+ if((await publishedPointer(env))?.authority==='d1')return true;
+ const pinned=await pinEpg(env);
+ if(pinned.epgPin?.programmeRunId&&seenRunId&&pinned.epgPin.programmeRunId!==seenRunId)return false;
+ const report=await loadJSON(pinned,'programme.json');
+ if(!report?.films||(report.runId&&seenRunId&&report.runId!==seenRunId))return false;
+ const index=report.films.findIndex(film=>String(film.id)===String(filmId));
+ if(index<0)return false;
+ const current=report.films[index],next=touchCanonicalFilm(current,candidate,seenRunId);
+ next.title=current.title;
+ if(!Object.hasOwn(current,'canonicalIdentity'))delete next.canonicalIdentity;
+ report.films[index]=next;
+ const pointer=await publishedPointer(env);
+ if(pointer?.phase==='published'&&seenRunId&&pointer.programmeRunId!==seenRunId)return false;
+ if(pointer?.phase==='published'&&pointer.programmeRunId===seenRunId){
+  if(fence)await fence();
+  await saveJSON(env,epgGenerationKey(seenRunId,'programme.json'),report);
+  const again=await publishedPointer(env);
+  if(again?.programmeRunId!==seenRunId||pointer.etag&&again.etag!==pointer.etag)return false;
+  return true;
+ }
+ if(fence)await fence();await saveJSON(env,'programme.json',report);return true;
+}
 async function resolveDiscoveryBatch(env,report,limit=24){
  if(!env.TMDB_API_READ_ACCESS_TOKEN)return {stage:'missing_secret',checked:0,remaining:null};
  const lease=await acquireDiscoveryLease(env);if(!lease)return {stage:'busy',checked:0,remaining:null};
@@ -821,8 +847,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     else if(gate.outcome==='detail_verified'){
      const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
      if(knownTmdb.has(String(movie.id))){
-      // A Film already on the watchlist takes its slots through the guarded insert after the decision, never by rewriting the programme.
-      if(!await publishedGenerationMatches(env,source.programmeRunId))return programmeChanged();
+      if(!await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence)||!await publishedGenerationMatches(env,source.programmeRunId))return programmeChanged();
      }else{
       const old=films[id];
       films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);
@@ -981,7 +1006,8 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
    else if(gate.outcome==='detail_verified'){
     const id=knownTmdb.get(String(movie.id))||'tmdb_'+movie.id;
     let saved=true;
-    if(!knownTmdb.has(String(movie.id))){
+    if(knownTmdb.has(String(movie.id)))saved=await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence);
+    else{
      const old=films[id];if(!old)added++;
      if(streamed&&!movie.overview&&candidate.description===undefined)candidate.description=await ledgerDescription(pinned,candidate.key)??undefined;
      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}

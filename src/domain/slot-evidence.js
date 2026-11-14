@@ -43,6 +43,7 @@ export function evidenceKeyDurations(evidenceKey){
 export function decisionAnchor(decision){
  if(!decision||typeof decision!=='object')return [];
  if(Array.isArray(decision.anchor))return normalizedDurations(decision.anchor);
+ if(decision.identitySource!=='tmdb_detail')return [];
  const recorded=evidenceKeyDurations(decision.evidenceKey);
  return recorded.length===1?recorded:[];
 }
