@@ -150,6 +150,7 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  beforeBatch=()=>{db.sql("UPDATE published_epg_authority SET programme_run_id='run-2' WHERE id=1");};
  const raced=await take(env,{programmeRunId:'run-1'});
  assert.equal(raced.lease,null,'the override cannot lease a run the pointer no longer names');
+ assert.equal(raced.busy.kind,'generation_mismatch','a stale programme is the hard stale-generation fence, not a soft lost_race');
  assert.equal(leaseRow(db).leaseId,null);
 }
 // (3) Published fence: yesterday published and pinned for run-1; both move to run-2 between the pre-read and the UPDATE. A request for run-1 is not admitted for run-2's pointer.
@@ -160,6 +161,8 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  beforeBatch=()=>{db.sql("UPDATE published_epg_authority SET programme_run_id='run-2' WHERE id=1");db.sql("UPDATE discovery_authority SET programme_run_id='run-2', published_programme_run_id='run-2' WHERE id=1");};
  const raced=await take(env,{programmeRunId:'run-1'});
  assert.equal(raced.lease,null,'a stale programme id is refused by the statement itself');
+ assert.equal(raced.busy.kind,'generation_mismatch','ordinary publication: stale_generation, not lost_race');
+ assert.notEqual(raced.busy.kind,'lost_race');
 }
 // (4) The lease-free writers carry the same bound clock and id: a continuation for a stale programme, or across the boundary, is refused inside its own statement.
 {
@@ -502,9 +505,10 @@ assert.equal(DISCOVERY_EPG_PRIORITY_POLL_MS,60000);
  assert.match(worker,/takeDiscoveryLease\(env,'epg'\)/,'the publication paths take the lease as the EPG role');
  assert.equal([...worker.matchAll(/takeDiscoveryLease\(env[^)]*\)/g)].length,1,'only the publication helper takes the lease in the Worker');
  // Inert boundary (review of #605): nothing keyed on the pause is live while the table is absent. The structured EPG busy, the frozen `runKey` and the pointer stamp all wait for the table.
- assert.match(worker,/\(taken\.busy\?\.kind==='lease_held'\|\|taken\.busy\?\.kind==='lost_race'\)&&await epgPausePresent\(env\)\)throw new ResolverBusy/);
- assert.match(worker,/await epgPausePresent\(env\)\?\{runKey:OrchestrationPolicy\.madridDayKey/);
- assert.match(worker,/typeof EpgPriorityPause==='undefined'\|\|!await epgPausePresent\(env\)\)return null/);
+ assert.match(worker,/\(taken\.busy\?\.kind==='lease_held'\|\|taken\.busy\?\.kind==='lost_race'\)&&await epgPausePresence\(env\)===true\)throw new ResolverBusy/);
+ assert.match(worker,/const pausePresent=await requirePausePresence\(env\);/);
+ assert.match(worker,/pausePresent\?\{runKey:OrchestrationPolicy\.madridDayKey/);
+ assert.match(worker,/typeof EpgPriorityPause==='undefined'\|\|!await requirePausePresence\(env\)\)return null/);
  assert.match(fs.readFileSync('src/published-epg.js','utf8'),/const paused=stage\.phase==='published'&&stage\.pausePresent===true/);
  const admin=fs.readFileSync('src/admin/discovery-recovery.js','utf8');
  assert.doesNotMatch(admin,/acquireDiscoveryLease\(env,'epg'\)/,'admin and manual paths are Discovery, never `epg`');

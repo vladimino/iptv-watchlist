@@ -13,6 +13,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import * as Authority from '../src/discovery-authority.js';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
+import {scopedEpgPriority} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -240,6 +241,46 @@ await Authority.releaseProjectorWindow(env,{owner:'p1'});
  const answer=await call('windowBusyResponse')({runId:'run-1',stage:'epg',remaining:0,failures:[]},{kind:'lease_held',expiresAt:holderUntil});
  assert.equal(answer.discovery.nextAction,'wait');assert.equal(answer.discovery.busyKind,'lease_held');assert.equal(answer.failures,0);
  assert.ok(Date.parse(answer.discovery.nextCatchUpAt)<=Date.now()+Authority.LEASE_TTL_MS+5000);
+}
+
+// 4. Unreadable presence is not absence (review of #605). Schema 22 with the authority read failing: no new run is started and no publication stamps a NULL day; the structured busy is not
+// invented either. Schema 21 (verified absent) keeps going exactly as before: no presence error and no `runKey` on a run.
+{
+ const all=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+ const build=(name,upTo)=>{
+  const f=path.join(root,name);
+  const made=sqliteSync(['-bail',f],{input:'PRAGMA foreign_keys=ON;\n'+all.filter(n=>Number(n.slice(0,4))<=upTo).map(n=>fs.readFileSync('migrations/'+n,'utf8')).join('\n'),encoding:'utf8'});
+  if(made.status!==0)throw new Error(made.stderr||'migration failed');
+  return f;
+ };
+ vm.runInContext(scopedEpgPriority(),context);// the bundle carries the pause contract; the offline loader does not
+ let failing=false;
+ const faulty=f=>d1Standin(f,{rewrite:sql=>failing&&/FROM schema_contract/.test(sql)?'SELEC broken':sql});
+ const f22=build('e22-fault.sqlite',22);
+ const db22=faulty(f22);
+ db22.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
+ const bucket22=new MemoryBucket();
+ const env22={DB:db22,BUCKET:bucket22,discoveryLease:null};
+ failing=true;
+ const before=fetches;
+ await assert.rejects(()=>call('beginSync')(env22),error=>error.code==='epg_priority_presence_unreadable'&&error.status===503,'beginSync fails closed on an unreadable presence');
+ assert.equal(await bucket22.get('sync.json'),null,'no run was persisted without its frozen key');
+ assert.equal(await bucket22.get('watchlist-ingest.json'),null,'the failure is not recorded as a watchlist failure');
+ assert.equal(fetches,before,'the source was not fetched');
+ await assert.rejects(()=>call('publicationRunKey')(env22,{runId:'run-1',runKey:'2026-11-13'},'run-1'),error=>error.code==='epg_priority_presence_unreadable','no publication stamps a NULL day on an unreadable presence');
+ failing=false;
+ // Readable and present: the frozen day is stamped for the run it belongs to, and for no other run.
+ assert.equal(await call('publicationRunKey')(env22,{runId:'run-1',runKey:'2026-11-13'},'run-1'),'2026-11-13');
+ assert.equal(await call('publicationRunKey')(env22,{runId:'run-0',runKey:'2026-11-13'},'run-1'),null,'another run\'s key is never stamped');
+ // Schema 21, verified absent: today's behaviour. No presence error, no frozen key, no stamp.
+ const db21=faulty(build('e21-inert.sqlite',21));
+ db21.sql("UPDATE discovery_authority SET mode='d1', cutover='open', programme_run_id='run-1', published_programme_run_id='run-1' WHERE id=1");
+ const bucket21=new MemoryBucket();
+ const env21={DB:db21,BUCKET:bucket21,discoveryLease:null};
+ failing=false;// a healthy read of a v21 database is the VERIFIED absence; only an unreadable answer is unknown
+ await assert.rejects(()=>call('beginSync')(env21),error=>error.code!=='epg_priority_presence_unreadable','schema 21 does not stop on the presence read: it goes on to the source fetch as before');
+ assert.equal(await call('publicationRunKey')(env21,{runId:'run-1',runKey:'2026-11-13'},'run-1'),null,'schema 21 stamps nothing');
+ failing=false;
 }
 
 console.log('Projector window, EPG and Workflow (ADR 0103): the three publication paths raise one typed busy for a window and keep the generic error for any other missing lease; the sync step answers a structured non-failure busy to the absolute deadline before any heavy work and without persisting an error; the seal step does the same with its own kind and no TTL cap; the executor reads the answer as a wait; the Workflow state write is refused softly with no stall or recovery charge');

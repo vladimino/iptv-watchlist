@@ -1386,7 +1386,12 @@ export async function acquireLease(env,context={}){
   if(paused){
    let again=decision;
    if(again.admit){try{again=discoveryAdmission(await readPriorityFacts(env,nowMs(),context));}catch{again=null;}}
-   if(again&&again.reason==='epg_priority')return {handled:true,lease:null,busy:await priorityBusy(env,gate,again,nowMs())};
+   // A hard conflict is never softened to contention: a request for a programme the pointer no longer names is the stale-generation fence (ADR 0135 decision 6), also under an
+   // override, and unreadable evidence fails closed. Both are decided before `lease_held` / `lost_race`.
+   if(again==null)throw failed('discovery_epg_priority_evidence');
+   if(again.reason==='stale_generation')return {handled:true,lease:null,busy:{kind:'generation_mismatch',expiresAt:null}};
+   if(!again.admit&&again.reason!=='epg_priority')throw failed('discovery_epg_priority_evidence');
+   if(again.reason==='epg_priority')return {handled:true,lease:null,busy:await priorityBusy(env,gate,again,nowMs())};
   }
   // ADR 0103: a requested or held window is its own, typed, absolute-deadline busy; the caller waits until then.
   if(gate.windowTable){
