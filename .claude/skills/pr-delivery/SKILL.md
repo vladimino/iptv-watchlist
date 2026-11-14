@@ -49,3 +49,7 @@ Research evidence: <yes or no>
 ```
 
 Keep the lines even when a tool appends its own footer after them; position in the body does not matter, the shape does. Check the three lines once more before `create_pull_request` or `update_pull_request`; the full policy is in [documentation governance](../../../docs/process/documentation-governance.md).
+
+## After the PR exists: subscribe in the same turn
+
+Opening the PR is not the end of delivery. Without asking, call `subscribe_github_pr` with `{"options":{"scope":"pr","prUrl":"<PR URL>"}}` and `subscribe_github_ci` with `{"options":{"scope":"branch","repo":"owner/name","branch":"<branch>"}}` (`repo` is required; omitting it fails validation). Then state what you are waiting for and end the turn. See [agent workflow](../../../docs/process/agent-workflow.md#executor-opens-the-pr-and-subscribes-without-asking).
