@@ -1,3 +1,4 @@
+import {engineStep} from './support/engine-step.mjs';
 // A step invocation that the platform ends without a response (for example `exceededMemory`) runs no further
 // code: no catch, no outcome write, no lease release. These cases model that by a storage write that never
 // settles, so the step after it never runs, and check what the next explicit step and the read-only views do:
@@ -37,7 +38,8 @@ const execution={waitUntil(){}};
 const origin='https://iptv.vladimino.workers.dev',headers={'Content-Type':'application/json'};
 const post=async(path,body)=>{const response=await worker.fetch(new Request(origin+path,{method:'POST',headers,body:JSON.stringify(body)}),env,execution);return {status:response.status,data:await response.json()};};
 const status=async()=>(await worker.fetch(new Request(origin+'/api/enrichment/pipeline/status'),env,execution)).json();
-const step=()=>post('/api/sync/epg',{runId:'sync-1'});
+const step=engineStep(context,env);
+const resolve=body=>engineStep(context,env,{route:'/api/enrichment/discovery/resolve',runId:null,extra:{...body,force:body.chunks!==0}})();
 // Starts a step that is killed at the selected write: the returned promise never settles, as for a killed invocation.
 async function killedStep(at){hang=at;const dead=step();dead.catch(()=>{});for(let i=0;i<200&&hang;i++)await new Promise(resolve=>setTimeout(resolve,0));assert.equal(hang,null,'the step reached the write it dies at');return {dead};}
 const iso=ms=>new Date(ms).toISOString();
@@ -127,7 +129,7 @@ assert.equal(continuation().stage,'running');assert.equal(ring()[0].phase,'enter
 clockTime+=LATER;
 pipeline=await status();
 assert.equal(pipeline.continuationHealth.status,'orphaned');assert.equal(pipeline.continuationHealth.chunkCompleted,false);assert.equal(pipeline.continuationHealth.interruptions,0);
-let report=(await post('/api/enrichment/discovery/resolve',{chunks:0})).data;
+let report=(await resolve({chunks:0})).data;
 assert.equal(report.discovery.reason,'orphaned');assert.equal(report.discovery.nextAction,'continue');
 const decisionsBefore=decided();
 await killedStep(finalStatus);
@@ -141,7 +143,7 @@ assert.equal(firstClosed.error,null);
 clockTime+=LATER;
 pipeline=await status();
 assert.equal(pipeline.continuationHealth.status,'orphaned');assert.equal(pipeline.continuationHealth.interruptions,1);
-report=(await post('/api/enrichment/discovery/resolve',{chunks:0})).data;
+report=(await resolve({chunks:0})).data;
 assert.equal(report.discovery.state,'running');assert.equal(report.discovery.reason,'interrupted');assert.equal(report.discovery.nextAction,'stop','the read-only report already says stop');
 const leaseBefore=plain(records.get('epg/resolver-lease.json')),decidedBefore=decided();puts=[];
 r=await step();
@@ -160,7 +162,7 @@ pipeline=await status();assert.equal(pipeline.continuation.reason,'interrupted')
 assert.equal(call('discoveryContract')({stage:'paused',reason:'interrupted',remainingChunks:12}).nextAction,'stop');
 
 // 7. An owner-forced resolve (HTTP, outside the schedule) runs the chunk; its checkpoint drops the count.
-r=await post('/api/enrichment/discovery/resolve',{});
+r=await resolve({});
 assert.equal(r.status,200);assert.equal(r.data.diagnostic.decision.force,true);assert.equal(r.data.diagnostic.branch,'chunk');
 assert.equal(continuation().stage,'paused');assert.equal(continuation().reason,null);assert.equal(continuation().interruptions,undefined);assert.equal(decided(),decidedBefore+CHUNK);
 

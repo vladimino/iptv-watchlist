@@ -1,3 +1,4 @@
+import {engineStep} from './support/engine-step.mjs';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -51,6 +52,11 @@ const worker=context.worker,entrypoint=vm.runInContext('DiscoveryContinuation',c
 const execution={waitUntil(){},exports:{DiscoveryContinuation:{async fetch(){return Response.json({ok:true});}}}};
 const baseEnv=()=>({BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:TOKEN,TMDB_REQUEST_INTERVAL_MS:0,MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD});
 async function http(path,method,payload,env=baseEnv()){
+ // AIR-325: the HTTP step only delegates; the chunk engine and its diagnostics are driven the way the retired external step drove them.
+ if(path==='/api/sync/epg'&&method==='POST'&&payload?.runId===RUN&&records.get('sync.json')?.stage==='complete'){
+  try{const result=await engineStep(context,env,{runId:RUN})();return {status:result.status,body:result.data};}
+  catch(error){return {status:502,body:{error:error.message}};}
+ }
  const response=await worker.fetch(new Request(SITE+path,{method,headers:{'Content-Type':'application/json'},body:payload===undefined?undefined:JSON.stringify(payload)}),env,execution);
  return {status:response.status,body:await response.json()};
 }
@@ -269,9 +275,9 @@ assertSanitized('mcp mismatch');
 seed();
 const viaMcp=await mcp('epg_sync_step',{runId:RUN});
 assert.equal(viaMcp.isError,undefined,JSON.stringify(viaMcp));
-assert.equal(viaMcp.structuredContent.diagnostic.branch,'chunk');
+assert.equal(viaMcp.structuredContent.delegated,true);assert.equal(viaMcp.structuredContent.discovery.reason,'delegated');
 assert.equal(diag().recent[0].caller,'mcp');
-assert.equal(diag().recent[0].branch,'continuation');
+assert.equal(diag().recent[0].branch,'delegated');
 assertSanitized('mcp chunk');
 
 // 10. A metadata step is logged but not persisted: the ring buffer is for the continuation boundary.
@@ -310,7 +316,8 @@ assert.equal((await http('/api/enrichment/pipeline/status','GET')).body.continua
 
 // 13. The HTTP resolve route and the internal entrypoint record their own callers and routes.
 seed();
-const resolve=await http('/api/enrichment/discovery/resolve','POST',{});
+const resolve=await engineStep(context,baseEnv(),{route:'/api/enrichment/discovery/resolve',runId:null,branch:'resolve',extra:{force:true}})();
+resolve.body=resolve.data;
 assert.equal(resolve.status,200);
 assert.equal(resolve.body.diagnostic.branch,'chunk');
 assert.equal(resolve.body.diagnostic.decision.force,true);
@@ -320,8 +327,8 @@ assert.equal(diag().recent[0].branch,'resolve');
 assert.equal(diag().recent[0].runId,null);
 assert.equal(diag().recent[0].runIdShape,null);
 seed();
-const internal=await entrypoint.fetch(new Request(continuationUrl,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chunks:0})}),baseEnv(),execution);
-const internalBody=await internal.json();
+const internal=await engineStep(context,baseEnv(),{route:'/api/enrichment/discovery/resolve',runId:null,caller:'internal',branch:'resolve',extra:{chunks:0,force:false}})();
+const internalBody=internal.data;
 assert.equal(internal.status,200);
 assert.equal(internalBody.diagnostic.branch,'report_only');
 assert.equal(diag().recent[0].caller,'internal');
