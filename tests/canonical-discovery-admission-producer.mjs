@@ -382,7 +382,7 @@ for(const stage of ['legacy','r2','prepared']){
   const file=database(stage);
   assert.equal(sqlite(file,"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1").status,0);
   const env={...envOf(file),BUCKET:new MemoryBucket(),discoveryLease:null};
-  const taken=await Authority.acquireLease(env,{programmeRunId:null});
+  const taken=await Authority.acquireLease(env,{programmeRunId:null,role:'epg'});
   env.discoveryLease=taken.lease;
   await Authority.ingestLedger(env,{programmeRunId:'run-hook',handoff:true,lease:taken.lease,items:(async function*(){yield obs;})()});
   return {file,env,lease:taken.lease};

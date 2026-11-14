@@ -182,7 +182,7 @@ const tamperedFile=path.join(privateRoot,'tampered.json');fs.writeFileSync(tampe
  const done=await live.run({command:'schema',apply:true,confirm:live.CONFIRM.schema,env:env(),fetchImpl:d.fetchImpl,store});
  assert.deepEqual(done.applied,[...production,...diagnostic]);assert.equal(d.writes(),production.length+diagnostic.length,'one request per file');
  assert.equal(done.assess.ok,true,'the domain is in the state `provision` requires: '+JSON.stringify(done.assess));assert.ok(done.database.tables>100);
- assert.equal(sqlRows(d.file,'SELECT version FROM schema_contract')[0].version,21,'the diagnostic database holds the whole chain of the repository (a database of its own: production stays at its own version)');
+ assert.equal(sqlRows(d.file,'SELECT version FROM schema_contract')[0].version,22,'the diagnostic database holds the whole chain of the repository (a database of its own: production stays at its own version)');
  const sizeBefore=d.log.length;
  const again=await failure(()=>live.run({command:'schema',apply:true,confirm:live.CONFIRM.schema,env:env(),fetchImpl:d.fetchImpl,store}));
  assert.equal(again?.exitCode,3,'a second apply is refused');assert.equal(d.writes(),production.length+diagnostic.length,'and writes nothing');void sizeBefore;

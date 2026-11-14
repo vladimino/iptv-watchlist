@@ -33,7 +33,7 @@ const DISCOVERY_REPORT_COUNTERS=['checked','added','reused','screenedOut','touch
 const DISCOVERY_REPORT_SEEN_LIMIT=16;
 const DISCOVERY_REPORT_OUTBOX_LIMIT=64;
 const DISCOVERY_REPORT_CLOSE_ATTEMPTS=3;
-const DISCOVERY_REPORT_BLOCKED=new Set(['authority_held','authority_loading','authority_not_ready','generation_unpublished','generation_handoff','d1_unavailable','projector_window','write_conflict','intent_uncertain','intent_unconfirmed','stale_generation','workflow_unavailable','invalid','events_outbox_full']);
+const DISCOVERY_REPORT_BLOCKED=new Set(['authority_held','authority_loading','authority_not_ready','generation_unpublished','generation_handoff','d1_unavailable','projector_window','epg_priority','write_conflict','intent_uncertain','intent_unconfirmed','stale_generation','workflow_unavailable','invalid','events_outbox_full']);
 // The legacy status map of the per-chain events written before the hourly model; read only to deliver a legacy entry that was still pending.
 const DISCOVERY_TICK_STATUS={complete:'finished',backlog_empty:'finished',stale_generation:'superseded',recovery_exhausted:'failed',executor_not_workflow:'stopped'};
 function discoveryHourStamp(ms){return new Date(ms).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}Z$/,'Z').slice(0,11);}
@@ -377,9 +377,17 @@ async function writeWorkflowState(env,record,etag){
 // refusal into a value, never into a step failure: nothing is written, no stall or recovery budget is charged, and the caller
 // sleeps until the window's absolute expiry (the one deadline the window was granted with; a missing expiry waits a short fixed time).
 const WINDOW_WAKE_FALLBACK_MS=10000,WINDOW_WAKE_CAP_MS=330000,WINDOW_RETRY_LIMIT=24,WRITE_CONFLICT_RETRY_LIMIT=3,RECONCILE_WINDOW_ATTEMPTS=3;
+// ADR 0135 (AIR-459): the EPG-priority pause refuses the same state writes. It is the same kind of answer as a held window: a soft, typed refusal with a wake time (the
+// 60 s poll, which never lifts the pause), no stall or recovery budget, no instance. Its reason is `epg_priority`, never `projector_window`.
+const isWindowBusy=reason=>reason==='projector_window'||reason==='epg_priority';
+const priorityWindow=error=>{const at=Date.parse(error?.priority?.nextCatchUpAt);return {expiresAt:Number.isFinite(at)?at:Date.now()+60000,state:'epg_priority',ownerKind:error?.priority?.ownerKind??'none',owedDayKey:error?.priority?.owedDayKey??null};};
 async function writeWorkflowStateSoft(env,record,etag){
- try{return {saved:await writeWorkflowState(env,record,etag),windowBusy:false,window:null};}
- catch(error){if(error?.code==='discovery_window')return {saved:false,windowBusy:true,window:error.window||{expiresAt:null,state:null}};throw error;}
+ try{return {saved:await writeWorkflowState(env,record,etag),windowBusy:false,priorityBusy:false,window:null};}
+ catch(error){
+  if(error?.code==='discovery_window')return {saved:false,windowBusy:true,priorityBusy:false,window:error.window||{expiresAt:null,state:null}};
+  if(error?.code==='discovery_epg_priority')return {saved:false,windowBusy:false,priorityBusy:true,window:priorityWindow(error)};
+  throw error;
+ }
 }
 function windowWakeAt(source,now=Date.now()){
  const at=Number(source?.window?.expiresAt??source?.windowUntil);
@@ -476,7 +484,7 @@ async function settleWorkflowIfOwner(env,ownId,patch){
  // ADR 0103: a held projector window refuses this state write inside its own statement. That is a soft, typed refusal with an
  // expiry, not a step failure: nothing is written, no stall or recovery budget is charged, and the caller carries on to its sleep.
  try{if(await writeWorkflowState(env,next,state.etag))return {saved:true,reason:null,record:next};}
- catch(error){if(error?.code==='discovery_window')return {saved:false,reason:'projector_window',window:error.window||null,record:state.record};throw error;}
+ catch(error){if(error?.code==='discovery_window')return {saved:false,reason:'projector_window',window:error.window||null,record:state.record};if(error?.code==='discovery_epg_priority')return {saved:false,reason:'epg_priority',window:priorityWindow(error),record:state.record};throw error;}
  state=await readWorkflowState(env);
  if(state.record?.instanceId&&state.record.instanceId!==ownId)return {saved:false,reason:'other_instance',record:state.record};
  return {saved:false,reason:'write_conflict',record:state.record};
@@ -531,6 +539,7 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  const next={schemaVersion:1,...(same?previous:{}),...carry,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
  const first=await writeWorkflowStateSoft(env,next,etag);
  if(first.windowBusy)return {started:false,reason:'projector_window',windowUntil:first.window.expiresAt??null,programmeRunId,instanceId,series};
+ if(first.priorityBusy)return {started:false,reason:'epg_priority',windowUntil:first.window.expiresAt,programmeRunId,instanceId,series};
  let wrote=first.saved;
  if(!wrote){
   const state=await readWorkflowState(env);
@@ -594,6 +603,8 @@ function workflowAdmissionError(error){
  if(code==='discovery_incomplete'||code==='authority_loading')return 'authority_loading';
  // ADR 0103: a held projector window refuses the state write; the hourly reconcile simply tries again after its deadline.
  if(code==='discovery_window')return 'projector_window';
+ // ADR 0135: the pause is a wait, not an authority or D1 fault.
+ if(code==='discovery_epg_priority')return 'epg_priority';
  return 'd1_unavailable';
 }
 async function ensureDiscoveryWorkflow(env){
@@ -620,7 +631,7 @@ async function ensureDiscoveryWorkflow(env){
    if(gate.action==='arm'){
     const failure=workflowFailure(current.recovery,current.reason||'stopped',Date.now());
     const next={...current,reason:failure.quarantined?'recovery_exhausted':current.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
-    {const w=await writeWorkflowStateSoft(env,next,state.etag);if(w.windowBusy)return {started:false,reason:'projector_window',windowUntil:w.window.expiresAt??null,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(!w.saved)return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};}
+    {const w=await writeWorkflowStateSoft(env,next,state.etag);if(w.windowBusy)return {started:false,reason:'projector_window',windowUntil:w.window.expiresAt??null,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(w.priorityBusy)return {started:false,reason:'epg_priority',windowUntil:w.window.expiresAt,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(!w.saved)return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};}
     return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
    }
    const series=(current.series||0)+1;
@@ -628,7 +639,7 @@ async function ensureDiscoveryWorkflow(env){
   }
   const series=0;
   return createWorkflowInstance(env,programmeRunId,series,discoveryInstanceId(programmeRunId,series),state.etag,null);
- }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:{})};}
+ }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:error?.code==='discovery_epg_priority'?{windowUntil:priorityWindow(error).expiresAt}:{})};}
 }
 async function reconcileDiscoveryWorkflowAttempt(env,options={}){
  try{
@@ -646,7 +657,7 @@ async function reconcileDiscoveryWorkflowAttempt(env,options={}){
   if(status==='complete'||status==='errored'||status==='terminated'){
    const failure=workflowFailure(current.recovery,'instance_'+status,Date.now());
    const next={...current,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':failure.reason,recovery:failure,updatedAt:new Date().toISOString(),waitingUntil:failure.dueAt};
-   {const w=await writeWorkflowStateSoft(env,next,state.etag);if(w.windowBusy)return {started:false,reason:'projector_window',windowUntil:w.window.expiresAt??null,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(!w.saved)return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};}
+   {const w=await writeWorkflowStateSoft(env,next,state.etag);if(w.windowBusy)return {started:false,reason:'projector_window',windowUntil:w.window.expiresAt??null,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(w.priorityBusy)return {started:false,reason:'epg_priority',windowUntil:w.window.expiresAt,programmeRunId,instanceId:current.instanceId,series:current.series??0};if(!w.saved)return {started:false,reason:'write_conflict',programmeRunId,instanceId:current.instanceId,series:current.series??0};}
    return {started:false,reason:failure.quarantined?'recovery_exhausted':'recovery_waiting',programmeRunId,instanceId:current.instanceId,series:current.series??0,dueAt:failure.dueAt};
   }
   if(current.phase==='uncertain'||status==='absent'){
@@ -658,7 +669,7 @@ async function reconcileDiscoveryWorkflowAttempt(env,options={}){
   return {started:false,reason:'in_progress',programmeRunId,instanceId:current.instanceId,series:current.series??0};
  }
  return ensureDiscoveryWorkflow(env);
- }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:{})};}
+ }catch(error){return {started:false,reason:workflowAdmissionError(error),...(error?.code==='discovery_window'?{windowUntil:error.window?.expiresAt??null}:error?.code==='discovery_epg_priority'?{windowUntil:priorityWindow(error).expiresAt}:{})};}
 }
 // AIR-428: a scheduled firing retries a projector-window refusal in the same tick, after the window's one expiry.
 // An unscheduled caller still returns the typed refusal immediately. Each attempt, including a refusal, is logged;
@@ -694,7 +705,7 @@ async function stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks){
   if(recovery.quarantined)finalReason='recovery_exhausted';
  }
  const settled=await settleWorkflowIfOwner(env,ownId,{phase:'stopped',reason:finalReason,programmeRunId:pinned,series,chunksThisInstance:chunks,waitingUntil:recovery?.dueAt||null,recovery});
- return {stopped:true,reason:finalReason,chunks,instanceId:ownId,settled:settled?.saved===true,settleReason:settled?.reason||null,...(settled?.reason==='projector_window'?{windowUntil:settled.window?.expiresAt??null}:{})};
+ return {stopped:true,reason:finalReason,chunks,instanceId:ownId,settled:settled?.saved===true,settleReason:settled?.reason||null,...(isWindowBusy(settled?.reason)?{windowUntil:settled.window?.expiresAt??null}:{})};
 }
 // AIR-364 (ADR 0098). Arms the recovery of a recognised step failure and proves what was persisted. The write is one expected-etag CAS
 // of the whole record; a lost CAS re-reads and recomputes from the fresh record (at most three times), so the attempt counter moves
@@ -710,6 +721,7 @@ async function armStepFailureRecovery(env,ownId,series,pinned,chunks){
   const next={schemaVersion:1,...record,programmeRunId:pinned,series,instanceId:ownId,phase:'stopped',reason:failure.quarantined?'recovery_exhausted':'step_failure',chunksThisInstance:chunks,waitingUntil:failure.dueAt,recovery:failure,updatedAt:new Date().toISOString()};
   const w=await writeWorkflowStateSoft(env,next,state.etag);
   if(w.windowBusy)return {armed:false,reason:'projector_window',windowUntil:w.window.expiresAt??null};
+  if(w.priorityBusy)return {armed:false,reason:'epg_priority',windowUntil:w.window.expiresAt};
   if(w.saved)return {armed:true,quarantined:failure.quarantined===true,dueAt:failure.dueAt,attempts:failure.attempts};
  }
  return {armed:false,reason:'write_conflict'};
@@ -765,16 +777,16 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
    if(++conflicts>=WRITE_CONFLICT_RETRY_LIMIT||steps>=DISCOVERY_WORKFLOW_STEP_CAP)return {kind:'deferred',cause:'conflict',result:last};
   }
  };
- const settleKind=result=>result?.saved===true?'saved':result?.reason==='projector_window'?'window':result?.reason==='other_instance'?'lost':'conflict';
+ const settleKind=result=>result?.saved===true?'saved':isWindowBusy(result?.reason)?'window':result?.reason==='other_instance'?'lost':'conflict';
  const deferredExit=(reason,cause,extra={})=>({stopped:true,deferred:true,reason:cause==='window'?'window_'+reason:reason+'_write_conflict',chunks,instanceId:ownId,...extra});
  const finish=async(prefix,reason)=>{
-  const done=await persist(prefix,()=>stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks),result=>result?.settled===true?'saved':result?.settleReason==='projector_window'?'window':result?.settleReason==='other_instance'?'lost':'conflict');
+  const done=await persist(prefix,()=>stopOwnedWorkflow(env,ownId,reason,pinned,series,chunks),result=>result?.settled===true?'saved':isWindowBusy(result?.settleReason)?'window':result?.settleReason==='other_instance'?'lost':'conflict');
   if(done.kind==='deferred')return deferredExit('stop_unsaved',done.cause,{intended:reason});
   const {stopped,reason:final,chunks:count,instanceId}=done.result;
   return {stopped,reason:final,chunks:count,instanceId};
  };
  const recoverAfterStepFailure=async()=>{
-  const arming=await persist('recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks),result=>result?.armed===true?'saved':result?.reason==='projector_window'?'window':result?.reason==='not_owner'?'lost':'conflict_final');
+  const arming=await persist('recover-arm',()=>armStepFailureRecovery(env,ownId,series,pinned,chunks),result=>result?.armed===true?'saved':isWindowBusy(result?.reason)?'window':result?.reason==='not_owner'?'lost':'conflict_final');
   // The arming step already retries its own lost compare-and-swap three times (ADR 0098): a further conflict is the existing, explicit stop.
   if(arming.kind==='deferred'&&arming.cause==='conflict')return {stopped:true,reason:'recovery_write_conflict',chunks,instanceId:ownId};
   if(arming.kind==='deferred')return deferredExit('recovery_unarmed',arming.cause);
@@ -792,7 +804,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     if(!admitted.ok)return {done:true,started:false,reason:admitted.reason};
     if(admitted.programmeRunId!==pinned)return {done:true,started:false,reason:'stale_generation'};
     const outcome=await ensureDiscoveryWorkflow(env);
-    return {done:outcome.reason!=='recovery_waiting'&&outcome.reason!=='projector_window',started:outcome.started===true,reason:outcome.reason||null,until:outcome.reason==='projector_window'?windowWakeAt(outcome):null};
+    return {done:outcome.reason!=='recovery_waiting'&&!isWindowBusy(outcome.reason),started:outcome.started===true,reason:outcome.reason||null,until:isWindowBusy(outcome.reason)?windowWakeAt(outcome):null};
    });
    if(woke.done)return {stopped:true,reason:woke.started?'recovered':(woke.reason||'recovery_stopped'),chunks,instanceId:ownId};
    if(woke.until)await step.sleepUntil(stepName('window-sleep'),new Date(woke.until));
@@ -811,7 +823,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     if(plan.action==='wait'){
      const until=Number.isFinite(plan.until)?plan.until:Date.now()+1000;
      const settledWait=await doStep('wait',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:plan.reason,waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
-     await step.sleepUntil(stepName('sleep'),new Date(settledWait?.reason==='projector_window'?Math.max(until,windowWakeAt(settledWait)):until));
+     await step.sleepUntil(stepName('sleep'),new Date(isWindowBusy(settledWait?.reason)?Math.max(until,windowWakeAt(settledWait)):until));
      continue;
     }
     if(plan.action==='renew'){
@@ -826,7 +838,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     if(plan.action==='rollover'){
      const rolled=await doStep('rollover',async()=>{const owned=await workflowOwnerGate(env,ownId,series);if(!owned.owned)return {started:false,reason:'not_owner'};return rolloverDiscoveryWorkflow(env,pinned,series);});
      if(rolled.reason==='not_owner')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
-     if(rolled.reason==='projector_window'){await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(rolled)));continue;}
+     if(isWindowBusy(rolled.reason)){await step.sleepUntil(stepName('window-sleep'),new Date(windowWakeAt(rolled)));continue;}
      if(!rolled.started)await finish('rollover-stop','rollover_uncertain');
      return {stopped:true,reason:rolled.started?'rollover':'rollover_uncertain',chunks,instanceId:ownId,successor:rolled};
     }
@@ -837,8 +849,8 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
      const settledBusy=await doStep('busy',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
      // ADR 0103: a busy checkpoint refused by a held projector window waits for that window's one expiry (capped like every window wait), not for the
      // hourly gate the busy chunk carries in `until`. A refusal that names no readable deadline keeps the later of `until` and the fallback, as before.
-     const windowKnown=settledBusy?.reason==='projector_window'&&Number.isFinite(Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil))&&Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil)>0;
-     await step.sleepUntil(stepName('busy-sleep'),new Date(windowKnown?windowWakeAt(settledBusy):settledBusy?.reason==='projector_window'?Math.max(until,windowWakeAt(settledBusy)):until));
+     const windowKnown=isWindowBusy(settledBusy?.reason)&&Number.isFinite(Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil))&&Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil)>0;
+     await step.sleepUntil(stepName('busy-sleep'),new Date(windowKnown?windowWakeAt(settledBusy):isWindowBusy(settledBusy?.reason)?Math.max(until,windowWakeAt(settledBusy)):until));
      continue;
     }
     if(!outcome.progress){

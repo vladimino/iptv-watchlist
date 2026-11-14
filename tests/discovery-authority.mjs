@@ -32,7 +32,8 @@ const envFor=(db,bucket=new MemoryBucket())=>({DB:db,BUCKET:bucket,discoveryLeas
 assert.equal(Authority.DISCOVERY_TABLES.length,16);
 assert.doesNotMatch(fs.readFileSync('src/discovery-authority.js','utf8'),/INSERT INTO film\b|INSERT INTO person\b/);
 assert.doesNotMatch(fs.readFileSync('src/discovery.js','utf8'),/env\.DB\b/);
-assert.match(fs.readFileSync('build.mjs','utf8'),/scoped\('src\/discovery-authority\.js','DiscoveryAuthority'\)/);
+assert.match(fs.readFileSync('build.mjs','utf8'),/scopedDiscoveryAuthority\(\)/);
+assert.match(fs.readFileSync('scripts/bundle-scope.mjs','utf8'),/scopedReplacing\('src\/discovery-authority\.js','DiscoveryAuthority'/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeRead\(env,key\)/);
 assert.match(fs.readFileSync('src/worker.js','utf8'),/DiscoveryAuthority\.routeWrite\(env,key,value\)/);
 assert.doesNotMatch(fs.readFileSync('src/discovery-authority.js','utf8'),/ensureDiscoveryWorkflow|reconcileDiscoveryWorkflow|\.create\(/);
