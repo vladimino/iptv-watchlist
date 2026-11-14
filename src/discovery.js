@@ -733,10 +733,15 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const programmeChanged=()=>({schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,currentProgrammeRunId:null,timings});
  // ADR 0142 decisions 4 and 5. Every assignment is a guarded insert behind the stored decision; the totals reach the chunk summary and the Discovery status.
  const assignment={assigned:0,present:0,evidence_drift:0,slot_taken:0,film_absent:0,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:0,replayed:0,replayRemaining:0};
+ const candidateByKey=new Map(),driftSeen=new Map();
+ for(const row of [...selected.items,...selected.touches])candidateByKey.set(row.candidate.key,row.candidate);
  const assignSlots=async key=>{
   await heartbeat();
   const result=await guarded(()=>timedWrite(()=>DiscoveryAuthority.assignObservationSlots(env,{observationKey:key,programmeRunId:source.programmeRunId},{lease})));
   if(!result){assignment.refused++;return null;}
+  for(const item of result.skipped)if(item.reason==='evidence_drift'&&Number.isFinite(item.minutes)){
+   const entry=driftSeen.get(key)||{minutes:new Set()};entry.minutes.add(item.minutes);driftSeen.set(key,entry);
+  }
   for(const [name,count] of Object.entries(result.outcomes))assignment[name]=(assignment[name]||0)+count;
   return result;
  };
@@ -870,6 +875,56 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;
   }
  }
+
+ // ADR 0142 decision 6: bounded revalidation of the drifted durations of verified observations, after every candidate that has no decision, with the TMDB calls and the time that are left.
+ // Each duration is evaluated alone, without the stored decision as a confirmation. A budget stop, a TMDB failure or a rate limit completes no evaluation and records nothing.
+ const revalidation={observations:0,revalidated:0,revalidation_failed:0,revalidation_exhausted:0,deferred:0};
+ if(!error&&typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.planRevalidation==='function'){
+  for(const [key,entry] of [...driftSeen].sort((a,b)=>String(a[0]).localeCompare(String(b[0])))){
+   const previous=decisions[key],candidate=candidateByKey.get(key);
+   if(!candidate)continue;
+   const plan=DiscoveryAuthority.planRevalidation(previous,[...entry.minutes]);
+   if(!plan.eligible)continue;
+   revalidation.observations++;
+   if(plan.exhausted){revalidation.revalidation_exhausted++;continue;}
+   if(!plan.todo.length)continue;
+   if(tmdbCalls>=PAGED_TMDB_CALLS||Date.now()+PAGED_MIN_REQUEST_MS+writeEstimate(2)>persistLimit()){revalidation.deferred++;break;}
+   try{
+    const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
+    const known=knownScorerCandidates(aliasIndex,candidate);
+    // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
+    const scorerCandidates=known.some(row=>String(row.tmdbId)===String(movie.id))?known.map(row=>String(row.tmdbId)===String(movie.id)?{...row,runtime:movie.runtime??row.runtime??null}:row):[...known,{...searchHitCandidate(movie),runtime:movie.runtime??null}];
+    const reconfirmed=[],failed=[];let proposed=null;
+    for(const duration of plan.todo){
+     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)break;
+     const alone={...candidate,duration,durations:[duration]};
+     const observation={key,title:candidate.title,normalizedTitle:candidate.normalizedTitle,year:candidate.year??null,duration,durations:[duration]};
+     const rescored=scoreFilmResolution({observation,candidates:scorerCandidates});
+     const sameId=rescored.status==='accepted'&&String(rescored.acceptedTmdbId)===String(previous.tmdbId)&&!ownerRejected(previous,previous.tmdbId);
+     let confirmed=false;
+     if(sameId){
+      const gate=gateScoredCandidate(pinned,source,alone,rescored,{},films,now,{tmdbDetail:tmdbDetailFromMovie(movie),competitors:detailCompetitors(aliasIndex,alone,previous.tmdbId,structuralCompetitorForms(rescored))});
+      confirmed=gate.outcome==='detail_verified';
+     }else if(rescored.status==='accepted'&&rescored.acceptedTmdbId!=null)proposed=String(rescored.acceptedTmdbId);
+     (confirmed?reconfirmed:failed).push(duration);
+    }
+    if(!reconfirmed.length&&!failed.length)continue;
+    const next=DiscoveryAuthority.decisionAfterRevalidation(previous,{reconfirmed,failed,proposedTmdbId:proposed},{evidenceKey:candidateEvidence(candidate),checkedAt:new Date().toISOString(),provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null}});
+    await heartbeat();
+    const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease})));
+    if(!wrote)return programmeChanged();
+    if(!wrote.written.includes(key))continue;
+    decisions[key]=next;
+    revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
+    if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
+    if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key);
+   }catch(e){
+    if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
+    if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
+    error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;
+   }
+  }
+ }
  // Candidates were waiting and none could be taken before the budget ended: say so, and back off.
  if(!error&&pending.length&&checked===0){error='wall_budget';retryAt=new Date(Date.now()+PAGED_BUDGET_BACKOFF_MS).toISOString();}
  timings.tmdbMs=Date.now()-tmdbStarted;
@@ -895,7 +950,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  }
  if(!selected.items.length&&remaining===0)nextAfter=selected.after||'';
  const nextTouchAfter=selected.touches.length?selected.touchAfter||touchAfter:touchAfter;
- const summary={schemaVersion:2,assignment,stage:error||cheapRemaining>0||remaining==null||remaining>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,timings};
+ const summary={schemaVersion:2,assignment,revalidation,stage:error||cheapRemaining>0||remaining==null||remaining>0?'partial':'complete',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,added,remaining,cheapRemaining,error,retryAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,paged:true,maxPage,itemCount:source.itemCount,tmdbCalls,selectAfter:nextAfter,touchAfter:nextTouchAfter,timings};
  try{await fence();}catch(e){throw lost(e,'final');}
  // `preCommitMs` is what the stored status carries: the time up to its own write. The status write, the continuation
  // checkpoint and the total through that checkpoint are measured after the writes and reach only the returned
