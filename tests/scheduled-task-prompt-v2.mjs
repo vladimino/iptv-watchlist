@@ -84,13 +84,14 @@ for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
 }
 // AIR-469: a failed preflight on fingerprint.evidence triggers a bounded evidence recovery before any failure item. A static text check; it does not prove model behaviour (AIR-451 needs an authorized natural-run observation).
 {const step7=prompt.split('\n').find(l=>l.startsWith('7. '));assert.ok(step7);
- const trigger=step7.indexOf('`fingerprint.evidence: too_few`'),recovery=step7.indexOf('ОБЯЗАТЕЛЬНО сделай один ограниченный evidence-recovery проход'),last=step7.indexOf('только тогда отправь существующий {filmId,failure:{kind:\'parse_error\'}}'),legacy=step7.indexOf('Фильм, у которого после этого остаются issues');
+ const trigger=step7.indexOf('`fingerprint.evidence: too_few`'),recovery=step7.indexOf('ОБЯЗАТЕЛЬНО сделай один ограниченный evidence-recovery проход'),last=step7.indexOf('только тогда отправь {filmId,failure:{kind:\'parse_error\',reason,preflight}}'),legacy=step7.indexOf('Фильм, у которого после этого остаются issues');
  assert.ok(trigger>=0&&trigger<recovery&&recovery<last&&last<legacy,'too_few trigger, then recovery, then the last-resort failure');
  assert.ok(/`required` или `invalid_ref`/.test(step7)&&/НЕ являются разрешением немедленно отправить/.test(step7));
  assert.equal((step7.match(/НЕ БОЛЕЕ ОДНОЙ повторной `prediction_batch_validate`/g)||[]).length,1,'a single re-preflight');
  assert.ok(/лимит 2 web search запросов и 3 независимых использованных источников/.test(step7),'hard search and source limits');
  assert.ok(/Не добавляй фиктивные mechanics, `model_knowledge`, URL или evidence ради прохождения preflight/.test(step7)&&/Ни synopsis, ни `search_snippet`/.test(step7),'no fabricated evidence');
- assert.ok(/Не добавляй failure\.reason или failure\.preflight в MCP submit/.test(step7)&&!/failure:\{kind:'parse_error',reason/.test(prompt),'only the existing Worker fields are sent');
+ assert.ok(/failure:\{kind:'parse_error',reason,preflight\}/.test(step7)&&/preflight_validation_failed/.test(step7)&&/insufficient_evidence/.test(step7)&&/json_unparseable/.test(step7)&&/request_too_large/.test(step7)&&/максимум из 20 issues/.test(step7)&&/это твоё заявление, а не серверная телеметрия/i.test(step7),'AIR-472: the failure item carries the closed reason and the copied preflight issues, as a claim');
+ assert.ok(/повтори один раз как \{filmId,failure:\{kind:'parse_error'\}\}/.test(step7),'a legacy fallback exists');
  assert.ok(/ОБЯЗАТЕЛЕН, даже когда первый дал казавшуюся содержательной статью/.test(step3b(prompt)[0])&&/третий поиск не разрешён/.test(step3b(prompt)[0]),'3б: second search mandatory within the two-search budget');
  assert.ok(!/failure.reason|failure.preflight/.test(dry),'the frozen dry-run prompt is not widened');
  {const s3b=step3b(prompt)[0],s7=prompt.split('\n').find(l=>l.startsWith('7. '));

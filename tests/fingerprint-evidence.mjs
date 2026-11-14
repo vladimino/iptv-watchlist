@@ -135,6 +135,13 @@ assert.deepEqual(recorded.claims,[{group:'mechanic',dimension:'heist',value:'hei
 assert.equal(plain(call('predictionDiagnosticEvidence')(legacy)).status,'legacy');
 assert.deepEqual(plain(call('predictionDiagnosticEvidence')({...legacy,evidence:'text'})),{status:'unknown',note:'declared_source_not_verified'});
 const kept=plain(call('predictionDiagnosticValidation')({stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.evidence.execution.payoff',code:'invalid_ref'},{path:'fingerprint.evidence.execution.payoff.extra',code:'invalid_ref'},{path:'fingerprint.evidence note',code:'invalid_ref'}]}));
+// AIR-472: a caller claim is shown with its provenance, re-checked against the closed vocabulary, and only on a caller_reported record.
+{const claimed={reason:'insufficient_evidence',preflightIssues:[{path:'fingerprint.evidence',code:'too_few'},{path:'secret.x',code:'too_few'},{path:'fingerprint.a',code:'made_up'}]};
+ const shown=plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[],claimed}));
+ assert.deepEqual(shown.claimed,{provenance:'caller_claim',reason:'insufficient_evidence',preflightIssues:[{path:'fingerprint.evidence',code:'too_few'}]});
+ assert.equal(plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[]})).claimed,undefined,'no claim, nothing added');
+ assert.equal(plain(call('predictionDiagnosticValidation')({stage:'fingerprint_schema',reportedBy:'worker',issues:[],claimed})).claimed,undefined,'a Worker-verified record never shows a caller claim');
+ assert.equal(plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[],claimed:{reason:'free text',preflightIssues:'x'}})).claimed,undefined,'an unknown reason is dropped');}
 assert.deepEqual(kept.issues,[{path:'fingerprint.evidence.execution.payoff',code:'invalid_ref'}]);
 
 function boot(ids){records.clear();etags.clear();revision=0;records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});records.set('sync.json',{runId:'test',stage:'complete'});const catalog={};for(const id of ids)catalog[id]={id,title:'Heat '+id,original:id,year:1995,tmdbId:id.replace(/\D/g,''),genres:['Crime'],synopsis:'A crew plans a robbery.',directors:['Michael Mann'],actors:['Al Pacino'],runtime:170,shows:[{start:Date.now()}]};records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);}
