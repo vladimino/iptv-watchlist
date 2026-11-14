@@ -97,7 +97,7 @@ For a documentation-only PR with no runtime or configuration changes, **every** 
 
 ## EPG seal hand-off: deploy and rollback holdpoint (AIR-484)
 
-[ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md) decision 6. Deploying this code, and any later rollback of it, happens only when the `control` document holds no unfinished claim (`handoff.sealRunId` whose `sync.json` is still `stage: seal`) and no live successor instance. Read both with the read-only EPG status before merging or reverting; if a claim is pending, wait for the natural run or the hourly `ensure` recovery to finish it. Older code ignores `handoff` and could run a claimed seal in the wrong instance. This is a read-only check; it authorizes no run, flag or write.
+[ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md) decision 6. Deploying this code, and any later rollback of it, happens only when the `control` document holds no unfinished claim (`handoff.sealRunId` whose `sync.json` is still `stage: seal`) and no live successor instance. Read both with the read-only EPG status before merging or reverting: the claim is `handoff` in the status owner block, and `owner.liveness` is read for the recorded instance in every control phase, including `done` and `stopped`, so a successor still running its last step reads `alive` (`drainState` reports `instance_live`); only `finished` or `absent` together with `sync.json` not at `seal` proves the holdpoint; if a claim is pending, wait for the natural run or the hourly `ensure` recovery to finish it. Older code ignores `handoff` and could run a claimed seal in the wrong instance. This is a read-only check; it authorizes no run, flag or write.
 
 ## EPG commit memory
 

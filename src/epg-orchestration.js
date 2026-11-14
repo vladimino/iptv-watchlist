@@ -194,7 +194,8 @@ const EpgOrchestration=(()=>{
   let control;
   try{control=await readControl(env);}catch{return 'unreadable';}
   if(control.malformed)return 'unreadable';
-  if(control.record.instanceId&&['starting','running','waiting'].includes(control.record.phase)){
+  // AIR-484: a control phase of `done` or `stopped` does not prove the Workflow ended (its last step may still run), so the status is read for any recorded instance.
+  if(control.record.instanceId){
    const status=await instanceStatus(env.EPG_WORKFLOW,control.record.instanceId);
    if(status==='unknown')return 'unreadable';
    if(!ENDED.includes(status))return 'instance_live';
@@ -326,6 +327,9 @@ function frozenDay(run){
    if(!reply.runId)return {failure:{code:'evidence_contradictory'}};
    return {runId:reply.runId,started:true,run:await loadJSON(fe,'sync.json')};
   }
+  // AIR-484: a durable `stage: seal` at its first phase that no control claim covers (the claim CAS or the reply was lost) is handed over
+  // on restart; the producer never runs a seal unit. A run already past `ledger` is a legacy or claimed run and continues where it is.
+  if(run.stage==='seal'&&run.seal?.phase==='ledger'&&started===runKey&&control.handoff?.sealRunId!==run.runId)return {runId:run.runId,run,sealed:true};
   const path=run.stage==='metadata'?'/api/sync/metadata':'/api/sync/epg';
   const response=await postSync(fe,null,path,{runId:run.runId},'internal');
   const reply=await body(response);
@@ -551,9 +555,18 @@ function frozenDay(run){
    if(control.quarantine)return {started:false,reason:'quarantined',scope:'run'};
    const cooling=Date.parse(control.cooldownUntil||'');
    if(control.instanceId&&['starting','running','waiting'].includes(control.phase)){
+    if(claim&&control.stopReason==='status_unknown'&&Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
     const status=await instanceStatus(env.EPG_WORKFLOW,control.instanceId);
     if(ALIVE.includes(status))return {started:false,reason:'in_progress',instanceId:control.instanceId};
-    if(status==='unknown')return {started:false,reason:'status_unknown',instanceId:control.instanceId};
+    if(status==='unknown'){
+     if(!claim)return {started:false,reason:'status_unknown',instanceId:control.instanceId};
+     // A claimed seal must not stay silently unobserved: persistent uncertainty is counted under the budget and fails closed at quarantine.
+     const applied=policy().applyFailure(control.budget,{code:'create_uncertain'},{now,phase:control.checkpoint?.phase??null,checkpoint:control.checkpoint?.key??null,random});
+     control={...control,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:policy().failureClass('create_uncertain'),code:'create_uncertain'},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,stopReason:'status_unknown',updatedAt:iso(now)};
+     if(!await write(control))return {started:false,reason:'write_conflict'};
+     if(applied.quarantine)return {started:false,reason:'quarantined',scope:'run'};
+     return {started:false,reason:'status_unknown',instanceId:control.instanceId,until:applied.cooldownUntil};
+    }
     // A claimed seal whose successor reports `complete` while sync.json still says `seal` is contradictory evidence: fail closed.
     const code=claim&&status==='complete'?'evidence_contradictory':status==='errored'?'instance_errored':status==='absent'?'create_uncertain':'instance_terminated';
     if(claim&&status==='absent'&&Number.isFinite(cooling)&&cooling>now)return {started:false,reason:'cooldown',until:control.cooldownUntil};
@@ -605,7 +618,7 @@ function frozenDay(run){
   const started=frozenDay(run);
   const doneToday=(c.runKey===dayKey&&!!c.doneAt)||(started===dayKey&&run?.stage==='complete'&&!run.error);
   let liveness=null;
-  if(m.mode==='cloudflare'&&c.instanceId&&['starting','running','waiting'].includes(c.phase)&&typeof env?.EPG_WORKFLOW?.get==='function'){
+  if(m.mode==='cloudflare'&&c.instanceId&&typeof env?.EPG_WORKFLOW?.get==='function'){
    const status=await instanceStatus(env.EPG_WORKFLOW,c.instanceId);
    liveness=ALIVE.includes(status)?'alive':status==='complete'?'finished':status==='absent'?'absent':'unknown';
   }

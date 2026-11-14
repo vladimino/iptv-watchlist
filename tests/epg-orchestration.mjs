@@ -67,7 +67,7 @@ const one=(db,sql)=>Object.values(db.sql(sql)[0]||{})[0];
 }
 
 // The module in a context like the Worker's: the scoped policy, the module, a scripted pipeline and a published-authority stub.
-function load({sync,pipeline,authority={ready:true},workflow=null,db}){
+function load({sync,pipeline,authority={ready:true},workflow=null,db,src=null}){
  const state={sync:sync??null,calls:[],authority:{...authority}};
  const context=vm.createContext({console,Date,Math,JSON,Promise,Intl,URL,crypto:webcrypto});
  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
@@ -78,7 +78,7 @@ function load({sync,pipeline,authority={ready:true},workflow=null,db}){
   const reply=await pipeline(pathname,body,state,env);
   return {status:reply.status??200,json:async()=>reply.body??{}};
  };
- vm.runInContext(source,context);
+ vm.runInContext(src??source,context);
  const env={DB:db,EPG_WORKFLOW:workflow};
  return {context,state,env,epg:vm.runInContext('EpgOrchestration',context)};
 }
@@ -1050,6 +1050,113 @@ for(const stage of ['epg','seal']){
   await h.epg.ensure(h.env,{now:due0});
   const late=runner(h,{startAt:nextDue});
   eq(await h.epg.run(h.env,{runKey:day,series:0,epoch:1},late.step,{now:late.clock,clock:late.clock}),{stopped:true,reason:'day_rolled',instanceId:'epg_20261107_0'});
+ }
+}
+// AIR-484 review: crash windows of the hand-off, bounded unknown status, the drain proof and a mixed-version restart.
+{
+ const day='2026-11-07',due0=Date.parse('2026-11-07T16:00:00Z'),nextDue=Date.parse('2026-11-08T16:00:00Z');
+ const sealPaths=['/api/sync/epg'];
+ const durableSeal=due=>({runId:'run-1',stage:'seal',startedAt:at(due),updatedAt:at(due),seal:{phase:'ledger'}});
+ {// (a) the seal is durable but the claim never landed: the restarted producer runs no seal unit and hands over
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  h.state.sync=durableSeal(due0);
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  eq(out,{stopped:true,reason:'seal_handoff',instanceId:'epg_20261107_0',successor:'epg_20261107_1'});
+  assert.equal(h.state.calls.filter(c=>sealPaths.includes(c.pathname)).length,0,'the producer executed no seal unit');
+  assert.equal(h.state.sync.seal.phase,'ledger');
+  const out2=await h.epg.run(h.env,{runKey:day,series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out2.reason,'complete');
+ }
+ {// (b) claimed, create never ran: the hourly ensure creates the same id once and the run finishes once
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  const realDo=r.step.do;
+  r.step.do=async(name,fn)=>{if(name.startsWith('handoff'))throw new Error('killed before create');return realDo.call(r.step,name,fn);};
+  await assert.rejects(()=>h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5}));
+  assert.equal(h.wf.creates.length,1);
+  assert.equal((await control(h)).handoff.sealRunId,'run-1');
+  const rec=await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
+  assert.equal(rec.started,true);assert.equal(rec.instanceId,'epg_20261107_1');
+  assert.equal(h.wf.creates.filter(c=>c.id==='epg_20261107_1').length,1);
+ }
+ {// (c) create reached the platform but the outcome was lost: the status is read back, nothing is created twice
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  const create=h.wf.create.bind(h.wf);
+  h.wf.create=async args=>{await create(args);throw new Error('response lost');};
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.reason,'seal_handoff');assert.equal(out.successor,'epg_20261107_1');
+  eq(start(await h.epg.ensure(h.env,{now:nextDue})),{started:false,reason:'in_progress',instanceId:'epg_20261107_1'});
+  assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1);
+ }
+ {// persistent unknown status of a claimed successor is counted, never created blindly, and ends in quarantine
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const get=h.wf.get.bind(h.wf);
+  h.wf.get=async()=>{throw new Error('platform unavailable');};
+  let now=nextDue,last;
+  for(let i=0;i<12&&!last?.quarantined&&last?.reason!=='quarantined';i++){last=await h.epg.ensure(h.env,{now,random:()=>0.5});now+=12*H;}
+  assert.equal(last.reason,'quarantined','unresolved uncertainty fails closed');
+  assert.equal(h.wf.creates.length,2,'no create while the status is unknown');
+  assert.ok((await control(h)).budget.consecutive>=1);
+ }
+ {// unknown, then the platform recovers: alive attaches
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const get=h.wf.get.bind(h.wf);
+  h.wf.get=async()=>{throw new Error('platform unavailable');};
+  assert.equal((await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5})).reason,'status_unknown');
+  h.wf.get=get;
+  assert.equal((await h.epg.ensure(h.env,{now:nextDue+12*H,random:()=>0.5})).reason,'in_progress');
+ }
+ {// the drain proof and the read model see a live successor after the control phase is done
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  await h.epg.run(h.env,{runKey:day,series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal((await control(h)).phase,'done');
+  assert.equal(await h.epg.drainState(h.env,r.clock()),'instance_live','the successor is still running its last step');
+  assert.equal((await h.epg.readModel(h.env,r.clock())).owner.liveness,'alive');
+  h.wf.instances.set('epg_20261107_1','complete');
+  assert.equal(await h.epg.drainState(h.env,r.clock()),'verified');
+  assert.equal((await h.epg.readModel(h.env,r.clock())).owner.liveness,'finished');
+ }
+ {// finishing yesterday's claimed seal does not complete today's due publication
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const r2=runner(h,{startAt:nextDue});
+  await h.epg.run(h.env,{runKey:day,series:1,epoch:1},r2.step,{now:r2.clock,clock:r2.clock,random:()=>0.5});
+  h.wf.instances.set('epg_20261107_1','complete');
+  const today=await h.epg.ensure(h.env,{now:nextDue+H});
+  assert.equal(today.started,true);assert.equal(today.runKey,'2026-11-08','today starts its own run');
+  assert.equal((await control(h)).doneAt,null);
+ }
+ {// mixed version: the actual pre-change executor restarts a claimed successor and a stale producer
+  const pre=fs.readFileSync('tests/fixtures/epg-orchestration-pre-air-484.js','utf8');
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const old=load({pipeline:pipeline({metadataSteps:1}),workflow:h.wf,db:h.db,src:pre});
+  old.state.sync=h.state.sync;old.state.now=h.state.now;
+  const stale=await old.epg.run(old.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(stale.reason,'not_owner');
+  // The old code ignores the claim and finishes the seal in the claimed instance: no second start, no second publication.
+  const done=await old.epg.run(old.env,{runKey:day,series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(done.reason,'complete');
+  assert.equal(old.state.calls.filter(c=>c.pathname==='/api/sync/start').length,0);
+  assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1);
  }
 }
 console.log('epg-orchestration: ok');
