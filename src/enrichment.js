@@ -405,6 +405,8 @@ const fingerprintFacet=(f,usable=fingerprintCurrent(f))=>usable&&f?{plotMechanic
 // genre-specific dimensions) and the schema of the exact fingerprint. Copied from the full fingerprint, bound to its hash.
 const fingerprintImpactFacet=f=>f&&typeof f.fingerprintHash==='string'&&f.fingerprintHash?{fingerprintHash:f.fingerprintHash,fingerprintSchemaVersion:f.fingerprintSchemaVersion??null,fingerprintPromptVersion:f.fingerprintPromptVersion??null,invalidatedAt:f.invalidatedAt||null,plotMechanics:Array.isArray(f.plotMechanics)?[...f.plotMechanics]:null,execution:isObject(f.execution)?{...f.execution}:null}:null;
 const predictionCurrent=(p,profile,f)=>!!p&&!!profile&&fingerprintCurrent(f)&&p.tasteProfileVersion===profile.version&&p.tasteProfileHash===profile.profileHash&&p.fingerprintHash===f.fingerprintHash&&p.fingerprintSchemaVersion===FINGERPRINT_SCHEMA_VERSION&&p.predictionPromptVersion===PREDICTION_PROMPT_VERSION;
+// The state a batch start needs to decide freshness and to build a manifest: the fingerprint and the current prediction, without the replaced versions.
+async function readFilmStateCurrent(env,id){const key=filmKey(id);const [fingerprint,predictions]=await Promise.all([loadJSON(env,key+'fingerprint.json'),loadJSON(env,key+'predictions.json',{currentOnly:true})]);return {fingerprint,predictions};}
 async function readFilmState(env,id){const key=filmKey(id);const [fingerprint,predictions]=await Promise.all([loadJSON(env,key+'fingerprint.json'),loadJSON(env,key+'predictions.json')]);return {fingerprint,predictions};}
 function cloneJSON(value){return JSON.parse(JSON.stringify(value));}
 async function mergeStoredJSON(env,key,empty,apply){
@@ -1240,13 +1242,19 @@ function requestScopeUnchanged(env,key,value){
 }
 const noteQueueCounts=(env,queue)=>{const scope=requestScopeOf(env);if(scope&&queue&&Number.isInteger(queue.priorityCount))scope.queueCounts={priorityCount:queue.priorityCount,coldRemaining:Number.isInteger(queue.coldRemaining)?queue.coldRemaining:null};};
 const STEP_TIMER=Symbol('predictionStepTimer');
-const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration'];
+const STEP_NOTES=['items','selected','pending','batchSize','bodyItems','predictionOnly','fingerprintAndPrediction','created','recalculated','alreadyCurrent','failures','manifestFilms','manifestBytes','deferredBudget','needsRegeneration','preflights','refreshRounds','scannedFilms','settledFilms','leaseRefused','liveLeaseAgeMs'];
+const STEP_STAGES=['preflight','turned_away','idle','settle_previous','catalog_gate','queue_refresh','preflight_refreshed','runner_lease','preflight_lease','persist'],STEP_STAGE_CAP=16;
 const STEP_OPS_CAP=4000,STEP_CLASS_CAP=40;
 const STEP_TABLE=/\b(?:from|into|update|join)\s+["`]?([a-z_][a-z0-9_]{0,59})["`]?/i;
 function stepKeyClass(key){
  const k=typeof key==='string'?key:'';
  if(k===profileKey)return 'profile';if(k===RUNNER_LEASE_KEY||k===PREDICTION_MUTATION_LEASE)return 'lease';
  if(k.startsWith(ENRICHMENT_KEY+'runs/'))return 'run';if(k===ENRICHMENT_KEY+'latest-run.json')return 'run_latest';
+ if(k.startsWith(ENRICHMENT_KEY+'run-diagnostics'))return 'diagnostics';
+ if(k==='epg/published-generation.json')return 'epg_generation';if(k==='sync.json')return 'sync';
+ if(k.startsWith(ENRICHMENT_KEY+'profile/'))return 'profile_version';
+ if(k==='epg/discovered-films.json')return 'catalog';
+ if(k.startsWith('events/')||k.startsWith(ENRICHMENT_KEY+'start-events/')||k===ENRICHMENT_KEY+'event-outbox.json')return 'events';
  if(k.startsWith(ENRICHMENT_KEY+'sources/'))return 'source';if(k===ENRICHMENT_KEY+'view-index.json')return 'view_index';
  if(k.startsWith(ENRICHMENT_KEY+'films/'))return /\/(?:fingerprint|predictions)\.json$/.test(k)?'film_state':'film_other';
  if(k===predictionQueueKey)return 'queue';if(k.startsWith(ENRICHMENT_KEY+'diagnostics/')||k.includes('/diagnostic'))return 'diagnostics';
@@ -1257,7 +1265,7 @@ function stepSqlClass(sql){const m=typeof sql==='string'?STEP_TABLE.exec(sql):nu
 function stepSizeClass(bytes){return !(bytes>=0)?'unknown':bytes<1024?'lt1k':bytes<65536?'lt64k':bytes<1048576?'lt1m':'ge1m';}
 function createStepTimer(now=Date.now){
  const started=now(),ops=[],classes=new Map(),notes={},total={r2:{n:0,ms:0,bytesIn:0,bytesOut:0},d1:{n:0,ms:0,statements:0,batches:0,rowsRead:0,rowsWritten:0}};
- let truncated=false;
+ let truncated=false;const stages=[];
  const union=list=>{let sum=0,end=-Infinity;for(const [a,b] of list.slice().sort((x,y)=>x[0]-y[0])){if(b<=a)continue;if(a>end){sum+=b-a;end=b;}else if(b>end){sum+=b-end;end=b;}}return sum;};
  const record=(kind,cls,op,from,to,extra={})=>{try{
   const ms=Math.max(0,to-from),bucket=total[kind];bucket.n++;bucket.ms+=ms;
@@ -1268,12 +1276,18 @@ function createStepTimer(now=Date.now){
   if(ops.length<STEP_OPS_CAP)ops.push([from,to,kind]);else truncated=true;
  }catch{truncated=true;}};
  const note=fields=>{try{for(const name of STEP_NOTES){const value=fields?.[name];if(Number.isSafeInteger(value)&&value>=0)notes[name]=value;}}catch{/* a note never changes the step */}};
+ // A stage is a named sequential section of one step: its wall time and how many R2 and D1 calls finished inside it. Names come from the closed STEP_STAGES list.
+ const stage=async(name,work)=>{
+  const from=now(),r2=total.r2.n,d1=total.d1.n;
+  try{return await work();}
+  finally{try{if(STEP_STAGES.includes(name)&&stages.length<STEP_STAGE_CAP)stages.push({stage:name,ms:Math.max(0,now()-from),r2:total.r2.n-r2,d1:total.d1.n-d1});else truncated=true;}catch{truncated=true;}}
+ };
  const summary=(step,fields)=>{
   const wallMs=Math.max(0,now()-started),busyMs=union(ops.map(([a,b])=>[a,b])),r2Busy=union(ops.filter(o=>o[2]==='r2').map(([a,b])=>[a,b])),d1Busy=union(ops.filter(o=>o[2]==='d1').map(([a,b])=>[a,b])),summed=total.r2.ms+total.d1.ms;
   const byClass={};for(const [label,entry] of classes)byClass[label]={n:entry.n,ms:entry.ms,maxMs:entry.maxMs,bytes:entry.bytes,ops:entry.ops};
-  return {event:'prediction_step_timing',step,...fields,wallMs,busyMs,overlapMs:Math.max(0,summed-busyMs),unattributedMs:Math.max(0,wallMs-busyMs),r2:{...total.r2,busyMs:r2Busy},d1:{...total.d1,busyMs:d1Busy},classes:byClass,notes,...(truncated?{truncated:true}:{})};
+  return {event:'prediction_step_timing',step,...fields,wallMs,busyMs,overlapMs:Math.max(0,summed-busyMs),unattributedMs:Math.max(0,wallMs-busyMs),r2:{...total.r2,busyMs:r2Busy},d1:{...total.d1,busyMs:d1Busy},classes:byClass,notes,...(stages.length?{stages}:{}),...(truncated?{truncated:true}:{})};
  };
- return {record,note,summary,now};
+ return {record,note,stage,summary,now};
 }
 // An R2 object whose body readers are timed (the body is read after `get` has answered, and that is I/O too). Everything else is the real object.
 function timedR2Object(object,timer,cls){
@@ -1335,6 +1349,8 @@ function stepTimedEnv(env,timer){
  return timed;
 }
 const noteStep=(env,fields)=>{try{const timer=env?.[STEP_TIMER];if(timer)timer.note(fields());}catch{/* a note never changes the step */}};
+const forgetAuthority=env=>{try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.forgetRequestAuthority==='function')PredictionD1.forgetRequestAuthority(env);}catch{/* the next read is then merely shared */}};
+const timedStage=(env,name,work)=>{const timer=env?.[STEP_TIMER];return timer&&typeof timer.stage==='function'?timer.stage(name,work):work();};
 async function timedPredictionStep(env,step,body,requestId,work){
  let timer=null,timed=env;
  try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
@@ -2015,7 +2031,7 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
   if(pin)chunk=rest.splice(0,slots);
   else{chunk=queueBatchIds(queue,rest,slots);if(!chunk.length)break;const taken=new Set(chunk);rest=rest.filter(id=>!taken.has(id));}
   scanned+=chunk.length;
-  const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmState(env,id):null));
+  const found=await readFilmsById(env,report,chunk),states=await Promise.all(chunk.map(id=>found.has(id)?readFilmStateCurrent(env,id):null));
   chunk.forEach((id,i)=>{
    const film=found.get(id);if(!film){skipped.missingAdmission.push(id);return;}
    const state=states[i];if(freshness.state(state.predictions?.current,state.fingerprint,film.genres)){skipped.alreadyCurrent.push(id);return;}
@@ -2023,7 +2039,7 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
    items.push({filmId:id,lane:queue.priority?.[id]?.hot?'hot':'cold',plan,film,state});
   });
  }
- return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length},manifestSize:cap};
+ return {items,skipped,notEligible,eligible:{hot:queue.priorityCount||0,cold:queue.coldRemaining??0,ready:ready.length},manifestSize:cap,scanned};
 }
 // The manifest body, serialized once for its size and its hash. `runId` and `lease` are placeholders in a preflight (same width as the real values).
 const batchFilmInputHash=async film=>(await contentHash({filmId:film.filmId,lane:film.lane,plan:film.plan,modelMetadata:film.modelMetadata,fingerprintHash:film.fingerprint?.fingerprintHash||null})).slice(0,24);
@@ -2048,7 +2064,8 @@ const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manife
 const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:selection.items.length,queueRefreshed,...(queueSettled?{queueSettled}:{}),eligible:selection.eligible,skipped:{missingAdmission:selection.skipped.missingAdmission.length,alreadyCurrent:selection.skipped.alreadyCurrent.length},pendingCount:queue.pending.length,hotRemaining:queue.priorityCount??null,coldRemaining:queue.coldRemaining??null,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
 // Read-only. Reads the profile, the programme, the stored queue (and its own generation, the revision a later step compares) and the films; heals, rebuilds, settles and takes nothing.
 // A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
-async function batchPreflight(env,body){
+async function batchPreflight(env,body,tally=null){
+ if(tally)tally.preflights++;
  const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
  if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
  if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return {response:json({error:'No completed programme snapshot'},409)};
@@ -2056,6 +2073,7 @@ async function batchPreflight(env,body){
  if(why)return {profile,report,stale:why,revision,manifestSize};
  try{
   const selection=await batchSelection(env,{profile,report,queue:stored,pin:body.pin||null,limit:manifestSize});
+  if(tally)tally.scannedFilms+=selection.scanned;
   const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
   return {profile,report,queue:stored,revision,selection,manifest,manifestSize,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
  }catch(error){
@@ -2066,23 +2084,27 @@ async function batchPreflight(env,body){
 const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.bytes},extra);
 // The queue refresh and the settlement that D7-A names as effects of batch_start: a queue that fails the advance gate is refreshed (not rebuilt on every start), and the films the
 // preflight found already current or without an admission leave the queue in one guarded settlement. The caller reads the result again as a fresh preflight, its new baseline.
-async function batchRefreshQueue(env,body,pre){
- let queue=pre.queue,settled=0;
+// The settlement looks at the films the manifest would be built from (the client-requested size), not at a default 100: a film behind that window leaves the queue when it is reached.
+async function batchRefreshQueue(env,body,pre,tally=null){
+ let queue=pre.queue,settled=0;const limit=resolveManifestSize(body).size;
  if(pre.stale)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:false,fallback:true});
  const context=await advanceContext(env,pre.report,pre.profile);
  for(let round=0;round<3;round++){
-  const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
+  const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue,limit}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
+  if(tally){tally.refreshRounds++;tally.scannedFilms+=selection.scanned;}
   if(!settle.length)break;
   const next=await mutatePredictionQueue(env,guardedSettle(context,settle,'batch_start_settle'),'batch_start_settle',queue)||queue;
   if(next===queue)break;
   settled+=settle.length;queue=next;
+  if(tally)tally.settledFilms+=settle.length;
  }
  return {queue,settled};
 }
 // A live runner lease turns a real start away; it is recorded as a start attempt and nothing else is written.
-async function batchTurnedAway(env,body){
+async function batchTurnedAway(env,body,tally=null){
  const live=await loadJSON(env,RUNNER_LEASE_KEY);
  if(!(live?.runId&&live.expiresAt>Date.now()))return null;
+ if(tally){tally.leaseRefused=1;tally.liveLeaseAgeMs=Math.max(0,Math.round(Date.now()-(live.expiresAt-RUNNER_LEASE_TTL)));}
  const turned={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'completed',selectedIds:[],results:{},failures:{}};
  turned.diagnosticStartedAt=turned.createdAt;turned.completedAt=turned.createdAt;
  await diagnosticCheckpoint(env,turned,{startResult:'already_running'});
@@ -2101,10 +2123,16 @@ async function batchIdle(env,body,pre){
  return result;
 }
 // What a refusal of the manifest never does: it creates no run, Event, diagnostics row or `latest-run`, and it does not pass through the start's stop recorder.
+// What a start did, for the step-timing line: counters only (no ids, keys or payloads). `tally` is one request's own object.
 async function batchStartRoute(env,body,requestId){
+ const tally={preflights:0,refreshRounds:0,scannedFilms:0,settledFilms:0};
+ try{return await batchStartWork(env,body,requestId,tally);}
+ finally{noteStep(env,()=>tally);}
+}
+async function batchStartWork(env,body,requestId,tally){
  const bad=validateBatchStartBody(body);if(bad)return bad;
  const notD1=await batchRequiresD1(env);if(notD1)return notD1;
- const dryRun=body.dryRun===true;let pre=await batchPreflight(env,body);if(pre.response)return pre.response;
+ const dryRun=body.dryRun===true;let pre=await timedStage(env,'preflight',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
  if(dryRun){
   // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
   if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
@@ -2116,28 +2144,32 @@ async function batchStartRoute(env,body,requestId){
  // Precedence of a real start: an overlapping run first, then an idle outcome, then the size refusal. A live runner lease (a v5 run, or an earlier v2 run) turns the attempt away with
  // `already_running` before anything else, naming the holder: an overlapping trigger never reports an independent start result, and it writes nothing to the queue, the run, the lease or
  // the films. It is recorded as a start attempt, like every start attempt.
- const turned=await batchTurnedAway(env,body);if(turned)return turned;
+ const turned=await timedStage(env,'turned_away',()=>batchTurnedAway(env,body,tally));if(turned)return turned;
  // Nothing to deliver, or no capacity, on a current queue: the idle outcome of a start (before the size refusal, so `remainingPercent: 0` is `quota`, not a size error).
- if(!pre.stale){const idle=await batchIdle(env,body,pre);if(idle)return idle;}
+ forgetAuthority(env);
+ if(!pre.stale){const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
  // Zero writes while the manifest does not fit and the stored queue is current: no lease, run, queue, Event, diagnostics row or film write.
  if(pre.manifest&&pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre);
  // The guards a v5 start runs before it takes the lease: the previous run's retries, and a held catalog.
- const unsettled=await atStage('settle_previous',()=>settlePreviousRun(env));if(unsettled)return unsettled;
- const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
+ forgetAuthority(env);
+ const unsettled=await timedStage(env,'settle_previous',()=>atStage('settle_previous',()=>settlePreviousRun(env)));if(unsettled)return unsettled;
+ const held=await timedStage(env,'catalog_gate',()=>atStage('catalog_gate',()=>catalogHeldCause(env)));if(held)return catalogHeldResponse(held);
  let queueRefreshed=false,queueSettled=0;
  if(pre.stale||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
-  try{const refreshed=await atStage('queue_refresh',()=>batchRefreshQueue(env,body,pre));queueRefreshed=true;queueSettled=refreshed.settled;}
+  forgetAuthority(env);
+  try{const refreshed=await timedStage(env,'queue_refresh',()=>atStage('queue_refresh',()=>batchRefreshQueue(env,body,pre,tally)));queueRefreshed=true;queueSettled=refreshed.settled;}
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
-  pre=await batchPreflight(env,body);if(pre.response)return pre.response;
+  pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
   if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true});
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
- {const idle=await batchIdle(env,body,pre);if(idle)return idle;}
+ {const idle=await timedStage(env,'idle',()=>batchIdle(env,body,pre));if(idle)return idle;}
  const runId=crypto.randomUUID(),attemptAt=new Date().toISOString();
  const attempt={runId,createdAt:attemptAt,diagnosticStartedAt:attemptAt,trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};
- const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));
+ forgetAuthority(env);
+ const lease=await timedStage(env,'runner_lease',()=>atStage('runner_lease',()=>runnerLease(env,runId,'acquire')));
  if(lease.status!=='owned'){
   // Not a refusal of the manifest: the attempt is recorded as every start attempt is.
   attempt.status='completed';attempt.completedAt=new Date().toISOString();attempt.stopReason=lease.status==='already_running'?null:lease.status;
@@ -2148,7 +2180,8 @@ async function batchStartRoute(env,body,requestId){
  // acquire and release may have happened if it does not hold.
  let answer;
  try{
-  const again=await batchPreflight(env,body);
+  forgetAuthority(env);
+  const again=await timedStage(env,'preflight_lease',()=>batchPreflight(env,body,tally));
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
   if(again.stale||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{...(queueRefreshed?{queueRefreshed:true}:{})});}
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
@@ -2156,7 +2189,7 @@ async function batchStartRoute(env,body,requestId){
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
   pre={...again,manifest:exact,answer};
  }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
- return batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt});
+ return timedStage(env,'persist',()=>batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}));
 }
 // After the lease is held and the snapshot revalidated: the ordinary start bookkeeping (the diagnostics row, the expired diagnostics and the pending Events, a recovered run) and the run itself.
 async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}){
@@ -2521,6 +2554,8 @@ async function batchSubmitDryRun(env,body){
 async function timedBatchStep(env,step,body,requestId,work){
  let timer=null,timed=env;
  try{timer=createStepTimer();timed=stepTimedEnv(env,timer);}catch{timer=null;timed=env;}
+ // The authority marker only, never the object scope: reads in this request reuse the marker until the request's own database writes (the lease acquire is the first), so the post-lease preflight reads it afresh.
+ try{if(typeof PredictionD1!=='undefined'&&typeof PredictionD1.scopeRequest==='function')timed=PredictionD1.scopeRequest(timed);}catch{/* an unscoped start reads the marker every time */}
  let status=null;
  try{const response=await work(timed);status=response&&typeof response.status==='number'?response.status:null;return response;}
  catch(error){status=0;throw error;}
