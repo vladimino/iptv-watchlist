@@ -1483,12 +1483,16 @@ async function loadCatalogForQueue(pinned){
  }
 }
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
- const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
+ const pinned=report?.runId?{...env,epgPin:{...(env.epgPin||{}),programmeRunId:report.runId,authority:env.epgPin?.authority||(typeof PublishedEpg!=='undefined'?'d1':undefined)}}:await pinEpg(env);
  const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned)]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile||!report?.films)return null;
  if(capture)Object.assign(capture,{report,profile,index,catalog});
- const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
+ const now=Date.now();
+ const completedOnly=typeof PublishedEpg!=='undefined'&&!!report?.runId;
+ const completed=completedOnly?completedShowsByTmdb(report):new Map();
+ const films=allEnrichmentFilms(report,catalog).map(film=>withCompletedShows(film,completed,report.runId,completedOnly));
+ const watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
  const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
  // The fingerprint transition rule (ADR-0035) decides; the strict fingerprint outcome is counted beside it. Each outstanding
@@ -1525,7 +1529,9 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
   work[id]={class:chosen.requiredWork,requiredWork:chosen.requiredWork,migration,reason:chosen.reason,...(fv.fields?{fields:fv.fields}:{})};
  }
  const missing=films.filter(f=>!fresh.get(String(f.id)));
- missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||(Date.parse(b.hotEnteredAt||b.discoveredAt)||0)-(Date.parse(a.hotEnteredAt||a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
+ // ADR 0142 decision 13: the late tie-break uses the earliest start of the Film's completed (or, outside D1, record) showings, then discoveredAt, then the id. hotEnteredAt is not read.
+ const earliestStart=film=>{const starts=(film.shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);return starts.length?Math.min(...starts):0;};
+ missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||earliestStart(a)-earliestStart(b)||(Date.parse(b.discoveredAt)||0)-(Date.parse(a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
  const hotPending=missing.filter(f=>priority[f.id].hot).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))],currentIds=new Set(missing.map(f=>String(f.id))),retries=Object.fromEntries(Object.entries(previous?.retries||{}).filter(([id])=>currentIds.has(id)));
  const hotCount=films.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-hotPending.length,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
  const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:report.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
