@@ -92,7 +92,14 @@ for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.ok(/Не добавляй фиктивные mechanics, `model_knowledge`, URL или evidence ради прохождения preflight/.test(step7)&&/Ни synopsis, ни `search_snippet`/.test(step7),'no fabricated evidence');
  assert.ok(/Не добавляй failure\.reason или failure\.preflight в MCP submit/.test(step7)&&!/failure:\{kind:'parse_error',reason/.test(prompt),'only the existing Worker fields are sent');
  assert.ok(/ОБЯЗАТЕЛЕН, даже когда первый дал казавшуюся содержательной статью/.test(step3b(prompt)[0])&&/третий поиск не разрешён/.test(step3b(prompt)[0]),'3б: second search mandatory within the two-search budget');
- assert.ok(!/failure.reason|failure.preflight/.test(dry),'the frozen dry-run prompt is not widened');}
+ assert.ok(!/failure.reason|failure.preflight/.test(dry),'the frozen dry-run prompt is not widened');
+ {const s3b=step3b(prompt)[0],s7=prompt.split('\n').find(l=>l.startsWith('7. '));
+  assert.ok(/EVIDENCE-RECOVERY ПЕРЕД ШАГОМ 5/.test(s3b)&&/ноль честных evidence claims ДО preflight/.test(s3b)&&/вопреки фразе шага 5/.test(s3b),'3б overrides the step-5 early-out before it');
+  assert.ok(s3b.indexOf('EVIDENCE-RECOVERY ПЕРЕД ШАГОМ 5')>=0&&/не более ОДНОГО такого прохода на фильм \(до и после preflight вместе\)/.test(s3b),'one pass in total');
+  assert.ok(/НЕ создавай фиктивный кандидат ради вызова preflight/.test(s3b)&&/по одному из двух путей/.test(s7)&&/уже выполнен на пути \(а\)/.test(s7),'no dummy candidate; two unambiguous paths in step 7');
+  assert.ok(/а web search доступен и ещё есть бюджет/.test(s3b)&&/gateStatus=blocked/.test(s3b)&&/недоступность поиска не разрешает немедленный failure/.test(s3b),'3б: search availability is respected');
+  assert.ok(prompt.indexOf(s3b)<prompt.indexOf('\n5. ОБЯЗАТЕЛЬНАЯ КАРТА'),'the override comes before step 5');}
+}
 assert.ok(/ОДНОЙ сквозной последовательности 0, 1, 2/.test(dry)&&/предпроверка 0, submit 1, следующая предпроверка 2, следующий submit 3/.test(dry)&&/ИМЕННО вызова prediction_batch_submit/.test(dry)&&/никогда вызова предпроверки/.test(dry),'one global callId sequence for every MCP call; a film names its submit call only');
 assert.ok(!/присвой callId \(0, 1, 2… в порядке вызовов/.test(doc),'the old per-submit numbering is gone');
 assert.ok(/preflight \{valid,attempts/.test(dry)&&/kind 'preflight'/.test(dry),'the dry-run prompt records the preflight per film and per call');
