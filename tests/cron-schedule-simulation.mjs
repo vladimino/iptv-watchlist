@@ -127,11 +127,14 @@ for(const [label,day] of DAYS){
 // reports by value; no shared lease or await between them; the cron handler does no long step of its own.
 const worker=fs.readFileSync('src/worker.js','utf8');
 const handler=worker.slice(worker.indexOf('async scheduled('),worker.indexOf('async fetch('));
-assert.match(handler,/execution\.waitUntil\(Promise\.allSettled\(\[/);
+assert.match(handler,/Promise\.allSettled\(\[/);
 for(const member of ['runD1EnrichmentProjection(','RatingsOrchestration.ensure(','EpgOrchestration.ensure(','reconcileDiscoveryWorkflow(','Monitor.run(']){
  assert.ok(handler.includes(member),member+' is a member of the tick');
 }
-assert.equal((handler.match(/await /g)||[]).length,0,'the handler awaits nothing itself: no member waits for another');
+// AIR-482: the Discovery reconcile and its hourly report start alone and the other members start when it settles or after a bounded head start, so a
+// later member's memory peak cannot kill the close; a rejected reconcile never blocks the others.
+assert.ok(handler.indexOf('reconcileDiscoveryWorkflow(')<handler.indexOf('runD1EnrichmentProjection('),'reconcile starts before the projector');
+assert.match(handler,/SCHEDULED_RECONCILE_HEAD_MS/);
 assert.doesNotMatch(handler,/lease|acquire/i,'no shared lease between the members');
 
 // 5. Nothing in the source or the scripts assumes the :37 minute.
