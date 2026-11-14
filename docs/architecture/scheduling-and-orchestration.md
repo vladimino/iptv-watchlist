@@ -229,10 +229,10 @@ sequenceDiagram
     S->>C: Seal phases and publish exactly once
     Note over H,S: Claim pending while sync.json still says seal
     H->>C: Read claim and successor status
-    Note over H: Absent or unknown, create the same id or attach
-    Note over H: Alive, wait
+    Note left of H: Absent or unknown, create the same id or attach
+    Note left of H: Alive, wait
     H->>C: Errored or terminated, CAS to a new recovery series
-    Note over H: Complete while still seal, fail closed
+    Note left of H: Complete while still seal, fail closed
 ```
 
 ## The separate ratings pipeline
