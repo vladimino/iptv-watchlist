@@ -137,9 +137,12 @@ assert.deepEqual(plain(call('predictionDiagnosticEvidence')({...legacy,evidence:
 const kept=plain(call('predictionDiagnosticValidation')({stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.evidence.execution.payoff',code:'invalid_ref'},{path:'fingerprint.evidence.execution.payoff.extra',code:'invalid_ref'},{path:'fingerprint.evidence note',code:'invalid_ref'}]}));
 // AIR-472: every path the validators can report is an allowed claim path; invented ones are not.
 {const src=fs.readFileSync('src/enrichment.js','utf8'),allowed=call('callerFailurePathAllowed');
- for(const literal of new Set([...src.matchAll(/add\('((?:fingerprint|prediction|assessment)[A-Za-z0-9_.]*)'/g)].map(m=>m[1]).filter(path=>!path.endsWith('.'))))assert.ok(allowed(literal),'validator path '+literal+' is an allowed claim path');
+ for(const literal of new Set([...src.matchAll(/'((?:fingerprint|prediction|assessment)(?:\.[A-Za-z0-9_]+)*\.?)'/g)].map(m=>m[1]).filter(path=>!path.endsWith('.')&&path!=='fingerprint.json')))assert.ok(allowed(literal),'validator path '+literal+' is an allowed claim path');
  for(const key of Object.keys(EXECUTION)){assert.ok(allowed('fingerprint.execution.'+key));assert.ok(allowed('fingerprint.evidence.execution.'+key));}
  for(const bad of ['fingerprint.notARealField','fingerprint.evidence.group0.claim','fingerprint.evidence.execution.nope','prediction.secret','assessment.research.invented','secret.x','',null,7])assert.equal(allowed(bad),false,String(bad));}
+{const allowed=call('callerFailurePathAllowed'),broken={assessmentVersion:1,ratingBasis:5,probability4PlusBasis:5,tasteSignals:[{signal:5,anchor:5,direction:5}],risks:[{risk:5,severity:5}],uncertainties:[5],research:{status:'x',attempts:[{ref:5,outcome:5,note:5}]},sources:[{kind:'x',ref:5,access:5,usedFor:5}],conflicts:[{topic:5,handling:5,positions:[{source:5,stance:5}]}],model:{id:5,version:5,effort:5,status:'x'}};
+ const emitted=plain(call('assessmentIssues')(broken,{}));assert.ok(emitted.length>0);
+ for(const issue of emitted)assert.ok(allowed(issue.path),'a real assessment validator path is an allowed claim path: '+issue.path+' '+issue.code);}
 // AIR-472: a caller claim is shown with its provenance, re-checked against the closed vocabulary, and only on a caller_reported record.
 {const claimed={reason:'insufficient_evidence',preflightIssues:[{path:'fingerprint.evidence',code:'too_few'},{path:'secret.x',code:'too_few'},{path:'fingerprint.a',code:'made_up'}]};
  const shown=plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[],claimed}));

@@ -68,6 +68,10 @@ const claim={kind:'parse_error',reason:'insufficient_evidence',preflight:{issues
  }
  assert.equal(Object.keys(run(w,m).submitted||{}).length,0,'nothing was recorded');assert.deepEqual(pointers(w),[]);
  const ok=await submit(w,m,[{filmId:pick[0],failure:{kind:'parse_error',reason:'json_unparseable'}}]);assert.equal(ok.status,200);assert.deepEqual(ok.data.results[0].validation.claimed,{reason:'json_unparseable'});
+ for(const [index,paths] of [['assessment.model.id','assessment.research.attempts.outcome'],['assessment.conflicts.handling','assessment.conflicts.positions.stance','assessment.conflicts.topic','assessment.model.effort','assessment.model.version','assessment.research.attempts.note']].entries()){
+  const r=await submit(w,m,[{filmId:pick[2+index],failure:{kind:'parse_error',reason:'preflight_validation_failed',preflight:{issues:paths.map(path=>({path,code:'invalid_enum'}))}}}]);
+  assert.equal(r.status,200,paths.join());assert.deepEqual(r.data.results[0].validation.claimed.preflightIssues.map(x=>x.path).sort(),[...paths].sort(),'a path the assessment validator reports is accepted as a claim');
+ }
  const max=await submit(w,m,[{filmId:pick[1],failure:{kind:'parse_error',reason:'preflight_validation_failed',preflight:{issues:Array.from({length:20},()=>({path:'fingerprint.evidence.execution.pace',code:'too_few'}))}}}]);
  assert.equal(max.status,200);assert.equal(max.data.results[0].validation.claimed.preflightIssues.length,1,'equal issues are deduplicated');
 }
