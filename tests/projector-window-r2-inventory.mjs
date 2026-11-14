@@ -95,7 +95,7 @@ const FILE_SITES={
  'src/epg-diagnostic.js':{r2:3,wrapper:0,dynamic:2},   // AIR-453 (ADR 0121): the guarded put and delete of the DIAGNOSTIC bucket and the identity put of `provision`; inert (no caller), a separate bucket, never a projector input
  'src/epg-diagnostic-run.js':{r2:4,wrapper:0,dynamic:1},   // AIR-455 (ADR 0121): the baseline writes and the cleanup of the DIAGNOSTIC bucket through the allowlisted context, the run document and the consumption marker; behind owner-only routes, inert without the diagnostic bindings, never a projector input
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
- 'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
+ 'src/discovery.js':{r2:8,wrapper:13,dynamic:2},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
  // events): not a projector input and not on a Discovery, admin-recovery or publication path.
  // Batch runner v2: +2 wrapper sites and +2 dynamic keys in batch_start, both the same object and key shape the v5 start writes: the create of `enrichment/sources/<runId>.json` (the metadata
@@ -140,7 +140,6 @@ const inventory={sites:siteCount,files:perFile.size,inputSites:[...inputSites.va
 const classes={
  // The Discovery files: every site is classified, with its guard, in projector-window-r2-writes.mjs.
  'advanceDiscovery@src/discovery.js':'discovery file',
- 'attachWatchlistShowing@src/discovery.js':'discovery file',
  'observationShardPut@src/discovery.js':'discovery file',
  'releaseDiscoveryLease@src/discovery.js':'discovery file (the legacy R2 lease record)',
  'renewDiscoveryLease@src/discovery.js':'discovery file (the legacy R2 lease record)',

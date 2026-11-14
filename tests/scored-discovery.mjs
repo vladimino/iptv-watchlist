@@ -224,8 +224,7 @@ assert.equal(watchlist.records.get('epg/discovery-resolution.json')['dune|1984']
 assert.equal(watchlist.records.get('epg/discovered-films.json').tmdb_11,undefined);
 assert.equal(shown.title,'Дюна');
 assert.equal(shown.titleStatus,'reviewed');
-assert.equal(shown.shows.length,1);
-assert.equal(shown.shows[0].channelId,'n');
+assert.equal(shown.shows.length,0,'the programme document is no longer patched; the slot assignment owns the show rows');
 assert.equal(shown.canonicalIdentity,undefined);
 
 const shifted=harness('on',async url=>{if(String(url).includes('/movie/')){shifted.records.set('epg/published-generation.json',{programmeRunId:'other',phase:'published'});return detailOf(11,'Дюна','Dune',1984,137);}return new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]}));});
@@ -239,36 +238,6 @@ assert.equal(shifted.records.get('epg/discovery-resolution.json')?.['dune|1984']
 assert.deepEqual(shifted.records.get('programme.json').films[0].shows,[]);
 assert.equal(shifted.records.get('programme.json').films[0].title,'Дюна');
 assert.equal(shifted.records.get('epg/discovered-films.json').tmdb_11,undefined);
-
-const raced=harness('on',url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]})));
-seed(raced.records,candidate('Dune',1984),{});
-raced.listed=structuredClone(listed);
-raced.records.set('programme.json',{runId:'run-1',films:[structuredClone(listed)]});
-raced.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
-const racedPut=raced.env.BUCKET.put.bind(raced.env.BUCKET);
-raced.env.BUCKET.put=async(key,value,options)=>{const saved=await racedPut(key,value,options);if(key==='epg/generations/run-1/programme.json'){raced.records.set('epg/published-generation.json',{programmeRunId:'run-new',phase:'published'});raced.records.set('programme.json',{runId:'run-new',films:[{id:'lb1',title:'Новая программа',titleStatus:'reviewed',shows:[{channelId:'fresh',start:1}]}]});}return saved;};
-const racedResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[listed]},4)',raced);
-assert.equal(racedResult.stage,'programme_changed');
-assert.equal(raced.records.get('epg/discovery-resolution.json')?.['dune|1984'],undefined);
-assert.equal(raced.records.get('programme.json').films[0].title,'Новая программа');
-assert.equal(raced.records.get('programme.json').films[0].shows[0].channelId,'fresh');
-
-const afterCheck=harness('on',url=>url.includes('/movie/')?detailOf(11,'Дюна','Dune',1984,137):new Response(JSON.stringify({total_pages:1,results:[{id:11,title:'Dune',original_title:'Dune',release_date:'1984-01-01'}]})));
-seed(afterCheck.records,candidate('Dune',1984),{});
-afterCheck.listed=structuredClone(listed);
-afterCheck.records.set('programme.json',{runId:'run-1',films:[structuredClone(listed)]});
-afterCheck.records.set('epg/published-generation.json',{programmeRunId:'run-1',phase:'published'});
-let stagedProgramme=false,publicWrites=0;
-const afterGet=afterCheck.env.BUCKET.get.bind(afterCheck.env.BUCKET),afterPut=afterCheck.env.BUCKET.put.bind(afterCheck.env.BUCKET);
-afterCheck.env.BUCKET.put=async(key,value,options)=>{if(key==='programme.json')publicWrites++;if(key==='epg/generations/run-1/programme.json')stagedProgramme=true;return afterPut(key,value,options);};
-afterCheck.env.BUCKET.get=async key=>{const object=await afterGet(key);if(key==='epg/published-generation.json'&&stagedProgramme){const seen=await object.json();afterCheck.records.set('epg/published-generation.json',{programmeRunId:'run-new',phase:'published'});afterCheck.records.set('programme.json',{runId:'run-new',films:[{id:'lb1',title:'Новая программа',titleStatus:'reviewed',shows:[{channelId:'fresh',start:1}]}]});return {etag:object.etag,json:async()=>seen};}return object;};
-const afterResult=await vm.runInContext('resolveDiscoveryBatch(env,{runId:"run-1",films:[listed]},4)',afterCheck);
-assert.equal(afterResult.stage,'programme_changed');
-assert.equal(publicWrites,0);
-assert.equal(afterCheck.records.get('epg/discovery-resolution.json')?.['dune|1984'],undefined);
-assert.equal(afterCheck.records.get('programme.json').films[0].title,'Новая программа');
-assert.equal(afterCheck.records.get('programme.json').films[0].shows[0].channelId,'fresh');
-assert.equal(afterCheck.records.get('epg/generations/run-1/programme.json').films[0].shows[0].channelId,'n');
 
 const moved=harness('on',url=>url.includes('/movie/')?detailOf(77,'Brand New Film','Brand New Film',1999,137):new Response(JSON.stringify({total_pages:1,results:[{id:77,title:'Brand New Film',original_title:'Brand New Film',release_date:'1999-01-01'}]})));
 seed(moved.records,candidate('Brand New Film',1999),{});

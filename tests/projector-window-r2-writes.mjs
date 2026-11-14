@@ -48,8 +48,6 @@ const classes={
  "discovery.js|saveJSON|'epg/discovered-films.json'":{count:1,input:true,guard:LEASE,routed:'epg/discovered-films.json'},
  'discovery.js|env.BUCKET.put|key':{count:2,input:false,guard:/await guard\(\)|const stop=await guard\(\)|put=/,note:'catalog poster copy (guard before each write) and the observation shard put (immutable segment); neither is read by the projector under D1'},
  'discovery.js|env.BUCKET.put|CATALOG_POSTER_NEGATIVES_KEY':{count:1,input:false,guard:LEASE},
- "discovery.js|saveJSON|epgGenerationKey(seenRunId,'programme.json')":{count:2,input:true,guard:/patchProgramme|publishedPointer\(env\)|await fence\(\)/,note:'the D1 published programme is the projector input under D1 (PublishedEpg.authoritativeSnapshot); this is the R2 compatibility copy behind a D1 CAS or pointer check'},
- "discovery.js|saveJSON|'programme.json'":{count:1,input:true,guard:LEASE,note:'only without a published D1 pointer'},
  "discovery.js|saveJSON|'epg/discovery-status.json'":{count:5,input:false,guard:null},
  "discovery.js|saveJSON|'epg/discovery-resolution.json'":{count:3,input:true,guard:LEASE,routed:'epg/discovery-resolution.json'},
  'discovery.js|saveJSON|manifestKey':{count:1,input:false,guard:LEASE},

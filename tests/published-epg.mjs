@@ -482,18 +482,7 @@ function arm(db){db.sql("UPDATE published_epg_authority SET mode='d1' WHERE id=1
  assert.equal(result.stage==='programme_changed',false,JSON.stringify(result));
  assert.equal(result.checked,1);
  const stored=await readDocument(db,run,'programme');
- assert.equal(stored.films[0].shows.length,1);
- const stolen=arm(open());
- await publishGeneration({DB:stolen},{programmeRunId:run,phase:'published',expectedProgrammeRunId:null,programme:body,watchlist:list},{now:0});
- const stolenEnv={...env,DB:stolen,BUCKET:env.BUCKET};
- const wrapped={...PublishedEpg,async patchProgramme(target,programmeRunId,programme,options){target.DB.sql('UPDATE published_epg_authority SET generation=generation+1');return PublishedEpg.patchProgramme(target,programmeRunId,programme,options);}};
- records.set('epg/discovery-resolution.json',{});
- records.set('epg/discovery-status.json',{retryAt:null});
- records.set('epg/discovered-films.json',{});
- context.PublishedEpg=wrapped;
- const changed=await context.resolveDiscoveryBatch(stolenEnv,body,1);
- assert.equal(changed.stage,'programme_changed');
- assert.equal((await readDocument(stolen,run,'programme')).films[0].shows.length,0);
+ assert.equal(stored.films[0].shows.length,0,'Discovery never patches the published programme document');
 }
 
 console.log('published EPG authority: marker, fence, lease, resume, empty shows, withheld, ordering, mirror and enrichment pin passed');
