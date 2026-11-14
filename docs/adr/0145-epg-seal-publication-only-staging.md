@@ -55,8 +55,8 @@ AIR-480 stage 4b-1 ([PR #637](https://github.com/vladimino/iptv-watchlist/pull/6
 | `watchlist` | `epgSync` (`{updatedAt, films: run.watchlist}`) | The `pointer` (D1 watchlist document), `mirrors` (`watchlist.json`), the `intent` fallback | D1 after the pointer. The same Film list also rides in `sync.json` as `run.watchlist`. |
 | `uncertain` | The scan | The `intent` unit (`uncertain.json`) | R2 `uncertain.json`; small. |
 | `fence`, `expectedProgrammeRunId` | `PublishedEpg.currentGeneration` at `seal_stage` | The `pointer` unit (CAS of the published pointer) | The D1 `published_epg_authority` row; the staged values are the expected state. |
-| Generation ledger `epg/generations/<runId>/discovery-latest.json` | `seal_stage` (streamed with a known length; etag kept in `run.seal`) | `seal_ledger` (range reads, etag-checked) → D1 ledger tables; `copy` → `epg/discovery-latest.json` mirror | The R2 object is an immutable run input. After the seal the D1 ledger is authoritative and `epg/discovery-latest.json` is a mirror. |
-| `sync.json` | Every EPG step | Every action: about three reads and at least one write | The R2 run checkpoint. It carries `run.seal` (phase, units, ledger key and etag). |
+| Generation ledger `epg/generations/<runId>/discovery-latest.json` | `seal_stage` (streamed with a known length; etag kept in `run.seal.etag`, key in `run.seal.sourceKey`) | `seal_ledger` (range reads, etag-checked) → D1 ledger tables; `copy` → `epg/discovery-latest.json` mirror | The R2 object is an immutable run input. After the seal the D1 ledger is authoritative and `epg/discovery-latest.json` is a mirror. |
+| `sync.json` | Every EPG step | Every action: about three reads and at least one write | The R2 run checkpoint. It carries `run.seal`: phase, units, the ledger's `sourceKey` and `etag`, and after this record `layout`, `publicationKey` and `publicationEtag`. |
 | `epg/seal/<runId>/payload.json` | `seal_stage`; also `epg-diagnostic-run.js` through the same function | The seal phases after `ledger` | An immutable run-scoped R2 input, deleted at completion. |
 
 ### Measured
@@ -94,7 +94,8 @@ Traffic per `seal_catalog` step:
    An AIR-480 card waiting in `Верификация` for a natural run is not treated as Done. The implementation of this record needs only the code contract on `main`, plus the owner's go-ahead.
 1. **Only the publication is staged.** `seal_stage` writes one run-keyed object, `epg/seal/<runId>/publication.json`, instead of `payload.json`. It holds `runId`, `report`, `watchlist`, `uncertain`, `fence` and `expectedProgrammeRunId`, with today's meaning.
    - The object is written before `sync.json` moves to `stage: seal`.
-   - `run.seal` records `layout: 2` and the object's etag. Every read checks that etag, as `seal_ledger` does for the ledger, and fails closed on a missing or changed object.
+   - `run.seal` records `layout: 2` and two new fields, `publicationKey` and `publicationEtag`. The existing ledger fields `run.seal.sourceKey` and `run.seal.etag` keep their meaning and values: they belong to the generation ledger, and `readSealedItems` fences every ledger read with them. No new field reuses them.
+   - Every read of `publication.json` checks `publicationEtag` and fails closed on a missing object or a mismatch, before the step writes anything. Ledger reads keep checking `run.seal.etag`. The two checks are independent: a mismatch on one never rewrites or relaxes the other.
    - Nothing of the catalog is staged: no catalog copy, no `availability.json`, no D1 BLOB or JSON document.
 2. **The `catalog` seal phase is removed.** A finished `ledger` phase moves straight to `publish`. The EPG sync then writes nothing into `discovery_admission` during the seal, and D1 stays the only copy of the catalog. The catalog read the scan needs to match catalog-only Films is unchanged.
 3. **The later phases read only `publication.json`.** That covers `seal_publish` (`pointer`, `mirrors`, `copy`, `intent`), `seal_finalize` and `seal_queue`.
@@ -108,7 +109,12 @@ Traffic per `seal_catalog` step:
 5. **Mixed versions fail closed; deploy and rollback at a drain holdpoint.**
    - **Old code on a `layout: 2` run** still runs `seal_ledger`, whose input is unchanged. It then enters `catalog` or `publish`, finds no `payload.json` and throws before that step writes anything. The step keeps its phase, and the hourly `ensure` (ADR 0100, 0144) retries.
    - **No dual write.** No layout writes both forms, because that would bring back the bytes this record removes.
-   - **Holdpoint.** A deploy that introduces or removes `layout: 2`, and its rollback, happens only when a read-only EPG status shows no run at `stage: seal`. This is the same discipline as ADR 0144. It is a separate deploy from the M5 deploy.
+   - **Holdpoint.** A deploy that introduces or removes `layout: 2`, and its rollback, happens only at the ADR 0144 drain holdpoint ([deployment runbook](../runbooks/deployment.md)). It is a separate deploy from the M5 deploy. Before merging the deploy and before reverting it, the read-only EPG status must show all three of:
+     1. no unfinished handoff claim in `orchestration.handoff`, meaning no `handoff.sealRunId` whose `sync.json` is still at `stage: seal`;
+     2. `orchestration.syncRun.stage` not `seal`;
+     3. `orchestration.owner.liveness` `finished` or `absent` for the recorded instance. This is read in every control phase, including `done` and `stopped`, because a successor still running its last step reads `alive` (`drainState: instance_live`).
+
+     A stage that is not `seal` does not prove the holdpoint by itself. Any other value, such as `alive`, a pending claim, or an unreadable or unknown field, means the holdpoint is not proven, and the deploy or rollback does not proceed. While a claim is pending, the natural run or the hourly `ensure` recovery finishes it, and the three checks are read again. The check is read-only; it authorizes no run, flag or write.
 6. **Retention.** At completion `seal_queue` deletes every object of the run's seal prefix (`payload.json`, `publication.json`), where today it deletes one. Objects of abandoned runs already accumulate today. Removing them needs a new R2 delete writer and is **not** decided here.
 7. **Relation to ADR 0144.** The successor instance finishes the seal from the run-keyed object and `run.seal`, both durable in R2; the hand-off is unchanged. Any code that names the seal phases must drop `catalog` in the same change. That covers the Workflow progress count and the read models, which the implementation lists exhaustively.
 
@@ -147,7 +153,7 @@ Traffic per `seal_catalog` step:
 - **Memory.** Measured in Node (via C's identical object), `seal_publish` drops from 44-46 to 31 MiB, and `seal_finalize` and `seal_queue` from 44 to 18. The 63 MiB `seal_catalog` step disappears. Inferred: `seal_stage` serialises 3.6 MiB instead of 14.2 MiB.
 - **D1.** No catalog reads or admission writes during the seal: per `seal_catalog` step that is 8-16 MiB of reads and the write batches. No new D1 table, migration or contention.
 - **Semantics.** The EPG sync no longer writes the catalog during the seal. The stale-copy overwrite, empty `shows` and re-sent supersession described under *What M5 changes* are gone without a new rule. No live-row-wins merge is needed, because nothing is merged.
-- **Smaller than C.** One object and one etag, no availability format, no equivalence proof to maintain.
+- **Smaller than C.** One object and one new etag field (`publicationEtag`), no availability format, no equivalence proof to maintain.
 - **Restart and crash points.**
   - **Mid-write in `seal_stage`.** A crash before `sync.json` moves to `seal` leaves an object the next attempt rewrites under the same key, because the run rescans.
   - **Inside the seal.** A crash re-reads the same immutable, etag-checked object.
@@ -159,9 +165,9 @@ Traffic per `seal_catalog` step:
 ## Recovery and migration boundary
 
 - **No data change.** No D1 schema change, migration, flag, Task, Access or authority marker.
-- **Rollback.** A code rollback at the drain holdpoint is enough. `layout: 2` objects left behind are inert, because old code never reads them.
+- **Rollback.** A code rollback at the drain holdpoint of decision 5 (all three checks) is enough. `layout: 2` objects left behind are inert, because old code never reads them.
 - **Rollback is not reversed by M5.** Rolling back this record restores `seal_catalog` with whatever `main` then contains. After M5 that phase writes no availability.
-- **Hard boundary.** A deploy or rollback with a run at `stage: seal` would block that run until the matching code returns. That is the boundary the holdpoint protects, read from the EPG status.
+- **Hard boundary.** A deploy or rollback with a run at `stage: seal`, a pending handoff claim or a live successor instance would let mixed-version code run that seal, or block it until the matching code returns. That is what the three checks of decision 5 protect. An unknown value fails closed.
 - **No operation authorized.** This record authorizes no implementation, deployment or production operation. Each step below needs its own owner approval where the card process requires one.
 
 ### Staged rollout
@@ -170,14 +176,17 @@ Traffic per `seal_catalog` step:
 2. **Owner decision** on this record: D as the final layout, C+ deferred, the abandoned-object cleanup left open.
 3. **Offline implementation PR.** It contains decisions 1-7 and the legacy reader. The closed set of `epg_memory_boundary` names drops `seal_catalog_payload` and `seal_catalog_merge` in the reference. Tests:
    - old code failing closed on a `layout: 2` run;
-   - a crash at every write point of `seal_stage`;
+   - a `publicationEtag` mismatch or a missing `publication.json` failing closed without writing, while `run.seal.etag` (ledger) stays unchanged and is still checked; both etags are validated independently;
+   - a crash at every write point of `seal_stage`, including the boundary between the `publication.json` write and the `sync.json` checkpoint;
    - `ledger` → `publish` with no `catalog` phase;
-   - a legacy run in each phase;
+   - a legacy run in each seal phase;
+   - after M5, no catalog Film loses its slot availability through a D seal;
    - next-day adoption by the successor instance;
-   - deletion at completion.
+   - deletion at completion;
+   - the three-condition drain gate of decision 5, each condition failing alone and an unknown value, before a mixed-version deploy or rollback.
 
    The benchmark stays as the regression measure. The same PR updates the architecture seal diagram, `docs/reference/orchestration-reliability.md` and the deployment runbook holdpoint.
-4. **Deploy at a drain holdpoint.** Acceptance on a natural run:
+4. **Deploy at the drain holdpoint of decision 5.** All three read-only checks must hold. Acceptance on a natural run:
    - `seal_payload_text` bytes fall from about 14.9 M to about 3.6 M characters;
    - no `seal_catalog` phase appears;
    - the seal completes;
