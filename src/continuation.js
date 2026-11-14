@@ -1,4 +1,4 @@
-// Public HTTP always reaches the default export. This entrypoint stays internal and runs one chunk; it does not schedule the next one.
+// Public HTTP always reaches the default export. This entrypoint stays internal. Since AIR-325 it runs no chunk: it answers through resolveDiscoveryRequest, which only delegates to the Discovery Workflow or reports the contract.
 export const DiscoveryContinuation={async fetch(request,env,execution){
  if(request.method!=='POST'||new URL(request.url).pathname!==new URL(DISCOVERY_CONTINUATION_URL).pathname)return json({error:'Not found'},404);
  if(!env.BUCKET)return json({error:'Storage unavailable'},503);

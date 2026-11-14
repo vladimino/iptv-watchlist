@@ -14,7 +14,7 @@ flowchart TB
         mcp["src/mcp.js: JWT and MCP protocol"]
         sync["Sync and EPG handlers"]
         prediction["Prediction runner handlers"]
-        discovery["One discovery chunk per explicit request"]
+        discovery["Discovery chunk engine, called only by the Workflow"]
         catalogD1["src/catalog-d1.js: read-only relational views"]
         projector["src/d1-enrichment.js: enrichment projector, D1_ENRICHMENT_WRITE off by default"]
         route --> sync
@@ -23,9 +23,9 @@ flowchart TB
         route -->|exact /mcp| mcp
         mcp -->|allowlisted tool call| sync
         mcp -->|allowlisted tool call| prediction
-        sync -->|explicit step after EPG commit| discovery
         workflow["Discovery Workflow class, no schedule"]
-        discovery -.->|when admission passes| workflow
+        sync -.->|"queues the intent and delegates when admission passes"| workflow
+        workflow -->|"one chunk per durable step"| discovery
     end
     store[("R2 BUCKET: iptv")]
     d1[("D1 iptv: cache, predictions, EPG, owner reviews; others projected")]

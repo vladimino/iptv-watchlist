@@ -92,7 +92,7 @@ A fenced call answers `external_writer_fenced` and writes nothing. While the mod
 - TMDB 429 and the stored `retryAt` or backoff become `cooldownUntil`.
 - Decisions, including `cheap_pass` and partial ones, are idempotent per key.
 - An interrupted hop is recovered by the executor only when its proof holds: same published generation, the hop's own unfinished status, no diagnostic claiming its checkpoint, authority open. Otherwise the outcome is `evidence_contradictory` or `evidence_unreadable` (`unsafe`).
-- In external mode the manual interrupted confirm keeps its own contract ([ADR 0088](../adr/0088-guarded-interrupted-discovery-recovery.md)).
+- The manual interrupted confirm of [ADR 0088](../adr/0088-guarded-interrupted-discovery-recovery.md) is refused since AIR-325 (`cause: executor_workflow`); the Workflow applies the interruption rules itself.
 
 ### Ratings
 
