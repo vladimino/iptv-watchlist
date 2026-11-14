@@ -1,4 +1,4 @@
-# ADR 0141: Assessment conflict positions may carry a caller-reported author, so one page source can hold several opinions
+# ADR 0143: Assessment conflict positions may carry a caller-reported author, so one page source can hold several opinions
 
 **Status:** Accepted (refines [ADR 0132](0132-prediction-assessment-artifact.md))
 **Original decision date:** 2026-11-14

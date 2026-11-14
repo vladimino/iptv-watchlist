@@ -80,7 +80,7 @@ const mutate=fn=>{const a=base();fn(a);return a;};
   [mutate(a=>{a.ratingBasis='x'.repeat(700);a.probability4PlusBasis='y'.repeat(400);a.uncertainties=['u'.repeat(220),'u'.repeat(220),'u'.repeat(220)];a.tasteSignals=Array.from({length:5},()=>({direction:'supports',signal:'s'.repeat(220),anchor:'a'.repeat(120)}));}),['assessment too_large']],
  ];
  for(const [a,expected] of cases){const got=await issues(a);assert.equal(JSON.stringify(got),JSON.stringify(expected),JSON.stringify(expected));assert.ok(!JSON.stringify(got).includes(SECRET));}
- // ADR 0141: one page source with two distinct authors is valid; legacy distinct-index positions stay valid
+ // ADR 0143: one page source with two distinct authors is valid; legacy distinct-index positions stay valid
  for(const positions of [[{source:1,author:'Reviewer A',stance:'earned'},{source:1,author:'Reviewer B',stance:'weak'}],[{source:1,author:'A',stance:'x'},{source:1,author:'B',stance:'y'},{source:2,stance:'z'}],[{source:1,author:'A',stance:'x'},{source:2,stance:'y'}]]){const v=await verdict(mutate(a=>{a.conflicts[0].positions=positions;}));assert.equal(v.valid,true,JSON.stringify(v.assessment));}
  // unavailable model and a metadata-free film are explicit and valid; the cap is on serialized UTF-8 bytes, so multibyte text counts by bytes
  assert.equal((await verdict(mutate(a=>{a.model={status:'unavailable'};}))).valid,true);
@@ -96,7 +96,7 @@ const asmKeys=()=>[...w.records.keys()].filter(k=>/\/predictions\/assessments\//
 const verKeys=()=>[...w.records.keys()].filter(k=>/\/predictions\/versions\//.test(k));
 const submit=(items,extra={})=>w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items,...extra});
 const item=(id,a)=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction,...(a===undefined?{}:{assessment:a})});
-const asm=()=>{const a=base();a.sources=a.sources.filter(x=>x.kind!=='metadata');a.sources.forEach(x=>{});a.conflicts[0].positions=[{source:0,stance:'earned'},{source:1,stance:'weak'}];return a;};
+const asm=()=>{const a=base();a.sources=a.sources.filter(x=>x.kind!=='metadata');a.sources.forEach(x=>{});a.conflicts[0].positions=[{source:0,author:SECRET+' A',stance:'earned'},{source:0,author:SECRET+' B',stance:'weak'}];return a;};
 const dumpAll=()=>JSON.stringify([...w.records.entries()].filter(([k])=>!/\/predictions\/assessments\//.test(k)))+JSON.stringify(['prediction_pointer','prediction_current','prediction_history','prediction_lineage','prediction_fingerprint'].map(t=>sql(w.file,'SELECT * FROM '+t)));
 
 // 3. A dry run validates the assessment, reports would_write and writes nothing.
@@ -105,6 +105,7 @@ const dumpAll=()=>JSON.stringify([...w.records.entries()].filter(([k])=>!/\/pred
  const ok=await submit([item(f1,asm()),item(f2)],{dryRun:true});assert.equal(ok.status,200,JSON.stringify(ok.data).slice(0,300));
  same(ok.data.results.map(r=>[r.filmId,r.status,r.assessment]),[[f1,'would_write','would_write'],[f2,'would_write','not_sent']]);
  const bad=await submit([item(f1,{...asm(),extra:1})],{dryRun:true});assert.equal(bad.data.results[0].status,'validation_failure');assert.equal(bad.data.results[0].validation.stage,'assessment_schema');same(bad.data.results[0].validation.issues,[{path:'assessment.extra',code:'unknown_field'}]);
+ for(const [positions] of [[[{source:0,stance:'a'},{source:0,stance:'b'}]],[[{source:0,author:'X',stance:'a'},{source:0,author:' x ',stance:'b'}]]]){const neg=await submit([item(f1,{...asm(),conflicts:[{topic:'t',handling:'kept_unresolved',positions}]})],{dryRun:true});assert.equal(neg.data.results[0].status,'validation_failure');assert.equal(neg.data.results[0].validation.stage,'assessment_schema');}
  assert.equal(JSON.stringify([...w.records.entries()])+JSON.stringify(sql(w.file,"SELECT name FROM sqlite_master")),before,'a dry run writes nothing');assert.equal(asmKeys().length,0);
 }
 // 4. A real submit writes version, then assessment, then the D1 commit; the object carries confirmed and reported parts apart; no hot projection carries any assessment text.
@@ -119,7 +120,7 @@ let firstDigest;
  assert.ok(key.endsWith('/'+body.predictionSha256+'.json'));assert.ok(body.predictionKey.endsWith('/predictions/versions/'+body.predictionSha256+'.json'));assert.ok(w.records.has(body.predictionKey));
  assert.deepEqual(Object.keys(body.confirmed).sort(),['assessmentSha256','fingerprintHash','predictionGeneratedAt','recordedAt','runId','tasteProfile','trigger']);
  assert.deepEqual(Object.keys(body.callerReported).sort(),['conflicts','model','research','sources']);assert.deepEqual(Object.keys(body.assessment).sort(),['assessmentVersion','probability4PlusBasis','ratingBasis','risks','tasteSignals','uncertainties']);
- assert.equal(body.callerReported.model.id,'synthetic-model');assert.equal(body.confirmed.runId,m.runId);
+ assert.deepEqual(body.callerReported.conflicts[0].positions.map(x=>[x.source,x.author]),[[0,SECRET+' A'],[0,SECRET+' B']],'both authors are kept under callerReported');assert.equal(body.callerReported.model.id,'synthetic-model');assert.equal(body.confirmed.runId,m.runId);
  console.log('sidecar object: '+new TextEncoder().encode(JSON.stringify(body)).length+' B for a caller assessment of '+new TextEncoder().encode(JSON.stringify(asm())).length+' B');
  assert.ok(!dumpAll().includes(SECRET),'no assessment text in D1, the bundle, the view index, Events or any other object');
  assert.ok(!w.logs.join('\n').includes(SECRET),'no assessment text in any log line');
@@ -155,9 +156,9 @@ let firstDigest;
 }
 // 8. An invalid assessment fails only its film at the assessment_schema stage: nothing is stored for it, the others are unaffected; a failure item is not_applicable.
 {
- const r=await submit([item(f4,{...asm(),extra:1}),item(f5),{filmId:m.films[5]?.filmId||f5,failure:{kind:'parse_error'},assessment:asm()}].slice(0,2));
+ const r=await submit([item(f4,{...asm(),conflicts:[{topic:'t',handling:'kept_unresolved',positions:[{source:0,author:'X',stance:'a'},{source:0,author:' x ',stance:'b'}]}]}),item(f5),{filmId:m.films[5]?.filmId||f5,failure:{kind:'parse_error'},assessment:asm()}].slice(0,2));
  same(r.data.results.map(x=>[x.filmId,x.status,x.assessment]),[[f4,'validation_failure','not_applicable'],[f5,'created','not_sent']]);
- same(r.data.results[0].validation,{stage:'assessment_schema',reportedBy:'worker',issues:[{path:'assessment.extra',code:'unknown_field'}]});
+ same(r.data.results[0].validation,{stage:'assessment_schema',reportedBy:'worker',issues:[{path:'assessment.conflicts.positions',code:'invalid_ref'}]});
  assert.equal(sql(w.file,"SELECT film_id FROM prediction_pointer WHERE film_id='"+f4+"'").length,0);assert.equal(asmKeys().filter(k=>k.includes('/'+f4+'/')).length,0);
 }
 // 9. The published contract and the v5 route: enrichment_schema carries contract.assessment; the v5 submit refuses the key.
