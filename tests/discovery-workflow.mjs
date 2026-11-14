@@ -1132,4 +1132,21 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
  assert.equal(continuation().reason,'interrupted');assert.equal(continuation().interruptions,2);
 }
 
+// AIR-483: a typed refusal of the intent write is a wait, never an untyped intent_uncertain.
+{
+ const realQueue=context.queueDiscovery;
+ const refuse=(code,extra)=>vm.runInContext('queueDiscovery=async()=>{const e=new Error("x");e.code='+JSON.stringify(code)+';'+extra+'throw e;}',context);
+ const probe=async()=>{seed();records.delete('epg/resolver-continuation.json');records.delete('epg/resolver-continuation');env.DISCOVERY_EXECUTOR='workflow';armWorkflowAdmission();creates.length=0;return call('reconcileDiscoveryWorkflow')(env);};
+ refuse('discovery_window','e.window={expiresAt:123,state:"held"};');
+ const win=await probe();
+ assert.equal(win.reason,'projector_window');assert.equal(win.windowUntil,123);assert.equal(creates.length,0);
+ refuse('discovery_epg_priority','e.priority={nextCatchUpAt:Date.now()+60000};');
+ assert.equal((await probe()).reason,'epg_priority');
+ refuse('discovery_fence','');
+ assert.equal((await probe()).reason,'authority_held');
+ refuse('boom','');
+ assert.equal((await probe()).reason,'intent_uncertain');
+ context.queueDiscovery=realQueue;
+}
+
 console.log('Discovery workflow: retired selector ignored, delegated requests, fail-closed without Workflow admission, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
