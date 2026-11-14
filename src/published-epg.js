@@ -592,7 +592,7 @@ export async function authoritativeSnapshot(env){
  const current=await currentGeneration(env);
  if(!current)return null;
  if(!current.programmeRunId)return {programmeRunId:null,programme:null,watchlist:null,generation:current.generation};
- const programme=await readDocument(env,current.programmeRunId,'programme');
+ const programme=await readCompletedProgramme(env,current.programmeRunId);
  const watchlist=await readDocument(env,current.programmeRunId,'watchlist');
  const after=await currentGeneration(env);
  if(!after||after.generation!==current.generation||after.programmeRunId!==current.programmeRunId)throw failed('published_epg_fence');
@@ -713,8 +713,12 @@ export async function releasePublished(env){
  return after;
 }
 async function discoveryGeneration(db){
- try{const row=await one(db,'SELECT generation FROM discovery_authority WHERE id=1');return row?Number(row.generation):null;}
- catch{return null;}
+ let row;
+ try{row=await one(db,'SELECT generation FROM discovery_authority WHERE id=1');}
+ catch(error){throw failed('published_epg_fence',error);}
+ const generation=row?Number(row.generation):NaN;
+ if(!Number.isFinite(generation))throw failed('published_epg_fence');
+ return generation;
 }
 export async function revertPublished(env,{confirm}={}){
  if(confirm!=='r2')throw failed('published_epg_confirm');
@@ -738,7 +742,7 @@ export async function revertPublished(env,{confirm}={}){
  if(!sameMembership(programme?.films,programmeMembers)||!sameMembership(watchlist?.films,watchMembers))throw failed('published_epg_fence');
  // ADR 0142 decision 12: every assignment and every correction advances the Discovery generation, so one that landed after the comparison above fails the flip.
  await fenced(database(env),[
-  ['UPDATE published_epg_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND programme_run_id=? AND mirror_programme_run_id=? AND mirror_etag=? AND mirror_watchlist_etag=? AND generation=?'+(discoveryBefore==null?'':' AND (SELECT generation FROM discovery_authority WHERE id=1)=?'),[authority.programmeRunId,authority.mirrorProgrammeRunId,authority.mirrorEtag,authority.mirrorWatchlistEtag,authority.generation,...(discoveryBefore==null?[]:[discoveryBefore])]],
+  ['UPDATE published_epg_authority SET mode=\'r2\' WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND programme_run_id=? AND mirror_programme_run_id=? AND mirror_etag=? AND mirror_watchlist_etag=? AND generation=? AND (SELECT generation FROM discovery_authority WHERE id=1)=?',[authority.programmeRunId,authority.mirrorProgrammeRunId,authority.mirrorEtag,authority.mirrorWatchlistEtag,authority.generation,discoveryBefore]],
   [FENCE_SQL,[]],
  ]);
  const after=await readAuthority(env);

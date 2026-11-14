@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-import {activatePublished, importPublished, readDocument, readMembers, releasePublished, revertPublished, sealPublished} from '../src/published-epg.js';
+import {activatePublished, importPublished, readCompletedProgramme, readDocument, readMembers, releasePublished, revertPublished, sealPublished} from '../src/published-epg.js';
 import {createD1Adapter, D1Error, DEFAULT_ENDPOINT, renderSql} from './d1-backfill.mjs';
 import {ExportError} from './migration-export.mjs';
 import {createReadOnlyClient, readCredentials, rfc3986, signRequest} from './r2-snapshot-export.mjs';
@@ -475,7 +475,7 @@ async function revertMarker(opened, credentials, client, ctx, fetchImpl){
  };
  const after=await revertPublished({...opened.binding,BUCKET:bucket},{confirm:'r2'});
  const readback=await readSnapshot(opened.binding);
- const programme=await readDocument(opened.binding,after.programmeRunId,'programme');
+ const programme=await readCompletedProgramme(opened.binding,after.programmeRunId);
  const watchlist=await readDocument(opened.binding,after.programmeRunId,'watchlist');
  const fresh=await readPublished(client);
  const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
@@ -508,7 +508,7 @@ async function activateMarker(opened, client, ctx, snapshot, source, clock){
   }
   throw stop;
  }
- const programme=await readDocument(opened.binding,after.programmeRunId,'programme');
+ const programme=await readCompletedProgramme(opened.binding,after.programmeRunId);
  const watchlist=await readDocument(opened.binding,after.programmeRunId,'watchlist');
  const same=(left,right)=>JSON.stringify(left)===JSON.stringify(right);
  const moved=fresh.pointer.etag!==source.pointer.etag||fresh.programme.etag!==source.programme.etag||fresh.watchlist.etag!==source.watchlist.etag||fresh.pointerBody.programmeRunId!==after.programmeRunId||!same(fresh.programmeBody,programme)||!same(fresh.watchlistBody,watchlist);
@@ -551,7 +551,7 @@ async function sealHold(opened, client, ctx, snapshot, clock){
  assertIdle(writers);
  const marker=heldMarker(snapshot);
  const fresh=await readPublished(client);
- const programme=await readDocument(opened.binding,marker.programmeRunId,'programme');
+ const programme=await readCompletedProgramme(opened.binding,marker.programmeRunId);
  const watchlist=await readDocument(opened.binding,marker.programmeRunId,'watchlist');
  const programmeMembers=await readMembers(opened.binding,marker.programmeRunId,'programme');
  const watchMembers=await readMembers(opened.binding,marker.programmeRunId,'watchlist');

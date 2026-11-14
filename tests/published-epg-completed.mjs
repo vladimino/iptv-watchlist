@@ -62,7 +62,7 @@ const assignRow=(file,film,channel,start,key='obs-1')=>sql(file,`INSERT INTO pub
  const watch=await PublishedEpg.readDocumentAt(env,'run-c','watchlist',7);
  assert.deepEqual(watch.films.map(film=>film.id),['member-1','member-2'],'the watchlist document never gains a catalog Film');
  const snapshot=await PublishedEpg.authoritativeSnapshot(env);
- assert.equal(snapshot.programme.catalogFilms,undefined,'the projector snapshot stays the sealed programme');
+ assert.deepEqual(snapshot.programme,read,'the projector snapshot is the completed programme');
  assert.equal(sql(file,'SELECT generation FROM published_epg_authority')[0].generation,7,'assigned rows never move the published generation');
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM published_epg_member WHERE kind='programme'")[0].n,2,'a catalog Film is not a member');
 }
@@ -98,6 +98,18 @@ const assignRow=(file,film,channel,start,key='obs-1')=>sql(file,`INSERT INTO pub
  assert.equal(sql(file,'SELECT mode FROM published_epg_authority')[0].mode,'d1','a Discovery write between the comparison and the flip leaves the mode unchanged');
  reverted=await PublishedEpg.revertPublished(env,{confirm:'r2'});
  assert.equal(reverted.mode,'r2','a retry without a concurrent write flips');
+}
+
+// The revert guard fails closed: an unreadable or missing Discovery generation aborts before any flip.
+{
+ const {file,env}=await world();
+ sql(file,"UPDATE published_epg_authority SET mode='d1'");
+ const broken={...env,DB:d1Standin(file,{onQuery:text=>{if(/FROM discovery_authority/.test(String(text)))throw new Error('D1 read failed');}})};
+ await assert.rejects(()=>PublishedEpg.revertPublished(broken,{confirm:'r2'}),error=>error.code==='published_epg_fence');
+ assert.equal(sql(file,'SELECT mode FROM published_epg_authority')[0].mode,'d1');
+ sql(file,'DELETE FROM discovery_authority');
+ await assert.rejects(()=>PublishedEpg.revertPublished(env,{confirm:'r2'}),error=>error.code==='published_epg_fence');
+ assert.equal(sql(file,'SELECT mode FROM published_epg_authority')[0].mode,'d1','a missing generation never disables the fence');
 }
 
 console.log('published EPG completed read: completion, mirrors and revert guard ok');

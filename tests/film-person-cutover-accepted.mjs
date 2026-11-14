@@ -61,7 +61,7 @@ const LEASE='connector:test-lease';
 const IDS=await requiredStatementIds();
 // the required statement set is fixed by reviewed constants: 20 witness, 10 gate and one count per table of the copy plan
 assert.deepEqual(IDS,[...await witnessIds(),...GATE_IDS.map(id=>'gate:'+id),...COPY_TABLES.map(table=>'count:'+table)]);
-assert.equal(COPY_TABLES.length,39);assert.equal(IDS.length,69);assert.ok(Object.isFrozen(COPY_TABLES)&&Object.isFrozen(GATE_IDS));
+assert.equal(COPY_TABLES.length,40);assert.equal(IDS.length,70);assert.ok(Object.isFrozen(COPY_TABLES)&&Object.isFrozen(GATE_IDS));
 const factsOf=async()=>{
  const digests=Object.fromEntries(await Promise.all(IDS.map(async id=>[id,await H(id)])));
  const lease={id:LEASE,startedAt:'2026-11-10T17:59:00.000Z',until:'2026-11-10T18:44:00.000Z'};
