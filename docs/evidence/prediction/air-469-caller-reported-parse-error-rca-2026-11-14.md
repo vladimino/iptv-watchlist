@@ -44,6 +44,12 @@ Provenance: a client self-report from the saved ChatGPT Task A completion report
 - Do not infer that research access was blocked or that every legitimate evidence source was exhausted.
 - The installed Task A prompt (23,537 characters, byte-identical to the canonical file, Task disabled, per the reviewer's read-only registry comparison) sends `failure.kind=parse_error` whenever one re-preflight still has issues. Evidence insufficiency is thus classified as a generic format failure by prompt design. Falling back to `unknown` execution does not guarantee a valid object: a fingerprint with zero valid claims is rejected as `fingerprint.evidence too_few`.
 
+## Delivery status (three distinct states)
+
+- **RCA delivered:** this report (read-only investigation).
+- **New canonical text in GitHub:** [`hourly-predictions-batch-v2.md`](../../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md), steps 3б and 7, adds a mandatory bounded evidence-recovery pass when the first `prediction_batch_validate` reports `fingerprint.evidence` / `fingerprint.evidence.*` `too_few`, `required` or `invalid_ref`: one pass, at most 2 searches and 3 sources per film, one re-preflight, no fabricated evidence, and the failure item only afterwards. It adds no `failure.reason` or `failure.preflight`. `tests/scheduled-task-prompt-v2.mjs` checks the text statically; that does not prove model behaviour, so a natural-run observation under AIR-451 is still required.
+- **Old installed Task A prompt:** unchanged and still paused. Editing the installed prompt and restarting Task A each need a separate operation-specific owner GO.
+
 ## Telemetry gap
 
 The Worker records neither the preflight verdict history nor why the client chose `failure`. Preflight (`prediction_batch_validate`) is read-only and stores nothing, so even a Worker issue list seen by the client at 06:00 UTC is gone. Without a client trace the cause of the two failures cannot be classified between (a) to (d). No payload is reconstructed here.
