@@ -35,7 +35,7 @@ Measured at the 256 MiB cap, which completes:
 | peak external / ArrayBuffers | 118.1 / 114.6 (the R2 stand-in returns whole segment and ledger objects; a real R2 `get` body is streamed, so this is partly an artifact of the stand-in) |
 | peak RSS | 433 (includes the sqlite stand-in) |
 
-Semantics at every completing run: scan items = expected (42 156 - 2000 + 200 = 40 356 at the unconstrained size; the tool reports the exact numbers), new ledger items = scan items, `upsertedKeys` = departures, archive items grow by the departures minus the returns. Wall time of the stage was about 12-16 s on this machine, R2 stand-in traffic about 70 puts and 80 gets (about 0.4 GB read), which is not a latency claim about Cloudflare.
+Semantics at every completing run: scan items = expected items (40 226 in the first, larger run: the published active ledger of the baseline minus 2000 departures plus 200 returns), new ledger items = scan items, `upsertedKeys` = 2000 = departures, archive items 40 213 + 2000 - 200 = 42 013 plus the 200 re-entered keys that stay archived (42 213 reported). Wall time of the stage was about 12-16 s on this machine, R2 stand-in traffic about 70 puts and 80 gets (about 0.4 GB read), which is not a latency claim about Cloudflare.
 
 Larger fixture (`--item-bytes 1200`): the scan array alone is 160 MiB of heap, peak heap 470 MiB when uncapped, OOM at 192 and 128 MiB.
 
