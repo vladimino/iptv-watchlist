@@ -60,7 +60,16 @@ const mutate=fn=>{const a=base();fn(a);return a;};
   [mutate(a=>{a.sources[0]={kind:'model_knowledge',ref:'something',usedFor:'u'};}),['assessment.sources.ref invalid_ref']],
   [mutate(a=>{a.conflicts=[a.conflicts[0],a.conflicts[0],a.conflicts[0]];}),['assessment.conflicts too_many']],
   [mutate(a=>{a.conflicts[0].positions=[{source:1,stance:'a'}];}),['assessment.conflicts.positions too_few']],
-  [mutate(a=>{a.conflicts[0].positions=[{source:1,stance:'a'},{source:1,stance:'b'}];}),['assessment.conflicts.positions invalid_ref']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,stance:'a'},{source:1,stance:'b'}];}),['assessment.conflicts.positions.author required']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'A',stance:'a'},{source:1,stance:'b'}];}),['assessment.conflicts.positions.author required']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'A',stance:'a'},{source:1,author:' a ',stance:'b'}];}),['assessment.conflicts.positions invalid_ref']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'',stance:'a'},{source:1,author:'B',stance:'b'}];}),['assessment.conflicts.positions.author empty']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'  ',stance:'a'},{source:1,author:'  ',stance:'b'}];}),['assessment.conflicts.positions.author empty','assessment.conflicts.positions.author empty']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'A',stance:'a'},{source:1,author:7,stance:'b'}];}),['assessment.conflicts.positions.author invalid_type']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'x'.repeat(81),stance:'a'},{source:1,author:'B',stance:'b'}];}),['assessment.conflicts.positions.author too_long']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'A',stance:'a'},{source:1,author:'B',stance:'b',extra:1}];}),['assessment.conflicts.positions.extra unknown_field']],
+  [mutate(a=>{a.conflicts[0].positions=[{source:1,author:'A',stance:'a'},{source:1,author:'B',stance:'b'},{source:1,author:'a',stance:'c'}];}),['assessment.conflicts.positions invalid_ref']],
+  [mutate(a=>{a.sources[2]={...a.sources[1]};}),['assessment.sources invalid_ref']],
   [mutate(a=>{a.conflicts[0].positions[0].source=9;}),['assessment.conflicts.positions.source out_of_range']],
   [mutate(a=>{a.conflicts[0].positions[0].source='1';}),['assessment.conflicts.positions.source invalid_type']],
   [mutate(a=>{a.conflicts[0].handling='averaged';}),['assessment.conflicts.handling invalid_enum']],
@@ -71,6 +80,8 @@ const mutate=fn=>{const a=base();fn(a);return a;};
   [mutate(a=>{a.ratingBasis='x'.repeat(700);a.probability4PlusBasis='y'.repeat(400);a.uncertainties=['u'.repeat(220),'u'.repeat(220),'u'.repeat(220)];a.tasteSignals=Array.from({length:5},()=>({direction:'supports',signal:'s'.repeat(220),anchor:'a'.repeat(120)}));}),['assessment too_large']],
  ];
  for(const [a,expected] of cases){const got=await issues(a);assert.equal(JSON.stringify(got),JSON.stringify(expected),JSON.stringify(expected));assert.ok(!JSON.stringify(got).includes(SECRET));}
+ // ADR 0141: one page source with two distinct authors is valid; legacy distinct-index positions stay valid
+ for(const positions of [[{source:1,author:'Reviewer A',stance:'earned'},{source:1,author:'Reviewer B',stance:'weak'}],[{source:1,author:'A',stance:'x'},{source:1,author:'B',stance:'y'},{source:2,stance:'z'}],[{source:1,author:'A',stance:'x'},{source:2,stance:'y'}]]){const v=await verdict(mutate(a=>{a.conflicts[0].positions=positions;}));assert.equal(v.valid,true,JSON.stringify(v.assessment));}
  // unavailable model and a metadata-free film are explicit and valid; the cap is on serialized UTF-8 bytes, so multibyte text counts by bytes
  assert.equal((await verdict(mutate(a=>{a.model={status:'unavailable'};}))).valid,true);
  const wide=mutate(a=>{a.ratingBasis='ж'.repeat(700);a.probability4PlusBasis='ж'.repeat(400);a.uncertainties=['ж'.repeat(220),'ж'.repeat(220)];a.tasteSignals=[{direction:'supports',signal:'ж'.repeat(220)},{direction:'supports',signal:'ж'.repeat(220)}];a.sources=[];a.conflicts=[];a.research={status:'not_attempted'};});
