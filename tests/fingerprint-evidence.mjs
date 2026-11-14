@@ -135,6 +135,21 @@ assert.deepEqual(recorded.claims,[{group:'mechanic',dimension:'heist',value:'hei
 assert.equal(plain(call('predictionDiagnosticEvidence')(legacy)).status,'legacy');
 assert.deepEqual(plain(call('predictionDiagnosticEvidence')({...legacy,evidence:'text'})),{status:'unknown',note:'declared_source_not_verified'});
 const kept=plain(call('predictionDiagnosticValidation')({stage:'fingerprint_schema',reportedBy:'worker',issues:[{path:'fingerprint.evidence.execution.payoff',code:'invalid_ref'},{path:'fingerprint.evidence.execution.payoff.extra',code:'invalid_ref'},{path:'fingerprint.evidence note',code:'invalid_ref'}]}));
+// AIR-472: every path the validators can report is an allowed claim path; invented ones are not.
+{const src=fs.readFileSync('src/enrichment.js','utf8'),allowed=call('callerFailurePathAllowed');
+ for(const literal of new Set([...src.matchAll(/'((?:fingerprint|prediction|assessment)(?:\.[A-Za-z0-9_]+)*\.?)'/g)].map(m=>m[1]).filter(path=>!path.endsWith('.')&&path!=='fingerprint.json')))assert.ok(allowed(literal),'validator path '+literal+' is an allowed claim path');
+ for(const key of Object.keys(EXECUTION)){assert.ok(allowed('fingerprint.execution.'+key));assert.ok(allowed('fingerprint.evidence.execution.'+key));}
+ for(const bad of ['fingerprint.notARealField','fingerprint.evidence.group0.claim','fingerprint.evidence.execution.nope','prediction.secret','assessment.research.invented','secret.x','',null,7])assert.equal(allowed(bad),false,String(bad));}
+{const allowed=call('callerFailurePathAllowed'),broken={assessmentVersion:1,ratingBasis:5,probability4PlusBasis:5,tasteSignals:[{signal:5,anchor:5,direction:5}],risks:[{risk:5,severity:5}],uncertainties:[5],research:{status:'x',attempts:[{ref:5,outcome:5,note:5}]},sources:[{kind:'x',ref:5,access:5,usedFor:5}],conflicts:[{topic:5,handling:5,positions:[{source:5,stance:5}]}],model:{id:5,version:5,effort:5,status:'x'}};
+ const emitted=plain(call('assessmentIssues')(broken,{}));assert.ok(emitted.length>0);
+ for(const issue of emitted)assert.ok(allowed(issue.path),'a real assessment validator path is an allowed claim path: '+issue.path+' '+issue.code);}
+// AIR-472: a caller claim is shown with its provenance, re-checked against the closed vocabulary, and only on a caller_reported record.
+{const claimed={reason:'insufficient_evidence',preflightIssues:[{path:'fingerprint.evidence',code:'too_few'},{path:'secret.x',code:'too_few'},{path:'fingerprint.a',code:'made_up'}]};
+ const shown=plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[],claimed}));
+ assert.deepEqual(shown.claimed,{provenance:'caller_claim',reason:'insufficient_evidence',preflightIssues:[{path:'fingerprint.evidence',code:'too_few'}]});
+ assert.equal(plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[]})).claimed,undefined,'no claim, nothing added');
+ assert.equal(plain(call('predictionDiagnosticValidation')({stage:'fingerprint_schema',reportedBy:'worker',issues:[],claimed})).claimed,undefined,'a Worker-verified record never shows a caller claim');
+ assert.equal(plain(call('predictionDiagnosticValidation')({stage:'caller_reported',reportedBy:'caller',issues:[],claimed:{reason:'free text',preflightIssues:'x'}})).claimed,undefined,'an unknown reason is dropped');}
 assert.deepEqual(kept.issues,[{path:'fingerprint.evidence.execution.payoff',code:'invalid_ref'}]);
 
 function boot(ids){records.clear();etags.clear();revision=0;records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});records.set('sync.json',{runId:'test',stage:'complete'});const catalog={};for(const id of ids)catalog[id]={id,title:'Heat '+id,original:id,year:1995,tmdbId:id.replace(/\D/g,''),genres:['Crime'],synopsis:'A crew plans a robbery.',directors:['Michael Mann'],actors:['Al Pacino'],runtime:170,shows:[{start:Date.now()}]};records.set('programme.json',{runId:'test',films:[]});records.set('epg/discovered-films.json',catalog);}
