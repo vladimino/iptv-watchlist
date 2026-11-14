@@ -1,9 +1,9 @@
-# ADR 0139: EPG diagnostic replay dataset as a chunked manifest with content-addressed parts (proposal for owner decision)
+# ADR 0139: EPG diagnostic replay dataset as a chunked manifest with content-addressed parts
 
-**Status:** Proposed (design for owner decision under the architecture gate of [AIR-470](https://trello.com/c/jSOVQGBH); nothing is implemented, provisioned or run by this ADR, and it is not a production GO)  
-**Original decision date:** unknown (pending owner decision)  
+**Status:** Accepted (architecture only; explicit owner approval on [AIR-470](https://trello.com/c/jSOVQGBH), 2026-11-14; Path A feasibility remains unproven; no runtime or production GO)  
+**Original decision date:** 2026-11-14  
 **Recorded at:** 2026-11-14  
-**Approval source:** not documented (the owner approves, amends or rejects this proposal on the pull request or the card)  
+**Approval source:** [AIR-470](https://trello.com/c/jSOVQGBH), explicit owner approval recorded on 2026-11-14 after architectural walkthrough and exact-HEAD review of [PR #613](https://github.com/vladimino/iptv-watchlist/pull/613).  
 **Related work:** [AIR-470](https://trello.com/c/jSOVQGBH), [AIR-456 H2a NO-GO evidence](../evidence/orchestration/epg-diagnostic-dataset-air-456-h2a-no-go-2026-11-12.md), [ADR 0121](0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](0124-epg-diagnostic-canary-run-contract.md)  
 **Supersedes:** None (ADR 0121 and ADR 0124 stay Accepted; this ADR would add a second dataset format next to the one they describe)  
 **Superseded by:** None
@@ -28,7 +28,7 @@ Production EPG stays inside 128 MB because it streams: the segments are read one
 
 What the current format implies: the dataset digest is `sha256(canonical(everything except digest))` and the current `canonical()` implementation builds the sorted-keys string of the whole value, so it needs whole-value materialization. A streaming canonicalizer is theoretically possible, but it would still have to sort keys of one huge object and read segment texts that are embedded as escaped JSON strings inside the dataset JSON, so it would be a new digest implementation with the same contract risk and no cheaper than a new format. This ADR therefore proposes a new durable format and digest rule and does not claim v1 is impossible to stream. The card names a new durable format or digest contract as an architecture gate.
 
-## Decision (proposed)
+## Decision
 
 Add `epg-replay-dataset` schema version 2, a chunked dataset, alongside version 1. Version 1 stays readable with unchanged fail-closed behaviour, provenance, immutability, isolation and the owner-GO boundaries of ADR 0121 and ADR 0124 (it is simply refused above its budget). Version dispatch is by the root object, below.
 
@@ -94,4 +94,4 @@ Add `epg-replay-dataset` schema version 2, a chunked dataset, alongside version 
 
 ## Recovery boundaries
 
-This proposal touches no production or diagnostic resource and authorizes no change to `src/worker.js`. After acceptance, implementation starts with the path A feasibility test, then offline code, tests and documentation. `dataset-build` against production R2, `dataset-put`, `prepare-domain`, a Workflow launch, any diagnostic R2 write and any production seal change need their own operation-specific owner decisions.
+This architectural decision itself touches no production or diagnostic resource and authorizes no change to `src/worker.js`. After acceptance, implementation starts with the path A feasibility test, then offline code, tests and documentation. `dataset-build` against production R2, `dataset-put`, `prepare-domain`, a Workflow launch, any diagnostic R2 write and any production seal change need their own operation-specific owner decisions.
