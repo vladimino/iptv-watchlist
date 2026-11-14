@@ -1,9 +1,9 @@
 # ADR 0145: After ADR 0142 decision 13, the EPG seal stages only the publication; no catalog staging, no availability input, no `seal_catalog`
 
-**Status:** Proposed (2026-11-14; awaiting the owner's design decision; no implementation, deployment or production operation authorized)
-**Original decision date:** not decided
+**Status:** Accepted as DESIGN (2026-11-15; implementation after the ADR 0142 decision 13/M5 code contract reaches `main`; no production operation authorized)
+**Original decision date:** 2026-11-15
 **Recorded at:** 2026-11-14
-**Approval source:** not documented (design gate of [AIR-485](https://trello.com/c/qulgP9a8)). Owner sequencing of 14 November 2026 on [PR #638](https://github.com/vladimino/iptv-watchlist/pull/638#issuecomment-6885539218): AIR-485 has a native Trello prerequisite on AIR-480. The remaining consumer and availability cleanup of ADR 0142 decision 13 (M5) is to reach `main` before any AIR-485 staging change. The final layout after M5 is to be assessed against the interim option.
+**Approval source:** Product Owner decision of 2026-11-15 recorded in [AIR-485](https://trello.com/c/qulgP9a8), following [independent technical review of PR #638](https://github.com/vladimino/iptv-watchlist/pull/638#pullrequestreview-5907764074): final layout D is accepted as an architectural design; C+/D+ and abandoned-object cleanup are deferred. The [owner sequencing of 2026-11-14](https://github.com/vladimino/iptv-watchlist/pull/638#issuecomment-6885539218) remains binding: AIR-480's ADR 0142 decision 13 (M5) code contract must reach `main` before AIR-485 implementation. Acceptance of this ADR is not implementation, deploy or production authorization.
 **Related work:**
 - [AIR-485](https://trello.com/c/qulgP9a8), with [offline comparison evidence](../evidence/orchestration/air-485-seal-staging-comparison-2026-11-14.md).
 - [AIR-480](https://trello.com/c/ZS0Xdrlq): implements ADR 0142 and is the prerequisite.
@@ -84,7 +84,7 @@ Traffic per `seal_catalog` step:
 
 **Not addressed by any layout.** The 14 November OOMs were in `seal_ledger` and at `seal_publish_copy` ([AIR-462 correlation](../evidence/orchestration/air-462-epg-oom-natural-run-2026-11-14.md)). `seal_ledger` reads no payload. During the copy, every layout holds `report` and `watchlist`. This record lowers the parse peaks and the garbage of the steps after the ledger seal, and the bytes `seal_stage` serialises. It is **not** claimed as an OOM fix.
 
-## Decision (proposed)
+## Decision (accepted design; implementation conditional on M5)
 
 0. **Prerequisite and order.** Nothing in this record is implemented before the M5 code contract of ADR 0142 decision 13 is on `main`. The contract is verified in the code, not from a Trello list:
    - `epgSync` writes no availability fields into catalog Films;
@@ -173,7 +173,7 @@ Traffic per `seal_catalog` step:
 ### Staged rollout
 
 1. **M5 on `main`.** AIR-480 delivers the ADR 0142 decision 13 code contract, verified in code as decision 0 requires, with its own deploy.
-2. **Owner decision** on this record: D as the final layout, C+ deferred, the abandoned-object cleanup left open.
+2. **Owner decision (accepted 2026-11-15).** D is the final layout; C+/D+ are deferred, and abandoned-object cleanup remains a separate undecided item. Acceptance of this design does not waive the M5 code prerequisite.
 3. **Offline implementation PR.** It contains decisions 1-7 and the legacy reader. The closed set of `epg_memory_boundary` names drops `seal_catalog_payload` and `seal_catalog_merge` in the reference. Tests:
    - old code failing closed on a `layout: 2` run;
    - a `publicationEtag` mismatch or a missing `publication.json` failing closed without writing, while `run.seal.etag` (ledger) stays unchanged and is still checked; both etags are validated independently;
@@ -198,7 +198,7 @@ Traffic per `seal_catalog` step:
 
 ## Evidence
 
-- **Original decision:** not decided (design gate on [AIR-485](https://trello.com/c/qulgP9a8)); owner sequencing on [PR #638](https://github.com/vladimino/iptv-watchlist/pull/638#issuecomment-6885539218).
+- **Original decision:** Accepted as DESIGN on 2026-11-15 by the Product Owner (recorded in [AIR-485](https://trello.com/c/qulgP9a8)), after [review PASS](https://github.com/vladimino/iptv-watchlist/pull/638#pullrequestreview-5907764074); owner sequencing on [PR #638](https://github.com/vladimino/iptv-watchlist/pull/638#issuecomment-6885539218). Implementation and production actions are not authorized by this acceptance alone.
 - **Implementation:** none.
 - **Dated verification:** [offline comparison, 14 November 2026](../evidence/orchestration/air-485-seal-staging-comparison-2026-11-14.md) (`scripts/epg-seal-staging-bench.mjs`, `origin/main` `f5c57498`). The seal steps it measures are unchanged at `00d3f162`.
 - **Uncertainty:**

@@ -1,6 +1,6 @@
 # AIR-485: offline comparison of EPG seal staging layouts, 14 November 2026
 
-Offline only: Node v22.23.4, the Worker bundle loaded in-process, the D1 stand-in on a local SQLite file with every migration applied, a file-backed R2 stand-in. Synthetic data, no private payloads. No production read or write, no Workflow, Discovery, TMDB, flag, lease, Task, R2, D1 or Access action. Tree: `origin/main` at `f5c57498` (after [PR #635](https://github.com/vladimino/iptv-watchlist/pull/635)); the same run at `962dc37d` gave the same figures within 1-2 MiB. **Operational authority: none.** Design input for [ADR 0145](../../adr/0145-epg-seal-publication-only-staging.md) (Proposed).
+Offline only: Node v22.23.4, the Worker bundle loaded in-process, the D1 stand-in on a local SQLite file with every migration applied, a file-backed R2 stand-in. Synthetic data, no private payloads. No production read or write, no Workflow, Discovery, TMDB, flag, lease, Task, R2, D1 or Access action. Tree: `origin/main` at `f5c57498` (after [PR #635](https://github.com/vladimino/iptv-watchlist/pull/635)); the same run at `962dc37d` gave the same figures within 1-2 MiB. **Operational authority: none.** Offline design evidence for [ADR 0145](../../adr/0145-epg-seal-publication-only-staging.md) (Accepted as DESIGN on 2026-11-15; no production validation).
 
 Reproduce: `npm ci && node scripts/epg-seal-staging-bench.mjs` (about 130 s; `--out file.json` writes the rows below; `--only C:catalog` runs one cell).
 
