@@ -1,6 +1,6 @@
 // AIR-471: the R2 and D1 cost of one batch_start (manifestSize 5), its stage-level observability and the freshness it must keep.
 // Offline: the real Worker code over a sqlite D1 stand-in and an in-memory R2, counted by the step-timing instrumentation. No Cloudflare, model, TMDB, Scheduled Task or production call.
-// The numbers in BEFORE are the same scenarios run on main at f314b339 (counts of the step-timing line); the asserted budgets are the ceilings of this change, not a production claim.
+// BEFORE is the baseline commit's measurement of the same scenarios (tests/fixtures/prediction-batch-start-parity-baseline.json, written by scripts/prediction-batch-start-diff.mjs); the asserted budgets are ceilings of this change, not a production claim.
 import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import * as PredictionD1 from '../src/prediction-d1.js';
@@ -10,9 +10,12 @@ const reconcile=async w=>{const r=await w.api('queue/reconcile',{});assert.equal
 const timing=w=>w.logs.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(l=>l?.event==='prediction_step_timing'&&l.step==='batch_start');
 const last=w=>timing(w).at(-1);
 const profileV=async(w,version)=>{const profile={version,profileHash:'p'+version,profile:{ratingScale:'Scale '+version}};w.records.set('enrichment/profile/versions/'+version+'.json',profile);await PredictionD1.saveMutable(w.env,'enrichment/profile/current.json',profile);};
-const BEFORE={clean5:{r2:48,d1:131},already_running:{r2:9,d1:41},size100:{r2:48,d1:1083},stale:{r2:59,d1:664},missing:{r2:56,d1:1156}};
+import fs from 'node:fs';
+const baseline=JSON.parse(fs.readFileSync(new URL('./fixtures/prediction-batch-start-parity-baseline.json',import.meta.url),'utf8'));
+const alias={clean5:'clean5',already_running:'already_running',size100:'size100',stale:'stale_profile',missing:'missing_admission_in_window'};
+const BEFORE=Object.fromEntries(Object.entries(alias).map(([k,v])=>[k,baseline.metrics[v]]));
 const table=[];
-const note=(name,line)=>table.push([name,BEFORE[name].r2+' -> '+line.r2.n,BEFORE[name].d1+' -> '+line.d1.n].join(' | '));
+const note=(name,line)=>{assert.ok(line.d1.n<BEFORE[name].d1,name+': fewer D1 calls than the baseline');assert.ok(line.r2.n<=BEFORE[name].r2,name+': no more R2 calls than the baseline');table.push([name,BEFORE[name].r2+' -> '+line.r2.n,BEFORE[name].d1+' -> '+line.d1.n].join(' | '));};
 
 // 1. Clean current queue, manifestSize 5.
 {
@@ -112,6 +115,25 @@ const note=(name,line)=>table.push([name,BEFORE[name].r2+' -> '+line.r2.n,BEFORE
  const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.expiresAt,0,'the lease was released');
  w.ctx.PredictionD1=original;
  const again=await batch(w,{manifestSize:5});assert.equal(again.status,200,'the next start works');
+}
+
+// 8. A competing start that wins the lease between the early check and the acquire is counted too, with the holder's age only when the answer carries its expiry.
+for(const [name,hook,aged] of [
+ ['live holder seen at acquire',(w,original)=>({openLease:async(...a)=>{if(!w.fired){w.fired=true;const doc=JSON.stringify({owner:'rival',runId:'11111111-1111-4111-8111-111111111111',heartbeatAt:new Date().toISOString(),expiresAt:Date.now()+14*60000,epoch:7}).replace(/'/g,"''");sql(w.file,"UPDATE prediction_lease SET document_json='"+doc+"' WHERE name='runner'");}return original.openLease(...a);}}),true],
+ ['lost compare-and-swap at acquire',(w,original)=>({writeLease:async(...a)=>{if(!w.fired&&a[2]?.expiresAt>0){w.fired=true;sql(w.file,"UPDATE prediction_domain_authority SET generation=generation+1 WHERE id=1");}return original.writeLease(...a);}}),false],
+]){
+ const w=await flowWorld({films:30});await reconcile(w);
+ sql(w.file,"INSERT INTO prediction_lease (name,token,expires_at,document_json) VALUES ('runner','t0',1,'{\"runId\":\"00000000-0000-4000-8000-000000000001\",\"expiresAt\":1,\"epoch\":3}')");
+ const original=w.ctx.PredictionD1;w.fired=false;w.ctx.PredictionD1={...original,...hook(w,original)};
+ const runs=()=>sql(w.file,'SELECT COUNT(*) AS n FROM prediction_run')[0].n,before=runs();
+ const r=await batch(w,{manifestSize:5});
+ assert.equal(r.data.status,'already_running',name+': '+JSON.stringify(r.data).slice(0,200));assert.ok(!('films' in r.data),'no manifest, no adoption');
+ assert.equal(runs(),before,'no run row');
+ const line=last(w);
+ assert.equal(line.notes.leaseRefused,1,name);assert.equal(line.notes.leaseRefusedAtAcquire,1,name);
+ if(aged){assert.equal(r.data.runId,'11111111-1111-4111-8111-111111111111','the holder is named');assert.ok(Number.isSafeInteger(line.notes.liveLeaseAgeMs)&&line.notes.liveLeaseAgeMs>=59000&&line.notes.liveLeaseAgeMs<=62000,String(line.notes.liveLeaseAgeMs));}
+ else assert.ok(!('liveLeaseAgeMs' in line.notes),'no age is invented without an expiry');
+ assert.equal(line.notes.preflights,1,name+': the early check passed and the refusal came at the acquire, before the post-lease preflight');
 }
 
 console.log('| scenario (manifestSize 5 unless noted) | R2 calls main -> now | D1 calls main -> now |\n| --- | --- | --- |\n'+table.map(row=>'| '+row+' |').join('\n'));
