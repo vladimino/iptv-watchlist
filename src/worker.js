@@ -1793,7 +1793,13 @@ async fetch(request,env,execution){
     const titles=await localizedTitleStore(env,pinned,gate,[...(data?.films||[]),...(watchlist?.films||[])]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
-    const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body);
+    const merged=programmeWithWatchlist(data,watchlist);
+    let catalog=null;
+    if(Array.isArray(merged.catalogFilms)&&merged.catalogFilms.length){
+     try{const publication=await epgPublication(env);catalog=await catalogGenerationCopy(env,publication,data.runId||null,'discovered-films.json');}
+     catch{catalog=null;}
+    }
+    const presented=presentLocalized(presentCatalogFilms(merged,catalog),titles,reviews.body);
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;

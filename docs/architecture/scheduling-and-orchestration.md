@@ -209,9 +209,9 @@ sequenceDiagram
     D1-->>Disc: admitted
 ```
 
-### Planned: seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), Accepted as design; implementation tracked in AIR-484, not delivered)
+### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
-**Current state:** one instance still runs `epg_commit` and the seal. **Planned state** is the diagram. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. The staged payload is today's single `epg/seal/<runId>/payload.json`, unchanged; its format belongs to AIR-485. A pending claim, even of a previous Madrid day, takes priority over today's start.
+**State:** the diagram is implemented in `src/epg-orchestration.js`; it has not yet run in production. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. The staged payload is today's single `epg/seal/<runId>/payload.json`, unchanged; its format belongs to AIR-485. A pending claim, even of a previous Madrid day, takes priority over today's start.
 
 ```mermaid
 sequenceDiagram
