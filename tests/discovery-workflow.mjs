@@ -1132,21 +1132,72 @@ assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.lengt
  assert.equal(continuation().reason,'interrupted');assert.equal(continuation().interruptions,2);
 }
 
-// AIR-483: a typed refusal of the intent write is a wait, never an untyped intent_uncertain.
+// AIR-483: the real queueDiscovery -> replaceContinuation path, with only the D1 authority boundary refusing the write.
+// Incident shape: a persisted paused/programme_changed checkpoint of the still-published, pinned generation and a nonempty backlog.
 {
- const realQueue=context.queueDiscovery;
- const refuse=(code,extra)=>vm.runInContext('queueDiscovery=async()=>{const e=new Error("x");e.code='+JSON.stringify(code)+';'+extra+'throw e;}',context);
- const probe=async()=>{seed();records.delete('epg/resolver-continuation.json');records.delete('epg/resolver-continuation');env.DISCOVERY_EXECUTOR='workflow';armWorkflowAdmission();creates.length=0;return call('reconcileDiscoveryWorkflow')(env);};
- refuse('discovery_window','e.window={expiresAt:123,state:"held"};');
- const win=await probe();
- assert.equal(win.reason,'projector_window');assert.equal(win.windowUntil,123);assert.equal(creates.length,0);
- refuse('discovery_epg_priority','e.priority={nextCatchUpAt:Date.now()+60000};');
- assert.equal((await probe()).reason,'epg_priority');
- refuse('discovery_fence','');
- assert.equal((await probe()).reason,'authority_held');
- refuse('boom','');
- assert.equal((await probe()).reason,'intent_uncertain');
- context.queueDiscovery=realQueue;
+ const OTHER_RUN='99999999-9999-4999-8999-999999999999';
+ const refusal=(code,extra={})=>Object.assign(new Error(code),{code},extra);
+ let refuseWith=null,refusedWrites=0;
+ const incident=(options={})=>{
+  seed({stage:'complete',remaining:9790,reason:'programme_changed',...options});
+  env.DISCOVERY_EXECUTOR='workflow';
+  armWorkflowAdmission(GENERATION);
+  context.DiscoveryAuthority.writeContinuation=async()=>{if(refuseWith){refusedWrites++;throw refuseWith;}return {handled:false};};
+  refusedWrites=0;refuseWith=null;creates.length=0;
+ };
+ const waits=[];
+ const scheduled=()=>call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async outcome=>{waits.push(outcome.reason);}});
+
+ // Held projector window: nothing is created or overwritten while it is held; the bounded same-tick retry recovers after expiry.
+ incident();
+ refuseWith=refusal('discovery_window',{window:{expiresAt:Date.now()+1000,state:'held'}});
+ const before=JSON.stringify(continuation());
+ const held=await call('reconcileDiscoveryWorkflow')(env);
+ assert.equal(held.reason,'projector_window');assert.equal(held.started,false);assert.ok(held.windowUntil>0);
+ assert.equal(creates.length,0);assert.equal(JSON.stringify(continuation()),before);assert.ok(refusedWrites>=1);
+ waits.length=0;refusedWrites=0;
+ let ticks=0;
+ const out=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async()=>{waits.push('wait');if(++ticks===1)refuseWith=null;}});
+ assert.equal(out.started,true,JSON.stringify(out));assert.equal(waits.length,1);assert.ok(refusedWrites>=1);
+ assert.equal(creates.length,1);assert.equal(creates[0].params.programmeRunId,GENERATION);assert.equal(creates[0].params.series,0);
+ assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);assert.equal(continuation().remainingChunks,9790>12?continuation().remainingChunks:12);
+ const again=await scheduled();
+ assert.equal(creates.length,1,'a later tick attaches or waits and never creates a second instance: '+JSON.stringify(again));
+
+ // A window that stays held is bounded to RECONCILE_WINDOW_ATTEMPTS attempts and never creates an instance.
+ incident();
+ refuseWith=refusal('discovery_window',{window:{expiresAt:Date.now()+1000,state:'held'}});
+ waits.length=0;
+ const stuck=await scheduled();
+ assert.equal(stuck.reason,'projector_window');assert.equal(waits.length,2);assert.equal(creates.length,0);
+
+ // Hard authority refusal: fail-closed, no retry, no instance.
+ incident();
+ refuseWith=refusal('discovery_fence');
+ waits.length=0;
+ const fenced=await scheduled();
+ assert.equal(fenced.reason,'authority_held');assert.equal(waits.length,0);assert.equal(refusedWrites,1);assert.equal(creates.length,0);
+
+ // EPG priority pause: a typed wait, no projector-style same-tick loop, no instance.
+ incident();
+ refuseWith=refusal('discovery_epg_priority',{priority:{nextCatchUpAt:Date.now()+60000}});
+ waits.length=0;
+ const paused=await scheduled();
+ assert.equal(paused.reason,'epg_priority');assert.equal(waits.length,0);assert.equal(refusedWrites,1);assert.equal(creates.length,0);
+
+ // A genuinely moved generation: the stored checkpoint belongs to another published generation; nothing is overwritten or started.
+ incident();
+ {let reads=0;const base=context.PublishedEpg.currentGeneration;
+  context.PublishedEpg.currentGeneration=async(...args)=>reads++===0?base(...args):{authority:'d1',programmeRunId:OTHER_RUN,phase:'published',generation:2,fence:'d1:2:'+OTHER_RUN};}
+ const moved=JSON.stringify(continuation());
+ const stale=await scheduled();
+ assert.equal(stale.started,false);assert.ok(['stale_generation','stopped','generation_handoff'].includes(stale.reason),JSON.stringify(stale));assert.equal(creates.length,0);assert.equal(JSON.stringify(continuation()),moved);
+
+ // Unknown failures stay intent_uncertain.
+ incident();
+ refuseWith=new Error('boom');
+ const unknown=await scheduled();
+ assert.equal(unknown.reason,'intent_uncertain');assert.equal(creates.length,0);
 }
 
 console.log('Discovery workflow: retired selector ignored, delegated requests, fail-closed without Workflow admission, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
