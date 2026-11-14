@@ -241,7 +241,6 @@ resetAll();seed({count:3});elect();
  assert.equal((await call('closeHourlyDiscoveryReport')(env,{reason:'in_progress'},{scheduled:true})).reason,'not_scheduled');
  assert.equal((await call('closeHourlyDiscoveryReport')(env,{reason:'in_progress'},{scheduled:true,now:NaN})).reason,'not_scheduled');
  assert.equal((await call('reconcileDiscoveryWorkflow')(env)).started,false);
- assert.equal((await closed({reason:'stopped'},5,{...env,DISCOVERY_EXECUTOR:'external'})).reason,'not_workflow');
  assert.equal(reports().length,n,'an unscheduled caller and an external executor write nothing');
 }
 

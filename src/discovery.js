@@ -1077,13 +1077,6 @@ async function saveObservationIndex(env,source,decisions,fence,writer){
 }
 // One request runs one chunk. A later HTTP request is not a new isolate; confirm the memory hypothesis in production after deploy. Do not schedule the next chunk with waitUntil.
 const DISCOVERY_CHUNK_BUDGET=12;
-// Absent, null and '' stay on the external hourly executor. Only the exact token `workflow` leaves that path.
-// Any other string fails closed. The binding is not set by a deploy (ADR 0083).
-function discoveryExecutorMode(env){
- const value=env?.DISCOVERY_EXECUTOR;
- if(value==null||value==='')return 'external';
- return value==='external'||value==='workflow'?value:'invalid';
-}
 function discoveryChunkBudget(){return DISCOVERY_CHUNK_BUDGET;}
 const CONTINUATION_KEY='epg/resolver-continuation.json';
 // AIR-151: read-only diagnostics of the continuation boundary. Every POST /api/sync/epg step and
@@ -1544,14 +1537,10 @@ function delegatedContract(contract,workflow){
  return {...overlaid,delegated:true,executor:'workflow',workflow:workflow||null};
 }
 async function noteDiscoveryWorkflow(env){
- if(discoveryExecutorMode(env)!=='workflow')return {started:false,reason:discoveryExecutorMode(env)==='invalid'?'invalid':'external'};
  if(typeof ensureDiscoveryWorkflow!=='function')return {started:false,reason:'workflow_unavailable'};
  try{return await ensureDiscoveryWorkflow(env);}catch{return {started:false,reason:'start_uncertain',uncertain:true};}
 }
 async function presentQueuedDiscovery(env,discovery){
- const mode=discoveryExecutorMode(env);
- if(mode==='external')return {discovery};
- if(mode!=='workflow')return {discovery,executor:'invalid',delegated:false};
  if(discovery?.nextAction==='stop')return {discovery,executor:'workflow',delegated:false};
  const workflow=await noteDiscoveryWorkflow(env);
  return {discovery:delegatedContract(discovery,workflow),executor:'workflow',delegated:true,workflow};
@@ -1571,7 +1560,7 @@ async function presentContinuationDiscovery(env){
 // `options.workflow` (the record, or null for none) is the Workflow state the caller already holds as part of a consistent snapshot; without it the state is
 // read here. Only the platform liveness of that record's instance is observed anew.
 async function discoveryExecutorReadout(env,continuation,options={}){
- const configured=discoveryExecutorMode(env);
+ const configured='workflow';
  const now=Date.now();
  let stored=null;
  if(Object.hasOwn(options,'workflow'))stored=options.workflow;
@@ -1584,12 +1573,11 @@ async function discoveryExecutorReadout(env,continuation,options={}){
  const terminal=stored?.phase==='stopped'&&['complete','backlog_empty','stale_generation','executor_not_workflow'].includes(stored.reason);
  const stoppedWithBacklog=stored?.phase==='stopped'&&pending&&!terminal;
  let owner='none';
- if(configured==='invalid')owner='invalid';
- else if(facts.dead)owner='none';
+ if(facts.dead)owner='none';
  else if(liveness==='unknown')owner='unknown';
  else if(facts.alive&&facts.active)owner='workflow';
  else if(facts.active&&!facts.stalled&&liveness==null)owner='workflow';
- const degraded=configured==='invalid'||stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
+ const degraded=stored?.phase==='uncertain'||stored?.phase==='unknown'||liveness==='unknown'||!!facts.stalled||stoppedWithBacklog||!!facts.recoveryWaiting||!!facts.quarantined||!!(facts.dead&&pending);
  return {configured,owner,programmeRunId:stored?.programmeRunId||continuation?.programmeRunId||null,instanceId:stored?.instanceId||null,series:Number.isInteger(stored?.series)?stored.series:null,phase:stored?.phase||null,waitingUntil:stored?.waitingUntil||null,waitingReason:stored?.reason||null,lastProgress:stored?.lastProgress||null,chunks:Number.isInteger(stored?.chunksThisInstance)?stored.chunksThisInstance:null,recovery:stored?.recovery||null,pending,eligible:!!decision?.run||continuation?.reason==='chunk_budget',degraded,stalled:!!facts.stalled,recoveryDue:facts.recoveryDue||null,liveness,updatedAt:facts.updatedAt||null,budget:typeof discoveryWorkflowChunkLimit==='function'?{externalSeries:discoveryChunkBudget(),instanceChunkLimit:discoveryWorkflowChunkLimit()}:null};
 }
 async function resolveDiscoveryRequest(env,execution,body,caller='http'){
@@ -1606,17 +1594,13 @@ async function resolveDiscoveryRequest(env,execution,body,caller='http'){
   else if(body.recovery==='interrupted'&&body.chunks!==undefined&&body.chunks!==0){step.branch='invalid_recovery';response=json({error:'Invalid recovery'},400);}
   else{
    const report=await loadJSON(env,'programme.json');
-   const executor=discoveryExecutorMode(env);
    const recovery=body.recovery==='interrupted';
    let authority=null;
    if(recovery&&typeof DiscoveryAuthority!=='undefined'){try{authority=await DiscoveryAuthority.readAuthority(env);}catch{authority={unavailable:true};}}
    const authorityCause=authority?.unavailable?'authority_unavailable':authority?.transfer==='loading'?'authority_loading':authority?.held||authority?.cutover==='held'?'authority_held':null;
    if(!report?.films){step.branch='no_programme';response=json({error:'No programme'},409);}
-   else if(executor==='invalid'){step.branch='executor_invalid';response=json({error:'discovery_executor_invalid',executor:'invalid'},503);}
-   else if(recovery&&executor==='workflow'){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:'owner_investigation',cause:'executor_workflow',budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
-   else if(recovery&&authorityCause){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:authorityCause,cause:authorityCause,budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
-   else if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
-   else{step.branch='resolve';const outcome=await advanceDiscovery(env,{...body,force:recovery?false:body.chunks!==0,recoverInterrupted:recovery,trace:step.diagnostic,onPersist:async()=>{if(persistStep)return;persistStep=true;step.recorded.entered=await recordContinuationDiagnostic(env,step);},onCheckpoint:committed=>markContinuationCheckpoint(env,step,persistStep,committed)});step.discovery=discoverySummary(outcome.discovery);response=json(outcome);}
+   else if(recovery){step.branch='recovery_refused';response=json({recovery:{permit:'refused',reason:'owner_investigation',cause:'executor_workflow',budget:null,proof:null},discovery:{state:'paused',nextAction:'stop',reason:'interrupted',remainingChunks:null},diagnostic:step.diagnostic});}
+   else{step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);response=json({...presented,diagnostic:step.diagnostic});}
   }
  }catch(e){await closeContinuationStep(env,step,started,null,e,persistStep);throw e;}
  await closeContinuationStep(env,step,started,response,null,persistStep);
@@ -1678,9 +1662,9 @@ async function discoveryOperationalStatus(env){
   chunks:{...fact(continuation,continuation?.at,{remainingChunks:operationalNumber(continuation?.remainingChunks)}),source:'continuation'},
   ledger:{...fact(last,last?.finishedAt||null,{remaining:operationalNumber(last?.remaining),cheapRemaining:operationalNumber(last?.cheapRemaining)}),source:'status'},
  };
- let executor={configured:discoveryExecutorMode(env)};
+ let executor={configured:'workflow'};
  // The executor facts come from the Workflow record of the same snapshot; only the platform liveness of that instance is observed now, and says so.
- if(executor.configured!=='external'){try{executor=await discoveryExecutorReadout(env,continuation,{workflow:records.workflow});executor={...executor,workflowSource:'snapshot'};if(executor.liveness!=null)executor.livenessObserved={at:new Date(now).toISOString(),source:'workflow_binding',atomicWithSnapshot:false};}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
+ {try{executor=await discoveryExecutorReadout(env,continuation,{workflow:records.workflow});executor={...executor,workflowSource:'snapshot'};if(executor.liveness!=null)executor.livenessObserved={at:new Date(now).toISOString(),source:'workflow_binding',atomicWithSnapshot:false};}catch{executor={configured:executor.configured,owner:'unknown',degraded:true};unavailable.push('executor');}}
  const window=records.window&&records.window.expiresAt>now&&records.window.state!=='idle'?{state:records.window.state,expiresAt:new Date(records.window.expiresAt).toISOString()}:{state:'idle',expiresAt:null};
  return {view:'operational',schemaVersion:1,observedAt:new Date(now).toISOString(),source,authority:{state:authority.state,mode:authority.mode??null,cutover:authority.cutover??null,transfer:authority.transfer??null,generation:authority.generation??null,cause:authority.cause||null},
   programmeRunId:published||continuation?.programmeRunId||null,publishedProgrammeRunId:published,projectorWindow:window,
@@ -1709,6 +1693,6 @@ async function discoveryPipelineStatus(env){
  }
  const pipeline={schemaVersion:2,programmeRunId:source?.programmeRunId||null,updatedAt:source?.updatedAt||null,candidates:counts.ledgerTotal,rawCandidates:counts.ledgerTotal,latestRawCandidates:source?.rawCandidates??null,latestFilteredNonMovies:source?.filteredNonMovies??null,filteredNonMovies:counts.rejectedNonfilm,checked:Object.values(statuses).reduce((a,b)=>a+b,0),pending:counts.currentUnresolved,unresolved:counts.currentUnresolved,ready:counts.readyNow,...counts,confirmedFilms:confirmed.size,verifiedFilms:Object.keys(catalog||{}).length,hot:queue?.hotCount??0,cold:queue?.coldCount??0,queuedForPrediction:queue?.pendingCount??0,hotQueuedForPrediction:queue?.priorityCount??0,predicted:queue?.hotPredicted??0,coldWithoutPrediction:queue?.coldWithoutPrediction??0,nextHotPredictions:(persistedQueue?.pending||[]).slice(0,persistedQueue?.priorityCount||0).slice(0,5).map(id=>{const f=catalogFilmById(catalog,id);return {filmId:id,title:f?.title||null,tmdbId:f?.tmdbId||null,hot:f?filmIsHot(f):null,discoveredAt:f?.discoveredAt||null};}),statuses,scoringPreview:scorePreviewSummary(scorePreview,pinned.epgPin?.programmeRunId||source?.programmeRunId||null),lastBatch:last||null,continuation:continuation||null,continuationHealth:continuationHealthReport,continuationDiagnostics:continuationDiagnostics||null};
  if(interruptedRecovery)pipeline.interruptedRecovery=interruptedRecovery;
- if(discoveryExecutorMode(env)!=='external')pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation);
+ pipeline.discoveryExecutor=await discoveryExecutorReadout(env,continuation);
  return pipeline;
 }

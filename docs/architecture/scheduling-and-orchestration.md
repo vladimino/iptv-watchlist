@@ -165,7 +165,7 @@ sequenceDiagram
             Worker->>D1: Write metadata sync clocks with checkpoint
         end
     end
-    opt DISCOVERY_EXECUTOR is workflow
+    opt Workflow binding and D1 admission pass
         Cron->>Worker: reconcileDiscoveryWorkflow
         Note over Worker,D1: Reads only unless a missing intent or a dead instance needs one create. No chunk, no TMDB. A projector_window refusal is retried in this tick after the window expiry (AIR-428); each attempt is logged.
     end

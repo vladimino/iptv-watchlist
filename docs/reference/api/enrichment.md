@@ -222,7 +222,7 @@ Every EPG commit and discovery response includes `discovery`:
 | `state` | `paused`, `running`, `complete`, `error`, or `busy`. A finished response is not left `running`; a `running` state in a report is a live writer (`reason: busy`) or an orphan (`reason: orphaned`), see above. |
 | `remainingChunks` | Chunks still allowed in this series. A new series starts at 12. |
 | `nextAction` | `continue`: call again now. `wait`: do not call before `nextCatchUpAt`. `stop`: do not call until the next EPG commit. |
-| `reason` | Why the series is paused or waiting (`epg_committed`, `scan_committed`, `chunk_budget`, `backoff`, `programme_changed`, `busy`, `orphaned`, `interrupted`, `idle`, `missing_secret`, an error code), or `null` between chunks. `delegated` appears only on the HTTP answer when `DISCOVERY_EXECUTOR=workflow`; it is not written into the continuation record. |
+| `reason` | Why the series is paused or waiting (`epg_committed`, `scan_committed`, `chunk_budget`, `backoff`, `programme_changed`, `busy`, `orphaned`, `interrupted`, `idle`, `missing_secret`, an error code), or `null` between chunks. `delegated` appears only on the HTTP answer (the Workflow is the only executor, AIR-325); it is not written into the continuation record. |
 | `nextCatchUpAt` | Earliest time for the next call when `nextAction` is `wait` (the next whole UTC hour, the backoff time or a lease expiry). A gate, not a scheduled run. |
 | `nextScheduledRunAt` | On `wait` only: the first nominal hourly Scheduled Task trigger at or after `nextCatchUpAt`, when the catch-up is expected; `null` otherwise or when the schedule is unknown. Informational; it never replaces the gate. |
 | `retryAt` | Discovery backoff, when one is stored. |
