@@ -211,7 +211,7 @@ sequenceDiagram
 
 ### Proposed: seal in a successor instance over split staged objects ([ADR 0144](../adr/0144-epg-commit-seal-execution-boundary-and-split-staged-payload.md), Proposed, not implemented)
 
-Nothing here runs today: one instance still runs `epg_commit` and the seal. The diagram is the proposed shape only. The successor is **not** claimed to get a fresh isolate. Staged objects are written before the manifest, and the manifest is the commit marker.
+Nothing here runs today: one instance still runs `epg_commit` and the seal. The diagram is the proposed shape only. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. Staged objects are written before the manifest, and the `sync.json` save with `seal.layout: split` is the commit point. A pending claim, even of a previous Madrid day, takes priority over today's start.
 
 ```mermaid
 sequenceDiagram
@@ -220,17 +220,20 @@ sequenceDiagram
     participant C as D1 control document
     participant S as Successor instance
     participant H as Hourly ensure
-    P->>R2: Write report, catalog, watchlist, uncertain
-    P->>R2: Write manifest last (commit marker)
-    P->>C: CAS claim names successor id and sealed run
-    P->>S: create() with deterministic id
+    P->>R2: Write report, catalog, watchlist, uncertain, manifest last
+    P->>R2: Save sync.json with seal layout split (commit point)
+    P->>C: CAS claim, next series, no failure recorded
+    P->>S: create() with the next series id
     Note over P: Ends normally. Takes no more step leases.
     S->>C: Admit against claim and mode revision
     S->>R2: Read only the objects the phase needs, check length and hash
     S->>C: Seal phases and publish exactly once
-    Note over H,S: If create() is lost or the successor dies before the pointer
-    H->>C: Read claim, status, lease
-    H->>S: Re-create the same deterministic id
+    Note over H,S: Claim pending while sync.json still says seal
+    H->>C: Read claim and successor status
+    Note over H: Absent or unknown, create the same id or attach
+    Note over H: Alive, wait
+    H->>C: Errored or terminated, CAS to a new recovery series
+    Note over H: Complete while still seal, fail closed
 ```
 
 ## The separate ratings pipeline
