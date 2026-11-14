@@ -229,6 +229,8 @@ export function scopeRequest(env){
  if(!database||typeof database!=='object'||typeof database.prepare!=='function')return env;
  return {...env,DB:scopedDatabase(database,{read:null})};
 }
+// A request that is about to write (or to take the lease) asks for the marker afresh, so the generation its fenced write carries is the current one, not the one an earlier read of the request saw.
+export function forgetRequestAuthority(env){const scope=REQUEST_SCOPES.get(env?.DB);if(scope)scope.read=null;}
 export async function readPredictionAuthority(db,env){
  const scope=REQUEST_SCOPES.get(db);
  if(!scope)return readAuthorityNow(db,env);
@@ -427,10 +429,11 @@ async function loadPredictionRecord(env,row){
  const body=await verified(env.BUCKET,row.r2Key,row.contentSha256);
  return {...body,r2Key:row.r2Key,contentSha256:row.contentSha256};
 }
-async function loadPredictions(env,filmId){
+// `currentOnly` (a batch start's freshness check) reads the pointer and its body and leaves the replaced versions, which that check never looks at, unread: no lineage query and no body per replaced version.
+async function loadPredictions(env,filmId,{currentOnly=false}={}){
  const current=await one(env.DB,'SELECT taste_profile_version AS tasteProfileVersion, taste_profile_hash AS tasteProfileHash, fingerprint_hash AS fingerprintHash, r2_key AS r2Key, content_sha256 AS contentSha256, updated_at AS updatedAt, display_json AS display FROM prediction_pointer WHERE film_id=?',[filmId]);
- const history=await many(env.DB,'SELECT replaced_at AS replacedAt, r2_key AS r2Key, content_sha256 AS contentSha256, display_json AS display FROM prediction_lineage WHERE film_id=? ORDER BY replaced_at',[filmId]);
- if(!current&&!history.length)return null;
+ const history=currentOnly?[]:await many(env.DB,'SELECT replaced_at AS replacedAt, r2_key AS r2Key, content_sha256 AS contentSha256, display_json AS display FROM prediction_lineage WHERE film_id=? ORDER BY replaced_at',[filmId]);
+ if(!current&&!history.length)return currentOnly?{current:null,history:[]}:null;
  let currentRecord=null;
  if(current){const display=JSON.parse(current.display);currentRecord={...await loadPredictionRecord(env,current),...display,r2Key:current.r2Key,contentSha256:current.contentSha256};}
  const past=[];
@@ -456,7 +459,7 @@ async function loadLatest(db){
  try{return JSON.parse(row.document);}catch{throw failed('prediction_domain_unavailable');}
 }
 
-export async function routeRead(env,key){
+export async function routeRead(env,key,options=null){
  const kind=predictionMutableKey(key);
  if(!kind)return {handled:false};
  const authority=await readPredictionAuthority(env?.DB,env);
@@ -467,7 +470,7 @@ export async function routeRead(env,key){
  if(kind==='latest')return {handled:true,value:await loadLatest(env.DB)};
  if(kind==='run')return {handled:true,value:await loadRun(env.DB,runIdFrom(key))};
  if(kind==='fingerprint')return {handled:true,value:await loadFingerprint(env,filmIdFrom(key,'fingerprint'))};
- if(kind==='predictions')return {handled:true,value:await loadPredictions(env,filmIdFrom(key,'predictions'))};
+ if(kind==='predictions')return {handled:true,value:await loadPredictions(env,filmIdFrom(key,'predictions'),{currentOnly:options?.currentOnly===true})};
  return {handled:false};
 }
 

@@ -46,7 +46,7 @@ const loadJSON=async(env,key,options=null)=>{
   if(pinned){const object=await env.BUCKET.get(epgGenerationKey(pinned,staged));if(object)return storedJSON(object,key,options);}
   else{const pointer=await env.BUCKET.get(EPG_GENERATION_KEY);if(pointer){const generation=await pointer.json();if(generation?.phase==='published'&&generation.programmeRunId){const object=await env.BUCKET.get(epgGenerationKey(generation.programmeRunId,staged));if(object)return storedJSON(object,key,options);}}}
  }
- if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key);if(routed.handled)return learned(routed.value);}
+ if(typeof PredictionD1!=='undefined'){const routed=await PredictionD1.routeRead(env,key,options);if(routed.handled)return learned(routed.value);}
  if(typeof RatingsD1!=='undefined'){const routed=await RatingsD1.routeRead(env,key);if(routed.handled)return learned(routed.value);}
  const o=await env.BUCKET.get(key);let value=o?await storedJSON(o,key,options):null;
  if(key==='enrichment/view-index.json'&&typeof PredictionD1!=='undefined')value=await PredictionD1.overlayIndex(env,value,canonicalMoodFacet);
