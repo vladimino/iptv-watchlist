@@ -2,11 +2,18 @@
 
 ADRs document durable accepted choices, not live feature flags, operational permissions or observations. See [template](template.md), [documentation governance](../README.md) and [evidence registry](../evidence/README.md).
 
+## Proposed records
+
+Pending proposals. An entry moves to the accepted table below only after the owner's explicit decision on the ADR itself.
+
+| ADR | Status | Decision and evidence |
+| --- | --- | --- |
+| [0140 — A separate Producer Workflow completes the full EPG producer pass as repeated bounded invocations of one run, in an adaptive chain of instances](0140-producer-workflow-adaptive-successor-chain.md) | **Proposed** 2026-11-14 (owner direction on [AIR-374](https://trello.com/c/ha7ais3w), not an acceptance; design only, no code, Workflow, configuration or production operation) | S-A and W3 direction; qualifies one cadence sentence of [ADR 0128](0128-epg-canonical-producer-durable-execution.md) decision 8; [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md) |
+
 ## Accepted records
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
-| [0139 — A separate Producer Workflow completes the full EPG producer pass as repeated bounded invocations of one run, in an adaptive chain of instances](0139-producer-workflow-adaptive-successor-chain.md) | **Proposed** 2026-11-14 (owner direction on [AIR-374](https://trello.com/c/ha7ais3w), not an acceptance; design only, no code, Workflow, configuration or production operation) | S-A and W3 direction; qualifies one cadence sentence of [ADR 0128](0128-epg-canonical-producer-durable-execution.md) decision 8; [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md) |
 | [0138 — The M2b volume measurement uses a synthetic catalog at the E6 aggregate scale](0138-m2b-synthetic-scale-measurement.md) | **Accepted** 2026-11-14 (owner decision on [AIR-465](https://trello.com/c/OMe41E89); supersedes the measurement-input clause of ADR 0128 gate M2b; no production operation authorized) | Unit volume and local planning cost come from a deterministic sqlite catalog at the sanitized E6 aggregates. The run does not close production `changedShare`, `person_state`, Worker-to-D1 round trip, D1 write cost or Workflow limits, and it does not choose the D-C numbers. The full-table production copy stays blocked and is not required |
 | [0137 — A unit absent from a complete, committed, sealed newer input settles its older failed result as `left_plan`](0137-left-plan-settlement-from-sealed-newer-input.md) | **Accepted** 2026-11-13 (owner decision, option C, on [AIR-374](https://trello.com/c/ha7ais3w) and the [PR #601 decision record](https://github.com/vladimino/iptv-watchlist/pull/601#issuecomment-6866712541); extends ADR 0128 decision 8; no production operation authorized) | A failed producer result whose unit is absent from the current full plan, proven by the complete, committed, sealed input of a newer published generation and an authoritative generation order, is superseded `left_plan` (history kept); no provenance, no settlement |
 | [0136 — Batch v2 clients choose `manifestSize`; spending the selected manifest is a normal `manifest_spent` complete](0136-prediction-batch-manifest-size-and-spent-complete.md) | **Accepted** 2026-11-13 (owner decision on [AIR-463](https://trello.com/c/7pGBGSh0); does not rewrite ADR 0122; no Task enablement authorized; renumbered from a colliding draft 0135 after AIR-458 took that number on main) | Optional `manifestSize` 1..100 on `prediction_batch_start` (default 100); normal `prediction_complete` reason `manifest_spent` when every selected film is settled while the global queue may still have ready films |

@@ -1,4 +1,4 @@
-# ADR 0139: A separate Producer Workflow completes the full EPG producer pass as repeated bounded invocations of one run, in an adaptive chain of instances
+# ADR 0140: A separate Producer Workflow completes the full EPG producer pass as repeated bounded invocations of one run, in an adaptive chain of instances
 
 **Status:** Proposed
 **Original decision date:** 2026-11-14 (owner direction; this record is the design, not an acceptance)
@@ -27,9 +27,10 @@ This record states the architectural direction the owner agreed for the design. 
 5. **The chain is single-owner, duplicate-safe and recoverable.** Required invariants for the design:
    - deterministic successor ids, derived from the EPG run and a sequence, so a repeated create names the same instance;
    - a compare-and-set so that exactly one instance owns the run at a time (the run row already carries a revision; whether it needs an owner field is part of the design);
-   - a duplicate-safe create: a second create of the same id changes nothing, and a lost or uncertain create is distinguishable from a refused one;
-   - recovery from an uncertain create and from a death before the hand-off through the EXISTING hourly reconciliation, which finds a published generation with no complete pass and no live owner and re-creates the deterministic instance. No new schedule is added;
-   - the chain is pinned to one sealed, published EPG generation, and it stops when a newer generation supersedes it.
+   - a duplicate-safe create: a second create of the same id changes nothing, and a lost or uncertain create is distinguishable from a refused one; an ambiguous `create()` never proves that the instance is absent;
+   - recovery from an uncertain create and from a death before the hand-off through the EXISTING hourly reconciliation, which finds a published generation with no complete pass and no live owner and re-creates the deterministic instance. This is recovery of the chain; it is distinct from scheduling the unit retry pass of ADR 0128 decision 8, which stays unscheduled. No new schedule is added;
+   - the chain is pinned to one sealed, published EPG generation, and it stops when a newer generation supersedes it;
+   - **the fences that exist today do not provide this.** The S4-4 store compare-and-sets the revision of the SAME producer run row and fences the canonical D1 authority marker (`d1`/`open` and its generation). Neither shows that the pinned generation is still the LATEST published one, and a run-row revision compare-and-set does not give exclusive, expiring instance ownership: an older chain could keep advancing its own run after a newer generation superseded it while the marker stays open. S5-1 therefore must add, and its acceptance must verify, an independent latest-published-generation fence or admission at the hand-off and at every mutation boundary, and an expiring ownership claim. The exact protocol is a separate reviewed owner gate; the existing driver is not claimed to prove either invariant, and a bounded hand-off and recovery with its lease and fencing semantics is defined before implementation.
 6. **Every invocation is bounded and reported.** Bounded time, units and the actual D1 and R2 calls; each invocation produces a report of counts (no ids or content), so the real consumption against the budgets becomes measurable.
 7. **EPG and Discovery keep priority.** The producer yields to the daily EPG publication and to Discovery ([ADR 0135](0135-epg-priority-discovery-pause.md)), and backs off against the single-threaded D1 database; the mechanism and the tolerated level of D1 contention are not decided here.
 8. **Observability is its own.** The producer chain has its own telemetry and read-model state, separate from the EPG executor's.
@@ -40,7 +41,7 @@ This record states the architectural direction the owner agreed for the design. 
 - the D-C numerical values (`sliceSize`, `maxSlicesPerRun`, the slice deadline, the per-instance boundary, the lag SLA);
 - the concrete mechanism of the hand-off between instances;
 - the tolerated level of D1 contention and the backoff rule;
-- S-C: the [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md) is an input; splitting the pass or adding a narrower completion claim is not approved, and the title readers keep their mode for the wiring PR to assign;
+- S-C: the [reader inventory](../evidence/d1-migration/air-374-canonical-freshness-readers-2026-11-14.md) is an input; splitting the pass or adding a narrower completion claim is not approved, and the title readers keep their mode for the wiring PR to assign, and the inventory's title conclusion is limited to eligible provisional localization;
 - S-B: a delta plan is deferred until the real steady-state cost is measured; plan identity, `left_plan` ([ADR 0137](0137-left-plan-settlement-from-sealed-newer-input.md)) and the schema are not changed for a hypothetical optimisation.
 
 ## Alternatives considered
@@ -62,7 +63,7 @@ This record states the architectural direction the owner agreed for the design. 
 - New complexity: a second Workflow, a successor protocol with its own ownership and recovery, and a reconciliation step; the design must show it adds no failure path to the publication.
 - The hourly reconciliation gains one more responsibility. It is not a new schedule, but it qualifies the cadence line of decision 8 of ADR 0128 and needs the owner's explicit acceptance.
 - A large amount of what the design needs is unmeasured (round trips, batching, instance consumption, D1 contention). The reports of decision 6 are how it becomes measurable, and the D-C numbers wait for them.
-- Titles reach the title readers when their Film-facts units are applied, not at publication; assigning those readers a mode stays with the wiring PR.
+- An ELIGIBLE provisional title of a Film that is new to a generation can reach the title readers only after its Film-facts unit has been applied, not at publication. Whether a given Film gets one is not guaranteed: reviewed and owner localization rows are preserved, there may be no eligible source, and presentation also needs a matching trusted TMDB claim. Assigning those readers a mode stays with the wiring PR.
 
 ## Recovery and migration boundary
 

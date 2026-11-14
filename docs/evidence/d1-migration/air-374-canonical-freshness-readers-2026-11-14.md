@@ -6,7 +6,7 @@
 
 1. **Nobody in the Worker calls `canonicalFreshness`.** Its only users are the S4-4 driver (`readCanonicalFreshness`, `readerDecision`), the run module, tests and documentation. [ADR 0128](../../adr/0128-epg-canonical-producer-durable-execution.md) decision 11 already says no reader consumes canonical EPG membership while the layer is dormant, and that the wiring PR enumerates the readers and assigns each a mode. The audit test it promises for a direct read of canonical membership does not exist yet.
 2. **Two live Worker readers are marker-gated, not freshness-gated.** `GET /api/programme` and `GET /api/watchlist` read their titles through `catalogTitlesFromD1` at marker `open`, and the `/api/d1/*` views read Film and Person rows. Both check only the marker state and generation, never whether the producer pass is complete.
-3. **The title readers depend on `film_facts` units alone.** The effective localization row is materialised in the same batch as the Film facts (`src/canonical-film-writers.js`), and `catalogTitlesFromD1` reads exactly those rows for the Film ids of the published documents.
+3. **The title readers depend on the `film_facts` units, and only for ELIGIBLE provisional localization.** The effective localization row is materialised in the same batch as the Film facts (`src/canonical-film-writers.js`), and `catalogTitlesFromD1` returns only nonblank `film_dimension` localization rows with status `provisional` for the Film ids of the published documents. `writeFilmFacts` can preserve a reviewed or owner row, find no eligible automatic title, or no-op, and presentation also needs a matching trusted TMDB claim, so applying a Film's `film_facts` unit does not by itself guarantee that its title appears.
 4. **Today `current` waits for the whole plan.** `canonicalFreshness` looks at the live `film_facts` results only, but `current` also requires `pass_state='passed'`, which is the cursor passing the last unit of the plan, Person and credit units included.
 5. **`film_credits` units depend on Person identities, and they are last in the plan.** The plan order is `film_facts`, `person_mutation`, `person_state`, `film_credits` (`KIND_RANK`), and a credit whose Person is absent is a recoverable `film_person_reference` refusal.
 
@@ -26,7 +26,7 @@ The marker-gated reader module the Worker bundles is `src/canonical-catalog-read
 
 | Reader | What it reads at `open` | Depends on |
 | --- | --- | --- |
-| `GET /api/programme` and `GET /api/watchlist` titles (`catalogTitlesFromD1` through `src/worker.js`) | `film_dimension` rows with `dimension='localization'`, `status='provisional'`, for the Film ids of the published documents; a Film with no row is simply absent from the answer | `film_facts` units only. No state or generation appears in the response |
+| `GET /api/programme` and `GET /api/watchlist` titles (`catalogTitlesFromD1` through `src/worker.js`) | `film_dimension` rows with `dimension='localization'`, `status='provisional'`, for the Film ids of the published documents; a Film with no row is simply absent from the answer | The `film_facts` units, for eligible provisional localization only (see verdict 3). No state or generation appears in the response |
 | `/api/d1/*` views (`src/catalog-d1.js`: `status`, `persons`, `persons/review`, `persons/{role}/{key}`, `.../identity`, `films/{id}`) | Film and Person rows read directly; owner-facing | Person units for people, Film units for Films |
 | Rated-archive fallback of the film route (`catalogAdmittedFilmFromD1`) | `film_rated_admission`, identity claims, redirects, the retirement ledger | Not the EPG pass: rated admission writes these rows |
 
@@ -57,8 +57,8 @@ With the modelled generation of the [synthetic measurement](air-465-m2b-syntheti
 
 ## What this implies, and what it does not decide
 
-- The only live reader that needs a freshness-like guarantee today (the programme and watchlist titles) depends on the first 397 units, while `current` waits for all 7,240. Whether to add a narrower claim, split the pass or keep one claim is the S-C question. **The owner has not approved a split**, and this page does not choose.
-- After the mirrors freeze at `open`, the titles of a Film that is new to a generation reach the title readers when its `film_facts` unit has been applied, not at publication. With the current reader a Film with no row is silently missing and the response carries no state. Assigning the title readers a mode (fail closed, or display-only with the state and generations visible, as decision 11 allows) belongs to the wiring PR, not to this page.
+- The only live reader that needs a freshness-like guarantee today (the programme and watchlist titles) depends, for eligible titles, on the first 397 units, while `current` waits for all 7,240. Whether to add a narrower claim, split the pass or keep one claim is the S-C question. **The owner has not approved a split**, and this page does not choose.
+- After the mirrors freeze at `open`, an ELIGIBLE provisional title of a Film that is new to a generation can reach the title readers only after its `film_facts` unit has been applied, not at publication. Whether a given Film gets one depends on the writer's guards (reviewed and owner rows are preserved, there may be no eligible source) and on a trusted TMDB match. With the current reader a Film with no eligible row is silently missing and the response carries no state. Assigning the title readers a mode (fail closed, or display-only with the state and generations visible, as decision 11 allows) belongs to the wiring PR, not to this page.
 - The `/api/d1/*` views and the future filmography depend on Person and credit completeness, which is a property of the whole plan.
 
 ## Not verified here
