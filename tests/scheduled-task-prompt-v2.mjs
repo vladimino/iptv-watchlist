@@ -89,7 +89,7 @@ const at=(text,needle)=>text.indexOf(needle);
 for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.ok(at(text,'prediction_batch_validate({items})')>=0&&at(text,'prediction_batch_validate({items})')<at(text,'prediction_batch_submit({runId'),label+': the preflight comes before the submit');
  assert.ok(/ОДНОЙ повторной предпроверки/.test(text)&&/НИКОГДА не выдумывай refs/.test(text)&&/в том числе stakes/.test(text),label+': bounded retry, no invented refs, no metadata-only execution quality');
- assert.ok(/failure:\{kind:'parse_error'\}/.test(text),label+': an unrepairable film is reported as a failure item');
+ assert.ok(/failure:\{kind:'parse_error'/.test(text),label+': an unrepairable film is reported as a failure item');
 }
 // AIR-469: a failed preflight on fingerprint.evidence triggers a bounded evidence recovery before any failure item. A static text check; it does not prove model behaviour (AIR-451 needs an authorized natural-run observation).
 {const step7=prompt.split('\n').find(l=>l.startsWith('7. '));assert.ok(step7);
@@ -99,11 +99,13 @@ for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.equal((step7.match(/НЕ БОЛЕЕ ОДНОЙ повторной `prediction_batch_validate`/g)||[]).length,1,'a single re-preflight');
  assert.ok(/лимит 2 web search запросов и 3 независимых использованных источников/.test(step7),'hard search and source limits');
  assert.ok(/Не добавляй фиктивные mechanics, `model_knowledge`, URL или evidence ради прохождения preflight/.test(step7)&&/Ни synopsis, ни `search_snippet`/.test(step7),'no fabricated evidence');
- assert.ok(/failure:\{kind:'parse_error',reason,preflight\}/.test(step7)&&/preflight_validation_failed/.test(step7)&&/insufficient_evidence/.test(step7)&&/json_unparseable/.test(step7)&&/request_too_large/.test(step7)&&/максимум из 20 issues/.test(step7)&&/это твоё заявление, а не серверная телеметрия/i.test(step7),'AIR-472: the failure item carries the closed reason and the copied preflight issues, as a claim');
- assert.ok(/повтори один раз как \{filmId,failure:\{kind:'parse_error'\}\}/.test(step7),'a legacy fallback exists');
- assert.equal((step7.match(/failure:\{kind:'parse_error'\}/g)||[]).length,1,'AIR-472: the legacy-only item appears once, as the explicit fallback after a Worker rejection');assert.ok(step7.indexOf("повтори один раз как {filmId,failure:{kind:'parse_error'}}")>step7.indexOf("failure:{kind:'parse_error',reason,preflight}"),'the fallback comes after the claim');assert.ok(!/остаются issues, отправь как/.test(prompt),'no unconditional legacy instruction remains');assert.ok(!/отправь существующий failure/.test(prompt),'3б no longer sends a legacy failure');
+ assert.ok(/failure:\{kind:'parse_error',reason,preflight\}/.test(step7)&&/preflight_validation_failed/.test(step7)&&/insufficient_evidence/.test(step7)&&/json_unparseable/.test(step7)&&/request_too_large/.test(step7)&&/максимум из 20 issues/.test(step7)&&/это твоё заявление, а не серверная телеметрия/i.test(step7),'the failure item carries the closed reason and the copied preflight issues, as a claim');
+ assert.ok(!/повтори один раз как \{filmId,failure:\{kind:'parse_error'\}\}/.test(step7),'no kind-only fallback');
+ assert.ok(/Не отправляй \{filmId,failure:\{kind:'parse_error'\}\} без reason/.test(step7)&&/Worker ответит 400/.test(step7),'a missing reason is a 400, not a retry as kind-only');
+ assert.ok(/reason:'request_too_large'/.test(step7),'an oversized single film is reported with request_too_large');
+ assert.ok(!/остаются issues, отправь как/.test(prompt),'no unconditional legacy instruction remains');assert.ok(!/отправь существующий failure/.test(prompt),'3б no longer sends a legacy failure');
  assert.ok(/ОБЯЗАТЕЛЕН, даже когда первый дал казавшуюся содержательной статью/.test(step3b(prompt)[0])&&/третий поиск не разрешён/.test(step3b(prompt)[0]),'3б: second search mandatory within the two-search budget');
- assert.ok(!/failure.reason|failure.preflight/.test(dry),'the frozen dry-run prompt is not widened');
+ assert.ok(/reason:'preflight_validation_failed'/.test(dry)&&/reason:'insufficient_evidence'/.test(dry),'the dry-run failure item carries a closed reason');
  {const s3b=step3b(prompt)[0],s7=prompt.split('\n').find(l=>l.startsWith('7. '));
   assert.ok(/EVIDENCE-RECOVERY ПЕРЕД ШАГОМ 5/.test(s3b)&&/ноль честных evidence claims ДО preflight/.test(s3b)&&/вопреки фразе шага 5/.test(s3b),'3б overrides the step-5 early-out before it');
   assert.ok(s3b.indexOf('EVIDENCE-RECOVERY ПЕРЕД ШАГОМ 5')>=0&&/не более ОДНОГО такого прохода на фильм \(до и после preflight вместе\)/.test(s3b),'one pass in total');
@@ -201,7 +203,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
  assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];
- const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
+ const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error',reason:'json_unparseable'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
  const generationSize=1,submitBatchSize=5,seen={};let flushes=0,preflights=0,flagged=[],buffer=[],submitItems=null;
  for(let i=0;i<ids.length;i+=generationSize){
   for(const id of ids.slice(i,i+generationSize))buffer.push(itemFor(id));
@@ -210,7 +212,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
   let items=buffer;buffer=[];flushes++;
   const candidates=items.filter(it=>!it.failure);
   if(candidates.length){const pre=await w.call('prediction_batch_validate',{items:candidates});preflights++;assert.ok(!pre.isError,JSON.stringify(pre.data).slice(0,200));
-   for(const res of pre.data.results)if(!res.valid){flagged.push([res.filmId,res.prediction.issues.concat(res.fingerprint.issues).map(x=>x.path+' '+x.code)]);items=items.map(it=>it.filmId===res.filmId?{filmId:res.filmId,failure:{kind:'parse_error'}}:it);}}
+   for(const res of pre.data.results)if(!res.valid){flagged.push([res.filmId,res.prediction.issues.concat(res.fingerprint.issues).map(x=>x.path+' '+x.code)]);items=items.map(it=>it.filmId===res.filmId?{filmId:res.filmId,failure:{kind:'parse_error',reason:'preflight_validation_failed'}}:it);}}
   const r=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));
   if(flushes===1){submitItems=items;const again=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(again.data.results.every(x=>x.replayed===true),'replay by the same body');}
   for(const x of r.data.results)seen[x.status]=(seen[x.status]||0)+1;

@@ -44,7 +44,7 @@ const rich=w=>{ // a fingerprint with evidence on every asserted mechanic and ex
 // 2. Mixed outcomes inside one group: a schema failure and a reported failure do not touch the others; the failures are sanitized, retryable and never a payload copy.
 {
  const w=await ready(12);const m=await start(w),pick=ids(m).slice(0,7);
- const bad={...w.prediction,predictedRating:99,secret:'do-not-echo'},items=[item(w,pick[0]),{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},item(w,pick[2]),{filmId:pick[3],failure:{kind:'parse_error'}},item(w,pick[4]),{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction},item(w,pick[6])];
+ const bad={...w.prediction,predictedRating:99,secret:'do-not-echo'},items=[item(w,pick[0]),{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},item(w,pick[2]),{filmId:pick[3],failure:{kind:'parse_error',reason:'json_unparseable'}},item(w,pick[4]),{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction},item(w,pick[6])];
  const r=await submit(w,m,items);assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));
  const by=Object.fromEntries(r.data.results.map(x=>[x.filmId,x]));
  assert.deepEqual([pick[0],pick[2],pick[4],pick[6]].map(id=>by[id].status),['created','created','created','created']);
@@ -59,8 +59,8 @@ const rich=w=>{ // a fingerprint with evidence on every asserted mechanic and ex
  // the failed film is not resubmitted in the run: the stored failure answers, whatever the payload
  const same=await submit(w,m,[{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad}]);assert.equal(same.data.results[0].status,'validation_failure');assert.equal(same.data.results[0].replayed,true,'the identical payload is a replay of the stored failure');assert.equal(same.data.results[0].retryAt,by[pick[1]].retryAt);
  const retried=await submit(w,m,[item(w,pick[1])]);assert.equal(retried.data.results[0].status,'conflict','a failed film is not retried in the run: a different payload is a conflict, not a replay');assert.equal(pointers(w).length,4);
- const failed2=await submit(w,m,[{filmId:pick[3],failure:{kind:'parse_error'}}]);assert.equal(failed2.data.results[0].replayed,true,'an identical reported failure is a replay');
- assert.equal((await submit(w,m,[{filmId:pick[3],failure:{kind:'validation_error'}}])).data.results[0].status,'conflict','a different failure kind is a conflict');
+ const failed2=await submit(w,m,[{filmId:pick[3],failure:{kind:'parse_error',reason:'json_unparseable'}}]);assert.equal(failed2.data.results[0].replayed,true,'an identical reported failure is a replay');
+ assert.equal((await submit(w,m,[{filmId:pick[3],failure:{kind:'validation_error',reason:'json_unparseable'}}])).data.results[0].status,'conflict','a different failure kind is a conflict');
 }
 
 // 3. Replay: the same body again is idempotent per film: nothing is written twice, no version object, history row or view-index entry is added.
@@ -242,7 +242,7 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  const counts=counted(w),before=await state(w),puts=counts.put;
  const bad={...w.prediction,predictedRating:99};
  const dry=(items,extra={})=>w.api('batch/submit',{runId:'dry-run',epoch:1,items,dryRun:true,manifestHash:dm.data.manifestHash,...extra});
- const r=await dry([{...item(w,pick[0]),inputHash:dm.data.films[0].inputHash},{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},{filmId:pick[2],failure:{kind:'parse_error'}},{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction}]);
+ const r=await dry([{...item(w,pick[0]),inputHash:dm.data.films[0].inputHash},{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},{filmId:pick[2],failure:{kind:'parse_error',reason:'json_unparseable'}},{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction}]);
  assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.dryRun,true);assert.equal(r.data.manifestHash,dm.data.manifestHash);assert.equal(r.data.runId,null);
  const by=Object.fromEntries(r.data.results.map(x=>[x.filmId,x]));
  assert.equal(by[pick[0]].status,'would_write');assert.equal(by[pick[0]].liveInput,'same');assert.equal(by[pick[1]].status,'validation_failure');assert.equal(by[pick[1]].validation.stage,'prediction_schema');assert.equal(by[pick[2]].validation.stage,'caller_reported');assert.equal(by.tmdb_9999.status,'not_eligible');assert.equal(by.tmdb_9999.liveInput,'not_eligible');

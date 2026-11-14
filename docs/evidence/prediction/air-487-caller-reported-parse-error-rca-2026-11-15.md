@@ -79,19 +79,14 @@ Sibling created films show the Worker accepted well-formed fingerprints, predict
 
 Existing coverage kept: `tests/prediction-batch-validate.mjs` (`fingerprint.evidence too_few`), `tests/fingerprint-evidence.mjs`, `tests/prediction-batch-submit.mjs` (mixed outcomes).
 
-## Fix proposal (not implemented here; needs owner GO)
+## Implementation (same card, after owner chose both)
 
-Minimal, fail-closed, no validator relaxation, no automatic retry or Taste Profile change.
+Canonical prompt: no kind-only fallback; every production and dry-run failure item carries a closed `reason`; a missing `reason` is documented as HTTP 400, not a retry as `{kind:'parse_error'}`. Worker `validateBatchSubmitBody`: `failure.reason` required on every batch v2 failure item; one missing reason 400s the whole body and writes nothing. v5 `prediction_submit` is unchanged. Installing the live Task A prompt remains a **separate owner GO** (canonical file ≠ registry). Deploying the Worker **before** that paste will 400 every production kind-only failure from the currently installed prompt.
 
-1. **Prompt (separate Task edit GO):** treat the legacy `{kind:'parse_error'}` fallback as a last resort only after a **corrected** claim still 400s, and require a closed `reason` on every production failure item. Do not strip a known reason to pass submit. Keep evidence-recovery; do not map `gateStatus=limited` to `parse_error`.
-2. **Worker (separate code PR, if the owner wants a hard gate):** refuse a failure item that has `kind` but neither `reason` nor `preflight` on batch v2 (`400`, nothing written), with tests for mixed batches (one bad failure item must not 400 a whole mixed body **or** must — pick one and document it; today's code 400s the **whole** submit when any item's claim is invalid). Do not accept invalid fingerprints through this path.
-3. **Telemetry (optional, later):** persist a bounded count of claim-400 vs legacy-failure accepts. Do not store payloads.
-4. **Out of scope:** production `prediction_batch_start`/`submit`/`complete`, lease/retry writes, synthetic PASS runs, changing AIR-451/AIR-473 quality gates.
-
-Rollback for (1) is restoring the previous Task text. Rollback for (2) is reverting the PR; optional fields today remain compatible with old clients.
+Offline proof: `tests/prediction-caller-failure-claim.mjs`, `tests/scheduled-task-prompt-v2.mjs`. Telemetry of claim-400 vs legacy accepts is still later.
 
 ## Verdict
 
 **RCA:** the three films were accepted as **legacy caller `failure.kind=parse_error` items**. The AIR-472 claim contract was deployed and is exercised offline; this natural run **did not persist a claim**. The four closed reasons are **not determined**. A prompt-directed 400→legacy fallback is consistent and unproven. Neighbours in the run were not blocked.
 
-**Implementation:** not in this delivery. Owner chooses prompt-only vs Worker-required `reason` as a later atomic PR.
+**Implementation:** Worker required-reason gate and canonical prompt are in this PR. Live Task paste is not authorized here.
