@@ -195,9 +195,9 @@ In all three, no new alert is added (ADR 0128 decision 10: the state surfaces th
 ## Not verified here
 
 - Any live value: the marker, flags, EPG mode, schema version and run state were not read (no production access in this change).
-- Production `changedShare` (the synthetic harness share of 0 is the fixture matching itself), `person_state`, Person and credit applied cost per unit, the Worker to D1 round-trip time, D1 CPU per EPG step, the heap behaviour and M1 limits, and any completion throughput. The synthetic statement counts and local timings are recorded; they are not those quantities.
+- Production `changedShare` (the synthetic harness share of 0 is the fixture matching itself), `person_state`, Person and credit applied cost per unit, the Worker to D1 round-trip time, D1 CPU per EPG step, the heap behaviour, the real enforcement and consumption against the documented Workflow platform limits (the limits themselves are recorded in the M1 evidence), and any completion throughput. The synthetic statement counts and local timings are recorded; they are not those quantities.
 - Whether a repeated invocation of the same run resumes its cursor in production (read from ADR 0128 decision 3 and the S4-4 tests: an equal recomputed fingerprint resumes, a changed one replays from the start); no producer pass has run in production.
-- That the slice deadline semantics above match what S4-4 will implement.
+- That the slice deadline semantics above match what S4-4 implemented (the driver is delivered and dormant; its parameters are required and the deadline is at most the lease less its margin, but no pass has run in production).
 - The statement-cap arithmetic ("three fixed statements"): derived from the store's description, to be confirmed against `commitSlice` in S4-4.
 - Every scenario value in this page (round trips per run, wall time, slices) is arithmetic over the inputs listed, not an observation.
 

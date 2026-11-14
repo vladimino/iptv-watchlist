@@ -21,7 +21,7 @@
 | Concurrent instances | 50,000 per account; instances in `waiting` do not count. Creation rate 300/s per account, 100/s per Workflow | Documented | Workflows limits; 15 Apr 2026 changelog |
 | Default step retry | 5 retries, 10 s delay, exponential backoff, 10 minutes timeout per attempt | Documented | Workflows "Sleeping and retrying" |
 | Cron Trigger CPU | 15 minutes for an interval of one hour or more (30 s below one hour) | Documented | Workers limits |
-| Instance state and log retention | 7 days by default on Workers Paid, configurable to 30 days | Documented | Workflows limits |
+| Instance state and log retention | 30 days by default on Workers Paid, configurable to a shorter period (3 days on Workers Free). Corrected at review against the primary Workflows limits page (last updated 21 Sep 2026, footnote 8); the documentation search chunk used for the first capture said 7 days, so that connector's snippets can lag the page | Documented | Workflows limits |
 | D1 result, statement and parameters | Query result at most 50 MB (enforced from 4 Nov 2026); statement at most 100,000 bytes; at most 100 bound parameters; at most six simultaneous connections per invocation | Documented | D1 limits |
 | D1 throughput | Each database processes queries one at a time; throughput follows query duration; a query runs at most 30 s | Documented | D1 limits and FAQ |
 | Whether limits are enforced in local development | They are enforced only on the deployed Worker | Documented | Wrangler configuration |
