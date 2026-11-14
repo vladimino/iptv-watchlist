@@ -458,4 +458,23 @@ const setup=(opts={})=>{const {db,file}=migrated(18,opts);open(db);const bucket=
  assert.ok(DEADLINE+60000<15*60000);
 }
 
+// 3b. AIR-482: the cron starts the Discovery reconcile up to 45 s before the projector. The window length and its fencing do not depend on that head start.
+{
+ const HEAD=45000;
+ const {db}=migrated();open(db);
+ const env=envFor(db);
+ const early=await Authority.acquireLease(env,{});
+ assert.ok(early.lease,'admission before the request is the pre-existing ordering: a chunk lease is granted');
+ db.sql(`UPDATE discovery_lease SET lease_id='chunk-early', expires_at=${T0+HEAD+20000}, programme_run_id='run-1' WHERE id=1`);
+ const req=await Authority.requestProjectorWindow(env,{owner:'p1',now:T0+HEAD});
+ assert.equal(req.outcome,'requested');assert.equal(req.expiresAt,T0+HEAD+DEADLINE,'the absolute deadline is measured from the delayed request: the window is not shortened');
+ const refused=await Authority.acquireLease(env,{});
+ assert.equal(refused.lease,null);assert.equal(refused.busy.kind,'projector_window','new admission is closed from the request on');
+ const pending=await Authority.grantProjectorWindow(env,{owner:'p1',now:T0+HEAD+1000});
+ assert.equal(pending.outcome,'pending');
+ const granted=await Authority.grantProjectorWindow(env,{owner:'p1',now:T0+HEAD+21000});
+ assert.equal(granted.outcome,'granted','the in-flight early chunk ends by its own TTL and the projector gets the window: no starvation');
+ assert.equal(granted.expiresAt,T0+HEAD+DEADLINE);
+}
+
 console.log('Projector window (ADR 0103): migration 0018 refuses anything but a complete version 17 and seeds one idle row; with the table absent every path is as before; request, grant and release are atomic, an expired or late request is never granted and leaves no lease; admission closes while requested or held with a typed busy; the three lease-free generation writers are refused while held; a stalled former lease holder cannot commit; every generation bump has the lease fence or the window predicate; under a window the projector is productive with the generation pin unchanged, waits without a busy loop, defers with its own reasons when not granted, busy, expired or forced, tells the window lost from the lease lost, and writes nothing for the window when the flag is off, the table is absent or the run is dry; a seeded 1,000-tick model keeps the closed time within one deadline');
