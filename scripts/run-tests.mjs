@@ -173,12 +173,13 @@ export const WEIGHTS={
  'ratings-run.mjs':2,
 };
 export const DEFAULT_WEIGHT=0.5;
-// Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`, about 9 s more of job wall time than a plain shard job (about 5% of a shard's roughly 195 s); 33 units are 7 s of wall at 0.233 s a unit. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
-export const FIRST_SHARD_OFFSET=20;
+// Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`. AIR-480 stage 4b: 80 units (was 20) after shard 1 of PR #639 measured 237.5 s against the 240 s gate with only 2.5 s of margin; the extra offset keeps the two heaviest mutation files on other shards while the weight contract still balances the three shards. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
+export const FIRST_SHARD_OFFSET=80;
 // AIR-374 contention cohort (see planTests): the files that compete for the CPU are the mutation files (any weight) and every other file of at least HEAVY_MIN_WEIGHT units, about 9% of the files and 55% of the weight. They are dealt before the rest by "pressure": a file's weight, times HEAVY_MUTATION_PRESSURE for a mutation file, which re-runs a production module against many mutants in child processes and so takes far more of a 4 vCPU runner than its weight says (a fit of the 36 shard jobs of 12 runs gives about 0.65 s of `Run tests` per mutation unit against 0.06 to 0.09 s per unit of any other weight). Shard 1 starts FIRST_SHARD_HEAVY_CREDIT pressure units ahead: with 117 s in the last run against 158 s and 187 s it has the most headroom, so it gets the largest cohort share; its total weight is still dealt less by FIRST_SHARD_OFFSET.
 export const HEAVY_MIN_WEIGHT=20;
 export const HEAVY_MUTATION_PRESSURE=6;
-export const FIRST_SHARD_HEAVY_CREDIT=100;
+export const FIRST_SHARD_HEAVY_CREDIT=160;
+// AIR-480: 160 (was 100) so shard 1's extra FIRST_SHARD_OFFSET does not also collect the heaviest mutation file by pressure.
 const MUTATION=/-mutation\.mjs$/;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
