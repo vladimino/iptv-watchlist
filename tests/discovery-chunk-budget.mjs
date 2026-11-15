@@ -68,14 +68,14 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
 }
 
 // The discovery source as a vm context, with a controllable clock and a TMDB stub that records its queries.
-function chunkContext({clock,onFetch,respond=null}){
+function chunkContext({clock,onFetch,respond=null,fetchStatus=null}){
  const queueRefreshes=[];
  const realNow=Date.now.bind(Date);
  const FakeDate=class extends Date{static now(){return realNow()+clock.offset;}};
  const searched=[],timeouts=[];
  const signals={timeout(ms){timeouts.push(ms);return AbortSignal.timeout(ms);}};
  const context=vm.createContext({console,Date:FakeDate,Promise,URL,URLSearchParams,AbortSignal:signals,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
-  fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
+  fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);if(fetchStatus)return Promise.resolve(new Response(JSON.stringify({}),{status:fetchStatus,headers:{'Content-Type':'application/json','Retry-After':'60'}}));return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:Authority,pinEpg:async value=>value,
   refreshPredictionQueue:async(target,report,trigger)=>{queueRefreshes.push(trigger);},
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
@@ -271,11 +271,13 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(searched.length,16,'exactly the cap, never 17');
  assert.equal(result.tmdbCalls,16);
  assert.equal(result.checked,15,'the candidate that would pass the cap is not counted');
+ assert.equal(result.deferred,1,'the TMDB-touched remainder is fenced, not left as head-of-line');
  assert.equal(result.error,null,'normal budget exhaustion is not a failure');
- assert.equal(result.retryAt,null,'and sets no retry time');
+ assert.equal(result.retryAt,null,'and sets no series retry time');
  assert.equal(result.stage,'partial');
- assert.equal(result.remaining,16+HOT.length-15);
- assert.equal(decisionCount(file),15,'the sixteenth candidate has no decision');
+ assert.equal(result.remaining,16+HOT.length-15-1);
+ assert.equal(decisionCount(file),16);
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'")[0].n,1);
  await Authority.releaseLease(env,lease.lease);
 }
 
@@ -700,6 +702,69 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  const text=String(plan.stdout||'');
  assert.match(text,/SCAN|SEARCH/i);
  fs.writeFileSync(path.join(root,'air-425-count-plan.txt'),text);
+}
+
+// 22. AIR-492: a slow TMDB candidate that cannot be stored does not pause the series or stick as head-of-line.
+{
+ const {file,env}=await fixture({extraHot:8});
+ const clock={offset:0};
+ const {context,searched}=chunkContext({clock,onFetch(){clock.offset+=30000;}});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const starved=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(starved.checked,0);
+ assert.equal(starved.deferred,1);
+ assert.equal(starved.error,null);
+ assert.equal(starved.retryAt,null);
+ assert.ok(searched.length>=1);
+ assert.equal(starved.stage,'partial');
+ const hop=context.continuationAfterChunk(starved,20,'hop-1',new Date().toISOString(),RUN);
+ assert.notEqual(hop.reason,'backoff');
+ assert.equal(hop.retryAt,null);
+ assert.equal(hop.remainingChunks,19);
+ const deferred=sql(file,"SELECT observation_key AS k, retry_at AS r, status AS s, json_extract(payload_json,'$.deferReason') AS d FROM discovery_decision");
+ assert.equal(deferred.length,1);
+ assert.equal(deferred[0].d,'wall_budget');
+ assert.equal(deferred[0].s,null);
+ assert.ok(Date.parse(deferred[0].r)>Date.now());
+ const firstKey=deferred[0].k;
+ await Authority.releaseLease(env,lease.lease);
+ clock.offset=0;
+ const next=chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ const lease2=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease2.lease;
+ const progressed=await next.context.resolveDiscoveryChunk(env,{films:[]},24,lease2.lease);
+ assert.ok(progressed.checked>0,'other eligible keys move after a budget defer');
+ const keys=sql(file,'SELECT observation_key AS k FROM discovery_decision').map(row=>row.k);
+ assert.ok(keys.some(key=>key!==firstKey),'a different observation is stored');
+ assert.equal(keys.filter(key=>key===firstKey).length,1,'the deferred key is not rewritten as checked');
+ await Authority.releaseLease(env,lease2.lease);
+}
+
+{
+ const {env}=await fixture({extraHot:4});
+ const clock={offset:0};
+ const {context,searched}=chunkContext({clock,fetchStatus:429});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const limited=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(limited.deferred,0);
+ assert.match(String(limited.error),/429/);
+ assert.ok(Date.parse(limited.retryAt)>Date.now());
+ assert.ok(searched.length>=1);
+ const hop=context.continuationAfterChunk(limited,20,'hop-1',new Date().toISOString(),RUN);
+ assert.equal(hop.reason,'backoff');
+ await Authority.releaseLease(env,lease.lease);
+}
+
+{
+ const {env}=await fixture();
+ const clock={offset:0};
+ const {context,searched}=chunkContext({clock,respond:()=>({results:[]})});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const ok=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(ok.error,null);
+ assert.equal(ok.deferred,0);
+ assert.equal(ok.checked,HOT.length);
+ assert.ok(searched.length>=HOT.length);
+ await Authority.releaseLease(env,lease.lease);
 }
 
 console.log('discovery chunk budget ok');
