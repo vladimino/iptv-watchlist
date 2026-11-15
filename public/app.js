@@ -1109,8 +1109,13 @@ function lastChanceBadge(film){
  if(!isLastChance(film))return '';
  return lastChanceMark(archiveDeadline(film));
 }
+function catalogIsDiscoveryNew(film){
+ if(film?.watched===true||film?.actualRating!=null)return false;
+ const item=filmEnrichmentItem(film);
+ return item.watched!==true&&item.actualRating==null;
+}
 function catalogBadge(film){
- if(!film?.catalogOnly)return '';
+ if(!film?.catalogOnly||!catalogIsDiscoveryNew(film))return '';
  return '<span class="finds-badge" title="Фильм вне твоего watchlist, не новинка проката" aria-label="Вне watchlist">NEW</span>';
 }
 function card(film){
@@ -1643,7 +1648,7 @@ function similarCard(row,now){
  const original=film.original&&film.original!==film.title?`<p class="original">${escapeHTML(film.original)}</p>`:'';
  const genres=(film.genres||[]).filter(Boolean);
  const both=scores.includes('score-actual')&&scores.includes('score-predicted');
- return `<article class="film-similar-card ${catalog?'is-catalog':'is-watchlist'}${scores?both?' has-both-scores':' has-score':''}" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${scores}<div class="film-head"><div class="film-similar-poster">${catalog?similarBadge('new'):''}${soonBadge(film,{now,shows:findsWindowShows(film,now,null)})}${similarPoster(film)}</div><div class="film-info"><h3>${similarTitle(film)}${letterboxdLink(film,{catalog})}</h3>${original}<span class="film-year">${escapeHTML(year)}${runtime}</span>${genres.length?`<div class="film-tags">${genres.map(escapeHTML).join(' · ')}</div>`:''}${catalog?'':similarBadge(row.badge)}</div></div><p class="film-similar-airing">${escapeHTML(airing.text)}</p><p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;
+ return `<article class="film-similar-card ${catalog?'is-catalog':'is-watchlist'}${scores?both?' has-both-scores':' has-score':''}" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${scores}<div class="film-head"><div class="film-similar-poster">${catalog&&catalogIsDiscoveryNew(film)?similarBadge('new'):''}${soonBadge(film,{now,shows:findsWindowShows(film,now,null)})}${similarPoster(film)}</div><div class="film-info"><h3>${similarTitle(film)}${letterboxdLink(film,{catalog})}</h3>${original}<span class="film-year">${escapeHTML(year)}${runtime}</span>${genres.length?`<div class="film-tags">${genres.map(escapeHTML).join(' · ')}</div>`:''}${catalog?'':similarBadge(row.badge)}</div></div><p class="film-similar-airing">${escapeHTML(airing.text)}</p><p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;
 }
 // The last markup written into #film-similar-cards. An identical refresh keeps that DOM, so a focused title stays focused.
 let similarMarkup='';
@@ -1661,7 +1666,7 @@ function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
  const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),match=findsMatchText(film,context),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
  const label=escapeHTML(film.title||film.original||''),verifiedId=similarVerifiedIdentity(film)?'tmdb_'+film.tmdbId:null,title=verifiedId?`<a class="film-open" href="${filmHref(verifiedId)}" data-film-id="${escapeHTML(verifiedId)}">${label}</a>`:label;
- return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster"><span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>${airing.availability?.state==='soon'?soonBadge(film,{now,shows:findsWindowShows(film,now,scope)}):''}${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
+ return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster">${catalogIsDiscoveryNew(film)?'<span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>':''}${airing.availability?.state==='soon'?soonBadge(film,{now,shows:findsWindowShows(film,now,scope)}):''}${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
 }
 function findsMarkAction(film){
  if(!findsSource.watchedMarkEnabled||!film.tmdbId)return '';
@@ -1888,9 +1893,7 @@ function installProgramme(data){
  ({start:WINDOW_START,cutoff:CUTOFF,end:WINDOW_END}=programmeWindow(report));
  const shape=(f,catalog)=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:(f.shows||[]).map(s=>({...s,offset:(s.start-CUTOFF)/3600000})),catalogOnly:!!catalog,onWatchlist:catalog?false:f.onWatchlist!==false});
  const members=(report.films||[]).map(f=>shape(f,false));
- const memberTmdb=new Set(members.map(f=>f.tmdbId==null?'':String(f.tmdbId)).filter(Boolean));
- const extras=(report.catalogFilms||[]).filter(f=>f&&(f.tmdbId==null||!memberTmdb.has(String(f.tmdbId)))).map(f=>shape(f,true));
- films=[...members,...extras];
+ films=members;
  MAX_YEAR=Math.max(previousMax,...films.map(f=>Number(f.year)||0));
  if(followYear)state.to=MAX_YEAR;
  setYearBounds(followYear);
