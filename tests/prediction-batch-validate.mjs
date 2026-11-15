@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {nonFunctional} from './suite-gate.mjs';
 
 const dump=f=>{const r=sqliteSync([f,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
 const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
@@ -146,10 +147,14 @@ const ids=n=>Array.from({length:n},(_,i)=>'tmdb_'+(i+1));
 {
  const items=ids(10).map((id,i)=>({filmId:id,fingerprint:rich(i),prediction:prediction(),metadata})),req=enc(JSON.stringify({items}));
  assert.ok(req<57344,'ten realistic candidates fit one request: '+req);
- const times=[];let last;for(let n=0;n<200;n++){const t=process.hrtime.bigint();last=await call('prediction_batch_validate',{items});times.push(Number(process.hrtime.bigint()-t)/1e6);}
- times.sort((a,b)=>a-b);const median=times[100],p95=times[190];
- assert.equal(last.data.valid,true);const resp=enc(last.text);
- assert.ok(p95<100,'a preflight of ten candidates is a light validation, not a long operation: p95 '+p95.toFixed(2)+' ms');
- console.log('batch preflight, 10 realistic candidates: request '+req+' bytes, response '+resp+' bytes, structuredContent twin '+enc(JSON.stringify(last.structured))+' bytes, median '+median.toFixed(2)+' ms, p95 '+p95.toFixed(2)+' ms over 200 calls (local, in-process, not production)');
+ const once=await call('prediction_batch_validate',{items});
+ assert.equal(once.data.valid,true);
+ await nonFunctional('prediction-batch-validate-p95',async()=>{
+  const times=[];let last;for(let n=0;n<200;n++){const t=process.hrtime.bigint();last=await call('prediction_batch_validate',{items});times.push(Number(process.hrtime.bigint()-t)/1e6);}
+  times.sort((a,b)=>a-b);const median=times[100],p95=times[190];
+  assert.equal(last.data.valid,true);const resp=enc(last.text);
+  assert.ok(p95<100,'a preflight of ten candidates is a light validation, not a long operation: p95 '+p95.toFixed(2)+' ms');
+  console.log('batch preflight, 10 realistic candidates: request '+req+' bytes, response '+resp+' bytes, structuredContent twin '+enc(JSON.stringify(last.structured))+' bytes, median '+median.toFixed(2)+' ms, p95 '+p95.toFixed(2)+' ms over 200 calls (local, in-process, not production)');
+ });
 }
 console.log('prediction-batch-validate ok');

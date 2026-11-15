@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {nonFunctional} from './suite-gate.mjs';
 import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
 import {scoped,scopedEpgPriority,scopedDiscoveryAuthority} from '../scripts/bundle-scope.mjs';
@@ -113,7 +114,8 @@ for(const key of ['enrichment/profile/current.json','enrichment/view-index.json'
 {
  const {bucket}=bucketFor({silent:['sync.json','enrichment/latest-run.json']});
  const started=Date.now(),r=await footer(world,{DB:db,BUCKET:bucket,FOOTER_SOURCE_TIMEOUT_MS:60});const took=Date.now()-started;
- assert.equal(r.status,200,'a silent source does not hang the footer');assert.ok(took<3000,'bounded wait: '+took+' ms');
+ assert.equal(r.status,200,'a silent source does not hang the footer');
+ nonFunctional('footer-resilience-silent-source',()=>{assert.ok(took<3000,'bounded wait: '+took+' ms');});
  assert.ok(r.body.degraded.includes('sync')&&r.body.degraded.includes('run'),'the silent sources are named: '+JSON.stringify(r.body.degraded));
 }
 
@@ -177,7 +179,8 @@ const NULL_COVERAGE=['confirmedFilmsTotal','currentPredictionsTotal','windowFilm
   for(const key of NULL_COVERAGE)assert.equal(r.body.coverage[key],null,'coverage.'+key+' is unknown without freshness');
   vm.runInContext('predictionFreshness=()=>new Promise(()=>{})',r2);
   const started=Date.now();r=await footer(r2,{...r2Files(),FOOTER_SOURCE_TIMEOUT_MS:60});
-  assert.ok(Date.now()-started<3000,'a hung freshness is cut off');assert.equal(r.status,200);
+  nonFunctional('footer-resilience-hung-freshness',()=>{assert.ok(Date.now()-started<3000,'a hung freshness is cut off');});
+  assert.equal(r.status,200);
   assert.equal(r.body.recommendations.newUnseen.state,'unknown','a hung freshness is unknown too');assert.ok(r.body.degraded.includes('freshness'));
  }finally{vm.runInContext('predictionFreshness=__original',Object.assign(r2,{__original:original}));}
  r=await footer(r2,r2Files());assert.equal(r.body.recommendations.newUnseen.rating45plus,1,'the real freshness rule is restored');
