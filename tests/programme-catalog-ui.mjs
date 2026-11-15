@@ -55,7 +55,16 @@ const html=run('card(films[1])');
 assert.match(html,/is-catalog/);
 assert.match(html,/finds-badge/);
 assert.match(html,/tmdb_900/);
+assert.equal(html.includes('data-started-id'),false,'catalogOnly cards have no started action');
 assert.equal(run('card(films[0])').includes('is-catalog'),false);
+assert.equal(run('card(films[0]).includes("data-started-id")'),true);
+run('fillFilmPage(films[1])');
+assert.equal(el('#film-screen-actions').innerHTML.includes('data-started-id'),false,'catalogOnly film page has no started action');
+run('state.period="soon";render()');
+assert.equal(el('#watchlist-title').hidden,false);
+assert.equal(el('#watchlist-title').textContent,'Из программы');
+assert.equal(run('visibleFilms().some(film=>film.catalogOnly)'),true);
+assert.equal(run('visibleFilms().some(film=>!film.catalogOnly)'),true);
 run(`installProgramme({
  updatedAt:"2026-11-15T11:00:00.000Z",
  window:{from:Date.parse("2026-11-12T12:00:00Z"),to:Date.parse("2026-11-16T12:00:00Z")},
@@ -66,4 +75,6 @@ run(`installProgramme({
 })`);
 assert.equal(run('films.length'),1);
 assert.equal(run('films[0].id'),'watch-a');
+run('state.period="soon";render()');
+assert.equal(el('#watchlist-title').textContent,'Из watchlist');
 console.log('programme catalog UI: catalogFilms in grid, not watchlist identities');
