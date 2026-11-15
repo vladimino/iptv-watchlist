@@ -1482,14 +1482,24 @@ async function loadCatalogForQueue(pinned){
   catch(error){if(error?.code!=='discovery_fence'||attempt>=CATALOG_FENCE_ATTEMPTS)throw error;}
  }
 }
+async function queuePin(env,report){
+ if(env?.epgPin?.authority==='d1'&&env.epgPin.programmeRunId)return env;
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live)return {...env,epgPin:{authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,fence:live.fence,generation:live.generation}};
+ }
+ if(report?.runId)return {...env,epgPin:{...(env.epgPin||{}),programmeRunId:report.runId}};
+ return pinEpg(env);
+}
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
- const pinned=report?.runId?{...env,epgPin:{...(env.epgPin||{}),programmeRunId:report.runId,authority:env.epgPin?.authority||(typeof PublishedEpg!=='undefined'?'d1':undefined)}}:await pinEpg(env);
+ const pinned=await queuePin(env,report);
  const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned)]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile||!report?.films)return null;
  if(capture)Object.assign(capture,{report,profile,index,catalog});
  const now=Date.now();
- const completedOnly=typeof PublishedEpg!=='undefined'&&!!report?.runId;
+ // ADR 0142: completed-only ranking is a live D1 published pin whose run matches the completed programme, not the mere presence of the PublishedEpg module (the Worker always bundles it; currentGeneration null is the R2 path).
+ const completedOnly=pinned?.epgPin?.authority==='d1'&&!!pinned.epgPin.programmeRunId&&report?.runId===pinned.epgPin.programmeRunId;
  const completed=completedOnly?completedShowsByTmdb(report):new Map();
  const films=allEnrichmentFilms(report,catalog).map(film=>withCompletedShows(film,completed,report.runId,completedOnly));
  const watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));

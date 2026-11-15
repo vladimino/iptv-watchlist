@@ -12,13 +12,22 @@ const env={BUCKET:{
  async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};},
  list:async()=>({objects:[],truncated:false})
 }};
-const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console});
-vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
-for(const file of ['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 const now=Date.now();
 const H=3600000;
 const show=(start)=>({channelId:'c',channel:'C',start,end:start+H});
 const film=(id,tmdb,extra={})=>({id,tmdbId:String(tmdb),canonicalIdentity:'tmdb:'+tmdb,title:id,original:id,year:2020,genres:[],directors:[],actors:[],...extra});
+const liveD1={value:null,unreadable:false};
+const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,PublishedEpg:{
+ currentGeneration:async()=>liveD1.value,
+ readDocumentAt:async(_env,run,kind)=>{
+  if(!liveD1.value)throw new Error('D1 programme is not the authority');
+  if(liveD1.unreadable)return null;
+  if(kind==='watchlist')return {films:[]};
+  return {runId:run,films:[],catalogFilms:[{id:'tmdb_9',tmdbId:'9',canonicalIdentity:'tmdb:9',shows:[show(now-H)]}]};
+ }
+}});
+vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ctx);
+for(const file of ['src/domain/film-person.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/sources.js','src/discovery.js','src/domain/prediction-versions.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/worker.js'])vm.runInContext(fs.readFileSync(file,'utf8').replace('export default','globalThis.worker='),ctx);
 records.set('enrichment/profile/current.json',{version:1,profileHash:'p',profile:{ratingScale:'Half stars'}});
 records.set('enrichment/view-index.json',{});
 records.set('sync.json',{runId:'run-q',stage:'complete'});
@@ -29,27 +38,23 @@ async function reconcile(){
  return records.get('enrichment/prediction-queue.json');
 }
 
-// Outside D1 the record shows still rank the queue, but hotEnteredAt is never a tie-break: two equally hot Films order by earliest start, then discoveredAt, then id.
+// PublishedEpg is defined (as in the Worker bundle) but currentGeneration is null: the R2 path. Record shows rank the queue; hotEnteredAt is not a tie-break.
 {
+ liveD1.value=null;
+ records.set('epg/published-generation.json',{programmeRunId:'run-q',phase:'published'});
  records.set('programme.json',{runId:'run-q',films:[]});
  records.set('epg/discovered-films.json',{
   late:film('late','1',{shows:[show(now-1*H)],hotEnteredAt:new Date(now-10*86400000).toISOString(),discoveredAt:new Date(now-2*86400000).toISOString()}),
   early:film('early','2',{shows:[show(now-2*H)],hotEnteredAt:new Date(now).toISOString(),discoveredAt:new Date(now-2*86400000).toISOString()})
  });
  const queue=await reconcile();
- assert.deepEqual(queue.hotPending,['early','late'],'the earlier start ranks first; a later hotEnteredAt does not');
+ assert.deepEqual(queue.hotPending,['early','late'],'R2 authority keeps record shows; the earlier start ranks first; a later hotEnteredAt does not');
 }
 
-// Under a D1 pin the queue uses the completed programme showings only: a same-run stale catalog showing does not make a Film hot, and an assigned catalog Film does.
+// D1/open pin: completed programme showings only. A same-run stale catalog showing is not hot; an assigned catalog Film is.
 {
- const live={programmeRunId:'run-q',generation:7,phase:'published',fence:'f'};
- ctx.PublishedEpg={
-  currentGeneration:async()=>live,
-  readDocumentAt:async(_env,run,kind)=>{
-   if(kind==='watchlist')return {films:[]};
-   return {runId:run,films:[],catalogFilms:[{id:'tmdb_9',tmdbId:'9',canonicalIdentity:'tmdb:9',shows:[show(now-H)]}]};
-  }
- };
+ liveD1.value={programmeRunId:'run-q',generation:7,phase:'published',fence:'f'};
+ liveD1.unreadable=false;
  records.set('programme.json',{runId:'run-q',films:[]});
  const catalog={
   stale:film('stale','8',{shows:[show(now-H)],showsProgrammeRunId:'run-q',hotEnteredAt:new Date(now).toISOString()}),
@@ -62,7 +67,16 @@ async function reconcile(){
  assert.equal(queue.priority.assigned.hot,true);
  assert.equal(queue.hotPending.includes('stale'),false);
  assert.equal(queue.priority.stale?.hot,false,'a same-run catalog showing that the completed read dropped is not hot');
- delete ctx.PublishedEpg;
+}
+
+// D1 is authoritative but the completed programme is unreadable: fail closed, do not rank from catalog shows.
+{
+ liveD1.unreadable=true;
+ records.set('programme.json',{runId:'run-q',films:[]});
+ records.set('epg/discovered-films.json',{hot:film('hot','8',{shows:[show(now-H)]})});
+ const response=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/queue/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),env);
+ assert.equal(response.status,502,'an unreadable D1 programme does not rebuild from catalog shows');
+ liveD1.unreadable=false;
 }
 
 console.log('prediction queue hotEnteredAt tie-break and completed-read showings ok');
