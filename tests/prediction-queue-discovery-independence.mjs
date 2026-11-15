@@ -1,8 +1,8 @@
-// AIR-431. The Prediction queue advances on its own state while Discovery keeps writing. Production: every next/submit/complete rebuilt the queue from
-// the whole catalog, each rebuild was a fenced read against the Discovery generation, and a Discovery chunk landing between its statements failed it
-// (`discovery_fence`), so a run stalled in 503 waits until its lease expired. Here the Worker runs in a vm on an in-memory R2 and a real Discovery
-// authority on a local sqlite D1 stand-in, and every catalog query moves the Discovery generation (a chunk landing on each statement).
-// Local stand-ins only; nothing here calls Cloudflare, TMDB or production.
+// AIR-431 / AIR-493. The Prediction queue advances on its own state while Discovery keeps writing. A runner step does
+// not rebuild from the whole catalog. A full rebuild reads the catalog as one admission snapshot (ADR 0147): a Discovery
+// chunk that only bumps `discovery_authority.generation` does not fence it. Here the Worker runs in a vm on an in-memory
+// R2 and a real Discovery authority on a local sqlite D1 stand-in, and every catalog query moves the Discovery generation
+// (a continuation write on each statement). Local stand-ins only; nothing here calls Cloudflare, TMDB or production.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {d1Standin} from './d1-standin.mjs';
@@ -50,15 +50,15 @@ assert.equal(built.value.status,200);assert.equal(queue().pending.length+queue()
 assert.equal(queue().hotPending.length,HOT,'hot films in the queue');assert.equal(queue().programmeRunId,'p1');
 console.log('full rebuild (reconcile): queries',built.queries,'whole-catalog reads',built.fullReads,'ms',built.ms.toFixed(0));
 stats.storm=true;
-// The control: with the storm on a whole-catalog read is the failure of production, the bounded retry does not hide a storm that never stops.
+// AIR-493: a generation-only storm is not a torn catalog. The rebuild is one SELECT; retries of `discovery_fence` are unused.
 const control=await measured(()=>api('queue/reconcile',{}));
-assert.ok(control.value.status>=500||control.value.data?.error,'a rebuild under a continuous storm fails: '+JSON.stringify(control.value.data).slice(0,200));
-assert.ok(control.fullReads>=3,'bounded retries of the fenced catalog read: '+control.fullReads);
+assert.equal(control.value.status,200,'a catalog snapshot rebuild survives a generation-only storm: '+JSON.stringify(control.value.data).slice(0,200));
+assert.equal(control.fullReads,1,'no generation-fence retries of the catalog SELECT');
 
 resetLease();logs.length=0;
 const started=await measured(()=>api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}}));
 assert.equal(started.value.status,200,JSON.stringify(started.value.data));assert.equal(started.value.data.status,'running');
-assert.equal(started.value.data.queueStale?.reason,'discovery_fence','start under a storm runs on the persisted queue and says so');
+assert.equal(started.value.data.queueStale,undefined,'start under a generation storm rebuilds a readable catalog, not a stale fallback');
 const run=started.value.data;
 console.log('start under storm: queries',started.queries,'whole-catalog reads (bounded retries)',started.fullReads,'by-id reads',started.idReads,'ms',started.ms.toFixed(0));
 let progressReads=0,predicted=new Set(),batches=0,steps={next:[],submit:[],complete:null};
@@ -87,7 +87,7 @@ assert.ok(batches>=2,'at least two full sequential runner batches');
 assert.equal(queue().hotPredicted,HOT,'hot counter follows the settled films');assert.equal(queue().priorityCount,0);assert.equal(queue().coldRemaining,0);assert.equal(queue().pending.length,0);
 const done=await measured(()=>api('complete',{runId:run.runId}));steps.complete=done;
 assert.equal(done.value.status,200,JSON.stringify(done.value.data).slice(0,300));assert.equal(done.value.data.status,'complete');assert.ok(done.fullReads<=1,'complete reads the catalog at most once, for its Event coverage (best effort): '+done.fullReads);
-assert.equal(done.value.data.snapshot.coverage,null,'coverage is unknown under the storm, never computed from a missing catalog');
+assert.equal(done.value.data.snapshot.coverage?.confirmedFilmsTotal,TOTAL,'coverage is computed from the readable catalog snapshot under a generation storm');
 assert.equal(records.get('enrichment/runs/'+run.runId+'.json').status,'complete');
 assert.equal(queue().lastBatch.runId,run.runId);assert.equal(queue().metrics.hotProcessedTotal,HOT);
 assert.equal(lines().length,0,'no failed prediction boundary during the whole run: '+JSON.stringify(lines()).slice(0,300));
@@ -125,21 +125,19 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  assert.ok(!queue().pending.includes('tmdb_'+(TOTAL+4)),'and it is out of the queue');
 }
 
-// 3. A published programme transition: the persisted queue belongs to the old programme, so a rebuild is required; under a storm that is the old,
-//    honest wait (503 catalog_held, lease kept), and once the storm ends the run continues on the new generation.
+// 3. A published programme transition: the persisted queue belongs to the old programme, so a rebuild is required.
+//    A generation-only storm does not hold the catalog; the rebuild lands on the new programme in the same step.
 {
  stats.storm=false;resetLease();publish('p3');assert.equal((await api('queue/reconcile',{})).status,200);resetLease();
  const run3=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(run3.status,'running',JSON.stringify(run3));
  publish('p4');stats.storm=true;logs.length=0;
  const waiting=await api('next',{runId:run3.runId,batchSize:20});
- assert.equal(waiting.status,503,JSON.stringify(waiting.data).slice(0,300));assert.equal(waiting.data.code,'prediction_catalog_held');assert.equal(waiting.data.cause,'discovery_fence');
+ assert.equal(waiting.status,200,JSON.stringify(waiting.data).slice(0,300));
  assert.equal(records.get('enrichment/runs/'+run3.runId+'.json').status,'running','the run keeps its lease and is not stopped');
- stats.storm=false;
- const resumed=await api('next',{runId:run3.runId,batchSize:20});assert.equal(resumed.status,200,JSON.stringify(resumed.data).slice(0,300));
- assert.equal(queue().programmeRunId,'p4','the queue was rebuilt on the published programme');
+ assert.equal(queue().programmeRunId,'p4','the queue was rebuilt on the published programme during the generation storm');
 }
-// 4. Reads stay independent of the storm: enrichment status reads no catalog and still reports the queue; the queue overview reports the working queue as
-//    eligible (the unreadable catalog only makes the snapshot partial, it never turns a queue with ready work into "unavailable").
+// 4. Reads stay independent of the storm: enrichment status reads no catalog and still reports the queue; the queue
+//    overview stays eligible/ready. The catalog snapshot is readable under a generation-only storm (ADR 0147).
 {
  stats.storm=false;resetLease();publish('p5');assert.equal((await api('queue/reconcile',{})).status,200);
  stats.storm=true;ctx.env=env;
@@ -147,8 +145,8 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  assert.equal(statusRead.value.status,200);assert.equal(statusRead.fullReads,0,'status reads no whole catalog');assert.equal(statusRead.idReads,0);
  assert.equal(statusRead.value.data.selectedCount,queue().hotCount+queue().coldCount);assert.ok(statusRead.value.data.queue.pendingCount>0);
  const view=await vm.runInContext('(async()=>predictionQueueOverview(await loadPredictionDiagnosticSnapshot(env),Date.now()))()',ctx);
- assert.equal(view.state,'eligible');assert.equal(view.cause,'ready');assert.equal(view.snapshot.partial,true,'the unreadable catalog is reported as partial');
- assert.ok(view.snapshot.reasons.includes('catalog_unavailable'),JSON.stringify(view.snapshot.reasons));
+ assert.equal(view.state,'eligible');assert.equal(view.cause,'ready');
+ assert.ok(!view.snapshot.reasons.includes('catalog_unavailable'),JSON.stringify(view.snapshot.reasons));
  // The enrichment status also survives an unreadable Discovery status record.
  assert.ok(['object'].includes(typeof statusRead.value.data.discovery)||statusRead.value.data.discovery===null);
 }

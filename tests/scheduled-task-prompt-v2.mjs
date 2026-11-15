@@ -1,6 +1,6 @@
 // AIR-449: the proposed Predictions batch runner v2 Scheduled Task prompt, its dry-run prompt and the A/B contract. The files are documentation only (no live Task exists), so this test keeps honest:
 // the stated lengths and SHA-256, the tool names the texts mention, the generation steps shared byte for byte by both prompts, the exact MCP calls (through the real MCP tool handler, offline),
-// the sample/result schema, the dry-run write freeze over group sizes 1 to 10, and the real partial-stop semantics of the bounded run. No model, network, production or Scheduled Task is involved.
+// the sample/result schema, the dry-run write freeze over group sizes 1 to 10, and the real partial-stop semantics of the bounded run. No model, network, production or Scheduled Task operation is involved.
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
@@ -47,6 +47,15 @@ assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'produ
 assert.ok(/prediction_batch_submit\(\{runId:'dry-run',epoch:1,dryRun:true/.test(dry),'separate A/B template retains frozen dry-run submit');
 for(const needle of ['НЕ БОЛЕЕ 2 web search запросов','НЕ БОЛЕЕ 3 независимо написанных источников','Guardian, Letterboxd, Slant','3000 байт','research.status=not_attempted','search_snippet','attempted_found','НЕ внутри него'])assert.ok(step3a(prompt)[0].includes(needle),needle);
 for(const key of ['assessmentVersion','ratingBasis','probability4PlusBasis','tasteSignals','risks','uncertainties','research','sources','conflicts','model','usedFor','access','handling','stance','anchor','severity'])assert.ok(step3a(prompt)[0].includes(key),'step 3а names '+key);
+// AIR-481 / ADR 0143: same-URL authors are retained in the assessment without duplicating sources.
+for(const text of [prompt,dry]){const research=step3a(text)[0];
+ assert.ok(research.includes('positions 2–3 {source: индекс в sources, author? 1–80, stance 1–160}')&&research.includes('ОДИН URL')&&research.includes('настоящих разных author'),'same-page independently authored disagreements survive as two attributed positions');
+ assert.ok(research.includes('sources(kind,ref) всегда уникальны'),'the source URL is stored once');
+ assert.ok(!research.includes('baseline без интернета')&&research.includes('без отдельного metadata-only baseline'),'production prediction rationale is the assessment, not a second baseline score');
+ assert.ok(research.includes('по языку, стране и эпохе фильма'),'source choice adapts to language and era');
+}
+assert.ok(step3b(prompt)[0].includes('concreteExecutionFinding')&&!step3b(prompt)[0].includes('изменение от baseline'),'the production gate preserves per-film finding but not a mandatory baseline delta');
+assert.ok(prompt.includes('валидные индексы positions (повтор source только с настоящими разными author, по 1–80 символов)'),'manual preflight permits the accepted ADR 0143 repeated source index with genuine distinct authors');
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
 assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
@@ -80,19 +89,23 @@ const at=(text,needle)=>text.indexOf(needle);
 for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.ok(at(text,'prediction_batch_validate({items})')>=0&&at(text,'prediction_batch_validate({items})')<at(text,'prediction_batch_submit({runId'),label+': the preflight comes before the submit');
  assert.ok(/ОДНОЙ повторной предпроверки/.test(text)&&/НИКОГДА не выдумывай refs/.test(text)&&/в том числе stakes/.test(text),label+': bounded retry, no invented refs, no metadata-only execution quality');
- assert.ok(/failure:\{kind:'parse_error'\}/.test(text),label+': an unrepairable film is reported as a failure item');
+ assert.ok(/failure:\{kind:'parse_error'/.test(text),label+': an unrepairable film is reported as a failure item');
 }
 // AIR-469: a failed preflight on fingerprint.evidence triggers a bounded evidence recovery before any failure item. A static text check; it does not prove model behaviour (AIR-451 needs an authorized natural-run observation).
 {const step7=prompt.split('\n').find(l=>l.startsWith('7. '));assert.ok(step7);
- const trigger=step7.indexOf('`fingerprint.evidence: too_few`'),recovery=step7.indexOf('ОБЯЗАТЕЛЬНО сделай один ограниченный evidence-recovery проход'),last=step7.indexOf('только тогда отправь существующий {filmId,failure:{kind:\'parse_error\'}}'),legacy=step7.indexOf('Фильм, у которого после этого остаются issues');
- assert.ok(trigger>=0&&trigger<recovery&&recovery<last&&last<legacy,'too_few trigger, then recovery, then the last-resort failure');
+ const trigger=step7.indexOf('`fingerprint.evidence: too_few`'),recovery=step7.indexOf('ОБЯЗАТЕЛЬНО сделай один ограниченный evidence-recovery проход'),last=step7.indexOf('только тогда отправь {filmId,failure:{kind:\'parse_error\',reason,preflight}}');
+ assert.ok(trigger>=0&&trigger<recovery&&recovery<last&&last>0,'too_few trigger, then recovery, then the last-resort failure');
  assert.ok(/`required` или `invalid_ref`/.test(step7)&&/НЕ являются разрешением немедленно отправить/.test(step7));
  assert.equal((step7.match(/НЕ БОЛЕЕ ОДНОЙ повторной `prediction_batch_validate`/g)||[]).length,1,'a single re-preflight');
  assert.ok(/лимит 2 web search запросов и 3 независимых использованных источников/.test(step7),'hard search and source limits');
  assert.ok(/Не добавляй фиктивные mechanics, `model_knowledge`, URL или evidence ради прохождения preflight/.test(step7)&&/Ни synopsis, ни `search_snippet`/.test(step7),'no fabricated evidence');
- assert.ok(/Не добавляй failure\.reason или failure\.preflight в MCP submit/.test(step7)&&!/failure:\{kind:'parse_error',reason/.test(prompt),'only the existing Worker fields are sent');
+ assert.ok(/failure:\{kind:'parse_error',reason,preflight\}/.test(step7)&&/preflight_validation_failed/.test(step7)&&/insufficient_evidence/.test(step7)&&/json_unparseable/.test(step7)&&/request_too_large/.test(step7)&&/максимум из 20 issues/.test(step7)&&/это твоё заявление, а не серверная телеметрия/i.test(step7),'the failure item carries the closed reason and the copied preflight issues, as a claim');
+ assert.ok(!/повтори один раз как \{filmId,failure:\{kind:'parse_error'\}\}/.test(step7),'no kind-only fallback');
+ assert.ok(/Не отправляй \{filmId,failure:\{kind:'parse_error'\}\} без reason/.test(step7)&&/Worker ответит 400/.test(step7),'a missing reason is a 400, not a retry as kind-only');
+ assert.ok(/reason:'request_too_large'/.test(step7),'an oversized single film is reported with request_too_large');
+ assert.ok(!/остаются issues, отправь как/.test(prompt),'no unconditional legacy instruction remains');assert.ok(!/отправь существующий failure/.test(prompt),'3б no longer sends a legacy failure');
  assert.ok(/ОБЯЗАТЕЛЕН, даже когда первый дал казавшуюся содержательной статью/.test(step3b(prompt)[0])&&/третий поиск не разрешён/.test(step3b(prompt)[0]),'3б: second search mandatory within the two-search budget');
- assert.ok(!/failure.reason|failure.preflight/.test(dry),'the frozen dry-run prompt is not widened');
+ assert.ok(/reason:'preflight_validation_failed'/.test(dry)&&/reason:'insufficient_evidence'/.test(dry),'the dry-run failure item carries a closed reason');
  {const s3b=step3b(prompt)[0],s7=prompt.split('\n').find(l=>l.startsWith('7. '));
   assert.ok(/EVIDENCE-RECOVERY ПЕРЕД ШАГОМ 5/.test(s3b)&&/ноль честных evidence claims ДО preflight/.test(s3b)&&/вопреки фразе шага 5/.test(s3b),'3б overrides the step-5 early-out before it');
   assert.ok(s3b.indexOf('EVIDENCE-RECOVERY ПЕРЕД ШАГОМ 5')>=0&&/не более ОДНОГО такого прохода на фильм \(до и после preflight вместе\)/.test(s3b),'one pass in total');
@@ -190,7 +203,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
  assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];
- const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
+ const itemFor=id=>id===badParse?{filmId:id,failure:{kind:'parse_error',reason:'json_unparseable'}}:id===badContent?{filmId:id,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}}:{filmId:id,fingerprint:w.fingerprint,prediction:w.prediction};
  const generationSize=1,submitBatchSize=5,seen={};let flushes=0,preflights=0,flagged=[],buffer=[],submitItems=null;
  for(let i=0;i<ids.length;i+=generationSize){
   for(const id of ids.slice(i,i+generationSize))buffer.push(itemFor(id));
@@ -199,7 +212,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
   let items=buffer;buffer=[];flushes++;
   const candidates=items.filter(it=>!it.failure);
   if(candidates.length){const pre=await w.call('prediction_batch_validate',{items:candidates});preflights++;assert.ok(!pre.isError,JSON.stringify(pre.data).slice(0,200));
-   for(const res of pre.data.results)if(!res.valid){flagged.push([res.filmId,res.prediction.issues.concat(res.fingerprint.issues).map(x=>x.path+' '+x.code)]);items=items.map(it=>it.filmId===res.filmId?{filmId:res.filmId,failure:{kind:'parse_error'}}:it);}}
+   for(const res of pre.data.results)if(!res.valid){flagged.push([res.filmId,res.prediction.issues.concat(res.fingerprint.issues).map(x=>x.path+' '+x.code)]);items=items.map(it=>it.filmId===res.filmId?{filmId:res.filmId,failure:{kind:'parse_error',reason:'preflight_validation_failed'}}:it);}}
   const r=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(!r.isError,JSON.stringify(r.data).slice(0,200));
   if(flushes===1){submitItems=items;const again=await w.call('prediction_batch_submit',{runId,epoch,items});assert.ok(again.data.results.every(x=>x.replayed===true),'replay by the same body');}
   for(const x of r.data.results)seen[x.status]=(seen[x.status]||0)+1;
@@ -211,7 +224,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const refused=await w.call('prediction_complete',{runId});assert.equal(refused.isError,true);assert.match(JSON.stringify(refused.data),/Queue not empty/,'a reasonless complete is refused while ready films remain');
  const done=await w.call('prediction_complete',{runId,reason:'manifest_spent'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
  // AIR-463 / ADR 0136: spending the selected manifest is a normal complete, not a partial time_budget stop.
- assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.ok(done.data.title!=='Прогнозы приостановлены');
+ assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.equal(done.data.title,'Пакет прогнозов обработан с ошибками');assert.equal(done.data.presentation,'batch_v2_terminal');assert.ok(done.data.failed>0);
  assert.ok((done.data.hotRemaining||0)+(done.data.coldRemaining||0)>0,'global outstanding remains after a short run');
  const eventKeys=()=>[...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+runId);
  assert.equal(eventKeys().length,1,'exactly one persisted completion Event');

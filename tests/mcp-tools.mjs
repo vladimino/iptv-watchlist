@@ -172,11 +172,13 @@ assert.equal(anonymous.response.status,403);
 assert.equal(anonymous.body.error.code,-32001);
 
 const listed=await context.worker.fetch(new Request(SITE+'/mcp',{method:'POST',headers,body:JSON.stringify(rpc(2,'tools/list',{}))}),env());
+const PREFLIGHT_ISSUE_SHAPE='"items":{"type":"object","properties":{"path":{"type":"string","maxLength":120},"code":{"type":"string","enum":["required","invalid_type","invalid_version","invalid_enum","too_few","too_many","empty","too_long","out_of_range","invalid_step","invalid_ref","too_large","unknown_field"]}},"required":["path","code"],"additionalProperties":false}';
 const tools=(await listed.json()).result.tools;
 for(const tool of tools){
  assert.equal(tool.inputSchema.additionalProperties,false,tool.name);
  const properties=JSON.stringify(tool.inputSchema.properties||{});
- assert.doesNotMatch(properties,/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
+ assert.doesNotMatch(properties.replace(PREFLIGHT_ISSUE_SHAPE,''),/"url"|"key"|"path"|"prefix"|"bucket"/,tool.name);
+ if(tool.name==='prediction_batch_submit'){assert.ok(properties.includes(PREFLIGHT_ISSUE_SHAPE),'the claimed issue shape is published, a validation path and code and nothing else');assert.equal((properties.match(/"path"/g)||[]).length,2,'the only "path" in the schema is the preflight issue shape (properties and required)');assert.ok(JSON.stringify(tool.inputSchema).includes('"required":["kind","reason"]'),'batch v2 failure.reason is required in the MCP schema');}
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
 for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending']){
@@ -210,9 +212,9 @@ const committed=await tool(syncEnv,'epg_sync_step',{runId:syncRunId},{execution}
 assert.equal(committed.body.result.isError,undefined,JSON.stringify(committed.body));
 assert.equal(committed.body.result.structuredContent.stage,'complete');
 assert.equal(committed.body.result.structuredContent.discovery.state,'paused');
-assert.equal(committed.body.result.structuredContent.discovery.reason,'epg_committed');
+assert.equal(committed.body.result.structuredContent.discovery.reason,'delegated');
 assert.equal(committed.body.result.structuredContent.discovery.remainingChunks,12);
-assert.equal(committed.body.result.structuredContent.discovery.nextAction,'continue');
+assert.equal(committed.body.result.structuredContent.discovery.nextAction,'wait');
 assert.equal(background.length,0,'the EPG commit does not dispatch a discovery hop');
 // AIR-151: the commit step leaves a diagnostics entry with the epg_commit branch and the queued contract.
 const commitEntry=sync.records.get('epg/resolver-continuation-diagnostics.json').recent[0];
@@ -221,9 +223,9 @@ assert.equal(commitEntry.route,'/api/sync/epg');
 assert.equal(commitEntry.branch,'epg_commit');
 assert.equal(commitEntry.runStage,'epg');
 assert.equal(commitEntry.phase,'completed');
-assert.equal(commitEntry.discovery.reason,'epg_committed');
+assert.equal(commitEntry.discovery.reason,'delegated');
 assert.equal(commitEntry.discovery.remainingChunks,12);
-assert.equal(commitEntry.discovery.nextAction,'continue');
+assert.equal(commitEntry.discovery.nextAction,'wait');
 const programme=sync.records.get('programme.json');
 assert.equal(programme.watchlistCount,1);
 assert.equal(programme.films[0].shows.length,1);
@@ -232,11 +234,9 @@ const letterboxdCalls=fetches.filter(href=>href.includes('letterboxd.com')).leng
 const follow=await tool(syncEnv,'epg_sync_step',{runId:syncRunId},{execution});
 assert.equal(follow.body.result.isError,undefined,JSON.stringify(follow.body));
 assert.equal(follow.body.result.structuredContent.stage,'complete');
-assert.equal(follow.body.result.structuredContent.discovery.nextAction,'stop');
-assert.equal(follow.body.result.structuredContent.discovery.reason,'missing_secret');
-assert.equal(follow.body.result.structuredContent.diagnostic.branch,'missing_secret');
-assert.equal(sync.records.get('epg/resolver-continuation-diagnostics.json').recent[0].branch,'continuation');
-assert.equal(sync.records.get('epg/resolver-continuation-diagnostics.json').recent[0].diagnostic.branch,'missing_secret');
+assert.equal(follow.body.result.structuredContent.discovery.nextAction,'wait');
+assert.equal(follow.body.result.structuredContent.discovery.reason,'delegated');
+assert.equal(follow.body.result.structuredContent.delegated,true);
 assert.equal(fetches.filter(href=>href.includes('letterboxd.com')).length,letterboxdCalls,'discovery does not retry Letterboxd');
 assert.equal(background.length,0);
 

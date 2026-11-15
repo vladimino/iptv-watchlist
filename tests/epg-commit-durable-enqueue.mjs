@@ -77,7 +77,7 @@ assert.equal(pipeline.continuation.programmeRunId,runId);assert.equal(pipeline.c
 let epgBefore=epgFetches(),queued=structuredClone(continuation());
 let r=await step(runId);
 assert.equal(r.status,200);assert.equal(r.data.stage,'complete');assert.equal(epgFetches(),epgBefore,'the retry does not download the EPG again');
-assert.equal(r.data.discovery.programmeRunId,runId);assert.equal(r.data.discovery.remainingChunks,12);assert.equal(r.data.discovery.nextAction,'continue');
+assert.equal(r.data.discovery.programmeRunId,runId);assert.equal(r.data.discovery.remainingChunks,12);assert.equal(r.data.discovery.nextAction,'wait');
 assert.deepEqual(continuation(),queued,'the retry neither reopens nor duplicates the series');
 
 // 2. Killed inside the publish → queue window (the checkpoint write itself never lands): the run is still `epg`
@@ -116,7 +116,7 @@ assert.equal(r.data.stage,'complete');assert.deepEqual(continuation(),RUNNING,'a
 assert.equal(r.data.discovery.nextAction==='continue',false);
 set('epg/resolver-lease.json',{id:'live-writer',hopId:RUNNING.hopId,expiresAt:Date.now()-1});
 r=await step(runId);
-assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(continuation().programmeRunId,runId);
+assert.equal(r.data.delegated,true,'the step only delegates; the Workflow reconstructs the intent');
 
 // 5. Simultaneous retries of the same commit open the series once.
 runId=await readyToCommit();
@@ -168,7 +168,7 @@ set('epg/resolver-continuation.json',STALE);
 [status,view]=await views();
 assert.deepEqual(hourlyStageA(status,view),{step:true,reason:'generation_handoff'},'a stranded earlier-generation record is handed over');
 r=await step(runId);
-assert.equal(r.data.diagnostic.recovery.action,'generation_recovered');assert.equal(continuation().programmeRunId,runId);
+assert.equal(r.data.delegated,true,'the step only delegates; the Workflow reconstructs the intent');
 
 assert.deepEqual(fetches.filter(href=>href.includes('themoviedb')),[],'no TMDB request was made');
 console.log('AIR-212 durable discovery enqueue: kill before complete, publish/queue window, repeat of the same run, kept progress, live writer, simultaneous retries, generation fence and the hourly stage A gate passed');

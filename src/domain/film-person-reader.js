@@ -159,8 +159,47 @@ function tmdbRetirementRecords(store,film){
  return [loaded.programme,loaded.watchlist,loaded.metadata].filter(Boolean);
 }
 function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.shows:undefined;}
-function observedShows(programme,body){const programmeShows=knownShows(programme);return programmeShows!==undefined?programmeShows:knownShows(body);}
-function observedProgrammeRun(programme,body){if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;return null;}
+// Built once per programme object (READER_INDEXES). Members first, then catalogFilms; the first id and the first TMDB keep their place.
+function completedSlots(store){
+ if(!Array.isArray(store?.programme?.catalogFilms))return null;
+ return readerIndex(store.programme,programme=>{
+  const byId=new Map(),byTmdb=new Map(),byTmdbKnown=new Map();
+  const place=film=>{
+   if(!film)return;
+   const id=String(film.id);
+   if(id&&!byId.has(id))byId.set(id,film);
+   const tmdb=film.tmdbId==null||film.tmdbId===''?null:String(film.tmdbId);
+   if(!tmdb)return;
+   if(!byTmdb.has(tmdb))byTmdb.set(tmdb,film);
+   if(knownShows(film)!==undefined&&!byTmdbKnown.has(tmdb))byTmdbKnown.set(tmdb,film);
+  };
+  for(const film of programme.films||[])place(film);
+  for(const film of programme.catalogFilms)place(film);
+  return {byId,byTmdb,byTmdbKnown};
+ });
+}
+// Exact Film id outranks TMDB. An explicit `shows: []` on that id stays empty even when another same-TMDB slot has shows.
+// A member without a `shows` key may still take a later same-TMDB slot that lists shows (catalogFilms or another member).
+function completedSlot(store,record){
+ const index=completedSlots(store);
+ if(!index||!record)return null;
+ const id=String(record.id),tmdb=record.tmdbId==null||record.tmdbId===''?null:String(record.tmdbId);
+ const exact=index.byId.get(id)||null;
+ if(exact&&knownShows(exact)!==undefined)return exact;
+ if(tmdb&&index.byTmdbKnown.has(tmdb))return index.byTmdbKnown.get(tmdb);
+ return exact||(tmdb&&index.byTmdb.get(tmdb))||{shows:[]};
+}
+function observedShows(programme,body,completed){
+ if(completed)return knownShows(completed)!==undefined?knownShows(completed):[];
+ const programmeShows=knownShows(programme);
+ return programmeShows!==undefined?programmeShows:knownShows(body);
+}
+function observedProgrammeRun(programme,body,completed){
+ if(completed)return Object.hasOwn(completed,'showsProgrammeRunId')?completed.showsProgrammeRunId||null:null;
+ if(programme&&Object.hasOwn(programme,'showsProgrammeRunId'))return programme.showsProgrammeRunId||null;
+ if(body&&Object.hasOwn(body,'showsProgrammeRunId'))return body.showsProgrammeRunId||null;
+ return null;
+}
 // AIR-276: Letterboxd diary slugs by lid. A diary entry links a slug to a Film only through the lid on the same row.
 // Each observation bounds when the slug was first seen: an alias stamped by the writer at its `firstObservedAt`
 // exactly; an older alias only within its entry's reads, `firstObservedAt`..`observedAt`. Across observations of one
@@ -217,7 +256,8 @@ function filmFacts(record,store,resolution,now){
  const evidence=identityEvidence([loaded.programme,metadata,loaded.watchlist,record]);
  const translation=reviewedTranslation([metadata,loaded.programme,loaded.watchlist,record]);
  const decision=decisionForFilm(record,resolution);
- return {letterboxdId,letterboxdSlugs:letterboxdSlugs(letterboxdId,loaded,store,now),tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id],fingerprintVerdictOf(store,id)),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body),showsProgrammeRunId:observedProgrammeRun(programme,body),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:body.epgLastAiring};
+ const completed=completedSlot(store,record);
+ return {letterboxdId,letterboxdSlugs:letterboxdSlugs(letterboxdId,loaded,store,now),tmdbId:evidence.tmdbId,conflictingTmdbIds:evidence.conflictingTmdbIds,localId:letterboxdId?'film:'+letterboxdId:null,now,decision,metadata:{present:!!(metadata||body.discoveredAt||body.metadataAt||body.synopsis),metadataAt:body.metadataAt||body.discoveredAt||null,peopleVersion:body.peopleVersion??((body.directors||body.actors)?1:null),peopleNamesVersion:body.peopleNamesVersion,synopsisPresent:!!(body.synopsis||body.synopsisFetchedAt),failure:syncFailure(store.sync,id),source:letterboxdId?'letterboxd':'tmdb'},title:{original:originalTitle([metadata,loaded.programme,loaded.watchlist,record]),titleRu:translation.titleRu,titleStatus:translation.titleStatus,dictionary:(store.filmTitleIndex||{})[id]||null,provisional:store.titles?.[id]||null,epgTitle:programme&&programme.title!==body.title?programme.title:null},fingerprint:fingerprintFacts(store.fingerprints?.[id],fingerprintVerdictOf(store,id)),prediction:predictionFacts(store.predictions?.[id],predictionFailure(store,id),typeof store.predictionCompatible==='function'?store.predictionCompatible(id):undefined),predictionHistory:store.predictions?.[id]?.history||[],profile:store.profile||null,currentFingerprintHash:store.fingerprints?.[id]?.fingerprintHash??null,shows:observedShows(programme,body,completed),showsProgrammeRunId:observedProgrammeRun(programme,body,completed),publishedProgrammeRunId:store.programme?.runId||null,epgLastAiring:completed?undefined:body.epgLastAiring};
 }
 function projectFilm(facts){const view=filmView(facts);return view?attachAvailability(view,{shows:facts.shows,showsProgrammeRunId:facts.showsProgrammeRunId,publishedProgrammeRunId:facts.publishedProgrammeRunId,epgLastAiring:facts.epgLastAiring,now:facts.now}):null;}
 function lifecycleBody(film){return {contractVersion:film.contractVersion,id:film.id,storedId:storedFilmId(film),canonicalIdentity:film.canonicalIdentity,externalIds:film.externalIds,redirects:film.redirects||[],aliases:film.aliases,identity:film.identity,metadata:film.metadata,localization:film.localization,fingerprint:film.fingerprint,prediction:film.prediction,availability:film.availability||null};}

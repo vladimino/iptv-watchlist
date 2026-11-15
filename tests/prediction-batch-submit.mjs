@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {nonFunctional} from './suite-gate.mjs';
 
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
@@ -44,7 +45,7 @@ const rich=w=>{ // a fingerprint with evidence on every asserted mechanic and ex
 // 2. Mixed outcomes inside one group: a schema failure and a reported failure do not touch the others; the failures are sanitized, retryable and never a payload copy.
 {
  const w=await ready(12);const m=await start(w),pick=ids(m).slice(0,7);
- const bad={...w.prediction,predictedRating:99,secret:'do-not-echo'},items=[item(w,pick[0]),{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},item(w,pick[2]),{filmId:pick[3],failure:{kind:'parse_error'}},item(w,pick[4]),{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction},item(w,pick[6])];
+ const bad={...w.prediction,predictedRating:99,secret:'do-not-echo'},items=[item(w,pick[0]),{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},item(w,pick[2]),{filmId:pick[3],failure:{kind:'parse_error',reason:'json_unparseable'}},item(w,pick[4]),{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction},item(w,pick[6])];
  const r=await submit(w,m,items);assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));
  const by=Object.fromEntries(r.data.results.map(x=>[x.filmId,x]));
  assert.deepEqual([pick[0],pick[2],pick[4],pick[6]].map(id=>by[id].status),['created','created','created','created']);
@@ -59,8 +60,8 @@ const rich=w=>{ // a fingerprint with evidence on every asserted mechanic and ex
  // the failed film is not resubmitted in the run: the stored failure answers, whatever the payload
  const same=await submit(w,m,[{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad}]);assert.equal(same.data.results[0].status,'validation_failure');assert.equal(same.data.results[0].replayed,true,'the identical payload is a replay of the stored failure');assert.equal(same.data.results[0].retryAt,by[pick[1]].retryAt);
  const retried=await submit(w,m,[item(w,pick[1])]);assert.equal(retried.data.results[0].status,'conflict','a failed film is not retried in the run: a different payload is a conflict, not a replay');assert.equal(pointers(w).length,4);
- const failed2=await submit(w,m,[{filmId:pick[3],failure:{kind:'parse_error'}}]);assert.equal(failed2.data.results[0].replayed,true,'an identical reported failure is a replay');
- assert.equal((await submit(w,m,[{filmId:pick[3],failure:{kind:'validation_error'}}])).data.results[0].status,'conflict','a different failure kind is a conflict');
+ const failed2=await submit(w,m,[{filmId:pick[3],failure:{kind:'parse_error',reason:'json_unparseable'}}]);assert.equal(failed2.data.results[0].replayed,true,'an identical reported failure is a replay');
+ assert.equal((await submit(w,m,[{filmId:pick[3],failure:{kind:'validation_error',reason:'json_unparseable'}}])).data.results[0].status,'conflict','a different failure kind is a conflict');
 }
 
 // 3. Replay: the same body again is idempotent per film: nothing is written twice, no version object, history row or view-index entry is added.
@@ -242,7 +243,7 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  const counts=counted(w),before=await state(w),puts=counts.put;
  const bad={...w.prediction,predictedRating:99};
  const dry=(items,extra={})=>w.api('batch/submit',{runId:'dry-run',epoch:1,items,dryRun:true,manifestHash:dm.data.manifestHash,...extra});
- const r=await dry([{...item(w,pick[0]),inputHash:dm.data.films[0].inputHash},{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},{filmId:pick[2],failure:{kind:'parse_error'}},{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction}]);
+ const r=await dry([{...item(w,pick[0]),inputHash:dm.data.films[0].inputHash},{filmId:pick[1],fingerprint:w.fingerprint,prediction:bad},{filmId:pick[2],failure:{kind:'parse_error',reason:'json_unparseable'}},{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction}]);
  assert.equal(r.status,200,JSON.stringify(r.data).slice(0,300));assert.equal(r.data.dryRun,true);assert.equal(r.data.manifestHash,dm.data.manifestHash);assert.equal(r.data.runId,null);
  const by=Object.fromEntries(r.data.results.map(x=>[x.filmId,x]));
  assert.equal(by[pick[0]].status,'would_write');assert.equal(by[pick[0]].liveInput,'same');assert.equal(by[pick[1]].status,'validation_failure');assert.equal(by[pick[1]].validation.stage,'prediction_schema');assert.equal(by[pick[2]].validation.stage,'caller_reported');assert.equal(by.tmdb_9999.status,'not_eligible');assert.equal(by.tmdb_9999.liveInput,'not_eligible');
@@ -271,7 +272,8 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  const line=lineLog(w,'batch_submit').at(-1);assert.equal(line.notes.created,10);
  const queueWrites=sql(w.file,"SELECT count(*) AS n FROM prediction_queue")[0].n;
  console.log('batch_submit of 10 rich items: '+bytes+' request bytes, '+ms+' ms offline, '+trips+' D1 round trips, R2 '+line.r2.n+' operations, D1 statements '+line.d1.statements);
- assert.ok(ms<15000,'bounded wall time offline: '+ms);assert.ok(trips<1500,'bounded D1 round trips: '+trips);
+ nonFunctional('prediction-batch-submit-wall',()=>{assert.ok(ms<15000,'bounded wall time offline: '+ms);});
+ assert.ok(trips<1500,'bounded D1 round trips: '+trips);
  // ten fingerprints at the contract's own maximum (12000 characters each) are over the call limit: the MCP tool refuses them with nothing submitted, see tests/mcp-tools.mjs
  const max={...w.fingerprint,strengths:Array.from({length:8},()=>'s'.repeat(500)),risks:Array.from({length:8},()=>'r'.repeat(500)),sourceRefs:[]};
  const maxBytes=new TextEncoder().encode(JSON.stringify({runId:m.runId,epoch:1,items:pick.map(id=>({filmId:id,fingerprint:max,prediction:w.prediction}))})).length;
@@ -401,26 +403,16 @@ function r2Diff2(a,b){return [...b.keys()].filter(k=>!a.has(k)||a.get(k)!==b.get
  assert.equal(JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0].d).status,'running','the old run was not marked stopped on its former holder\'s behalf');
 }
 
-// 19. A progress Event is written only behind a guarded checkpoint of the run record. The record is saved first with the Event as an intent; a handler that loses its gate before the Event write
-// leaves the intent for the next holder, which publishes it exactly once.
+// 19. A batch_v2 run does not write start or progress Events, even when a progress checkpoint would have been due on v5.
 {
  const w=await ready(12);const m=await start(w),pick=ids(m);
- // make a progress record due: the last one is an hour old
  const doc=run(w,m);doc.lastProgressAt=new Date(Date.now()-3600000).toISOString();sql(w.file,"UPDATE prediction_run SET document_json='"+JSON.stringify(doc).replace(/'/g,"''")+"' WHERE run_id='"+m.runId+"'");
- const progressKeys=()=>[...w.records.keys()].filter(k=>/progress/.test(k));
- const original=w.ctx.PredictionD1;let replaced=false;
- w.ctx.PredictionD1={...original,saveMutable:async(env,key,value)=>{const done=await original.saveMutable(env,key,value);if(!replaced&&/\/runs\//.test(key)&&value?.progressIntent){replaced=true;setLease(w,d=>{d.submitGate={token:'replacement',requestId:'x',bodyHash:'y',startedAt:new Date().toISOString(),expiresAt:Date.now()+45000};});}return done;}};
- const first=await submit(w,m,pick.slice(0,3).map(id=>item(w,id)));w.ctx.PredictionD1=original;
- assert.equal(first.status,409,JSON.stringify(first.data).slice(0,300));assert.equal(first.data.status,'gate_lost');assert.equal(first.data.committed,true);
- assert.equal(progressKeys().length,0,'the superseded handler wrote no progress Event');
- const stored=run(w,m);assert.ok(stored.progressIntent&&stored.progressIntent.id.includes('-progress-'),'the intent is in the authoritative record');
- // the current holder publishes it first, once
- setLease(w,d=>{delete d.submitGate;});
- const next=await submit(w,m,pick.slice(3,5).map(id=>item(w,id)));assert.equal(next.status,200,JSON.stringify(next.data).slice(0,300));
- assert.equal(progressKeys().length,1,'exactly one progress Event');const after=run(w,m);assert.ok(!after.progressIntent,'and the intent is cleared');
- const eventKey=progressKeys()[0],body0=JSON.stringify(w.records.get(eventKey));
- const again=await submit(w,m,pick.slice(5,7).map(id=>item(w,id)));assert.equal(again.status,200);assert.equal(progressKeys().length,1,'no duplicate');assert.equal(JSON.stringify(w.records.get(eventKey)),body0,'and the published Event is unchanged');
- // a rejected call writes no diagnostics step and no stop Event either
- assert.ok(![...w.records.keys()].some(k=>/stop-events\//.test(k)),'no stop Event of this v2 run');
+ const first=await submit(w,m,pick.slice(0,3).map(id=>item(w,id)));assert.equal(first.status,200,JSON.stringify(first.data).slice(0,300));
+ const next=await submit(w,m,pick.slice(3,5).map(id=>item(w,id)));assert.equal(next.status,200);
+ const journal=[...w.records.entries()].filter(([k])=>k.startsWith('events/items/')).map(([,v])=>v);
+ assert.equal(journal.filter(e=>String(e.id||'').startsWith('prediction-start-')).length,0);
+ assert.equal(journal.filter(e=>/-progress-/.test(String(e.id||''))).length,0);
+ const stored=run(w,m);assert.ok(!stored.progressIntent,'no leftover progress intent');
+ assert.ok(![...w.records.keys()].some(k=>/stop-events\//.test(k)),'no stop Event until complete');
 }
 console.log('prediction-batch-submit: ok');

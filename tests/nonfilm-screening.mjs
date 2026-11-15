@@ -48,7 +48,9 @@ assert.equal(vm.runInContext(`nonFilmEPGReason('Plain Title','<programme><title>
 // and a reliable watchlist identity outranks title screening.
 const now=Date.UTC(2026,9,27,12);
 const stamp=ms=>{const d=new Date(ms);return d.toISOString().slice(0,19).replace(/[-T:]/g,'')+' +0000';};
-const programme=(title,minutes,extra='')=>`<programme start="${stamp(now)}" stop="${stamp(now+minutes*60000)}" channel="c1"><title>${title}</title>${extra}</programme>`;
+// Each programme gets its own start: one slot has one owner (ADR 0142 decision 1), so a shared start would discard them.
+let slotIndex=0;
+const programme=(title,minutes,extra='')=>{const start=now+(slotIndex++)*3600000;return `<programme start="${stamp(start)}" stop="${stamp(start+minutes*60000)}" channel="c1"><title>${title}</title>${extra}</programme>`;};
 const xml=`<tv><channel id="c1"><display-name>Кино</display-name></channel>${[
  programme('Star Wars: Episode 3 - Revenge of the Sith',140),
  programme('Сезон охоты 2',76),

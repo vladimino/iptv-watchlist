@@ -1,6 +1,6 @@
 // AIR-323 / ADR 0083, AIR-324 / ADR 0093. Durable Discovery continuation. One bounded chunk per step.
-// Only DISCOVERY_EXECUTOR=workflow calls create(). The existing Worker cron may call reconcileDiscoveryWorkflow;
-// that path is a no-op while the mode is external. No workflows[].schedules. The executor record follows the
+// The Workflow is the permanent Discovery executor. The existing Worker cron may call reconcileDiscoveryWorkflow;
+// that path is a no-op without admission. No workflows[].schedules. The executor record follows the
 // discovery marker: D1 when it is d1, otherwise R2 (AIR-320).
 const DISCOVERY_WORKFLOW_STATE_KEY='epg/discovery-workflow.json';
 const DISCOVERY_WORKFLOW_CHUNK_LIMIT=20;
@@ -40,7 +40,7 @@ function discoveryHourStamp(ms){return new Date(ms).toISOString().replace(/[-:]/
 function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
 // The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
 // negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
-function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&cheapRemaining===0&&!error;}
+function discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
 function newDiscoveryReport(since,seen=[]){
  const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,queueGeneration:null,seen,lastClosedHour:null};
  for(const name of DISCOVERY_REPORT_COUNTERS)report[name]=0;
@@ -95,7 +95,7 @@ function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue}){
 // The legacy per-chain event of the model before the hourly reports. Used only to deliver an entry that was still pending at the change.
 function discoveryTickEvent(tick){
  const reason=tick.settled?.reason||null;
- const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:discoveryQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
+ const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:discoveryQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error,discoveryCount(tick.waitingRetry)),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
  for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=tick[name]||0;
  return event;
 }
@@ -107,19 +107,19 @@ async function putDiscoveryEvent(env,event){
 // the published generation. An empty queue needs the continuation to say complete for that generation too. An unreadable source is `incomplete`.
 async function discoveryReportQueue(env,report,programmeRunId){
  const unreadable={remaining:null,cheapRemaining:null,error:null,empty:false,incomplete:true,reason:'queue_unreadable'};
- let remaining=null,cheapRemaining=null,error=null;
+ let remaining=null,cheapRemaining=null,error=null,waitingRetry=null;
  try{
   // The queue values of the accumulator belong to the generation of the chunk that wrote them. Deltas carry across a generation change, the queue
   // reading does not: another generation's backlog or empty state is unknown for this one, never reused.
-  if(report.chunks>0&&report.queueGeneration&&report.queueGeneration===programmeRunId){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;}
+  if(report.chunks>0&&report.queueGeneration&&report.queueGeneration===programmeRunId){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;waitingRetry=discoveryCount(report.waitingRetry);}
   else if(programmeRunId){
    const last=await loadJSON(env,'epg/discovery-status.json');
-   if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
+   if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);waitingRetry=discoveryCount(last.waitingRetry);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
   }
  }catch{return unreadable;}
  let complete=false;
  try{const stored=programmeRunId?await readContinuation(env):null;complete=!!stored?.record&&stored.record.programmeRunId===programmeRunId&&stored.record.stage==='complete';}catch{return unreadable;}
- return {remaining,cheapRemaining,error,empty:complete&&discoveryQueueEmpty(remaining,cheapRemaining,error),incomplete:false,reason:null};
+ return {remaining,cheapRemaining,error,empty:complete&&discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry),incomplete:false,reason:null};
 }
 // Delivers every pending report: the events of the outbox and a legacy per-chain tick that was settled and not yet delivered. An entry leaves
 // the record only after its create-only put is confirmed. The record is written back with its `updatedAt` untouched, so delivery never hides a
@@ -149,7 +149,6 @@ async function deliverDiscoveryOutbox(env){
 // outbox at its limit) leaves the accumulator as it is: the deltas then appear in the next report, whose `from` says how far back it reaches.
 async function closeHourlyDiscoveryReport(env,outcome,options){
  if(options?.scheduled!==true||!Number.isFinite(options.now))return {closed:false,reason:'not_scheduled'};
- if(discoveryExecutorMode(env)!=='workflow')return {closed:false,reason:'not_workflow'};
  await deliverDiscoveryReportFaults(env);
  const hourMs=Math.floor(options.now/3600000)*3600000,hourKey=discoveryHourStamp(hourMs),at=new Date(hourMs).toISOString();
  const generationOf=record=>outcome?.programmeRunId||record?.programmeRunId||null;
@@ -445,9 +444,8 @@ function workflowReadoutFacts(stored,liveness,now){
 // Pure. The external hourly contract stays in continuationDecision; a future chunk_budget is renewed here only
 // when the saved status proves this generation still has work.
 function workflowPlan(input){
- const {mode,published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites,used}=input||{};
+ const {published,pinned,record,lease,now,chunks,chunkLimit,last,uncertainWrites,used}=input||{};
  const spent=(used||0)>=DISCOVERY_WORKFLOW_INVOCATION_BUDGET;
- if(mode!=='workflow')return {action:'stop',reason:'executor_not_workflow'};
  if((uncertainWrites||0)>=DISCOVERY_WORKFLOW_WRITE_LIMIT)return {action:'stop',reason:'write_uncertain'};
  if(!pinned||!published||pinned!==published||(record&&record.programmeRunId!==pinned))return {action:'stop',reason:'stale_generation'};
  if(!record)return {action:'stop',reason:'no_continuation'};
@@ -475,7 +473,7 @@ async function workflowPlanInput(env,pinned,chunks,chunkLimit,uncertainWrites,us
  const stored=await readContinuation(env);
  const lease=await loadJSON(env,'epg/resolver-lease.json');
  const last=await loadJSON(env,'epg/discovery-status.json');
- return {mode:discoveryExecutorMode(env),published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
+ return {published,pinned,record:stored.record,lease,now:Date.now(),chunks,chunkLimit,last,uncertainWrites,used};
 }
 async function settleWorkflowIfOwner(env,ownId,patch){
  let state=await readWorkflowState(env);
@@ -560,9 +558,6 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  }
 }
 async function discoveryWorkflowAdmission(env){
- const mode=discoveryExecutorMode(env);
- if(mode==='external')return {ok:false,reason:'external'};
- if(mode!=='workflow')return {ok:false,reason:'invalid'};
  if(typeof env?.DISCOVERY_WORKFLOW?.create!=='function')return {ok:false,reason:'workflow_unavailable'};
  if(typeof DiscoveryAuthority==='undefined')return {ok:false,reason:'authority_not_ready'};
  let gate;
@@ -591,7 +586,13 @@ async function ensurePublishedDiscoveryIntent(env,programmeRunId){
   return {ok:true,reconstructed:false};
  }
  try{await queueDiscovery(env,'epg_committed',programmeRunId);}
- catch{return {ok:false,reason:'intent_uncertain'};}
+ catch(error){
+  const code=error?.code;
+  if(code==='discovery_window')return {ok:false,reason:'projector_window',windowUntil:error.window?.expiresAt??null};
+  if(code==='discovery_epg_priority')return {ok:false,reason:'epg_priority',windowUntil:priorityWindow(error).expiresAt};
+  if(code==='discovery_fence'||code==='authority_held')return {ok:false,reason:'authority_held'};
+  return {ok:false,reason:'intent_uncertain'};
+ }
  const after=(await readContinuation(env)).record;
  if(!after||after.programmeRunId!==programmeRunId)return {ok:false,reason:after?.programmeRunId?'stale_generation':'intent_unconfirmed'};
  if(after.reason==='programme_changed'||discoveryContract(after).nextAction==='stop')return {ok:false,reason:'stopped'};
@@ -613,7 +614,7 @@ async function ensureDiscoveryWorkflow(env){
   if(!admitted.ok)return {started:false,reason:admitted.reason};
   const programmeRunId=admitted.programmeRunId;
   const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
-  if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
+  if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId,...(intent.windowUntil!==undefined?{windowUntil:intent.windowUntil}:{})};
   const state=await readWorkflowState(env),current=state.record;
   const same=current?.programmeRunId===programmeRunId;
   if(same&&current.instanceId&&['starting','running','waiting'].includes(current.phase))return createWorkflowInstance(env,programmeRunId,current.series||0,current.instanceId,state.etag,current.recovery||null,current);
@@ -647,7 +648,7 @@ async function reconcileDiscoveryWorkflowAttempt(env,options={}){
  if(!admitted.ok)return {started:false,reason:admitted.reason};
  const programmeRunId=admitted.programmeRunId;
  const intent=await ensurePublishedDiscoveryIntent(env,programmeRunId);
- if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId};
+ if(!intent.ok)return {started:false,reason:intent.reason,programmeRunId,...(intent.windowUntil!==undefined?{windowUntil:intent.windowUntil}:{})};
  const binding=env.DISCOVERY_WORKFLOW;
  const state=await readWorkflowState(env),current=state.record;
  const same=current?.programmeRunId===programmeRunId&&current.instanceId;

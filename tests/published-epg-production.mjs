@@ -99,6 +99,7 @@ async function install(schema){
  const productionFile=path.join(root,'production.sqlite');
  sql(productionFile,'PRAGMA user_version=0;');
  applyMigrations(productionFile, schema);
+ sql(productionFile,'CREATE TABLE IF NOT EXISTS discovery_authority (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL); INSERT OR IGNORE INTO discovery_authority VALUES (1,0);');
  const objects=new Map();
  const calls={urls:[], batches:[]};
  function putObject(key, value){
@@ -222,6 +223,28 @@ function run(args, installed, env){
 }
 
 {
+ const installed=await install(6);
+ predict(installed.productionFile);
+ assert.equal((await run(['--apply','--confirm','apply','--target','iptv'], installed)).exit,0);
+ installed.putObject('epg/published-generation.json',{programmeRunId:'run-a',phase:'published'});
+ installed.putObject('programme.json',{runId:'run-a',updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat',title:'Heat',shows:[]}]});
+ installed.putObject('watchlist.json',{updatedAt:'2026-11-01T12:00:00.000Z',films:[{id:'film:heat'}]});
+ assert.equal((await run(['--load','--confirm','load','--target','iptv'], installed)).exit,0);
+ assert.equal((await run(['--activate','--confirm','activate','--producers-drained','--target','iptv'], installed)).exit,0);
+ sql(installed.productionFile,"INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) VALUES ('run-a','film:heat','a',7200000,10800000,'A',NULL,'discovery','obs-1'),('run-a','tmdb_777','c',14400000,18000000,'C',NULL,'discovery','obs-2'); UPDATE discovery_authority SET generation=generation+1 WHERE id=1;");
+ const reverted=await run(['--revert','--confirm','r2','--target','iptv'], installed, canonicalEnv());
+ assert.equal(reverted.exit,0,JSON.stringify(reverted.result));
+ assert.equal(reverted.result.mode,'r2');
+ const mirror=JSON.parse(installed.objects.get('programme.json').text);
+ assert.equal(mirror.films[0].shows.length,1,'the completed R2 mirror holds the assigned member show');
+ assert.equal(mirror.catalogFilms.length,1,'and the catalog Film');
+ const again=await run(['--activate','--confirm','activate','--producers-drained','--target','iptv'], installed);
+ assert.equal(again.exit,0,JSON.stringify(again.result));
+ assert.equal(again.result.mode,'d1','activation compares the completed mirror with the completed read');
+ assert.equal(JSON.parse(installed.objects.get('programme.json').text).catalogFilms.length,1);
+}
+
+{
  const root=await mkdtemp(path.join(os.tmpdir(),'air319-offline-'));
  const database=path.join(root,'local.sqlite');
  sql(database,'PRAGMA user_version=0;');
@@ -231,6 +254,7 @@ function run(args, installed, env){
  assert.equal(sql(database,'SELECT version FROM schema_contract;',{json:true})[0].version,6);
  assert.equal(sql(database,"SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'published_epg%' OR name='schema_contract_no_downgrade';",{json:true})[0].n,0);
  predict(database);
+ sql(database,'CREATE TABLE IF NOT EXISTS discovery_authority (id INTEGER PRIMARY KEY, generation INTEGER NOT NULL); INSERT OR IGNORE INTO discovery_authority VALUES (1,0);');
  const migrated=sqliteSync(['-bail',database],{input:fs.readFileSync('migrations/0008_published_epg_authority.sql','utf8'),encoding:'utf8'});
  assert.equal(migrated.status,0,migrated.stderr);
  const bareOffline=spawnSync(process.execPath,[offline],{encoding:'utf8'});

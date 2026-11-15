@@ -79,7 +79,7 @@ for(const [file,text] of texts){
 // receiver fails, so a write that the primitive list cannot see by name cannot arrive silently.
 // AIR-402: index, group, sequence and merged are the in-memory lookups of the view build (src/domain/film-person-reader.js, orderedFilmIndex and its caller): Maps built from the view, never storage.
 // AIR-442: scope.values is the Map of one prediction request's own scope (src/enrichment.js, createRequestScope): what the step itself read or wrote, never storage.
-const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','EPG_TRACE','skipUntil']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage
+const IN_MEMORY=new Set(['films','wanted','store.inflight','stillMissing','rows','reentryGroups.groups','map','latestGroups.groups','byTmdb','byLid','also','index','group','sequence','merged','scope.values','EPG_PHASE_SINKS','EPG_TRACE','skipUntil','matched','discovery','deferredKeys']);   // AIR-455: EPG_PHASE_SINKS; AIR-374 P3c: skipUntil is the per-binding WeakMap of the cached projector-route skip (src/canonical-discovery-admission-producer.js), never storage is the Map of the diagnostic canary's own run markers (src/worker.js), never storage // AIR-480 stage 1: matched and discovery are the local Maps of scanEPG, pruned after the stream when a slot has two owners. // AIR-492: deferredKeys is the in-memory set of this hop's fairness fences.
 const receivers=new Map();
 for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0-9_$.]*)\.(put|delete|createMultipartUpload|resumeMultipartUpload)\(/g)){
  const who=m[1],method=m[2];
@@ -95,14 +95,14 @@ const FILE_SITES={
  'src/epg-diagnostic.js':{r2:3,wrapper:0,dynamic:2},   // AIR-453 (ADR 0121): the guarded put and delete of the DIAGNOSTIC bucket and the identity put of `provision`; inert (no caller), a separate bucket, never a projector input
  'src/epg-diagnostic-run.js':{r2:4,wrapper:0,dynamic:1},   // AIR-455 (ADR 0121): the baseline writes and the cleanup of the DIAGNOSTIC bucket through the allowlisted context, the run document and the consumption marker; behind owner-only routes, inert without the diagnostic bindings, never a projector input
  'src/discovery-workflow.js':{r2:2,wrapper:0,dynamic:0},   // ADR 0118: +1 for the ledger of report-failure notices (events/discovery-report-faults.json, not a projector input)
- 'src/discovery.js':{r2:8,wrapper:16,dynamic:4},
+ 'src/discovery.js':{r2:8,wrapper:15,dynamic:3},
  // AIR-416: +2 wrapper sites, both mergeStoredJSON(env,EVENT_OUTBOX_KEY,...) (`enrichment/event-outbox.json`, the Predictions writer's index of undelivered run
  // events): not a projector input and not on a Discovery, admin-recovery or publication path.
  // Batch runner v2: +2 wrapper sites and +2 dynamic keys in batch_start, both the same object and key shape the v5 start writes: the create of `enrichment/sources/<runId>.json` (the metadata
  // of the run's films) and the interrupted record of a recovered earlier run (`enrichment/runs/<runId>.json`). Neither is a projector input or on a Discovery, admin-recovery or publication path.
  // Batch runner v2 batch_submit: +1 r2 site, +1 wrapper site and +1 dynamic key, all of the shape the v5 runner already writes: `runnerLeaseEdit` puts the runner lease object (the same key `runnerLease` puts, in the object
  // mode) and the per-film `enrichment/films/<id>/predictions.json` bundle (the key the v5 submit writes). Neither is a projector input or on a Discovery, admin-recovery or publication path.
- 'src/enrichment.js':{r2:13,wrapper:47,dynamic:33}, // ADR 0132: +1 create-only put of the prediction assessment sidecar; it is no projector input (the projector reads film state, the bundle and the view index, never predictions/assessments/)
+ 'src/enrichment.js':{r2:15,wrapper:47,dynamic:33}, // ADR 0146: +1 create-only put of enrichment/stop-events/<runId>.json on complete, +1 reconstruct of a missing stop record on the next start; neither is a projector input (the projector does not read the Events Log or the Predictions outbox)
  'src/filter-presets.js':{r2:1,wrapper:0,dynamic:0},
  'src/letterboxd-diary.js':{r2:1,wrapper:1,dynamic:2},
  'src/letterboxd-facts.js':{r2:1,wrapper:0,dynamic:0},
@@ -115,7 +115,9 @@ const FILE_SITES={
  'src/published-epg.js':{r2:2,wrapper:8,dynamic:8},
  // AIR-410: +1 for writeDiscoveryEvent, the create-only put of one `discovery` Events Log entry (events/items/..., not a projector input).
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
- 'src/worker.js':{r2:16,wrapper:47,dynamic:18},
+ // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
+ // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
+ 'src/worker.js':{r2:17,wrapper:47,dynamic:19},
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');

@@ -1,4 +1,9 @@
-const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
+const json=(data,status=200,extra=null)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...(extra&&typeof extra==='object'?extra:{})}});
+const DISCOVERY_USER_READ_CODES=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','discovery_bounded'];
+function discoveryUserReadRefusal(error){
+ if(!DISCOVERY_USER_READ_CODES.includes(error?.code))return null;
+ return json({error:'The catalog is not readable right now',code:error.code},503,{'Retry-After':'1'});
+}
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
 // `options.item`, for a discovery ledger stored in R2, parses the `items` array one element at a time and keeps what
@@ -280,13 +285,31 @@ function findsTitleSuppressor({keys,rule,catalog,metadata,watchlist,programme}){
   return owners?.size===1&&owners.has(tmdbId)&&!linked.has(tmdbId)&&(!relaxed||aliasFar(key,tmdbId,film.year));
  };
 }
-function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
+// ADR 0142 decisions 11 and 13: under an authoritative D1 published run, Finds and the film page take the showings of a Film EXCLUSIVELY from the completed programme read (member
+// `films` and non-member `catalogFilms`, matched by TMDB id). An absent Film is zero showings; the shows of the admission payload are never a second source, even for the pinned
+// run. Outside D1 (R2 authority) the record's own shows stay as before.
+function completedShowsByTmdb(programme){
+ const out=new Map();
+ for(const entry of [...(programme?.films||[]),...(programme?.catalogFilms||[])]){
+  if(entry?.tmdbId==null||!Array.isArray(entry.shows))continue;
+  const key=String(entry.tmdbId);out.set(key,[...(out.get(key)||[]),...entry.shows]);
+ }
+ return out;
+}
+function withCompletedShows(film,completed,programmeRunId,completedOnly){
+ if(!completedOnly||!film||typeof film!=='object')return film;
+ const shows=film.tmdbId==null?[]:dedupeShows(completed?.get(String(film.tmdbId))||[]);
+ return {...film,shows,showsProgrammeRunId:programmeRunId};
+}
+function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,programmeRunId,pinned,completedOnly=false,now,titleExclusion={state:'unavailable',keys:null},freshness=strictFreshness(profile),watchedMarkEnabled=false}){
  const from=now-CATALOG_ARCHIVE_MS,to=now+CATALOG_FUTURE_MS,excluded=new Set(),posterFor=catalogPosters(metadata),posterSource=new Map(),orderOf=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){if(film?.id!=null)excluded.add(String(film.id));if(film?.tmdbId)excluded.add('tmdb:'+String(film.tmdbId));}
  const bridge={index,metadata,watchlist,programme,catalog},consumedTmdb=catalogConsumedTmdb(bridge),watchlistTmdb=catalogWatchlistTmdb(bridge);
  const letterboxdFor=catalogLetterboxdUrls({metadata,watchlist,programme,catalog}),hidden=titleExclusion.state==='applied'?findsTitleSuppressor({keys:titleExclusion.keys,rule:titleExclusion.rule,catalog,metadata,watchlist,programme}):null,hiddenIdentities=new Set();
  const byIdentity=new Map();
- for(const film of Object.values(catalog||{})){
+ const completed=completedOnly&&programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map();
+ for(const record of Object.values(catalog||{})){
+  const film=withCompletedShows(record,completed,programmeRunId,completedOnly);
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
   const id=String(film.id),identity=film.canonicalIdentity;
   if(excluded.has(id)||excluded.has(identity))continue;
@@ -328,7 +351,8 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
 // for the current profile and fingerprint, shows only when the record's shows were written by the pinned generation (zero shows is a valid
 // answer), a Letterboxd link only when stored records prove it. No write, no fetch.
 const CATALOG_FILM_TMDB=/^[1-9]\d{0,11}$/;
-function catalogFilmPage({film,programmeRunId,index,profile,metadata,watchlist,programme,freshness,now}){
+function catalogFilmPage({film:stored,programmeRunId,completedOnly=false,index,profile,metadata,watchlist,programme,freshness,now}){
+ const film=withCompletedShows(stored,completedOnly&&programme?.runId===programmeRunId?completedShowsByTmdb(programme):new Map(),programmeRunId,completedOnly);
  const id=String(film.id),tmdbId=String(film.tmdbId),item=index?.[id],artwork=catalogPosters(metadata)(film);
  const letterboxdUrl=catalogLetterboxdUrls({metadata,watchlist,programme,catalog:{[id]:film}})(film);
  const current=!!(profile&&item?.prediction&&freshness.indexed(item,film));
@@ -452,7 +476,7 @@ async function catalogFilmRoute(env,tmdbId){
  const runId=programme?.runId&&programme.runId===pinnedRunId?pinnedRunId:null;
  if(pinnedRunId&&!runId&&!degraded.includes('programme'))degraded.push('programme');
  const freshness=profile?await optional('freshness',()=>predictionFreshness(env,profile)):null;
- const page=catalogFilmPage({film:found.film,programmeRunId:runId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
+ const page=catalogFilmPage({film:found.film,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
  return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
@@ -534,13 +558,20 @@ async function catalogAvailableRoute(env){
  const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  const generationCopy=name=>catalogGenerationCopy(env,publication,pinnedRunId,name);
  const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
- const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+ let programme,catalog,watchlist,index,profile,metadata,titleExclusion;
+ try{
+  [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+ }catch(error){
+  const refused=discoveryUserReadRefusal(error);
+  if(refused)return refused;
+  throw error;
+ }
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to an in-memory copy. GET /api/enrichment/view uses the same overlay and neither persists it.
  const seeded=overlayRatingsSeed(index);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,completedOnly:publication.authority==='d1'&&!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
@@ -708,7 +739,18 @@ async function metadataSync(env,run){
 }
 // AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so
 // the staged publication can run it as a separate bounded step. It leaves the run's stage alone and is idempotent.
-async function persistWatchlist(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);if(saved===false)throw new Error('published_epg_fence');if(!saved)await saveJSON(env,'watchlist.json',next);}}
+async function persistWatchlist(env,run,report){
+ // ADR 0142 decision 14: one EPG sync, one generation increment. The publish commit already stored the watchlist.
+ // saveWatchlist would bump generation a second time; under a live D1 pin the tail writes nothing.
+ if(typeof PublishedEpg!=='undefined'&&await PublishedEpg.currentGeneration(env))return;
+ const list=await loadJSON(env,'watchlist.json');
+ if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){
+  const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};
+  const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);
+  if(saved===false)throw new Error('published_epg_fence');
+  if(!saved)await saveJSON(env,'watchlist.json',next);
+ }
+}
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
@@ -770,7 +812,6 @@ async function finishSync(env,run,report){await finishSyncPersist(env,run,report
 // completes, and the AIR-159 handoff covers a run that never gets there.
 async function queueCommittedDiscovery(env,run){
  try{await queueDiscovery(env,'epg_committed',run.runId);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
- if(typeof discoveryExecutorMode!=='function'||discoveryExecutorMode(env)!=='workflow')return;
  try{await noteDiscoveryWorkflow(env);}catch(e){run.discoveryError=String(e.message).slice(0,160);}
 }
 async function copyEpgGeneration(env,runId){
@@ -1178,7 +1219,7 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
    const planned=await planDiscoveryLedger(env,{runId,latest:ledger.holder?.discovery??ledger.latest,mode:ledger.mode,lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null,holder:ledger.holder||null});
    await storePlannedDiscovery(env,runId,ledger.meta,planned,next,lease);
   }
-  if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
+  if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId,{writeAvailability:false});}
   for(const [name,value] of Object.entries(next)){if(value==null)continue;await saveJSON(env,epgGenerationKey(runId,name),value);next[name]=null;if(name!=='programme.json')files[name]=null;}
   const live=await PublishedEpg.currentGeneration(env);
   if(!live||live.fence!==publication.fence)throw new Error('EPG generation changed during publish');
@@ -1307,6 +1348,8 @@ async function sealedPublishAvailable(env){
  return DiscoveryAuthority.sealSupported(env);
 }
 function sealPayloadKey(runId){return 'epg/seal/'+runId+'/payload.json';}
+function sealPublicationKey(runId){return 'epg/seal/'+runId+'/publication.json';}
+function sealLayout(run){return Number(run?.seal?.layout)===2?2:1;}
 function sealResponse(run,discovery,extra={}){
  return {runId:run.runId,stage:'seal',remaining:0,failures:run.failures?.length??0,seal:{phase:run.seal?.phase??null,...(extra.seal||{})},discovery:{state:'paused',remainingChunks:null,nextAction:'continue',reason:'ledger_seal',at:new Date().toISOString(),nextCatchUpAt:null,nextScheduledRunAt:null,retryAt:null,programmeRunId:run.runId,...discovery}};
 }
@@ -1329,11 +1372,13 @@ async function stageSealedGeneration(env,run,{holder,meta,pending,nextWatchlist,
   await putKnownLength(env.BUCKET,key,discoveryDocumentLength(framing,itemBytes,itemCount),discoveryDocumentStream(framing,source),{httpMetadata:{contentType:'application/json'}});
   const stored=await env.BUCKET.head(key);if(!stored?.etag)throw new Error('Generation ledger was not stored');
   epgPhase(run.runId,'seal_stage_emit','exit',{elapsedMs:Date.now()-emitStarted,items:itemCount,bytes:itemBytes});
-  const payloadText=JSON.stringify({runId:run.runId,report:pending['programme.json'],catalog:pending['discovered-films.json'],watchlist:nextWatchlist,uncertain,fence:publication.fence,expectedProgrammeRunId:publication.programmeRunId??null});
+  const publicationKey=sealPublicationKey(run.runId);
+  const payloadText=JSON.stringify({runId:run.runId,report:pending['programme.json'],watchlist:nextWatchlist,uncertain,fence:publication.fence,expectedProgrammeRunId:publication.programmeRunId??null});
   epgBoundary(run.runId,'seal_stage_payload_put','enter',{bytes:payloadText.length});
-  await env.BUCKET.put(sealPayloadKey(run.runId),payloadText,{httpMetadata:{contentType:'application/json'}});
+  const storedPublication=await env.BUCKET.put(publicationKey,payloadText,{httpMetadata:{contentType:'application/json'}});
   epgBoundary(run.runId,'seal_stage_payload_put','exit');
-  run.seal={jobId:crypto.randomUUID(),phase:'ledger',sourceKey:key,etag:stored.etag,itemTotal:itemCount,prefixBytes:framing.prefix.byteLength,stagedAt:new Date().toISOString()};
+  if(!storedPublication?.etag)throw new Error('Seal publication was not stored');
+  run.seal={jobId:crypto.randomUUID(),phase:'ledger',sourceKey:key,etag:stored.etag,layout:2,publicationKey,publicationEtag:storedPublication.etag,itemTotal:itemCount,prefixBytes:framing.prefix.byteLength,stagedAt:new Date().toISOString()};
   run.stage='seal';run.updatedAt=new Date().toISOString();delete run.error;
   await saveJSON(env,'sync.json',run);
   return sealResponse(run,{},{seal:{itemTotal:itemCount}});
@@ -1390,19 +1435,17 @@ async function sealLedgerStep(env,run,lease,deadline){
 // The catalog is brought up to date by the difference to what D1 holds, a bounded part per step: a step writes what
 // differs and the next step finds what is left, so no cursor is needed.
 async function sealCatalogStep(env,run,lease,deadline){
- epgBoundary(run.runId,'seal_catalog_payload','enter');
- const payload=JSON.parse(await (await env.BUCKET.get(sealPayloadKey(run.runId))).text());
- epgBoundary(run.runId,'seal_catalog_payload','exit');
+ // ADR 0145: after M5 a layout-2 run stages no catalog and this phase has no work. A leftover `catalog` phase of an
+ // in-flight layout-2 run is skipped into `publish` without reading or writing admissions. A leftover layout-1 run still
+ // finishes from `payload.json`; under a live D1 pin it writes no availability.
+ if(sealLayout(run)===2||await discoveryLedgerAuthoritative(env))return {done:true,remaining:0,stale:0,written:0,items:0,batches:0,reads:0,writeMs:0};
+ const payload=await sealPayload(env,run,{keepCatalog:true});
  const pinned=await pinEpg(env);
  const mergeStarted=Date.now();
- epgBoundary(run.runId,'seal_catalog_merge','enter');
- const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId);
+ const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId,{writeAvailability:true});
  const current=await loadJSON(env,'epg/discovered-films.json')||{};
  const changed=Object.keys(next).filter(id=>JSON.stringify(next[id])!==JSON.stringify(current[id])).sort();
  const stale=Object.keys(current).filter(id=>!Object.hasOwn(next,id));
- epgBoundary(run.runId,'seal_catalog_merge','exit',{count:changed.length,items:stale.length,elapsedMs:Date.now()-mergeStarted});
- // AIR-422: the films go to upsertAdmissions in flushes; it packs each batch to its caps and carries the generation from one batch to the
- // next, so a batch is one D1 round trip. At least one batch per step, so a step with its time already spent still moves.
  let written=0,batches=0,reads=0,writeMs=0,carried=null;
  for(let at=0;at<changed.length;){
   const slice=changed.slice(at,at+SEAL_CATALOG_FLUSH),started=Date.now();
@@ -1412,8 +1455,6 @@ async function sealCatalogStep(env,run,lease,deadline){
   at+=slice.length-(result.remaining||0);
   if(Date.now()>=deadline)break;
  }
- // Done only when a step finds nothing to write: the merge depends on what D1 holds, so the step that writes the last
- // films is followed by one that confirms the difference is empty.
  const left=changed.length-written;
  if(!changed.length&&stale.length)await DiscoveryAuthority.supersedeAdmissions(env,stale,{lease});
  return {done:!changed.length,remaining:left,stale:stale.length,written,items:written,batches,reads,writeMs};
@@ -1424,18 +1465,24 @@ async function sealCatalogStep(env,run,lease,deadline){
 // those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
 // AIR-460: the staged payload holds the whole catalog, which only `seal_catalog` reads. The publish, finalize and queue steps drop it
 // the moment it is parsed, so its parsed objects are not held through the pointer, mirrors, copy and intent units.
-async function sealPayload(env,run){
+async function sealPayload(env,run,{keepCatalog=false}={}){
  const id=run.runId;
+ const layout=sealLayout(run);
+ const key=layout===2?(run.seal.publicationKey||sealPublicationKey(id)):sealPayloadKey(id);
+ const expected=layout===2?run.seal.publicationEtag:null;
+ if(layout===2&&!expected)throw new Error('Seal publication etag is missing');
  epgBoundary(id,'seal_payload_get','enter');
- const object=await env.BUCKET.get(sealPayloadKey(id));
+ const object=await env.BUCKET.get(key);
  epgBoundary(id,'seal_payload_get','exit',{bytes:object?.size});
+ if(!object)throw new Error(layout===2?'Seal publication is missing':'Seal payload is missing');
+ if(layout===2&&object.etag!==expected)throw new Error('Seal publication changed during the seal');
  epgBoundary(id,'seal_payload_text','enter');
  const text=await object.text();
  epgBoundary(id,'seal_payload_text','exit',{bytes:text.length});
  epgBoundary(id,'seal_payload_parse','enter',{bytes:text.length});
  const payload=JSON.parse(text);
  epgBoundary(id,'seal_payload_parse','exit');
- delete payload.catalog;
+ if(!keepCatalog)delete payload.catalog;
  return payload;
 }
 // A step is a list of units. The first unit that is not finished always runs, so every call makes progress; no later unit
@@ -1532,6 +1579,7 @@ async function sealQueueStep(env,run,deadline=Infinity){
  await saveJSON(env,'sync.json',run);
  await flushEpgEvent(env,run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
+ try{await env.BUCKET.delete(sealPublicationKey(run.runId));}catch{}
  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
 }
 // One bounded step of the staged publication. It starts no unit of work after SEAL_REQUEST_BUDGET_MS from the request's entry and answers
@@ -1552,7 +1600,7 @@ async function sealStep(env,run,entryAt=Date.now()){
    const result=await tracedPhase(run.runId,'seal_ledger',()=>sealLedgerStep(env,run,lease,deadline),value=>({cursor:value.state.cursorItems,total:value.state.itemTotal,phase:value.state.phase,done:value.done,...(value.stats||{})}));
    // AIR-420: the cursor the step reached is kept on the run, so the read model and the executor's progress count see the seal move.
    run.seal.cursor=result.state.cursorItems;run.seal.ledgerPhase=result.state.phase;
-   if(result.done){run.seal.phase='catalog';}
+   if(result.done){run.seal.phase=sealLayout(run)===2?'publish':'catalog';}
    run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);
    return sealResponse(run,{},{seal:{cursor:result.state.cursorItems,itemTotal:result.state.itemTotal,ledgerPhase:result.state.phase}});
   }
@@ -1618,7 +1666,7 @@ async function withEpgTrace(env,body,work){
 }
 // A closed set of boundaries around the large allocations of the staged publication and the only numeric fields they may carry. The counts
 // are allocation proxies (bytes the code already knows), not heap measurements: workerd offers no heap figure to read.
-const EPG_BOUNDARIES=new Set(['seal_stage_archive_begin','seal_stage_archive_segments','seal_stage_emit_begin','seal_stage_payload_put','seal_ledger_begin','seal_ledger_read','seal_ledger_batches','seal_ledger_archive','seal_catalog_payload','seal_catalog_merge','seal_payload_get','seal_payload_text','seal_payload_parse']);
+const EPG_BOUNDARIES=new Set(['seal_stage_archive_begin','seal_stage_archive_segments','seal_stage_emit_begin','seal_stage_payload_put','seal_ledger_begin','seal_ledger_read','seal_ledger_batches','seal_ledger_archive','seal_payload_get','seal_payload_text','seal_payload_parse']);
 const EPG_BOUNDARY_FIELDS=['elapsedMs','bytes','items','batches','cursor','total','count','segments'];
 function epgBoundary(runId,boundary,edge,fields={}){
  try{
@@ -1702,7 +1750,7 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';await flushEpgEvent(env,run);if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);const executor=discoveryExecutorMode(env);if(executor==='invalid'){step.branch='executor_invalid';return json({error:'discovery_executor_invalid',executor:'invalid'},503);}if(executor==='workflow'){step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}const outcome=await advanceDiscovery(env,{caller:step.caller,trace:step.diagnostic,onCheckpoint:committed=>markContinuationCheckpoint(env,step,true,committed)});step.discovery=discoverySummary(outcome.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,discovery:outcome.discovery,diagnostic:outcome.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';await flushEpgEvent(env,run);if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}
  if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run,entryAt);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
@@ -1737,18 +1785,20 @@ async function epgSync(env,run){
  if(!run.events||supersededEpg?.at!==report.updatedAt){const priorWatch=run.events?.find(item=>item?.type==='watchlist'),anchored=!!priorWatch&&priorWatch.removed?.length>0;const before=await loadJSON(env,'watchlist.json');run.events=[anchored?priorWatch:watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(anchored){await saveJSON(env,'sync.json',run);}else{const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}}
  if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  previous=null;
- const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId).catalog,'programme.json':report};
+ const liveCatalog=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
+ const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId,{writeAvailability:!liveCatalog}).catalog,'programme.json':report};
  cache=null;
  if(await sealedPublishAvailable(env)){const publication=await PublishedEpg.currentGeneration(env);if(publication)return await tracedPhase(run.runId,'seal_stage',()=>stageSealedGeneration(env,run,{holder:discoveryHolder,meta:{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist,uncertain:result.uncertain,publication}));}
  let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}
  await queueCommittedDiscovery(env,run);
  if(!published?.authoritative||!published.mirrored)await saveJSON(env,'watchlist.json',{updatedAt:report.updatedAt,films:run.watchlist});await saveJSON(env,'uncertain.json',{updatedAt:report.updatedAt,items:result.uncertain});return completeWithRatings(env,run,report);
 }
+const SCHEDULED_RECONCILE_HEAD_MS=45000;
 export default {
 // AIR-275 phase 2 (ADR 0056): the cron trigger runs the D1 enrichment projector; with D1_ENRICHMENT_WRITE off it returns at once.
 // AIR-347 (ADR 0090): the same firing also calls the ratings executor's `ensure`; with the executor mode external it reads one document and returns.
-// AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; with DISCOVERY_EXECUTOR absent it returns without create().
-async scheduled(controller,env,execution){execution.waitUntil(Promise.allSettled([typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:controller.scheduledTime||Date.now(),trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env,{scheduled:true,now:controller.scheduledTime||Date.now()}):Promise.resolve(),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]));},
+// AIR-324 (ADR 0093): the same firing also calls reconcileDiscoveryWorkflow; it creates instances only while the admission gate passes.
+async scheduled(controller,env,execution){const at=controller.scheduledTime||Date.now();const reconcile=Promise.resolve().then(()=>typeof reconcileDiscoveryWorkflow==='function'?reconcileDiscoveryWorkflow(env,{scheduled:true,now:at}):undefined);const settled=reconcile.then(()=>{},()=>{});const head=new Promise(resolve=>{const timer=setTimeout(resolve,SCHEDULED_RECONCILE_HEAD_MS);settled.then(()=>{clearTimeout(timer);resolve();});});execution.waitUntil((async()=>{await head;await Promise.allSettled([reconcile,typeof runD1EnrichmentProjection==='function'?runD1EnrichmentProjection(env,{now:at,trigger:'cron'}):Promise.resolve(),typeof RatingsOrchestration==='undefined'?Promise.resolve():RatingsOrchestration.ensure(env,{now:Date.now()}),typeof EpgOrchestration==='undefined'?Promise.resolve():EpgOrchestration.ensure(env,{now:Date.now()}),typeof Monitor==='undefined'?Promise.resolve():Monitor.run(env,{now:controller.scheduledTime||Date.now()})]);})());},
 async fetch(request,env,execution){
  const url=new URL(request.url);
  try{
@@ -1793,7 +1843,13 @@ async fetch(request,env,execution){
     const titles=await localizedTitleStore(env,pinned,gate,[...(data?.films||[]),...(watchlist?.films||[])]);
     const reviews=await publishedOwnerReviews(pinned);
     if(!reviews.ok)return json({error:'storage_unavailable',reason:'owner_review_unavailable'},503);
-    const presented=presentLocalized(programmeWithWatchlist(data,watchlist),titles,reviews.body);
+    const merged=programmeWithWatchlist(data,watchlist);
+    let catalog=null;
+    if(Array.isArray(merged.catalogFilms)&&merged.catalogFilms.length){
+     try{const publication=await epgPublication(env);catalog=await catalogGenerationCopy(env,publication,data.runId||null,'discovered-films.json');}
+     catch{catalog=null;}
+    }
+    const presented=presentLocalized(presentCatalogFilms(merged,catalog),titles,reviews.body);
     const sync=await loadJSON(env,'sync.json');
     const publishedAt=typeof epgUxPublishedAt==='function'?epgUxPublishedAt(sync,data):null;
     if(publishedAt)presented.publishedAt=publishedAt;else delete presented.publishedAt;

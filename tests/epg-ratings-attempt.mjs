@@ -73,7 +73,7 @@ assert.deepEqual(sync().ratingPending,['public-films-list']);
 // Past the window the next step closes it as unknown, names the phase, and requests nothing from Letterboxd.
 clock+=2000;
 const trace=await step('run-kill');
-assert.equal(trace.branch,'continuation');
+assert.equal(trace.branch,'delegated');
 assert.deepEqual([sync().ratingAttempt.state,sync().ratingAttempt.cause,sync().ratingAttempt.interruptedPhase],['unknown','interrupted','post_commit']);
 assert.equal(sync().ratingPending,undefined,'no endless pending');
 assert.match(sync().ratingError,/interrupted during post_commit/);

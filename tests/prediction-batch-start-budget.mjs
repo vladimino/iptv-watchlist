@@ -5,6 +5,14 @@ import assert from 'node:assert/strict';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import * as PredictionD1 from '../src/prediction-d1.js';
 
+function plantDiagnosticHistory(w,n=492){
+ const prefix='enrichment/run-diagnostics/';
+ for(let i=0;i<n;i++){
+  const at=new Date(Date.now()-(i+1)*60000).toISOString(),id='hist-'+String(i).padStart(4,'0');
+  const inv=String(9999999999999-Date.parse(at)).padStart(13,'0');
+  w.records.set(prefix+inv+'-'+id+'.json',{runId:id,state:'completed',startedAt:at,endedAt:at,leaseExpiredAt:at,leaseAcquiredAt:at,stopReason:'queue_empty'});
+ }
+}
 const batch=(w,body={})=>w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',...body});
 const reconcile=async w=>{const r=await w.api('queue/reconcile',{});assert.equal(r.status,200);return r;};
 const timing=w=>w.logs.map(l=>{try{return JSON.parse(l);}catch{return null;}}).filter(l=>l?.event==='prediction_step_timing'&&l.step==='batch_start');
@@ -23,6 +31,11 @@ const note=(name,line)=>{assert.ok(line.d1.n<BEFORE[name].d1,name+': fewer D1 ca
  const r=await batch(w,{manifestSize:5});assert.equal(r.status,200);assert.equal(r.data.films.length,5);
  const line=last(w);note('clean5',line);
  assert.ok(line.r2.n<=52,'R2 calls: '+line.r2.n);assert.ok(line.d1.n<=90,'D1 calls: '+line.d1.n);
+ const hist=await flowWorld({films:40});await reconcile(hist);plantDiagnosticHistory(hist,492);
+ hist.logs.length=0;const rh=await batch(hist,{manifestSize:5});assert.equal(rh.status,200);assert.equal(rh.data.films.length,5);
+ const histLine=last(hist),diag=histLine.classes['r2:diagnostics']?.n||0,cleanDiag=line.classes['r2:diagnostics']?.n||0;
+ assert.ok(diag<=16&&diag<=cleanDiag+8,'history of 492 diagnostics must not be listed on start: r2:diagnostics='+diag+' vs '+cleanDiag);
+ assert.ok(histLine.r2.n<=line.r2.n+8,'R2 cost independent of diagnostic history: '+histLine.r2.n+' vs '+line.r2.n);
  assert.equal(line.notes.preflights,2,'the initial and the post-lease preflight');assert.equal(line.notes.refreshRounds,0);assert.equal(line.notes.settledFilms,0);
  assert.equal(line.notes.scannedFilms,10,'five films read by each of the two preflights');
  assert.equal(line.notes.manifestFilms,5);

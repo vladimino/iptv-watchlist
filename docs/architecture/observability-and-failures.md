@@ -39,9 +39,30 @@ What the data can and cannot establish: a `completed` entry whose branch explain
 
 The hourly cron's Discovery reconcile (`reconcileDiscoveryWorkflow`) is independent of whether the cron invocation itself succeeded. Each attempt, including `projector_window`, `write_conflict`, `d1_unavailable`, `recovery_waiting` and a started successor, emits one Workers Log object `event=discovery_workflow_reconcile` with `scheduled`, `attempt`, `started`, `reason`, `programmeRunId`, `instanceId`, `series` and `windowUntil` or `dueAt` when present. Absence of that line in a cron that also ran the projector means the reconcile outcome was not recorded (the 10 November 2026 `step_cap` gap, [AIR-428 evidence](../evidence/orchestration/air-428-discovery-step-cap-recovery-2026-11-10.md)).
 
-When `DISCOVERY_EXECUTOR` is absent, pipeline status does not add an executor field and these continuation diagnostics stay as they are. When it is `workflow` or `invalid`, `GET /api/enrichment/pipeline/status` adds a read-only `discoveryExecutor`: the configured mode, whether a Workflow instance is the owner, the generation, instance and series, the phase, what it is waiting for, the last chunk summary, recovery attempts and `recoveryDue`, whether the record is `stalled`, and whether work is still pending. A record that merely says `running` is not an owner once the platform reports that instance finished or absent, or once the record is older than 15 minutes and is not sleeping until a future `waitingUntil`. `degraded` stays true for an invalid mode, an uncertain or unknown phase, an unknown live status, a stall, a stop that still has a backlog, and a recovery wait or quarantine. The read does not create a Workflow or run a chunk. `delegated` on a continuation response means the request handed the series to that executor; it is not `complete`, and it is not written into the continuation record. EPG, discovery, predictions and ratings stay separate statuses.
+`GET /api/enrichment/pipeline/status` always adds (the retired `DISCOVERY_EXECUTOR` variable is ignored, AIR-325) a read-only `discoveryExecutor`: the configured mode, whether a Workflow instance is the owner, the generation, instance and series, the phase, what it is waiting for, the last chunk summary, recovery attempts and `recoveryDue`, whether the record is `stalled`, and whether work is still pending. A record that merely says `running` is not an owner once the platform reports that instance finished or absent, or once the record is older than 15 minutes and is not sleeping until a future `waitingUntil`. `degraded` stays true for an uncertain or unknown phase, an unknown live status, a stall, a stop that still has a backlog, and a recovery wait or quarantine. The read does not create a Workflow or run a chunk. `delegated` on a continuation response means the request handed the series to that executor; it is not `complete`, and it is not written into the continuation record. EPG, discovery, predictions and ratings stay separate statuses.
 
 **Two Discovery status levels ([ADR 0115](../adr/0115-discovery-operational-status-view.md)).** The detailed pipeline status walks the whole ledger under a snapshot fence of the Discovery authority generation, so while Discovery commits it can answer `discovery_fence`; that is the expected outcome of an expensive read, not a Workflow failure. The operational view (`view=operational`) is the health read: one batch of single-row SELECTs (authority row, transfer, status, continuation, workflow, lease, projector window), one consistent snapshot, no ledger, decision or catalog read, no TMDB, no write. It reports the phase, next action, executor and lease liveness and the last checkpoint's stored backlog with its own time and `known | stale | unknown`; an unreadable record is named in `unavailable`, a held cutover is `authority.state: held`, and an unavailable authority is a typed answer with no invented records.
+
+**User catalog versus the generation fence ([ADR 0147](../adr/0147-discovery-user-read-snapshot-fence.md)).** `GET /api/catalog/available` and `GET /api/enrichment/view` read the catalog as one admission snapshot. They do not fail because continuation or status writers moved `discovery_authority.generation`. A real pin change, a non-seal `loading` transfer, a held cutover or an unreadable authority is HTTP 503 with `code` and `Retry-After: 1`, logged only if it still escapes as an unhandled route error. A 502 `discovery_fence` on those two paths is a defect, not an expected wait.
+
+```mermaid
+%%{init: {"flowchart": {"htmlLabels": true, "wrappingWidth": 220, "nodeSpacing": 28, "rankSpacing": 36}}}%%
+flowchart TD
+    userGet["User catalog<br/>GET"]
+    snapshot["One admission<br/>SELECT"]
+    paged["Paged ledger<br/>walk"]
+    genBump["Continuation<br/>bumps generation"]
+    pin["Pin or transfer<br/>epoch"]
+    ok["200 catalog"]
+    wait["503 Retry-After"]
+    userGet --> snapshot
+    snapshot --> pin
+    pin -->|stable| ok
+    pin -->|moved / loading / held| wait
+    genBump -.-> snapshot
+    genBump -.-> paged
+    paged -->|generation moved| wait
+```
 
 A committed taste-profile publication records one `taste_profile` event after the current pointer moves ([Events](../reference/domain/events.md)). The pointer and the event are not one transaction. A failed event put leaves the committed profile in place and says so on the publication response. The recovery is a replay of that same publication request: it does not move current again and creates the missing event once, and only when the immutable version body is marked `tasteProfileEventExpected`. A version without that marker is left without an event. It does not scan older versions and it does not run from a schedule. `GET /api/events` is unchanged and is still not a safe production read.
 

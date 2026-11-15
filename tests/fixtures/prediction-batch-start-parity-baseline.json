@@ -26,7 +26,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "709791546b5a2a783030e10ad543150802c65df1fe7f7821c5a114a3e1d43986",
+    "manifestHash": "8668d19c6f16a635a99efa3af65cd80f0611cdf6d3d24dec36415d49edd9ae7f",
     "manifestSize": 5,
     "filmsSelected": 5,
     "queueRefreshed": false,
@@ -85,7 +85,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -184,8 +184,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "709791546b5a2a783030e10ad543150802c65df1fe7f7821c5a114a3e1d43986",
-      "manifestBytes": 16112,
+      "manifestHash": "8668d19c6f16a635a99efa3af65cd80f0611cdf6d3d24dec36415d49edd9ae7f",
+      "manifestBytes": 16355,
       "manifestSize": 5,
       "selectedIds": [
        "tmdb_1",
@@ -319,8 +319,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "709791546b5a2a783030e10ad543150802c65df1fe7f7821c5a114a3e1d43986",
-      "manifestBytes": 16112,
+      "manifestHash": "8668d19c6f16a635a99efa3af65cd80f0611cdf6d3d24dec36415d49edd9ae7f",
+      "manifestBytes": 16355,
       "manifestSize": 5,
       "selectedIds": [
        "tmdb_1",
@@ -382,7 +382,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "709791546b5a2a783030e10ad543150802c65df1fe7f7821c5a114a3e1d43986",
+    "manifestHash": "8668d19c6f16a635a99efa3af65cd80f0611cdf6d3d24dec36415d49edd9ae7f",
     "manifestSize": 5,
     "filmsSelected": 5,
     "queueRefreshed": false,
@@ -440,7 +440,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -564,7 +564,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "709791546b5a2a783030e10ad543150802c65df1fe7f7821c5a114a3e1d43986",
+    "manifestHash": "8668d19c6f16a635a99efa3af65cd80f0611cdf6d3d24dec36415d49edd9ae7f",
     "manifestSize": 5,
     "filmsSelected": 5,
     "queueRefreshed": false,
@@ -622,7 +622,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -950,7 +950,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "6a5fc60cdcccc8e3fa9bd0ba70f62d2abe7c366528dd21189344b5dcdfe4d022",
+    "manifestHash": "f0f96fc4f63e21090033f03eda8c22c325c10efb60c405d1e0e19cc0c0b9cddf",
     "manifestSize": 100,
     "filmsSelected": 100,
     "queueRefreshed": false,
@@ -1674,7 +1674,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -1953,8 +1953,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "6a5fc60cdcccc8e3fa9bd0ba70f62d2abe7c366528dd21189344b5dcdfe4d022",
-      "manifestBytes": 39140,
+      "manifestHash": "f0f96fc4f63e21090033f03eda8c22c325c10efb60c405d1e0e19cc0c0b9cddf",
+      "manifestBytes": 39383,
       "manifestSize": 100,
       "selectedIds": [
        "tmdb_1",
@@ -2104,7 +2104,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "74793b544f9c7e372356a3df4f7c90100ebb243b98e9cbc0d37e35a6ec7128a2",
+    "manifestHash": "186e69d4a9daca98eb183b030e847e0d9bdbad7dfe3d160be5f2d49f8f539c87",
     "manifestSize": 10,
     "filmsSelected": 10,
     "queueRefreshed": false,
@@ -2198,7 +2198,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -2273,8 +2273,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "74793b544f9c7e372356a3df4f7c90100ebb243b98e9cbc0d37e35a6ec7128a2",
-      "manifestBytes": 17319,
+      "manifestHash": "186e69d4a9daca98eb183b030e847e0d9bdbad7dfe3d160be5f2d49f8f539c87",
+      "manifestBytes": 17562,
       "manifestSize": 10,
       "selectedIds": [
        "tmdb_1",
@@ -2334,7 +2334,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "06b28542f4b66eb2f2b7ebf88402b20a766dc7f22758c9163aac2d4e81f52ef5",
+    "manifestHash": "833327e390c1c51a0ad258b87aa825744def9ada4cbc87c330f1a0014edf9f36",
     "manifestSize": 5,
     "filmsSelected": 5,
     "queueRefreshed": true,
@@ -2393,7 +2393,7 @@
     ],
     "profileHash": "p2",
     "profileSha": "69e89de18f9b2d033de468d6f6e88a51692194396f057f1f2f93772a27467178",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -2612,8 +2612,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "06b28542f4b66eb2f2b7ebf88402b20a766dc7f22758c9163aac2d4e81f52ef5",
-      "manifestBytes": 16118,
+      "manifestHash": "833327e390c1c51a0ad258b87aa825744def9ada4cbc87c330f1a0014edf9f36",
+      "manifestBytes": 16361,
       "manifestSize": 5,
       "selectedIds": [
        "tmdb_1",
@@ -2668,7 +2668,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "20a940e17191d16a169d890e34585df1676ff8585dea9c7eb4d18ea3b6e3a5d2",
+    "manifestHash": "956c264f3e14debb7952be6845651a751858fb3fbd0db7db6e80f3f9ef910420",
     "manifestSize": 5,
     "filmsSelected": 5,
     "queueRefreshed": true,
@@ -2728,7 +2728,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -2941,8 +2941,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "20a940e17191d16a169d890e34585df1676ff8585dea9c7eb4d18ea3b6e3a5d2",
-      "manifestBytes": 16133,
+      "manifestHash": "956c264f3e14debb7952be6845651a751858fb3fbd0db7db6e80f3f9ef910420",
+      "manifestBytes": 16376,
       "manifestSize": 5,
       "selectedIds": [
        "tmdb_11",
@@ -2997,7 +2997,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "da8dcb5defac32979ebae3fe6fe7ded196ec00eb3ee93d7facf5dc498b4e5a65",
+    "manifestHash": "7e8a59573cf3528e624504c4ef1974e0dc2fef1c22cb24c43126293c64458e73",
     "manifestSize": 5,
     "filmsSelected": 5,
     "queueRefreshed": true,
@@ -3057,7 +3057,7 @@
     ],
     "profileHash": "p",
     "profileSha": "02961d0e914c2b4014362c080080022924cb8e93cb685147c6689e162aa12cf5",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -3272,8 +3272,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 1,
-      "manifestHash": "da8dcb5defac32979ebae3fe6fe7ded196ec00eb3ee93d7facf5dc498b4e5a65",
-      "manifestBytes": 16138,
+      "manifestHash": "7e8a59573cf3528e624504c4ef1974e0dc2fef1c22cb24c43126293c64458e73",
+      "manifestBytes": 16381,
       "manifestSize": 5,
       "selectedIds": [
        "tmdb_10",
@@ -3309,7 +3309,7 @@
     "status": "blocked",
     "reason": "manifest_too_large",
     "code": "manifest_too_large",
-    "bytes": 440460,
+    "bytes": 440703,
     "limit": 262144,
     "films": 100,
     "largestFilmBytes": 4259,
@@ -3559,7 +3559,7 @@
      "callBudgetMs": 25000
     },
     "manifestFormat": "compact-1",
-    "manifestHash": "2b1793007d5a21c61d762447d496fdc00750fd552256d3b79328b42d1c9e1cef",
+    "manifestHash": "f708f9a2e8b7723d33bd10e14a6ce43455740a21f07a48b173e381963af5c49c",
     "manifestSize": 20,
     "filmsSelected": 20,
     "queueRefreshed": false,
@@ -3723,7 +3723,7 @@
     ],
     "profileHash": "p2",
     "profileSha": "69e89de18f9b2d033de468d6f6e88a51692194396f057f1f2f93772a27467178",
-    "contractSha": "b79e3ff444b3e61de14e527c22614c3b6029ca8ae5681aa44b2a846efb5d7e56"
+    "contractSha": "bb72927898290c0cc2f7c16b19a1c3a5d36cf87c5cd5ff8b7e50d9f7504d4de1"
    },
    "queue": {
     "pending": [
@@ -3782,8 +3782,8 @@
       "protocol": "batch_v2",
       "status": "complete",
       "epoch": 1,
-      "manifestHash": "709791546b5a2a783030e10ad543150802c65df1fe7f7821c5a114a3e1d43986",
-      "manifestBytes": 16112,
+      "manifestHash": "8668d19c6f16a635a99efa3af65cd80f0611cdf6d3d24dec36415d49edd9ae7f",
+      "manifestBytes": 16355,
       "manifestSize": 5,
       "selectedIds": [
        "tmdb_1",
@@ -3799,8 +3799,8 @@
       "protocol": "batch_v2",
       "status": "running",
       "epoch": 2,
-      "manifestHash": "2b1793007d5a21c61d762447d496fdc00750fd552256d3b79328b42d1c9e1cef",
-      "manifestBytes": 25301,
+      "manifestHash": "f708f9a2e8b7723d33bd10e14a6ce43455740a21f07a48b173e381963af5c49c",
+      "manifestBytes": 25544,
       "manifestSize": 20,
       "selectedIds": [
        "tmdb_14",

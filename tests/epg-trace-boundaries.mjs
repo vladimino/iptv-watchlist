@@ -132,19 +132,17 @@ const trail=()=>lines.map(l=>{try{return JSON.parse(l);}catch{return null;}}).fi
  }finally{Object.assign(context,real);}
 }
 
-// 8. The catalog step: the merge is a pair and the payload exit carries no count (nothing is enumerated for the log).
+// 8. Layout 2 skips the catalog step with no catalog boundary markers and no admission write.
 {
  const real={pinEpg:context.pinEpg,loadJSON:context.loadJSON,DiscoveryAuthority:context.DiscoveryAuthority};
+ let wrote=false;
  context.pinEpg=async env=>env;context.loadJSON=async()=>({});
- context.DiscoveryAuthority={ownsKey(){return false;},async upsertAdmissions(env,films){return {written:Object.keys(films),refused:[],batches:1,reads:0,remaining:0};}};
- const catalog={tmdb_1:{id:'tmdb_1',tmdbId:'1',canonicalIdentity:'tmdb:1'},tmdb_2:{id:'tmdb_2',tmdbId:'2',canonicalIdentity:'tmdb:2'}};
- const bucket={async get(key){return {async text(){return JSON.stringify({runId:'run-c',catalog});},async json(){return {};}};}};
+ context.DiscoveryAuthority={ownsKey(){return false;},async upsertAdmissions(){wrote=true;return {written:[],refused:[],batches:0,reads:0,remaining:0};}};
  try{
   lines.length=0;
-  await call('sealCatalogStep')({BUCKET:bucket},{runId:'run-c'},{},Date.now()+1e9);
-  assert.deepEqual(trail(),['seal_catalog_payload:enter','seal_catalog_payload:exit','seal_catalog_merge:enter','seal_catalog_merge:exit']);
-  assert.equal(boundaries().find(e=>e.boundary==='seal_catalog_payload'&&e.edge==='exit').count,undefined);
-  assert.equal(boundaries().find(e=>e.boundary==='seal_catalog_merge'&&e.edge==='exit').count,2);
+  const out=await call('sealCatalogStep')({BUCKET:{}},{runId:'run-c',seal:{layout:2,publicationKey:'k',publicationEtag:'e'}},{},Date.now()+1e9);
+  assert.equal(out.done,true);assert.equal(wrote,false);
+  assert.equal(trail().filter(x=>x.startsWith('seal_catalog')).length,0);
   assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/epgBoundary\([^\n]*Object\.(keys|values|entries)\(/,'no marker enumerates an object for its count');
  }finally{Object.assign(context,real);}
 }

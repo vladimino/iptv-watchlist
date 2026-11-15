@@ -8,6 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {scoped,scopedReplacing,scopePersonIdentity} from '../scripts/bundle-scope.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {nonFunctional} from './suite-gate.mjs';
 
 const source=fs.readFileSync('src/catalog-d1.js','utf8');
 assert.doesNotMatch(source,/\b(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)\b/i,'the D1 catalog views never write');
@@ -161,10 +162,12 @@ assert.equal(r.body.reference.links.length,0);
 assert.deepEqual(r.body.films.director.watchlist,['film:tmdb:7']);
 assert.deepEqual(r.body.films.director.catalog,[]);
 assert.deepEqual(r.body.films.actor.watchlist,[]);
-const started=Date.now();
-for(let n=0;n<20;n++)await get('persons/actor/al-pacino/identity');
-const elapsed=Date.now()-started;
-assert.ok(elapsed<5000,`20 identity reads took ${elapsed}ms`);
+await nonFunctional('catalog-d1-identity-read-latency',async()=>{
+ const started=Date.now();
+ for(let n=0;n<20;n++)await get('persons/actor/al-pacino/identity');
+ const elapsed=Date.now()-started;
+ assert.ok(elapsed<5000,`20 identity reads took ${elapsed}ms`);
+});
 assert.equal((await get('persons/actor/decoy-0/identity')).body.reference.memberIds.includes('person:actor/al-pacino'),false);
 assert.equal((await get('persons/actor/nobody/identity')).status,404);
 assert.equal((await get('persons/writer/ann/identity')).status,404);

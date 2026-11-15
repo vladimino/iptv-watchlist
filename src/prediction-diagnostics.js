@@ -5,8 +5,10 @@
 const PREDICTION_DIAGNOSTIC_PAGE_MAX=20;
 
 async function loadPredictionDiagnosticSnapshot(env,filmId){
+ let pinned=env;
+ try{pinned=await pinEpg(env);}catch{pinned=env;}
  const read=async key=>{
-  try{const value=await loadJSON(env,key);return {status:value==null?'not_recorded':'recorded',value};}
+  try{const value=await loadJSON(pinned,key);return {status:value==null?'not_recorded':'recorded',value};}
   catch{return {status:'unavailable',value:null};}
  };
  const [queue,profile,index,programme,catalog,publishedGeneration]=await Promise.all([
@@ -24,6 +26,7 @@ async function loadPredictionDiagnosticSnapshot(env,filmId){
   queue:queue.value,queueStatus:queue.status,profile:profile.value,profileStatus:profile.status,index:index.value,indexStatus:index.status,
   programme:programme.value,programmeStatus:programme.status,catalog:catalog.value,catalogStatus:catalog.status,
   publishedGeneration:publishedGeneration.value,publishedGenerationStatus:publishedGeneration.status,films,
+  completedOnly:pinned?.epgPin?.authority==='d1',
  };
 }
 function predictionDiagnosticOutstanding(queue){
@@ -54,7 +57,19 @@ const PREDICTION_VALIDATION_STAGES=['caller_reported','fingerprint_schema','fing
 function predictionDiagnosticValidation(validation){
  if(!validation||typeof validation!=='object')return null;
  const issues=Array.isArray(validation.issues)?validation.issues.filter(issue=>issue&&typeof issue==='object'&&typeof issue.path==='string'&&/^(fingerprint|prediction)(\.[A-Za-z0-9_]{1,40}){0,3}$/.test(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):[];
- return {stage:PREDICTION_VALIDATION_STAGES.includes(validation.stage)?validation.stage:'unknown',reportedBy:validation.reportedBy==='caller'||validation.reportedBy==='worker'?validation.reportedBy:null,issues};
+ const out={stage:PREDICTION_VALIDATION_STAGES.includes(validation.stage)?validation.stage:'unknown',reportedBy:validation.reportedBy==='caller'||validation.reportedBy==='worker'?validation.reportedBy:null,issues};
+ const claim=predictionDiagnosticClaim(validation.claimed);
+ if(claim&&out.stage==='caller_reported'&&out.reportedBy==='caller')out.claimed=claim;
+ return out;
+}
+// AIR-472: a caller-supplied failure reason and echoed preflight issues, re-checked against the closed vocabulary. It is a client claim, never Worker telemetry, and says nothing about whether a preflight ran.
+const CALLER_CLAIM_REASONS=['preflight_validation_failed','insufficient_evidence','json_unparseable','request_too_large'];
+function predictionDiagnosticClaim(claimed){
+ if(!claimed||typeof claimed!=='object')return null;
+ const reason=CALLER_CLAIM_REASONS.includes(claimed.reason)?claimed.reason:null;
+ const issues=Array.isArray(claimed.preflightIssues)?claimed.preflightIssues.filter(issue=>issue&&typeof issue==='object'&&callerFailurePathAllowed(issue.path)&&ISSUE_CODES.includes(issue.code)).slice(0,MAX_ISSUES).map(issue=>({path:issue.path,code:issue.code})):null;
+ if(!reason&&!issues)return null;
+ return {provenance:'caller_claim',reason,preflightIssues:issues};
 }
 function predictionDiagnosticRetry(queue,filmId){
  const retry=queue?.retries?.[filmId];
@@ -185,7 +200,7 @@ function predictionDiagnosticReasons(snapshot,outstanding){
 }
 function predictionDiagnosticCoverage(snapshot,now){
  if(snapshot.programmeStatus!=='recorded'||snapshot.profileStatus!=='recorded'||snapshot.indexStatus==='unavailable'||!snapshot.profile)return {status:'unknown',current:null,total:null,percent:null,windowCurrent:null,windowTotal:null,windowPercent:null};
- const summary=canonicalCoverageSummary(snapshot.programme,snapshot.catalogStatus==='recorded'?snapshot.catalog:null,snapshot.index||{},snapshot.profile,now,snapshot.freshness||strictFreshness(snapshot.profile));
+ const summary=canonicalCoverageSummary(snapshot.programme,snapshot.catalogStatus==='recorded'?snapshot.catalog:null,snapshot.index||{},snapshot.profile,now,snapshot.freshness||strictFreshness(snapshot.profile),snapshot.completedOnly===true);
  const complete=snapshot.catalogStatus==='recorded'&&snapshot.indexStatus==='recorded';
  return {
   status:complete?'recorded':'partial',current:summary.currentPredictionsTotal,total:summary.confirmedFilmsTotal,

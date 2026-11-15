@@ -1,4 +1,4 @@
-// AIR-323 / ADR 0083: the Discovery Workflow is inert unless DISCOVERY_EXECUTOR=workflow.
+// AIR-325 / ADR 0083: the Discovery Workflow is the permanent executor; DISCOVERY_EXECUTOR is retired and ignored.
 // Absent mode keeps one explicit chunk. Workflow mode does not run that chunk in the request, renews a spent
 // series without the hourly gate, and fences a second writer. No production binding is read or written.
 import fs from 'node:fs';
@@ -22,7 +22,7 @@ const binding={
  async get(){return {status:'running'};}
 };
 const env={BUCKET:bucket,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,LETTERBOXD_USERNAME:'tester',DISCOVERY_WORKFLOW:binding};
-const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,console:{log(){},error(){},warn(){}},ASSETS:{},fetch:async()=>new Response('unexpected',{status:599})});
+const context=vm.createContext({Response,Request,Headers,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,TextDecoder,Uint8Array,crypto:webcrypto,setTimeout,clearTimeout,console:{log(){},error(){},warn(){}},ASSETS:{},fetch:async()=>new Response('unexpected',{status:599})});
 vm.runInContext(fs.readFileSync('src/domain/film-person.js','utf8'),context);
 for(const file of ['src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js','src/domain/profile-impact.js','src/domain/prediction-compatibility.js','src/domain/fingerprint-compatibility.js','src/domain/prediction-confidence.js','src/enrichment.js','src/letterboxd-diary.js','src/continuation.js','src/discovery-workflow.js','src/worker.js']){
  vm.runInContext(fs.readFileSync(file,'utf8').replace(/export \{[^}]+\};/g,'').replace('export default','globalThis.worker=').replace('export const DiscoveryContinuation','const DiscoveryContinuation'),context);
@@ -107,13 +107,18 @@ function workflowEnv(mode){return {...env,DISCOVERY_EXECUTOR:mode};}
 const future=new Date(now+3600000).toISOString();
 const hourly=call('continuationDecision')({stage:'paused',reason:'chunk_budget',remainingChunks:0,nextCatchUpAt:future,retryAt:null},now);
 assert.equal(hourly.run,false);assert.equal(hourly.contract.nextAction,'wait');assert.equal(hourly.contract.reason,'chunk_budget');
-for(const [value,mode] of [[undefined,'external'],[null,'external'],['','external'],['external','external'],['workflow','workflow'],['Workflow','invalid'],[' workflow','invalid']])assert.equal(call('discoveryExecutorMode')({DISCOVERY_EXECUTOR:value}),mode,JSON.stringify(value));
+assert.throws(()=>call('discoveryExecutorMode'),/not defined/,'the transitional selector is retired');
 
-// 1. Absent flag: one explicit step still runs one chunk.
+// 1. AIR-325: a missing, old `external` or invalid DISCOVERY_EXECUTOR never runs a chunk in the request. Without the Workflow binding the step fails closed.
 seed();
 let response=await post('/api/sync/epg',{runId:'sync-1'});
-assert.equal(response.status,200);assert.equal(response.data.discovery.nextAction,'continue');assert.equal(response.data.delegated,undefined);
-assert.equal(decided(),24);assert.equal(creates.length,0);assert.equal(continuation().reason,null);
+assert.equal(response.status,200,JSON.stringify(response.data));assert.equal(response.data.delegated,true);assert.equal(response.data.discovery.reason,'delegated');
+assert.equal(decided(),0);assert.equal(creates.length,0);
+for(const value of ['external','nope','Workflow',undefined]){
+ seed();
+ response=await post('/api/sync/epg',{runId:'sync-1'},workflowEnv(value));
+ assert.equal(response.status,200);assert.equal(response.data.delegated,true);assert.equal(response.data.executor,'workflow');assert.equal(decided(),0);assert.equal(creates.length,0);
+}
 
 // 2. Workflow mode does not run the chunk in the request and does not call the series complete.
 seed();
@@ -124,14 +129,11 @@ assert.equal(response.data.discovery.nextAction,'wait');assert.equal(response.da
 assert.equal(decided(),0);assert.equal(creates.length,1);assert.equal(creates[0].id,INSTANCE);assert.equal(creates[0].params.chunkLimit,undefined);
 assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().remainingChunks,12);
 
-// 3. An invalid flag fails closed on a chunk and still lets the commit tail publish its intent.
-seed();
-response=await post('/api/sync/epg',{runId:'sync-1'},workflowEnv('nope'));
-assert.equal(response.status,503);assert.equal(response.data.error,'discovery_executor_invalid');assert.equal(decided(),0);assert.equal(creates.length,0);
+// 3. A stale `external` value still publishes the commit intent and starts no chunk.
 seed({stage:'epg',syncId:GENERATION,programmeRunId:GENERATION});
-response=await post('/api/sync/epg',{runId:GENERATION},workflowEnv('nope'));
-assert.equal(response.status,200,JSON.stringify(response.data));assert.equal(response.data.stage,'complete');assert.equal(response.data.executor,'invalid');
-assert.equal(decided(),0);assert.equal(creates.length,0);assert.equal(continuation().reason,'epg_committed');
+response=await post('/api/sync/epg',{runId:GENERATION},workflowEnv('external'));
+assert.equal(response.status,200,JSON.stringify(response.data));assert.equal(response.data.stage,'complete');
+assert.equal(decided(),0);assert.equal(continuation().reason,'epg_committed');
 
 // The same commit tail in workflow mode recovers the queued intent without a chunk.
 seed({stage:'epg',syncId:GENERATION,programmeRunId:GENERATION});
@@ -245,14 +247,11 @@ seed();
 delete env.DISCOVERY_EXECUTOR;
 puts.length=0;creates.length=0;
 let pipeline=await status();
-assert.equal(Object.hasOwn(pipeline,'discoveryExecutor'),false);assert.equal(creates.length,0);assert.equal(puts.length,0);
-env.DISCOVERY_EXECUTOR='workflow';
+assert.equal(pipeline.discoveryExecutor.configured,'workflow');assert.equal(creates.length,0);assert.equal(puts.length,0);
+env.DISCOVERY_EXECUTOR='nope';
 pipeline=await status();
 assert.equal(pipeline.discoveryExecutor.configured,'workflow');assert.equal(pipeline.discoveryExecutor.owner,'none');
 assert.equal(creates.length,0);assert.equal(puts.length,0);
-env.DISCOVERY_EXECUTOR='nope';
-pipeline=await status();
-assert.equal(pipeline.discoveryExecutor.configured,'invalid');assert.equal(pipeline.discoveryExecutor.degraded,true);assert.equal(creates.length,0);
 seed();
 env.DISCOVERY_EXECUTOR='workflow';
 elect();
@@ -357,8 +356,9 @@ async function fireCron(environment=env){
  await Promise.all(pending);
 }
 
-// 14. Cron reconcile is inert while the flag is absent, and self-starts only in workflow mode.
+// 14. Cron reconcile fails closed without admission regardless of the retired flag, and self-starts once admission passes.
 seed();
+clearWorkflowAdmission();
 delete env.DISCOVERY_EXECUTOR;
 creates.length=0;puts.length=0;
 await fireCron();
@@ -479,7 +479,7 @@ delete context.DiscoveryAuthority;
 delete context.PublishedEpg;
 delete env.DISCOVERY_EXECUTOR;
 const rolledBack=await call('ensureDiscoveryWorkflow')(env);
-assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
+assert.equal(rolledBack.reason,'authority_not_ready');assert.equal(creates.length,0);
 
 
 // 11. AIR-360. A Workflow instance hands over to a successor before its D1 statement total nears the level at which
@@ -511,7 +511,7 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  const plan=input=>call('workflowPlan')({mode:'workflow',published:GENERATION,pinned:GENERATION,record:{stage:'paused',reason:null,remainingChunks:5,programmeRunId:GENERATION,at:iso},lease:null,now:Date.now(),chunks:3,chunkLimit:20,last:null,uncertainWrites:0,...input});
  same(plan({used:5999}),{action:'continue',reason:null});
  same(plan({used:6000}),{action:'rollover',reason:'invocation_budget'});
- assert.equal(plan({used:6000,mode:'external'}).action,'stop');
+ assert.equal(plan({used:6000,mode:'external'}).action,'rollover','a stale mode input is ignored');
  assert.equal(plan({used:6000,published:OTHER}).action,'stop');
  assert.equal(plan({used:6000,record:{stage:'paused',reason:'backoff',remainingChunks:4,programmeRunId:GENERATION,at:iso,retryAt:new Date(Date.now()+60000).toISOString(),nextCatchUpAt:new Date(Date.now()+60000).toISOString()}}).action,'wait');
  same(plan({used:6000,record:{stage:'paused',reason:'chunk_budget',remainingChunks:0,programmeRunId:GENERATION,at:iso,nextCatchUpAt:new Date(Date.now()+3600000).toISOString()},last:{programmeRunId:GENERATION,remaining:40}}),{action:'rollover',reason:'invocation_budget'});
@@ -718,15 +718,11 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
   assert.equal(ended.reason,'recovery_exhausted');assert.equal(creates.length,0);assert.equal(t.sleeps.length,0,'a quarantined recovery does not sleep');
   assert.equal(record().recovery.quarantined,true);
 
-  // A new generation published while sleeping, and the external mode: the wake stops without a successor.
+  // A new generation published while sleeping: the wake stops without a successor.
   fresh();creates.length=0;
   t=startRun({onSleep:async date=>{advanceTo(date);armWorkflowAdmission(OTHER);}});
   ended=await t.run();
   assert.equal(creates.length,0);assert.equal(ended.reason,'stale_generation','a newer generation is not opened by the stale instance');
-  fresh();creates.length=0;
-  t=startRun({onSleep:async date=>{advanceTo(date);t.env.DISCOVERY_EXECUTOR='external';}});
-  ended=await t.run();
-  assert.equal(creates.length,0);assert.equal(ended.reason,'external');
   Object.assign(env,{DISCOVERY_EXECUTOR:'workflow'});
 
   // D1 failure while arming: the arming step is not caught, the instance ends as before and nothing is created.
@@ -1107,4 +1103,122 @@ assert.equal(rolledBack.reason,'external');assert.equal(creates.length,0);
  }
 }
 
-console.log('Discovery workflow: external parity, delegated requests, invalid fail-closed, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');
+// AIR-325 integration acceptance through the real entrypoints. A killed hop leaves a `running` record with an expired lease.
+// The real HTTP step must not mutate it or run a chunk; the Workflow settles it, and a repeated interruption fails closed in the Workflow.
+{
+ const ORPHAN='4b9bc7c5-c429-460b-87a5-e4adf2d4fbe8';
+ context.advanceDiscovery=realAdvance;
+ const orphan=(patch={})=>{
+  seed();elect();
+  set('epg/resolver-continuation.json',{stage:'running',reason:null,at:iso,hopId:ORPHAN,remainingChunks:5,nextCatchUpAt:null,retryAt:null,programmeRunId:GENERATION,...patch});
+  set('epg/resolver-lease.json',{id:ORPHAN,expiresAt:now-1000});
+  creates.length=0;puts.length=0;
+ };
+ orphan();
+ const stored=JSON.stringify(continuation()),leaseBefore=JSON.stringify(records.get('epg/resolver-lease.json'));
+ for(const [path,body] of [['/api/sync/epg',{runId:'sync-1'}],['/api/enrichment/discovery/resolve',{}],['/api/enrichment/discovery/resolve',{recovery:'interrupted'}]]){
+  const answered=await post(path,body);
+  assert.equal(answered.status,200,path);assert.equal(decided(),0,path+' ran no chunk');
+  assert.equal(JSON.stringify(continuation()),stored,path+' did not touch the orphan record');
+  assert.equal(JSON.stringify(records.get('epg/resolver-lease.json')),leaseBefore,path+' did not take the lease');
+ }
+ orphan();
+ const settled=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+ assert.ok(decided()>0,'the Workflow ran the chunk: '+JSON.stringify(settled));
+ assert.notEqual(continuation().hopId,ORPHAN,'the orphan was settled by the Workflow engine');
+ orphan({interruptions:1});
+ const failedClosed=await call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},step);
+ assert.equal(decided(),0,'a repeated interruption runs no chunk in the Workflow: '+JSON.stringify(failedClosed));
+ assert.equal(continuation().reason,'interrupted');assert.equal(continuation().interruptions,2);
+}
+
+// AIR-483: the real queueDiscovery -> replaceContinuation path, with only the D1 authority boundary refusing the write.
+// Incident shape: a persisted paused/programme_changed checkpoint (remainingChunks 0) of the still-published, pinned generation.
+{
+ const OTHER_RUN='99999999-9999-4999-8999-999999999999';
+ const refusal=(code,extra={})=>Object.assign(new Error(code),{code},extra);
+ let refuseWith=null,refusedWrites=0;
+ const incident=(options={})=>{
+  seed({stage:'complete',remaining:0,reason:'programme_changed',...options});
+  env.DISCOVERY_EXECUTOR='workflow';
+  armWorkflowAdmission(GENERATION);
+  context.DiscoveryAuthority.writeContinuation=async()=>{if(refuseWith){refusedWrites++;throw refuseWith;}return {handled:false};};
+  refusedWrites=0;refuseWith=null;creates.length=0;
+ };
+ const waits=[];
+ const scheduled=()=>call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async outcome=>{waits.push(outcome.reason);}});
+
+ // Held projector window: nothing is created or overwritten while it is held; the bounded same-tick retry recovers after expiry.
+ incident();
+ refuseWith=refusal('discovery_window',{window:{expiresAt:Date.now()+1000,state:'held'}});
+ const before=JSON.stringify(continuation());
+ const held=await call('reconcileDiscoveryWorkflow')(env);
+ assert.equal(held.reason,'projector_window');assert.equal(held.started,false);assert.ok(held.windowUntil>0);
+ assert.equal(creates.length,0);assert.equal(JSON.stringify(continuation()),before);assert.ok(refusedWrites>=1);
+ waits.length=0;refusedWrites=0;
+ let ticks=0;
+ const out=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async()=>{waits.push('wait');if(++ticks===1)refuseWith=null;}});
+ assert.equal(out.started,true,JSON.stringify(out));assert.equal(waits.length,1);assert.ok(refusedWrites>=1);
+ assert.equal(creates.length,1);assert.equal(creates[0].params.programmeRunId,GENERATION);assert.equal(creates[0].params.series,0);
+ assert.equal(continuation().reason,'epg_committed');assert.equal(continuation().programmeRunId,GENERATION);assert.equal(continuation().remainingChunks,12);
+ const again=await scheduled();
+ assert.equal(creates.length,1,'a later tick attaches or waits and never creates a second instance: '+JSON.stringify(again));
+
+ // Incident shape with owner state: series 9 stopped with reason programme_changed. Held window -> typed retry -> intent readback -> durable
+ // recovery arm (recovery_waiting) -> once due, exactly one successor series 10; the published and pinned generation never changes.
+ incident();
+ set('epg/discovery-workflow.json',{schemaVersion:1,programmeRunId:GENERATION,series:9,instanceId:'discovery_'+GENERATION.replace(/[^0-9A-Za-z]/g,'').slice(0,32)+'_9',phase:'stopped',updatedAt:iso,waitingUntil:null,reason:'programme_changed',chunksThisInstance:3,lastProgress:null,recovery:null});
+ refuseWith=refusal('discovery_window',{window:{expiresAt:Date.now()+1000,state:'held'}});
+ waits.length=0;
+ let released=0;
+ const armed9=await call('reconcileDiscoveryWorkflow')(env,{scheduled:true,wait:async()=>{waits.push('wait');if(++released===1)refuseWith=null;}});
+ assert.equal(armed9.reason,'recovery_waiting',JSON.stringify(armed9));assert.equal(waits.length,1);assert.equal(creates.length,0);
+ assert.equal(continuation().reason,'epg_committed');
+ assert.equal(records.get('epg/discovery-workflow.json').series,9);assert.ok(records.get('epg/discovery-workflow.json').recovery?.dueAt);
+ const stillWaiting=await scheduled();
+ assert.equal(stillWaiting.reason,'recovery_waiting');assert.equal(creates.length,0);
+ records.get('epg/discovery-workflow.json').recovery.dueAt=new Date(Date.now()-1000).toISOString();
+ const successor10=await scheduled();
+ assert.equal(successor10.started,true,JSON.stringify(successor10));assert.equal(successor10.series,10);
+ assert.equal(creates.length,1);assert.equal(creates[0].params.series,10);assert.equal(creates[0].params.programmeRunId,GENERATION);
+ await scheduled();
+ assert.equal(creates.length,1,'no second successor');
+ assert.equal(records.get('epg/published-generation.json').programmeRunId,GENERATION);
+
+ // A window that stays held is bounded to RECONCILE_WINDOW_ATTEMPTS attempts and never creates an instance.
+ incident();
+ refuseWith=refusal('discovery_window',{window:{expiresAt:Date.now()+1000,state:'held'}});
+ waits.length=0;
+ const stuck=await scheduled();
+ assert.equal(stuck.reason,'projector_window');assert.equal(waits.length,2);assert.equal(creates.length,0);
+
+ // Hard authority refusal: fail-closed, no retry, no instance.
+ incident();
+ refuseWith=refusal('discovery_fence');
+ waits.length=0;
+ const fenced=await scheduled();
+ assert.equal(fenced.reason,'authority_held');assert.equal(waits.length,0);assert.equal(refusedWrites,1);assert.equal(creates.length,0);
+
+ // EPG priority pause: a typed wait, no projector-style same-tick loop, no instance.
+ incident();
+ refuseWith=refusal('discovery_epg_priority',{priority:{nextCatchUpAt:Date.now()+60000}});
+ waits.length=0;
+ const paused=await scheduled();
+ assert.equal(paused.reason,'epg_priority');assert.equal(waits.length,0);assert.equal(refusedWrites,1);assert.equal(creates.length,0);
+
+ // A genuinely moved generation: the stored checkpoint belongs to another published generation; nothing is overwritten or started.
+ incident();
+ {let reads=0;const base=context.PublishedEpg.currentGeneration;
+  context.PublishedEpg.currentGeneration=async(...args)=>reads++===0?base(...args):{authority:'d1',programmeRunId:OTHER_RUN,phase:'published',generation:2,fence:'d1:2:'+OTHER_RUN};}
+ const moved=JSON.stringify(continuation());
+ const stale=await scheduled();
+ assert.equal(stale.started,false);assert.ok(['stale_generation','stopped','generation_handoff'].includes(stale.reason),JSON.stringify(stale));assert.equal(creates.length,0);assert.equal(JSON.stringify(continuation()),moved);
+
+ // Unknown failures stay intent_uncertain.
+ incident();
+ refuseWith=new Error('boom');
+ const unknown=await scheduled();
+ assert.equal(unknown.reason,'intent_uncertain');assert.equal(creates.length,0);
+}
+
+console.log('Discovery workflow: retired selector ignored, delegated requests, fail-closed without Workflow admission, renewal past 12, backoff, fencing, recovery, cron reconcile and an inert binding passed');

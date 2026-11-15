@@ -1,0 +1,1419 @@
+import path from 'node:path';
+
+// AIR-490. Every tests/*.mjs file is named here exactly once. tests/test-classification.mjs fails when a file is missing, duplicated or new.
+// core: result, contract, integrity, CAS/fence/replay, boundedness, call or SQL counts, timeouts as semantics, and resource hard caps a safe deploy needs.
+// non-functional: runner wall-clock, latency, p95, throughput, CPU or heap profiles, benchmarks, and mutation testing (how well the tests kill mutants).
+// split: one file holds both. nonFunctional(id, fn) in tests/suite-gate.mjs runs fn only in the non-functional suite.
+// support: imported library, not a test. fixture: historical file the public suite does not run.
+// A name containing budget, memory or mutation is not itself the classification.
+export const CORE_REASON='Result, contract, integrity, CAS/fence/replay, boundedness, call or SQL counts, timeout semantics, or a resource hard cap a safe deploy needs. No runner wall-clock, percentile latency, throughput, heap profile, or mutant-kill check.';
+export const FILES={
+ "activity-ui.mjs": {
+  "suite": "core"
+ },
+ "activity.mjs": {
+  "suite": "core"
+ },
+ "admin-actions-presentation.mjs": {
+  "suite": "core"
+ },
+ "admin-actions-view.mjs": {
+  "suite": "core"
+ },
+ "admin-actions.mjs": {
+  "suite": "core"
+ },
+ "admin-discovery-recovery-page.mjs": {
+  "suite": "core"
+ },
+ "admin-film-title-api.mjs": {
+  "suite": "core"
+ },
+ "admin-film-title-page.mjs": {
+  "suite": "core"
+ },
+ "admin-health-api.mjs": {
+  "suite": "core"
+ },
+ "admin-letterboxd-apply.mjs": {
+  "suite": "core"
+ },
+ "admin-letterboxd-archive-api.mjs": {
+  "suite": "core"
+ },
+ "admin-letterboxd-page.mjs": {
+  "suite": "core"
+ },
+ "admin-limbo-api.mjs": {
+  "suite": "core"
+ },
+ "admin-limbo-page.mjs": {
+  "suite": "core"
+ },
+ "admin-posters-api.mjs": {
+  "suite": "core"
+ },
+ "admin-posters-page.mjs": {
+  "suite": "core"
+ },
+ "admin-posters-run.mjs": {
+  "suite": "core"
+ },
+ "admin-prediction-recovery-api.mjs": {
+  "suite": "core"
+ },
+ "admin-prediction-recovery-page.mjs": {
+  "suite": "core"
+ },
+ "admin-query.mjs": {
+  "suite": "core"
+ },
+ "admin-read-api.mjs": {
+  "suite": "core"
+ },
+ "admin-shell.mjs": {
+  "suite": "core"
+ },
+ "adr-0142-examples.mjs": {
+  "suite": "core",
+  "note": "Auditable index of ADR 0142 examples onto covering tests; not a coverage certificate by itself."
+ },
+ "air-100-rollout.mjs": {
+  "suite": "core"
+ },
+ "air-376-small-fixes.mjs": {
+  "suite": "core"
+ },
+ "air-86-replay.mjs": {
+  "suite": "core"
+ },
+ "air-94-screening-audit.mjs": {
+  "suite": "core"
+ },
+ "air-97-rescore.mjs": {
+  "suite": "core"
+ },
+ "air-99-census.mjs": {
+  "suite": "core"
+ },
+ "air-99-detail.mjs": {
+  "suite": "core"
+ },
+ "candidate-discovery.mjs": {
+  "suite": "core"
+ },
+ "candidate-show-identity.mjs": {
+  "suite": "core"
+ },
+ "canonical-catalog-reader-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-catalog-reader.mjs": {
+  "suite": "core"
+ },
+ "canonical-catalog-titles-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-catalog-titles.mjs": {
+  "suite": "core"
+ },
+ "canonical-dictionary-producer-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-dictionary-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-differential-helper.mjs": {
+  "suite": "core"
+ },
+ "canonical-differential-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-differential.mjs": {
+  "suite": "core"
+ },
+ "canonical-discovery-admission-producer-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-discovery-admission-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-epg-person-producer-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-epg-person-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-epg-producer-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-epg-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-exception-decisions.mjs": {
+  "suite": "core"
+ },
+ "canonical-film-external-ids-producer-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-film-external-ids-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-film-writers-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-film-writers.mjs": {
+  "suite": "core"
+ },
+ "canonical-handoff-readiness.mjs": {
+  "suite": "core"
+ },
+ "canonical-person-mutation-producer-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-person-mutation-producer.mjs": {
+  "suite": "core"
+ },
+ "canonical-person-state-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-person-state.mjs": {
+  "suite": "core"
+ },
+ "canonical-person.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-adapters-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-producer-adapters.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-driver-mutation-b.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-producer-driver-mutation-lib.mjs": {
+  "suite": "support",
+  "note": "Library of runMutationPart. Executing this file runs no check. The two driver part files import it and run the mutant-kill checks in the non-functional suite."
+ },
+ "canonical-producer-driver-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-producer-driver.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-run-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-producer-run.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-schema-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-producer-schema.mjs": {
+  "suite": "core"
+ },
+ "canonical-producer-store-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-producer-store.mjs": {
+  "suite": "core"
+ },
+ "canonical-producers.mjs": {
+  "suite": "core"
+ },
+ "canonical-read-model.mjs": {
+  "suite": "core"
+ },
+ "canonical-readiness-classes.mjs": {
+  "suite": "core"
+ },
+ "canonical-receipted-writers-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-receipted-writers.mjs": {
+  "suite": "core"
+ },
+ "canonical-receipts-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "canonical-receipts.mjs": {
+  "suite": "core"
+ },
+ "canonical-repository-projected-link.mjs": {
+  "suite": "core"
+ },
+ "canonical-repository.mjs": {
+  "suite": "core"
+ },
+ "card-ux.mjs": {
+  "suite": "core"
+ },
+ "catalog-availability-writes.mjs": {
+  "suite": "core"
+ },
+ "catalog-available-user-facts.mjs": {
+  "suite": "core"
+ },
+ "catalog-available.mjs": {
+  "suite": "core"
+ },
+ "catalog-completed-d1.mjs": {
+  "suite": "core"
+ },
+ "catalog-d1.mjs": {
+  "suite": "split",
+  "note": "The route contract stays in core. Twenty timed identity reads are scenario catalog-d1-identity-read-latency."
+ },
+ "catalog-film.mjs": {
+  "suite": "core"
+ },
+ "catalog-posters.mjs": {
+  "suite": "core"
+ },
+ "catalog-watched-d1.mjs": {
+  "suite": "core"
+ },
+ "channel-finds.mjs": {
+  "suite": "core"
+ },
+ "confidence-assessment-ui.mjs": {
+  "suite": "core"
+ },
+ "content-search.mjs": {
+  "suite": "core"
+ },
+ "contextual-finds.mjs": {
+  "suite": "core"
+ },
+ "continuation-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "continuous-drain.mjs": {
+  "suite": "core"
+ },
+ "coverage-percent.mjs": {
+  "suite": "core"
+ },
+ "cron-schedule-simulation.mjs": {
+  "suite": "core"
+ },
+ "d1-backfill.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-bucket-unicode.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-buckets.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-context.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-duplicate-retained.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-fairness.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-identity-collision.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-phase-log.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-phases.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment-stored-pages.mjs": {
+  "suite": "core"
+ },
+ "d1-enrichment.mjs": {
+  "suite": "core"
+ },
+ "d1-projection-seed.mjs": {
+  "suite": "core"
+ },
+ "d1-schema.mjs": {
+  "suite": "core"
+ },
+ "d1-standin.mjs": {
+  "suite": "core"
+ },
+ "daily-quality.mjs": {
+  "suite": "core"
+ },
+ "data-health.mjs": {
+  "suite": "core"
+ },
+ "deferred-completion-status.mjs": {
+  "suite": "core"
+ },
+ "diary-first-ratings.mjs": {
+  "suite": "core"
+ },
+ "discovery-activity.mjs": {
+  "suite": "core"
+ },
+ "discovery-admission-packed.mjs": {
+  "suite": "core",
+  "note": "8,312-film write stays in core. newTrips*350<60000 is a cap on round trips at a fixed 350ms model, not the runner clock. localMs is only logged."
+ },
+ "discovery-archive-import.mjs": {
+  "suite": "core"
+ },
+ "discovery-authority.mjs": {
+  "suite": "core"
+ },
+ "discovery-bounded-d1-rehearsal.mjs": {
+  "suite": "core"
+ },
+ "discovery-bounded-drain.mjs": {
+  "suite": "core"
+ },
+ "discovery-bounded-fence.mjs": {
+  "suite": "core"
+ },
+ "discovery-bounded-lib.mjs": {
+  "suite": "core"
+ },
+ "discovery-conflict-diagnostics.mjs": {
+  "suite": "core",
+  "note": "Typed discovery_conflict / fence classification, failedAt phase and UNIQUE category. No production read."
+ },
+ "discovery-chunk-budget.mjs": {
+  "suite": "split",
+  "note": "Same-key reads, fences and the injected preChunkMs gap stay in core. The concurrent-versus-sequential runner ratio is scenario discovery-chunk-budget-concurrent-walk."
+ },
+ "discovery-chunk-memory.mjs": {
+  "suite": "core",
+  "note": "The chunk must release inputs and keep the same decisions. That is a resource bound, not a speed target."
+ },
+ "discovery-decisions-read.mjs": {
+  "suite": "core"
+ },
+ "discovery-events.mjs": {
+  "suite": "core"
+ },
+ "discovery-identity-review.mjs": {
+  "suite": "core"
+ },
+ "discovery-ledger-archive.mjs": {
+  "suite": "core"
+ },
+ "discovery-ledger-install.mjs": {
+  "suite": "core"
+ },
+ "discovery-ledger-split.mjs": {
+  "suite": "core"
+ },
+ "discovery-observation-index.mjs": {
+  "suite": "core"
+ },
+ "discovery-operational-status.mjs": {
+  "suite": "core"
+ },
+ "discovery-paged-write.mjs": {
+  "suite": "core"
+ },
+ "discovery-pipeline-d1-status.mjs": {
+  "suite": "core"
+ },
+ "discovery-pipeline.mjs": {
+  "suite": "core"
+ },
+ "discovery-production.mjs": {
+  "suite": "core"
+ },
+ "discovery-reconsider.mjs": {
+  "suite": "core"
+ },
+ "discovery-recovery.mjs": {
+  "suite": "core"
+ },
+ "discovery-revalidation.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-busy.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-interrupted.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-publish.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-reads.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-restart.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-resume.mjs": {
+  "suite": "core"
+ },
+ "discovery-seal-throughput.mjs": {
+  "suite": "core",
+  "note": "Production-sized seal stays in core. The assertions are round-trip and statement caps plus crash, fence and replay. standinWallMs is only logged."
+ },
+ "discovery-slot-assignment.mjs": {
+  "suite": "core"
+ },
+ "discovery-status-memory.mjs": {
+  "suite": "core",
+  "note": "Operational status must not follow ledger size in statement count. Milliseconds are only logged."
+ },
+ "discovery-user-read-fence.mjs": {
+  "suite": "split",
+  "note": "Fence, HTTP 503 and R2-fallback refusals are core. The delayed-catalog wait is gated nonFunctional."
+ },
+ "discovery-workflow-bundle.mjs": {
+  "suite": "core"
+ },
+ "discovery-workflow.mjs": {
+  "suite": "core"
+ },
+ "documentation-governance.mjs": {
+  "suite": "core"
+ },
+ "effective-window.mjs": {
+  "suite": "core"
+ },
+ "enrichment.mjs": {
+  "suite": "core"
+ },
+ "epg-commit-durable-enqueue.mjs": {
+  "suite": "core"
+ },
+ "epg-commit-interrupted-handoff.mjs": {
+  "suite": "core"
+ },
+ "epg-commit-memory.mjs": {
+  "suite": "core",
+  "note": "The commit must fold a large ledger without holding it. That is a memory bound required for a safe deploy, not a latency target."
+ },
+ "epg-diagnostic-bindings-ready.mjs": {
+  "suite": "core"
+ },
+ "epg-diagnostic-context.mjs": {
+  "suite": "core"
+ },
+ "epg-diagnostic-provision.mjs": {
+  "suite": "core"
+ },
+ "epg-diagnostic-run.mjs": {
+  "suite": "core"
+ },
+ "epg-event-publication-d1.mjs": {
+  "suite": "core"
+ },
+ "epg-event-publication.mjs": {
+  "suite": "core"
+ },
+ "epg-extended-future.mjs": {
+  "suite": "core"
+ },
+ "epg-mirror-reconciliation.mjs": {
+  "suite": "core"
+ },
+ "epg-orchestration.mjs": {
+  "suite": "core"
+ },
+ "epg-path-a-feasibility.mjs": {
+  "suite": "core",
+  "note": "The tiny-scale replay must be exact and must refuse bad paths. heapUsed>0 only proves a sample was recorded."
+ },
+ "epg-path-a-workerd.mjs": {
+  "suite": "core"
+ },
+ "epg-phase-markers.mjs": {
+  "suite": "core"
+ },
+ "epg-priority-gate.mjs": {
+  "suite": "core"
+ },
+ "epg-priority-pause.mjs": {
+  "suite": "core"
+ },
+ "epg-producer-dry-run-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "epg-producer-dry-run.mjs": {
+  "suite": "core"
+ },
+ "epg-producer-m2b-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "epg-producer-m2b-reader-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "epg-producer-m2b-reader.mjs": {
+  "suite": "core"
+ },
+ "epg-producer-m2b-synthetic.mjs": {
+  "suite": "core"
+ },
+ "epg-producer-m2b.mjs": {
+  "suite": "core"
+ },
+ "epg-published-at.mjs": {
+  "suite": "core"
+ },
+ "epg-r2-known-length.mjs": {
+  "suite": "core",
+  "note": "Known-length publish at tens of megabytes stays in core. The assertions are sizes, counts and the type error. seedMs and publishMs are only logged."
+ },
+ "epg-ratings-attempt.mjs": {
+  "suite": "core"
+ },
+ "epg-replay-dataset.mjs": {
+  "suite": "core"
+ },
+ "epg-repository.mjs": {
+  "suite": "core"
+ },
+ "epg-slot-uniqueness.mjs": {
+  "suite": "core"
+ },
+ "epg-status-ledger-mode.mjs": {
+  "suite": "core"
+ },
+ "epg-trace-boundaries.mjs": {
+  "suite": "core"
+ },
+ "event-outbox.mjs": {
+  "suite": "core"
+ },
+ "events-pagination-ui.mjs": {
+  "suite": "core"
+ },
+ "events-screen.mjs": {
+  "suite": "core"
+ },
+ "events-type-filter.mjs": {
+  "suite": "core"
+ },
+ "evidence-json-paths.mjs": {
+  "suite": "core"
+ },
+ "execution-filters.mjs": {
+  "suite": "core"
+ },
+ "expired-diagnostics-settle.mjs": {
+  "suite": "core"
+ },
+ "facet-picker-focus.mjs": {
+  "suite": "core"
+ },
+ "facet-pickers.mjs": {
+  "suite": "core"
+ },
+ "feature-flags.mjs": {
+  "suite": "core"
+ },
+ "film-admission.mjs": {
+  "suite": "core"
+ },
+ "film-availability.mjs": {
+  "suite": "core"
+ },
+ "film-card-actions.mjs": {
+  "suite": "core"
+ },
+ "film-compare.mjs": {
+  "suite": "core"
+ },
+ "film-history.mjs": {
+  "suite": "core"
+ },
+ "film-page.mjs": {
+  "suite": "core"
+ },
+ "film-permalink.mjs": {
+  "suite": "core"
+ },
+ "film-person-0019-preflight-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-0019-preflight.mjs": {
+  "suite": "core"
+ },
+ "film-person-0020-preflight-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-0020-preflight.mjs": {
+  "suite": "core"
+ },
+ "film-person-authority.mjs": {
+  "suite": "core"
+ },
+ "film-person-backfill.mjs": {
+  "suite": "core"
+ },
+ "film-person-baseline.mjs": {
+  "suite": "core"
+ },
+ "film-person-capture-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-capture.mjs": {
+  "suite": "core"
+ },
+ "film-person-connector-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-connector.mjs": {
+  "suite": "core"
+ },
+ "film-person-cutover-accepted.mjs": {
+  "suite": "core"
+ },
+ "film-person-cutover-minimum-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-cutover-minimum.mjs": {
+  "suite": "core"
+ },
+ "film-person-cutover-record-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-cutover-record.mjs": {
+  "suite": "core"
+ },
+ "film-person-cutover-run.mjs": {
+  "suite": "core"
+ },
+ "film-person-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "film-person-e6-measure-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-e6-measure.mjs": {
+  "suite": "core",
+  "note": "Percentile arithmetic and stop rules of the measurement kit are functional. This file does not assert a runner latency."
+ },
+ "film-person-h1-rehearsal.mjs": {
+  "suite": "core"
+ },
+ "film-person-h1-verify-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-h1-verify.mjs": {
+  "suite": "core"
+ },
+ "film-person-localize.mjs": {
+  "suite": "core"
+ },
+ "film-person-prepared-loader-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "film-person-prepared-loader.mjs": {
+  "suite": "core"
+ },
+ "film-person-reader.mjs": {
+  "suite": "split",
+  "note": "The lifecycle contract, including the 2500-film hot result, stays in core. The 8s runner bound is scenario film-person-reader-completed-slots-index."
+ },
+ "film-person.mjs": {
+  "suite": "core"
+ },
+ "film-retention.mjs": {
+  "suite": "core"
+ },
+ "film-route.mjs": {
+  "suite": "core"
+ },
+ "film-show-layout.mjs": {
+  "suite": "core"
+ },
+ "film-sync-state.mjs": {
+  "suite": "core"
+ },
+ "film-timeline.mjs": {
+  "suite": "core"
+ },
+ "film-title-review.mjs": {
+  "suite": "core"
+ },
+ "filter-preset-ui.mjs": {
+  "suite": "core"
+ },
+ "filter-presets.mjs": {
+  "suite": "core"
+ },
+ "filters-window.mjs": {
+  "suite": "fixture",
+  "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "finds-availability.mjs": {
+  "suite": "core"
+ },
+ "finds-title-exclusion.mjs": {
+  "suite": "core"
+ },
+ "finds-watched-hit-area.mjs": {
+  "suite": "core"
+ },
+ "finds-watched-mark.mjs": {
+  "suite": "core"
+ },
+ "finds.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-compatibility-spec.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-compatibility.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-evidence.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-migration-queue.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-readers.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-source-derivation.mjs": {
+  "suite": "core"
+ },
+ "fingerprint-version-import.mjs": {
+  "suite": "core"
+ },
+ "footer-collection.mjs": {
+  "suite": "core"
+ },
+ "footer-resilience.mjs": {
+  "suite": "split",
+  "note": "Status, degraded names and unknown values stay in core. The measured 3s waits are scenarios footer-resilience-silent-source and footer-resilience-hung-freshness. A real hang still hits the per-file timeout."
+ },
+ "generation-stage-faults.mjs": {
+  "suite": "core"
+ },
+ "generation-stage-lib.mjs": {
+  "suite": "core"
+ },
+ "generation-stage-withheld.mjs": {
+  "suite": "core"
+ },
+ "generation-stage.mjs": {
+  "suite": "core"
+ },
+ "get-side-effects.mjs": {
+  "suite": "core"
+ },
+ "get-write-audit-harness.mjs": {
+  "suite": "core"
+ },
+ "get-write-audit-lib.mjs": {
+  "suite": "core"
+ },
+ "get-write-audit.mjs": {
+  "suite": "core"
+ },
+ "get-write-baseline.mjs": {
+  "suite": "core"
+ },
+ "internal-continuation.mjs": {
+  "suite": "core"
+ },
+ "interrupted-continuation.mjs": {
+  "suite": "core"
+ },
+ "interrupted-recovery.mjs": {
+  "suite": "core"
+ },
+ "item-failures.mjs": {
+  "suite": "core"
+ },
+ "json-array-stream-parity.mjs": {
+  "suite": "core"
+ },
+ "json-schema-lite.mjs": {
+  "suite": "core"
+ },
+ "last-chance.mjs": {
+  "suite": "core"
+ },
+ "lease-recovery.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-archive-preview.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-archive-zip.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-baseline-chunks.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-baseline-import.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-diary.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-facts.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-identity-resolve.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-inferred.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-rated-admission.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-rated-candidates.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-reconcile.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-slug-alias.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-tmdb-rebase.mjs": {
+  "suite": "core"
+ },
+ "letterboxd-tmdb-search.mjs": {
+  "suite": "core"
+ },
+ "lifecycle-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "lifecycle-parity.mjs": {
+  "suite": "core"
+ },
+ "limbo-inventory.mjs": {
+  "suite": "core"
+ },
+ "live-refresh.mjs": {
+  "suite": "core"
+ },
+ "live-telemetry.mjs": {
+  "suite": "core"
+ },
+ "local-api.mjs": {
+  "suite": "core"
+ },
+ "local-dev-smoke.mjs": {
+  "suite": "core"
+ },
+ "local-fixtures.mjs": {
+  "suite": "core"
+ },
+ "local-store.mjs": {
+  "suite": "core"
+ },
+ "local-timeshift.mjs": {
+  "suite": "core"
+ },
+ "localization-sources.mjs": {
+  "suite": "core"
+ },
+ "match-hint.mjs": {
+  "suite": "core"
+ },
+ "mcp-tools.mjs": {
+  "suite": "core"
+ },
+ "mcp.mjs": {
+  "suite": "core"
+ },
+ "memory-bucket.mjs": {
+  "suite": "core"
+ },
+ "metadata-cache-production.mjs": {
+  "suite": "core"
+ },
+ "metadata-cache.mjs": {
+  "suite": "core"
+ },
+ "migration-export.mjs": {
+  "suite": "core"
+ },
+ "migration-import.mjs": {
+  "suite": "core"
+ },
+ "migration-pattern-limit.mjs": {
+  "suite": "core"
+ },
+ "monitor-policy.mjs": {
+  "suite": "core"
+ },
+ "monitor-runtime.mjs": {
+  "suite": "core"
+ },
+ "monitor-telegram.mjs": {
+  "suite": "core"
+ },
+ "mood-vocabulary.mjs": {
+  "suite": "core"
+ },
+ "names.mjs": {
+  "suite": "fixture",
+  "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "nonfilm-screening.mjs": {
+  "suite": "core"
+ },
+ "offline-importer.mjs": {
+  "suite": "core"
+ },
+ "orphaned-continuation.mjs": {
+  "suite": "core"
+ },
+ "owner-review-d1.mjs": {
+  "suite": "core"
+ },
+ "period-counters.mjs": {
+  "suite": "core"
+ },
+ "period-filter.mjs": {
+  "suite": "core"
+ },
+ "persist-watchlist-tail.mjs": {
+  "suite": "core"
+ },
+ "person-identity-projection.mjs": {
+  "suite": "core"
+ },
+ "person-name-editor.mjs": {
+  "suite": "core"
+ },
+ "person-name-review.mjs": {
+  "suite": "core"
+ },
+ "personal-filters.mjs": {
+  "suite": "core"
+ },
+ "prediction-ab-report.mjs": {
+  "suite": "core"
+ },
+ "prediction-assessment.mjs": {
+  "suite": "core"
+ },
+ "prediction-authority-scope.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-profile.mjs": {
+  "suite": "core",
+  "note": "The profile asserts storage-call counts and byte sizes. It does not assert wall-clock speed."
+ },
+ "prediction-batch-start-budget.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-start-parity-lib.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-start-parity.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-start.mjs": {
+  "suite": "core"
+ },
+ "prediction-batch-submit.mjs": {
+  "suite": "split",
+  "note": "Settlement, byte cap and the round-trip cap stay in core. Offline wall time is scenario prediction-batch-submit-wall."
+ },
+ "prediction-batch-validate.mjs": {
+  "suite": "split",
+  "note": "Verdicts and the request-size cap stay in core. The p95 of 200 calls is scenario prediction-batch-validate-p95."
+ },
+ "prediction-caller-failure-claim.mjs": {
+  "suite": "core"
+ },
+ "prediction-closed-contract.mjs": {
+  "suite": "core"
+ },
+ "prediction-compatibility.mjs": {
+  "suite": "core"
+ },
+ "prediction-confidence.mjs": {
+  "suite": "core"
+ },
+ "prediction-d1-flow-lib.mjs": {
+  "suite": "core"
+ },
+ "prediction-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "prediction-domain-production.mjs": {
+  "suite": "core"
+ },
+ "prediction-domain.mjs": {
+  "suite": "core"
+ },
+ "prediction-dry-run-isolation.mjs": {
+  "suite": "core"
+ },
+ "prediction-manifest-size.mjs": {
+  "suite": "core"
+ },
+ "prediction-materialization.mjs": {
+  "suite": "core"
+ },
+ "prediction-overlay-index.mjs": {
+  "suite": "core",
+  "note": "The production-shaped overlay asserts query counts and field parity. Wall time is only logged."
+ },
+ "prediction-quality.mjs": {
+  "suite": "core"
+ },
+ "prediction-queue-budget.mjs": {
+  "suite": "core",
+  "note": "The encoded queue must fit the character cap. Write time is only logged."
+ },
+ "prediction-queue-cas.mjs": {
+  "suite": "core"
+ },
+ "prediction-queue-discovery-independence.mjs": {
+  "suite": "core",
+  "note": "A run under a Discovery storm must settle each film once and bound whole-catalog reads. Milliseconds are only logged."
+ },
+ "prediction-queue-head-seed-d1.mjs": {
+  "suite": "core"
+ },
+ "prediction-queue-hotenteredat.mjs": {
+  "suite": "core"
+ },
+ "prediction-r2-roundtrips.mjs": {
+  "suite": "core"
+ },
+ "prediction-recovery.mjs": {
+  "suite": "core"
+ },
+ "prediction-repository.mjs": {
+  "suite": "core"
+ },
+ "prediction-start-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "prediction-step-timing.mjs": {
+  "suite": "split",
+  "note": "The logical-clock timer contract stays in core. Real hrtime overhead is scenario prediction-step-timing-overhead."
+ },
+ "prediction-versions.mjs": {
+  "suite": "core"
+ },
+ "profile-compatibility-spec.mjs": {
+  "suite": "core"
+ },
+ "profile-publisher.mjs": {
+  "suite": "core"
+ },
+ "programme-catalog-d1-route.mjs": {
+  "suite": "core"
+ },
+ "programme-catalog-presentation.mjs": {
+  "suite": "core"
+ },
+ "programme-catalog-route.mjs": {
+  "suite": "core"
+ },
+ "programme-catalog-ui.mjs": {
+  "suite": "core"
+ },
+ "programme-display-window.mjs": {
+  "suite": "core"
+ },
+ "programme-freshness.mjs": {
+  "suite": "core"
+ },
+ "projector-bulk-spike.mjs": {
+  "suite": "core",
+  "note": "Grouped writes must refuse a conflict and fall back to the same rows. That is a correctness check of the spike, not a benchmark gate."
+ },
+ "projector-bulk.mjs": {
+  "suite": "core"
+ },
+ "projector-l1-budget.mjs": {
+  "suite": "core"
+ },
+ "projector-marker-fence-mutation.mjs": {
+  "suite": "non-functional",
+  "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
+ },
+ "projector-marker-fence.mjs": {
+  "suite": "core"
+ },
+ "projector-view-parity.mjs": {
+  "suite": "core"
+ },
+ "projector-window-epg.mjs": {
+  "suite": "core"
+ },
+ "projector-window-r2-instrumented.mjs": {
+  "suite": "core"
+ },
+ "projector-window-r2-inventory.mjs": {
+  "suite": "core"
+ },
+ "projector-window-r2-writes.mjs": {
+  "suite": "core"
+ },
+ "projector-window.mjs": {
+  "suite": "core"
+ },
+ "published-epg-completed.mjs": {
+  "suite": "core"
+ },
+ "published-epg-production.mjs": {
+  "suite": "core"
+ },
+ "published-epg.mjs": {
+  "suite": "core"
+ },
+ "queue-compatibility.mjs": {
+  "suite": "core"
+ },
+ "r2-snapshot-export.mjs": {
+  "suite": "core"
+ },
+ "rating-history.mjs": {
+  "suite": "core"
+ },
+ "rating-identity.mjs": {
+  "suite": "core"
+ },
+ "ratings-api.mjs": {
+  "suite": "core"
+ },
+ "ratings-cursor-merge.mjs": {
+  "suite": "core"
+ },
+ "ratings-d1.mjs": {
+  "suite": "core"
+ },
+ "ratings-epg.mjs": {
+  "suite": "core"
+ },
+ "ratings-event-details.mjs": {
+  "suite": "core"
+ },
+ "ratings-event.mjs": {
+  "suite": "core"
+ },
+ "ratings-harness.mjs": {
+  "suite": "core"
+ },
+ "ratings-legacy-link.mjs": {
+  "suite": "core"
+ },
+ "ratings-migration.mjs": {
+  "suite": "core"
+ },
+ "ratings-orchestration.mjs": {
+  "suite": "core"
+ },
+ "ratings-queue-v2.mjs": {
+  "suite": "core"
+ },
+ "ratings-refresh.mjs": {
+  "suite": "core"
+ },
+ "ratings-run.mjs": {
+  "suite": "core"
+ },
+ "ratings.mjs": {
+  "suite": "core"
+ },
+ "removal-rating-lookup.mjs": {
+  "suite": "core"
+ },
+ "removal-ratings.mjs": {
+  "suite": "core"
+ },
+ "resolution-acceptance.mjs": {
+  "suite": "core"
+ },
+ "return-home.mjs": {
+  "suite": "core"
+ },
+ "run-diagnostics.mjs": {
+  "suite": "core"
+ },
+ "run-history.mjs": {
+  "suite": "core"
+ },
+ "run-tests-runner.mjs": {
+  "suite": "core"
+ },
+ "scheduled-task-prompt-v2.mjs": {
+  "suite": "core"
+ },
+ "scheduled-task-timing.mjs": {
+  "suite": "core"
+ },
+ "schema-preflight.mjs": {
+  "suite": "core"
+ },
+ "scored-discovery.mjs": {
+  "suite": "core"
+ },
+ "scored-resolution.mjs": {
+  "suite": "core"
+ },
+ "search-scopes-ui.mjs": {
+  "suite": "core"
+ },
+ "shortlist.mjs": {
+  "suite": "core"
+ },
+ "show-replacement.mjs": {
+  "suite": "core"
+ },
+ "similar-films.mjs": {
+  "suite": "core"
+ },
+ "snapshot.mjs": {
+  "suite": "core"
+ },
+ "sort-default.mjs": {
+  "suite": "core"
+ },
+ "sources.mjs": {
+  "suite": "fixture",
+  "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "sqlite-session-semantics.mjs": {
+  "suite": "core"
+ },
+ "sqlite-session.mjs": {
+  "suite": "core",
+  "note": "LARGE_ANSWER selects quote mode so large values stay correct. It is not a suite speed gate."
+ },
+ "started.mjs": {
+  "suite": "core"
+ },
+ "status-footer-ui.mjs": {
+  "suite": "core"
+ },
+ "status-footer.mjs": {
+  "suite": "core"
+ },
+ "stop-observability.mjs": {
+  "suite": "core"
+ },
+ "story-filters.mjs": {
+  "suite": "core"
+ },
+ "submit-validation.mjs": {
+  "suite": "core"
+ },
+ "suite-gate.mjs": {
+  "suite": "support",
+  "note": "Helper that skips nonFunctional callbacks unless IPTV_TEST_SUITE=non-functional. Executing this file runs no check."
+ },
+ "superseded-redirect.mjs": {
+  "suite": "core"
+ },
+ "synopsis.mjs": {
+  "suite": "fixture",
+  "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "test-classification.mjs": {
+  "suite": "core"
+ },
+ "throughput.mjs": {
+  "suite": "core",
+  "note": "Despite the name, the file checks queue admission, idempotency and failure boundaries. It does not assert a rate."
+ },
+ "timeless-documentation.mjs": {
+  "suite": "core"
+ },
+ "titles.mjs": {
+  "suite": "fixture",
+  "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "tmdb-connection.mjs": {
+  "suite": "core"
+ },
+ "tmdb-retirement-decisions.mjs": {
+  "suite": "core"
+ },
+ "tmdb-tv-identity.mjs": {
+  "suite": "core"
+ },
+ "tmdb-tv-runtime.mjs": {
+  "suite": "core"
+ },
+ "tmdb-watchlist-credits.mjs": {
+  "suite": "core"
+ },
+ "unscheduled.mjs": {
+  "suite": "fixture",
+  "note": "Historical integration fixture, intentionally absent from the public suite."
+ },
+ "url-state.mjs": {
+  "suite": "core"
+ },
+ "viewing.mjs": {
+  "suite": "core"
+ },
+ "watchlist-card-rating.mjs": {
+  "suite": "core"
+ },
+ "watchlist-chance.mjs": {
+  "suite": "core"
+ },
+ "watchlist-event-ratings.mjs": {
+  "suite": "core"
+ }
+};
+export const SUITES=['core','non-functional','split','support','fixture'];
+const REPO_TESTS=path.resolve(path.dirname(new URL(import.meta.url).pathname),'..','tests');
+
+export function entryOf(file){
+ return FILES[file]??null;
+}
+// files is the directory listing already limited to *.mjs. suite is core, non-functional or all.
+// A directory other than this repository's tests/ folder is not classified: every file is runnable, which is how the runner's own fixtures work.
+export function selectSuite(files,directory,suite){
+ if(path.resolve(directory)!==REPO_TESTS)return files;
+ const wanted=suite==='all'?new Set(['core','split','non-functional']):suite==='non-functional'?new Set(['non-functional','split']):new Set(['core','split']);
+ const selected=[];
+ for(const file of files){
+  const entry=FILES[file];
+  if(!entry){const error=new Error('unclassified test file '+file+'; add it to scripts/test-classification.mjs');error.code='unclassified';throw error;}
+  if(entry.suite==='support'||entry.suite==='fixture')continue;
+  if(wanted.has(entry.suite))selected.push(file);
+ }
+ return selected;
+}

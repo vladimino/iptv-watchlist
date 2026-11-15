@@ -47,6 +47,7 @@ export function scopedImports(file,name,preamble){
 export function scopedEpgPriority(){
  return scoped('src/domain/orchestration-policy.js','OrchestrationPolicy')+'\n'+scopedReplacing('src/domain/epg-priority-pause.js','EpgPriorityPause','const {EPG_SCHEDULE,madridDayKey,madridInstant}=OrchestrationPolicy;\n');
 }
+// ADR 0142: the per-slot evidence rule is a pure module scoped in front of the authority, which assigns slots with it.
 export function scopedDiscoveryAuthority(){
- return scopedReplacing('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\n');
+ return scoped('src/domain/slot-evidence.js','SlotEvidence')+'\n'+scopedImports('src/discovery-authority.js','DiscoveryAuthority','const {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS}=EpgPriorityPause;\nconst {slotEligibility,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT:SLOT_REVALIDATION_LIMIT}=SlotEvidence;');
 }

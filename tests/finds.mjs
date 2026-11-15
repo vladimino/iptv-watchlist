@@ -24,12 +24,12 @@ assert(orderOf('id="movies"')<orderOf('id="empty"'),'the grid comes before its e
 assert(orderOf('id="empty"')<orderOf('id="finds"'),'the finds section follows the grid and its empty state');
 assert(orderOf('id="finds"')<orderOf('class="status-footer"'),'the finds section stays inside the results column above the footer');
 assert.match(html.slice(orderOf('id="finds"'),orderOf('class="status-footer"')),/<\/section>\s*<\/section>\s*<section id="film-screen"/,'the finds section is the last block of the results column (the film and events columns follow it in the workspace)');
-assert.equal((app.match(/fetch\('\/api\/catalog\/available'\)/g)||[]).length,1,'the section reads the catalog route once');
+assert.equal((app.match(/fetchUserRead\('\/api\/catalog\/available'\)/g)||[]).length,1,'the section reads the catalog route once');
 assert.match(app,/loadEnrichment\(\{quiet:true\}\),\n\s+loadCatalog\(\),/,'the catalog refreshes with the other live loaders');
 assert.doesNotMatch(app,/finds-card[^`]*film-open/,'a find never opens the watchlist film route');
 
 const nodes={'#finds':{hidden:true},'#finds-cards':{innerHTML:''},'#finds-caption':{textContent:''}};
-const ui=vm.createContext({Date,Intl,Set,Map,console,document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
+const ui=vm.createContext({Date,Intl,Set,Map,console,setTimeout,clearTimeout,document:{querySelector:selector=>nodes[selector]||null,querySelectorAll:()=>[]}});
 vm.runInContext(scoped('src/domain/film-availability.js','FilmAvailability'),ui);
 vm.runInContext(app.replace(/init\(\);\s*$/,''),ui);
 vm.runInContext(`viewClock=${now}`,ui);
@@ -240,6 +240,25 @@ vm.runInContext("findsSource={...findsSource,programmeRunId:'G3'};report={films:
 assert.equal(nodes['#finds'].hidden,true,'a programme without a run id cannot vouch for the catalog');
 vm.runInContext("report={runId:'G3',films:[]};renderFinds(now)",ui);
 assert.equal(nodes['#finds'].hidden,false);
+// A first load that fails is an unavailable catalog, not an empty Finds list.
+vm.runInContext("findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false};report={runId:'G1',films:[]};",ui);
+queue.length=0;queue.push({ok:false,status:503});
+assert.equal(await run('loadCatalog()',null),false);
+assert.equal(nodes['#finds'].hidden,false,'an unavailable catalog is shown, not hidden as empty');
+assert.match(nodes['#finds-cards'].innerHTML,/Каталог сейчас недоступен/);
+assert.equal(shown(),0);
+// One Retry-After on 503 is retried once; a later 200 is success.
+let userReads=0;
+const retryFetch=async()=>{
+ userReads++;
+ if(userReads===1)return {ok:false,status:503,headers:{get:name=>name==='Retry-After'?'0':null},json:async()=>({error:'fence',code:'discovery_fence'})};
+ const ok=answer('G1',ranked);return {ok:true,status:200,json:async()=>ok.body};
+};
+ui.fetch=retryFetch;
+vm.runInContext('findsLoading=false;findsSource={films:[],programmeRunId:null,generatedAt:null,ready:false,error:false};report={runId:\'G1\',films:[]};',ui);
+assert.equal(await run('loadCatalog()',null),true);
+assert.equal(userReads,2,'one bounded retry');
+assert.equal(shown(),5);
 assert.match(app,/else updateSourceInfo\(\);\n\s+renderFinds\(\);/,'every programme refresh re-evaluates the section');
 assert.match(app,/findsSource=\{\.\.\.findsSource,error:true\};\n\s+renderFinds\(\);/,'a failed catalog refresh re-evaluates the section');
 console.log('Finds: thresholds, window, watchlist and watched exclusions, ranking, limit, no filler, dedupe, franchise, airing, NEW card, hidden empty section and generation freshness passed');

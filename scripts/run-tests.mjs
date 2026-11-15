@@ -1,22 +1,25 @@
-import {appendFileSync,readdirSync} from 'node:fs';
-import {spawn} from 'node:child_process';
+import {appendFileSync,readdirSync,writeFileSync} from 'node:fs';
+import {spawn,spawnSync} from 'node:child_process';
 import {availableParallelism} from 'node:os';
 import path from 'node:path';
+import {selectSuite} from './test-classification.mjs';
 
 // AIR-378. Runs every self-contained test file in its own Node process (process isolation is kept), a bounded number at a time.
 //
-//   npm test                          default: min(6, ceil(1.5 x CPUs)) files at a time (AIR-408: the suite waits more than it computes)
+//   npm test                          the core suite: min(6, ceil(1.5 x CPUs)) files at a time (AIR-408: the suite waits more than it computes)
+//   npm test -- --suite non-functional  mutant-kill checks and runner wall-clock checks (also TEST_SUITE); the nightly workflow runs this
+//   npm test -- --suite all           core, then the non-functional suite (split files run in both, with the matching callbacks)
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
-//   npm test -- --shard 1/3           this part of the suite only (also TEST_SHARD); CI runs the three shards as three jobs (AIR-418)
+//   npm test -- --shard 1/3           this part of the selected suite only (also TEST_SHARD); CI runs the core suite as three jobs (AIR-418)
 //
 // A failing, timed-out or signalled file is never lost: it is named with its exit code or signal and its full stdout and stderr, the runner
 // stops starting new files, lets the running ones finish and exits non-zero. Files in SERIAL_ONLY run alone, after the parallel phase.
 
 // Historical integration fixtures contain downloaded production snapshots and
 // are intentionally not part of the public repository.
-const FIXTURE_DEPENDENT=new Set([
+export const FIXTURE_DEPENDENT=new Set([
  'filters-window.mjs',
  'names.mjs',
  'sources.mjs',
@@ -172,13 +175,152 @@ export const WEIGHTS={
  'ratings-orchestration.mjs':2,
  'ratings-run.mjs':2,
 };
+// AIR-494: core-only scheduling costs, mean GitHub Actions `ok <file> (<s>s)` over 12 successful CI/CD runs after AIR-490 (fit set; docs/evidence/ci/air-494-core-shard-recalibration-2026-11-15.md). Rounded seconds, entries of 2 or more; the two serial-only files keep solo-time / 0.233 s per unit so they pay for the tail they add after the parallel phase. Mutation files are not in this map: the required jobs run `--suite core`. Unlisted core files keep DEFAULT_WEIGHT.
+export const CORE_WEIGHTS={
+ 'generation-stage.mjs':55,
+ 'discovery-decisions-read.mjs':44,
+ 'epg-r2-known-length.mjs':42,
+ 'sqlite-session-semantics.mjs':38,
+ 'generation-stage-withheld.mjs':34,
+ 'local-dev-smoke.mjs':32,
+ 'projector-view-parity.mjs':26,
+ 'discovery-seal-publish.mjs':24,
+ 'projector-bulk-spike.mjs':24,
+ 'epg-diagnostic-run.mjs':22,
+ 'run-tests-runner.mjs':22,
+ 'd1-enrichment-buckets.mjs':21,
+ 'prediction-batch-start.mjs':21,
+ 'prediction-queue-budget.mjs':21,
+ 'd1-enrichment-bucket-unicode.mjs':19,
+ 'discovery-bounded-drain.mjs':19,
+ 'film-person-prepared-loader.mjs':19,
+ 'film-person-h1-rehearsal.mjs':18,
+ 'd1-backfill.mjs':17,
+ 'd1-enrichment-fairness.mjs':16,
+ 'd1-enrichment-stored-pages.mjs':15,
+ 'canonical-producer-driver.mjs':14,
+ 'offline-importer.mjs':14,
+ 'discovery-production.mjs':13,
+ 'projector-bulk.mjs':13,
+ 'd1-enrichment.mjs':12,
+ 'epg-diagnostic-context.mjs':12,
+ 'epg-diagnostic-provision.mjs':12,
+ 'epg-orchestration.mjs':12,
+ 'prediction-batch-submit.mjs':12,
+ 'discovery-archive-import.mjs':11,
+ 'discovery-chunk-budget.mjs':11,
+ 'discovery-seal-throughput.mjs':11,
+ 'migration-export.mjs':11,
+ 'film-person-capture.mjs':10,
+ 'film-person-reader.mjs':10,
+ 'prediction-authority-scope.mjs':10,
+ 'canonical-receipted-writers.mjs':9,
+ 'get-write-audit.mjs':9,
+ 'prediction-queue-cas.mjs':9,
+ 'prediction-manifest-size.mjs':8,
+ 'prediction-queue-discovery-independence.mjs':8,
+ 'discovery-admission-packed.mjs':7,
+ 'epg-replay-dataset.mjs':7,
+ 'film-person-connector.mjs':7,
+ 'migration-pattern-limit.mjs':7,
+ 'canonical-producer-schema.mjs':6,
+ 'canonical-receipts.mjs':6,
+ 'film-person-baseline.mjs':6,
+ 'generation-stage-faults.mjs':6,
+ 'prediction-domain-production.mjs':6,
+ 'r2-snapshot-export.mjs':6,
+ 'deferred-completion-status.mjs':5,
+ 'discovery-pipeline-d1-status.mjs':5,
+ 'epg-producer-m2b-synthetic.mjs':5,
+ 'film-person-e6-measure.mjs':5,
+ 'prediction-batch-start-parity-lib.mjs':5,
+ 'prediction-overlay-index.mjs':5,
+ 'published-epg-production.mjs':5,
+ 'tmdb-tv-runtime.mjs':5,
+ 'admin-letterboxd-archive-api.mjs':4,
+ 'canonical-dictionary-producer.mjs':4,
+ 'canonical-differential.mjs':4,
+ 'canonical-epg-person-producer.mjs':4,
+ 'discovery-authority.mjs':4,
+ 'discovery-bounded-d1-rehearsal.mjs':4,
+ 'discovery-chunk-memory.mjs':4,
+ 'discovery-ledger-install.mjs':4,
+ 'discovery-status-memory.mjs':4,
+ 'epg-path-a-feasibility.mjs':4,
+ 'epg-status-ledger-mode.mjs':4,
+ 'film-person-cutover-run.mjs':4,
+ 'metadata-cache.mjs':4,
+ 'prediction-batch-start-budget.mjs':4,
+ 'prediction-batch-start-parity.mjs':4,
+ 'prediction-domain.mjs':4,
+ 'scheduled-task-prompt-v2.mjs':4,
+ 'canonical-catalog-titles.mjs':3,
+ 'canonical-person-mutation-producer.mjs':3,
+ 'canonical-person-state.mjs':3,
+ 'd1-enrichment-phases.mjs':3,
+ 'discovery-ledger-split.mjs':3,
+ 'discovery-operational-status.mjs':3,
+ 'film-person-authority.mjs':3,
+ 'film-person-cutover-accepted.mjs':3,
+ 'letterboxd-baseline-chunks.mjs':3,
+ 'owner-review-d1.mjs':3,
+ 'prediction-dry-run-isolation.mjs':3,
+ 'projector-l1-budget.mjs':3,
+ 'projector-marker-fence.mjs':3,
+ 'projector-window.mjs':3,
+ 'published-epg.mjs':3,
+ 'ratings-orchestration.mjs':3,
+ 'ratings-run.mjs':3,
+ 'admin-letterboxd-apply.mjs':2,
+ 'admin-shell.mjs':2,
+ 'canonical-catalog-reader.mjs':2,
+ 'canonical-discovery-admission-producer.mjs':2,
+ 'canonical-epg-producer.mjs':2,
+ 'canonical-film-external-ids-producer.mjs':2,
+ 'canonical-film-writers.mjs':2,
+ 'canonical-handoff-readiness.mjs':2,
+ 'canonical-producer-adapters.mjs':2,
+ 'canonical-producer-store.mjs':2,
+ 'canonical-producers.mjs':2,
+ 'canonical-read-model.mjs':2,
+ 'canonical-readiness-classes.mjs':2,
+ 'cron-schedule-simulation.mjs':2,
+ 'd1-enrichment-phase-log.mjs':2,
+ 'discovery-bounded-fence.mjs':2,
+ 'discovery-events.mjs':2,
+ 'discovery-ledger-archive.mjs':2,
+ 'discovery-revalidation.mjs':2,
+ 'discovery-seal-resume.mjs':2,
+ 'epg-commit-durable-enqueue.mjs':2,
+ 'epg-event-publication.mjs':2,
+ 'epg-mirror-reconciliation.mjs':2,
+ 'epg-priority-gate.mjs':2,
+ 'epg-producer-m2b.mjs':2,
+ 'evidence-json-paths.mjs':2,
+ 'film-admission.mjs':2,
+ 'film-person-0019-preflight.mjs':2,
+ 'film-person-0020-preflight.mjs':2,
+ 'film-person-cutover-record.mjs':2,
+ 'film-sync-state.mjs':2,
+ 'fingerprint-source-derivation.mjs':2,
+ 'item-failures.mjs':2,
+ 'letterboxd-rated-candidates.mjs':2,
+ 'lifecycle-diagnostics.mjs':2,
+ 'metadata-cache-production.mjs':2,
+ 'prediction-batch-profile.mjs':2,
+ 'prediction-caller-failure-claim.mjs':2,
+ 'projector-window-epg.mjs':2,
+ 'ratings-cursor-merge.mjs':2,
+};
 export const DEFAULT_WEIGHT=0.5;
-// Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`, about 9 s more of job wall time than a plain shard job (about 5% of a shard's roughly 195 s); 33 units are 7 s of wall at 0.233 s a unit. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
-export const FIRST_SHARD_OFFSET=20;
+// Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`. AIR-480 stage 4b raised this from 20 to 80 after shard 1 of PR #639 measured 237.5 s. AIR-490: that 240 s figure is no longer a merge gate. AIR-494 keeps 80 for both maps: with core costs in seconds it leaves shard 1 about 7 s of job overhead (mean extra 24.4 s against 17.4 s on the plain shard jobs) without emptying it. The nightly map still uses it so the two heaviest mutation files stay off shard 1. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
+export const FIRST_SHARD_OFFSET=80;
 // AIR-374 contention cohort (see planTests): the files that compete for the CPU are the mutation files (any weight) and every other file of at least HEAVY_MIN_WEIGHT units, about 9% of the files and 55% of the weight. They are dealt before the rest by "pressure": a file's weight, times HEAVY_MUTATION_PRESSURE for a mutation file, which re-runs a production module against many mutants in child processes and so takes far more of a 4 vCPU runner than its weight says (a fit of the 36 shard jobs of 12 runs gives about 0.65 s of `Run tests` per mutation unit against 0.06 to 0.09 s per unit of any other weight). Shard 1 starts FIRST_SHARD_HEAVY_CREDIT pressure units ahead: with 117 s in the last run against 158 s and 187 s it has the most headroom, so it gets the largest cohort share; its total weight is still dealt less by FIRST_SHARD_OFFSET.
 export const HEAVY_MIN_WEIGHT=20;
 export const HEAVY_MUTATION_PRESSURE=6;
-export const FIRST_SHARD_HEAVY_CREDIT=100;
+export const FIRST_SHARD_HEAVY_CREDIT=160;
+// AIR-480: 160 (was 100) so shard 1's extra FIRST_SHARD_OFFSET does not also collect the heaviest mutation file by pressure. AIR-490 left this constant for the nightly plan. AIR-494: the core plan has no mutation files, so that credit dumped the remaining heavy core files onto shards 2 and 3. CORE_FIRST_SHARD_HEAVY_CREDIT is the core-only credit, refit on the same 12-run set; the nightly plan still uses FIRST_SHARD_HEAVY_CREDIT.
+export const CORE_FIRST_SHARD_HEAVY_CREDIT=10;
 const MUTATION=/-mutation\.mjs$/;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
@@ -226,8 +368,12 @@ export function capture(){
 
 // `shard` is {index, count} (index from 1) or null for the whole suite. AIR-374: the files are ordered heaviest first (WEIGHTS, then name) and dealt one by one to the shard with the least weight so far
 // (ties to the lowest index), so the split is the same whichever shard asks and every file is in exactly one shard, whatever the count.
-export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights=WEIGHTS,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit=FIRST_SHARD_HEAVY_CREDIT,mutationPressure=HEAVY_MUTATION_PRESSURE}={}){
- const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
+export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit,mutationPressure=HEAVY_MUTATION_PRESSURE,suite='core'}={}){
+ const listed=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
+ const all=selectSuite(listed,directory,suite);
+ const core=suite==='core';
+ weights=weights??(core?CORE_WEIGHTS:WEIGHTS);
+ heavyCredit=heavyCredit??(core?CORE_FIRST_SHARD_HEAVY_CREDIT:FIRST_SHARD_HEAVY_CREDIT);
  const weight=file=>weights[file]??DEFAULT_WEIGHT;
  const ordered=[...all].sort((a,b)=>weight(b)-weight(a)||(a<b?-1:1));
  const owner=new Map();
@@ -279,7 +425,22 @@ async function main(){
  const timeoutMs=positive(option(args,'timeout-ms','TEST_TIMEOUT_MS',undefined),'--timeout-ms',300000);
  const shard=parseShard(option(args,'shard','TEST_SHARD',undefined));
  if(shard===undefined){console.error(`--shard must be "index/count" with 1 <= index <= count, got "${option(args,'shard','TEST_SHARD',undefined)}"`);process.exit(2);}
- const plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard});
+ const suite=option(args,'suite','TEST_SUITE','core');
+ if(suite!=='core'&&suite!=='non-functional'&&suite!=='all'){console.error(`--suite must be core, non-functional or all, got "${suite}"`);process.exit(2);}
+ if(suite==='all'){
+  if(shard){console.error('--suite all cannot be combined with --shard');process.exit(2);}
+  const rest=[];
+  for(let index=0;index<args.length;index++){if(args[index]==='--suite'){index++;continue;}rest.push(args[index]);}
+  const run=name=>spawnSync(process.execPath,[path.resolve(new URL(import.meta.url).pathname),...rest,'--suite',name],{stdio:'inherit',env:{...process.env,TEST_SUITE:name,IPTV_TEST_SUITE:name}});
+  const first=run('core');
+  if((first.status??1)!==0){process.exitCode=first.status??1;return;}
+  const second=run('non-functional');
+  process.exitCode=second.status??1;
+  return;
+ }
+ let plan;
+ try{plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard,suite});}
+ catch(error){if(error.code==='unclassified'){console.error(error.message);process.exit(2);}throw error;}
  const part=shard?` (shard ${shard.index}/${shard.count} of ${plan.suite} files)`:'';
  // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.
  if(jobs===1){plan.parallel=[...plan.parallel,...plan.serial].sort();plan.serial=[];}
@@ -290,7 +451,7 @@ async function main(){
  function runFile(file){
   return new Promise(resolve=>{
    const began=Date.now();
-   const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true});
+   const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true,env:{...process.env,IPTV_TEST_SUITE:suite}});
    const record={file,stdout:'',stderr:'',omitted:0};
    const captures={stdout:capture(),stderr:capture()};
    let timedOut=false,settled=false,killTimer=null;
@@ -358,7 +519,7 @@ async function main(){
  process.on('SIGINT',()=>onSignal('SIGINT'));
  process.on('SIGTERM',()=>onSignal('SIGTERM'));
 
- console.log(`Running ${plan.total} self-contained test files${part} (${jobs===1?'serial':`up to ${jobs} at a time`}${plan.serial.length?`, ${plan.serial.length} serial-only`:''}, ${seconds(timeoutMs)} per file).`);
+ console.log(`Running ${plan.total} self-contained test files, suite ${suite}${part} (${jobs===1?'serial':`up to ${jobs} at a time`}${plan.serial.length?`, ${plan.serial.length} serial-only`:''}, ${seconds(timeoutMs)} per file).`);
  const notStarted=[...await pool(plan.parallel,jobs)];
  if(!stopping)notStarted.push(...await pool(plan.serial,1));else notStarted.push(...plan.serial);
  const wall=Date.now()-started;
@@ -366,9 +527,14 @@ async function main(){
  const slowest=[...results].sort((a,b)=>b.ms-a.ms).slice(0,10);
  const busy=results.reduce((sum,record)=>sum+record.ms,0);
  process.stdout.write(`\nSlowest files: ${slowest.map(record=>`${record.file} ${seconds(record.ms)}`).join(', ')}\n`);
- process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, jobs ${jobs}.\n`);
+ process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, suite ${suite}, jobs ${jobs}.\n`);
+ if(process.env.IPTV_TEST_REPORT){
+  const report={suite,shard:shard?`${shard.index}/${shard.count}`:null,wallMs:wall,summedFileMs:busy,jobs,failed:failures.map(record=>record.file),files:results.map(record=>({file:record.file,ms:record.ms,ok:record.ok}))};
+  try{writeFileSync(process.env.IPTV_TEST_REPORT,JSON.stringify(report,null,2));}
+  catch(error){console.error(`could not write IPTV_TEST_REPORT: ${error.message}`);}
+ }
  if(process.env.GITHUB_STEP_SUMMARY){
-  const lines=[`### Test runner${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
+  const lines=[`### Test runner ${suite}${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','Wall time is a health metric. It does not gate merge or deploy. A failed file, a per-file timeout and the job timeout still fail this job.','','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
   try{appendFileSync(process.env.GITHUB_STEP_SUMMARY,lines.join('\n')+'\n');}catch{}
  }
  // Exit through exitCode, not process.exit(): when stdout or stderr is a pipe (as in CI) process.exit() can cut the report still being written.

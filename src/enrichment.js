@@ -346,9 +346,9 @@ const ASSESSMENT_CONTRACT={version:1,required:false,protocols:['batch_v2'],maxSe
  fields:{assessmentVersion:{const:1},ratingBasis:{text:[1,700]},probability4PlusBasis:{text:[1,400]},tasteSignals:{maxItems:5,item:{direction:['supports','against','neutral'],signal:{text:[1,220]},anchor:{text:[1,120],optional:true}}},risks:{maxItems:3,item:{risk:{text:[1,220]},severity:['low','medium','high']}},uncertainties:{maxItems:3,item:{text:[1,220]}},
   research:{status:['not_attempted','attempted_blocked','attempted_no_findings','attempted_found'],attempts:{maxItems:4,item:{outcome:['blocked','unreadable','irrelevant'],ref:{https:true,optional:true},note:{text:[1,100],optional:true}}}},
   sources:{maxItems:6,item:{kind:['metadata','model_knowledge','web_research'],ref:{accept:['metadata:synopsis|genres|runtime|credits','model_knowledge','https://… URL']},usedFor:{text:[1,120]},access:{values:['full_text','partial_text','search_snippet'],requiredWhen:'kind=web_research',forbiddenOtherwise:true}}},
-  conflicts:{maxItems:2,item:{topic:{text:[1,120]},positions:{minItems:2,maxItems:3,item:{source:'distinct integer index into sources',stance:{text:[1,160]}}},handling:['kept_unresolved','weighted','not_relied_on']}},
+  conflicts:{maxItems:2,item:{topic:{text:[1,120]},positions:{minItems:2,maxItems:3,item:{source:'integer index into sources; an index may repeat only when every position naming it carries a distinct author',author:{text:[1,80],optional:true,callerReported:true,requiredWhen:'source index repeats within the conflict'},stance:{text:[1,160]}}},handling:['kept_unresolved','weighted','not_relied_on']}},
   model:{status:['reported','unavailable'],reported:{id:{text:[1,80]},version:{text:[1,40],optional:true},effort:{text:[1,20],optional:true}}}},
- consistency:'research.status attempted_found needs at least one web_research source; every other status forbids one; not_attempted forbids attempts; access only on web_research; conflict positions name distinct valid sources',
+ consistency:'research.status attempted_found needs at least one web_research source; every other status forbids one; not_attempted forbids attempts; access only on web_research; conflict positions name valid sources; a repeated source index needs distinct non-empty authors',
  stored:'immutable create-only R2 object per prediction version; caller content is reported, not confirmed'};
 function assessmentIssues(a,metadata){
  const issues=[],add=(path,code)=>{if(issues.length<MAX_ISSUES)issues.push({path,code});};
@@ -385,8 +385,10 @@ function assessmentIssues(a,metadata){
   if(attempts!==undefined){if(list('assessment.research.attempts',attempts,0,4)){if(r.status==='not_attempted'&&attempts.length)add('assessment.research.attempts','too_many');let bad=false;for(const v of attempts){if(!isObject(v)){bad=true;continue;}closed('assessment.research.attempts',v,['outcome','ref','note']);oneOf('assessment.research.attempts.outcome',v.outcome,['blocked','unreadable','irrelevant']);if(v.ref!==undefined&&!urlOk(v.ref))add('assessment.research.attempts.ref','invalid_ref');text('assessment.research.attempts.note',v.note,100,true);}if(bad)add('assessment.research.attempts','invalid_type');}}
   if(Array.isArray(a.sources)&&a.sources.length<=6){if(r.status==='attempted_found'&&webSources===0)add('assessment.sources','too_few');else if(['not_attempted','attempted_blocked','attempted_no_findings'].includes(r.status)&&webSources>0)add('assessment.research.status','invalid_enum');}}
  each('assessment.conflicts',a.conflicts,0,2,v=>{closed('assessment.conflicts',v,['topic','positions','handling']);text('assessment.conflicts.topic',v.topic,120);oneOf('assessment.conflicts.handling',v.handling,['kept_unresolved','weighted','not_relied_on']);
-  if(list('assessment.conflicts.positions',v.positions,2,3)){const seen=new Set();let bad=false;for(const p of v.positions){if(!isObject(p)){bad=true;continue;}closed('assessment.conflicts.positions',p,['source','stance']);text('assessment.conflicts.positions.stance',p.stance,160);
-    if(p.source===undefined)add('assessment.conflicts.positions.source','required');else if(!Number.isInteger(p.source))add('assessment.conflicts.positions.source','invalid_type');else if(p.source<0||p.source>=sources.length)add('assessment.conflicts.positions.source','out_of_range');else if(seen.has(p.source))add('assessment.conflicts.positions','invalid_ref');else seen.add(p.source);}if(bad)add('assessment.conflicts.positions','invalid_type');}});
+  if(list('assessment.conflicts.positions',v.positions,2,3)){const bySource=new Map();let bad=false;for(const p of v.positions){if(!isObject(p)){bad=true;continue;}closed('assessment.conflicts.positions',p,['source','author','stance']);text('assessment.conflicts.positions.stance',p.stance,160);text('assessment.conflicts.positions.author',p.author,80,true);
+    if(p.source===undefined)add('assessment.conflicts.positions.source','required');else if(!Number.isInteger(p.source))add('assessment.conflicts.positions.source','invalid_type');else if(p.source<0||p.source>=sources.length)add('assessment.conflicts.positions.source','out_of_range');else{if(!bySource.has(p.source))bySource.set(p.source,[]);bySource.get(p.source).push(p);}}
+   for(const group of bySource.values()){if(group.length<2)continue;const names=group.map(p=>typeof p.author==='string'?p.author.trim().toLowerCase():'');if(names.some(n=>!n)){if(group.some(p=>p.author===undefined))add('assessment.conflicts.positions.author','required');}else if(new Set(names).size!==names.length)add('assessment.conflicts.positions','invalid_ref');}
+   if(bad)add('assessment.conflicts.positions','invalid_type');}});
  const m=a.model;
  if(m===undefined)add('assessment.model','required');
  else if(!isObject(m))add('assessment.model','invalid_type');
@@ -1039,9 +1041,10 @@ async function runnerHeartbeat(env,body){
 async function predictionProgressEvent(env,run,queue,final=false){
  const summary=runSummary(run),success=summary.added+summary.updated,now=Date.now();
  run.hotRemaining=queue?.priorityCount??0;run.coldRemaining=queue?.coldRemaining??0;
+ if(isBatchV2Run(run)&&!final)return null;
  if(!final&&success-(run.progressSavedCount||0)<50&&now-Date.parse(run.lastProgressAt||run.createdAt)<30*60000)return null;
  const at=new Date(now).toISOString(),snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot);run.progressSavedCount=success;run.lastProgressAt=at;
- return {id:'enrichment-'+run.runId+(final?'':'-progress-'+success),type:'enrichment',at,stage:final?run.status:'running',runId:run.runId,trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),remaining:run.hotRemaining+run.coldRemaining,hotRemaining:run.hotRemaining,coldRemaining:run.coldRemaining,queueSchemaVersion:6,delta,snapshot,reason:run.stopReason||null,...scheduledRunFields()};
+ return {id:'enrichment-'+run.runId+(final?'':'-progress-'+success),type:'enrichment',at,stage:final?run.status:'running',runId:run.runId,trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),remaining:run.hotRemaining+run.coldRemaining,hotRemaining:run.hotRemaining,coldRemaining:run.coldRemaining,queueSchemaVersion:6,delta,snapshot,reason:run.stopReason||null,...batchV2EventFields(run),...scheduledRunFields()};
 }
 async function runnerProgress(env,run,queue,final=false){
  const event=await predictionProgressEvent(env,run,queue,final);if(!event)return;
@@ -1052,6 +1055,7 @@ const START_EVENT_PREFIX=ENRICHMENT_KEY+'start-events/';
 async function runnerStarted(env,run,resumed,queue,inputs=null){
  const snapshot=await predictionEventSnapshot(env,queue,run.batchSize,inputs),runState=run.startResult==='recovered_stale_lease'?'recovered':resumed?'resumed':'started';
  run.coverageStartCurrentPredictions=snapshot.coverage?.currentPredictionsTotal??null;await savePredictionRun(env,run);
+ if(isBatchV2Run(run))return;
  const event={id:'prediction-start-'+run.runId,type:'enrichment',at:run.createdAt,startedAt:run.createdAt,stage:resumed?'resumed':'started',runState,title:runState==='recovered'?'Прогнозы восстановлены':resumed?'Прогнозы продолжены':'Прогнозы запущены',queueSchemaVersion:6,hotRemaining:queue?.priorityCount??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:run.batchSize,delta:{added:0,updated:0,failed:0,predictionGain:0},snapshot};
  const key=START_EVENT_PREFIX+run.runId+'.json';await saveJSON(env,key,{event});if(!await flushStopEvent(env,{event},key))await noteEventOutbox(env,key);
 }
@@ -1065,12 +1069,27 @@ async function flushStopEvent(env,record,key){
  for(let attempt=0;attempt<3;attempt++){try{await writeEvent(env,record.event);if(key){record.delivered=true;await saveJSON(env,key,record);}return true;}catch{}}
  return false;
 }
+async function parkAndFlushRunEvent(env,event,runId){
+ if(!event||!runId)return false;
+ const key=STOP_EVENT_PREFIX+runId+'.json';
+ try{
+  let record=await loadJSON(env,key);
+  if(!record){record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;}
+  const written=await flushStopEvent(env,record,key);if(!written)await noteEventOutbox(env,key);return written;
+ }catch{return false;}
+}
+async function reconstructMissingBatchV2StopRecord(env,latest,pending){
+ if(!isBatchV2Run(latest)||!isText(latest?.runId,100)||!latest.event||!['complete','partial'].includes(latest.status))return;
+ const key=STOP_EVENT_PREFIX+latest.runId+'.json';
+ if(pending[key]?.quarantined)return;
+ try{if(await loadJSON(env,key))return;await env.BUCKET.put(key,JSON.stringify({event:latest.event}),{onlyIf:{etagDoesNotMatch:'*'}});}catch{}
+}
 async function recordRunStop(env,id,reason,fallback={}){
  let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
  if(run.recoveredByRunId){const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
  const settled=await settleRunRetries(env,run,'stop_retries'),key=STOP_EVENT_PREFIX+id+'.json',existing=await loadJSON(env,key);let record=existing;
  if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
- const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={remaining:queue?(queue.priorityCount||0)+(queue.coldRemaining||0):null,id:run.event?.id||'enrichment-'+id,type:'enrichment',runId:id,at,queueSchemaVersion:6,stage:'partial',title:'Прогнозы приостановлены',reason:systemicReason(reason),stopReason:systemicReason(reason),trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,checked:summary.checked,processed:summary.processed,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),hotRemaining:queue?.priorityCount??fallback.hotRemaining??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??fallback.coldRemaining??run.coldRemaining??null,delta,snapshot};
+ const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run),event={remaining:queue?(queue.priorityCount||0)+(queue.coldRemaining||0):null,id:run.event?.id||'enrichment-'+id,type:'enrichment',runId:id,at,queueSchemaVersion:6,stage:'partial',title:v2.presentation?'Пакет прогнозов прерван':'Прогнозы приостановлены',reason:systemicReason(reason),stopReason:systemicReason(reason),trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,checked:summary.checked,processed:summary.processed,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),hotRemaining:queue?.priorityCount??fallback.hotRemaining??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??fallback.coldRemaining??run.coldRemaining??null,delta,snapshot,...v2};
  record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key);
  }
  run.status='partial';run.reason=record.event.reason;run.stopReason=record.event.reason;run.completedAt=record.event.at;run.event=record.event;run.counts={created:record.event.added,recalculated:record.event.updated,failed:record.event.failed,pending:(record.event.hotRemaining||0)+(record.event.coldRemaining||0)};
@@ -1097,6 +1116,7 @@ async function deliverPendingEvents(env,now=Date.now()){
  try{
   const [index,latest]=await Promise.all([loadJSON(env,EVENT_OUTBOX_KEY),loadJSON(env,ENRICHMENT_KEY+'latest-run.json')]);
   const pending=isObject(index?.pending)?index.pending:{},indexed=Object.keys(pending).filter(eventOutboxKey);
+  await reconstructMissingBatchV2StopRecord(env,latest,pending);
   // Quarantined entries stay in the index and in the status read; they are counted here and never take a delivery slot, so any number of them cannot keep a
   // later event from being delivered. The budget of one start goes, in this order, to the two records of the latest run (not yet noted anywhere when a
   // process ended between the record and the journal), then to the pending index entries, oldest first.
@@ -1113,7 +1133,10 @@ async function deliverPendingEvents(env,now=Date.now()){
     else{
      report.checked++;
      // A stop is completed as a whole (run record, diagnostic row, journal item): the same idempotent path the stop itself took.
-     if(key.startsWith(STOP_EVENT_PREFIX)){const stop=await recordRunStop(env,record.event.runId,record.event.reason,{outbox:true});result=stop.status==='superseded'||stop.eventPending===false?'delivered':'failed';}
+     if(key.startsWith(STOP_EVENT_PREFIX)){
+      if(record.event.stage==='complete')result=await flushStopEvent(env,record,key)?'delivered':'failed';
+      else{const stop=await recordRunStop(env,record.event.runId,record.event.reason,{outbox:true});result=stop.status==='superseded'||stop.eventPending===false?'delivered':'failed';}
+     }
      else result=await flushStopEvent(env,record,key)?'delivered':'failed';
      if(result==='delivered')report.delivered++;
     }
@@ -1472,21 +1495,50 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrit
  }
  throw new PredictionQueueConflictError(trigger);
 }
-// A rebuild reads the whole catalog; a Discovery chunk that commits between its statements is a transient fence, so the read is repeated a
-// few times with a short pause. A held cutover or an incomplete load keeps failing and is raised to the caller as before.
+// A rebuild reads the whole catalog as one admission snapshot (ADR 0147). A continuation or status write that only
+// bumps the Discovery generation does not fence it. A held cutover, a non-seal load, or an EPG pin change still
+// throws `discovery_fence` / `discovery_incomplete`; those are retried a few times, then raised.
 async function loadCatalogForQueue(pinned){
  for(let attempt=1;;attempt++){
   try{return await loadJSON(pinned,'epg/discovered-films.json');}
   catch(error){if(error?.code!=='discovery_fence'||attempt>=CATALOG_FENCE_ATTEMPTS)throw error;}
  }
 }
+async function queuePin(env,report){
+ if(env?.epgPin?.authority==='d1'&&env.epgPin.programmeRunId)return env;
+ if(typeof PublishedEpg!=='undefined'){
+  const live=await PublishedEpg.currentGeneration(env);
+  if(live)return {...env,epgPin:{authority:'d1',programmeRunId:live.programmeRunId,phase:live.phase,fence:live.fence,generation:live.generation}};
+ }
+ if(report?.runId)return {...env,epgPin:{...(env.epgPin||{}),programmeRunId:report.runId}};
+ return pinEpg(env);
+}
+function publishedEpgUnavailable(){
+ const error=new Error('published_epg_unavailable');
+ error.code='published_epg_unavailable';
+ throw error;
+}
+// A D1 pin whose run is not the caller's completed programme is not R2: reload the pinned generation, or fail closed.
+async function consistentQueueReport(pinned,report){
+ if(pinned?.epgPin?.authority!=='d1'||!pinned.epgPin.programmeRunId)return report;
+ if(report?.runId===pinned.epgPin.programmeRunId)return report;
+ const reloaded=await loadJSON(pinned,'programme.json');
+ if(!reloaded||reloaded.runId!==pinned.epgPin.programmeRunId)publishedEpgUnavailable();
+ return reloaded;
+}
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
- const pinned=report?.runId?{...env,epgPin:{programmeRunId:report.runId}}:await pinEpg(env);
+ const pinned=await queuePin(env,report);
+ const source=await consistentQueueReport(pinned,report);
  const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned)]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
- if(!profile||!report?.films)return null;
- if(capture)Object.assign(capture,{report,profile,index,catalog});
- const now=Date.now(),films=allEnrichmentFilms(report,catalog),watchlistIds=new Set(eligibleEnrichmentFilms(report).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
+ if(!profile||!source?.films)return null;
+ if(capture)Object.assign(capture,{report:source,profile,index,catalog});
+ const now=Date.now();
+ // ADR 0142: completed-only ranking is a live D1 published pin whose run matches the completed programme, not the mere presence of the PublishedEpg module (the Worker always bundles it; currentGeneration null is the R2 path).
+ const completedOnly=pinned?.epgPin?.authority==='d1'&&!!pinned.epgPin.programmeRunId&&source?.runId===pinned.epgPin.programmeRunId;
+ const completed=completedOnly?completedShowsByTmdb(source):new Map();
+ const films=allEnrichmentFilms(source,catalog).map(film=>withCompletedShows(film,completed,source.runId,completedOnly));
+ const watchlistIds=new Set(eligibleEnrichmentFilms(source).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
  const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
  // The fingerprint transition rule (ADR-0035) decides; the strict fingerprint outcome is counted beside it. Each outstanding
@@ -1523,10 +1575,12 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
   work[id]={class:chosen.requiredWork,requiredWork:chosen.requiredWork,migration,reason:chosen.reason,...(fv.fields?{fields:fv.fields}:{})};
  }
  const missing=films.filter(f=>!fresh.get(String(f.id)));
- missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||(Date.parse(b.hotEnteredAt||b.discoveredAt)||0)-(Date.parse(a.hotEnteredAt||a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
+ // ADR 0142 decision 13: the late tie-break uses the earliest start of the Film's completed (or, outside D1, record) showings, then discoveredAt, then the id. hotEnteredAt is not read.
+ const earliestStart=film=>{const starts=(film.shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);return starts.length?Math.min(...starts):0;};
+ missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||earliestStart(a)-earliestStart(b)||(Date.parse(b.discoveredAt)||0)-(Date.parse(a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
  const hotPending=missing.filter(f=>priority[f.id].hot).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))],currentIds=new Set(missing.map(f=>String(f.id))),retries=Object.fromEntries(Object.entries(previous?.retries||{}).filter(([id])=>currentIds.has(id)));
  const hotCount=films.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-hotPending.length,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
- const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:report.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
+ const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:source.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  return queue;
 }
 // AIR-431. The Prediction queue advances on its own state. A runner step (next, submit, complete) no longer rebuilds the queue from the
@@ -1694,9 +1748,14 @@ function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshn
  }
  return {state:'ok',rating40to44,rating45plus};
 }
-function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now(),freshness=strictFreshness(profile)){
+function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now(),freshness=strictFreshness(profile),completedOnly=false){
  const groups=new Map();
- for(const film of [...(report?.films||[]),...Object.values(catalog||{})]){
+ const completed=completedOnly&&typeof withCompletedShows==='function'&&typeof completedShowsByTmdb==='function'?completedShowsByTmdb(report):null;
+ const overlay=film=>{
+  if(!completedOnly||typeof withCompletedShows!=='function'||completed==null)return film;
+  return withCompletedShows(film,completed,report?.runId,true);
+ };
+ for(const film of [...(report?.films||[]),...Object.values(catalog||{})].map(overlay)){
   const tmdbId=String(film?.tmdbId||'').trim();if(!tmdbId)continue;
   const identity='tmdb:'+tmdbId,group=groups.get(identity)||{ids:new Set(),films:[]};
   group.ids.add(String(film.id));group.films.push(film);group.byId=group.byId||new Map();if(!group.byId.has(String(film.id)))group.byId.set(String(film.id),film);groups.set(identity,group);
@@ -1722,10 +1781,13 @@ function predictionQueueSlices(queue,now=Date.now()){
 }
 // `inputs` are the objects a queue rebuild of this request already read; with them nothing large is read again.
 async function predictionEventSnapshot(env,queue,batchSize=null,inputs=null){
- const unreadable=new Set(),safe=async key=>{try{return await loadJSON(pinned,key);}catch{unreadable.add(key);return null;}},given=inputs?.report&&inputs.profile&&inputs.index!==undefined&&inputs.catalog!==undefined,pinned=given?env:await pinEpg(env),[profile,index,report,catalog,persistedQueue]=await Promise.all([given?inputs.profile:safe(profileKey),given?inputs.index:safe(ENRICHMENT_KEY+'view-index.json'),given?inputs.report:safe('programme.json'),given?inputs.catalog:safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
+ const unreadable=new Set();
+ let pinned=env;
+ try{pinned=await pinEpg(env);}catch{pinned=env;}
+ const safe=async key=>{try{return await loadJSON(pinned,key);}catch{unreadable.add(key);return null;}},given=inputs?.report&&inputs.profile&&inputs.index!==undefined&&inputs.catalog!==undefined,[profile,index,report,catalog,persistedQueue]=await Promise.all([given?inputs.profile:safe(profileKey),given?inputs.index:safe(ENRICHMENT_KEY+'view-index.json'),given?inputs.report:safe('programme.json'),given?inputs.catalog:safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
  // AIR-431. A source that could not be read (a held or failing catalog) makes the coverage unknown: it is never computed from a missing catalog
  // and reported as a drop. The run, the queue slices and the delta (predictionGain null) do not depend on it.
- const coverage=unreadable.has('epg/discovered-films.json')||unreadable.has('programme.json')||unreadable.has(ENRICHMENT_KEY+'view-index.json')?null:canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile));
+ const coverage=unreadable.has('epg/discovered-films.json')||unreadable.has('programme.json')||unreadable.has(ENRICHMENT_KEY+'view-index.json')?null:canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile),pinned?.epgPin?.authority==='d1');
  return {coverage:coverage?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal)}:null,queue:predictionQueueSlices(persistedQueue),...(Number.isInteger(batchSize)&&batchSize>0?{currentBatchSize:batchSize}:{})};
 }
 function predictionEventDelta(run,summary,snapshot){const current=snapshot?.coverage?.currentPredictionsTotal,start=run.coverageStartCurrentPredictions;return {added:summary.added,updated:summary.updated,failed:summary.failed,predictionGain:Number.isInteger(current)&&Number.isInteger(start)?current-start:null};}
@@ -1892,7 +1954,7 @@ async function footerStatus(env){
  if(!footerPlainObject(index)&&!degraded.includes('index'))degraded.push('index_missing');
  if(!footerPlainObject(profile)&&!degraded.includes('profile'))degraded.push('profile_missing');
  const coverageReadable=!['programme','catalog','index','profile','freshness','programme_missing','catalog_missing','index_missing','profile_missing'].some(name=>degraded.includes(name))&&!!freshness;
- const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
+ const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness,pinned?.epgPin?.authority==='d1'):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
  const queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
  const collection=footerCollection({report,catalog,watchlist,index,metadata}),newUnseen=footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness});
  const recognized=ledger?.recognized??null,counts=ledger?.counts??null;
@@ -1913,7 +1975,7 @@ function queueBatchIds(queue,ready,slots){
 }
 const RUN_DIAGNOSTICS_PREFIX=ENRICHMENT_KEY+'run-diagnostics/';
 const RUN_DIAGNOSTICS_SETTLE_KEY=ENRICHMENT_KEY+'run-diagnostics-settle.json';
-const RUN_DIAGNOSTICS_SETTLE_LIMIT=100;
+const RUN_DIAGNOSTICS_SETTLE_LIMIT=10;
 function diagnosticKey(id,at){return RUN_DIAGNOSTICS_PREFIX+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-'+id+'.json';}
 async function diagnosticCheckpoint(env,run,patch={}){
  if(run.runId.startsWith('blocked-'))return null; // Aggregate stop Events are not additional trigger attempts.
@@ -1930,6 +1992,11 @@ function projectedDiagnostic(row,now=Date.now()){
 }
 async function persistExpiredDiagnostic(env,itemKey,row,now=Date.now()){
  if(!leaseExpiredDiagnostic(row,now))return;
+ // The diagnostic row's leaseExpiredAt is not authority while this run still holds the live runner lease
+ // (heartbeat renews the lease before savePredictionRun / diagnosticCheckpoint). A stale timestamp must not
+ // interrupt the live holder from another run's prediction_complete sweep.
+ const lease=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(lease?.runId===row.runId&&lease.expiresAt>now)return;
  const run=await checkedRun(env,row.runId);
  if(run&&['running','interrupted'].includes(run.status)){
   if(run.status==='interrupted'&&run.stopReason==='lease_expired'&&row.state==='interrupted')return;
@@ -1939,9 +2006,10 @@ async function persistExpiredDiagnostic(env,itemKey,row,now=Date.now()){
  await saveJSON(env,itemKey,projectedDiagnostic(row,now));
 }
 async function settleExpiredDiagnostics(env,now=Date.now()){
- // One R2 list page per authorized start, with a durable resume cursor. A list/get/put error leaves the cursor
- // unchanged so the next start retries the same page; already-settled rows are no-ops. Admission of the new run
- // does not wait on a full history scan (AIR-415).
+ // One small R2 list page per authorized complete (AIR-486), with a durable resume cursor. A list/get/put error
+ // leaves the cursor unchanged so the next complete retries the same page; already-settled rows are no-ops. The
+ // start path recovers only the lease holder's recoveredRunId and does not walk this prefix (AIR-415 settlement
+ // stays eventual, not on the batch_start HTTP critical path).
  try{
   const state=await loadJSON(env,RUN_DIAGNOSTICS_SETTLE_KEY)||{};
   const page=await env.BUCKET.list({prefix:RUN_DIAGNOSTICS_PREFIX,limit:RUN_DIAGNOSTICS_SETTLE_LIMIT,...(state.cursor?{cursor:state.cursor}:{})});
@@ -1974,13 +2042,16 @@ function ownedCatalogHeld(boundary,error,requestId,runId,extra={}){
  return catalogHeldResponse(error.code,{runId,leaseTtlMs:RUNNER_LEASE_TTL,...extra});
 }
 // The start finds nothing eligible: it releases the lease and records the idle check (a quota or retry-backoff stop is blocked, an empty queue is a noop).
-async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true}){
- if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff')await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
+async function startIdle(env,{runId,body,profile,queue,plan,holdsLease=true,userEvent=holdsLease}){
+ if(holdsLease)await runnerLease(env,runId,'release');const at=new Date().toISOString(),remaining=queue.priorityCount+queue.coldRemaining,reason=plan.reason==='quota'?'quota':remaining?'retry_backoff':null,stage=reason?'blocked':'noop';const lastBatch={runId:null,trigger:body.trigger==='scheduled'?'scheduled':'manual',startedAt:at,finishedAt:at,stage,profileVersion:profile.version,batchSize:0,hotProcessed:0,coldProcessed:0,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,checked:0,added:0,updated:0,failed:0,remaining,reason};await mutatePredictionQueue(env,current=>({...current,lastCheckAt:at,lastBatch}),'start_check');if(reason==='retry_backoff'&&userEvent)await writeEvent(env,{id:'enrichment-blocked-'+Math.floor(Date.now()/3600000),type:'enrichment',at,queueSchemaVersion:3,...lastBatch,...scheduledRunFields()});return json({status:stage,...lastBatch,...scheduledRunFields()});
 }
 // ---- Batch runner v2: batch_start (ADR 0122 + ADR 0136). One request returns one self-sufficient manifest of at most the client-requested manifestSize (default and ceiling BATCH_RUNNER.maxManifestFilms). ----
 // It runs beside the v5 runner on the same queue, runner lease, retry records and persistence. `batch_submit` is a separate delivery.
 const BATCH_PROTOCOL='batch_v2';
+const BATCH_V2_PRESENTATION='batch_v2_terminal';
 const BATCH_MANIFEST_FORMAT='compact-1';
+function isBatchV2Run(run){return run?.protocol===BATCH_PROTOCOL;}
+function batchV2EventFields(run){return isBatchV2Run(run)?{protocol:BATCH_PROTOCOL,presentation:BATCH_V2_PRESENTATION}:{};}
 const BATCH_RUNNER={version:2,maxManifestFilms:100,maxManifestBytes:256*1024,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:56*1024,callBudgetMs:25000};
 // Films read to fill one manifest when some queued films are already current or have lost their admission: bounded so a start never walks the whole queue.
 const BATCH_SCAN_LIMIT=300;
@@ -2116,7 +2187,7 @@ async function batchIdle(env,body,pre){
  const plan=adaptivePredictionBatch(pre.queue,body.capacity);
  if(!(plan.reason==='quota'||!pre.selection.items.length))return null;
  const idle={runId:crypto.randomUUID(),createdAt:new Date().toISOString(),trigger:body.trigger==='scheduled'?'scheduled':'manual',status:'starting',selectedIds:[],results:{},failures:{}};idle.diagnosticStartedAt=idle.createdAt;
- const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false}));
+ const result=await predictionWriter(env,()=>startIdle(env,{runId:null,body,profile:pre.profile,queue:pre.queue,plan,holdsLease:false,userEvent:false}));
  const data=await result.clone().json();
  idle.status=data.status==='noop'?'idle':data.status==='busy'?'completed':'blocked';idle.completedAt=new Date().toISOString();idle.stopReason=data.status==='blocked'?data.reason||null:null;
  await diagnosticCheckpoint(env,idle,{startResult:['blocked','noop'].includes(data.status)?data.status:'error'});
@@ -2192,7 +2263,7 @@ async function batchStartWork(env,body,requestId,tally){
  }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
  return timedStage(env,'persist',()=>batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}));
 }
-// After the lease is held and the snapshot revalidated: the ordinary start bookkeeping (the diagnostics row, the expired diagnostics and the pending Events, a recovered run) and the run itself.
+// After the lease is held and the snapshot revalidated: this run's diagnostics row, pending Events, recovery of the one previous lease holder, and the run itself. Historic diagnostic settlement is complete, not start.
 async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}){
  const {profile,report,queue,selection}=pre,plan=adaptivePredictionBatch(queue,body.capacity);
  const response=await observedPrediction(env,{...body,diagnosticRunId:runId},async()=>{
@@ -2202,7 +2273,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
   await diagnosticCheckpoint(env,attempt,{state:'running',startResult:attempt.startResult});
   try{
    const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{
-    await settleExpiredDiagnostics(env);await deliverPendingEvents(env);
+    await deliverPendingEvents(env);
     const previous=await loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),recovered=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):previous?.status==='running'?previous:null;
     if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
     const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();
@@ -2229,17 +2300,71 @@ const BATCH_ITEM_KEYS=['filmId','fingerprint','prediction','failure','inputHash'
 const V5_ITEM_KEYS=['filmId','fingerprint','prediction','failure'];
 // Undeclared item keys are named with the closed-contract code; only a sanitised, truncated key reaches the path, never a value.
 function unknownItemKeyIssues(items,allowed){const issues=[];if(Array.isArray(items))items.forEach((item,i)=>{if(isObject(item))for(const key of Object.keys(item))if(!allowed.includes(key)&&issues.length<MAX_ISSUES)issues.push({path:'items['+i+'].'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});});return issues;}
+// AIR-472: the optional, caller-supplied account of why a film is reported as failed. Closed vocabulary, bounded, never free text. It is a client claim (reportedBy=caller), not Worker telemetry:
+// the Worker did not necessarily see the preflight the caller echoes, and it never validates a candidate through this branch.
+const CALLER_FAILURE_REASONS=['preflight_validation_failed','insufficient_evidence','json_unparseable','request_too_large'];
+const CALLER_ASSESSMENT_PATHS=['assessment','assessment.assessmentVersion','assessment.ratingBasis','assessment.probability4PlusBasis','assessment.tasteSignals','assessment.tasteSignals.signal','assessment.tasteSignals.anchor','assessment.tasteSignals.direction','assessment.risks','assessment.risks.risk','assessment.risks.severity','assessment.uncertainties','assessment.research','assessment.research.status','assessment.research.attempts','assessment.research.attempts.ref','assessment.research.attempts.outcome','assessment.research.attempts.note','assessment.sources','assessment.sources.kind','assessment.sources.ref','assessment.sources.access','assessment.sources.usedFor','assessment.conflicts','assessment.conflicts.topic','assessment.conflicts.handling','assessment.conflicts.positions','assessment.conflicts.positions.source','assessment.conflicts.positions.author','assessment.conflicts.positions.stance','assessment.model','assessment.model.status','assessment.model.id','assessment.model.version','assessment.model.effort'];
+let callerFailurePaths=null;
+// The paths the Worker's own validators can report, built from the contract constants: a path outside this set is not a preflight path and is never stored or shown.
+function callerFailurePathAllowed(path){
+ if(typeof path!=='string')return false;
+ if(!callerFailurePaths){
+  const set=new Set(['fingerprint','prediction','fingerprint.evidence','fingerprint.evidence.plotMechanics','fingerprint.evidence.execution',...CALLER_ASSESSMENT_PATHS]);
+  for(const key of Object.keys(FINGERPRINT_RULES))set.add('fingerprint.'+key);
+  for(const key of Object.keys(EXECUTION)){set.add('fingerprint.execution.'+key);set.add('fingerprint.evidence.execution.'+key);}
+  for(const key of MECHANICS)set.add('fingerprint.evidence.plotMechanics.'+key);
+  for(const key of BATCH_MODEL_FIELDS)set.add('prediction.'+key);
+  callerFailurePaths=set;
+ }
+ return callerFailurePaths.has(path);
+}
+function callerFailureIssues(failure){
+ if(!isObject(failure))return [{path:'failure',code:'invalid_type'}];
+ const issues=[];
+ for(const key of Object.keys(failure))if(!['kind','reason','preflight'].includes(key)&&issues.length<MAX_ISSUES)issues.push({path:'failure.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});
+ if(failure.reason===undefined)issues.push({path:'failure.reason',code:'required'});
+ else if(!CALLER_FAILURE_REASONS.includes(failure.reason))issues.push({path:'failure.reason',code:typeof failure.reason==='string'?'invalid_enum':'invalid_type'});
+ if(failure.preflight!==undefined){
+  const p=failure.preflight;
+  if(!isObject(p))issues.push({path:'failure.preflight',code:'invalid_type'});
+  else{
+   for(const key of Object.keys(p))if(key!=='issues'&&issues.length<MAX_ISSUES)issues.push({path:'failure.preflight.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});
+   if(!Array.isArray(p.issues))issues.push({path:'failure.preflight.issues',code:p.issues===undefined?'required':'invalid_type'});
+   else if(p.issues.length>MAX_ISSUES)issues.push({path:'failure.preflight.issues',code:'too_many'});
+   else p.issues.forEach((issue,i)=>{
+    if(!isObject(issue)||Object.keys(issue).some(key=>key!=='path'&&key!=='code')){issues.push({path:'failure.preflight.issues['+i+']',code:'invalid_type'});return;}
+    if(!callerFailurePathAllowed(issue.path))issues.push({path:'failure.preflight.issues['+i+'].path',code:'invalid_ref'});
+    if(!ISSUE_CODES.includes(issue.code))issues.push({path:'failure.preflight.issues['+i+'].code',code:'invalid_enum'});
+   });
+  }
+ }
+ return issues.slice(0,MAX_ISSUES);
+}
+// Canonical form of a valid claim: issues sorted by path then code and deduplicated, so equal claims hash and compare equal. Null only for a historical kind-only item (new submits require reason).
+function callerFailureClaim(failure){
+ if(!isObject(failure)||failure.reason===undefined&&failure.preflight===undefined)return null;
+ const list=Array.isArray(failure.preflight?.issues)?failure.preflight.issues:[],seen=new Set(),issues=[];
+ for(const issue of [...list].sort((a,b)=>String(a.path).localeCompare(String(b.path))||String(a.code).localeCompare(String(b.code)))){const key=issue.path+' '+issue.code;if(!seen.has(key)){seen.add(key);issues.push({path:issue.path,code:issue.code});}}
+ return {...(failure.reason!==undefined?{reason:failure.reason}:{}),...(failure.preflight!==undefined?{preflightIssues:issues}:{})};
+}
+// The failure part of an item digest: the bare kind string for the legacy shape (digests stay byte-identical), kind plus the canonical claim otherwise.
+function batchFailureDigestPart(failure){
+ if(!isObject(failure))return null;
+ const claim=callerFailureClaim(failure);
+ return claim?{kind:String(failure.kind||''),...claim}:String(failure.kind||'');
+}
 const batchPick=(value,keys)=>Object.fromEntries(keys.filter(key=>isObject(value)&&value[key]!==undefined).map(key=>[key,value[key]]));
 // One digest per item over one tuple of reproducible projections (ADR 0122 decision 6): the model-supplied prediction fields (not the Worker's), the fingerprint's content hash
 // (the same one the stored fingerprint carries) and the failure kind. It is recomputable from a committed film, so a replay after a crash is recognized without a receipt store.
 async function batchItemDigest(id,item){
- return contentHash({filmId:id,fingerprint:isObject(item?.fingerprint)?await contentHash({...item.fingerprint,filmId:id}):null,prediction:isObject(item?.prediction)?batchPick(item.prediction,BATCH_MODEL_FIELDS):null,failure:isObject(item?.failure)?String(item.failure.kind||''):null,...(item?.assessment!==undefined?{assessmentSha256:await assessmentSha256(item.assessment)}:{})});
+ return contentHash({filmId:id,fingerprint:isObject(item?.fingerprint)?await contentHash({...item.fingerprint,filmId:id}):null,prediction:isObject(item?.prediction)?batchPick(item.prediction,BATCH_MODEL_FIELDS):null,failure:batchFailureDigestPart(item?.failure),...(item?.assessment!==undefined?{assessmentSha256:await assessmentSha256(item.assessment)}:{})});
 }
 function validateBatchSubmitBody(body){
  if(!isObject(body)||!isText(body.runId,100)||!Number.isInteger(body.epoch)||body.epoch<1)return json({error:'Invalid runId or epoch'},400);
  if(!Array.isArray(body.items)||!body.items.length||body.items.length>BATCH_RUNNER.submitMaxItems)return json({error:'Expected 1–'+BATCH_RUNNER.submitMaxItems+' items'},400);
  {const unknown=unknownItemKeyIssues(body.items,BATCH_ITEM_KEYS);if(unknown.length)return json({error:'Invalid item',issues:unknown},400);}
  for(const item of body.items)if(!isObject(item)||!isText(item.filmId,100)||item.fingerprint!==undefined&&!isObject(item.fingerprint)||item.prediction!==undefined&&!isObject(item.prediction)||item.failure!==undefined&&!isObject(item.failure)||item.assessment!==undefined&&!isObject(item.assessment))return json({error:'Invalid item'},400);
+ {const claimIssues=[];body.items.forEach((item,i)=>{if(item.failure!==undefined)for(const issue of callerFailureIssues(item.failure))if(claimIssues.length<MAX_ISSUES)claimIssues.push({path:'items['+i+'].'+issue.path,code:issue.code});});if(claimIssues.length)return json({error:'Invalid item',issues:claimIssues},400);}
  if(new Set(body.items.map(item=>String(item.filmId))).size!==body.items.length)return json({error:'Duplicate filmId'},400);
  if(body.dryRun!==true&&body.items.some(item=>item.inputHash!==undefined))return json({error:'inputHash is accepted only with dryRun'},400);
  if(body.items.some(item=>item.inputHash!==undefined&&!/^[0-9a-f]{24}$/.test(String(item.inputHash))))return json({error:'Invalid inputHash'},400);
@@ -2329,12 +2454,12 @@ async function batchSubmitItem(env,ctx,item){
   if(recorded.outcome==='validation_failure'){const failure=run.failures[id]||{};return {result:{filmId:id,status:'validation_failure',error:failure.kind||'parse_error',retryable:true,retryAt:failure.retryAt,...(failure.validation?{validation:failure.validation}:{}),assessment:sent?'not_applicable':'not_sent',replayed:true}};}
   return {result:{filmId:id,status:recorded.outcome,assessment:replayAssessment,replayed:true,...(recorded.compatibility?{compatibility:recorded.compatibility}:{})}};
  }
- let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null,deferredIndex=null,result=null;
+ let failureStage='storage_error',validationStage=null,reportedBy=null,issues=null,claimed=null,deferredIndex=null,result=null;
  try{
   const state=await readFilmState(env,id);let fingerprint=state.fingerprint;const genres=source[id]?.genres,stored=state.predictions?.current;
   // The crash window: the prediction was committed by this run but its result was not recorded. The stored record carries this run id and the model fields the request carries.
   if(stored?.runId===run.runId){
-   const same=await contentHash({filmId:id,fingerprint:isObject(item.fingerprint)?fingerprint?.fingerprintHash||null:null,prediction:isObject(item.prediction)?batchPick(stored,BATCH_MODEL_FIELDS):null,failure:isObject(item.failure)?String(item.failure.kind||''):null,...(item.assessment!==undefined?{assessmentSha256:await assessmentSha256(item.assessment)}:{})});
+   const same=await contentHash({filmId:id,fingerprint:isObject(item.fingerprint)?fingerprint?.fingerprintHash||null:null,prediction:isObject(item.prediction)?batchPick(stored,BATCH_MODEL_FIELDS):null,failure:batchFailureDigestPart(item.failure),...(item.assessment!==undefined?{assessmentSha256:await assessmentSha256(item.assessment)}:{})});
    if(same!==digest)return {result:{filmId:id,status:'conflict'}};
    // An assessment object the interrupted call did not get to write is written now; one that exists with other content is a conflict and nothing is overwritten.
    let assessmentStatus='not_sent';
@@ -2342,7 +2467,7 @@ async function batchSubmitItem(env,ctx,item){
    const outcome=run.baseline?.[id]?'recalculated':'created';run.results[id]=outcome;delete run.failures[id];run.submitted[id]={outcome,inputDigest:digest,assessment:assessmentStatus,committedAt:new Date().toISOString()};
    return {result:{filmId:id,status:outcome,assessment:assessmentStatus,replayed:true},settled:true};
   }
-  if(item.failure&&!freshness.state(stored,fingerprint,genres)){failureStage='parse_error';validationStage='caller_reported';reportedBy='caller';issues=[];throw new Error('Reported malformed model response');}
+  if(item.failure&&!freshness.state(stored,fingerprint,genres)){failureStage='parse_error';validationStage='caller_reported';reportedBy='caller';issues=[];claimed=callerFailureClaim(item.failure);throw new Error('Reported malformed model response');}
   const usable=f=>freshness.fingerprintUsable(f,genres);
   if(item.fingerprint&&!usable(fingerprint)){
    const found=fingerprintIssues(item.fingerprint,source[id]);if(found.length){failureStage='parse_error';validationStage='fingerprint_schema';reportedBy='worker';issues=found;throw new Error('Invalid fingerprint');}
@@ -2386,7 +2511,7 @@ async function batchSubmitItem(env,ctx,item){
   if(error instanceof BatchGateLost)return {result:{filmId:id,status:'blocked',reason:error.status},stop:error.status};
   if(deferredIndex){try{await updateViewIndex(env,id,deferredIndex);}catch{/* the failure being recorded is the item's own */}deferredIndex=null;}
   const at=new Date().toISOString(),retryable=failureStage==='parse_error',previous=await loadJSON(env,predictionQueueKey),attempts=(previous?.retries?.[id]?.attempts||0)+1,retryAt=Date.now()+Math.min(6*3600000,3600000*2**(attempts-1));
-  const validation=validationStage?{stage:validationStage,reportedBy,issues}:null;
+  const validation=validationStage?{stage:validationStage,reportedBy,issues,...(claimed?{claimed}:{})}:null;
   if(!retryable)return {result:{filmId:id,status:'blocked',reason:'storage_error'},stop:'storage_error'};
   run.failures[id]={kind:failureStage,scope:'item',retryable:true,failedAt:at,retryAt,attempts,...(validation?{validation}:{})};run.results[id]='failed';run.retryHeal='pending';
   run.submitted[id]={outcome:'validation_failure',inputDigest:digest,committedAt:at};
@@ -2407,7 +2532,7 @@ async function batchRecordRetry(env,run,id,result){
 async function batchPublishIntent(env,ctx){
  const run=ctx.run,intent=run.progressIntent;if(!intent)return;
  const held=await batchGateHeld(env,ctx);if(held!=='held')throw new BatchGateLost(held);
- await writeEvent(env,intent);
+ if(!isBatchV2Run(run))await writeEvent(env,intent);
  delete run.progressIntent;
  await batchGuardedCommit(env,ctx,()=>savePredictionRun(ctx.guarded,run));
 }
@@ -2538,7 +2663,7 @@ async function batchSubmitDryRun(env,body){
   let liveInput='same';
   if(item.inputHash){const plan=freshness.fingerprintUsable(state.fingerprint,genres)?'prediction_only':'fingerprint_and_prediction',entry={filmId:id,lane:queue?.priority?.[id]?.hot?'hot':'cold',plan,modelMetadata:batchCompact(modelMetadata(film)),...(plan==='prediction_only'?{fingerprint:batchCompact(state.fingerprint)}:{})};liveInput=(await batchFilmInputHash(entry))===item.inputHash?'same':'changed';}
   const current_=state.predictions?.current;
-  if(item.failure){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage:'caller_reported',reportedBy:'caller',issues:[]},liveInput,assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
+  if(item.failure){results.push({filmId:id,status:'validation_failure',error:'parse_error',validation:{stage:'caller_reported',reportedBy:'caller',issues:[],...(callerFailureClaim(item.failure)?{claimed:callerFailureClaim(item.failure)}:{})},liveInput,assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
   let fingerprint=state.fingerprint;
   if(freshness.state(current_,fingerprint,genres)){results.push({filmId:id,status:'already_current',liveInput:'not_eligible',assessment:item.assessment!==undefined?'not_applicable':'not_sent',dryRun:true});continue;}
   if(item.fingerprint&&!freshness.fingerprintUsable(fingerprint,genres)){const found=fingerprintIssues(item.fingerprint,modelMetadata(film));if(found.length){issues=found;stage='fingerprint_schema';}else fingerprint={...item.fingerprint,filmId:id,fingerprintHash:await contentHash({...item.fingerprint,filmId:id}),fingerprintSchemaVersion:item.fingerprint.fingerprintSchemaVersion??FINGERPRINT_SCHEMA_VERSION};}
@@ -2570,7 +2695,7 @@ async function diagnosedStart(env,body,requestId){
   const held=await atStage('catalog_gate',()=>catalogHeldCause(env));if(held)return catalogHeldResponse(held);
   const lease=await atStage('runner_lease',()=>runnerLease(env,runId,'acquire'));if(lease.status!=='owned')return json(lease);
   shell.leaseAcquiredAt=lease.heartbeatAt;shell.lastHeartbeatAt=lease.heartbeatAt;const previous=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;shell.startResult=previous&&['running','interrupted'].includes(previous.status)?'recovered_stale_lease':'running';await diagnosticCheckpoint(env,shell,{state:'running',startResult:shell.startResult});
-  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await settleExpiredDiagnostics(env);await deliverPendingEvents(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
+  try{const result=await atStage('writer_lease',()=>predictionWriter(env,async()=>{await deliverPendingEvents(env);return enrichmentStart(env,body,{...lease,diagnosticStartedAt:at,startResult:shell.startResult});}));if(result.status>=400)await runnerLease(env,runId,'release');return result;}catch(error){await runnerLease(env,runId,'release');if(error?.stage==='queue_refresh'&&CATALOG_HELD_CODES.includes(error?.code)){logPredictionFailure('start',error,requestId,runId);return catalogHeldResponse(error.code);}throw error;}
  },'start',requestId);
  const data=await response.clone().json();if(data.status!=='running'){shell.status=data.status==='already_running'?'completed':data.status==='noop'?'idle':'blocked';shell.completedAt=new Date().toISOString();shell.stopReason=data.stopReason||data.reason||(data.error?'storage_error':null);await diagnosticCheckpoint(env,shell,{startResult:['already_running','blocked','noop'].includes(data.status)?data.status:'error',leaseAcquiredAt:shell.leaseAcquiredAt||null,lastHeartbeatAt:shell.lastHeartbeatAt||null});}
  return response;
@@ -2711,13 +2836,17 @@ async function enrichmentSubmit(env,body,requestId){
 }
 async function enrichmentComplete(env,body,requestId){
  const run=await checkedRun(env,body?.runId);if(!run)return json({error:'Unknown run'},404);
- if(run.status==='complete'||run.status==='partial'){if(run.event)await writeEvent(env,run.event);else await writeEvent(env,{id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts});await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...(run.event||{})});}
+ if(run.status==='complete'||run.status==='partial'){
+  const replay=run.event||{id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts};
+  if(isBatchV2Run(run))await parkAndFlushRunEvent(env,replay,run.runId);else await writeEvent(env,replay);
+  await runnerLease(env,run.runId,'release');await settleExpiredDiagnostics(env);return json({runId:run.runId,status:run.status,counts:run.counts,...(run.event||{})});
+ }
  const fault=readCallerFault(body);if(fault.rejected)return json({error:'Invalid fault'},400);
  const faultReason=typeof body.reason==='string'&&!NORMAL_COMPLETE.includes(body.reason)?systemicReason(body.reason):null;
  if(fault.value&&!FAULT_REASONS.includes(faultReason))return json({error:'Fault requires an external stop reason'},400);
  const attributed=externalAttribution(faultReason,fault.value);if(attributed)run.callerFault=attributed;
  const lease=await runnerLease(env,run.runId);if(lease.status!=='owned')return json(lease,409);run.lastHeartbeatAt=lease.heartbeatAt;
- if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){return json(await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null}));}
+ if(body.reason&&!NORMAL_COMPLETE.includes(body.reason)){const stopped=await recordRunStop(env,run.runId,systemicReason(body.reason),{callerFault:run.callerFault||null});await settleExpiredDiagnostics(env);return json(stopped);}
  // ADR 0136: spending every selected manifest film is a normal complete for batch_v2 even when the global queue still has ready films. Unsubmitted / deferred_budget slots fail closed; profile/contract/lease stops stay as they are.
  if(body.reason==='manifest_spent'){
   if(run.protocol!==BATCH_PROTOCOL)return json({error:'manifest_spent is accepted only for a batch_v2 run'},400);
@@ -2744,12 +2873,24 @@ async function enrichmentComplete(env,body,requestId){
   // ADR 0136: a short batch that spent its selected manifest records stopReason manifest_spent (not time_budget, not a false queue_empty) while still reporting the real global outstanding counters.
   if(queue&&!run.reason&&!pending)run.stopReason=body.reason==='manifest_spent'?'manifest_spent':(queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty');
  }
- const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);await writeEvent(env,event);await runnerLease(env,run.runId,'release');return json({runId:run.runId,status:run.status,counts:run.counts,...event});
+ const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run),failedCount=run.counts.failed||0,title=v2.presentation?(run.status==='complete'?(failedCount?'Пакет прогнозов обработан с ошибками':'Пакет прогнозов обработан'):'Пакет прогнозов прерван'):undefined,event={id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...(title?{title}:{}),...v2,...scheduledRunFields()};run.event=event;await savePredictionRun(env,run);if(isBatchV2Run(run))await parkAndFlushRunEvent(env,event,run.runId);else await writeEvent(env,event);await runnerLease(env,run.runId,'release');await settleExpiredDiagnostics(env);return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,discoveryRead,lease,eventOutbox]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovery-status.json').then(value=>({value}),()=>({value:null,unavailable:true})),loadJSON(env,RUNNER_LEASE_KEY),eventOutboxStatus(env)]);const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:queue?(queue.hotCount||0)+(queue.coldCount||0):report?eligibleEnrichmentFilms(report).length:0,pendingCount:queue?.pendingCount??null,discovery:discoveryRead.value||null,...(discoveryRead.unavailable?{discoveryStatus:'unavailable'}:{}),queue,eventOutbox};}
+async function loadGenreCatalog(env){
+ if(typeof DiscoveryAuthority!=='undefined'){
+  const gate=await DiscoveryAuthority.readAuthority(env);
+  if(gate.held){const error=new Error('discovery_fence');error.code='discovery_fence';throw error;}
+  if(gate.ready){
+   const routed=await DiscoveryAuthority.routeRead(env,'epg/discovered-films.json');
+   if(!routed.handled){const error=new Error('discovery_unavailable');error.code='discovery_unavailable';throw error;}
+   return routed.value;
+  }
+ }
+ return loadJSON(env,'epg/discovered-films.json');
+}
 async function enrichmentView(env){const [profile,stored]=await Promise.all([loadJSON(env,profileKey),readViewIndex(env)]),index=typeof PredictionD1==='undefined'?stored:await PredictionD1.overlayIndex(env,stored,canonicalMoodFacet),freshness=await predictionFreshness(env,profile);
  // Genres feed only the selective rules, so the programme and catalog are read only when one of them is on.
- const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadJSON(pinned,'epg/discovered-films.json')]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS,groups:MOOD_GROUPS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,moodGroups:moodPresentationGroups(facet.mapping),fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,...(Object.hasOwn(p,'confidenceAssessment')?{confidenceAssessment:p.confidenceAssessment,fingerprintHash:p.fingerprintHash??null}:{}),stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}
+ const films=freshness.needsGenres?await (async()=>{const pinned=await pinEpg(env),[report,catalog]=await Promise.all([loadJSON(pinned,'programme.json'),loadGenreCatalog(pinned)]);return new Map(allEnrichmentFilms(report||{films:[]},catalog).map(f=>[String(f.id),f]));})():null;return {moodVocabulary:{version:MOOD_MAPPING_VERSION,labels:MOOD_LABELS,groups:MOOD_GROUPS},profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,compatibility:{profileMode:freshness.mode,fingerprintMode:freshness.fingerprintMode,...fingerprintTarget()},films:Object.fromEntries(Object.entries(index||{}).map(([id,item])=>{const p=item.prediction,f=item.fingerprint,facet=canonicalMoodFacet(f,p);return [id,{moodIds:facet.moodIds,moodGroups:moodPresentationGroups(facet.mapping),fingerprint:f&&f.fingerprintHash===item.fingerprintHash?{plotMechanics:f.plotMechanics||[],moodIds:facet.moodIds,execution:executionFacet(f.execution)}:null,prediction:p?{predictedRating:p.predictedRating,probability4Plus:p.probability4Plus,confidence:p.confidence,matchSignals:p.matchSignals,mainRisk:p.mainRisk,moodIds:facet.moodIds,...(Object.hasOwn(p,'confidenceAssessment')?{confidenceAssessment:p.confidenceAssessment,fingerprintHash:p.fingerprintHash??null}:{}),stale:!freshness.indexed(item,films?.get(id))}:null,actualRating:item.actualRating??null,watched:item.watched===true?true:item.watched===false?false:null}];}))};}
 
 async function backfillFingerprintView(env,body){const [index,report,catalog]=await Promise.all([ensureInitialRatings(env),loadJSON(env,'programme.json'),loadJSON(env,'epg/discovered-films.json')]),ids=[...new Set([...Object.keys(index),...allEnrichmentFilms(report||{films:[]},catalog).map(f=>String(f.id))])].sort(),cursor=String(body.cursor||'');if(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1||body.limit>100))return json({error:'Invalid limit'},400);const selected=ids.filter(id=>id>cursor).slice(0,body.limit||80),fingerprints=await Promise.all(selected.map(id=>loadJSON(env,filmKey(id)+'fingerprint.json')));let added=0,updated=0;const patches=[];for(let i=0;i<selected.length;i++){const id=selected[i],facet=fingerprintFacet(fingerprints[i]),impact=fingerprintImpactFacet(fingerprints[i]);const previousFacet=index[id]?.fingerprint;if(!facet||previousFacet?.fingerprintHash===facet.fingerprintHash&&Object.hasOwn(previousFacet,'execution')&&index[id]?.impactFeatures?.fingerprintHash===facet.fingerprintHash)continue;patches.push({id,facet,impact});index[id]?.fingerprint?updated++:added++;}if(patches.length)await mergeStoredJSON(env,ENRICHMENT_KEY+'view-index.json',{},current=>{for(const patch of patches)current[patch.id]={...(current[patch.id]||{}),fingerprintHash:patch.facet.fingerprintHash,fingerprint:patch.facet,impactFeatures:patch.impact};return current;});return json({checked:selected.length,added,updated,nextCursor:selected.length&&ids.some(id=>id>selected.at(-1))?selected.at(-1):null});}
 const predictionBenchmarkKey=id=>ENRICHMENT_KEY+'benchmarks/'+encodeURIComponent(id)+'.json';
@@ -3025,7 +3166,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   const report=await loadJSON(pinned,'programme.json');if(!report?.films)return json({error:'No programme'},409);
   const now=Date.now(),response=await fetch(sourceConfig(env).epg,{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
   const cache=await loadJSON(pinned,'epg/discovered-films.json')||{},known=new Set(report.films.map(f=>String(f.tmdbId)));const result=await scanEPG(response.body,[...report.films,...Object.values(cache).filter(f=>!known.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now+8*3600000)return json({error:'EPG horizon too short'},502);
-  const old=await loadJSON(pinned,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true,programmeRunId:report.runId});const replaced=replaceCatalogAvailability(cache,result.discovery,report.runId);
+  const old=await loadJSON(pinned,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true,programmeRunId:report.runId});const replaced=replaceCatalogAvailability(cache,result.discovery,report.runId,{writeAvailability:pinned?.epgPin?.authority!=='d1'});
   await updatePublishedFiles(env,{'discovery-latest.json':{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items},'discovered-films.json':replaced.catalog});
   await refreshPredictionQueue(env,report,'epg_scan');const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'scan_committed',report.runId));return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned,...presented});
  }
@@ -3069,7 +3210,15 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());
- if(path==='/api/enrichment/view'&&request.method==='GET')return json(await enrichmentView(env));
+ if(path==='/api/enrichment/view'&&request.method==='GET'){
+  try{return json(await enrichmentView(env));}
+  catch(error){
+   if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','discovery_bounded'].includes(error?.code)){
+    return json({error:'The catalog is not readable right now',code:error.code},503,{'Retry-After':'1'});
+   }
+   throw error;
+  }
+ }
  if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return backfillFingerprintView(env,body);
  if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveActualMirror(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});}return json({results});}
  if(path==='/api/enrichment/ratings/backfill'&&request.method==='POST')return ratingsBackfill(env,body);

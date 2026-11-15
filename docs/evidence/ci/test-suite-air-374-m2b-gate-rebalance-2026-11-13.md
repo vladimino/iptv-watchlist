@@ -1,6 +1,6 @@
 # AIR-374 M2b: the shard 3 runtime gate (180 s) and the follow-up rebalance (13 Nov 2026)
 
-**Status (13 Nov 2026, later the same day):** superseded as a work item. The Product Owner replaced the 180 s per-shard gate with 240 s per shard as a permanent policy ([agent workflow](../../process/agent-workflow.md#test-suite-performance-quality-gate)) and withdrew the optimisation targets. The measurements below are kept as the record of the runs that led to it; nothing in them was rewritten.
+**Status (13 Nov 2026, later the same day):** superseded as a work item. The Product Owner replaced the 180 s per-shard gate with 240 s per shard as a permanent policy ([agent workflow](../../process/agent-workflow.md#test-suite-performance-quality-gate)) and withdrew the optimisation targets. The measurements below are kept as the record of the runs that led to it; nothing in them was rewritten. On 15 Nov 2026 that 240 s gate itself stopped being a merge or deploy blocker; runner wall-clock checks moved to the nightly suite ([AIR-490](air-490-nonfunctional-suite-2026-11-15.md)). The heading linked above is unchanged so this record still resolves.
 
 **Captured:** 2026-11-13, from the retained CI logs of PR #593 (CI/CD runs 43483457532, 43486898627 and 43490089489, three jobs each, plus the Controller's recorded rerun). **Nothing was run in production.** The numbers are wall and summed file time of the `Run tests` step, read from the job logs.
 

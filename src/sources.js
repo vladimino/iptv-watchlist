@@ -88,34 +88,34 @@ async function forEachJsonArrayItems(chunks,field,onItem){
  const source=chunks[Symbol.asyncIterator]();
  const pull=async min=>{while(buf.length-pos<min&&!eof){const step=await source.next();if(step.done){eof=true;break;}if(step.value)buf+=step.value;}};
  const compact=()=>{if(pos>262144){buf=buf.slice(pos);pos=0;}};
- const need=async n=>{if(buf.length-pos<n)await pull(n);};
- const skipWs=async()=>{while(true){await need(1);if(pos>=buf.length)return;const c=buf[pos];if(c!==' '&&c!=='\n'&&c!=='\r'&&c!=='\t')return;pos++;}};
+ // Inline checks, not an awaited helper: an async `need(1)` per character allocated a promise per byte (AIR-460).
+ const skipWs=async()=>{while(true){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)return;const c=buf[pos];if(c!==' '&&c!=='\n'&&c!=='\r'&&c!=='\t')return;pos++;}};
  const fail=()=>{throw new Error('Discovery ledger JSON is incomplete');};
- const skipString=async()=>{if(buf[pos]!=='"')fail();pos++;while(true){await need(1);if(pos>=buf.length)fail();const c=buf[pos++];if(c==='\\'){await need(1);if(pos>=buf.length)fail();const e=buf[pos++];if(e==='u'){await need(4);if(buf.length-pos<4)fail();pos+=4;}}else if(c==='"')return;}};
+ const skipString=async()=>{if(buf[pos]!=='"')fail();pos++;while(true){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const c=buf[pos++];if(c==='\\'){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const e=buf[pos++];if(e==='u'){(buf.length-pos<4&&await pull(4));if(buf.length-pos<4)fail();pos+=4;}}else if(c==='"')return;}};
  const scanValue=async()=>{
-  await need(1);if(pos>=buf.length)fail();const c=buf[pos];
+  (buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const c=buf[pos];
   if(c==='"'){await skipString();return;}
-  if(c==='{'||c==='['){let depth=0;while(true){await need(1);if(pos>=buf.length)fail();const ch=buf[pos++];if(ch==='"'){pos--;await skipString();continue;}if(ch==='{'||ch==='[')depth++;else if(ch==='}'||ch===']'){depth--;if(depth===0)return;}}}
+  if(c==='{'||c==='['){let depth=0;while(true){(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();const ch=buf[pos++];if(ch==='"'){pos--;await skipString();continue;}if(ch==='{'||ch==='[')depth++;else if(ch==='}'||ch===']'){depth--;if(depth===0)return;}}}
   while(true){if(pos>=buf.length){if(eof)return;await pull(1);if(pos>=buf.length)return;}const ch=buf[pos];if(ch===','||ch===']'||ch==='}'||ch<=' ')return;pos++;}
  };
- await skipWs();await need(1);if(pos>=buf.length||buf[pos]!=='{')fail();pos++;
+ await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length||buf[pos]!=='{')fail();pos++;
  const wrapper={};let first=true,sawField=false;
  while(true){
-  await skipWs();await need(1);if(pos>=buf.length)fail();
+  await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();
   if(buf[pos]==='}'){pos++;break;}
-  if(!first){if(buf[pos]!==',')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();}
+  if(!first){if(buf[pos]!==',')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();}
   first=false;
   if(buf[pos]!=='"')fail();
   const keyStart=pos;await skipString();const key=JSON.parse(buf.slice(keyStart,pos));
-  await skipWs();await need(1);if(pos>=buf.length||buf[pos]!==':')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();
+  await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length||buf[pos]!==':')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();
   if(key===field){
    if(sawField||buf[pos]!=='[')fail();
    sawField=true;
    pos++;let itemFirst=true;
    while(true){
-    await skipWs();await need(1);if(pos>=buf.length)fail();
+    await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();
     if(buf[pos]===']'){pos++;break;}
-    if(!itemFirst){if(buf[pos]!==',')fail();pos++;await skipWs();await need(1);if(pos>=buf.length)fail();}
+    if(!itemFirst){if(buf[pos]!==',')fail();pos++;await skipWs();(buf.length-pos<1&&await pull(1));if(pos>=buf.length)fail();}
     itemFirst=false;const start=pos;await scanValue();const slice=buf.slice(start,pos);compact();await onItem(JSON.parse(slice));
    }
   }else{const start=pos;await scanValue();wrapper[key]=JSON.parse(buf.slice(start,pos));compact();}
@@ -193,17 +193,47 @@ function archivedPayloadNewer(next,current){
  if(Number.isFinite(a)!==Number.isFinite(b))return Number.isFinite(a);
  return String(next?.lastSeenProgrammeRunId||'')>=String(current?.lastSeenProgrammeRunId||'');
 }
-function mergeCatalogIdentity(incoming,live,programmeRunId){
+const CATALOG_AVAILABILITY_FIELDS=['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt'];
+function stripCatalogAvailability(film){
+ if(!film||typeof film!=='object')return film;
+ const next={...film};
+ for(const field of CATALOG_AVAILABILITY_FIELDS)delete next[field];
+ return next;
+}
+function catalogIdentityDigest(film){
+ const body=stripCatalogAvailability(film);
+ if(!body||typeof body!=='object')return JSON.stringify(body);
+ const ordered={};
+ for(const key of Object.keys(body).sort()){
+  ordered[key]=key==='aliases'&&Array.isArray(body[key])?[...body[key]].sort():body[key];
+ }
+ return JSON.stringify(ordered);
+}
+function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
+ const writeAvailability=options.writeAvailability!==false;
  const next={...(incoming||{})};
+ const liveKeys=new Set();
  for(const [key,film] of Object.entries(live||{})){
   if(!film||typeof film!=='object')continue;
+  liveKeys.add(key);
   const staged=next[key];
-  if(!staged){next[key]={...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null};continue;}
-  next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+  if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
+  const merged={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+  if(writeAvailability===false){
+   next[key]=catalogIdentityDigest(merged)===catalogIdentityDigest(film)?film:stripCatalogAvailability(merged);
+   continue;
+  }
+  next[key]=merged;
+ }
+ if(writeAvailability===false)for(const [key,film] of Object.entries(next)){
+  if(liveKeys.has(key)||!film||typeof film!=='object')continue;
+  next[key]=stripCatalogAvailability(film);
  }
  return next;
 }
-function replaceCatalogAvailability(catalog,discoveryItems,programmeRunId){
+// ADR 0142 decision 13: under D1 the catalog record is identity data. Availability (`shows`, `epgLastAiring`, `showsProgrammeRunId`) is not rewritten here; readers take it from the completed programme. R2 still stamps those fields (`writeAvailability` default true).
+function replaceCatalogAvailability(catalog,discoveryItems,programmeRunId,options={}){
+ if(options.writeAvailability===false)return {catalog:catalog||{},changed:false};
  const byTmdb=new Map();
  for(const item of discoveryItems||[]){if(!item?.confirmedTmdbId)continue;const id=String(item.confirmedTmdbId),list=byTmdb.get(id)||[];list.push(...(item.shows||[]));byTmdb.set(id,list);}
  const next={};let changed=false;
@@ -256,8 +286,10 @@ function xmlTime(s){const m=s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})
 const EPG_HOT_FUTURE_MS=24*3600000,EPG_RETAIN_FUTURE_MS=7*24*3600000;
 async function scanEPG(stream,watchlist,now){
  const index=new Map();for(const film of watchlist){for(const title of new Set((film.aliases||[film.original]).map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
- const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map();let scanned=0,min=Infinity,max=-Infinity,kept=0,buffer='',complete=false,bytes=0;
+ const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
+ // ADR 0142 decision 1: one owner per (channel, start). The same owner again is ignored; a second owner discards both records after the stream.
+ const claimSlot=(channelId,startAt,owner,title,channel)=>{const slot=channelId+':'+startAt,held=slotOwners.get(slot);if(held===undefined){slotOwners.set(slot,owner);return 'new';}if(held===owner)return 'same';if(!conflictedSlots.has(slot))conflictedSlots.set(slot,{title,channel,start:startAt,reason:'duplicate_slot'});return 'conflict';};
  try{while(true){const {done,value}=await reader.read();if(done){buffer+=decoder.decode();break;}bytes+=value.length;if(bytes>400000000)throw new Error('EPG exceeds supported size');buffer+=decoder.decode(value,{stream:true});
  while(true){const start=buffer.search(/<(?:channel|programme)\s/);if(start<0){if(buffer.includes('</tv>'))complete=true;buffer=buffer.slice(-1000);break;}if(start>0)buffer=buffer.slice(start);const type=buffer.startsWith('<channel ')?'channel':'programme',end=buffer.indexOf('</'+type+'>');if(end<0){if(buffer.length>1000000)throw new Error('EPG record exceeds limit');break;}const xml=buffer.slice(0,end+type.length+3);buffer=buffer.slice(end+type.length+3);
  if(type==='channel'){channels.set(attr(xml,'id'),field(xml,'display-name'));continue;}
@@ -270,13 +302,22 @@ async function scanEPG(stream,watchlist,now){
  if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;kept++;
  // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
  if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
- if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(previous){previous.shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title});previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[{channelId,channel,start:startAt,end:endAt,epgTitle:title}]});}continue;}
- const f=valid[0];if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);const hint=showMatchBasis(titleYear,{key,title:parts.title,normalizedTitle:key,year:titleYear,duration:Math.round(duration),durations:[Math.round(duration)]},candidates.filter(film=>film?.tmdbId).map(film=>({tmdbId:film.tmdbId,title:film.title,original:film.original,aliases:film.aliases,year:film.year,runtime:film.runtime,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId})));matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:hint.basis,matchReason:hint.hint?hint.reason:null});
+ if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(claimSlot(channelId,startAt,'o:'+discoveryKey,title,channel)!=='new')continue;const shown={channelId,channel,start:startAt,end:endAt,epgTitle:title};showMeta.set(shown,{title:parts.title,description:description&&description!=='Нет описания'?description.slice(0,700):null,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null});if(previous){previous.shows.push(shown);previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[shown]});}continue;}
+ const f=valid[0];if(claimSlot(channelId,startAt,'f:'+f.id,title,channel)!=='new')continue;if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);const hint=showMatchBasis(titleYear,{key,title:parts.title,normalizedTitle:key,year:titleYear,duration:Math.round(duration),durations:[Math.round(duration)]},candidates.filter(film=>film?.tmdbId).map(film=>({tmdbId:film.tmdbId,title:film.title,original:film.original,aliases:film.aliases,year:film.year,runtime:film.runtime,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId})));matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:hint.basis,matchReason:hint.hint?hint.reason:null});
  }
  }
  }finally{reader.releaseLock();}
  complete=complete||buffer.includes('</tv>');if(!complete||scanned===0)throw new Error('EPG incomplete: closing tv tag or programmes missing');
- return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size},uncertain:[...uncertain.values()].slice(0,100)};
+ if(conflictedSlots.size){const contested=show=>conflictedSlots.has(show.channelId+':'+show.start);
+  for(const [id,film] of matched){film.shows=film.shows.filter(show=>!contested(show));if(!film.shows.length)matched.delete(id);}
+  for(const [key,candidate] of discovery){const before=candidate.shows.length;candidate.shows=candidate.shows.filter(show=>!contested(show));if(!candidate.shows.length){discovery.delete(key);continue;}if(candidate.shows.length===before)continue;
+   // The identity evidence of the observation (duration, title forms, description, confirmed TMDB id) must come from slots that remain, in feed order, as when the candidate was first built.
+   const [first]=candidate.shows,metas=candidate.shows.map(show=>showMeta.get(show));
+   candidate.airings=candidate.shows.length;candidate.firstAiring=first.start;candidate.lastAiring=Math.max(...candidate.shows.map(show=>show.start));
+   candidate.duration=Math.round((first.end-first.start)/60000);candidate.title=metas[0].title;candidate.rawTitles=[...new Set(candidate.shows.map(show=>show.epgTitle))].slice(0,8);
+   candidate.description=metas.find(meta=>meta.description)?.description||null;candidate.confirmedTmdbId=metas[0].confirmedTmdbId;}
+  }
+ return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size},uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
 
 async function loadPeopleNameIndex(films){
@@ -360,6 +401,24 @@ function programmeWithWatchlist(report,watchlist){
  const scheduled=new Map(report.films.map(f=>[String(f.id),f]));
  const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
  return {...report,films,people:peopleCatalog(films)};
+}
+
+// ADR 0142 decision 11 (presentation). `report.catalogFilms` are identity-only entries of the completed read. Film data comes from the current catalog record of the same TMDB id; an
+// entry without such a record is not presented as a Film and is counted. A catalog that could not be read (`catalog` null) never touches `films`: the part is stated as unavailable.
+function presentCatalogFilms(report,catalog){
+ const entries=Array.isArray(report?.catalogFilms)?report.catalogFilms:[];
+ if(!entries.length){const {catalogFilms,...rest}=report||{};return rest;}
+ if(!catalog||typeof catalog!=='object'||Array.isArray(catalog))return {...report,catalogFilms:[],catalogPart:{state:'unavailable',entries:entries.length}};
+ const records=new Map(Object.values(catalog).filter(item=>item&&typeof item==='object'&&item.tmdbId!=null&&item.canonicalIdentity==='tmdb:'+item.tmdbId).map(item=>[String(item.tmdbId),item]));
+ const films=[];let unpresented=0;
+ for(const entry of entries){
+  const record=entry.tmdbId==null?null:records.get(String(entry.tmdbId));
+  if(!record||entry.canonicalIdentity!=='tmdb:'+record.tmdbId){unpresented++;continue;}
+  const data={...record};for(const field of CATALOG_AVAILABILITY_FIELDS)delete data[field];
+  const shows=entry.shows||[];
+  films.push({...data,id:entry.id,tmdbId:String(record.tmdbId),canonicalIdentity:entry.canonicalIdentity,shows,availableUntil:shows.length?availabilityDeadline({shows}):null,onWatchlist:false});
+ }
+ return {...report,catalogFilms:films,catalogPart:{state:'ok',entries:entries.length,presented:films.length,unpresented}};
 }
 
 // Canonical titles are independent of EPG presence and language. Match stable IDs only.
