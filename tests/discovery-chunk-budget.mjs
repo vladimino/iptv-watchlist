@@ -231,7 +231,10 @@ async function lostLease({failAt,mutate}){
  // Only the cheap-pass checkpoint may have been stored before the loss (a loss during the walk stores nothing); never a final summary.
  const storedStatus=statusPayload(base.file);
  if(storedStatus!==statusBefore)assert.equal(JSON.parse(storedStatus).checkpoint,'cheap_pass','no final status after the lease is lost');
- assert.equal(decisionCount(base.file),decisionsBefore);
+ if(failAt==='final'){
+  assert.equal(sql(base.file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'")[0].n,decisionCount(base.file));
+  assert.ok(decisionCount(base.file)<=1,'only the pre-TMDB fairness fence may land before the lost lease');
+ }else assert.equal(decisionCount(base.file),decisionsBefore);
  return {error,file:base.file,lease:lease.lease};
 }
 {
@@ -376,7 +379,8 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(decisionsNow.mix01.status,'no_confident_match');
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission WHERE state='current'")[0].n,1);
  assert.equal(sql(file,"SELECT canonical_identity FROM discovery_admission")[0].canonical_identity,'tmdb:1000');
- assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n),3+HOT.length,'one history row per decision');
+ assert.equal(new Set(sql(file,'SELECT observation_key AS k FROM discovery_decision_history').map(row=>row.k)).size,3+HOT.length);
+ assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_decision_history')[0].n),2*(3+HOT.length),'fairness fence then outcome');
  assert.equal(Number(sql(file,'SELECT COUNT(*) AS n FROM discovery_score')[0].n),3+HOT.length,'the score preview holds this chunk');
  assert.deepEqual(first.queueRefreshes,[],'the chunk does not refresh the prediction queue; the runner does');
  assert.equal(JSON.parse(statusPayload(file)).checked,3+HOT.length);
@@ -439,14 +443,14 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  const owner={status:'verified',filmId:'tmdb_5',tmdbId:'5',identitySource:'owner'};
  let fired=false;
  const {context}=chunkContext({clock:{offset:0},respond:()=>({results:[]}),onFetch(){
-  if(!fired){fired=true;sql(file,`INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, evidence_key, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('mix00','${RUN}',1,'verified',NULL,'5','movie','tmdb_5','owner-hash','${JSON.stringify(owner)}')`);}
+  if(!fired){fired=true;sql(file,`UPDATE discovery_decision SET status='verified', tmdb_id='5', media_kind='movie', film_id='tmdb_5', decision_hash='owner-hash', payload_json='${JSON.stringify(owner)}', retry_at=NULL WHERE observation_key='mix00'`);}
  }});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  const result=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
  assert.equal(sql(file,"SELECT decision_hash FROM discovery_decision WHERE observation_key='mix00'")[0].decision_hash,'owner-hash');
- assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision_history WHERE observation_key='mix00'")[0].n,0);
+ assert.equal(sql(file,"SELECT json_extract(payload_json,'$.deferReason') AS d FROM discovery_decision WHERE observation_key='mix00'")[0].d,null);
  assert.equal(result.error,null);
- assert.equal(result.checked,1+HOT.length,'the candidate counts as handled');
+ assert.equal(result.checked,HOT.length,'the owner key is not counted as this hop\'s TMDB identity');
  await Authority.releaseLease(env,lease.lease);
 }
 
@@ -464,7 +468,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(result.error,'admission_identity_conflict');
  assert.ok(Date.parse(result.retryAt)>Date.now());
  assert.equal(result.added,0);
- assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE observation_key='mix00'")[0].n,0,'no decision without its Film');
+ assert.equal(sql(file,"SELECT json_extract(payload_json,'$.deferReason') AS d FROM discovery_decision WHERE observation_key='mix00'")[0].d,'wall_budget','identity is not stored; the pre-TMDB fence may stand');
  assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_admission")[0].n,1);
  await Authority.releaseLease(env,lease.lease);
 }
@@ -702,6 +706,11 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  const text=String(plan.stdout||'');
  assert.match(text,/SCAN|SEARCH/i);
  fs.writeFileSync(path.join(root,'air-425-count-plan.txt'),text);
+ const waitingPlan=sqliteSync(['-bail',file],{input:'EXPLAIN QUERY PLAN '+Authority.WAITING_RETRY_SQL.replace(/\?/g,'0')+';',encoding:'utf8'});
+ if(waitingPlan.status!==0)throw new Error(waitingPlan.stderr||'waiting explain failed');
+ const waitingText=String(waitingPlan.stdout||'');
+ assert.match(waitingText,/SCAN|SEARCH/i);
+ fs.writeFileSync(path.join(root,'air-492-waiting-retry-plan.txt'),waitingText);
 }
 
 // 22. AIR-492: a slow TMDB candidate that cannot be stored does not pause the series or stick as head-of-line.
@@ -745,7 +754,6 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  const {context,searched}=chunkContext({clock,fetchStatus:429});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  const limited=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
- assert.equal(limited.deferred,0);
  assert.match(String(limited.error),/429/);
  assert.ok(Date.parse(limited.retryAt)>Date.now());
  assert.ok(searched.length>=1);
@@ -785,7 +793,7 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.notEqual(hop.stage,'complete');
  assert.equal(hop.reason,'backoff');
  await Authority.releaseLease(env,lease.lease);
- sql(file,"UPDATE discovery_decision SET retry_at='2020-01-01T00:00:00.000Z', payload_json=json_set(payload_json,'$.retryAt',json('\"2020-01-01T00:00:00.000Z\"')) WHERE json_extract(payload_json,'$.deferReason')='wall_budget'");
+ sql(file,"UPDATE discovery_decision SET retry_at='2020-01-01T00:00:00.000Z' WHERE json_extract(payload_json,'$.deferReason')='wall_budget'");
  sql(file,"UPDATE discovery_status SET retry_at=NULL, payload_json=json_set(payload_json,'$.retryAt',null)");
  const later=chunkContext({clock:{offset:0},respond:()=>({results:[]})});
  const lease2=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease2.lease;
@@ -798,18 +806,31 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
 }
 
 {
- const {file,env}=await fixture({extraHot:3});
- const clock={offset:0};
- const {context}=chunkContext({clock,onFetch(){clock.offset+=36000;}});
- const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
- let checkpoints=0;
- const late=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
- assert.equal(late.deferred,0,'a miss past persistLimit does not start another D1 batch');
- assert.equal(checkpoints,1);
- assert.ok(late.timings.totalMs<=40000,'checkpoint stays inside the wall: '+late.timings.totalMs);
- assert.notEqual(late.stage,'complete');
- assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'")[0].n),0);
- await Authority.releaseLease(env,lease.lease);
+ const {file,env}=await fixture({extraHot:8});
+ const runLate=async()=>{
+  const clock={offset:0};
+  const {context}=chunkContext({clock,onFetch(){clock.offset+=36000;}});
+  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+  let checkpoints=0;
+  const late=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
+  await Authority.releaseLease(env,lease.lease);
+  return {late,checkpoints};
+ };
+ const first=await runLate();
+ assert.equal(first.late.deferred,1,'a late TMDB still stores the pre-request fairness fence');
+ assert.equal(first.late.error,null);
+ assert.equal(first.checkpoints,1);
+ assert.ok(first.late.timings.totalMs<=40000,'checkpoint stays inside the wall: '+first.late.timings.totalMs);
+ assert.notEqual(first.late.stage,'complete');
+ const firstKeys=sql(file,"SELECT observation_key AS k FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'").map(row=>row.k);
+ assert.equal(firstKeys.length,1);
+ const remainingAfterFirst=first.late.remaining;
+ const second=await runLate();
+ assert.equal(second.late.error,null);
+ assert.ok(second.late.timings.totalMs<=40000,'second late hop still checkpoints: '+second.late.timings.totalMs);
+ const allKeys=sql(file,"SELECT observation_key AS k FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'").map(row=>row.k);
+ assert.ok(allKeys.some(key=>key!==firstKeys[0]),'a consecutive late hop fences a different eligible key');
+ assert.ok(second.late.remaining<remainingAfterFirst||second.late.checked>0,'eligible work moves without a new generation');
 }
 
 {
@@ -832,14 +853,13 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
   const key=String(query||'').replace(/^Film /,'');
   const row=sql(file,`SELECT evidence_key AS k FROM discovery_observation WHERE observation_key='${key}'`)[0];
   if(!row)return;
-  sql(file,`INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('${key}','${RUN}',1,'no_confident_match',5,'${row.k}','repeated_uncertain_match',NULL,NULL,NULL,NULL,'owner-hash','${JSON.stringify({status:'no_confident_match',attempts:5,terminalReason:'repeated_uncertain_match',evidenceKey:row.k,owner:true})}')`);
+  sql(file,`UPDATE discovery_decision SET status='no_confident_match', attempts=5, evidence_key='${row.k}', terminal_reason='repeated_uncertain_match', retry_at=NULL, decision_hash='owner-hash', payload_json='${JSON.stringify({status:'no_confident_match',attempts:5,terminalReason:'repeated_uncertain_match',evidenceKey:row.k,owner:true})}' WHERE observation_key='${key}'`);
  }});
  const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
  const raced=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
- assert.equal(raced.deferred,0);
  const owner=sql(file,"SELECT json_extract(payload_json,'$.owner') AS o, json_extract(payload_json,'$.deferReason') AS d FROM discovery_decision");
  assert.ok(owner.some(row=>row.o===1||row.o===true),'owner decision stands');
- assert.equal(owner.filter(row=>row.d==='wall_budget').length,0);
+ assert.equal(owner.filter(row=>(row.o===1||row.o===true)&&row.d==='wall_budget').length,0);
  await Authority.releaseLease(env,lease.lease);
 }
 

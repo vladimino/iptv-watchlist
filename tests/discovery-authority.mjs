@@ -424,6 +424,7 @@ assert.ok(limited.retryAt);
 wideStatus=403;
 wideFetches=[];
 await Authority.routeWrite(wideEnv,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',programmeRunId:'run-wide',retryAt:null});
+wide.db.sql("UPDATE discovery_decision SET retry_at='2020-01-01T00:00:00.000Z'");
 const forbidden=await wideContext.resolveDiscoveryChunk(wideEnv,{films:[]},1,wideLease.lease);
 assert.equal(forbidden.error,'TMDB HTTP 403');
 assert.deepEqual(wideFetches,[403]);

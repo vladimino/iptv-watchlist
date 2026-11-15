@@ -34,7 +34,7 @@ That matches `tmdbCalls=1`, `checked=0`, five-minute waits, and a queue that bar
 | 16th TMDB call on a candidate that cannot finish | that key is deferred; 15 checked identities; no series `retryAt` |
 | TMDB cap with no extra call on the next candidate | no defer (cap throw before `tmdbCalls++`) |
 | Sole remaining candidate deferred | `remaining=0`, `waitingRetry>=1`, `stage=partial`, series `retryAt`; continuation is `paused`/`backoff`, not `complete`; after `retry_at` is due the same generation checks that key |
-| Fetch past `persistLimit` | no `wall_budget` defer row, checkpoint still runs, `deferred=0` |
+| Two consecutive +36 s TMDB hops with extra eligible rows | each hop stores a pre-request `wall_budget` fence, checkpoints inside 40 s, `error=null`; the second hop fences a **different** key |
 | TMDB `TimeoutError` after a call | `deferred=1`, `error=null` |
 | Owner CAS during fetch | owner payload kept, no `wall_budget` defer, cursor not treated as handled |
 
