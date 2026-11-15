@@ -90,6 +90,23 @@ function open(db){
  await assert.rejects(()=>Authority.readFilmAdmission({DB:db},'10'),error=>error.code==='discovery_fence');
 }
 
+function catalogReplaceAba(db){
+ db.sql("UPDATE discovery_transfer SET state='loading', batches=batches+1 WHERE id=1");
+ db.sql("UPDATE discovery_admission SET state='pending' WHERE state='current'");
+ db.sql("UPDATE discovery_transfer SET state='committed', batches=batches+1 WHERE id=1");
+}
+function isCatalogAdmissionRead(text){
+ return /FROM discovery_admission WHERE state='current' ORDER BY film_id/.test(text)
+  || /FROM discovery_admission WHERE media_kind='movie' AND tmdb_id=/.test(text);
+}
+
+{
+ const {db}=migrated({onQuery:async text=>{if(isCatalogAdmissionRead(text))catalogReplaceAba(db);}});
+ open(db);admit(db,film(10));admit(db,film(11));
+ await assert.rejects(()=>Authority.routeRead({DB:db},'epg/discovered-films.json'),error=>error.code==='discovery_fence');
+ await assert.rejects(()=>Authority.readFilmAdmission({DB:db},'10'),error=>error.code==='discovery_fence');
+}
+
 const records=new Map();
 const bucket={
  async get(key){return records.has(key)?{etag:'e',json:async()=>structuredClone(records.get(key))}:null;},
@@ -160,6 +177,34 @@ async function get(path,env){
  const loading=await get('/api/catalog/available',{DB:db,BUCKET:bucket});
  assert.equal(loading.status,503,JSON.stringify(loading.body));
  assert.equal(loading.body.code,'discovery_incomplete');
+}
+
+{
+ seedBucket();
+ const {db}=migrated({onQuery:async text=>{if(isCatalogAdmissionRead(text))catalogReplaceAba(db);}});
+ open(db);admit(db,film(10));admit(db,film(11));
+ const aba=await get('/api/catalog/available',{DB:db,BUCKET:bucket});
+ assert.equal(aba.status,503,JSON.stringify(aba.body));
+ assert.equal(aba.body.code,'discovery_fence');
+ assert.equal(aba.body.films,undefined,'ABA empty catalog is never HTTP 200');
+ assert.ok(!aba.body.films,'no R2 fallback after a catalog replace ABA');
+ const abaView=await get('/api/enrichment/view',{DB:db,BUCKET:bucket});
+ assert.equal(abaView.status,503,JSON.stringify(abaView.body).slice(0,200));
+ assert.equal(abaView.body.code,'discovery_fence');
+}
+
+{
+ seedBucket();
+ const {db}=migrated();open(db);admit(db,film(10));
+ db.sql("UPDATE discovery_authority SET cutover='held' WHERE id=1");
+ const heldCatalog=await get('/api/catalog/available',{DB:db,BUCKET:bucket});
+ assert.equal(heldCatalog.status,503,JSON.stringify(heldCatalog.body));
+ assert.equal(heldCatalog.body.code,'discovery_fence');
+ assert.ok(!heldCatalog.body.films,'held catalog GET does not serve the R2 mirror');
+ const heldView=await get('/api/enrichment/view',{DB:db,BUCKET:bucket});
+ assert.equal(heldView.status,503,JSON.stringify(heldView.body).slice(0,200));
+ assert.equal(heldView.body.code,'discovery_fence');
+ assert.equal(heldView.body.films,undefined,'held enrichment view does not serve the R2 catalog');
 }
 
 {

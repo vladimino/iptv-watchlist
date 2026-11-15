@@ -1,5 +1,5 @@
 // AIR-431 / AIR-493. The Prediction queue advances on its own state while Discovery keeps writing. A runner step does
-// not rebuild from the whole catalog. A full rebuild reads the catalog as one admission snapshot (ADR 0146): a Discovery
+// not rebuild from the whole catalog. A full rebuild reads the catalog as one admission snapshot (ADR 0147): a Discovery
 // chunk that only bumps `discovery_authority.generation` does not fence it. Here the Worker runs in a vm on an in-memory
 // R2 and a real Discovery authority on a local sqlite D1 stand-in, and every catalog query moves the Discovery generation
 // (a continuation write on each statement). Local stand-ins only; nothing here calls Cloudflare, TMDB or production.
@@ -137,7 +137,7 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  assert.equal(queue().programmeRunId,'p4','the queue was rebuilt on the published programme during the generation storm');
 }
 // 4. Reads stay independent of the storm: enrichment status reads no catalog and still reports the queue; the queue
-//    overview stays eligible/ready. The catalog snapshot is readable under a generation-only storm (ADR 0146).
+//    overview stays eligible/ready. The catalog snapshot is readable under a generation-only storm (ADR 0147).
 {
  stats.storm=false;resetLease();publish('p5');assert.equal((await api('queue/reconcile',{})).status,200);
  stats.storm=true;ctx.env=env;

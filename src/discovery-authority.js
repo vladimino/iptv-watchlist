@@ -89,7 +89,7 @@ async function digest(text){
  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(text)));
  return [...bytes].map(byte=>byte.toString(16).padStart(2,'0')).join('');
 }
-function closed(){return {ready:false,held:false,tables:false,windowTable:false,priorityTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle'};}
+function closed(){return {ready:false,held:false,tables:false,windowTable:false,priorityTable:false,mode:'r2',cutover:null,version:null,generation:0,programmeRunId:null,publishedProgrammeRunId:null,transfer:'idle',transferBatches:0};}
 // AIR-387. One catalog film by TMDB movie id, for the permanent film page. A bounded read-only lookup: one indexed row
 // (media_kind, tmdb_id), no catalog scan, no write. It answers every state of that identity, so the caller can tell a film
 // that was never admitted from one that was superseded, and it fails closed like `routeRead`: a held cutover, a catalog or
@@ -266,12 +266,12 @@ export async function readAuthority(env){
  let row,transfer;
  try{
   row=await one(db,'SELECT mode, cutover, programme_run_id AS programmeRunId, generation, published_programme_run_id AS publishedProgrammeRunId FROM discovery_authority WHERE id=1');
-  transfer=await one(db,'SELECT state FROM discovery_transfer WHERE id=1');
+  transfer=await one(db,'SELECT state, batches FROM discovery_transfer WHERE id=1');
  }catch(error){throw failed('discovery_unavailable',error);}
  if(!row||(row.mode!=='r2'&&row.mode!=='d1')||(row.cutover!=='open'&&row.cutover!=='held'))throw failed('discovery_unavailable');
  if(!transfer||!['idle','loading','committed'].includes(transfer.state))throw failed('discovery_unavailable');
  const ready=row.mode==='d1'&&row.cutover==='open',held=row.mode==='d1'&&row.cutover==='held';
- return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state};
+ return {ready,held,tables:true,windowTable:names.includes('projector_window'),priorityTable:names.includes(PRIORITY_TABLE),mode:row.mode,cutover:row.cutover,version:numeric,generation:Number(row.generation),programmeRunId:row.programmeRunId??null,publishedProgrammeRunId:row.publishedProgrammeRunId??null,transfer:transfer.state,transferBatches:Number(transfer.batches)||0};
 }
 
 function assertOpen(gate){
@@ -289,19 +289,21 @@ function sealSafeKey(key){return SEAL_SAFE_KEYS.has(key)||(generationRequest(key
 // Multi-statement ledger/decision/score walks can mix pages if a writer lands between them. Those keys keep the global
 // authority generation fence. Single-statement catalog and payload reads are one SQLite snapshot: continuation, status and
 // Workflow writes still bump `discovery_authority.generation` but do not tear those rows, so fencing them on generation
-// turns a live Discovery Workflow into a user-facing 502. Held cutover, a loading transfer that is not a ledger seal, a
-// programme-run change and a lost D1 authority still fail closed.
+// turns a live Discovery Workflow into a user-facing 502. Catalog replacement does bump `discovery_transfer.batches`
+// (loading and committed), so snapshot reads compare that epoch and refuse an ABA empty catalog. Held cutover, a
+// loading transfer that is not a ledger seal, a programme-run change and a lost D1 authority still fail closed.
 function generationFencedKey(key){
  if(key==='epg/discovery-resolution.json'||key==='epg/discovery-latest.json'||key==='epg/discovery-score-preview.json')return true;
  const requested=generationRequest(key);
  return !!(requested&&key.endsWith('discovery-latest.json'));
 }
 function closeReadFence(opened,closed,{sealing=false,generationFence=true}={}){
+ const epochMoved=closed.transferBatches!==opened.transferBatches;
  if(sealing){
-  if(!closed.ready||closed.programmeRunId!==opened.programmeRunId||closed.transfer!=='loading')throw failed('discovery_fence');
+  if(!closed.ready||closed.programmeRunId!==opened.programmeRunId||closed.transfer!=='loading'||epochMoved)throw failed('discovery_fence');
   return;
  }
- if(!closed.ready||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
+ if(!closed.ready||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading'||epochMoved)throw failed('discovery_fence');
  if(generationFence&&closed.generation!==opened.generation)throw failed('discovery_fence');
 }
 // `loading` is a ledger seal, and not a catalog, decision or segment load in progress, only when the ledger is mid-handoff

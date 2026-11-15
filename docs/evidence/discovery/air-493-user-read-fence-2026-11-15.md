@@ -21,4 +21,4 @@ sqlite D1 stand-in, published generation, two current admissions. During the cat
 
 ## Verdict
 
-The 502 storm is an over-wide read fence, not missing catalog rows and not an EPG outage. The retained generation fence still protects multi-page ledger and decision reads. Natural production confirmation (502 rate on those two paths while Discovery stays `running`) is a post-deploy observation on [AIR-493](https://trello.com/c/AKoSOprC), not claimed here.
+The 502 storm is an over-wide read fence, not missing catalog rows and not an EPG outage. The retained generation fence still protects multi-page ledger and decision reads. Catalog replacement is fenced on `discovery_transfer.batches` so a `committed → loading → committed` ABA cannot return an empty 200. Held D1 does not fall back to the R2 catalog mirror for either user GET. Contract: [ADR 0147](../../adr/0147-discovery-user-read-snapshot-fence.md). Natural production confirmation (502 rate on those two paths while Discovery stays `running`) is a post-deploy observation on [AIR-493](https://trello.com/c/AKoSOprC), not claimed here.

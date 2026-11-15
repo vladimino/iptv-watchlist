@@ -43,7 +43,7 @@ The hourly cron's Discovery reconcile (`reconcileDiscoveryWorkflow`) is independ
 
 **Two Discovery status levels ([ADR 0115](../adr/0115-discovery-operational-status-view.md)).** The detailed pipeline status walks the whole ledger under a snapshot fence of the Discovery authority generation, so while Discovery commits it can answer `discovery_fence`; that is the expected outcome of an expensive read, not a Workflow failure. The operational view (`view=operational`) is the health read: one batch of single-row SELECTs (authority row, transfer, status, continuation, workflow, lease, projector window), one consistent snapshot, no ledger, decision or catalog read, no TMDB, no write. It reports the phase, next action, executor and lease liveness and the last checkpoint's stored backlog with its own time and `known | stale | unknown`; an unreadable record is named in `unavailable`, a held cutover is `authority.state: held`, and an unavailable authority is a typed answer with no invented records.
 
-**User catalog versus the generation fence ([ADR 0146](../adr/0146-discovery-user-read-snapshot-fence.md)).** `GET /api/catalog/available` and `GET /api/enrichment/view` read the catalog as one admission snapshot. They do not fail because continuation or status writers moved `discovery_authority.generation`. A real pin change, a non-seal `loading` transfer, a held cutover or an unreadable authority is HTTP 503 with `code` and `Retry-After: 1`, logged only if it still escapes as an unhandled route error. A 502 `discovery_fence` on those two paths is a defect, not an expected wait.
+**User catalog versus the generation fence ([ADR 0147](../adr/0147-discovery-user-read-snapshot-fence.md)).** `GET /api/catalog/available` and `GET /api/enrichment/view` read the catalog as one admission snapshot. They do not fail because continuation or status writers moved `discovery_authority.generation`. A real pin change, a non-seal `loading` transfer, a held cutover or an unreadable authority is HTTP 503 with `code` and `Retry-After: 1`, logged only if it still escapes as an unhandled route error. A 502 `discovery_fence` on those two paths is a defect, not an expected wait.
 
 ```mermaid
 flowchart TD
@@ -51,7 +51,7 @@ flowchart TD
     snapshot["Catalog snapshot: one admission SELECT"]
     paged["Paged ledger or decisions walk"]
     genBump["Continuation or status write bumps generation"]
-    pin["Programme pin, transfer or cutover"]
+    pin["Programme pin, transfer epoch, or cutover"]
     ok["200 consistent catalog"]
     wait["503 code plus Retry-After"]
     userGet --> snapshot
