@@ -238,4 +238,51 @@ const write=async(env,item,next,previous=null)=>Authority.writeDecisionDelta(env
  assert.equal(rows(file).length,0);
 }
 
+// Example 17: a skipped decision write never reaches the insert.
+{
+ const item=obs('cas');
+ const {file,env}=await setup([item]);
+ const first=verifiedDecision(item);
+ await write(env,item,first);
+ const skipped=await write(env,item,verifiedDecision(item,{attempts:2}),{status:'needs_verification',attempts:1,evidenceKey:first.evidenceKey});
+ assert.deepEqual(skipped.skipped,[{key:'cas',reason:'conflict'}]);
+ assert.equal(rows(file).length,0);
+}
+
+// Example 18: the decision lands, the process stops, the next assign completes the rows.
+{
+ const item=obs('crash');
+ const {file,env}=await setup([item]);
+ await write(env,item,verifiedDecision(item));
+ assert.equal(rows(file).length,0,'the decision write does not insert');
+ const again=await Authority.assignObservationSlots(env,{observationKey:'crash'});
+ assert.equal(again.outcomes.assigned,1);
+ assert.equal(rows(file).length,1);
+}
+
+// Example 20: an inactive observation, and a slot whose end_ms changed after the writer evaluated it.
+{
+ const item=obs('dead');
+ const {file,env}=await setup([item]);
+ await write(env,item,verifiedDecision(item));
+ sql(file,"UPDATE discovery_observation SET seen_in_latest=0 WHERE observation_key='dead'");
+ const inactive=await Authority.assignObservationSlots(env,{observationKey:'dead'});
+ assert.equal(inactive.reason,'observation_inactive');
+ assert.equal(rows(file).length,0);
+}
+{
+ const item=obs('moved');
+ const {file,env}=await setup([item]);
+ await write(env,item,verifiedDecision(item));
+ env.DB=d1Standin(file,{onBatch:async(statements)=>{
+  if(statements.some(item=>item.text.includes('INSERT INTO published_epg_show'))){
+   sqliteSync(['-bail',file],{input:"PRAGMA foreign_keys=ON;\nUPDATE discovery_observation_show SET end_ms=end_ms+60000 WHERE observation_key='moved';",encoding:'utf8'});
+  }
+ }});
+ const result=await Authority.assignObservationSlots(env,{observationKey:'moved'});
+ assert.equal(result.outcomes.slot_absent,1);
+ assert.equal(result.outcomes.assigned,0);
+ assert.equal(rows(file).length,0);
+}
+
 console.log('discovery slot assignment ok');

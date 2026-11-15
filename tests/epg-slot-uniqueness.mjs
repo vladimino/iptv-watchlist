@@ -88,9 +88,9 @@ assert.equal(lonely.discovery.length,0);
 assert.equal(lonely.stats.discoveryCandidates,0);
 
 // The count is complete while the diagnostic list stays capped at 100.
-const many=[];for(let index=0;index<130;index++){const offset=1+index*0.15;many.push(programme('Alpha Film 2001',offset),programme('Gamma Unknown Title',offset));}
+const many=[];for(let index=0;index<150;index++){const offset=1+index*0.15;many.push(programme('Alpha Film 2001',offset),programme('Gamma Unknown Title',offset));}
 const flood=await scan(many,watchlist);
-assert.equal(flood.stats.duplicate_slot,130,'duplicate_slot counts every discarded slot');
+assert.equal(flood.stats.duplicate_slot,150,'duplicate_slot counts every discarded slot');
 assert.equal(flood.uncertain.length,100,'the uncertain list is a sample capped at 100');
 assert.equal(flood.films.length,0);
 
