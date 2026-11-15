@@ -1071,9 +1071,19 @@ async function flushStopEvent(env,record,key){
 }
 async function parkAndFlushRunEvent(env,event,runId){
  if(!event||!runId)return false;
- const key=STOP_EVENT_PREFIX+runId+'.json';let record=await loadJSON(env,key);
- if(!record){record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;}
- const written=await flushStopEvent(env,record,key);if(!written)await noteEventOutbox(env,key);return written;
+ const key=STOP_EVENT_PREFIX+runId+'.json';
+ try{
+  let record=await loadJSON(env,key);
+  if(!record){record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key)||record;}
+  const written=await flushStopEvent(env,record,key);if(!written)await noteEventOutbox(env,key);return written;
+ }catch{return false;}
+}
+async function recoverLatestBatchV2Event(env,latest){
+ if(!isBatchV2Run(latest)||!isText(latest?.runId,100)||!latest.event||!['complete','partial'].includes(latest.status))return null;
+ const key=STOP_EVENT_PREFIX+latest.runId+'.json',existing=await loadJSON(env,key);
+ if(existing?.delivered)return null;
+ if(existing?.event)return await flushStopEvent(env,existing,key)?'delivered':'failed';
+ return await parkAndFlushRunEvent(env,latest.event,latest.runId)?'delivered':'failed';
 }
 async function recordRunStop(env,id,reason,fallback={}){
  let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
@@ -1106,6 +1116,9 @@ async function deliverPendingEvents(env,now=Date.now()){
  const report={checked:0,delivered:0,failed:0,quarantined:0};
  try{
   const [index,latest]=await Promise.all([loadJSON(env,EVENT_OUTBOX_KEY),loadJSON(env,ENRICHMENT_KEY+'latest-run.json')]);
+  const recovered=await recoverLatestBatchV2Event(env,latest);
+  if(recovered==='delivered')report.delivered++;else if(recovered==='failed')report.failed++;
+  if(recovered)report.checked++;
   const pending=isObject(index?.pending)?index.pending:{},indexed=Object.keys(pending).filter(eventOutboxKey);
   // Quarantined entries stay in the index and in the status read; they are counted here and never take a delivery slot, so any number of them cannot keep a
   // later event from being delivered. The budget of one start goes, in this order, to the two records of the latest run (not yet noted anywhere when a

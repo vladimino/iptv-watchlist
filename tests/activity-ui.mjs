@@ -94,11 +94,14 @@ context.richFinal={...context.richProgress,stage:'partial',stopReason:'quota'};r
   return vm.runInContext('eventHTML(v2event)',context);
  };
  let html=v2();
- assert.match(html,/Пакет прогнозов обработан/);assert.match(html,/В пакете: 5 · успешно 5 · не удалось 0/);
+ assert.match(html,/Пакет прогнозов обработан/);assert.match(html,/В пакете: 5 · новых 5 · пересчитано 0 · не удалось 0/);
  assert.match(html,/20 фильмов готовы к следующему запуску/);assert.doesNotMatch(html,/manifest_spent|Причина:/);
  assert.doesNotMatch(html,/Прогнозы обновлены|Прогнозы запущены|Прогнозы приостановлены/);
- html=v2({failed:3,added:2,selectedCount:5});
- assert.match(html,/Пакет прогнозов обработан с ошибками/);assert.match(html,/успешно 2 · не удалось 3/);
+ html=v2({failed:3,added:2,updated:0,selectedCount:5});
+ assert.match(html,/Пакет прогнозов обработан с ошибками/);assert.match(html,/В пакете: 5 · новых 2 · пересчитано 0 · не удалось 3/);
+ html=v2({failed:0,added:2,updated:3,selectedCount:5});
+ assert.match(html,/Пакет прогнозов обработан/);assert.match(html,/В пакете: 5 · новых 2 · пересчитано 3 · не удалось 0/);assert.doesNotMatch(html,/успешно |остаются для повторной попытки/);
+ html=v2({failed:3,added:2,updated:0,selectedCount:5});
  assert.match(html,/остаются для повторной попытки/);assert.doesNotMatch(html,/прерван|manifest_spent|Причина:/);
  html=v2({stage:'partial',stopReason:'quota',failed:0,added:1,selectedCount:5});
  assert.match(html,/Пакет прогнозов прерван/);assert.match(html,/Достигнут доступный лимит/);

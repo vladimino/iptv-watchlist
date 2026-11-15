@@ -263,4 +263,44 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  assert.equal(w.records.get('enrichment/stop-events/'+start.data.runId+'.json').delivered,true);
 }
 
+{
+ const w=await ready(12);await reconcile(w);
+ const start=await batch(w,{manifestSize:3});await submitAll(w,start.data);
+ const put=w.env.BUCKET.put.bind(w.env.BUCKET);
+ let failStop=true;
+ w.env.BUCKET.put=async(key,value,options)=>{if(failStop&&String(key).startsWith('enrichment/stop-events/'))throw new Error('stop record outage');return put(key,value,options);};
+ const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(done.status,200,JSON.stringify(done.data).slice(0,200));
+ assert.equal(done.data.status,'complete');assert.ok(done.data.event||done.data.presentation==='batch_v2_terminal');
+ assert.equal(w.records.has('enrichment/stop-events/'+start.data.runId+'.json'),false,'the stop record was not created');
+ assert.ok([...w.records.keys()].every(k=>!(k.startsWith('events/items/')&&w.records.get(k)?.id==='enrichment-'+start.data.runId)));
+ const latest=w.records.get('enrichment/latest-run.json');assert.equal(latest.runId,start.data.runId);assert.equal(latest.status,'complete');assert.equal(latest.event?.presentation,'batch_v2_terminal');
+ failStop=false;
+ const next=await batch(w,{manifestSize:3});
+ assert.equal(next.status,200,JSON.stringify(next.data).slice(0,200));
+ assert.equal([...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId).length,1,'the next start reconstructs the missing stop record and delivers one Event');
+ assert.equal(w.records.get('enrichment/stop-events/'+start.data.runId+'.json').delivered,true);
+}
+
+{
+ const w=await ready(12);await reconcile(w);
+ const start=await batch(w,{manifestSize:3});await submitAll(w,start.data);
+ const put=w.env.BUCKET.put.bind(w.env.BUCKET);
+ let failJournal=true;
+ w.env.BUCKET.put=async(key,value,options)=>{if(failJournal&&String(key).startsWith('events/items/'))throw new Error('journal outage');return put(key,value,options);};
+ const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(done.status,200);
+ const key='enrichment/stop-events/'+start.data.runId+'.json';
+ assert.equal(w.records.get(key)?.delivered,undefined);
+ const MAX=8;
+ w.ctx.env=w.env;w.ctx.__env=w.env;
+ for(let n=1;n<=MAX;n++)await vm.runInContext('deliverPendingEvents(env)',w.ctx);
+ failJournal=false;
+ const pending=w.records.get('enrichment/event-outbox.json')?.pending||{};
+ assert.equal(pending[key]?.quarantined,true,'after the attempt budget the undelivered terminal Event is quarantined');
+ assert.equal(pending[key]?.attempts,MAX);
+ assert.equal([...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId).length,0,'quarantine does not publish');
+ assert.equal(w.records.get(key).event.presentation,'batch_v2_terminal','the parked record is kept');
+}
+
 console.log('prediction-manifest-size ok');
