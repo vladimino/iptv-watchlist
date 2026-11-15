@@ -40,20 +40,11 @@ That matches `tmdbCalls=1`, `checked=0`, five-minute waits, and a queue that bar
 
 The 40 s wall and 16-call cap are unchanged. Deferred rows are not `verified` and do not increment `attempts`.
 
-## Mermaid visual QA (15 November 2026, 20:05 Europe/Madrid)
+## Mermaid visual QA (15 November 2026, 20:12 Europe/Madrid)
 
-Source: `docs/architecture/discovery-and-resolution.md` at `2f6b8f0c` (labels unchanged by the ADR status commit). GitHub blob: https://github.com/vladimino/iptv-watchlist/blob/2f6b8f0c551af5943c340833684be68e85d06225/docs/architecture/discovery-and-resolution.md
+Headless Chromium (`google-chrome-stable`) opened the GitHub blob of `docs/architecture/discovery-and-resolution.md` at PR HEAD `2986785d` (same diagram as `2f6b8f0c`). GitHub's `viewscreen.githubusercontent.com/markdown/mermaid` iframe drew `flowchart-v2` (viewBox about 2284×4305). No `Unable to render rich display` / parse error. No screenshot stored.
 
-GitHub draws Mermaid in the browser. A mermaid.ink flowchart-v2 SVG of **that exact fence** (no parse error, viewBox ~2192×4225) was inspected:
-
-- `eligible --yes--> defer --fence written--> search`
-- `search --TMDB evidence available--> scorer` (not a durable Film/decision)
-- `search --late or timeout; fence stands--> eligible` (back-edge)
-- `search --HTTP 429; series backoff--> unresolved`
-- `defer --no write window--> unresolved`
-- `writer --durable outcome replaces fence--> ledger`
-
-No post-TMDB diamond that writes a new defer. The page is tall because hydration/index subgraphs sit below (pre-existing). No screenshots stored. Independent review should still open the GitHub-rendered blob.
+Visible edge labels in that SVG: `fence written`, `no write window`, `TMDB evidence available`, `late or timeout; fence stands`, `HTTP 429; series backoff`, `durable outcome replaces fence`. Visible nodes include `CAS per-key retryAt fence before TMDB; not checked` and `Bounded TMDB search / detail`. Drawn edges include `eligible→defer`, `defer→search`, `search→scorer`, `search→eligible`, `search→unresolved`, `writer→ledger`. There is no post-TMDB diamond that writes a new defer. The canvas is tall because hydration/index subgraphs sit below (pre-existing).
 
 ## Verdict
 
