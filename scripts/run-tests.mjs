@@ -1,22 +1,25 @@
-import {appendFileSync,readdirSync} from 'node:fs';
-import {spawn} from 'node:child_process';
+import {appendFileSync,readdirSync,writeFileSync} from 'node:fs';
+import {spawn,spawnSync} from 'node:child_process';
 import {availableParallelism} from 'node:os';
 import path from 'node:path';
+import {selectSuite} from './test-classification.mjs';
 
 // AIR-378. Runs every self-contained test file in its own Node process (process isolation is kept), a bounded number at a time.
 //
-//   npm test                          default: min(6, ceil(1.5 x CPUs)) files at a time (AIR-408: the suite waits more than it computes)
+//   npm test                          the core suite: min(6, ceil(1.5 x CPUs)) files at a time (AIR-408: the suite waits more than it computes)
+//   npm test -- --suite non-functional  mutant-kill checks and runner wall-clock checks (also TEST_SUITE); the nightly workflow runs this
+//   npm test -- --suite all           core, then the non-functional suite (split files run in both, with the matching callbacks)
 //   npm test -- --serial              one file at a time, in name order (the previous behaviour)
 //   npm test -- --jobs 2              at most 2 files at a time (also TEST_JOBS=2)
 //   npm test -- --timeout-ms 120000   per-file limit (also TEST_TIMEOUT_MS), default 300000
-//   npm test -- --shard 1/3           this part of the suite only (also TEST_SHARD); CI runs the three shards as three jobs (AIR-418)
+//   npm test -- --shard 1/3           this part of the selected suite only (also TEST_SHARD); CI runs the core suite as three jobs (AIR-418)
 //
 // A failing, timed-out or signalled file is never lost: it is named with its exit code or signal and its full stdout and stderr, the runner
 // stops starting new files, lets the running ones finish and exits non-zero. Files in SERIAL_ONLY run alone, after the parallel phase.
 
 // Historical integration fixtures contain downloaded production snapshots and
 // are intentionally not part of the public repository.
-const FIXTURE_DEPENDENT=new Set([
+export const FIXTURE_DEPENDENT=new Set([
  'filters-window.mjs',
  'names.mjs',
  'sources.mjs',
@@ -173,13 +176,13 @@ export const WEIGHTS={
  'ratings-run.mjs':2,
 };
 export const DEFAULT_WEIGHT=0.5;
-// Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`. AIR-480 stage 4b: 80 units (was 20) after shard 1 of PR #639 measured 237.5 s against the 240 s gate with only 2.5 s of margin; the extra offset keeps the two heaviest mutation files on other shards while the weight contract still balances the three shards. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
+// Weight the first shard is dealt less than the others: its job (`Test and build`) also runs the documentation governance check, the build, the Discovery Workflow bundle validation and the artifact upload outside `Run tests`. AIR-480 stage 4b raised this from 20 to 80 after shard 1 of PR #639 measured 237.5 s. AIR-490: that 240 s figure is no longer a merge gate. The offset stays so shard 1 still starts lighter and the two heaviest mutation files stay off it when the nightly suite is planned. It is a starting load in the deal, so shard 1 ends about this much lighter than shards 2 and 3.
 export const FIRST_SHARD_OFFSET=80;
 // AIR-374 contention cohort (see planTests): the files that compete for the CPU are the mutation files (any weight) and every other file of at least HEAVY_MIN_WEIGHT units, about 9% of the files and 55% of the weight. They are dealt before the rest by "pressure": a file's weight, times HEAVY_MUTATION_PRESSURE for a mutation file, which re-runs a production module against many mutants in child processes and so takes far more of a 4 vCPU runner than its weight says (a fit of the 36 shard jobs of 12 runs gives about 0.65 s of `Run tests` per mutation unit against 0.06 to 0.09 s per unit of any other weight). Shard 1 starts FIRST_SHARD_HEAVY_CREDIT pressure units ahead: with 117 s in the last run against 158 s and 187 s it has the most headroom, so it gets the largest cohort share; its total weight is still dealt less by FIRST_SHARD_OFFSET.
 export const HEAVY_MIN_WEIGHT=20;
 export const HEAVY_MUTATION_PRESSURE=6;
 export const FIRST_SHARD_HEAVY_CREDIT=160;
-// AIR-480: 160 (was 100) so shard 1's extra FIRST_SHARD_OFFSET does not also collect the heaviest mutation file by pressure.
+// AIR-480: 160 (was 100) so shard 1's extra FIRST_SHARD_OFFSET does not also collect the heaviest mutation file by pressure. AIR-490 leaves this constant: the nightly plan still spreads mutation files, and the core plan is not retuned to it.
 const MUTATION=/-mutation\.mjs$/;
 // Output of one stream is kept whole up to HEAD_LIMIT+TAIL_LIMIT characters. Beyond that the beginning and the END are kept and the middle is
 // dropped with an explicit notice: the last lines of a failing file (its assertion and stack) are the ones that matter.
@@ -227,8 +230,9 @@ export function capture(){
 
 // `shard` is {index, count} (index from 1) or null for the whole suite. AIR-374: the files are ordered heaviest first (WEIGHTS, then name) and dealt one by one to the shard with the least weight so far
 // (ties to the lowest index), so the split is the same whichever shard asks and every file is in exactly one shard, whatever the count.
-export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights=WEIGHTS,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit=FIRST_SHARD_HEAVY_CREDIT,mutationPressure=HEAVY_MUTATION_PRESSURE}={}){
- const all=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
+export function planTests({directory='tests',fixtureDependent=FIXTURE_DEPENDENT,serialOnly=SERIAL_ONLY,shard=null,weights=WEIGHTS,firstShardOffset=FIRST_SHARD_OFFSET,heavyMinWeight=HEAVY_MIN_WEIGHT,heavyCredit=FIRST_SHARD_HEAVY_CREDIT,mutationPressure=HEAVY_MUTATION_PRESSURE,suite='core'}={}){
+ const listed=readdirSync(directory).filter(file=>file.endsWith('.mjs')&&!fixtureDependent.has(file)).sort();
+ const all=selectSuite(listed,directory,suite);
  const weight=file=>weights[file]??DEFAULT_WEIGHT;
  const ordered=[...all].sort((a,b)=>weight(b)-weight(a)||(a<b?-1:1));
  const owner=new Map();
@@ -280,7 +284,22 @@ async function main(){
  const timeoutMs=positive(option(args,'timeout-ms','TEST_TIMEOUT_MS',undefined),'--timeout-ms',300000);
  const shard=parseShard(option(args,'shard','TEST_SHARD',undefined));
  if(shard===undefined){console.error(`--shard must be "index/count" with 1 <= index <= count, got "${option(args,'shard','TEST_SHARD',undefined)}"`);process.exit(2);}
- const plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard});
+ const suite=option(args,'suite','TEST_SUITE','core');
+ if(suite!=='core'&&suite!=='non-functional'&&suite!=='all'){console.error(`--suite must be core, non-functional or all, got "${suite}"`);process.exit(2);}
+ if(suite==='all'){
+  if(shard){console.error('--suite all cannot be combined with --shard');process.exit(2);}
+  const rest=[];
+  for(let index=0;index<args.length;index++){if(args[index]==='--suite'){index++;continue;}rest.push(args[index]);}
+  const run=name=>spawnSync(process.execPath,[path.resolve(new URL(import.meta.url).pathname),...rest,'--suite',name],{stdio:'inherit',env:{...process.env,TEST_SUITE:name,IPTV_TEST_SUITE:name}});
+  const first=run('core');
+  if((first.status??1)!==0){process.exitCode=first.status??1;return;}
+  const second=run('non-functional');
+  process.exitCode=second.status??1;
+  return;
+ }
+ let plan;
+ try{plan=planTests({directory,serialOnly:serialOnly.size?serialOnly:SERIAL_ONLY,shard,suite});}
+ catch(error){if(error.code==='unclassified'){console.error(error.message);process.exit(2);}throw error;}
  const part=shard?` (shard ${shard.index}/${shard.count} of ${plan.suite} files)`:'';
  // One at a time is the previous behaviour: plain name order, and serial-only files are not moved to the end.
  if(jobs===1){plan.parallel=[...plan.parallel,...plan.serial].sort();plan.serial=[];}
@@ -291,7 +310,7 @@ async function main(){
  function runFile(file){
   return new Promise(resolve=>{
    const began=Date.now();
-   const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true});
+   const child=spawn(process.execPath,[path.join(directory,file)],{stdio:['ignore','pipe','pipe'],detached:true,env:{...process.env,IPTV_TEST_SUITE:suite}});
    const record={file,stdout:'',stderr:'',omitted:0};
    const captures={stdout:capture(),stderr:capture()};
    let timedOut=false,settled=false,killTimer=null;
@@ -359,7 +378,7 @@ async function main(){
  process.on('SIGINT',()=>onSignal('SIGINT'));
  process.on('SIGTERM',()=>onSignal('SIGTERM'));
 
- console.log(`Running ${plan.total} self-contained test files${part} (${jobs===1?'serial':`up to ${jobs} at a time`}${plan.serial.length?`, ${plan.serial.length} serial-only`:''}, ${seconds(timeoutMs)} per file).`);
+ console.log(`Running ${plan.total} self-contained test files, suite ${suite}${part} (${jobs===1?'serial':`up to ${jobs} at a time`}${plan.serial.length?`, ${plan.serial.length} serial-only`:''}, ${seconds(timeoutMs)} per file).`);
  const notStarted=[...await pool(plan.parallel,jobs)];
  if(!stopping)notStarted.push(...await pool(plan.serial,1));else notStarted.push(...plan.serial);
  const wall=Date.now()-started;
@@ -367,9 +386,14 @@ async function main(){
  const slowest=[...results].sort((a,b)=>b.ms-a.ms).slice(0,10);
  const busy=results.reduce((sum,record)=>sum+record.ms,0);
  process.stdout.write(`\nSlowest files: ${slowest.map(record=>`${record.file} ${seconds(record.ms)}`).join(', ')}\n`);
- process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, jobs ${jobs}.\n`);
+ process.stdout.write(`Wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${results.length} of ${plan.total} files run${part}, suite ${suite}, jobs ${jobs}.\n`);
+ if(process.env.IPTV_TEST_REPORT){
+  const report={suite,shard:shard?`${shard.index}/${shard.count}`:null,wallMs:wall,summedFileMs:busy,jobs,failed:failures.map(record=>record.file),files:results.map(record=>({file:record.file,ms:record.ms,ok:record.ok}))};
+  try{writeFileSync(process.env.IPTV_TEST_REPORT,JSON.stringify(report,null,2));}
+  catch(error){console.error(`could not write IPTV_TEST_REPORT: ${error.message}`);}
+ }
  if(process.env.GITHUB_STEP_SUMMARY){
-  const lines=[`### Test runner${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
+  const lines=[`### Test runner ${suite}${shard?` shard ${shard.index}/${shard.count}`:''}`,'',`${results.length} of ${plan.total} files run, jobs ${jobs}, wall ${seconds(wall)}, summed file time ${seconds(busy)}, ${failures.length} failed.`,'','Wall time is a health metric. It does not gate merge or deploy. A failed file, a per-file timeout and the job timeout still fail this job.','','| Slowest files | Time | Result |','| --- | ---: | --- |',...slowest.map(record=>`| ${record.file} | ${seconds(record.ms)} | ${record.ok?'ok':'FAIL'} |`),''];
   try{appendFileSync(process.env.GITHUB_STEP_SUMMARY,lines.join('\n')+'\n');}catch{}
  }
  // Exit through exitCode, not process.exit(): when stdout or stderr is a pipe (as in CI) process.exit() can cut the report still being written.
