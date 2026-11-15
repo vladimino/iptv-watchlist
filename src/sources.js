@@ -193,17 +193,41 @@ function archivedPayloadNewer(next,current){
  if(Number.isFinite(a)!==Number.isFinite(b))return Number.isFinite(a);
  return String(next?.lastSeenProgrammeRunId||'')>=String(current?.lastSeenProgrammeRunId||'');
 }
+const CATALOG_AVAILABILITY_FIELDS=['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt'];
+function stripCatalogAvailability(film){
+ if(!film||typeof film!=='object')return film;
+ const next={...film};
+ for(const field of CATALOG_AVAILABILITY_FIELDS)delete next[field];
+ return next;
+}
+function catalogIdentityDigest(film){
+ const body=stripCatalogAvailability(film);
+ if(!body||typeof body!=='object')return JSON.stringify(body);
+ const ordered={};
+ for(const key of Object.keys(body).sort()){
+  ordered[key]=key==='aliases'&&Array.isArray(body[key])?[...body[key]].sort():body[key];
+ }
+ return JSON.stringify(ordered);
+}
 function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
  const writeAvailability=options.writeAvailability!==false;
  const next={...(incoming||{})};
+ const liveKeys=new Set();
  for(const [key,film] of Object.entries(live||{})){
   if(!film||typeof film!=='object')continue;
+  liveKeys.add(key);
   const staged=next[key];
   if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
-  next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
-  if(writeAvailability===false)for(const field of ['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt']){
-   if(Object.hasOwn(film,field))next[key][field]=film[field];else delete next[key][field];
+  const merged={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+  if(writeAvailability===false){
+   next[key]=catalogIdentityDigest(merged)===catalogIdentityDigest(film)?film:stripCatalogAvailability(merged);
+   continue;
   }
+  next[key]=merged;
+ }
+ if(writeAvailability===false)for(const [key,film] of Object.entries(next)){
+  if(liveKeys.has(key)||!film||typeof film!=='object')continue;
+  next[key]=stripCatalogAvailability(film);
  }
  return next;
 }
@@ -381,7 +405,6 @@ function programmeWithWatchlist(report,watchlist){
 
 // ADR 0142 decision 11 (presentation). `report.catalogFilms` are identity-only entries of the completed read. Film data comes from the current catalog record of the same TMDB id; an
 // entry without such a record is not presented as a Film and is counted. A catalog that could not be read (`catalog` null) never touches `films`: the part is stated as unavailable.
-const CATALOG_AVAILABILITY_FIELDS=['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt'];
 function presentCatalogFilms(report,catalog){
  const entries=Array.isArray(report?.catalogFilms)?report.catalogFilms:[];
  if(!entries.length){const {catalogFilms,...rest}=report||{};return rest;}
