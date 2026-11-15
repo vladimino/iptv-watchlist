@@ -6,7 +6,7 @@
 **Approval source:** Product Owner explicit approval on [AIR-425](https://trello.com/c/oxFXx6Bn), 2026-11-10, accepting the same-evidence `excluded_nonfilm` / title-screen-only change limitation as a follow-up  
 **Related work:** [AIR-425](https://trello.com/c/oxFXx6Bn), [ADR 0085](0085-d1-authoritative-discovery.md), [AIR-352 budget](../evidence/d1-migration/air-352-chunk-budget-2026-11-05.md)  
 **Supersedes:** None (the paged walk remains for status counts)  
-**Superseded by:** [ADR 0146](0146-discovery-budget-defer-fairness.md) in part (a TMDB-touched candidate that cannot be stored is fenced with `retryAt` instead of a series-wide five-minute backoff; keyset selection is unchanged)
+**Superseded by:** [ADR 0148](0148-discovery-budget-defer-fairness.md) in part (a TMDB-touched candidate that cannot be stored is fenced with `retryAt` instead of a series-wide five-minute backoff; keyset selection is unchanged)
 
 ## Context
 

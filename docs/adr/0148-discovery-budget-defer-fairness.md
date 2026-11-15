@@ -1,4 +1,4 @@
-# ADR 0146: A TMDB-touched Discovery candidate that cannot be stored is deferred per key, not as a series backoff
+# ADR 0148: A TMDB-touched Discovery candidate that cannot be stored is deferred per key, not as a series backoff
 
 **Status:** Accepted  
 **Original decision date:** 2026-11-15  
