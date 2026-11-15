@@ -200,15 +200,34 @@ function stripCatalogAvailability(film){
  for(const field of CATALOG_AVAILABILITY_FIELDS)delete next[field];
  return next;
 }
+function catalogIdentityDigest(film){
+ const body=stripCatalogAvailability(film);
+ if(!body||typeof body!=='object')return JSON.stringify(body);
+ const ordered={};
+ for(const key of Object.keys(body).sort()){
+  ordered[key]=key==='aliases'&&Array.isArray(body[key])?[...body[key]].sort():body[key];
+ }
+ return JSON.stringify(ordered);
+}
 function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
  const writeAvailability=options.writeAvailability!==false;
  const next={...(incoming||{})};
+ const liveKeys=new Set();
  for(const [key,film] of Object.entries(live||{})){
   if(!film||typeof film!=='object')continue;
+  liveKeys.add(key);
   const staged=next[key];
-  if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:stripCatalogAvailability(film);continue;}
-  next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
-  if(writeAvailability===false)next[key]=stripCatalogAvailability(next[key]);
+  if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
+  const merged={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+  if(writeAvailability===false){
+   next[key]=catalogIdentityDigest(merged)===catalogIdentityDigest(film)?film:stripCatalogAvailability(merged);
+   continue;
+  }
+  next[key]=merged;
+ }
+ if(writeAvailability===false)for(const [key,film] of Object.entries(next)){
+  if(liveKeys.has(key)||!film||typeof film!=='object')continue;
+  next[key]=stripCatalogAvailability(film);
  }
  return next;
 }
