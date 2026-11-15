@@ -10,8 +10,8 @@ import {
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
- claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,readChain,rebaseChain,recoverChain,
- relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
+ claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,parseReleasePin,pinChainReleases,
+ readChain,rebaseChain,recoverChain,relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
 } from './canonical-producer-chain.js';
 import {epgRunForGeneration} from './canonical-producer-store.js';
 
@@ -100,18 +100,21 @@ function planFromSealed({programme,watchlist,watchMembers,previousIds=[]}){
  return {films,departed,persons,credits,personRows};
 }
 
-export async function acquireSealedSnapshot(env,programmeRunId){
+export async function acquireSealedSnapshot(env,programmeRunId,{previousIds}={}){
  const before=await readPublished(env);
  if(!before?.ready||before.programmeRunId!==programmeRunId)return {ok:false,code:'producer_generation_superseded'};
  const g0=Number(before.generation);
  const programme=await readDocument(env,programmeRunId,'programme');
  const watchlist=await readDocument(env,programmeRunId,'watchlist');
  const members=await readMembers(env,programmeRunId,'watchlist');
- let previousIds=[];
- try{previousIds=(await many(database(env),'SELECT film_id AS filmId FROM watchlist_film',[])).map(row=>row.filmId);}catch{previousIds=[];}
+ let prior=previousIds;
+ if(!Array.isArray(prior)){
+  try{prior=(await many(database(env),'SELECT film_id AS filmId FROM watchlist_film',[])).map(row=>row.filmId);}
+  catch{return {ok:false,code:'producer_membership_unreadable'};}
+ }
  const after=await readPublished(env);
  if(!after?.ready||after.programmeRunId!==programmeRunId||Number(after.generation)!==g0)return {ok:false,code:'producer_input_superseded'};
- const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds});
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds:prior});
  return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 
@@ -178,13 +181,24 @@ export async function reconcileProducerChain(env,{now=Date.now()}={}){
  }
 }
 
+const RECEIPT_PAGE=10;
+const RECEIPT_PAGES=20;
 function receiptsBlockCompletion(summary){
- if(!summary||summary.skipped===true)return false;
+ if(!summary||summary.skipped===true)return true;
  return (summary.failed||[]).length>0||(summary.waiting||[]).length>0||(summary.needsReview||[]).length>0;
 }
-async function reconcileReceiptsStep(env,plan,fence){
+async function drainEpgReceipts(env,plan,fence){
  if(!plan?.personPlan||!plan?.filmPlan)throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
- return reconcileEpgRun({...env,producerFence:fence},{plan:plan.personPlan,filmPlan:plan.filmPlan,limit:10});
+ const scoped={...env,producerFence:fence};
+ for(let page=0;page<RECEIPT_PAGES;page++){
+  const summary=await reconcileEpgRun(scoped,{plan:plan.personPlan,filmPlan:plan.filmPlan,limit:RECEIPT_PAGE});
+  if(!summary||summary.skipped===true||receiptsBlockCompletion(summary)){
+   const error=Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
+   throw error;
+  }
+  if((summary.considered||0)<RECEIPT_PAGE)return summary;
+ }
+ throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
 }
 
 export async function runProducerWorkflow(env,payload,step){
@@ -205,7 +219,9 @@ export async function runProducerWorkflow(env,payload,step){
  const work=async()=>{
   const meter={calls:0,statements:0,batches:0};
   const scoped=meteredEnv({...env,producerFence:fence},meter);
-  const snap=await acquireSealedSnapshot(scoped,P);
+  const stored=await readChain(scoped,P);
+  const pinned=parseReleasePin(stored?.release_pin);
+  const snap=await acquireSealedSnapshot(scoped,P,pinned.length?{previousIds:pinned}:{});
   if(!snap.ok){
    if(snap.code==='producer_input_superseded'||snap.code==='producer_generation_superseded'){
     if(rebases>=CHAIN_REBASE_CAP){await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_input_unstable'});return {state:'stopped',code:'producer_input_unstable'};}
@@ -217,6 +233,13 @@ export async function runProducerWorkflow(env,payload,step){
    return {state:'stopped',code:snap.code};
   }
   fence.inputGeneration=snap.generation;
+  if(!stored?.release_pin){
+   const pinnedAt=await pinChainReleases(scoped,{fence,revision:fence.revision,departed:snap.departed,at:new Date().toISOString()});
+   if(pinnedAt.chain){
+    chain=pinnedAt.chain;
+    fence={...fence,revision:Number(pinnedAt.chain.revision)};
+   }
+  }
   const at=new Date().toISOString();
   const passParams={
    runId:snap.label,sourceGeneration:snap.label,at,films:snap.films,departed:snap.departed,
@@ -225,22 +248,16 @@ export async function runProducerWorkflow(env,payload,step){
    prerequisites:async()=>({}),generationOrder,inputProvenance:{complete:true,committed:true,sealed:true,publishedGeneration:snap.label},
   };
   const plan=await buildEpgPlan(scoped,passParams);
-  let receipts;
-  try{receipts=await reconcileReceiptsStep(scoped,plan,fence);}
+  try{await drainEpgReceipts(scoped,plan,fence);}
   catch(error){
    const code=error?.code||'receipt_state_conflict';
    await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:code}).catch(()=>{});
    return {state:'stopped',code};
   }
-  if(receiptsBlockCompletion(receipts)){
-   await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:'receipt_state_conflict'}).catch(()=>{});
-   return {state:'stopped',code:'receipt_state_conflict',receipts};
-  }
   const pass=await runEpgProducerPass(scoped,{
    ...passParams,
    beforePassComplete:async()=>{
-    const after=await reconcileReceiptsStep(scoped,plan,fence);
-    if(receiptsBlockCompletion(after))return {stop:true,code:'receipt_state_conflict'};
+    await drainEpgReceipts(scoped,plan,fence);
    },
   });
   totals.invocations++;totals.calls+=meter.calls;totals.statements+=meter.statements;

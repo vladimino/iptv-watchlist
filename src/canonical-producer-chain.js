@@ -11,7 +11,7 @@ import {
 } from './canonical-producer-fence.js';
 
 const {assertSql,FENCE}=fenced;
-const COLUMNS='programme_run_id,input_generation,run_key,owner_epoch,owner_instance,claim_nonce,owner_state,lease_expires_at,handoff_count,takeover_count,rebase_count,relaunch_count,reopen_count,stopped_by,recovery_class,recovery_attempts,streak_started_at,next_attempt_at,progress_relaunches,revision,created_at,updated_at';
+const COLUMNS='programme_run_id,input_generation,run_key,release_pin,owner_epoch,owner_instance,claim_nonce,owner_state,lease_expires_at,handoff_count,takeover_count,rebase_count,relaunch_count,reopen_count,stopped_by,recovery_class,recovery_attempts,streak_started_at,next_attempt_at,progress_relaunches,revision,created_at,updated_at';
 const SKIPPED=Object.freeze({state:'skipped',reason:'projector_is_writer'});
 const iso=ms=>new Date(ms).toISOString();
 const fence=gate=>[FENCE,[gate.generation]];
@@ -154,7 +154,7 @@ export async function rebaseChain(env,{fence:f,revision,generation,at}={}){
  }
  try{
   await commit(env,gate,[fence(gate),authorityPin(f.programmeRunId,generation),
-   ["UPDATE canonical_producer_chain SET input_generation=?,rebase_count=rebase_count+1,revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND input_generation=? AND revision=?",
+   ["UPDATE canonical_producer_chain SET input_generation=?,release_pin=NULL,rebase_count=rebase_count+1,revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND input_generation=? AND revision=?",
     [generation,at,f.programmeRunId,f.epoch,f.nonce,f.inputGeneration,revision]],changesOne()]);
  }catch(error){throw error;}
  return {state:'rebased',chain:await readChain(env,f.programmeRunId),fence:{...f,inputGeneration:generation,revision:(revision||0)+1}};
@@ -243,6 +243,29 @@ export async function supersedeChain(env,{chain,at}={}){
  await commit(env,gate,[fence(gate),
   ["UPDATE canonical_producer_chain SET owner_state='superseded',revision=revision+1,updated_at=? WHERE programme_run_id=? AND revision=? AND owner_state NOT IN ('superseded')",[at,chain.programme_run_id,chain.revision]],changesOne()]);
  return {state:'superseded',chain:await readChain(env,chain.programme_run_id)};
+}
+
+export function parseReleasePin(value){
+ if(typeof value!=='string'||!value||value==='empty')return [];
+ return value.split(',').filter(id=>id.startsWith('film:'));
+}
+export function formatReleasePin(ids){
+ const unique=[...new Set((ids||[]).filter(id=>typeof id==='string'&&id.startsWith('film:')))].sort();
+ const pin=unique.join(',')||'empty';
+ if(pin.length>4000){const error=new Error('film_person_bounded');error.code='film_person_bounded';throw error;}
+ return pin;
+}
+export async function pinChainReleases(env,{fence:f,revision,departed,at}={}){
+ requireFence(f,['chain']);
+ const pin=formatReleasePin(departed);
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ await commit(env,gate,[fence(gate),...fenceStatements(f),
+  ["UPDATE canonical_producer_chain SET release_pin=COALESCE(release_pin,?),revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND revision=?",
+   [pin,at,f.programmeRunId,f.epoch,f.nonce,revision]],changesOne()]);
+ const chain=await readChain(env,f.programmeRunId);
+ if(Number.isInteger(Number(chain?.revision)))f.revision=Number(chain.revision);
+ return {state:'pinned',chain};
 }
 
 export async function setChainRunKey(env,{fence:f,revision,runKey,at}={}){

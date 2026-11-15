@@ -28,6 +28,7 @@ CREATE TABLE canonical_producer_chain (
  programme_run_id TEXT NOT NULL CHECK (length(programme_run_id) BETWEEN 1 AND 160),
  input_generation INTEGER NOT NULL CHECK (input_generation >= 0),
  run_key TEXT CHECK (run_key IS NULL OR length(run_key) BETWEEN 1 AND 160),
+ release_pin TEXT CHECK (release_pin IS NULL OR (length(release_pin) BETWEEN 1 AND 4000 AND release_pin NOT GLOB '*[^a-z0-9:,_]*')),
  owner_epoch INTEGER NOT NULL CHECK (owner_epoch >= 1),
  owner_instance TEXT NOT NULL CHECK (length(owner_instance) BETWEEN 1 AND 80 AND owner_instance GLOB 'pw_*'),
  claim_nonce TEXT CHECK (claim_nonce IS NULL OR (length(claim_nonce) BETWEEN 8 AND 64 AND claim_nonce NOT GLOB '*[^0-9a-f-]*')),
@@ -79,6 +80,7 @@ BEFORE INSERT ON canonical_producer_chain
 FOR EACH ROW
 WHEN NEW.owner_epoch <> 1 OR NEW.owner_state <> 'pending' OR NEW.claim_nonce IS NOT NULL OR NEW.revision <> 1
  OR NEW.handoff_count <> 0 OR NEW.takeover_count <> 0 OR NEW.rebase_count <> 0 OR NEW.relaunch_count <> 0 OR NEW.reopen_count <> 0
+ OR NEW.release_pin IS NOT NULL
 BEGIN
  SELECT RAISE(ABORT, 'canonical_producer_chain_insert');
 END;
