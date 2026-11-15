@@ -30,7 +30,7 @@ flowchart TD
     eligible -->|yes| defer
     defer -->|fence written| search
     defer -->|no write window| unresolved
-    search -->|identity saved; fence replaced| scorer
+    search -->|TMDB evidence available| scorer
     search -->|late or timeout; fence stands| eligible
     search -->|HTTP 429; series backoff| unresolved
     scorer --> score
@@ -38,7 +38,7 @@ flowchart TD
     score -->|yes| detail --> gate
     gate -->|detail_verified and current| writer
     gate -->|ambiguous, mismatch, stale| unresolved
-    writer --> ledger
+    writer -->|durable outcome replaces fence| ledger
     writer --> catalogue
     unresolved --> ledger
     owner --> hydrate
