@@ -41,6 +41,39 @@ function detailNorm(value){return String(value??'').normalize('NFKC').toLowerCas
 function detailNumber(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
 function detailTitles(movie){return [movie?.title,movie?.original,...(movie?.aliases||[])].filter(Boolean);}
 function detailYearCompatible(observationYear,candidateYear){return observationYear==null||candidateYear==null||Math.abs(observationYear-candidateYear)<=1;}
+function genreToken(value){return detailNorm(typeof value==='string'?value:(value&&value.name)||'');}
+function genreId(value){const id=typeof value==='number'?value:value&&typeof value==='object'?detailNumber(value.id):null;return id!=null&&id>0?id:null;}
+const TMDB_GENRE_MUSIC=10402,TMDB_GENRE_DOCUMENTARY=99;
+const MUSIC_GENRE_NAMES=new Set(['music','музыка','музыкальный','музика']);
+const DOCUMENTARY_GENRE_NAMES=new Set(['documentary','документальный','документальний']);
+const FILM_EPG_CATEGORY=new Set(['фильм','фільм','кино','кіно','телефильм','телефільм','movie','film','cinema']);
+const CONCERT_EPG_CATEGORY=new Set(['концерт','concert','concerts','live','музыка','музика','music']);
+function movieGenreIds(movie){
+ const ids=new Set();
+ for(const value of [...(movie?.genres||[]),...(movie?.genreIds||[])]){const id=genreId(value);if(id!=null)ids.add(id);}
+ return ids;
+}
+function movieHasGenre(movie,id,names){
+ if(movieGenreIds(movie).has(id))return true;
+ return [...(movie?.genres||[])].map(genreToken).some(name=>names.has(name));
+}
+function concertBroadcastCategory(categories){
+ const tokens=[...(categories||[])].map(detailNorm).filter(Boolean);
+ if(!tokens.length)return false;
+ const parts=tokens.flatMap(token=>token.split(' ').filter(Boolean));
+ if(parts.some(part=>FILM_EPG_CATEGORY.has(part)))return false;
+ return parts.some(part=>CONCERT_EPG_CATEGORY.has(part));
+}
+function concertBroadcastIdentity(movie,observation){
+ if(!concertBroadcastCategory(observation?.categories))return false;
+ if(!movieHasGenre(movie,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES))return false;
+ if(movieHasGenre(movie,TMDB_GENRE_DOCUMENTARY,DOCUMENTARY_GENRE_NAMES))return false;
+ const names=[...(movie?.genres||[])].map(genreToken).filter(Boolean);
+ const ids=[...movieGenreIds(movie)];
+ const leftover=names.filter(name=>!MUSIC_GENRE_NAMES.has(name)&&name!=='tv movie'&&name!=='телефильм'&&name!=='телефільм');
+ const leftoverIds=ids.filter(id=>id!==TMDB_GENRE_MUSIC&&id!==10770&&id!==TMDB_GENRE_DOCUMENTARY);
+ return leftover.length===0&&leftoverIds.length===0;
+}
 function verifyTmdbDetail(detail,tmdbId,observation,competitors,structural){
  const movie=detail?.evidence?.movie;
  if(detail?.authority!=='tmdb_detail'||!movie||typeof movie!=='object')return {ok:false,hold:'needs',reason:'detail_incomplete'};
@@ -84,6 +117,9 @@ function acceptScoredIdentity(input={}){
   const detail=verifyTmdbDetail(input.tmdbDetail,tmdbId,input.observation,input.competitors,input.score?.titleBasis?.structural||null);
   if(!detail.ok&&detail.hold==='candidate')return {...result,outcome:'candidate_decision',reason:detail.reason,candidateDecision:{status:detail.status,observationKey,reason:detail.reason,evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
   if(!detail.ok)return {...result,outcome:'needs_verification',reason:detail.reason};
+  if(!confirmed&&concertBroadcastIdentity(input.tmdbDetail?.evidence?.movie,input.observation)){
+   return {...result,outcome:'candidate_decision',reason:'concert_recording',candidateDecision:{status:'no_confident_match',observationKey,reason:'concert_recording',evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
+  }
   const observationYear=detailNumber(input.observation?.year),yearGap=observationYear==null||detail.releaseYear==null?null:Math.abs(observationYear-detail.releaseYear);
   if(!confirmed&&yearGap===1&&shortTitle(input.observation?.normalizedTitle||input.observation?.title)){
    const competingEditions=(input.competitors||[]).filter(film=>String(film?.tmdbId)!==tmdbId&&detailTitles(film).some(title=>detailNorm(title)===detail.matchedTitle)).map(film=>({tmdbId:String(film.tmdbId),year:detailNumber(film.year)}));

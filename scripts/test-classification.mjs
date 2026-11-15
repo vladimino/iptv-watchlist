@@ -297,6 +297,9 @@ export const FILES={
  "channel-finds.mjs": {
   "suite": "core"
  },
+ "concert-broadcast-admission.mjs": {
+  "suite": "core"
+ },
  "confidence-assessment-ui.mjs": {
   "suite": "core"
  },

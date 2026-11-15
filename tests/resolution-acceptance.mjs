@@ -240,4 +240,27 @@ const cheburashka=score(observe('чебурашка 2|2025','Чебурашка 
 assert.equal(cheburashka.reason,'accepted_unique_evidence');
 assert.equal(bound(cheburashka,{observation:{normalizedTitle:'чебурашка 2',year:2025,durations:[103]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'1228477',evidence:{movie:{id:'1228477',title:'Чебурашка 2',original:'Cheburashka',aliases:[],year:2026,runtime:103}}}}).outcome,'detail_verified');
 
+const robbieScore=score(observe('robbie williams live at the apple music festival|2016','Robbie Williams: Live at the Apple Music Festival',2016,82),[film('1326142','Robbie Williams: Live at the Apple Music Festival',2016,82)]);
+const robbieDetail={authority:'tmdb_detail',tmdbId:'1326142',evidence:{movie:{id:'1326142',title:'Robbie Williams: Live at the Apple Music Festival',original:'Robbie Williams: Live at the Apple Music Festival',aliases:[],year:2016,runtime:82,genres:['Музыка']}}};
+const robbieObservation={normalizedTitle:'robbie williams live at the apple music festival',year:2016,durations:[82],categories:['Концерт']};
+const robbieHold=bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail});
+assert.equal(robbieHold.outcome,'candidate_decision');
+assert.equal(robbieHold.reason,'concert_recording');
+assert.equal(robbieHold.candidateDecision.status,'no_confident_match');
+assert.equal(robbieHold.transition,null);
+assert.equal(bound(robbieScore,{observation:{...robbieObservation,categories:[]},tmdbDetail:robbieDetail}).outcome,'detail_verified');
+const robbieOwner={authority:'owner',tmdbId:'1326142',evidence:{authority:'owner',reviewed:true,tmdbId:'1326142'}};
+assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner}).outcome,'detail_verified');
+const tvMovieScore=score(observe('made for tv|1999','Made For Tv',1999,96),[film('7001','Made For Tv',1999,96)]);
+assert.equal(bound(tvMovieScore,{observation:{normalizedTitle:'made for tv',year:1999,durations:[96],categories:[]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'7001',evidence:{movie:{id:'7001',title:'Made For Tv',original:'Made For Tv',aliases:[],year:1999,runtime:96,genres:[{id:10770,name:'TV Movie'}],genreIds:[10770]}}}}).outcome,'detail_verified');
+const musicOnlyScore=score(observe('concert film|1984','Concert Film',1984,88),[film('841','Concert Film',1984,88)]);
+assert.equal(bound(musicOnlyScore,{observation:{normalizedTitle:'concert film',year:1984,durations:[88]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'841',evidence:{movie:{id:'841',title:'Concert Film',original:'Concert Film',aliases:[],year:1984,runtime:88,genres:[{id:10402,name:'Music'}],genreIds:[10402]}}}}).outcome,'detail_verified');
+const senseScore=score(observe('stop making sense|1984','Stop Making Sense',1984,88),[film('841','Stop Making Sense',1984,88)]);
+assert.equal(bound(senseScore,{observation:{normalizedTitle:'stop making sense',year:1984,durations:[88],categories:['Концерт']},tmdbDetail:{authority:'tmdb_detail',tmdbId:'841',evidence:{movie:{id:'841',title:'Stop Making Sense',original:'Stop Making Sense',aliases:[],year:1984,runtime:88,genres:[{id:99,name:'Documentary'},{id:10402,name:'Music'}],genreIds:[99,10402]}}}}).outcome,'detail_verified');
+const pompeiiScore=score(observe('pink floyd live at pompeii|1972','Pink Floyd Live at Pompeii',1972,85),[film('19204','Pink Floyd Live at Pompeii',1972,85)]);
+const pompeiiDetail={authority:'tmdb_detail',tmdbId:'19204',evidence:{movie:{id:'19204',title:'Pink Floyd Live at Pompeii',original:'Pink Floyd: Live at Pompeii',aliases:[],year:1972,runtime:85,genres:[{id:10402,name:'Music'}],genreIds:[10402]}}};
+for(const categories of [['Концерт','Фильм'],['Music','Кино'],['Концерт','телефильм']]){
+ assert.equal(bound(pompeiiScore,{observation:{normalizedTitle:'pink floyd live at pompeii',year:1972,durations:[85],categories},tmdbDetail:pompeiiDetail}).outcome,'detail_verified',categories.join('|'));
+}
+
 console.log('Scored identity acceptance passed.');
