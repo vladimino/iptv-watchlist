@@ -1,6 +1,6 @@
 # ADR 0145: After ADR 0142 decision 13, the EPG seal stages only the publication; no catalog staging, no availability input, no `seal_catalog`
 
-**Status:** Accepted as DESIGN (2026-11-15; implementation after the ADR 0142 decision 13/M5 code contract reaches `main`; no production operation authorized)
+**Status:** Accepted as DESIGN (2026-11-15; implementation started 2026-11-15 after the owner GO on AIR-485; no production operation authorized by this record)
 **Original decision date:** 2026-11-15
 **Recorded at:** 2026-11-14
 **Approval source:** Product Owner decision of 2026-11-15 recorded in [AIR-485](https://trello.com/c/qulgP9a8), following [independent technical review of PR #638](https://github.com/vladimino/iptv-watchlist/pull/638#pullrequestreview-5907764074): final layout D is accepted as an architectural design; C+/D+ and abandoned-object cleanup are deferred. The [owner sequencing of 2026-11-14](https://github.com/vladimino/iptv-watchlist/pull/638#issuecomment-6885539218) remains binding: AIR-480's ADR 0142 decision 13 (M5) code contract must reach `main` before AIR-485 implementation. Acceptance of this ADR is not implementation, deploy or production authorization.
