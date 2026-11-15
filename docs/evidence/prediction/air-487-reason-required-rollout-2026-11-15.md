@@ -1,19 +1,27 @@
-# AIR-487: required `failure.reason` — cutover hold (15 Nov 2026)
+# AIR-487: required `failure.reason` — cutover (15 Nov 2026)
 
-Coordination record. No production write, Task edit, enable, disable, run or deploy.
+Coordination record. No production write, Task edit, unpause, run or deploy in this session.
+
+Owner clarification (PR #641 comment, 15 Nov 2026 ~09:30 Europe/Madrid): **Task A has been paused since the evening of 14 Nov**, waiting for AIR-486 and AIR-487. It is **not** a running legacy caller for this rollout. A temporary backward-compatibility layer and an atomic Worker/Task paste are **not** required while Task A stays paused until its prompt is updated.
+
+## Roles
+
+| Role | Does | Does not |
+| --- | --- | --- |
+| Executor (this PR) | Canonical batch v2 prompt, Worker `failure.reason` gate, MCP schema, docs, offline tests; refresh from `main` | Access or edit the live Scheduled Task; merge; deploy; unpause |
+| Delivery Controller | Independent review, exact-HEAD CI, routine merge, confirm Test shards and Cloudflare deploy | Unpause Task A in that window; paste the prompt |
+| ChatGPT | After Worker deploy, copy the approved canonical prompt into installed Task A, verify length/SHA against the repository, keep a restore of the prior text | Implied by this PR; resume, manual run and schedule change are separate owner GOs |
 
 ## Registry vs canonical (this session did not re-read the live registry)
 
-Last **documented** Task A prompt identity, from the AIR-487 Trello card (owner/Controller readback used in the RCA, not a fresh Automations peek):
-
 | Field | Last recorded value | Source |
 | --- | --- | --- |
-| Installed text | 28172 characters, SHA-256 `fadb0e385cafbc1ebe0e0ffcd3d9f1bca8a9b0a214116c9c81deeb9bdce9a6c2` | Card + RCA of 15 Nov 2026 |
-| Kind-only fallback | Present in that text (retry once as `{filmId,failure:{kind:'parse_error'}}`) | Canonical file at that SHA; card says that SHA is what Task A ran |
-| Canonical file after this PR | 28426 characters, SHA-256 `f65dee1f258eb71013425d4bbd7e573018245f5c2507f8f0c10064a59646388d` | `hourly-predictions-batch-v2.md` headers / `tests/scheduled-task-prompt-v2.mjs` |
-| Task ID | Not restated in the AIR-487 card. An earlier AIR-468 reviewer peek named `6af7a2d8369081918b79bb2892bac0fe` as v2 Task A; **not re-verified here** | AIR-468 evidence |
+| Task A state | Paused since evening 14 Nov 2026 (Europe/Madrid), awaiting AIR-486 and AIR-487 | Owner clarification on PR #641 / Trello AIR-487; **not** a fresh Automations peek |
+| Installed text (last SHA while it ran) | 28172 characters, SHA-256 `fadb0e385cafbc1ebe0e0ffcd3d9f1bca8a9b0a214116c9c81deeb9bdce9a6c2` | AIR-487 card + RCA |
+| Kind-only fallback | Present in that installed text | Canonical file at that SHA |
+| Canonical file in this PR | 28426 characters, SHA-256 `f65dee1f258eb71013425d4bbd7e573018245f5c2507f8f0c10064a59646388d` | `hourly-predictions-batch-v2.md` / `tests/scheduled-task-prompt-v2.mjs` |
 
-The GitHub file is **not** the registry. A Worker deploy does not paste a prompt. Enabled/paused state of Task A is **not** proven by this file; treat the caller as still able to send kind-only until a fresh readback after an owner-authorized paste.
+The GitHub file is **not** the registry. A Worker deploy does not paste a prompt.
 
 ## RCA that must stay distinct
 
@@ -23,18 +31,19 @@ Run `c6b2c3d7-7382-41ad-9a4e-cd45c198d929`: three stored `inputDigest` values eq
 
 - Kind-only failure, including beside a valid neighbour: HTTP 400, `items[i].failure.reason required`, **nothing written**.
 - Claimed failure + valid candidate in the same body: 200; the neighbour is created; the failure is `caller_reported` with `validation.claimed`.
-- Recovery: the caller must add a closed `reason` (and optional preflight) and resubmit; dropping the invalid item is the caller's choice, not a Worker partial commit.
+- Recovery: the caller must add a closed `reason` (and optional preflight) and resubmit.
 - v5 `POST /api/enrichment/submit` still accepts `{failure:{kind}}`.
 
-Proof: `tests/prediction-caller-failure-claim.mjs`. These tests do not prove compatibility with the installed Task A prompt.
+Proof: `tests/prediction-caller-failure-claim.mjs`.
 
-## Rollout (hold merge/deploy until the owner picks one)
+## Rollout (while Task A remains paused)
 
-**Preferred (matches the approved hard gate):** one owner GO that (1) pastes the canonical prompt into the live Task, (2) readback of length + SHA-256 equal to `f65dee1f…`, (3) no in-flight batch_v2 run (lease idle / `already_running` absent), (4) then merge and deploy this Worker. Quiet window: between hourly slots, after the previous invocation has finished. A run that started under the old prompt and submits after deploy will 400 every kind-only item.
+1. Executor: this PR on current `main`, green exact-HEAD CI.
+2. Controller: merge and Cloudflare deploy. **Do not unpause Task A.**
+3. ChatGPT, separate owner GO after deploy: paste canonical prompt, registry readback of 28426 / `f65dee1f…`, retain restore of `fadb0e38…`.
+4. Resume, a manual run and a schedule change are **further** owner GOs, not this PR.
 
-**If paste cannot precede deploy:** do **not** merge this gate. A later approved compatibility stage could keep kind-only accepted until a flag or until the registry SHA matches; that stage is **not** in this PR and needs its own GO.
-
-This PR authorizes neither paste nor deploy.
+A compatibility flag is not in this PR.
 
 ## Rollback
 

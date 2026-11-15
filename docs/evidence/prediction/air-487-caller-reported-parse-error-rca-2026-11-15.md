@@ -89,4 +89,4 @@ Offline proof: `tests/prediction-caller-failure-claim.mjs`, `tests/scheduled-tas
 
 **RCA:** the three films were accepted as **legacy caller `failure.kind=parse_error` items**. The AIR-472 claim contract was deployed and is exercised offline; this natural run **did not persist a claim**. The four closed reasons are **not determined**. A prompt-directed 400→legacy fallback is consistent and unproven. Neighbours in the run were not blocked.
 
-**Implementation:** Worker required-reason gate and canonical prompt are in this PR. Live Task paste is not authorized here. Merge/deploy is held until an owner GO coordinates the registry paste (or a later compatibility stage); [cutover record](air-487-reason-required-rollout-2026-11-15.md).
+**Implementation:** Worker required-reason gate and canonical prompt are in this PR. Live Task paste is not this delivery. Task A is paused; Controller merge/deploy may proceed while it stays paused. Paste after deploy is ChatGPT under a separate GO; [cutover record](air-487-reason-required-rollout-2026-11-15.md).

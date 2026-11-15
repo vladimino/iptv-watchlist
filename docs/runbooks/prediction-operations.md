@@ -127,7 +127,7 @@ Both steps exist in the Worker and nothing calls them. A v2 run that stops witho
 
 ## Batch v2 required `failure.reason` (cutover)
 
-A batch v2 failure item must include a closed `failure.reason`. Kind-only `{kind:'parse_error'}` is HTTP 400 for the **whole** `prediction_batch_submit` body and writes nothing. A valid claimed failure and a valid candidate in the same body are both processed. v5 `prediction_submit` still accepts `{kind}` only. The canonical prompt in the repository is not the live Task. Merge and deploy of the required-reason Worker must not run against an installed prompt that still falls back to kind-only; the bounded hold, last documented Task SHA and rollback are in [AIR-487 cutover](../evidence/prediction/air-487-reason-required-rollout-2026-11-15.md). Pasting, enabling, disabling or running a Task needs its own owner GO.
+A batch v2 failure item must include a closed `failure.reason`. Kind-only `{kind:'parse_error'}` is HTTP 400 for the **whole** `prediction_batch_submit` body and writes nothing. A valid claimed failure and a valid candidate in the same body are both processed. v5 `prediction_submit` still accepts `{kind}` only. The canonical prompt in the repository is not the live Task. Task A is paused for this cutover: merge and deploy of the required-reason Worker may proceed while it stays paused; paste and resume are later owner GOs, not a Worker deploy. Roles, last documented SHA and rollback: [AIR-487 cutover](../evidence/prediction/air-487-reason-required-rollout-2026-11-15.md).
 
 ## Planned rollout of four hourly v2 Tasks (AIR-451)
 
