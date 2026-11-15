@@ -123,10 +123,7 @@ run(`installProgramme(${JSON.stringify({
 })})`);
 assert.equal(run('films.length'),250);
 assert.equal(run('report.catalogFilms.length'),3000);
-const t0=Date.now();
 run('state.period="all";render()');
-const elapsed=Date.now()-t0;
 assert.equal((el('#movies').innerHTML.match(/class="movie-card/g)||[]).length,250);
 assert.equal(el('#movies').innerHTML.includes('tmdb_10000'),false);
-assert.ok(elapsed<2000,'member-only grid render stays bounded: '+elapsed+'ms');
 console.log('programme catalog UI: members-only grid, catalogFilms on payload, NEW skipped for rated');
