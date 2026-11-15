@@ -989,7 +989,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // The prediction queue is not refreshed here: that call has no bound of its own, and the prediction runner refreshes the queue
  // from the catalog on every step, so a Film admitted by this chunk joins it on the runner's next step.
  // The preview is this chunk's scored outcomes. remaining is the SQL actionable set minus what this chunk settled, not the page.
- if((walkComplete||checked>0)&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){throw lost(e,'preview');}}
+ if((walkComplete||checked>0)&&Date.now()+writeEstimate(1)<=persistLimit()){try{await fence();await timedWrite(()=>saveScorePreview(env,source,preview));}catch(e){if(e&&typeof e==='object'&&!e.failedAt)e.failedAt='preview';throw lost(e,'preview');}}
  timings.writeMaxMs=writeCostMs;
  const settled=checked+screenedOut+knownAliases;
  const remaining=Number.isInteger(selected.remaining)?Math.max(0,selected.remaining-settled-deferred):null;
@@ -1248,7 +1248,7 @@ function diagnosticTime(value){return typeof value==='string'&&value.length<=40&
 function diagnosticCount(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
 // Allowlisted Discovery codes first (typed `error.code` / `Error(code)` message). Never copy cause text.
 const TYPED_DISCOVERY_CODES=new Set(['discovery_unavailable','discovery_fence','discovery_lease','discovery_conflict','discovery_bounded','discovery_not_authoritative','discovery_incomplete']);
-const DIAGNOSTIC_FAILED_AT=new Set(['cheap_decision','cheap_admission','replay_assignment','candidate_admission','candidate_decision','candidate_assignment','revalidation','revalidation_assignment','final_checkpoint']);
+const DIAGNOSTIC_FAILED_AT=new Set(['cheap_decision','cheap_admission','replay_assignment','candidate_admission','candidate_decision','candidate_assignment','revalidation','revalidation_assignment','final_checkpoint','preview']);
 const DIAGNOSTIC_FAILURE_KIND=new Set(['unique_constraint','input_invariant','fence','other']);
 function diagnosticErrorCode(error){
  const typed=typeof error?.code==='string'&&TYPED_DISCOVERY_CODES.has(error.code)?error.code:(typeof error?.message==='string'&&TYPED_DISCOVERY_CODES.has(error.message)?error.message:null);

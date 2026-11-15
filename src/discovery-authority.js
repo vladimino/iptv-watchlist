@@ -465,6 +465,8 @@ async function readScores(env,gate){
  for(const row of rows){const parsed=JSON.parse(row.payload_json);if(parsed?.observationKey)items[parsed.observationKey]=parsed;}
  return {schemaVersion:1,mode:'on',programmeRunId:gate.programmeRunId,items};
 }
+// The table is the last-chunk preview of the current programme. PK is observation_key, so a
+// previous run's leftover row collides on the same key if we only DELETE the current run.
 async function writeScores(env,value,gate,context){
  const lease=context.lease||leaseOf(env);
  if(!lease)throw failed('discovery_lease');
@@ -481,7 +483,7 @@ async function writeScores(env,value,gate,context){
  const opening=[
   fence(current,lease,' AND programme_run_id IS (SELECT programme_run_id FROM discovery_lease WHERE id=1)'),
   [FENCE_SQL,[]],
-  ['DELETE FROM discovery_score WHERE programme_run_id IS ?',[current.programmeRunId]],
+  ['DELETE FROM discovery_score',[]],
  ];
  if(opening.length+inserts.length<=STATEMENT_CAP){await commit(db,[...opening,...inserts]);return;}
  await commit(db,[...opening,['UPDATE discovery_transfer SET state=\'loading\', batches=batches+1 WHERE id=1',[]]]);

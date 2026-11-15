@@ -87,6 +87,32 @@ context.startDeferred={...context.richStart,snapshot:{...context.richStart.snaps
 context.storedExact={...context.storedTenths,snapshot:{coverage:{currentPredictionsTotal:2260,confirmedFilmsTotal:2260,windowCurrentPredictions:1812,windowFilmsTotal:1812,localPercent:100,windowPercent:100},queue:{hotPending:0,coldPending:0}}};richHTML=vm.runInContext('eventHTML(storedExact)',context);assert.match(richHTML,/Локальная база: 2260 из 2260 · 100%/);assert.match(richHTML,/Окно просмотра: 1812 из 1812 · 100%/);assert.doesNotMatch(richHTML,/100,0%/);
 context.storedInteger={...context.richStart,snapshot:{...context.richStart.snapshot,coverage:{...context.richStart.snapshot.coverage,localPercent:75,windowPercent:80}}};richHTML=vm.runInContext('eventHTML(storedInteger)',context);assert.match(richHTML,/Локальная база: 300 из 400 · 75%/);assert.match(richHTML,/Окно просмотра: 80 из 100 · 80%/);
 context.richFinal={...context.richProgress,stage:'partial',stopReason:'quota'};richHTML=vm.runInContext('eventHTML(richFinal)',context);assert.match(richHTML,/Причина: quota/);assert.match(richHTML,/Достигнут доступный лимит/);assert.doesNotMatch(richHTML,/hash|token|prompt|stack/i);
+// AIR-491: only events that carry presentation=batch_v2_terminal use the packet titles; historical v6 copy is unchanged.
+{
+ const v2=({stopReason='manifest_spent',stage='complete',failed=0,added=5,updated=0,selectedCount=5,queue=null,coverage=null}={})=>{
+  context.v2event={id:'enrichment-run',type:'enrichment',at:'2026-11-15T13:07:00.000Z',queueSchemaVersion:6,presentation:'batch_v2_terminal',protocol:'batch_v2',stage,stopReason,reason:null,selectedCount,delta:{added,updated,failed,predictionGain:added+updated},added,updated,failed,hotRemaining:20,coldRemaining:100,snapshot:{coverage:coverage||{currentPredictionsTotal:300,confirmedFilmsTotal:400,windowCurrentPredictions:80,windowFilmsTotal:100,localPercent:75,windowPercent:80},queue:queue||{hotPending:20,coldPending:100,outstanding:120,eligibleNow:20,deferredByRetry:0,nextRetryAt:null}}};
+  return vm.runInContext('eventHTML(v2event)',context);
+ };
+ let html=v2();
+ assert.match(html,/Пакет прогнозов обработан/);assert.match(html,/В пакете: 5 · новых 5 · пересчитано 0 · не удалось 0/);
+ assert.match(html,/20 фильмов готовы к следующему запуску/);assert.doesNotMatch(html,/manifest_spent|Причина:/);
+ assert.doesNotMatch(html,/Прогнозы обновлены|Прогнозы запущены|Прогнозы приостановлены/);
+ html=v2({failed:3,added:2,updated:0,selectedCount:5});
+ assert.match(html,/Пакет прогнозов обработан с ошибками/);assert.match(html,/В пакете: 5 · новых 2 · пересчитано 0 · не удалось 3/);
+ html=v2({failed:0,added:2,updated:3,selectedCount:5});
+ assert.match(html,/Пакет прогнозов обработан/);assert.match(html,/В пакете: 5 · новых 2 · пересчитано 3 · не удалось 0/);assert.doesNotMatch(html,/успешно |остаются для повторной попытки/);
+ html=v2({failed:3,added:2,updated:0,selectedCount:5});
+ assert.match(html,/остаются для повторной попытки/);assert.doesNotMatch(html,/прерван|manifest_spent|Причина:/);
+ html=v2({stage:'partial',stopReason:'quota',failed:0,added:1,selectedCount:5});
+ assert.match(html,/Пакет прогнозов прерван/);assert.match(html,/Достигнут доступный лимит/);
+ assert.doesNotMatch(html,/Причина: quota|manifest_spent|обработан(?! )/ );
+ html=v2({stopReason:'manifest_spent',failed:0,added:0,updated:0,selectedCount:5,queue:{hotPending:0,coldPending:0},coverage:{currentPredictionsTotal:10,confirmedFilmsTotal:40,windowCurrentPredictions:2,windowFilmsTotal:8,localPercent:25,windowPercent:25}});
+ assert.doesNotMatch(html,/Все фильмы с актуальными прогнозами|очередь (обработана|исчерпана)/i);
+ assert.match(html,/Остаток очереди в этой записи не сохранён|данные об очереди неполные|без прогноза/i);
+ const historic={id:'old-spent',type:'enrichment',at:'2026-11-15T13:07:00.000Z',queueSchemaVersion:6,stage:'complete',stopReason:'manifest_spent',delta:{added:5,updated:0,failed:0,predictionGain:5},snapshot:{coverage:{currentPredictionsTotal:300,confirmedFilmsTotal:400,windowCurrentPredictions:80,windowFilmsTotal:100,localPercent:75,windowPercent:80},queue:{hotPending:20,coldPending:100,outstanding:120,eligibleNow:20,deferredByRetry:0,nextRetryAt:null}}};
+ context.v2event=historic;html=vm.runInContext('eventHTML(v2event)',context);
+ assert.match(html,/Прогнозы обновлены/);assert.match(html,/Причина: manifest_spent/);assert.doesNotMatch(html,/Пакет прогнозов обработан/);
+}
 context.removalEvent={id:'removal',type:'watchlist',at:'2026-10-23T10:00:00Z',total:1,added:[{id:'stay',title:'Stay',year:2021}],removed:[{id:'gone',title:'Gone',year:2019,rating:4.5,ratingObservedAt:'2026-10-23T12:00:00Z'},{id:'missing',title:'Missing',year:2018},{id:'bad',title:'Bad',year:2017,rating:4.2}]};
 const removalHTML=vm.runInContext('eventHTML(removalEvent)',context);
 assert.match(removalHTML,/<h3>Просмотрены · 1<\/h3>[\s\S]*Gone \(2019\) · 4\.5 ★/);

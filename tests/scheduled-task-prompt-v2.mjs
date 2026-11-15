@@ -224,7 +224,7 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const refused=await w.call('prediction_complete',{runId});assert.equal(refused.isError,true);assert.match(JSON.stringify(refused.data),/Queue not empty/,'a reasonless complete is refused while ready films remain');
  const done=await w.call('prediction_complete',{runId,reason:'manifest_spent'});assert.ok(!done.isError,JSON.stringify(done.data).slice(0,300));
  // AIR-463 / ADR 0136: spending the selected manifest is a normal complete, not a partial time_budget stop.
- assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.ok(done.data.title!=='Прогнозы приостановлены');
+ assert.equal(done.data.status,'complete');assert.equal(done.data.stopReason,'manifest_spent');assert.equal(done.data.title,'Пакет прогнозов обработан с ошибками');assert.equal(done.data.presentation,'batch_v2_terminal');assert.ok(done.data.failed>0);
  assert.ok((done.data.hotRemaining||0)+(done.data.coldRemaining||0)>0,'global outstanding remains after a short run');
  const eventKeys=()=>[...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+runId);
  assert.equal(eventKeys().length,1,'exactly one persisted completion Event');
