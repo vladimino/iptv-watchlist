@@ -1196,7 +1196,7 @@ async function publishD1Generation(env,runId,files,ledger,watchlist,publication)
    const planned=await planDiscoveryLedger(env,{runId,latest:ledger.holder?.discovery??ledger.latest,mode:ledger.mode,lease,pointerEtag:publication.fence,publishedRunId:publication.phase==='published'?publication.programmeRunId||null:null,holder:ledger.holder||null});
    await storePlannedDiscovery(env,runId,ledger.meta,planned,next,lease);
   }
-  if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId);}
+  if(next['discovered-films.json']){const pinned=await pinEpg(env);next['discovered-films.json']=mergeCatalogIdentity(next['discovered-films.json'],await loadJSON(pinned,'epg/discovered-films.json'),runId,{writeAvailability:false});}
   for(const [name,value] of Object.entries(next)){if(value==null)continue;await saveJSON(env,epgGenerationKey(runId,name),value);next[name]=null;if(name!=='programme.json')files[name]=null;}
   const live=await PublishedEpg.currentGeneration(env);
   if(!live||live.fence!==publication.fence)throw new Error('EPG generation changed during publish');
@@ -1414,7 +1414,7 @@ async function sealCatalogStep(env,run,lease,deadline){
  const pinned=await pinEpg(env);
  const mergeStarted=Date.now();
  epgBoundary(run.runId,'seal_catalog_merge','enter');
- const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId);
+ const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId,{writeAvailability:pinned?.epgPin?.authority!=='d1'});
  const current=await loadJSON(env,'epg/discovered-films.json')||{};
  const changed=Object.keys(next).filter(id=>JSON.stringify(next[id])!==JSON.stringify(current[id])).sort();
  const stale=Object.keys(current).filter(id=>!Object.hasOwn(next,id));
@@ -1755,7 +1755,8 @@ async function epgSync(env,run){
  if(!run.events||supersededEpg?.at!==report.updatedAt){const priorWatch=run.events?.find(item=>item?.type==='watchlist'),anchored=!!priorWatch&&priorWatch.removed?.length>0;const before=await loadJSON(env,'watchlist.json');run.events=[anchored?priorWatch:watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(anchored){await saveJSON(env,'sync.json',run);}else{const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}}
  if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  previous=null;
- const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId).catalog,'programme.json':report};
+ const liveCatalog=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;
+ const pending={'discovered-films.json':replaceCatalogAvailability(cache,discoveryHolder.discovery,run.runId,{writeAvailability:!liveCatalog}).catalog,'programme.json':report};
  cache=null;
  if(await sealedPublishAvailable(env)){const publication=await PublishedEpg.currentGeneration(env);if(publication)return await tracedPhase(run.runId,'seal_stage',()=>stageSealedGeneration(env,run,{holder:discoveryHolder,meta:{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist,uncertain:result.uncertain,publication}));}
  let published;try{published=await tracedPhase(run.runId,'generation_publish',()=>publishGenerationWithLedger(env,run.runId,discoveryHolder,{programmeRunId:run.runId,updatedAt:report.updatedAt,rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies},pending,nextWatchlist));}catch(e){run.discoveryError=String(e.message).slice(0,160);throw e;}

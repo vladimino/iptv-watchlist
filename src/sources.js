@@ -193,17 +193,20 @@ function archivedPayloadNewer(next,current){
  if(Number.isFinite(a)!==Number.isFinite(b))return Number.isFinite(a);
  return String(next?.lastSeenProgrammeRunId||'')>=String(current?.lastSeenProgrammeRunId||'');
 }
-function mergeCatalogIdentity(incoming,live,programmeRunId){
+function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
+ const writeAvailability=options.writeAvailability!==false;
  const next={...(incoming||{})};
  for(const [key,film] of Object.entries(live||{})){
   if(!film||typeof film!=='object')continue;
   const staged=next[key];
-  if(!staged){next[key]={...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null};continue;}
+  if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
   next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
  }
  return next;
 }
-function replaceCatalogAvailability(catalog,discoveryItems,programmeRunId){
+// ADR 0142 decision 13: under D1 the catalog record is identity data. Availability (`shows`, `epgLastAiring`, `showsProgrammeRunId`) is not rewritten here; readers take it from the completed programme. R2 still stamps those fields (`writeAvailability` default true).
+function replaceCatalogAvailability(catalog,discoveryItems,programmeRunId,options={}){
+ if(options.writeAvailability===false)return {catalog:catalog||{},changed:false};
  const byTmdb=new Map();
  for(const item of discoveryItems||[]){if(!item?.confirmedTmdbId)continue;const id=String(item.confirmedTmdbId),list=byTmdb.get(id)||[];list.push(...(item.shows||[]));byTmdb.set(id,list);}
  const next={};let changed=false;
