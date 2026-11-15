@@ -5,8 +5,10 @@
 const PREDICTION_DIAGNOSTIC_PAGE_MAX=20;
 
 async function loadPredictionDiagnosticSnapshot(env,filmId){
+ let pinned=env;
+ try{pinned=await pinEpg(env);}catch{pinned=env;}
  const read=async key=>{
-  try{const value=await loadJSON(env,key);return {status:value==null?'not_recorded':'recorded',value};}
+  try{const value=await loadJSON(pinned,key);return {status:value==null?'not_recorded':'recorded',value};}
   catch{return {status:'unavailable',value:null};}
  };
  const [queue,profile,index,programme,catalog,publishedGeneration]=await Promise.all([
@@ -24,6 +26,7 @@ async function loadPredictionDiagnosticSnapshot(env,filmId){
   queue:queue.value,queueStatus:queue.status,profile:profile.value,profileStatus:profile.status,index:index.value,indexStatus:index.status,
   programme:programme.value,programmeStatus:programme.status,catalog:catalog.value,catalogStatus:catalog.status,
   publishedGeneration:publishedGeneration.value,publishedGenerationStatus:publishedGeneration.status,films,
+  completedOnly:pinned?.epgPin?.authority==='d1',
  };
 }
 function predictionDiagnosticOutstanding(queue){
@@ -197,7 +200,7 @@ function predictionDiagnosticReasons(snapshot,outstanding){
 }
 function predictionDiagnosticCoverage(snapshot,now){
  if(snapshot.programmeStatus!=='recorded'||snapshot.profileStatus!=='recorded'||snapshot.indexStatus==='unavailable'||!snapshot.profile)return {status:'unknown',current:null,total:null,percent:null,windowCurrent:null,windowTotal:null,windowPercent:null};
- const summary=canonicalCoverageSummary(snapshot.programme,snapshot.catalogStatus==='recorded'?snapshot.catalog:null,snapshot.index||{},snapshot.profile,now,snapshot.freshness||strictFreshness(snapshot.profile));
+ const summary=canonicalCoverageSummary(snapshot.programme,snapshot.catalogStatus==='recorded'?snapshot.catalog:null,snapshot.index||{},snapshot.profile,now,snapshot.freshness||strictFreshness(snapshot.profile),snapshot.completedOnly===true);
  const complete=snapshot.catalogStatus==='recorded'&&snapshot.indexStatus==='recorded';
  return {
   status:complete?'recorded':'partial',current:summary.currentPredictionsTotal,total:summary.confirmedFilmsTotal,

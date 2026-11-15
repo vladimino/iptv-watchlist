@@ -39,10 +39,32 @@ const live={tmdb_1:{id:'tmdb_1',tmdbId:'1',shows:[oldShow],aliases:['Live']}};
 ctx.live=live;
 const merged=run(`mergeCatalogIdentity({},live,'run-b',{writeAvailability:false})`);
 assert.equal(merged.tmdb_1.shows[0].channelId,'x');
+const stagedVsLive=run(`mergeCatalogIdentity({tmdb_1:{id:'tmdb_1',tmdbId:'1',title:'Staged',shows:[nextShow],availableUntil:${now}+1,showsProgrammeRunId:'run-staged',epgLastAiring:${now}+2,hotEnteredAt:'staged',aliases:['Staged']}},live,'run-b',{writeAvailability:false})`);
+assert.equal(stagedVsLive.tmdb_1.title,'Staged');
+assert.ok(stagedVsLive.tmdb_1.aliases.includes('Staged')&&stagedVsLive.tmdb_1.aliases.includes('Live'));
+assert.equal(stagedVsLive.tmdb_1.shows[0].channelId,'x');
+assert.equal(stagedVsLive.tmdb_1.showsProgrammeRunId,undefined);
+assert.equal(stagedVsLive.tmdb_1.hotEnteredAt,undefined);
+assert.equal(stagedVsLive.tmdb_1.epgLastAiring,undefined);
 const cleared=run(`mergeCatalogIdentity({},live,'run-b')`);
 assert.equal(JSON.stringify(cleared.tmdb_1.shows),'[]');
 
 const discovery=fs.readFileSync('src/discovery.js','utf8')+' '+fs.readFileSync('src/discovery-authority.js','utf8')+' '+fs.readFileSync('src/sources.js','utf8');
 assert.doesNotMatch(discovery,/\bfilm_alias\b/,'assignment, replay and catalog writers do not name film_alias');
 
-console.log('catalog availability writes: D1 skip, R2 stamp, aliases kept, no film_alias ok');
+const worker=fs.readFileSync('src/worker.js','utf8');
+vm.runInContext(worker.slice(worker.indexOf('function completedShowsByTmdb'),worker.indexOf('function catalogAvailable')),ctx);
+const enrichment=fs.readFileSync('src/enrichment.js','utf8');
+vm.runInContext(enrichment.slice(enrichment.indexOf('function canonicalCoverageSummary'),enrichment.indexOf('function coveragePercent')),ctx);
+ctx.freshness={indexed:()=>false};
+const staleCatalog={tmdb_1:{id:'tmdb_1',tmdbId:'1',canonicalIdentity:'tmdb:1',shows:[oldShow],epgLastAiring:now,hotEnteredAt:'stamped'}};
+ctx.staleCatalog=staleCatalog;
+const emptyCompleted=run(`canonicalCoverageSummary({runId:'run-b',films:[],catalogFilms:[]},staleCatalog,{},{},now,freshness,true)`);
+assert.equal(emptyCompleted.windowFilmsTotal,0,'stale catalog shows are not in the D1 coverage window');
+assert.equal(emptyCompleted.confirmedFilmsTotal,1);
+const assigned=run(`canonicalCoverageSummary({runId:'run-b',films:[],catalogFilms:[{id:'tmdb_1',tmdbId:'1',shows:[oldShow]}]},staleCatalog,{},{},now,freshness,true)`);
+assert.equal(assigned.windowFilmsTotal,1,'completed showings put the Film in the coverage window');
+const r2Coverage=run(`canonicalCoverageSummary({runId:'run-b',films:[]},staleCatalog,{},{},now,freshness,false)`);
+assert.equal(r2Coverage.windowFilmsTotal,1,'R2 coverage still uses catalog shows');
+
+console.log('catalog availability writes: D1 skip, R2 stamp, aliases kept, merge live availability, coverage overlay, no film_alias ok');

@@ -201,6 +201,9 @@ function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
   const staged=next[key];
   if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
   next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
+  if(writeAvailability===false)for(const field of ['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt']){
+   if(Object.hasOwn(film,field))next[key][field]=film[field];else delete next[key][field];
+  }
  }
  return next;
 }
