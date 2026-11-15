@@ -1,9 +1,9 @@
 # ADR 0147: User catalog reads fence authority, programme and transfer epoch, not the global Discovery generation
 
-**Status:** Proposed  
+**Status:** Accepted as DESIGN  
 **Original decision date:** 2026-11-15  
 **Recorded at:** 2026-11-15  
-**Approval source:** [AIR-493](https://trello.com/c/AKoSOprC) incident card plus owner numbering (AIR-492 keeps ADR 0146). The material snapshot-fence trade-off is **not** Accepted until independent review PASS and explicit owner merge approval.  
+**Approval source:** Product Owner chat acceptance 15 November 2026 («принимаю, это просто необходимое изменение»), recorded on [PR #659](https://github.com/vladimino/iptv-watchlist/pull/659#issuecomment-6899288485). Design only: not merge authorization, not a production operation. AIR-492 keeps ADR 0146 and must merge first.  
 **Related work:** [AIR-493](https://trello.com/c/AKoSOprC)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -42,6 +42,7 @@ Code rollback restores the previous global generation compare. It does not chang
 ## Evidence
 
 - **Original decision:** [AIR-493](https://trello.com/c/AKoSOprC); ADR number 0147 by owner comment on PR #659 (AIR-492 keeps 0146).
+- **Design acceptance:** [PR #659 comment recording the owner's chat approval](https://github.com/vladimino/iptv-watchlist/pull/659#issuecomment-6899288485) (the owner did not author that GitHub comment).
 - **Implementation:** the delivery PR of AIR-493
 - **Dated verification:** [offline RCA and tests](../evidence/discovery/air-493-user-read-fence-2026-11-15.md). Natural production 502 disappearance waits on post-merge deploy and the next Discovery Workflow, recorded on the card.
 - **Uncertainty:** production interleaving of a specific continuation write with a specific GET was correlated from logs, not captured as a distributed trace.
