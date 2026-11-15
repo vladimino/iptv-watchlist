@@ -679,6 +679,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // AIR-374 P3c: the time the canonical Film admission may use inside this chunk: the persist limit minus the cost of three writes (one admission unit is several round trips), so a unit never starts when it could not finish before the checkpoint reserve.
  const canonicalLimit=()=>persistLimit()-writeEstimate(3);
  const lost=(e,failedAt)=>{if(e?.name==='LeaseLostError')e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt};return e;};
+ const inPhase=async (name,fn)=>{try{return await fn();}catch(e){if(e&&typeof e==='object'&&!e.failedAt)e.failedAt=name;throw e;}};
  const heartbeat=async()=>{
   if(!lease||lease.expiresAt-Date.now()>DISCOVERY_LEASE_RENEW_MARGIN_MS)return;
   try{await fence();}catch(e){throw lost(e,'heartbeat');}
@@ -738,9 +739,9 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const assignment={assigned:0,present:0,evidence_drift:0,slot_taken:0,film_absent:0,stale_run:0,decision_changed:0,observation_inactive:0,slot_absent:0,refused:0,replayed:0,replayRemaining:0};
  const candidateByKey=new Map(),driftSeen=new Map();
  for(const row of [...selected.items,...selected.touches])candidateByKey.set(row.candidate.key,row.candidate);
- const assignSlots=async key=>{
+ const assignSlots=async (key,phase)=>{
   await heartbeat();
-  const result=await guarded(()=>timedWrite(()=>DiscoveryAuthority.assignObservationSlots(env,{observationKey:key,programmeRunId:source.programmeRunId},{lease})));
+  const result=await inPhase(phase,()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.assignObservationSlots(env,{observationKey:key,programmeRunId:source.programmeRunId},{lease}))));
   if(!result){assignment.refused++;return null;}
   for(const item of result.skipped)if(item.reason==='evidence_drift'&&Number.isFinite(item.minutes)){
    const entry=driftSeen.get(key)||{minutes:new Set()};entry.minutes.add(item.minutes);driftSeen.set(key,entry);
@@ -760,7 +761,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
    const group=planned.slice(index,index+PAGED_CHEAP_GROUP);
    await heartbeat();
-   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,Object.fromEntries(group.map(([key,item])=>[key,{previous:item.previous,next:item.next}])),{lease})));
+   const wrote=await inPhase('cheap_decision',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,Object.fromEntries(group.map(([key,item])=>[key,{previous:item.previous,next:item.next}])),{lease}))));
    if(!wrote)return programmeChanged();
    const done=new Set(wrote.written);
    // A key the chunk skipped belongs to another writer now (the owner, or a ledger that changed): it is not cheap work left.
@@ -772,7 +773,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
    const group=filmBatch.slice(index,index+perBatch);
    await heartbeat();
-   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(group.map(key=>[key,films[key]])),{lease,canonicalDeadline:canonicalLimit()})));
+   const wrote=await inPhase('cheap_admission',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(group.map(key=>[key,films[key]])),{lease,canonicalDeadline:canonicalLimit()}))));
    if(!wrote)return programmeChanged();
    touchedWritten+=wrote.written.length;
    filmsAttempted+=group.length;
@@ -793,7 +794,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   replay.sort((a,b)=>(candidateIsHot(b,nowSelect)?1:0)-(candidateIsHot(a,nowSelect)?1:0)||String(a.key).localeCompare(String(b.key)));
   for(const candidate of replay){
    if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit())){assignment.replayRemaining++;continue;}
-   if(await assignSlots(candidate.key))assignment.replayed++;
+   if(await assignSlots(candidate.key,'replay_assignment'))assignment.replayed++;
   }
  }
  timings.cheapMs=Date.now()-cheapStarted;
@@ -814,13 +815,13 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   await heartbeat();
   if(filmEntry){
    if(!await publishedGenerationMatches(env,source.programmeRunId))return 'changed';
-   const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[filmEntry[0]]:filmEntry[1]},{lease,canonicalDeadline:canonicalLimit()})));
+   const wrote=await inPhase('candidate_admission',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[filmEntry[0]]:filmEntry[1]},{lease,canonicalDeadline:canonicalLimit()}))));
    if(!wrote)return 'changed';
    // An identity that already belongs to another film id is never merged: the chunk stops and backs off.
    if(wrote.refused.length)return 'refused';
    if(!wrote.written.includes(filmEntry[0]))return 'changed';
   }
-  const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[candidate.key]:{previous:previous??null,next:decisions[candidate.key]}},{lease})));
+  const wrote=await inPhase('candidate_decision',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[candidate.key]:{previous:previous??null,next:decisions[candidate.key]}},{lease}))));
   if(!wrote)return 'changed';
   if(wrote.skipped.some(item=>item.reason==='conflict'||item.reason==='observation_gone'||item.reason==='evidence_changed'))decisions[candidate.key]=previous;
   return 'saved';
@@ -871,10 +872,11 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
    if(saved==='late'){decisions[candidate.key]=previous;if(newFilm){added--;delete films[filmEntry[0]];}break;}
    if(saved==='refused'){error='admission_identity_conflict';retryAt=new Date(Date.now()+3600000).toISOString();decisions[candidate.key]=previous;if(newFilm){added--;delete films[filmEntry[0]];}break;}
    checked++;
-   if(decisions[candidate.key]?.status==='verified'&&Date.now()<persistLimit())await assignSlots(candidate.key);
+   if(decisions[candidate.key]?.status==='verified'&&Date.now()<persistLimit())await assignSlots(candidate.key,'candidate_assignment');
   }catch(e){
    if(e?.name==='BudgetExhaustedError')break;
    if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'tmdb'};throw e;}
+   if(e?.code&&TYPED_DISCOVERY_CODES.has(e.code))throw e;
    error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;
   }
  }
@@ -914,16 +916,17 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     if(!reconfirmed.length&&!failed.length)continue;
     const next=DiscoveryAuthority.decisionAfterRevalidation(previous,{reconfirmed,failed,proposedTmdbId:proposed},{evidenceKey:candidateEvidence(candidate),checkedAt:new Date().toISOString(),provenance:{authority:'tmdb_detail',searchHit:false,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null}});
     await heartbeat();
-    const wrote=await guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease})));
+    const wrote=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[key]:{previous,next}},{lease}))));
     if(!wrote)return programmeChanged();
     if(!wrote.written.includes(key))continue;
     decisions[key]=next;
     revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
-    if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key);
+    if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
    }catch(e){
     if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
     if(e?.name==='LeaseLostError'){e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt:'revalidation'};throw e;}
+    if(e?.code&&TYPED_DISCOVERY_CODES.has(e.code))throw e;
     error=String(e.message).slice(0,120);retryAt=e.retryAt||new Date(Date.now()+60000).toISOString();break;
    }
   }
@@ -960,11 +963,13 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  // summary and the step diagnostic, so a quick pre-write figure is never read as a finished checkpoint.
  timings.preCommitMs=Date.now()-t0;
  const statusStarted=Date.now();
- await saveJSON(env,'epg/discovery-status.json',summary);
- timings.statusMs=Date.now()-statusStarted;
- const checkpointStarted=Date.now();
- if(checkpoint)await checkpoint(summary);
- timings.checkpointMs=Date.now()-checkpointStarted;
+ await inPhase('final_checkpoint',async()=>{
+  await saveJSON(env,'epg/discovery-status.json',summary);
+  timings.statusMs=Date.now()-statusStarted;
+  const checkpointStarted=Date.now();
+  if(checkpoint)await checkpoint(summary);
+  timings.checkpointMs=Date.now()-checkpointStarted;
+ });
  timings.totalMs=Date.now()-t0;
  return summary;
 }
@@ -1183,15 +1188,20 @@ const DIAGNOSTIC_VOCABULARY={
  runStage:['metadata','epg','seal','complete'],
  stage:['idle','paused','running','complete','error','busy','partial','programme_changed','awaiting_epg_discovery','backoff','missing_secret'],
  nextAction:['continue','wait','stop'],
- reason:['ledger_seal','epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted','delegated'],
+ reason:['ledger_seal','epg_committed','scan_committed','busy','chunk_budget','backoff','programme_changed','idle','missing_secret','error','discovery_failed','orphaned','interrupted','delegated','discovery_conflict','discovery_fence','discovery_lease','discovery_unavailable','discovery_bounded','discovery_not_authoritative','discovery_incomplete'],
  errorName:['Error','TypeError','RangeError','SyntaxError','ReferenceError','AbortError','TimeoutError'],
 };
 function diagnosticCode(list,value,fallback='other'){return value==null?null:list.includes(value)?value:fallback;}
 function diagnosticId(value){return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)?value:null;}
 function diagnosticTime(value){return typeof value==='string'&&value.length<=40&&Number.isFinite(Date.parse(value))?value:null;}
 function diagnosticCount(value){return typeof value==='number'&&Number.isFinite(value)?value:null;}
-// Classifies a thrown error into one of seven codes. The message is matched, never copied.
+// Allowlisted Discovery codes first (typed `error.code` / `Error(code)` message). Never copy cause text.
+const TYPED_DISCOVERY_CODES=new Set(['discovery_unavailable','discovery_fence','discovery_lease','discovery_conflict','discovery_bounded','discovery_not_authoritative','discovery_incomplete']);
+const DIAGNOSTIC_FAILED_AT=new Set(['cheap_decision','cheap_admission','replay_assignment','candidate_admission','candidate_decision','candidate_assignment','revalidation','revalidation_assignment','final_checkpoint']);
+const DIAGNOSTIC_FAILURE_KIND=new Set(['unique_constraint','input_invariant','fence','other']);
 function diagnosticErrorCode(error){
+ const typed=typeof error?.code==='string'&&TYPED_DISCOVERY_CODES.has(error.code)?error.code:(typeof error?.message==='string'&&TYPED_DISCOVERY_CODES.has(error.message)?error.message:null);
+ if(typed)return typed;
  const name=String(error?.name||''),message=String(error?.message||'');
  if(name==='AbortError'||name==='TimeoutError'||/timed? ?out/i.test(message))return 'timeout';
  if(/generation changed/i.test(message))return 'publish_conflict';
@@ -1200,6 +1210,27 @@ function diagnosticErrorCode(error){
  if(/tmdb|fetch|http\s?\d{3}|upstream|network|socket|dns/i.test(message))return 'upstream';
  if(name==='SyntaxError'||/invalid|not found|required|unexpected/i.test(message))return 'invalid_input';
  return 'unknown';
+}
+function diagnosticFailureKind(error){
+ if(DIAGNOSTIC_FAILURE_KIND.has(error?.failureKind))return error.failureKind;
+ const code=diagnosticErrorCode(error);
+ if(code==='discovery_fence')return 'fence';
+ if(code==='discovery_conflict')return /UNIQUE constraint failed/i.test(String(error?.cause?.message||''))?'unique_constraint':'input_invariant';
+ return 'other';
+}
+function diagnosticFailedAt(error,timings){
+ if(DIAGNOSTIC_FAILED_AT.has(error?.failedAt))return error.failedAt;
+ if(DIAGNOSTIC_FAILED_AT.has(timings?.failedAt))return timings.failedAt;
+ return null;
+}
+function diagnosticFailureConstraint(error){
+ return typeof error?.failureConstraint==='string'&&/^unique\.[a-z0-9_]+$/.test(error.failureConstraint)?error.failureConstraint:null;
+}
+function discoveryFailureFields(error,timings){
+ const code=error==null||error===''?null:diagnosticErrorCode(typeof error==='object'?error:{message:String(error)});
+ if(!code)return {error:null,failedAt:null,failureKind:null,failureConstraint:null};
+ const source=typeof error==='object'&&error?error:{message:String(error)};
+ return {error:code,failedAt:diagnosticFailedAt(source,timings),failureKind:diagnosticFailureKind(source),failureConstraint:diagnosticFailureConstraint(source)};
 }
 function diagnosticError(error){return {code:diagnosticErrorCode(error),name:diagnosticCode(DIAGNOSTIC_VOCABULARY.errorName,String(error?.name||'Error'),'Error')};}
 // A continuation `reason` outside the vocabulary is the thrown message an error record kept; it is
@@ -1212,10 +1243,13 @@ function diagnosticTimings(timings){
  if(!timings||typeof timings!=='object')return null;
  const out={};
  for(const field of ['preChunkMs','walkMs','pages','concurrency','renewals','firstRenewMs','cheapMs','tmdbMs','writeMaxMs','preCommitMs','statusMs','checkpointMs','totalMs','sinceStartMs'])if(Number.isFinite(timings[field]))out[field]=Math.max(0,Math.round(timings[field]));
- if(['heartbeat','tmdb','final','write','cheap_pass','preview'].includes(timings.failedAt))out.failedAt=timings.failedAt;
+ if(['heartbeat','tmdb','final','write','cheap_pass','preview',...DIAGNOSTIC_FAILED_AT].includes(timings.failedAt))out.failedAt=timings.failedAt;
  return Object.keys(out).length?out:null;
 }
-function chunkSummary(result){return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),cheapRemaining:diagnosticCount(result.cheapRemaining),added:diagnosticCount(result.added),reused:diagnosticCount(result.reused),screenedOut:diagnosticCount(result.screenedOut),touched:diagnosticCount(result.touched),tmdbCalls:diagnosticCount(result.tmdbCalls),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:result.error?diagnosticErrorCode({message:String(result.error)}):null};}
+function chunkSummary(result){
+ const failure=discoveryFailureFields(result.error==null||result.error===''?null:typeof result.error==='object'?result.error:{message:String(result.error),code:result.errorCode||result.code,failedAt:result.failedAt,failureKind:result.failureKind,failureConstraint:result.failureConstraint},result.timings);
+ return {...(diagnosticTimings(result.timings)?{timings:diagnosticTimings(result.timings)}:{}),stage:diagnosticCode(DIAGNOSTIC_VOCABULARY.stage,result.stage),checked:diagnosticCount(result.checked),remaining:diagnosticCount(result.remaining),cheapRemaining:diagnosticCount(result.cheapRemaining),added:diagnosticCount(result.added),reused:diagnosticCount(result.reused),screenedOut:diagnosticCount(result.screenedOut),touched:diagnosticCount(result.touched),tmdbCalls:diagnosticCount(result.tmdbCalls),variantPending:typeof result.variantPending==='boolean'?result.variantPending:diagnosticCount(result.variantPending),retryAt:diagnosticTime(result.retryAt),programmeRunId:diagnosticId(result.programmeRunId),error:failure.error,failedAt:failure.failedAt,failureKind:failure.failureKind,failureConstraint:failure.failureConstraint};
+}
 // One structured line per phase for Workers Logs; never throws.
 function observeContinuation(step){try{console.log(JSON.stringify({event:'epg_continuation',...step}));}catch{}}
 // A step entry. `runId` is kept only when it has the server-generated UUID shape; `runIdShape` says
@@ -1382,7 +1416,11 @@ function runningOverride(health){
 function continuationAfterChunk(result,budget,hopId,at,programmeRunId){
  if(result.stage==='programme_changed')return {stage:'paused',reason:'programme_changed',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId||null};
  if(result.stage==='awaiting_epg_discovery')return {stage:'paused',reason:'idle',at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:programmeRunId??null};
- if(result.stage==='error')return {stage:'error',reason:result.error||'discovery_failed',at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null};
+ if(result.stage==='error'){
+  const failure=discoveryFailureFields(typeof result.error==='object'?result.error:{message:String(result.error||'discovery_failed'),code:result.error,failedAt:result.failedAt,failureKind:result.failureKind,failureConstraint:result.failureConstraint},result.timings);
+  const typed=TYPED_DISCOVERY_CODES.has(failure.error);
+  return {stage:'error',reason:typed?failure.error:String(result.error||'discovery_failed'),at,hopId,remainingChunks:budget,nextCatchUpAt:nextCatchUpAt(),retryAt:null,programmeRunId:programmeRunId??null,failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null};
+ }
  if(result.stage==='backoff'||result.retryAt&&!result.checked)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:budget,nextCatchUpAt:result.retryAt||nextCatchUpAt(),retryAt:result.retryAt||null,programmeRunId:result.programmeRunId??programmeRunId??null};
  if(result.retryAt)return {stage:'paused',reason:'backoff',at,hopId,remainingChunks:Math.max(0,budget-1),nextCatchUpAt:result.retryAt,retryAt:result.retryAt,programmeRunId:result.programmeRunId??null};
  if(result.remaining===0&&!(result.cheapRemaining>0)&&!result.error)return {stage:'complete',reason:null,at,hopId,remainingChunks:0,nextCatchUpAt:null,retryAt:null,programmeRunId:result.programmeRunId??null};
@@ -1607,7 +1645,11 @@ async function advanceDiscovery(env,body={}){
   result=report?.films?await resolveDiscoveryChunk(env,report,body.limit||24,acquired,checkpoint,now):{stage:'awaiting_epg_discovery',checked:0,remaining:null};
  }catch(e){
   if(committed){result=committed.summary;trace.trailingError=diagnosticErrorCode(e);}
-  else result={stage:'error',error:String(e.message).slice(0,120),checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
+  else{
+   const failure=discoveryFailureFields(e,e?.timings);
+   const typed=TYPED_DISCOVERY_CODES.has(failure.error);
+   result={stage:'error',error:typed?failure.error:String(e?.message||e).slice(0,120),failedAt:typed?failure.failedAt:null,failureKind:typed?failure.failureKind:null,failureConstraint:typed?failure.failureConstraint:null,checked:0,remaining:null,...(e?.name==='LeaseLostError'?{timings:e.timings||null}:{})};
+  }
  }
  trace.chunk=chunkSummary(result);
  if(!committed){try{await checkpoint(result);}catch(e){await release();throw e;}}
@@ -1759,7 +1801,7 @@ async function discoveryOperationalStatus(env){
   programmeRunId:published||continuation?.programmeRunId||null,publishedProgrammeRunId:published,projectorWindow:window,
   discovery:{state:contract.state,reason:contract.reason,nextAction:contract.nextAction,remainingChunks:contract.remainingChunks,nextCatchUpAt:contract.nextCatchUpAt,retryAt:contract.retryAt},
   continuationHealth:health,lease:records.lease?{liveUntil:Number.isFinite(records.lease.expiresAt)&&records.lease.expiresAt>0?new Date(records.lease.expiresAt).toISOString():null,live:records.lease.expiresAt>now}:null,
-  lastCheckpoint:continuation?{stage:continuation.stage||null,reason:continuation.reason??null,at:continuation.at||null,programmeRunId:continuation.programmeRunId||null}:null,
+  lastCheckpoint:continuation?{stage:continuation.stage||null,reason:continuation.reason??null,at:continuation.at||null,programmeRunId:continuation.programmeRunId||null,failedAt:continuation.stage==='error'?diagnosticFailedAt(continuation):null,failureKind:continuation.stage==='error'?diagnosticFailureKind(continuation):null,failureConstraint:continuation.stage==='error'?diagnosticFailureConstraint(continuation):null}:null,
   lastChunk:last?{stage:typeof last.stage==='string'?last.stage.slice(0,40):null,checked:operationalNumber(last.checked),remaining:operationalNumber(last.remaining),finishedAt:typeof last.finishedAt==='string'?last.finishedAt:null}:null,
   backlog,executor,unavailable:[...new Set(unavailable)],
   detailed:{view:'detailed',note:'The detailed view reads the whole ledger under a snapshot fence and can be refused with discovery_fence while Discovery commits; that is not a failure of Discovery.'}};

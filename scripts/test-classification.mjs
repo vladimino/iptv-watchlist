@@ -397,6 +397,10 @@ export const FILES={
  "discovery-bounded-lib.mjs": {
   "suite": "core"
  },
+ "discovery-conflict-diagnostics.mjs": {
+  "suite": "core",
+  "note": "Typed discovery_conflict / fence classification, failedAt phase and UNIQUE category. No production read."
+ },
  "discovery-chunk-budget.mjs": {
   "suite": "split",
   "note": "Same-key reads, fences and the injected preChunkMs gap stay in core. The concurrent-versus-sequential runner ratio is scenario discovery-chunk-budget-concurrent-walk."
