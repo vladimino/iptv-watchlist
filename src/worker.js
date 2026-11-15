@@ -727,7 +727,18 @@ async function metadataSync(env,run){
 }
 // AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so
 // the staged publication can run it as a separate bounded step. It leaves the run's stage alone and is idempotent.
-async function persistWatchlist(env,run,report){const list=await loadJSON(env,'watchlist.json');if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);if(saved===false)throw new Error('published_epg_fence');if(!saved)await saveJSON(env,'watchlist.json',next);}}
+async function persistWatchlist(env,run,report){
+ // ADR 0142 decision 14: one EPG sync, one generation increment. The publish commit already stored the watchlist.
+ // saveWatchlist would bump generation a second time; under a live D1 pin the tail writes nothing.
+ if(typeof PublishedEpg!=='undefined'&&await PublishedEpg.currentGeneration(env))return;
+ const list=await loadJSON(env,'watchlist.json');
+ if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){
+  const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};
+  const saved=typeof PublishedEpg==='undefined'?null:await PublishedEpg.saveWatchlist(env,next);
+  if(saved===false)throw new Error('published_epg_fence');
+  if(!saved)await saveJSON(env,'watchlist.json',next);
+ }
+}
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
  if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
