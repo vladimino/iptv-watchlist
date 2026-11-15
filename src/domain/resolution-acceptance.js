@@ -46,8 +46,8 @@ function genreId(value){const id=typeof value==='number'?value:value&&typeof val
 const TMDB_GENRE_MUSIC=10402,TMDB_GENRE_DOCUMENTARY=99;
 const MUSIC_GENRE_NAMES=new Set(['music','музыка','музыкальный','музика']);
 const DOCUMENTARY_GENRE_NAMES=new Set(['documentary','документальный','документальний']);
-const FILM_EPG_CATEGORY=/\b(?:фильм|кино|телефильм|movie|film|cinema)\b/iu;
-const CONCERT_EPG_CATEGORY=new Set(['концерт','concert','concerts','live','музыка','music']);
+const FILM_EPG_CATEGORY=new Set(['фильм','фільм','кино','кіно','телефильм','телефільм','movie','film','cinema']);
+const CONCERT_EPG_CATEGORY=new Set(['концерт','concert','concerts','live','музыка','музика','music']);
 function movieGenreIds(movie){
  const ids=new Set();
  for(const value of [...(movie?.genres||[]),...(movie?.genreIds||[])]){const id=genreId(value);if(id!=null)ids.add(id);}
@@ -61,7 +61,7 @@ function concertBroadcastCategory(categories){
  const tokens=[...(categories||[])].map(detailNorm).filter(Boolean);
  if(!tokens.length)return false;
  const parts=tokens.flatMap(token=>token.split(' ').filter(Boolean));
- if(parts.some(part=>FILM_EPG_CATEGORY.test(part)))return false;
+ if(parts.some(part=>FILM_EPG_CATEGORY.has(part)))return false;
  return parts.some(part=>CONCERT_EPG_CATEGORY.has(part));
 }
 function concertBroadcastIdentity(movie,observation){

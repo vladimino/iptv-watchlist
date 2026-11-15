@@ -18,7 +18,7 @@ The production examples of 15 November 2026 (`tmdb_1326142`, `tmdb_238858`) are 
 
 After title, year and runtime on the fetched TMDB movie card succeed, `acceptScoredIdentity` withholds `detail_verified` only when **all** of the following hold:
 
-1. The observation carries XMLTV `<category>` values that name a concert or music broadcast (`концерт`, `concert`, `live`, `музыка`, `music`) and do **not** also name a film (`фильм`, `кино`, `movie`, `film`).
+1. The observation carries XMLTV `<category>` values that name a concert or music broadcast (`концерт`, `concert`, `live`, `музыка`, `music`) and do **not** also name a film (`фильм`, `кино`, `телефильм`, `movie`, `film`, and the corresponding Ukrainian tokens). Category tokens are matched as an exact normalized whitelist after whitespace split; JavaScript `\\b` is not used, because it does not treat Cyrillic letters as word characters.
 2. The TMDB card has Music, identified by genre id `10402` (preferred) or the known Music display names as a fallback when the id is absent.
 3. The card has no Documentary (`99`) and no other feature genre besides Music and TV Movie (`10770`).
 
