@@ -47,13 +47,13 @@ The hourly cron's Discovery reconcile (`reconcileDiscoveryWorkflow`) is independ
 
 ```mermaid
 flowchart TD
-    userGet["GET catalog/available or enrichment/view"]
-    snapshot["Catalog snapshot: one admission SELECT"]
-    paged["Paged ledger or decisions walk"]
-    genBump["Continuation or status write bumps generation"]
-    pin["Programme pin, transfer epoch, or cutover"]
-    ok["200 consistent catalog"]
-    wait["503 code plus Retry-After"]
+    userGet["User catalog GET"]
+    snapshot["One admission SELECT"]
+    paged["Paged ledger walk"]
+    genBump["Continuation bumps generation"]
+    pin["Pin or transfer epoch"]
+    ok["200 catalog"]
+    wait["503 Retry-After"]
     userGet --> snapshot
     snapshot --> pin
     pin -->|stable| ok
