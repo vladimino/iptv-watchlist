@@ -62,7 +62,7 @@ const s3=await w.call('prediction_batch_start',{trigger:'manual',dryRun:true,pin
 assert.equal((await w.call('prediction_batch_start',{trigger:'manual',dryRun:true,pin:{filmIds:[]}})).isError,true,'a bad pin is a refusal');
 
 // submit: every kind of item, in one group and one by one, twice (a repeated trial answers the same and writes nothing)
-const mixed=[...items(pick.slice(0,2)),{filmId:pick[2],fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}},{filmId:pick[3],failure:{kind:'parse_error'}},{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction}];
+const mixed=[...items(pick.slice(0,2)),{filmId:pick[2],fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}},{filmId:pick[3],failure:{kind:'parse_error',reason:'json_unparseable'}},{filmId:'tmdb_9999',fingerprint:w.fingerprint,prediction:w.prediction}];
 const m1=await dry({items:mixed}),m2=await dry({items:mixed});
 assert.equal(m1.isError,false,JSON.stringify(m1.data).slice(0,300));assert.deepEqual(m2.data,m1.data,'a repeated trial answers the same');
 const by=Object.fromEntries(m1.data.results.map(x=>[x.filmId,x]));

@@ -2259,7 +2259,8 @@ function callerFailureIssues(failure){
  if(!isObject(failure))return [{path:'failure',code:'invalid_type'}];
  const issues=[];
  for(const key of Object.keys(failure))if(!['kind','reason','preflight'].includes(key)&&issues.length<MAX_ISSUES)issues.push({path:'failure.'+key.replace(/[^A-Za-z0-9_]/g,'_').slice(0,40),code:'unknown_field'});
- if(failure.reason!==undefined&&!CALLER_FAILURE_REASONS.includes(failure.reason))issues.push({path:'failure.reason',code:typeof failure.reason==='string'?'invalid_enum':'invalid_type'});
+ if(failure.reason===undefined)issues.push({path:'failure.reason',code:'required'});
+ else if(!CALLER_FAILURE_REASONS.includes(failure.reason))issues.push({path:'failure.reason',code:typeof failure.reason==='string'?'invalid_enum':'invalid_type'});
  if(failure.preflight!==undefined){
   const p=failure.preflight;
   if(!isObject(p))issues.push({path:'failure.preflight',code:'invalid_type'});
@@ -2276,7 +2277,7 @@ function callerFailureIssues(failure){
  }
  return issues.slice(0,MAX_ISSUES);
 }
-// Canonical form of a valid claim: issues sorted by path then code and deduplicated, so equal claims hash and compare equal. Null when the item carries no reason and no preflight (the legacy shape).
+// Canonical form of a valid claim: issues sorted by path then code and deduplicated, so equal claims hash and compare equal. Null only for a historical kind-only item (new submits require reason).
 function callerFailureClaim(failure){
  if(!isObject(failure)||failure.reason===undefined&&failure.preflight===undefined)return null;
  const list=Array.isArray(failure.preflight?.issues)?failure.preflight.issues:[],seen=new Set(),issues=[];
