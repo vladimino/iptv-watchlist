@@ -1,4 +1,5 @@
-// AIR-480: every deterministic acceptance example of ADR 0142 names the tests that cover it.
+// AIR-480: auditable index of ADR 0142's 38 examples onto the tests that exercise them.
+// Existence of a named file is not a coverage certificate; the named tests assert the behaviour.
 // Local files only; this file does not call Cloudflare, TMDB or production.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

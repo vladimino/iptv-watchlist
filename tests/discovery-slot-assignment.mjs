@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
 import {slotEligibility,decisionAnchor,evidenceKeyDurations,anchorTolerance,slotMinutes} from '../src/domain/slot-evidence.js';
 import {MemoryBucket} from './memory-bucket.mjs';
@@ -66,6 +68,32 @@ const published=file=>sql(file,'SELECT generation, watchlist_generation, program
 const discoveryGeneration=file=>Number(sql(file,'SELECT generation FROM discovery_authority')[0].generation);
 const verifiedDecision=(item,extra={})=>({status:'verified',filmId:'member-1',tmdbId:'101',canonicalIdentity:'tmdb:101',identitySource:'tmdb_detail',anchor:[90],evidenceKey:Authority.evidenceKey(item),...extra});
 const write=async(env,item,next,previous=null)=>Authority.writeDecisionDelta(env,{[item.key]:{previous,next}});
+
+async function chunkAgainst(file,{authority=Authority,movieId=101,title='Film a'}={}){
+ const assigns=[];
+ const wrapped=new Proxy(authority,{
+  get(target,prop,receiver){
+   const value=Reflect.get(target,prop,receiver);
+   if(prop!=='assignObservationSlots'||typeof value!=='function')return value;
+   return async(...args)=>{assigns.push(args[1]?.observationKey??null);return value.apply(target,args);};
+  }
+ });
+ const env={DB:d1Standin(file),BUCKET:new MemoryBucket(),discoveryLease:null,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
+ const movie={id:movieId,title,original_title:title,release_date:'2001-05-01',runtime:90,genres:[],credits:{crew:[],cast:[]},translations:{translations:[]},alternative_titles:{titles:[]}};
+ const context=vm.createContext({console,Date,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
+  fetch(url){const parsed=new URL(url);return Promise.resolve(new Response(JSON.stringify(parsed.pathname.includes('/movie/')?movie:{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
+  DiscoveryAuthority:wrapped,pinEpg:async value=>value,refreshPredictionQueue:async()=>{},
+  loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[{id:'member-1',tmdbId:'101',title,original:title,year:2001,runtime:90,shows:[]}]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await wrapped.routeRead(target,key);return routed.handled?routed.value:null;},
+  saveJSON:async(target,key,value)=>{const routed=await wrapped.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
+ for(const name of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(name,'utf8'),context);
+ const report={films:[{id:'member-1',tmdbId:'101',title,original:title,year:2001,runtime:90,canonicalIdentity:'tmdb:101',shows:[]}]};
+ const lease=await wrapped.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ try{
+  sql(file,'DELETE FROM discovery_status');
+  const status=await context.resolveDiscoveryChunk(env,report,24,lease.lease);
+  return {status,assigns,env};
+ }finally{await wrapped.releaseLease(env,lease.lease);}
+}
 
 // 1. A member Film takes only its eligible slots, with no coordinate from the writer; the published generation does not move; replay inserts nothing.
 {
@@ -238,7 +266,7 @@ const write=async(env,item,next,previous=null)=>Authority.writeDecisionDelta(env
  assert.equal(rows(file).length,0);
 }
 
-// Example 17: a skipped decision write never reaches the insert.
+// Example 17: a skipped decision write never reaches the insert, including the resolver path.
 {
  const item=obs('cas');
  const {file,env}=await setup([item]);
@@ -248,19 +276,30 @@ const write=async(env,item,next,previous=null)=>Authority.writeDecisionDelta(env
  assert.deepEqual(skipped.skipped,[{key:'cas',reason:'conflict'}]);
  assert.equal(rows(file).length,0);
 }
-
-// Example 18: the decision lands, the process stops, the next assign completes the rows.
 {
- const item=obs('crash');
+ const item=obs('cas2',{title:'Film cas2',normalizedTitle:'film cas2'});
+ const {file,env}=await setup([item]);
+ await Authority.releaseLease(env,env.discoveryLease);
+ const skipWrite={...Authority,writeDecisionDelta:async()=>({written:[],skipped:[{key:item.key,reason:'conflict'}]})};
+ const result=await chunkAgainst(file,{authority:skipWrite,title:'Film cas2'});
+ assert.equal(result.assigns.length,0,'the resolver does not attempt the insert after a skipped decision');
+ assert.equal(rows(file).length,0);
+}
+
+// Example 18: the decision lands, the process stops, the next cheap-pass chunk restores both slots of example 1.
+{
+ const item=obs('crash',{shows:shows(['c',1,90],['d',2,90])});
  const {file,env}=await setup([item]);
  await write(env,item,verifiedDecision(item));
  assert.equal(rows(file).length,0,'the decision write does not insert');
- const again=await Authority.assignObservationSlots(env,{observationKey:'crash'});
- assert.equal(again.outcomes.assigned,1);
- assert.equal(rows(file).length,1);
+ await Authority.releaseLease(env,env.discoveryLease);
+ const replay=await chunkAgainst(file,{title:'Film crash'});
+ assert.ok(replay.assigns.includes('crash'));
+ assert.equal(rows(file).length,2,'both eligible slots of the observation are assigned');
+ assert.deepEqual(rows(file).map(row=>row.channel_id).sort(),['c','d']);
 }
 
-// Example 20: an inactive observation, and a slot whose end_ms changed after the writer evaluated it.
+// Example 20: an inactive observation (seen_in_latest or residence), and a slot whose end_ms changed after the writer evaluated it.
 {
  const item=obs('dead');
  const {file,env}=await setup([item]);
@@ -268,6 +307,15 @@ const write=async(env,item,next,previous=null)=>Authority.writeDecisionDelta(env
  sql(file,"UPDATE discovery_observation SET seen_in_latest=0 WHERE observation_key='dead'");
  const inactive=await Authority.assignObservationSlots(env,{observationKey:'dead'});
  assert.equal(inactive.reason,'observation_inactive');
+ assert.equal(rows(file).length,0);
+}
+{
+ const item=obs('gone');
+ const {file,env}=await setup([item]);
+ await write(env,item,verifiedDecision(item));
+ sql(file,"UPDATE discovery_observation SET residence='archive' WHERE observation_key='gone'");
+ const archived=await Authority.assignObservationSlots(env,{observationKey:'gone'});
+ assert.equal(archived.reason,'observation_inactive');
  assert.equal(rows(file).length,0);
 }
 {
