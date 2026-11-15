@@ -46,6 +46,13 @@ function nonFilmEPGReason(title,programmeXml){
  if(/(?<![\p{L}])(?:спец)?выпуск\s*[№#]?\s*\d+|\d+\s*[-–]\s*\d+\s*серии/iu.test(value))return 'broadcast_episode';
  return xmltvEpisodeReason(programmeXml);
 }
+function xmltvCategories(programmeXml){
+ const out=[];
+ for(const [,text] of String(programmeXml||'').matchAll(/<category\b[^>]*>([^<]*)<\/category>/g)){
+  const value=plain(text);if(value)out.push(value);
+ }
+ return [...new Set(out)].slice(0,8);
+}
 // A reliably matched watchlist/catalog identity or a verified decision outranks title screening.
 function screenedNonfilmReason(candidate,decision){
  if(decision?.status==='verified'||candidate?.confirmedTmdbId)return null;
@@ -302,7 +309,7 @@ async function scanEPG(stream,watchlist,now){
  if(startAt>=now+EPG_HOT_FUTURE_MS&&(valid.length!==1||valid[0]?.catalogOnly))continue;kept++;
  // A single reliable watchlist/catalog match is a known Film and is never screened out by its title.
  if(startAt<now+EPG_HOT_FUTURE_MS&&duration>=55&&duration<=300)rawDiscovery.add(key+'|'+(titleYear||''));if(valid.length!==1&&nonFilmEPGReason(title,xml)){if(duration>=55&&duration<=300)filteredNonMovies.add(key+'|'+(titleYear||''));continue;}
- if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc');if(claimSlot(channelId,startAt,'o:'+discoveryKey,title,channel)!=='new')continue;const shown={channelId,channel,start:startAt,end:endAt,epgTitle:title};showMeta.set(shown,{title:parts.title,description:description&&description!=='Нет описания'?description.slice(0,700):null,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null});if(previous){previous.shows.push(shown);previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[shown]});}continue;}
+ if(valid.length!==1||valid[0]?.catalogOnly){if(candidates.length)uncertain.set(`${channelId}:${startAt}`,{title,channel,start:startAt,reason:valid.length>1?'ambiguous':'insufficient_year_or_duration'});if(duration>=55&&duration<=300&&key&&key.length>=3&&key.length<=160){const discoveryKey=key+'|'+(titleYear||''),previous=discovery.get(discoveryKey),description=field(xml,'desc'),categories=xmltvCategories(xml);if(claimSlot(channelId,startAt,'o:'+discoveryKey,title,channel)!=='new')continue;const shown={channelId,channel,start:startAt,end:endAt,epgTitle:title};showMeta.set(shown,{title:parts.title,description:description&&description!=='Нет описания'?description.slice(0,700):null,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,categories});if(previous){previous.shows.push(shown);previous.airings++;previous.lastAiring=Math.max(previous.lastAiring,startAt);if(!previous.description&&description&&description!=='Нет описания')previous.description=description.slice(0,700);if(title!==previous.title&&!previous.rawTitles.includes(title)&&previous.rawTitles.length<8)previous.rawTitles.push(title);if(categories.length)previous.categories=[...new Set([...(previous.categories||[]),...categories])].slice(0,8);}else discovery.set(discoveryKey,{key:discoveryKey,confirmedTmdbId:valid.length===1&&valid[0].catalogOnly?String(valid[0].tmdbId):null,title:parts.title,rawTitles:[title],normalizedTitle:key,year:titleYear,duration:Math.round(duration),description:description&&description!=='Нет описания'?description.slice(0,700):null,categories,firstAiring:startAt,lastAiring:startAt,airings:1,shows:[shown]});}continue;}
  const f=valid[0];if(claimSlot(channelId,startAt,'f:'+f.id,title,channel)!=='new')continue;if(!matched.has(f.id))matched.set(f.id,{...f,title:/[а-яё]/i.test(title)?cleanTitle(title):f.original,shows:[]});if(!/[а-яё]/i.test(matched.get(f.id).title)&&/[а-яё]/i.test(title))matched.get(f.id).title=cleanTitle(title);const hint=showMatchBasis(titleYear,{key,title:parts.title,normalizedTitle:key,year:titleYear,duration:Math.round(duration),durations:[Math.round(duration)]},candidates.filter(film=>film?.tmdbId).map(film=>({tmdbId:film.tmdbId,title:film.title,original:film.original,aliases:film.aliases,year:film.year,runtime:film.runtime,trusted:film.canonicalIdentity==='tmdb:'+film.tmdbId})));matched.get(f.id).shows.push({channelId,channel,start:startAt,end:endAt,epgTitle:title,basis:hint.basis,matchReason:hint.hint?hint.reason:null});
  }
  }
@@ -315,7 +322,8 @@ async function scanEPG(stream,watchlist,now){
    const [first]=candidate.shows,metas=candidate.shows.map(show=>showMeta.get(show));
    candidate.airings=candidate.shows.length;candidate.firstAiring=first.start;candidate.lastAiring=Math.max(...candidate.shows.map(show=>show.start));
    candidate.duration=Math.round((first.end-first.start)/60000);candidate.title=metas[0].title;candidate.rawTitles=[...new Set(candidate.shows.map(show=>show.epgTitle))].slice(0,8);
-   candidate.description=metas.find(meta=>meta.description)?.description||null;candidate.confirmedTmdbId=metas[0].confirmedTmdbId;}
+   candidate.description=metas.find(meta=>meta.description)?.description||null;candidate.confirmedTmdbId=metas[0].confirmedTmdbId;
+   candidate.categories=[...new Set(metas.flatMap(meta=>meta.categories||[]))].slice(0,8);}
   }
  return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size},uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
