@@ -38,7 +38,22 @@ function generationRequest(key){
  return match?match[1]:null;
 }
 
-function failed(code,cause){const error=new Error(code);error.code=code;if(cause)error.cause=cause;return error;}
+const UNIQUE_TABLES=['discovery_observation_show','discovery_decision_history','published_epg_show','discovery_continuation','discovery_checkpoint','discovery_authority','discovery_admission','discovery_observation','discovery_decision','discovery_workflow','discovery_transfer','discovery_segment','discovery_intent','discovery_status','discovery_lease','discovery_score','discovery_cas'];
+function uniqueConstraintCategory(message){
+ const text=String(message||'');
+ for(const table of UNIQUE_TABLES)if(text.includes(table))return 'unique.'+table;
+ return 'unique.other';
+}
+function failed(code,cause){
+ const error=new Error(code);error.code=code;if(cause)error.cause=cause;
+ const message=String(cause?.message||cause||'');
+ if(code==='discovery_conflict'&&/UNIQUE constraint failed/i.test(message)){
+  error.failureKind='unique_constraint';
+  error.failureConstraint=uniqueConstraintCategory(message);
+ }else if(code==='discovery_conflict')error.failureKind='input_invariant';
+ else if(code==='discovery_fence')error.failureKind='fence';
+ return error;
+}
 function binding(db){return typeof db?.prepare==='function';}
 function database(env){return env&&typeof env.prepare==='function'?env:env?.DB;}
 async function one(db,sql,params=[]){
