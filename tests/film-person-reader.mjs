@@ -209,9 +209,7 @@ assert.match(reader,/function completedSlots\(store\)\{[\s\S]*readerIndex\(store
  }
  const at=Date.now();
  const view=readLifecycle({programme:{runId:'run-b',films,catalogFilms},discoveredFilms,filmTitles:[],personNames:[]},NOW);
- // Wall bound is a shard-load guard against per-Film slot scans, not a 8 s SLA: GitHub shard 3 of 3
- // (6-way) on 15 Nov 2026 ran this call past 8 s on an otherwise indexed path (AIR-480 #646 post-merge, AIR-485 #648).
- assert.equal(Date.now()-at<20000,true,'completed slots are indexed once, not scanned per Film');
+ assert.equal(Date.now()-at<8000,true,'completed slots are indexed once, not scanned per Film');
  assert.equal(view.films.find(item=>item.id==='film:tmdb:'+(1000+n-1))?.availability.hot,true);
 }
 

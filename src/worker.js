@@ -1427,7 +1427,7 @@ async function sealCatalogStep(env,run,lease,deadline){
  // in-flight layout-2 run is skipped into `publish` without reading or writing admissions. A leftover layout-1 run still
  // finishes from `payload.json`; under a live D1 pin it writes no availability.
  if(sealLayout(run)===2||await discoveryLedgerAuthoritative(env))return {done:true,remaining:0,stale:0,written:0,items:0,batches:0,reads:0,writeMs:0};
- const payload=await sealPayload(env,run);
+ const payload=await sealPayload(env,run,{keepCatalog:true});
  const pinned=await pinEpg(env);
  const mergeStarted=Date.now();
  const next=mergeCatalogIdentity(payload.catalog||{},await loadJSON(pinned,'epg/discovered-films.json'),run.runId,{writeAvailability:true});
@@ -1453,7 +1453,7 @@ async function sealCatalogStep(env,run,lease,deadline){
 // those parts and answers `nextAction: continue`; each is idempotent, so a cancelled or repeated step is safe.
 // AIR-460: the staged payload holds the whole catalog, which only `seal_catalog` reads. The publish, finalize and queue steps drop it
 // the moment it is parsed, so its parsed objects are not held through the pointer, mirrors, copy and intent units.
-async function sealPayload(env,run){
+async function sealPayload(env,run,{keepCatalog=false}={}){
  const id=run.runId;
  const layout=sealLayout(run);
  const key=layout===2?(run.seal.publicationKey||sealPublicationKey(id)):sealPayloadKey(id);
@@ -1470,7 +1470,7 @@ async function sealPayload(env,run){
  epgBoundary(id,'seal_payload_parse','enter',{bytes:text.length});
  const payload=JSON.parse(text);
  epgBoundary(id,'seal_payload_parse','exit');
- delete payload.catalog;
+ if(!keepCatalog)delete payload.catalog;
  return payload;
 }
 // A step is a list of units. The first unit that is not finished always runs, so every call makes progress; no later unit
