@@ -1,6 +1,6 @@
 # AIR-500: read-only audit of false Discovery Film identities
 
-**Captured:** 2026-11-15 23:40–00:50 UTC (00:40–01:50 Europe/Madrid). Point-in-time D1 reads; no production write.
+**Captured:** 2026-11-15 23:32–23:44 UTC (16 November 2026 00:32–00:44 Europe/Madrid). Point-in-time D1 reads; no production write.
 **Used by:** [AIR-500](https://trello.com/c/dD3BRQ2H). Inventory for [AIR-498](https://trello.com/c/3dPOigK9). This audit does not authorize a correction and does not complete AIR-498.
 **Code read:** `main` `97f5dc5f409b2820f3d23b4e90f657e4b50cf8a8` (ADR 0080, ADR 0142, ADR 0149, `src/discovery-authority.js` `ownerDecision`, `src/discovery.js` `ownerRejected`, `src/domain/scored-resolution.js` year/runtime bands).
 **Verdict:** one confirmed wrong observation link. Concert-shaped Music-only admissions stay `needs_review`. XMLTV category is absent on the whole active ledger, so Music, a Live/Concert title, or a missing fingerprint is not treated as proof.
