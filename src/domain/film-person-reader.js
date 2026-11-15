@@ -159,13 +159,35 @@ function tmdbRetirementRecords(store,film){
  return [loaded.programme,loaded.watchlist,loaded.metadata].filter(Boolean);
 }
 function knownShows(record){return record&&Object.hasOwn(record,'shows')?record.shows:undefined;}
-// A completed programme always carries `catalogFilms` (empty when none). Member and catalog slots are the only show source; the Film body is not.
+// Built once per programme object (READER_INDEXES). Members first, then catalogFilms; the first id and the first TMDB keep their place.
+function completedSlots(store){
+ if(!Array.isArray(store?.programme?.catalogFilms))return null;
+ return readerIndex(store.programme,programme=>{
+  const byId=new Map(),byTmdb=new Map(),byTmdbKnown=new Map();
+  const place=film=>{
+   if(!film)return;
+   const id=String(film.id);
+   if(id&&!byId.has(id))byId.set(id,film);
+   const tmdb=film.tmdbId==null||film.tmdbId===''?null:String(film.tmdbId);
+   if(!tmdb)return;
+   if(!byTmdb.has(tmdb))byTmdb.set(tmdb,film);
+   if(knownShows(film)!==undefined&&!byTmdbKnown.has(tmdb))byTmdbKnown.set(tmdb,film);
+  };
+  for(const film of programme.films||[])place(film);
+  for(const film of programme.catalogFilms)place(film);
+  return {byId,byTmdb,byTmdbKnown};
+ });
+}
+// Exact Film id outranks TMDB. An explicit `shows: []` on that id stays empty even when another same-TMDB slot has shows.
+// A member without a `shows` key may still take a later same-TMDB slot that lists shows (catalogFilms or another member).
 function completedSlot(store,record){
- if(!Array.isArray(store?.programme?.catalogFilms)||!record)return null;
+ const index=completedSlots(store);
+ if(!index||!record)return null;
  const id=String(record.id),tmdb=record.tmdbId==null||record.tmdbId===''?null:String(record.tmdbId);
- const match=film=>film&&(String(film.id)===id||(tmdb!=null&&film.tmdbId!=null&&String(film.tmdbId)===tmdb));
- const slots=[...(store.programme.films||[]),...store.programme.catalogFilms].filter(match);
- return slots.find(slot=>knownShows(slot)!==undefined)||slots[0]||{shows:[]};
+ const exact=index.byId.get(id)||null;
+ if(exact&&knownShows(exact)!==undefined)return exact;
+ if(tmdb&&index.byTmdbKnown.has(tmdb))return index.byTmdbKnown.get(tmdb);
+ return exact||(tmdb&&index.byTmdb.get(tmdb))||{shows:[]};
 }
 function observedShows(programme,body,completed){
  if(completed)return knownShows(completed)!==undefined?knownShows(completed):[];
