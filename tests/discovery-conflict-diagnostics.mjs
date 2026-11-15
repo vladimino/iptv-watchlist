@@ -29,6 +29,8 @@ assert.equal(code('diagnosticErrorCode')(new Error('Hot Film UNIQUE title')),'un
 assert.equal(code('diagnosticFailureKind')({code:'discovery_conflict',failureKind:'input_invariant'}),'input_invariant');
 assert.equal(code('diagnosticFailureKind')({code:'discovery_fence'}),'fence');
 assert.equal(code('diagnosticFailureKind')({code:'discovery_conflict',failureKind:'unique_constraint',cause:{message:'UNIQUE constraint failed: published_epg_show.programme_run_id'}}),'unique_constraint');
+assert.equal(code('diagnosticFailedAt')({failedAt:'candidate_assignment'}),'candidate_assignment');
+assert.equal(code('diagnosticFailedAt')({failedAt:'revalidation_assignment'}),'revalidation_assignment');
 
 const unique=Object.assign(new Error('discovery_conflict'),{code:'discovery_conflict',failureKind:'unique_constraint',failureConstraint:'unique.published_epg_show',failedAt:'replay_assignment',cause:{message:'UNIQUE constraint failed: published_epg_show.programme_run_id, channel_id, start_ms film=Hot Film'}});
 const summary=code('chunkSummary')({stage:'error',error:unique.error||unique.message,failedAt:unique.failedAt,failureKind:unique.failureKind,failureConstraint:unique.failureConstraint,checked:0,remaining:null});
@@ -72,7 +74,27 @@ await assert.rejects(()=>Authority.ingestLedger(env,{programmeRunId:'run-dup',ha
  assert.equal(error.failureKind,'input_invariant');
  return true;
 });
+sql("UPDATE discovery_transfer SET state='committed' WHERE id=1");
 await Authority.releaseLease(env,taken.lease);
+
+const uniqueLease=await Authority.acquireLease(env,{programmeRunId:null});
+env.discoveryLease=uniqueLease.lease;
+const generationBefore=Number(sql('SELECT generation FROM discovery_authority WHERE id=1')[0].generation);
+await assert.rejects(()=>Authority.routeWrite(env,'epg/discovery-score-preview.json',{items:{
+ a:{observationKey:'dup-score',outcome:'accepted',reason:'one'},
+ b:{observationKey:'dup-score',outcome:'accepted',reason:'two'}
+}},{lease:uniqueLease.lease}),error=>{
+ assert.equal(error.code,'discovery_conflict');
+ assert.equal(error.failureKind,'unique_constraint');
+ assert.equal(error.failureConstraint,'unique.discovery_score');
+ assert.equal(String(error.message),'discovery_conflict');
+ assert.equal(JSON.stringify({code:error.code,kind:error.failureKind,constraint:error.failureConstraint}).includes('UNIQUE constraint failed'),false);
+ return true;
+});
+assert.equal(Number(sql("SELECT COUNT(*) AS n FROM discovery_score WHERE observation_key='dup-score'")[0].n),0);
+assert.equal(Number(sql('SELECT generation FROM discovery_authority WHERE id=1')[0].generation),generationBefore,'the failed batch rolls back, including the fence');
+assert.equal(sql('SELECT lease_id FROM discovery_lease WHERE id=1')[0].lease_id,uniqueLease.lease.id);
+await Authority.releaseLease(env,uniqueLease.lease);
 
 const RUN='run-assign',START=Date.parse('2026-11-15T12:00:00Z'),MIN=60000;
 sql("UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
@@ -92,6 +114,8 @@ sql2(`INSERT INTO published_epg_document (programme_run_id, kind, ordinal, paylo
 sql2(`UPDATE published_epg_authority SET mode='d1', cutover='open', programme_run_id='${RUN}', generation=7`);
 await Authority.writeDecisionDelta(env2,{a:{previous:null,next:{status:'verified',filmId:'member-1',tmdbId:'101',canonicalIdentity:'tmdb:101',identitySource:'tmdb_detail',anchor:[90],evidenceKey:Authority.evidenceKey(obs)}}});
 const uniqueErr=()=>{const error=new Error('discovery_conflict');error.code='discovery_conflict';error.failureKind='unique_constraint';error.failureConstraint='unique.published_epg_show';error.cause=new Error('UNIQUE constraint failed: published_epg_show.programme_run_id, published_epg_show.channel_id, published_epg_show.start_ms');return error;};
+assert.match(fs.readFileSync('src/discovery.js','utf8'),/assignSlots\(candidate\.key,'candidate_assignment'\)/);
+assert.match(fs.readFileSync('src/discovery.js','utf8'),/assignSlots\(key,'revalidation_assignment'\)/);
 const wrapped=new Proxy(Authority,{
  get(target,prop,receiver){
   const value=Reflect.get(target,prop,receiver);
@@ -122,7 +146,20 @@ try{
  assert.equal(traced.failureKind,'unique_constraint');
  assert.equal(JSON.stringify(traced).includes('Hot Film')||JSON.stringify(traced).includes('UNIQUE constraint failed'),false);
  assert.equal(outcome.discovery?.reason,'discovery_conflict');
- assert.equal(page.workflowStepRecoverable?null:null,null);
+ const storedStatus=(await wrapped.routeRead(env2,'epg/discovery-status.json')).value;
+ assert.equal(storedStatus.checkpoint,'cheap_pass');
+ assert.equal(storedStatus.error,null);
+ const storedCont=(await wrapped.routeRead(env2,'epg/resolver-continuation.json')).value;
+ assert.equal(storedCont.reason,'discovery_conflict');
+ assert.equal(storedCont.failedAt,'replay_assignment');
+ assert.equal(storedCont.failureKind,'unique_constraint');
+ const op=await page.discoveryOperationalStatus(env2);
+ assert.equal(op.lastCheckpoint.reason,'discovery_conflict');
+ assert.equal(op.lastCheckpoint.failedAt,'replay_assignment');
+ assert.equal(op.lastCheckpoint.failureKind,'unique_constraint');
+ assert.equal(op.lastCheckpoint.failureConstraint,'unique.published_epg_show');
+ assert.equal(op.lastChunk.stage,'partial');
+ assert.notEqual(op.lastChunk.stage,'error');
 }finally{
  const row=sql2('SELECT lease_id FROM discovery_lease WHERE id=1')[0];
  if(row?.lease_id)await wrapped.releaseLease(env2,{id:row.lease_id,expiresAt:Date.now()+60000});

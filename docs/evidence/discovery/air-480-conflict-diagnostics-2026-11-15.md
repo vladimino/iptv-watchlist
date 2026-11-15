@@ -10,7 +10,9 @@ Offline classification of Discovery Authority errors after a natural-run series 
 
 - `diagnosticErrorCode` keeps allowlisted `error.code` / `Error(code)` messages (`discovery_conflict`, `discovery_fence`, …). A title-bearing UNIQUE string without a typed code stays `unknown`.
 - `failed()` sets `failureKind` `unique_constraint` plus `failureConstraint` `unique.<table>` when `commit()` sees D1 UNIQUE; other `discovery_conflict` is `input_invariant`; `discovery_fence` is `fence`. Table names are matched longest-first so `discovery_observation_show` is not collapsed to `discovery_observation`.
-- `advanceDiscovery` catch stores those fields; `chunkSummary` and `continuationAfterChunk` copy them. A paged chunk whose `assignObservationSlots` throws a shaped UNIQUE error records `failedAt: replay_assignment`.
+- `advanceDiscovery` catch stores those fields; `chunkSummary` and `continuationAfterChunk` copy them. A paged chunk whose `assignObservationSlots` throws a shaped UNIQUE error records `failedAt: replay_assignment`. Assignment after a candidate decision is `candidate_assignment`; after revalidation it is `revalidation_assignment`.
+- A real sqlite UNIQUE on `discovery_score` (two preview rows with the same observation_key in one `writeScores` batch) goes through `commit()` → `failed()` → `unique.discovery_score` and rolls the batch back (no score rows, fence generation unchanged).
+- The cheap-pass status is not rewritten on that catch. Operational `lastCheckpoint` carries the typed fields; `lastChunk` stays the earlier partial `cheap_pass`.
 - `workflowStepRecoverable` stays false for `discovery_conflict` and `discovery_fence`; true for `discovery_unavailable`.
 - Duplicate-identity `upsertAdmissions` in one map is `input_invariant`. A second film id with the same TMDB identity is `refused: identity_conflict` (not thrown). A film-id UNIQUE whose identity owner is absent rethrows `unique_constraint` / `unique.discovery_admission`.
 
