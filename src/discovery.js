@@ -298,17 +298,19 @@ async function tmdbRequest(env,path,options={}){
  const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)});
  if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
 }
-function catalogFilmFromDetail(movie,candidate,old,programmeRunId,id){
+function catalogFilmFromDetail(movie,candidate,old,programmeRunId,id,writeAvailability=true){
  const people=(entries,prefix)=>(entries||[]).slice(0,10).map(person=>({id:prefix+'/'+person.id,name:person.name,original:person.name}));
  const localized=(movie.translations?.translations||[]).filter(item=>['ru','uk','en'].includes(item.iso_639_1)).map(item=>item.data?.title);
  const alternates=(movie.alternative_titles?.titles||[]).filter(item=>['RU','UA','US','GB'].includes(item.iso_3166_1)).map(item=>item.title);
- return touchCanonicalFilm({...(old||{}),discoveredAt:old?.discoveredAt||new Date().toISOString(),id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(old?.aliases||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(genre=>genre.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,poster:movie.poster_path?'https://image.tmdb.org/t/p/w342'+movie.poster_path:null,directors:people((movie.credits?.crew||[]).filter(person=>person.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor')},candidate,programmeRunId);
+ return touchCanonicalFilm({...(old||{}),discoveredAt:old?.discoveredAt||new Date().toISOString(),id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(old?.aliases||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(genre=>genre.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,poster:movie.poster_path?'https://image.tmdb.org/t/p/w342'+movie.poster_path:null,directors:people((movie.credits?.crew||[]).filter(person=>person.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor')},candidate,programmeRunId,writeAvailability);
 }
-function touchCanonicalFilm(film,candidate,programmeRunId){
+function touchCanonicalFilm(film,candidate,programmeRunId,writeAvailability=true){
+ const aliases=[...new Set([...(film.aliases||[]),candidate.title,...(candidate.rawTitles||[])].filter(Boolean))];
+ if(writeAvailability===false)return {...film,canonicalIdentity:'tmdb:'+film.tmdbId,aliases};
  const explicit=Array.isArray(candidate.shows),incoming=explicit?dedupeShows(candidate.shows):null,same=!!programmeRunId&&film.showsProgrammeRunId===programmeRunId;
  const shows=incoming===null?film.shows||[]:same?dedupeShows([...(film.shows||[]),...incoming]):incoming;
  const hotEnteredAt=candidateIsHot(candidate)&&!filmIsHot(film)?new Date().toISOString():film.hotEnteredAt;
- return {...film,hotEnteredAt,canonicalIdentity:'tmdb:'+film.tmdbId,aliases:[...new Set([...(film.aliases||[]),candidate.title,...(candidate.rawTitles||[])].filter(Boolean))],shows,showsProgrammeRunId:explicit&&programmeRunId?programmeRunId:film.showsProgrammeRunId||null,epgLastAiring:Math.max(film.epgLastAiring||0,candidate.lastAiring||0)};
+ return {...film,hotEnteredAt,canonicalIdentity:'tmdb:'+film.tmdbId,aliases,shows,showsProgrammeRunId:explicit&&programmeRunId?programmeRunId:film.showsProgrammeRunId||null,epgLastAiring:Math.max(film.epgLastAiring||0,candidate.lastAiring||0)};
 }
 async function publishedPointer(env){
  if(typeof PublishedEpg!=='undefined'){
@@ -656,6 +658,7 @@ async function resolveDiscoveryBatch(env,report,limit=24){
 // A ledger above the in-memory cap is a cursor, not an array. One page is resident at a time, and only the
 // next `limit` actionable observations are kept for the TMDB calls.
 async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,source,startedAt,hopId,fence,pinned,entryAt=null){
+ const writeAvailability=pinned?.epgPin?.authority!=='d1';
  const last=await loadJSON(env,'epg/discovery-status.json');
  if(last?.retryAt&&Date.parse(last.retryAt)>Date.now())return {...last,stage:'backoff',checked:0};
  // The D1 lease lives 90 s and cannot be renewed once it has expired, so the chunk renews it on every long phase
@@ -718,7 +721,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     const filmKey='tmdb_'+decision.tmdbId,film=films[filmKey];
     if(film&&candidateIsHot(candidate,nowSelect)){
      if(!cheap.before.has(filmKey))cheap.before.set(filmKey,JSON.stringify(film));
-     films[filmKey]=touchCanonicalFilm(film,candidate,source.programmeRunId);
+     films[filmKey]=touchCanonicalFilm(film,candidate,source.programmeRunId,writeAvailability);
      cheap.films.add(filmKey);
     }
    }
@@ -855,7 +858,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
       if(!await attachWatchlistShowing(env,source.programmeRunId,id,candidate,fence)||!await publishedGenerationMatches(env,source.programmeRunId))return programmeChanged();
      }else{
       const old=films[id];
-      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);
+      films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);
       filmEntry=[id,films[id]];
       newFilm=!old;
       if(newFilm)added++;
@@ -995,7 +998,7 @@ async function ledgerDescription(pinned,key){
 // AIR-353: `entryAt` is when advanceDiscovery began. The gap to the chunk's own clock is `preChunkMs`: the preflight reads
 // (continuation, lease, generation, programme) that `totalMs` does not cover.
 async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null,entryAt=null){
- const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),hopId=lease?.id??null;
+ const startedAt=new Date().toISOString(),deadline=Date.now()+22000,pinned=await pinEpg(env),writeAvailability=pinned?.epgPin?.authority!=='d1',hopId=lease?.id??null;
  // Every durable write below, including those inside helpers, is preceded by a lease renewal; a lost lease aborts the chunk before the write.
  const fence=async()=>{if(lease&&!await renewDiscoveryLease(env,lease))throw leaseLostError();};
  // AIR-342: the inputs are read one after another. Each R2 JSON is held as its text and its parsed tree while it is
@@ -1027,7 +1030,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
  // Cheap pass updates availability for known identities even though no new lookup is needed.
  for(const candidate of source.items){const decision=decisions[candidate.key],reason=screenedNonfilmReason(candidate,decision);if(reason){if(decision?.status!=='excluded_nonfilm'){decisions[candidate.key]={status:'excluded_nonfilm',reason,checkedAt:startedAt};screenedOut++;}continue;}
   if(candidate.confirmedTmdbId&&(!decision||decision.status==='excluded_nonfilm')&&!ownerRejected(decision,candidate.confirmedTmdbId)){decisions[candidate.key]={status:'verified',filmId:knownTmdb.get(candidate.confirmedTmdbId)||'tmdb_'+candidate.confirmedTmdbId,tmdbId:candidate.confirmedTmdbId,identitySource:'known_epg_alias',checkedAt:startedAt};knownAliases++;}
-  const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId);indexFilm(films[key]);touched++;}}
+  const verified=decisions[candidate.key];if(verified?.status==='verified'){const key='tmdb_'+verified.tmdbId,film=films[key];if(film&&candidateIsHot(candidate)){films[key]=touchCanonicalFilm(film,candidate,source.programmeRunId,writeAvailability);indexFilm(films[key]);touched++;}}
  }
  if(touched||migrated){if(!await saveDiscoveredFilms(env,films,source.programmeRunId,fence))return {schemaVersion:2,stage:'programme_changed',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,currentProgrammeRunId:null};}if(screenedOut||knownAliases){await fence();await saveJSON(env,'epg/discovery-resolution.json',decisions);}
  await fence();await saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'});
@@ -1065,7 +1068,7 @@ async function resolveDiscoveryChunk(env,report,limit,lease=null,checkpoint=null
     else{
      const old=films[id];if(!old)added++;
      if(streamed&&!movie.overview&&candidate.description===undefined)candidate.description=await ledgerDescription(pinned,candidate.key)??undefined;
-     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
+     films[id]=catalogFilmFromDetail(movie,candidate,old,source.programmeRunId,id,writeAvailability);indexFilm(films[id]);saved=await saveDiscoveredFilms(env,films,source.programmeRunId,fence);}
     if(!saved||!await publishedGenerationMatches(env,source.programmeRunId))return {schemaVersion:2,stage:'programme_changed',startedAt,finishedAt:new Date().toISOString(),checked:checked+screenedOut+knownAliases,screenedOut,reused:knownAliases,touched,tmdbCalls,added,remaining:null,hotRemaining:null,error:null,retryAt:null,at:new Date().toISOString(),programmeRunId:source.programmeRunId};
     decisions[candidate.key]={status:'verified',filmId:id,tmdbId:String(movie.id),canonicalIdentity:'tmdb:'+movie.id,identitySource:'tmdb_detail',checkedAt:new Date().toISOString(),evidenceKey:candidateEvidence(candidate),anchor:verifiedAnchor(pinned,source,candidate,candidates,observation,movie,decisions,films,now,aliasIndex),provenance:{authority:'tmdb_detail',searchHit:searched,priorAlias:false,ownerReviewed:false,movieId:String(movie.id),runtime:movie.runtime??null,releaseYear:Number(String(movie.release_date||'').slice(0,4))||null,matchedTitle:candidate.normalizedTitle,programmeRunId:source.programmeRunId||null},scoring:{scorerVersion:score.scorerVersion,status:score.status,reason:score.reason,acceptedTmdbId:score.acceptedTmdbId??null},...ownerMarkerCarry(decisions[candidate.key])};
    }

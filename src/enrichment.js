@@ -1726,9 +1726,14 @@ function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshn
  }
  return {state:'ok',rating40to44,rating45plus};
 }
-function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now(),freshness=strictFreshness(profile)){
+function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now(),freshness=strictFreshness(profile),completedOnly=false){
  const groups=new Map();
- for(const film of [...(report?.films||[]),...Object.values(catalog||{})]){
+ const completed=completedOnly&&typeof withCompletedShows==='function'&&typeof completedShowsByTmdb==='function'?completedShowsByTmdb(report):null;
+ const overlay=film=>{
+  if(!completedOnly||typeof withCompletedShows!=='function'||completed==null)return film;
+  return withCompletedShows(film,completed,report?.runId,true);
+ };
+ for(const film of [...(report?.films||[]),...Object.values(catalog||{})].map(overlay)){
   const tmdbId=String(film?.tmdbId||'').trim();if(!tmdbId)continue;
   const identity='tmdb:'+tmdbId,group=groups.get(identity)||{ids:new Set(),films:[]};
   group.ids.add(String(film.id));group.films.push(film);group.byId=group.byId||new Map();if(!group.byId.has(String(film.id)))group.byId.set(String(film.id),film);groups.set(identity,group);
@@ -1754,10 +1759,13 @@ function predictionQueueSlices(queue,now=Date.now()){
 }
 // `inputs` are the objects a queue rebuild of this request already read; with them nothing large is read again.
 async function predictionEventSnapshot(env,queue,batchSize=null,inputs=null){
- const unreadable=new Set(),safe=async key=>{try{return await loadJSON(pinned,key);}catch{unreadable.add(key);return null;}},given=inputs?.report&&inputs.profile&&inputs.index!==undefined&&inputs.catalog!==undefined,pinned=given?env:await pinEpg(env),[profile,index,report,catalog,persistedQueue]=await Promise.all([given?inputs.profile:safe(profileKey),given?inputs.index:safe(ENRICHMENT_KEY+'view-index.json'),given?inputs.report:safe('programme.json'),given?inputs.catalog:safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
+ const unreadable=new Set();
+ let pinned=env;
+ try{pinned=await pinEpg(env);}catch{pinned=env;}
+ const safe=async key=>{try{return await loadJSON(pinned,key);}catch{unreadable.add(key);return null;}},given=inputs?.report&&inputs.profile&&inputs.index!==undefined&&inputs.catalog!==undefined,[profile,index,report,catalog,persistedQueue]=await Promise.all([given?inputs.profile:safe(profileKey),given?inputs.index:safe(ENRICHMENT_KEY+'view-index.json'),given?inputs.report:safe('programme.json'),given?inputs.catalog:safe('epg/discovered-films.json'),queue===undefined||queue===null?safe(predictionQueueKey):queue]);
  // AIR-431. A source that could not be read (a held or failing catalog) makes the coverage unknown: it is never computed from a missing catalog
  // and reported as a drop. The run, the queue slices and the delta (predictionGain null) do not depend on it.
- const coverage=unreadable.has('epg/discovered-films.json')||unreadable.has('programme.json')||unreadable.has(ENRICHMENT_KEY+'view-index.json')?null:canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile));
+ const coverage=unreadable.has('epg/discovered-films.json')||unreadable.has('programme.json')||unreadable.has(ENRICHMENT_KEY+'view-index.json')?null:canonicalCoverageSummary(report,catalog,index,profile,Date.now(),await predictionFreshness(env,profile),pinned?.epgPin?.authority==='d1');
  return {coverage:coverage?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal)}:null,queue:predictionQueueSlices(persistedQueue),...(Number.isInteger(batchSize)&&batchSize>0?{currentBatchSize:batchSize}:{})};
 }
 function predictionEventDelta(run,summary,snapshot){const current=snapshot?.coverage?.currentPredictionsTotal,start=run.coverageStartCurrentPredictions;return {added:summary.added,updated:summary.updated,failed:summary.failed,predictionGain:Number.isInteger(current)&&Number.isInteger(start)?current-start:null};}
@@ -1924,7 +1932,7 @@ async function footerStatus(env){
  if(!footerPlainObject(index)&&!degraded.includes('index'))degraded.push('index_missing');
  if(!footerPlainObject(profile)&&!degraded.includes('profile'))degraded.push('profile_missing');
  const coverageReadable=!['programme','catalog','index','profile','freshness','programme_missing','catalog_missing','index_missing','profile_missing'].some(name=>degraded.includes(name))&&!!freshness;
- const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
+ const coverage=coverageReadable?canonicalCoverageSummary(report,catalog,index,profile,Date.now(),freshness,pinned?.epgPin?.authority==='d1'):{confirmedFilmsTotal:null,currentPredictionsTotal:null,windowFilmsTotal:null,windowCurrentPredictions:null,cacheOffWindowTotal:null,pendingOffWindowTotal:null};
  const queue=queueStatusView(storedQueue),slices=predictionQueueSlices(storedQueue);
  const collection=footerCollection({report,catalog,watchlist,index,metadata}),newUnseen=footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshness});
  const recognized=ledger?.recognized??null,counts=ledger?.counts??null;
@@ -3117,7 +3125,7 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
   const report=await loadJSON(pinned,'programme.json');if(!report?.films)return json({error:'No programme'},409);
   const now=Date.now(),response=await fetch(sourceConfig(env).epg,{signal:AbortSignal.timeout(110000)});if(!response.ok)return json({error:'EPG HTTP '+response.status},502);
   const cache=await loadJSON(pinned,'epg/discovered-films.json')||{},known=new Set(report.films.map(f=>String(f.tmdbId)));const result=await scanEPG(response.body,[...report.films,...Object.values(cache).filter(f=>!known.has(String(f.tmdbId))).map(f=>({...f,catalogOnly:true}))],now);if(result.stats.epgEnd<now+8*3600000)return json({error:'EPG horizon too short'},502);
-  const old=await loadJSON(pinned,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true,programmeRunId:report.runId});const replaced=replaceCatalogAvailability(cache,result.discovery,report.runId);
+  const old=await loadJSON(pinned,'epg/discovery-latest.json'),items=mergeDiscoveryCandidates(old?.items,result.discovery,{replaceShows:true,programmeRunId:report.runId});const replaced=replaceCatalogAvailability(cache,result.discovery,report.runId,{writeAvailability:pinned?.epgPin?.authority!=='d1'});
   await updatePublishedFiles(env,{'discovery-latest.json':{programmeRunId:report.runId,updatedAt:new Date(now).toISOString(),rawCandidates:result.stats.rawCandidates,filteredNonMovies:result.stats.filteredNonMovies,items},'discovered-films.json':replaced.catalog});
   await refreshPredictionQueue(env,report,'epg_scan');const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'scan_committed',report.runId));return json({programmeRunId:report.runId,candidates:items.length,newCandidates:items.length-(old?.items?.length||0),scanned:result.stats.scanned,...presented});
  }
