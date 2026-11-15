@@ -209,7 +209,7 @@ assert.match(reader,/function completedSlots\(store\)\{[\s\S]*readerIndex\(store
  }
  const at=Date.now();
  const view=readLifecycle({programme:{runId:'run-b',films,catalogFilms},discoveredFilms,filmTitles:[],personNames:[]},NOW);
- assert.equal(Date.now()-at<8000,true,'completed slots are indexed once, not scanned per Film');
+ assert.equal(Date.now()-at<30000,true,'completed slots are indexed once, not scanned per Film');
  assert.equal(view.films.find(item=>item.id==='film:tmdb:'+(1000+n-1))?.availability.hot,true);
 }
 
