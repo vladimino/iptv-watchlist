@@ -483,6 +483,10 @@ export const FILES={
   "suite": "core",
   "note": "Operational status must not follow ledger size in statement count. Milliseconds are only logged."
  },
+ "discovery-user-read-fence.mjs": {
+  "suite": "split",
+  "note": "Fence, HTTP 503 and R2-fallback refusals are core. The delayed-catalog wait is gated nonFunctional."
+ },
  "discovery-workflow-bundle.mjs": {
   "suite": "core"
  },

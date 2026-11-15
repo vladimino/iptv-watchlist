@@ -1495,8 +1495,9 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrit
  }
  throw new PredictionQueueConflictError(trigger);
 }
-// A rebuild reads the whole catalog; a Discovery chunk that commits between its statements is a transient fence, so the read is repeated a
-// few times with a short pause. A held cutover or an incomplete load keeps failing and is raised to the caller as before.
+// A rebuild reads the whole catalog as one admission snapshot (ADR 0146). A continuation or status write that only
+// bumps the Discovery generation does not fence it. A held cutover, a non-seal load, or an EPG pin change still
+// throws `discovery_fence` / `discovery_incomplete`; those are retried a few times, then raised.
 async function loadCatalogForQueue(pinned){
  for(let attempt=1;;attempt++){
   try{return await loadJSON(pinned,'epg/discovered-films.json');}
@@ -3197,7 +3198,15 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/moods/diagnostics'&&request.method==='GET')return json(moodDiagnostics(await loadJSON(env,ENRICHMENT_KEY+'view-index.json')));
  if(path==='/api/enrichment/moods/backfill'&&request.method==='POST')return predictionWriter(env,()=>moodBackfill(env,body));
  if(path==='/api/enrichment/schema'&&request.method==='GET')return json(enrichmentSchemaDocument());
- if(path==='/api/enrichment/view'&&request.method==='GET')return json(await enrichmentView(env));
+ if(path==='/api/enrichment/view'&&request.method==='GET'){
+  try{return json(await enrichmentView(env));}
+  catch(error){
+   if(['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','discovery_bounded'].includes(error?.code)){
+    return json({error:'The catalog is not readable right now',code:error.code},503,{'Retry-After':'1'});
+   }
+   throw error;
+  }
+ }
  if(path==='/api/enrichment/fingerprint-view/backfill'&&request.method==='POST')return backfillFingerprintView(env,body);
  if(path==='/api/enrichment/actual-ratings'&&request.method==='PUT'){if(!Array.isArray(body.items)||body.items.length>100)return json({error:'Expected items (max 100)'},400);const results=[];for(const item of body.items){const id=String(item?.filmId||''),rating=item?.rating;if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!(rating===null||Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0)){results.push({filmId:id,error:'Invalid film or rating'});continue;}const updatedAt=new Date().toISOString();const facts=await LetterboxdFacts.recordFilmFacts(env,id,{rating},{observedAt:updatedAt,source:'owner'});if(facts.conflict){results.push({filmId:id,error:'Identity conflict; recorded for review'});continue;}if(!facts.accepted||facts.record.rating?.value!==rating){results.push({filmId:id,status:'older',rating:facts.record.rating?.value??null});continue;}await saveActualMirror(env,filmKey(id)+'actual.json',{rating,source:'letterboxd',updatedAt});results.push({filmId:id,status:'saved'});}return json({results});}
  if(path==='/api/enrichment/ratings/backfill'&&request.method==='POST')return ratingsBackfill(env,body);

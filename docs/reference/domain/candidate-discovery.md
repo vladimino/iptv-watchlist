@@ -68,7 +68,7 @@ The D1 ledger handoff (publishing a new generation's active ledger into `discove
 | `epg/discovery-status.json`, `epg/resolver-continuation.json` | readable with the same marker |
 | the active and generation ledger, observation pages and walks, the observation index, `epg/discovery-resolution.json`, the score preview, the workflow record, every write | `discovery_incomplete` |
 
-The exceptions apply only when the loading transfer is a ledger seal: previous observations are `retiring` (or the transfer names another programme) and no admission is `pending`. A catalog, decision or segment load that stopped half way keeps every key closed. A read fails with `discovery_fence` when the authority, the programme or the loading state changes while it runs. A consumer that ignores the marker still receives the consistent catalog. There is no R2 fallback.
+The exceptions apply only when the loading transfer is a ledger seal: previous observations are `retiring` (or the transfer names another programme) and no admission is `pending`. A catalog, decision or segment load that stopped half way keeps every key closed. A paged ledger or decisions read fails with `discovery_fence` when the authority generation, the programme or the loading state changes while it runs. A catalog or single-row payload read fails when the programme or loading state changes; a generation bump from continuation or status alone does not ([ADR 0146](../../adr/0146-discovery-user-read-snapshot-fence.md)). A consumer that ignores the marker still receives the consistent catalog. There is no R2 fallback.
 
 ## Resumable ledger seal ([ADR 0092](../../adr/0092-resumable-bounded-ledger-seal.md), Proposed)
 
