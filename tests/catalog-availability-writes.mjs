@@ -54,6 +54,7 @@ assert.doesNotMatch(discovery,/\bfilm_alias\b/,'assignment, replay and catalog w
 
 const worker=fs.readFileSync('src/worker.js','utf8');
 vm.runInContext(worker.slice(worker.indexOf('function completedShowsByTmdb'),worker.indexOf('function catalogAvailable')),ctx);
+vm.runInContext('var completedShowsByTmdbCalls=0;const _completedShowsByTmdb=completedShowsByTmdb;completedShowsByTmdb=function(programme){completedShowsByTmdbCalls++;return _completedShowsByTmdb(programme);};',ctx);
 const enrichment=fs.readFileSync('src/enrichment.js','utf8');
 vm.runInContext(enrichment.slice(enrichment.indexOf('function canonicalCoverageSummary'),enrichment.indexOf('function coveragePercent')),ctx);
 ctx.freshness={indexed:()=>false};
@@ -66,5 +67,13 @@ const assigned=run(`canonicalCoverageSummary({runId:'run-b',films:[],catalogFilm
 assert.equal(assigned.windowFilmsTotal,1,'completed showings put the Film in the coverage window');
 const r2Coverage=run(`canonicalCoverageSummary({runId:'run-b',films:[]},staleCatalog,{},{},now,freshness,false)`);
 assert.equal(r2Coverage.windowFilmsTotal,1,'R2 coverage still uses catalog shows');
+run('completedShowsByTmdbCalls=0');
+const many={tmdb_1:{id:'tmdb_1',tmdbId:'1',canonicalIdentity:'tmdb:1',shows:[oldShow]},tmdb_2:{id:'tmdb_2',tmdbId:'2',canonicalIdentity:'tmdb:2',shows:[oldShow]},tmdb_3:{id:'tmdb_3',tmdbId:'3',canonicalIdentity:'tmdb:3',shows:[oldShow]}};
+ctx.many=many;
+run(`canonicalCoverageSummary({runId:'run-b',films:[{id:'w1',tmdbId:'9',shows:[oldShow]}],catalogFilms:[{id:'tmdb_1',tmdbId:'1',shows:[oldShow]}]},many,{},{},now,freshness,true)`);
+assert.equal(run('completedShowsByTmdbCalls'),1,'the completed-showings index is built once per summary');
+run('completedShowsByTmdbCalls=0');
+run(`canonicalCoverageSummary({runId:'run-b',films:[]},many,{},{},now,freshness,false)`);
+assert.equal(run('completedShowsByTmdbCalls'),0,'R2 coverage does not build the completed-showings index');
 
 console.log('catalog availability writes: D1 skip, R2 stamp, aliases kept, merge live availability, coverage overlay, no film_alias ok');

@@ -1728,9 +1728,10 @@ function footerNewUnseen({report,catalog,watchlist,index,metadata,profile,freshn
 }
 function canonicalCoverageSummary(report,catalog,index,profile,now=Date.now(),freshness=strictFreshness(profile),completedOnly=false){
  const groups=new Map();
+ const completed=completedOnly&&typeof withCompletedShows==='function'&&typeof completedShowsByTmdb==='function'?completedShowsByTmdb(report):null;
  const overlay=film=>{
-  if(!completedOnly||typeof withCompletedShows!=='function'||typeof completedShowsByTmdb!=='function')return film;
-  return withCompletedShows(film,completedShowsByTmdb(report),report?.runId,true);
+  if(!completedOnly||typeof withCompletedShows!=='function'||completed==null)return film;
+  return withCompletedShows(film,completed,report?.runId,true);
  };
  for(const film of [...(report?.films||[]),...Object.values(catalog||{})].map(overlay)){
   const tmdbId=String(film?.tmdbId||'').trim();if(!tmdbId)continue;
