@@ -28,7 +28,7 @@ Hourly batch v2 runs finish in a few minutes with a handful of films. The Events
 
 ## Consequences
 
-Short batch v2 hours produce one truthful card. Operators still recover an undelivered terminal Event on the next authorized `prediction_start` / `prediction_batch_start` under the writer lease, including the window after `savePredictionRun` and before the stop-events object exists: `deliverPendingEvents` reconstructs that record from `latest-run.event`. A Worker rollback does not remove journal items already written with the new marker.
+Short batch v2 hours produce one truthful card. Operators still recover an undelivered terminal Event on the next authorized `prediction_start` / `prediction_batch_start` under the writer lease, including the window after `savePredictionRun` and before the stop-events object exists: `deliverPendingEvents` reconstructs a *missing* stop record from `latest-run.event` and then delivers it once through the existing outbox (quarantine and one attempt per start). An existing parked record is not flushed by reconstruction. A Worker rollback does not remove journal items already written with the new marker.
 
 ## Recovery and migration boundary
 

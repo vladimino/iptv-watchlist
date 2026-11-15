@@ -286,21 +286,48 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  const w=await ready(12);await reconcile(w);
  const start=await batch(w,{manifestSize:3});await submitAll(w,start.data);
  const put=w.env.BUCKET.put.bind(w.env.BUCKET);
- let failJournal=true;
- w.env.BUCKET.put=async(key,value,options)=>{if(failJournal&&String(key).startsWith('events/items/'))throw new Error('journal outage');return put(key,value,options);};
+ let failJournal=true,journalPuts=0;
+ w.env.BUCKET.put=async(key,value,options)=>{if(String(key).startsWith('events/items/')){journalPuts++;if(failJournal)throw new Error('journal outage');}return put(key,value,options);};
  const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
  assert.equal(done.status,200);
  const key='enrichment/stop-events/'+start.data.runId+'.json';
  assert.equal(w.records.get(key)?.delivered,undefined);
- const MAX=8;
  w.ctx.env=w.env;w.ctx.__env=w.env;
- for(let n=1;n<=MAX;n++)await vm.runInContext('deliverPendingEvents(env)',w.ctx);
+ journalPuts=0;
+ await vm.runInContext('deliverPendingEvents(env)',w.ctx);
+ assert.equal(journalPuts,3,'one authorized sweep retries the journal three times, not twice that from a second flush');
+ assert.equal(w.records.get('enrichment/event-outbox.json')?.pending?.[key]?.attempts,1);
+ const MAX=8;
+ for(let n=2;n<=MAX;n++)await vm.runInContext('deliverPendingEvents(env)',w.ctx);
  failJournal=false;
  const pending=w.records.get('enrichment/event-outbox.json')?.pending||{};
  assert.equal(pending[key]?.quarantined,true,'after the attempt budget the undelivered terminal Event is quarantined');
  assert.equal(pending[key]?.attempts,MAX);
  assert.equal([...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId).length,0,'quarantine does not publish');
  assert.equal(w.records.get(key).event.presentation,'batch_v2_terminal','the parked record is kept');
+ journalPuts=0;
+ const after=await vm.runInContext('deliverPendingEvents(env)',w.ctx);
+ assert.equal(journalPuts,0,'a quarantined latest Event is not written again after the journal returns');
+ assert.equal(JSON.parse(JSON.stringify(after)).delivered,0);
+ assert.equal(w.records.get('enrichment/event-outbox.json').pending[key].quarantined,true);
+ assert.equal([...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId).length,0);
+}
+
+{
+ const w=await ready(12);await reconcile(w);
+ const start=await batch(w,{manifestSize:3});await submitAll(w,start.data);
+ const put=w.env.BUCKET.put.bind(w.env.BUCKET);
+ let failStop=true;
+ w.env.BUCKET.put=async(key,value,options)=>{if(failStop&&String(key).startsWith('enrichment/stop-events/'))throw new Error('stop record outage');return put(key,value,options);};
+ const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(done.status,200);
+ failStop=false;
+ w.ctx.env=w.env;
+ await vm.runInContext('deliverPendingEvents(env)',w.ctx);
+ assert.equal([...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId).length,1,'a missing stop record is reconstructed and delivered once');
+ const again=await vm.runInContext('deliverPendingEvents(env)',w.ctx);
+ assert.equal(JSON.parse(JSON.stringify(again)).delivered,0,'a second sweep does not publish another journal item');
+ assert.equal([...w.records.entries()].filter(([k,v])=>k.startsWith('events/items/')&&v?.id==='enrichment-'+start.data.runId).length,1);
 }
 
 console.log('prediction-manifest-size ok');
