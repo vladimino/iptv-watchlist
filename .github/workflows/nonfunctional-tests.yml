@@ -1,0 +1,51 @@
+# AIR-490. Mutant-kill checks and runner wall-clock checks. A red run is a regression signal.
+# It is not a needs of Deploy to Cloudflare and it is not a branch-protection required check.
+# 04:00 UTC is 05:00 Europe/Madrid while the offset is UTC+1 and 06:00 while it is UTC+2.
+name: Non-functional tests
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nonfunctional-tests
+  cancel-in-progress: false
+
+jobs:
+  nonfunctional:
+    name: Non-functional tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run non-functional tests
+        run: npm test -- --suite non-functional
+        env:
+          IPTV_TEST_REPORT: nonfunctional-report.json
+
+      - name: Upload diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nonfunctional-test-report
+          path: nonfunctional-report.json
+          retention-days: 14
+          if-no-files-found: warn
