@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
+import {nonFunctional} from './suite-gate.mjs';
 
 const sha=async text=>[...new Uint8Array(await webcrypto.subtle.digest('SHA-256',new TextEncoder().encode(text)))].map(b=>b.toString(16).padStart(2,'0')).join('');
 const dump=file=>{const r=sqliteSync([file,'.dump'],{encoding:'utf8',maxBuffer:1<<28});if(r.status!==0)throw new Error(r.stderr);return r.stdout;};
@@ -271,7 +272,8 @@ const state=async w=>({d1:await sha(dump(w.file)),r2:[...r2Snapshot(w).entries()
  const line=lineLog(w,'batch_submit').at(-1);assert.equal(line.notes.created,10);
  const queueWrites=sql(w.file,"SELECT count(*) AS n FROM prediction_queue")[0].n;
  console.log('batch_submit of 10 rich items: '+bytes+' request bytes, '+ms+' ms offline, '+trips+' D1 round trips, R2 '+line.r2.n+' operations, D1 statements '+line.d1.statements);
- assert.ok(ms<15000,'bounded wall time offline: '+ms);assert.ok(trips<1500,'bounded D1 round trips: '+trips);
+ nonFunctional('prediction-batch-submit-wall',()=>{assert.ok(ms<15000,'bounded wall time offline: '+ms);});
+ assert.ok(trips<1500,'bounded D1 round trips: '+trips);
  // ten fingerprints at the contract's own maximum (12000 characters each) are over the call limit: the MCP tool refuses them with nothing submitted, see tests/mcp-tools.mjs
  const max={...w.fingerprint,strengths:Array.from({length:8},()=>'s'.repeat(500)),risks:Array.from({length:8},()=>'r'.repeat(500)),sourceRefs:[]};
  const maxBytes=new TextEncoder().encode(JSON.stringify({runId:m.runId,epoch:1,items:pick.map(id=>({filmId:id,fingerprint:max,prediction:w.prediction}))})).length;

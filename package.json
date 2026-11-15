@@ -7,6 +7,8 @@
     "build": "node build.mjs",
     "dev": "node scripts/local-dev.mjs",
     "test": "node scripts/run-tests.mjs",
+    "test:nonfunctional": "node scripts/run-tests.mjs --suite non-functional",
+    "test:all": "node scripts/run-tests.mjs --suite all",
     "smoke": "node scripts/smoke-check.mjs"
   },
   "engines": {
