@@ -20,6 +20,16 @@ const scan=async(programmes,watchlist=[])=>{
 const film=(id,title,year,extra={})=>({id,title,original:title,year,runtime:110,tmdbId:id,aliases:[title],...extra});
 const watchlist=[film('a','Alpha Film',2001),film('b','Beta Film',2002)];
 const starts=shows=>plain(shows.map(show=>(show.start-now)/H));
+const retainedKeys=result=>{
+ const keys=[];
+ for(const film of result.films||[])for(const show of film.shows||[])keys.push(String(show.channelId)+'|'+show.start);
+ for(const item of result.discovery||[])for(const show of item.shows||[])keys.push(String(show.channelId)+'|'+show.start);
+ return keys;
+};
+const assertUnique=result=>{
+ const keys=retainedKeys(result);
+ assert.equal(new Set(keys).size,keys.length,'no two retained slots share (channelId, start)');
+};
 
 // The same owner repeated on one slot is ignored: one show, no conflict.
 const same=await scan([programme('Alpha Film 2001',3),programme('Alpha Film 2001',3),programme('Alpha Film 2001',6)],watchlist);
@@ -88,10 +98,29 @@ assert.equal(lonely.discovery.length,0);
 assert.equal(lonely.stats.discoveryCandidates,0);
 
 // The count is complete while the diagnostic list stays capped at 100.
-const many=[];for(let index=0;index<130;index++){const offset=1+index*0.15;many.push(programme('Alpha Film 2001',offset),programme('Gamma Unknown Title',offset));}
+const many=[];for(let index=0;index<150;index++){const offset=1+index*0.15;many.push(programme('Alpha Film 2001',offset),programme('Gamma Unknown Title',offset));}
 const flood=await scan(many,watchlist);
-assert.equal(flood.stats.duplicate_slot,130,'duplicate_slot counts every discarded slot');
+assert.equal(flood.stats.duplicate_slot,150,'duplicate_slot counts every discarded slot');
 assert.equal(flood.uncertain.length,100,'the uncertain list is a sample capped at 100');
 assert.equal(flood.films.length,0);
+assertUnique(flood);
+assertUnique(same);assertUnique(unknownSame);assertUnique(conflict);assertUnique(channels);assertUnique(lonely);
+
+// Example 21: mixed retained Films and observations, contested slots gone, remaining unique.
+const mixed=await scan([
+ programme('Alpha Film 2001',1),
+ programme('Beta Film 2002',2),
+ programme('Alpha Film 2001',3),programme('Gamma Unknown Title',3),
+ programme('Gamma Unknown Title',4),
+ programme('Beta Film 2002',5),programme('Alpha Film 2001',5),
+ programme('Delta Unmatched Title',6),
+],watchlist);
+assert.equal(mixed.stats.duplicate_slot,2);
+assertUnique(mixed);
+assert.deepEqual(starts(mixed.films.find(item=>item.id==='a').shows),[1]);
+assert.deepEqual(starts(mixed.films.find(item=>item.id==='b').shows),[2]);
+assert.deepEqual(starts(mixed.discovery.find(item=>item.title==='Gamma Unknown Title').shows),[4]);
+assert.deepEqual(starts(mixed.discovery.find(item=>item.title==='Delta Unmatched Title').shows),[6]);
+assert.equal(retainedKeys(mixed).length,4);
 
 console.log('epg slot uniqueness ok');

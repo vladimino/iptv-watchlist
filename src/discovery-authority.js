@@ -1232,7 +1232,9 @@ export async function assignObservationSlots(env,spec,context={}){
  for(const slot of pending){
   if(after.get(slot.channelId+':'+slot.startMs)===film){outcomes.assigned++;result.assigned.push({channelId:slot.channelId,startMs:slot.startMs});continue;}
   const holder=await one(db,'SELECT film_id FROM published_epg_show WHERE programme_run_id=? AND channel_id=? AND start_ms=?',[run,slot.channelId,slot.startMs]);
-  const reason=holder?'slot_taken':'decision_changed';
+  if(holder){outcomes.slot_taken++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'slot_taken'});continue;}
+  const live=await one(db,"SELECT end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? AND channel_id=? AND start_ms=?",[key,slot.channelId,slot.startMs]);
+  const reason=(!live||live.end_ms!==slot.endMs)?'slot_absent':'decision_changed';
   outcomes[reason]++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason});
  }
  return result;

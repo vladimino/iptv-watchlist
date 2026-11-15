@@ -74,6 +74,10 @@ export const FILES={
  "admin-shell.mjs": {
   "suite": "core"
  },
+ "adr-0142-examples.mjs": {
+  "suite": "core",
+  "note": "Auditable index of ADR 0142 examples onto covering tests; not a coverage certificate by itself."
+ },
  "air-100-rollout.mjs": {
   "suite": "core"
  },
