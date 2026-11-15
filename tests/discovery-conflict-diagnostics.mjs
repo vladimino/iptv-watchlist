@@ -31,6 +31,7 @@ assert.equal(code('diagnosticFailureKind')({code:'discovery_fence'}),'fence');
 assert.equal(code('diagnosticFailureKind')({code:'discovery_conflict',failureKind:'unique_constraint',cause:{message:'UNIQUE constraint failed: published_epg_show.programme_run_id'}}),'unique_constraint');
 assert.equal(code('diagnosticFailedAt')({failedAt:'candidate_assignment'}),'candidate_assignment');
 assert.equal(code('diagnosticFailedAt')({failedAt:'revalidation_assignment'}),'revalidation_assignment');
+assert.equal(code('diagnosticFailedAt')({failedAt:'preview'}),'preview');
 
 const unique=Object.assign(new Error('discovery_conflict'),{code:'discovery_conflict',failureKind:'unique_constraint',failureConstraint:'unique.published_epg_show',failedAt:'replay_assignment',cause:{message:'UNIQUE constraint failed: published_epg_show.programme_run_id, channel_id, start_ms film=Hot Film'}});
 const summary=code('chunkSummary')({stage:'error',error:unique.error||unique.message,failedAt:unique.failedAt,failureKind:unique.failureKind,failureConstraint:unique.failureConstraint,checked:0,remaining:null});
@@ -95,6 +96,20 @@ assert.equal(Number(sql("SELECT COUNT(*) AS n FROM discovery_score WHERE observa
 assert.equal(Number(sql('SELECT generation FROM discovery_authority WHERE id=1')[0].generation),generationBefore,'the failed batch rolls back, including the fence');
 assert.equal(sql('SELECT lease_id FROM discovery_lease WHERE id=1')[0].lease_id,uniqueLease.lease.id);
 await Authority.releaseLease(env,uniqueLease.lease);
+
+sql("INSERT INTO discovery_score (observation_key, programme_run_id, generation, outcome, reason, payload_json) VALUES ('carry-key','run-old',1,'accepted','stale','{\"observationKey\":\"carry-key\"}')");
+sql("UPDATE discovery_authority SET programme_run_id='run-new'");
+const crossLease=await Authority.acquireLease(env,{programmeRunId:'run-new'});
+env.discoveryLease=crossLease.lease;
+await Authority.routeWrite(env,'epg/discovery-score-preview.json',{items:{
+ a:{observationKey:'carry-key',outcome:'accepted',reason:'fresh'}
+}},{lease:crossLease.lease});
+const carried=sql("SELECT observation_key, programme_run_id, reason FROM discovery_score WHERE observation_key='carry-key'");
+assert.equal(carried.length,1);
+assert.equal(carried[0].programme_run_id,'run-new');
+assert.equal(carried[0].reason,'fresh');
+assert.equal(Number(sql("SELECT COUNT(*) AS n FROM discovery_score WHERE programme_run_id='run-old'")[0].n),0);
+await Authority.releaseLease(env,crossLease.lease);
 
 const RUN='run-assign',START=Date.parse('2026-11-15T12:00:00Z'),MIN=60000;
 sql("UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1");
