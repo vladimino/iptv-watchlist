@@ -816,6 +816,21 @@ WHERE o.source_key='active' AND o.residence='active' AND o.seen_in_latest=1 AND 
  AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)`;
 export const ACTIONABLE_COUNT_SQL='SELECT COUNT(*) AS n '+ACTIONABLE_FROM;
 export const ACTIONABLE_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+ACTIONABLE_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
+// Current-window unresolved rows that SQL would treat as actionable except a future retry_at with
+// deferReason=wall_budget. Completing a generation requires this count to be zero, not only the eligible-now COUNT.
+// Ordinary uncertain-match retry_at does not keep a generation open.
+const WAITING_RETRY_FROM=`FROM discovery_observation o
+JOIN discovery_decision d ON d.observation_key=o.observation_key
+WHERE o.source_key='active' AND o.residence='active'
+ AND o.seen_in_latest=1
+ AND EXISTS (SELECT 1 FROM discovery_observation_show s WHERE s.source_key='active' AND s.observation_key=o.observation_key AND s.start_ms>=? AND s.start_ms<?)
+ AND IFNULL(d.status,'')<>'verified'
+ AND ${ACTIONABLE_SAME}
+ AND IFNULL(d.status,'')<>'excluded_nonfilm'
+ AND (d.terminal_reason IS NULL OR d.terminal_reason='')
+ AND d.retry_at IS NOT NULL AND d.retry_at>?
+ AND json_extract(d.payload_json,'$.deferReason')='wall_budget'`;
+export const WAITING_RETRY_SQL='SELECT COUNT(*) AS n, MIN(d.retry_at) AS next_retry '+WAITING_RETRY_FROM;
 export const TOUCH_PAGE_SQL='SELECT o.observation_key, o.payload_json, d.payload_json AS decision_json '+TOUCH_FROM+' AND o.observation_key>? ORDER BY o.observation_key LIMIT ?';
 export const SELECT_PAGE=80;
 export const SELECT_QUERIES=6;
@@ -840,6 +855,10 @@ export async function selectActionableObservations(env,options={}){
  if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'count'});
  const counted=await one(db,ACTIONABLE_COUNT_SQL,windowParams);
  const remaining=Number(counted?.n||0);
+ if(options.beforeQuery)await options.beforeQuery({query:0,after:startAfter,phase:'waiting_retry'});
+ const waitingRow=await one(db,WAITING_RETRY_SQL,windowParams);
+ const waitingRetry=Number(waitingRow?.n||0);
+ const nextRetryAt=typeof waitingRow?.next_retry==='string'&&waitingRow.next_retry?waitingRow.next_retry:null;
  const items=[];
  let cursor=startAfter,wrapped=false,queries=0,complete=false;
  while(items.length<pageSize&&queries<maxQueries){
@@ -887,7 +906,7 @@ export async function selectActionableObservations(env,options={}){
  }
  const closed=await readAuthority(env);
  if(closed.held||!closed.ready||closed.generation!==opened.generation||closed.programmeRunId!==opened.programmeRunId||closed.transfer==='loading')throw failed('discovery_fence');
- return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,complete};
+ return {programmeRunId:opened.programmeRunId,items,touches,after:cursor,touchAfter:touchCursor,wrapped,touchWrapped,queries,remaining,waitingRetry,nextRetryAt,complete};
 }
 
 // ADR 0092. The ledger seal is a resumable job instead of one request. `discovery_seal` (schema 12) holds its identity

@@ -40,7 +40,7 @@ function discoveryHourStamp(ms){return new Date(ms).toISOString().replace(/[-:]/
 function discoveryCount(value){return Number.isInteger(value)&&value>=0?value:null;}
 // The queue is empty only when every part of it is a proven numeric zero: the remaining count AND the cheap-pass remainder. A missing, null,
 // negative, fractional or non-numeric part is unknown and never a zero (a chunk that does not report the cheap-pass remainder confirms nothing).
-function discoveryQueueEmpty(remaining,cheapRemaining,error){return remaining===0&&cheapRemaining===0&&!error;}
+function discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry){return remaining===0&&cheapRemaining===0&&!error&&!(waitingRetry>0);}
 function newDiscoveryReport(since,seen=[]){
  const report={since:since||null,chunks:0,remaining:null,cheapRemaining:null,error:null,queueGeneration:null,seen,lastClosedHour:null};
  for(const name of DISCOVERY_REPORT_COUNTERS)report[name]=0;
@@ -95,7 +95,7 @@ function discoveryHourEvent({at,hourKey,generation,status,reason,report,queue}){
 // The legacy per-chain event of the model before the hourly reports. Used only to deliver an entry that was still pending at the change.
 function discoveryTickEvent(tick){
  const reason=tick.settled?.reason||null;
- const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:discoveryQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
+ const event={id:'discovery-'+tick.id,type:'discovery',kind:'run',at:tick.settled.at,startedAt:tick.startedAt,status:DISCOVERY_TICK_STATUS[reason]||'stopped',reason,chunks:tick.chunks||0,queueEmpty:discoveryQueueEmpty(discoveryCount(tick.remaining),discoveryCount(tick.cheapRemaining),tick.error,discoveryCount(tick.waitingRetry)),remaining:Number.isInteger(tick.remaining)?tick.remaining:null,error:tick.error||null};
  for(const name of DISCOVERY_REPORT_COUNTERS)event[name]=tick[name]||0;
  return event;
 }
@@ -107,19 +107,19 @@ async function putDiscoveryEvent(env,event){
 // the published generation. An empty queue needs the continuation to say complete for that generation too. An unreadable source is `incomplete`.
 async function discoveryReportQueue(env,report,programmeRunId){
  const unreadable={remaining:null,cheapRemaining:null,error:null,empty:false,incomplete:true,reason:'queue_unreadable'};
- let remaining=null,cheapRemaining=null,error=null;
+ let remaining=null,cheapRemaining=null,error=null,waitingRetry=null;
  try{
   // The queue values of the accumulator belong to the generation of the chunk that wrote them. Deltas carry across a generation change, the queue
   // reading does not: another generation's backlog or empty state is unknown for this one, never reused.
-  if(report.chunks>0&&report.queueGeneration&&report.queueGeneration===programmeRunId){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;}
+  if(report.chunks>0&&report.queueGeneration&&report.queueGeneration===programmeRunId){remaining=report.remaining;cheapRemaining=report.cheapRemaining;error=report.error;waitingRetry=discoveryCount(report.waitingRetry);}
   else if(programmeRunId){
    const last=await loadJSON(env,'epg/discovery-status.json');
-   if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
+   if(last&&last.programmeRunId===programmeRunId){remaining=discoveryCount(last.remaining);cheapRemaining=discoveryCount(last.cheapRemaining);waitingRetry=discoveryCount(last.waitingRetry);error=last.error?(typeof diagnosticErrorCode==='function'?diagnosticErrorCode({message:String(last.error)}):'other'):null;}
   }
  }catch{return unreadable;}
  let complete=false;
  try{const stored=programmeRunId?await readContinuation(env):null;complete=!!stored?.record&&stored.record.programmeRunId===programmeRunId&&stored.record.stage==='complete';}catch{return unreadable;}
- return {remaining,cheapRemaining,error,empty:complete&&discoveryQueueEmpty(remaining,cheapRemaining,error),incomplete:false,reason:null};
+ return {remaining,cheapRemaining,error,empty:complete&&discoveryQueueEmpty(remaining,cheapRemaining,error,waitingRetry),incomplete:false,reason:null};
 }
 // Delivers every pending report: the events of the outbox and a legacy per-chain tick that was settled and not yet delivered. An entry leaves
 // the record only after its create-only put is confirmed. The record is written back with its `updatedAt` untouched, so delivery never hides a
