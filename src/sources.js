@@ -193,17 +193,22 @@ function archivedPayloadNewer(next,current){
  if(Number.isFinite(a)!==Number.isFinite(b))return Number.isFinite(a);
  return String(next?.lastSeenProgrammeRunId||'')>=String(current?.lastSeenProgrammeRunId||'');
 }
+const CATALOG_AVAILABILITY_FIELDS=['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt'];
+function stripCatalogAvailability(film){
+ if(!film||typeof film!=='object')return film;
+ const next={...film};
+ for(const field of CATALOG_AVAILABILITY_FIELDS)delete next[field];
+ return next;
+}
 function mergeCatalogIdentity(incoming,live,programmeRunId,options={}){
  const writeAvailability=options.writeAvailability!==false;
  const next={...(incoming||{})};
  for(const [key,film] of Object.entries(live||{})){
   if(!film||typeof film!=='object')continue;
   const staged=next[key];
-  if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:film;continue;}
+  if(!staged){next[key]=writeAvailability?{...film,shows:[],showsProgrammeRunId:programmeRunId||film.showsProgrammeRunId||null}:stripCatalogAvailability(film);continue;}
   next[key]={...staged,aliases:[...new Set([...(staged.aliases||[]),...(film.aliases||[])])],fingerprint:staged.fingerprint||film.fingerprint,prediction:staged.prediction||film.prediction};
-  if(writeAvailability===false)for(const field of ['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt']){
-   if(Object.hasOwn(film,field))next[key][field]=film[field];else delete next[key][field];
-  }
+  if(writeAvailability===false)next[key]=stripCatalogAvailability(next[key]);
  }
  return next;
 }
@@ -381,7 +386,6 @@ function programmeWithWatchlist(report,watchlist){
 
 // ADR 0142 decision 11 (presentation). `report.catalogFilms` are identity-only entries of the completed read. Film data comes from the current catalog record of the same TMDB id; an
 // entry without such a record is not presented as a Film and is counted. A catalog that could not be read (`catalog` null) never touches `films`: the part is stated as unavailable.
-const CATALOG_AVAILABILITY_FIELDS=['shows','availableUntil','showsProgrammeRunId','epgLastAiring','hotEnteredAt'];
 function presentCatalogFilms(report,catalog){
  const entries=Array.isArray(report?.catalogFilms)?report.catalogFilms:[];
  if(!entries.length){const {catalogFilms,...rest}=report||{};return rest;}

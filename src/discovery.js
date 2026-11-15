@@ -306,7 +306,7 @@ function catalogFilmFromDetail(movie,candidate,old,programmeRunId,id,writeAvaila
 }
 function touchCanonicalFilm(film,candidate,programmeRunId,writeAvailability=true){
  const aliases=[...new Set([...(film.aliases||[]),candidate.title,...(candidate.rawTitles||[])].filter(Boolean))];
- if(writeAvailability===false)return {...film,canonicalIdentity:'tmdb:'+film.tmdbId,aliases};
+ if(writeAvailability===false)return stripCatalogAvailability({...film,canonicalIdentity:'tmdb:'+film.tmdbId,aliases});
  const explicit=Array.isArray(candidate.shows),incoming=explicit?dedupeShows(candidate.shows):null,same=!!programmeRunId&&film.showsProgrammeRunId===programmeRunId;
  const shows=incoming===null?film.shows||[]:same?dedupeShows([...(film.shows||[]),...incoming]):incoming;
  const hotEnteredAt=candidateIsHot(candidate)&&!filmIsHot(film)?new Date().toISOString():film.hotEnteredAt;
