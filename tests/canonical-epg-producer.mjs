@@ -356,8 +356,9 @@ if(section('7')){
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&full!==self&&fs.readFileSync(full,'utf8').includes('canonical-epg-producer'))importers.push(full);}};
  walk('src');
  // AIR-374 S4-4: the dormant driver (src/canonical-producer-driver.js) composes it; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
- assert.deepEqual(importers,['src/canonical-epg-person-producer.js','src/canonical-producer-driver.js'],'only the dormant EPG Person layer (ADR 0126) and the dormant driver import it');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-epg-producer'),file+' does not bundle it');
+ assert.deepEqual(importers.sort(),['src/canonical-epg-person-producer.js','src/canonical-producer-driver.js'],'only the EPG Person layer and the driver import it');
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-epg-producer'),file+' does not name it');
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes('canonical-epg-producer'),'AIR-497 bundles the EPG producer');
  const text=fs.readFileSync(path.join(SRC,'canonical-epg-producer.js'),'utf8');
  const code_=text.replace(/\/\/.*$/gm,'');
  assert.deepEqual([...text.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-producer-adapters.js','./film-person-authority.js']);

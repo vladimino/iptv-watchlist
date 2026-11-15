@@ -1,0 +1,151 @@
+// AIR-497 / ADR 0141: dormant canonical_producer_chain store, GATE, launch/claim/handoff/takeover, RETRY_GATE, marker dormancy.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'os';
+import path from 'node:path';
+import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
+import * as Fence from '../src/canonical-producer-fence.js';
+import * as Chain from '../src/canonical-producer-chain.js';
+import {reconcileProducerChain,acquireSealedSnapshot} from '../src/canonical-producer-workflow.js';
+
+const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-producer-chain-'));
+process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
+const sqlite=(file,text)=>sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text,encoding:'utf8',maxBuffer:1<<26});
+const rows=(file,text)=>{const r=sqliteSync(['-json','-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+text+';',encoding:'utf8'});if(r.status!==0)throw new Error(r.stderr);const o=r.stdout.trim();return o?JSON.parse(o):[];};
+const one=(file,text)=>Object.values(rows(file,text)[0]||{})[0];
+const chainFiles=fs.readdirSync('migrations').filter(name=>/^\d{4}_.*\.sql$/.test(name)).sort();
+const template=path.join(root,'t.sqlite');
+assert.equal(sqlite(template,chainFiles.map(name=>fs.readFileSync('migrations/'+name,'utf8')).join('\n')).status,0);
+assert.equal(Number(one(template,'SELECT version FROM schema_contract WHERE id=1')),23);
+assert.equal(Number(one(template,'SELECT COUNT(*) FROM canonical_producer_chain')),0);
+const VERIFY="UPDATE film_person_baseline SET state='loading',reference='t' WHERE id=1;UPDATE film_person_baseline SET state='verified' WHERE id=1;";
+let n=0;
+function database(stage='open'){
+ const file=path.join(root,'c-'+(n++)+'.sqlite');
+ fs.copyFileSync(template,file);
+ if(['prepared','open','held'].includes(stage))assert.equal(sqlite(file,VERIFY+"UPDATE film_person_authority SET mode='prepared',generation=1 WHERE id=1").status,0);
+ if(stage==='open'||stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1").status,0);
+ if(stage==='held')assert.equal(sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1").status,0);
+ if(stage==='open')assert.equal(sqlite(file,"UPDATE published_epg_authority SET mode='d1',cutover='open',programme_run_id='run-p',generation=10 WHERE id=1").status,0);
+ return file;
+}
+const envOf=file=>({DB:d1Standin(file)});
+const AT='2026-11-16T10:00:00.000Z';
+const P='run-p';
+
+{
+ const file=database('prepared');
+ const before=one(file,'SELECT COUNT(*) FROM canonical_producer_chain');
+ const env=envOf(file);
+ assert.deepEqual(await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)}),{state:'skipped',reason:'projector_is_writer'});
+ assert.equal(one(file,'SELECT COUNT(*) FROM canonical_producer_chain'),before);
+}
+
+{
+ const file=database();
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ assert.equal(launched.state,'launched');
+ assert.equal(launched.chain.owner_state,'pending');
+ assert.equal(launched.epoch,1);
+ const nonce='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+ const claimed=await Chain.claimChain(env,{programmeRunId:P,epoch:1,instanceId:launched.instanceId,nonce,generation:10,revision:1,at:AT,nowMs:Date.parse(AT)});
+ assert.equal(claimed.state,'owned');
+ const fence={kind:'chain',programmeRunId:P,epoch:1,nonce,inputGeneration:10,revision:claimed.chain.revision};
+ const {fenced}=await import('../src/canonical-mutations.js');
+ const gate={generation:2,producerFence:fence};
+ const db=env.DB;
+ await db.batch([db.prepare(fenced.FENCE).bind(2),db.prepare(Fence.chainGateSql()).bind(...Fence.chainGateParams(fence))]);
+ assert.equal(sqlite(file,"UPDATE published_epg_authority SET generation=11 WHERE id=1").status,0);
+ let failed=false;
+ try{
+  await db.batch([db.prepare(fenced.FENCE).bind(2),db.prepare(Fence.chainGateSql()).bind(...Fence.chainGateParams(fence))]);
+ }catch{failed=true;}
+ assert.equal(failed,true,'a moved generation rolls GATE back');
+ assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'active');
+ const stale={...fence,epoch:2};
+ failed=false;
+ try{await db.batch([db.prepare(fenced.FENCE).bind(2),db.prepare(Fence.chainGateSql()).bind(...Fence.chainGateParams(stale))]);}catch{failed=true;}
+ assert.equal(failed,true,'a stale owner fails GATE');
+}
+
+{
+ const file=database();
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const nonce='11111111-1111-1111-1111-111111111111';
+ await Chain.claimChain(env,{programmeRunId:P,epoch:1,instanceId:launched.instanceId,nonce,generation:10,revision:1,at:AT,nowMs:Date.parse(AT)});
+ const fence={kind:'chain',programmeRunId:P,epoch:1,nonce,inputGeneration:10,revision:2};
+ const hand=await Chain.handoffChain(env,{fence,revision:2,at:AT,nowMs:Date.parse(AT)});
+ assert.equal(hand.state,'handed_off');
+ assert.equal(hand.epoch,2);
+ assert.equal(hand.chain.owner_state,'pending');
+}
+
+{
+ const file=database();
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const expired=new Date(Date.parse(AT)-10*60000).toISOString();
+ assert.equal(sqlite(file,"UPDATE canonical_producer_chain SET lease_expires_at='"+expired+"',revision=revision+1,updated_at='"+AT+"' WHERE programme_run_id='"+P+"'").status,0);
+ const chain=await Chain.readChain(env,P);
+ const take=await Chain.takeoverChain(env,{chain,generation:10,at:AT,nowMs:Date.parse(AT)});
+ assert.equal(take.state,'pending');
+ assert.equal(take.epoch,2);
+}
+
+{
+ const file=database();
+ const env=envOf(file);
+ const retry=Fence.fenceStatements({kind:'retry',programmeRunId:P,inputGeneration:10});
+ const db=env.DB;
+ await db.batch([db.prepare(retry[0][0]).bind(...retry[0][1])]);
+ await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ let refused=false;
+ try{await db.batch([db.prepare(retry[0][0]).bind(...retry[0][1])]);}catch{refused=true;}
+ assert.equal(refused,true,'RETRY_GATE refuses while the chain is pending');
+}
+
+{
+ const created=[];
+ const dormant=await reconcileProducerChain({...envOf(database('prepared')),PRODUCER_WORKFLOW:{create:async({id})=>{created.push(id);}}},{now:Date.parse(AT)});
+ assert.equal(dormant.reason,'dormant');
+ assert.equal(created.length,0);
+ const noBind=await reconcileProducerChain(envOf(database()),{now:Date.parse(AT)});
+ assert.equal(noBind.reason,'workflow_unavailable');
+}
+
+{
+ const file=database();
+ const sha='a'.repeat(64);
+ sqlite(file,"INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}')");
+ const snap=await acquireSealedSnapshot(envOf(file),P);
+ assert.equal(snap.ok,true);
+ assert.equal(snap.generation,10);
+ assert.equal(snap.films[0].id,'film:tmdb:1');
+ assert.equal(Fence.snapshotLabel(P,10),'run-p:10');
+ const moved=await acquireSealedSnapshot(envOf(file),'other-run');
+ assert.equal(moved.ok,false);
+}
+
+{
+ const d=Fence.successorDecision({spentCalls:100,spentStatements:100,estimateCalls:40,estimateStatements:200});
+ assert.equal(d.continue,true);
+ const h=Fence.successorDecision({spentCalls:9000,spentStatements:9000,estimateCalls:2000,estimateStatements:2000});
+ assert.equal(h.continue,false);
+ const inf=Fence.successorDecision({spentCalls:0,spentStatements:0,estimateCalls:9000,estimateStatements:9000});
+ assert.equal(inf.reason,'producer_budget_infeasible');
+}
+
+assert.equal(Fence.recoveryClassOf('producer_cas_lost'),'transient');
+assert.equal(Fence.recoveryClassOf('receipt_state_conflict'),'receipt');
+assert.equal(Fence.recoveryClassOf('producer_store_missing'),'terminal');
+assert.equal(Fence.generationOrder('run-p:10','run-p:11'),-1);
+
+assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"binding": "PRODUCER_WORKFLOW"/);
+assert.match(fs.readFileSync('src/epg-orchestration.js','utf8'),/reconcileProducerChain/);
+assert.doesNotMatch(fs.readFileSync('src/canonical-producer-workflow.js','utf8').replace(/export async function retryEpgProducerResultsFenced[\s\S]*$/,''),/retryEpgProducerResults\(/,'the chain never calls the unit retry pass');
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/crons.*producer/i);
+assert.match(fs.readFileSync('build.mjs','utf8'),/export class ProducerWorkflow/);
+assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
