@@ -59,6 +59,10 @@ assert.ok(prompt.includes('валидные индексы positions (повто
 assert.ok(prompt.includes('{filmId,fingerprint,prediction,assessment,metadata}')&&dry.includes('{filmId,fingerprint,prediction,assessment,metadata}'),'preflight items carry the assessment');
 for(const t of [prompt,dry])assert.ok(t.includes('assessment.sources ссылается на metadata:*')&&t.includes('prediction_only'),'a prediction_only preflight carries metadata when the assessment cites metadata tokens');
 assert.ok(/5\+5/.test(prompt)&&/5\+5/.test(dry),'both prompts split a group over 56 KiB in advance, generationSize independent of the call size');
+// The installed Task A uses the source-selection variant and preserves validated items across budget deferral.
+for(const needle of ['3г. SOURCE SELECTION GATE / FULL-TEXT FALLBACK','candidateOriginalUrls','attemptedOriginalUrls','untriedCandidates','source_duplicate','fullTextFallback=NOT_NEEDED'])assert.ok(prompt.includes(needle),'Task A research variant D: '+needle);
+for(const needle of ['После valid:true сохраняй точный submit-ready item','ИСХОДНЫЙ submit-ready item','не пересобирай заново fingerprint, prediction, assessment','Если исходный item потерян, изменён','СНАЧАЛА вызови prediction_batch_validate','Это не новый локальный валидатор'])assert.ok(prompt.includes(needle),'deferred_budget immutable item: '+needle);
+assert.ok(!prompt.includes('- deferred_budget: фильм не обработан из-за бюджета вызова; отправь его заново в следующей группе.'),'old ambiguous deferred_budget instruction removed');
 assert.ok(!/web search[^.]*доступен и подтверждён/i.test(prompt),'no confirmed Web Search availability claim');
 // Runtime batching: generationSize=1 accumulates to submitBatchSize=5; several independent v2 Tasks share the lease.
 assert.ok(/generationSize=1/.test(prompt)&&/submitBatchSize=5/.test(prompt)&&/накапливай до submitBatchSize/.test(prompt),'template accumulates generationSize=1 films to submitBatchSize');
