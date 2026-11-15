@@ -1,3 +1,5 @@
+[![Non-functional tests](https://github.com/vladimino/iptv-watchlist/actions/workflows/nonfunctional-tests.yml/badge.svg)](https://github.com/vladimino/iptv-watchlist/actions/workflows/nonfunctional-tests.yml)
+
 # IPTV Watchlist — «В эфире»
 
 A private film guide built from a public [Letterboxd](https://letterboxd.com/) watchlist and an XMLTV/IPTV programme. It combines films on the watchlist with recently aired and upcoming broadcasts, adds discovered catalog films and metadata, and displays personal film-taste predictions when available.
