@@ -18,7 +18,7 @@ import {fenced} from './canonical-mutations.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {LIVE_STATES,NO_STRIKE,ORIGINS,PRODUCER_PLAN_VERSION,TERMINAL_STATES,canTransition,keyOfRow,mintDictionaryVersion,resumeDecision} from './canonical-producer-run.js';
 import {fenceStatements} from './canonical-producer-fence.js';
-import {completeChainStatements,leaseRenewStatements} from './canonical-producer-chain.js';
+import {completeChainStatements,leaseRenewStatements,readChain} from './canonical-producer-chain.js';
 
 export const SLICE_STATEMENT_CAP=48;
 export const DUE_LIMIT_MAX=50;
@@ -35,15 +35,33 @@ function producerExtras(env,gate,{at,renew=false,complete=false,ownerOnly=false}
  const f=env?.producerFence||gate?.producerFence;
  if(!f)return [];
  const out=fenceStatements(f,{ownerOnly});
+ let bump=0;
  if(renew&&f.kind==='chain'&&Number.isInteger(f.revision)){
-  out.push(...leaseRenewStatements(f,at,undefined,f.revision));
-  f.revision+=1;
+  out.push(...leaseRenewStatements(f,at,undefined,f.revision+bump));
+  bump+=1;
  }
  if(complete&&f.kind==='chain'&&Number.isInteger(f.revision)){
-  out.push(...completeChainStatements(f,at,f.revision));
-  f.revision+=1;
+  out.push(...completeChainStatements(f,at,f.revision+bump));
+  bump+=1;
  }
+ f._pendingBump=bump;
  return out;
+}
+function confirmFence(env){
+ const f=env?.producerFence;
+ const n=Number(f?._pendingBump||0);
+ if(f&&n&&Number.isInteger(f.revision))f.revision+=n;
+ if(f)f._pendingBump=0;
+}
+async function restoreFence(env){
+ const f=env?.producerFence;
+ if(!f)return;
+ f._pendingBump=0;
+ if(f.kind!=='chain'||typeof f.programmeRunId!=='string')return;
+ try{
+  const row=await readChain(env,f.programmeRunId);
+  if(row&&Number.isInteger(Number(row.revision)))f.revision=Number(row.revision);
+ }catch{/* keep the pre-batch revision */}
 }
 
 // The marker route, once. Returns {open:false} below `open` (the caller returns `skipped`), otherwise the generation the batches are fenced with.
@@ -76,8 +94,13 @@ async function commit(env,gate,statements,cause,run){
  const db=database(env);
  if(!db||typeof db.batch!=='function')throw failed('producer_transport');
  if(statements.length>SLICE_STATEMENT_CAP)throw failed('film_person_bounded');
- try{await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
- catch(error){throw await refuse(env,gate,error,cause,run);}
+ try{
+  await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));
+  confirmFence(env);
+ }catch(error){
+  await restoreFence(env);
+  throw await refuse(env,gate,error,cause,run);
+ }
 }
 
 // ---- reads ----
@@ -241,7 +264,7 @@ export async function commitPassComplete(env,{run,openAtCompletion,at}={}){
  if(!plain(run)||run.origin!=='epg'||typeof run.source_generation!=='string'||!Number.isInteger(openAtCompletion)||openAtCompletion<0||typeof at!=='string')throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,complete:true}),casRun(run),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,renew:true}),casRun(run),
   ["UPDATE canonical_producer_run SET pass_state='passed',applied_generation=source_generation,open_at_completion=?,completed_at=?,stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?",[openAtCompletion,at,at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }

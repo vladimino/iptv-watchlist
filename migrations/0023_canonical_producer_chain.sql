@@ -1,6 +1,6 @@
 -- Schema v23: the durable Film/Person producer Workflow chain row (AIR-497; ADR 0141 Accepted as DESIGN).
 -- INERT: this file is in the repository and is NOT applied to any database by a deploy. Applying it to production D1
--- is a separate owner GO on AIR-498; nothing in the Worker applies it. While the Film/Person marker is not d1/open
+-- is a separate owner GO on AIR-499; nothing in the Worker applies it. While the Film/Person marker is not d1/open
 -- the table stays empty (the same trigger pattern as 0020). The table starts EMPTY.
 -- It follows a complete version 22 and refuses anything else before a table is created: the first statement inserts a
 -- second schema_contract row and so aborts the file. The version becomes 23 and never goes down.

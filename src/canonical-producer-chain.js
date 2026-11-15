@@ -198,6 +198,16 @@ export async function yieldChain(env,{fence:f,revision,at}={}){
  return {state:'released',chain:await readChain(env,f.programmeRunId)};
 }
 
+export async function completeChain(env,{fence:f,revision,at}={}){
+ requireFence(f,['chain']);
+ const gate=await routeOf(env);
+ if(!gate.open)return SKIPPED;
+ await commit(env,gate,[fence(gate),...completeChainStatements(f,at,revision)]);
+ const chain=await readChain(env,f.programmeRunId);
+ if(Number.isInteger(Number(chain?.revision)))f.revision=Number(chain.revision);
+ return {state:'complete',chain};
+}
+
 export function completeChainStatements(fence,at,revision){
  requireFence(fence,['chain']);
  return [["UPDATE canonical_producer_chain SET owner_state='complete',revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND claim_nonce=? AND owner_state='active' AND input_generation=? AND revision=?",

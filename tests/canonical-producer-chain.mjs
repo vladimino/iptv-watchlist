@@ -7,7 +7,8 @@ import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 import * as Fence from '../src/canonical-producer-fence.js';
 import * as Chain from '../src/canonical-producer-chain.js';
-import {reconcileProducerChain,acquireSealedSnapshot} from '../src/canonical-producer-workflow.js';
+import {reconcileProducerChain,acquireSealedSnapshot,runProducerWorkflow} from '../src/canonical-producer-workflow.js';
+import * as Store from '../src/canonical-producer-store.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-producer-chain-'));
 process.on('exit',()=>{try{fs.rmSync(root,{recursive:true,force:true});}catch{}});
@@ -119,11 +120,17 @@ const P='run-p';
 {
  const file=database();
  const sha='a'.repeat(64);
- sqlite(file,"INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}')");
+ sqlite(file,"INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\",\"directors\":[{\"id\":\"director/1\",\"name\":\"One\"}]},{\"id\":\"tmdb_2\",\"title\":\"Left\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\",\"directors\":[{\"id\":\"director/1\",\"name\":\"One\"}]}]}');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1'),('run-p','programme',1,'tmdb_2')");
  const snap=await acquireSealedSnapshot(envOf(file),P);
  assert.equal(snap.ok,true);
  assert.equal(snap.generation,10);
- assert.equal(snap.films[0].id,'film:tmdb:1');
+ assert.deepEqual(snap.films.map(item=>item.id),['film:tmdb:1']);
+ assert.equal(snap.films[0].facts.watchlist,true);
+ assert.deepEqual(snap.departed,['film:tmdb:2']);
+ assert.equal(snap.personRows[0].id,'person:director/1');
+ assert.equal(snap.credits[0].filmId,'film:tmdb:1');
  assert.equal(Fence.snapshotLabel(P,10),'run-p:10');
  const moved=await acquireSealedSnapshot(envOf(file),'other-run');
  assert.equal(moved.ok,false);
@@ -149,3 +156,42 @@ assert.doesNotMatch(fs.readFileSync('src/canonical-producer-workflow.js','utf8')
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/crons.*producer/i);
 assert.match(fs.readFileSync('build.mjs','utf8'),/export class ProducerWorkflow/);
 assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
+
+{
+ const file=database();
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const nonce='22222222-2222-2222-2222-222222222222';
+ const claimed=await Chain.claimChain(env,{programmeRunId:P,epoch:1,instanceId:launched.instanceId,nonce,generation:10,revision:1,at:AT,nowMs:Date.parse(AT)});
+ const fence={kind:'chain',programmeRunId:P,epoch:1,nonce,inputGeneration:10,revision:claimed.chain.revision};
+ env.producerFence=fence;
+ const hex='a'.repeat(64);
+ const opened=await Store.openEpgRun(env,{runKey:'epg:run-p:10',sourceGeneration:'run-p:10',fingerprint:hex,units:[{kind:'film_facts',id:'film:tmdb:1'}],at:AT});
+ assert.equal(opened.state,'created');
+ const before=fence.revision;
+ env.DB.batch=async()=>{throw new Error('forced rollback');};
+ let failed=false;
+ try{await Store.commitStrike(env,{run:opened.run,next:{strike_kind:'film_facts',strike_id:'film:tmdb:1',strike_digest:hex,strike_class:'transient',strike_count:1},at:AT});}catch{failed=true;}
+ assert.equal(failed,true);
+ assert.equal(fence.revision,before,'a rejected batch does not advance the local chain revision');
+}
+
+{
+ const file=database();
+ const sha='b'.repeat(64);
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
+  "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('33333333-3333-3333-3333-333333333333'):fn()});
+ assert.equal(result.state,'complete');
+ assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'complete');
+ const run=rows(file,"SELECT run_key,source_generation,pass_state FROM canonical_producer_run WHERE origin='epg'")[0];
+ assert.equal(run.run_key,'epg:run-p:10');
+ assert.equal(run.source_generation,'run-p:10');
+ assert.equal(run.pass_state,'passed');
+ assert.match(fs.readFileSync('src/canonical-producer-workflow.js','utf8'),/runId:snap\.label/);
+}

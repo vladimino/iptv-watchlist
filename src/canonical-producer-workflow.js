@@ -1,8 +1,8 @@
 // AIR-497 / ADR 0141. Bounded Producer Workflow chain. Dormant unless the Film/Person marker is d1/open
 // AND env.PRODUCER_WORKFLOW exists. Launched ONLY from hourly reconcileProducerChain. No new cron, flag or Task.
-import {failed,readAuthority} from './film-person-authority.js';
+import {readAuthority} from './film-person-authority.js';
 import {readDocument,readMembers,readAuthority as readPublished} from './published-epg.js';
-import {runEpgProducerPass,retryEpgProducerResults,readCanonicalFreshness} from './canonical-producer-driver.js';
+import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFreshness} from './canonical-producer-driver.js';
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
 import {
  CHAIN_BOUNDARY_MARGIN_MS,CHAIN_CREATE_ATTEMPTS,CHAIN_FLOOR_D1_CALLS,CHAIN_FLOOR_D1_STATEMENTS,CHAIN_LEASE_MS,
@@ -10,8 +10,8 @@ import {
  snapshotLabel,generationOrder,producerInstanceId,requireFence,
 } from './canonical-producer-fence.js';
 import {
- claimChain,handoffChain,launchChain,listNonterminalChains,readChain,rebaseChain,recoverChain,relaunchChain,
- reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
+ claimChain,completeChain,handoffChain,launchChain,listNonterminalChains,readChain,rebaseChain,recoverChain,
+ relaunchChain,reopenChain,stopChain,supersedeChain,takeoverChain,yieldChain,
 } from './canonical-producer-chain.js';
 import {epgRunForGeneration} from './canonical-producer-store.js';
 
@@ -35,6 +35,76 @@ function createError(error){
  return 'uncertain';
 }
 
+function canonicalFilmId(raw){
+ const s=String(raw||'');
+ if(!s)return null;
+ if(s.startsWith('film:'))return s;
+ if(s.startsWith('tmdb_'))return 'film:tmdb:'+s.slice(5);
+ if(s.startsWith('tmdb:'))return 'film:'+s;
+ return 'film:'+s;
+}
+function canonicalPersonId(raw){
+ const s=String(raw||'');
+ if(!s)return null;
+ return s.startsWith('person:')?s:'person:'+s;
+}
+function filmFactsOf(film,watchlisted){
+ return {watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+}
+function idsOf(document,members){
+ if(Array.isArray(members)&&members.length)return members.map(row=>canonicalFilmId(row.filmId)).filter(Boolean);
+ return (Array.isArray(document?.films)?document.films:[]).map(film=>canonicalFilmId(film.id)).filter(Boolean);
+}
+function peopleOf(film){
+ const out=[];
+ for(const [role,list] of [['director',film?.directors],['actor',film?.actors]]){
+  if(!Array.isArray(list))continue;
+  for(const person of list){
+   const id=canonicalPersonId(person?.id);
+   if(!id)continue;
+   out.push({id,role,name:typeof person?.name==='string'?person.name:null,original:typeof person?.original==='string'?person.original:null});
+  }
+ }
+ return out;
+}
+function planFromSealed({programme,watchlist,watchMembers,programmeMembers}){
+ const listed=idsOf(watchlist,watchMembers);
+ const programmeIds=idsOf(programme,programmeMembers);
+ const byFilm=new Map();
+ for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){
+  const id=canonicalFilmId(film?.id);
+  if(id&&!byFilm.has(id))byFilm.set(id,film);
+ }
+ const seen=new Set(),films=[];
+ for(const id of listed){
+  if(seen.has(id))continue;
+  seen.add(id);
+  films.push({id,facts:filmFactsOf(byFilm.get(id)||{id},true)});
+ }
+ const departed=[];
+ for(const id of programmeIds){
+  if(seen.has(id))continue;
+  seen.add(id);
+  departed.push(id);
+ }
+ const personRows=[],persons=[],credits=[],personSeen=new Set();
+ for(const item of films){
+  const people=peopleOf(byFilm.get(item.id)||{});
+  if(!people.length)continue;
+  const unitCredits=[];
+  for(const person of people){
+   if(!personSeen.has(person.id)){
+    personSeen.add(person.id);
+    const bare=person.id.slice('person:'.length);
+    personRows.push({id:person.id,roleId:bare.includes('/')?bare:person.role+'/'+bare,contractVersion:1});
+   }
+   unitCredits.push({personId:person.id,role:person.role});
+  }
+  if(unitCredits.length)credits.push({filmId:item.id,credits:unitCredits});
+ }
+ return {films,departed,persons,credits,personRows};
+}
+
 export async function acquireSealedSnapshot(env,programmeRunId){
  const before=await readPublished(env);
  if(!before?.ready||before.programmeRunId!==programmeRunId)return {ok:false,code:'producer_generation_superseded'};
@@ -42,16 +112,11 @@ export async function acquireSealedSnapshot(env,programmeRunId){
  const programme=await readDocument(env,programmeRunId,'programme');
  const watchlist=await readDocument(env,programmeRunId,'watchlist');
  const members=await readMembers(env,programmeRunId,'watchlist');
+ const programmeMembers=await readMembers(env,programmeRunId,'programme');
  const after=await readPublished(env);
  if(!after?.ready||after.programmeRunId!==programmeRunId||Number(after.generation)!==g0)return {ok:false,code:'producer_input_superseded'};
- const films=(Array.isArray(programme?.films)?programme.films:[]).map(film=>{
-  const raw=String(film?.id||'');
-  const id=raw.startsWith('film:')?raw:raw.startsWith('tmdb_')?'film:tmdb:'+raw.slice(5):raw?('film:'+raw):null;
-  if(!id)return null;
-  return {id,facts:{watchlist:true,film:{contractVersion:1,canonicalIdentity:film.canonicalIdentity||null,originalTitle:film.original||film.title||null}}};
- }).filter(Boolean);
- const departed=[];
- return {ok:true,generation:g0,programmeRunId,films,departed,persons:[],credits:[],personRows:[],label:snapshotLabel(programmeRunId,g0),members,watchlist};
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,programmeMembers});
+ return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 
 async function createInstance(env,id,params){
@@ -117,9 +182,13 @@ export async function reconcileProducerChain(env,{now=Date.now()}={}){
  }
 }
 
+function receiptsBlockCompletion(summary){
+ if(!summary||summary.skipped===true)return false;
+ return (summary.failed||[]).length>0||(summary.waiting||[]).length>0||(summary.needsReview||[]).length>0;
+}
 async function reconcileReceiptsStep(env,plan,fence){
- const fenced={...env,producerFence:fence};
- return reconcileEpgRun(fenced,{plan:plan?.personPlan,filmPlan:plan?.filmPlan,limit:10});
+ if(!plan?.personPlan||!plan?.filmPlan)throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
+ return reconcileEpgRun({...env,producerFence:fence},{plan:plan.personPlan,filmPlan:plan.filmPlan,limit:10});
 }
 
 export async function runProducerWorkflow(env,payload,step){
@@ -152,17 +221,41 @@ export async function runProducerWorkflow(env,payload,step){
    return {state:'stopped',code:snap.code};
   }
   fence.inputGeneration=snap.generation;
-  await reconcileReceiptsStep(scoped,null,fence).catch(()=>{});
-  const pass=await runEpgProducerPass(scoped,{
-   runId:P,sourceGeneration:snap.label,at:new Date().toISOString(),films:snap.films,departed:snap.departed,
+  const at=new Date().toISOString();
+  const passParams={
+   runId:snap.label,sourceGeneration:snap.label,at,films:snap.films,departed:snap.departed,
    persons:snap.persons,credits:snap.credits,personRows:snap.personRows,
    sliceSize:CHAIN_SLICE_SIZE,maxSlicesPerRun:CHAIN_MAX_SLICES,sliceDeadlineMs:CHAIN_SLICE_DEADLINE_MS,
    prerequisites:async()=>({}),generationOrder,inputProvenance:{complete:true,committed:true,sealed:true,publishedGeneration:snap.label},
-  });
+  };
+  const plan=await buildEpgPlan(scoped,passParams);
+  let receipts;
+  try{receipts=await reconcileReceiptsStep(scoped,plan,fence);}
+  catch(error){
+   const code=error?.code||'receipt_state_conflict';
+   await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:code}).catch(()=>{});
+   return {state:'stopped',code};
+  }
+  if(receiptsBlockCompletion(receipts)){
+   await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:'receipt_state_conflict'}).catch(()=>{});
+   return {state:'stopped',code:'receipt_state_conflict',receipts};
+  }
+  const pass=await runEpgProducerPass(scoped,passParams);
   totals.invocations++;totals.calls+=meter.calls;totals.statements+=meter.statements;
   totals.maxCalls=Math.max(totals.maxCalls,meter.calls);totals.maxStatements=Math.max(totals.maxStatements,meter.statements);
   if(pass.state==='complete'){
-   await reconcileReceiptsStep(scoped,null,fence).catch(()=>{});
+   let after;
+   try{after=await reconcileReceiptsStep(scoped,plan,fence);}
+   catch(error){
+    const code=error?.code||'receipt_state_conflict';
+    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:code}).catch(()=>{});
+    return {state:'stopped',code,pass};
+   }
+   if(receiptsBlockCompletion(after)){
+    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'receipt_state_conflict'}).catch(()=>{});
+    return {state:'stopped',code:'receipt_state_conflict',pass,receipts:after};
+   }
+   await completeChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString()});
    return {state:'complete',pass};
   }
   if(pass.state==='skipped')return {state:'dormant',pass};
