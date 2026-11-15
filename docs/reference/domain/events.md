@@ -9,7 +9,7 @@ The activity list reads objects under `events/items/`. The key is `events/items/
 | `discovery` | One **scheduled hourly firing** of the Discovery reconcile, for its UTC hour ([ADR 0111](../../adr/0111-discovery-hourly-reports.md)) | One compact report: the deltas of the hour (new films, observations resolved, reused, screened, TMDB calls), what is left in the queue and the state at the firing, even while a Workflow runs |
 | `ratings` | A Ratings run that ended (finished, error or closed as unknown) | One compact result: Diary rows checked, new facts, removals handled, honest error or interruption |
 | `started`, `unstarted` | An owner mark on one film | The film title |
-| `enrichment` | A prediction run's start, progress, stop or completion | Queue progress, separate from profile publication |
+| `enrichment` | A prediction run's start, progress, stop or completion. A new `batch_v2` run writes only the terminal completion or stop ([ADR 0146](../../adr/0146-batch-v2-single-terminal-prediction-event.md)) | Queue progress for the v5 runner; one packet result for a new batch v2 run |
 | `taste_profile` | One committed move of the taste-profile current pointer | Version transition, a short category and selective or global scope |
 
 ## Taste-profile publication
@@ -84,7 +84,9 @@ The events screen and the compact feed draw each non-empty group as an expandabl
 
 ## Delivery of prediction run events
 
-A prediction run writes two kinds of `enrichment` events at fixed points: `prediction-start-<runId>` when it starts and `enrichment-<runId>` when it stops for a systemic reason (quota, a provider or storage error, a lost or expired lease). Each has a **durable record** written before the journal item: `enrichment/start-events/<runId>.json` and `enrichment/stop-events/<runId>.json` hold `{event, delivered}`. The journal key is derived from the event's `id` and `at`, so writing the same event again rewrites the same item: a repeated or concurrent delivery cannot duplicate it.
+A **v5 / continuous** prediction run writes two kinds of `enrichment` events at fixed points: `prediction-start-<runId>` when it starts and `enrichment-<runId>` when it stops for a systemic reason (quota, a provider or storage error, a lost or expired lease). Progress Events (`enrichment-<runId>-progress-<n>`) may appear during a long run. Each start or stop has a **durable record** written before the journal item: `enrichment/start-events/<runId>.json` and `enrichment/stop-events/<runId>.json` hold `{event, delivered}`. The journal key is derived from the event's `id` and `at`, so writing the same event again rewrites the same item: a repeated or concurrent delivery cannot duplicate it.
+
+A **`protocol=batch_v2` run** does not write a start Event or a progress Event ([ADR 0146](../../adr/0146-batch-v2-single-terminal-prediction-event.md)). After the terminal commit (normal `complete`, including `manifest_spent`, or a systemic `partial`) it writes one `enrichment-<runId>` parked in `enrichment/stop-events/<runId>.json`. New objects carry `presentation: "batch_v2_terminal"`. The Events screen uses that marker for the packet titles («Пакет прогнозов обработан», «… с ошибками», «Пакет прогнозов прерван») and does not print the raw code `manifest_spent`. Objects stored without the marker keep their previous cards. A start that never creates a run (`already_running`, `catalog_held`, `manifest_too_large`, idle `noop`) writes no Event.
 
 **Owner.** Delivery belongs to the Predictions writer ([ADR 0107](../../adr/0107-get-head-read-side-effect-boundary.md), [AIR-416](https://trello.com/c/f7FX4Elk)); no read delivers anything.
 
@@ -106,12 +108,12 @@ The events screen (`/events`) shows the one feed of `GET /api/events` in its mai
 | «Программа» | `epg` |
 | «Находки» | `discovery` (one Discovery hourly report, separate from the prediction runs of «Прогнозы») |
 | «Оценки» | `ratings` |
-| «Прогнозы» | `enrichment` (start, progress, stop and completion of a prediction run) |
+| «Прогнозы» | `enrichment` (v5 start, progress, stop and completion; one terminal packet Event for a new batch v2 run) |
 | «Модель вкуса» | `taste_profile` (a profile publication, not a prediction run) |
 
 The choice is the `type` query parameter of the events URL, next to the `return` target of the programme page; the default needs no parameter, an unknown value means «Все события», and a deep link, a reload and Back or Forward restore the pressed button. Changing the choice replaces the current history entry.
 
 **Automatic pagination.** Choosing a type (and opening `/events` with one) loads the following pages by itself, in cursor order and one request at a time, until 10 loaded events match or the cursor is exhausted. A page with no match neither stops the search nor needs a click, and events that are already loaded are reused, so nothing is read twice. While it searches the page says «Ищем более давние события…» with the number of matches found among the loaded events, and the matches found so far are listed. When 10 are loaded the search stops and «Более давние события» stays for manual paging. «Все события» never searches: it shows the first page and the manual button.
 
-The search stops at once, and its request is aborted, when the type or the screen changes. It stops on an API error (the reason is shown with «Повторить»; there is no automatic retry, and the retry resumes from the cursor that failed) and on a cursor that repeats or does not advance (a visible message and the same «Повторить»). An empty result is reported only when the whole archive has been read: «Во всём доступном архиве событий этого типа нет.» Before that, a type with no loaded match says «Среди загруженных событий этого типа пока нет.» A count is always a count of the loaded events, not a total. Events are keyed by `id`, so a page that repeats an event does not list it twice. Each page is a normal read of `GET /api/events`, which may also recover an undelivered prediction stop event (see above): this is not a safe production probe.
+The search stops at once, and its request is aborted, when the type or the screen changes. It stops on an API error (the reason is shown with «Повторить»; there is no automatic retry, and the retry resumes from the cursor that failed) and on a cursor that repeats or does not advance (a visible message and the same «Повторить»). An empty result is reported only when the whole archive has been read: «Во всём доступном архиве событий этого типа нет.» Before that, a type with no loaded match says «Среди загруженных событий этого типа пока нет.» A count is always a count of the loaded events, not a total. Events are keyed by `id`, so a page that repeats an event does not list it twice. Each page is a normal read of `GET /api/events`, which writes nothing and does not deliver or recover prediction events (see above).
 
