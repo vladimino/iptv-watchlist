@@ -3,7 +3,7 @@
 **Status:** Accepted as DESIGN  
 **Original decision date:** 2026-11-15  
 **Recorded at:** 2026-11-15  
-**Approval source:** Product Owner chat acceptance 15 November 2026 («принимаю, это просто необходимое изменение»), recorded on [PR #659](https://github.com/vladimino/iptv-watchlist/pull/659#issuecomment-6899288485). Design only: not merge authorization, not a production operation. AIR-492 keeps ADR 0146 and must merge first.  
+**Approval source:** Product Owner chat acceptance 15 November 2026 («принимаю, это просто необходимое изменение»), recorded on [PR #659](https://github.com/vladimino/iptv-watchlist/pull/659#issuecomment-6899288485). Design only: not merge authorization, not a production operation. AIR-492 uses ADR 0148 and must merge first.  
 **Related work:** [AIR-493](https://trello.com/c/AKoSOprC)  
 **Supersedes:** None  
 **Superseded by:** None
@@ -41,7 +41,7 @@ Code rollback restores the previous global generation compare. It does not chang
 
 ## Evidence
 
-- **Original decision:** [AIR-493](https://trello.com/c/AKoSOprC); ADR number 0147 by owner comment on PR #659 (AIR-492 keeps 0146).
+- **Original decision:** [AIR-493](https://trello.com/c/AKoSOprC); ADR number 0147 by owner comment on PR #659 (AIR-492 uses 0148).
 - **Design acceptance:** [PR #659 comment recording the owner's chat approval](https://github.com/vladimino/iptv-watchlist/pull/659#issuecomment-6899288485) (the owner did not author that GitHub comment).
 - **Implementation:** the delivery PR of AIR-493
 - **Dated verification:** [offline RCA and tests](../evidence/discovery/air-493-user-read-fence-2026-11-15.md). Natural production 502 disappearance waits on post-merge deploy and the next Discovery Workflow, recorded on the card.
