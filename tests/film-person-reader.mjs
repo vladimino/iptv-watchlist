@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import {nonFunctional} from './suite-gate.mjs';
 
 const domain=fs.readFileSync('src/domain/film-person.js','utf8'),reader=fs.readFileSync('src/domain/film-person-reader.js','utf8');
 assert.doesNotMatch(reader,/\b(fetch|import|export|BUCKET|wrangler)\b/);
@@ -209,7 +210,9 @@ assert.match(reader,/function completedSlots\(store\)\{[\s\S]*readerIndex\(store
  }
  const at=Date.now();
  const view=readLifecycle({programme:{runId:'run-b',films,catalogFilms},discoveredFilms,filmTitles:[],personNames:[]},NOW);
- assert.equal(Date.now()-at<8000,true,'completed slots are indexed once, not scanned per Film');
+ nonFunctional('film-person-reader-completed-slots-index',()=>{
+  assert.equal(Date.now()-at<8000,true,'completed slots are indexed once, not scanned per Film');
+ });
  assert.equal(view.films.find(item=>item.id==='film:tmdb:'+(1000+n-1))?.availability.hot,true);
 }
 

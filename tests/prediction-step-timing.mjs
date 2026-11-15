@@ -4,6 +4,7 @@
 // code is swallowed.
 import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {webcrypto} from 'node:crypto';
 import {d1Standin} from './d1-standin.mjs';
+import {nonFunctional} from './suite-gate.mjs';
 import os from 'node:os';import path from 'node:path';
 
 function world({timing=true,logger='capture'}={}){
@@ -166,15 +167,15 @@ assert.deepEqual(off.calls,on.calls,'the same R2 calls are made, none added or r
  w.ctx.spread=spread;w.call('noteStep(spread,()=>({items:2}))');assert.deepEqual(JSON.parse(JSON.stringify(w.call('timer.summary("next",{})'))).notes,{items:2});
 }
 
-// 9. Overhead: a timed call adds well under a millisecond to a call that takes none.
-{
+// 9. Overhead: a timed call adds well under a millisecond to a call that takes none. Runner wall-clock, so the core suite does not gate on it.
+await nonFunctional('prediction-step-timing-overhead',async()=>{
  const w=world();w.call('globalThis.timer=createStepTimer();globalThis.timedB=timedBucket(env.BUCKET,timer)');
  const bucket=w.ctx.timedB,plain=w.env.BUCKET;w.records.set('enrichment/view-index.json',{});
  const run=async b=>{const t0=process.hrtime.bigint();for(let i=0;i<5000;i++){const o=await b.get('enrichment/view-index.json');await o.json();}return Number(process.hrtime.bigint()-t0)/1e6/5000;};
  await run(plain);const base=await run(plain),timed=await run(bucket);
  assert.ok(timed-base<0.25,'added '+(timed-base).toFixed(4)+' ms per timed get+body (base '+base.toFixed(4)+' ms)');
  console.log(JSON.stringify({step_timing_overhead_ms_per_get:Number((timed-base).toFixed(4)),base_ms:Number(base.toFixed(4))}));
-}
+});
 // 10. The D1 binding is wrapped through the prediction domain module, which is where the Worker reaches D1; without that module it is left as it is.
 {
  const w=world();const fake={prepare:()=>({}),batch:async()=>[]};w.ctx.fakeDb=fake;

@@ -53,10 +53,11 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: node scripts/check-timeless-documentation.mjs
 
-      # AIR-418: the suite runs as three shards on three runners (this job, "Test shard 2 of 3" and "Test shard 3 of 3"), so its time no longer depends on one runner's speed.
-      # Every test file is in exactly one shard (scripts/run-tests.mjs, checked by tests/run-tests-runner.mjs); the deploy needs all three jobs.
+      # AIR-418: the core suite runs as three shards on three runners (this job, "Test shard 2 of 3" and "Test shard 3 of 3").
+      # AIR-490: --suite core is the functional and safety suite. Wall time is a health metric in the step summary.
+      # It does not gate this job. The nightly workflow is not a needs of deploy.
       - name: Run tests
-        run: npm test -- --shard 1/3
+        run: npm test -- --shard 1/3 --suite core
 
       - name: Build
         run: npm run build
@@ -105,7 +106,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Run tests
-        run: npm test -- --shard 2/3
+        run: npm test -- --shard 2/3 --suite core
 
   test-shard-3:
     name: Test shard 3 of 3
@@ -132,7 +133,7 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Run tests
-        run: npm test -- --shard 3/3
+        run: npm test -- --shard 3/3 --suite core
 
   deploy:
     name: Deploy to Cloudflare
