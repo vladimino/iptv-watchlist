@@ -191,7 +191,9 @@ async function d1EnrichmentStore(env,timer=D1_ENRICHMENT_NO_TIMER){
  let runId,watchlist,programme;
  if(published){
   if(!published.programmeRunId||!d1EnrichmentFilmList(published.programme)||!d1EnrichmentFilmList(published.watchlist))throw new D1EnrichmentInputError('generation_unpublished','published_epg');
-  runId=published.programmeRunId;watchlist=published.watchlist;programme=published.programme;
+  runId=published.programmeRunId;watchlist=published.watchlist;
+  // A completed pin without assigned rows is the sealed document (no `catalogFilms`). Stamp an empty list so Film/Person does not fall back to body shows.
+  programme={...published.programme,catalogFilms:Array.isArray(published.programme.catalogFilms)?published.programme.catalogFilms:[]};
  }else{
   const pointer=await d1EnrichmentRead(env,etags,EPG_GENERATION_KEY,d1EnrichmentRecord);
   if(pointer.phase!=='published'||typeof pointer.programmeRunId!=='string'||!pointer.programmeRunId)throw new D1EnrichmentInputError('generation_unpublished',EPG_GENERATION_KEY);

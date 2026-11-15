@@ -191,6 +191,12 @@ assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'legacy',original:'Legac
 assert.equal(hotOf({programme:{films:[{id:'pre',original:'Pre',title:'Pre',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'pre'),true);
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'stale',original:'Stale',title:'Stale',shows:[windowShow],showsProgrammeRunId:'run-a',epgLastAiring:NOW}]},filmTitles:[],personNames:[]},'stale'),false);
 assert.equal(hotOf({programme:{runId:'run-b',films:[{id:'current',original:'Current',title:'Current',shows:[windowShow],showsProgrammeRunId:'run-b'}]},filmTitles:[],personNames:[]},'current'),true);
+function catalogHot(store,filmId){return readLifecycle({filmTitles:[],personNames:[],...store},NOW).films.find(item=>item.id===filmId)?.availability.hot;}
+assert.equal(catalogHot({programme:{runId:'run-b',films:[],catalogFilms:[{id:'tmdb_9',tmdbId:'9',shows:[windowShow]}]},discoveredFilms:{tmdb_9:{id:'tmdb_9',tmdbId:'9',original:'Catalog',title:'Catalog',discoveredAt:FRESH,shows:[{start:NOW-DAY}]}}},'film:tmdb:9'),true,'completed catalogFilms are the show source');
+assert.equal(catalogHot({programme:{runId:'run-b',films:[{id:'28nq',tmdbId:'9',original:'Watchlist',title:'Watchlist'}],catalogFilms:[{id:'tmdb_9',tmdbId:'9',shows:[windowShow]}]}},'film:28nq'),true,'a watchlist Film matches catalogFilms by TMDB id');
+assert.equal(catalogHot({programme:{runId:'run-b',films:[{id:'28nq',tmdbId:'9',original:'Empty',title:'Empty',shows:[]}],catalogFilms:[{id:'tmdb_9',tmdbId:'9',shows:[windowShow]}]}},'film:28nq'),false,'an explicit empty member show list is not replaced by catalogFilms');
+assert.equal(catalogHot({programme:{runId:'run-b',films:[],catalogFilms:[]},discoveredFilms:{tmdb_9:{id:'tmdb_9',tmdbId:'9',original:'Stale',title:'Stale',discoveredAt:FRESH,shows:[windowShow],epgLastAiring:NOW}}},'film:tmdb:9'),false,'completed programme does not fall back to body shows');
+assert.equal(catalogHot({programme:{runId:'run-b',films:[]},discoveredFilms:{tmdb_8:{id:'tmdb_8',tmdbId:'8',original:'R2',title:'R2',discoveredAt:FRESH,shows:[windowShow]}}},'film:tmdb:8'),true,'R2 sealed programme still uses the Film body');
 
 // A verdict of the shared compatibility evaluator, when the store supplies one, replaces the strict comparison in both the
 // lifecycle dimension and the legacy status, and a carried prediction keeps its own profile provenance.
