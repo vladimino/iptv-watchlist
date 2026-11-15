@@ -52,8 +52,32 @@ Revalidation totals on that chunk: `observations=0`, `revalidated=0`, `revalidat
 
 Does not accept AIR-480 runtime and does not unblock AIR-374.
 
+The 14:01 Europe/Madrid rows above stay a point-in-time observation. Same series then failed again; see the addendum.
+
 ## Limits
 
-- IPTV MCP token refresh failed at capture; state is D1 + one Worker log event.
+- IPTV MCP token refresh failed at the 14:01 capture; that state is D1 + one Worker log event.
 - No film ids copied out.
-- Series 83 was still `running` after the first chunk; later chunks of this hour are not in this file.
+- Series 83 was still `running` after the first chunk at 14:01; the second chunk of that hour is in the addendum, not in the tables above.
+
+## Addendum: recurrent `discovery_conflict` on series 83 (14:06–14:12 Europe/Madrid)
+
+Independent review of HEAD `b984c93d` asked for this extension after a live read at 14:08 Europe/Madrid. Executor D1 `SELECT` at **14:12 Europe/Madrid** (`2026-11-15T13:12Z`) confirms the same series, no writer.
+
+| Field | Value |
+| --- | --- |
+| instance | still `discovery_0e4a5f908f504c6db74980c7565194a2_83`, series 83 |
+| `phase` / `reason` | `waiting` / `discovery_conflict` |
+| `waitingUntil` | `2026-11-15T14:00:00.000Z` (15:00 Europe/Madrid) |
+| `chunksThisInstance` | 2 |
+| `updatedAt` | `2026-11-15T13:06:23.900Z` |
+| `lastProgress` | `stage=error`, `checked=0`, `error=unknown` |
+| Discovery authority generation | 129518 |
+
+Overwritten `discovery_status` (hop `530f9609-8828-4fa8-8a00-34d1f03b492f`): `stage=partial`, `startedAt=2026-11-15T13:05:50.262Z`, `at=2026-11-15T13:05:55.347Z`, `finishedAt` absent, `checked=0`, no `assignment` object. Independent review also recorded last checkpoint `2026-11-15T13:06:21.497Z` and operational `remainingChunks=4` (invocation budget, not observation backlog).
+
+`basis='discovery'` on the same run: **15 047** rows / **5 634** films (was 15 046 / 5 633 at 14:01). A second address-level write happened before the hard wait.
+
+Worker log needles `discovery_workflow_step_failed` and `discovery_conflict` for 13:04–13:08:30 UTC were **zero** in the review’s read. Absence of those events does not prove no failure. The failing statement or constraint is **not** established. No RCA is claimed.
+
+**Amended verdict:** productive retry on series 83, then a **recurrent hard `discovery_conflict`**. AIR-480 R2 remains INCOMPLETE. Next natural catch-up is 15:00 Europe/Madrid, not started from this session.
