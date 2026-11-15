@@ -1,4 +1,9 @@
-const json=(data,status=200)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
+const json=(data,status=200,extra=null)=>new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store',...(extra&&typeof extra==='object'?extra:{})}});
+const DISCOVERY_USER_READ_CODES=['discovery_fence','discovery_incomplete','discovery_unavailable','discovery_not_authoritative','discovery_bounded'];
+function discoveryUserReadRefusal(error){
+ if(!DISCOVERY_USER_READ_CODES.includes(error?.code))return null;
+ return json({error:'The catalog is not readable right now',code:error.code},503,{'Retry-After':'1'});
+}
 function addGroup(left,right,displayed){const group={compared:(left?.compared||0)+(right?.compared||0),mismatched:(left?.mismatched||0)+(right?.mismatched||0)};if(displayed)group.displayed=(left?.displayed||0)+(right?.displayed||0);return group;}
 function recordLifecycle(run,path,mode,count){if(!run||(mode!=='on'&&mode!=='shadow')||!count?.films)return;const prior=run.lifecycleLocalization?.[path];run.lifecycleLocalization={...(run.lifecycleLocalization||{}),[path]:{mode,films:addGroup(prior?.films,count.films,true),people:addGroup(prior?.people,count.people,true),cache:addGroup(prior?.cache,count.cache,false)}};}
 // `options.item`, for a discovery ledger stored in R2, parses the `items` array one element at a time and keeps what
@@ -553,7 +558,14 @@ async function catalogAvailableRoute(env){
  const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  const generationCopy=name=>catalogGenerationCopy(env,publication,pinnedRunId,name);
  const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
- const [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+ let programme,catalog,watchlist,index,profile,metadata,titleExclusion;
+ try{
+  [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+ }catch(error){
+  const refused=discoveryUserReadRefusal(error);
+  if(refused)return refused;
+  throw error;
+ }
  if(pinnedRunId&&(!programme||programme.runId!==pinnedRunId))return json({error:'Programme generation is not in place'},409);
  if(pinnedRunId&&!catalog)return json({error:'Catalog generation copy is not in place'},409);
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);

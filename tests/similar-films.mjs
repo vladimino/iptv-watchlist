@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 // and the catalog answer Finds already cached. No second catalog read.
 const now=Date.UTC(2026,5,15,10,0,0),hour=3600000;
 const html=fs.readFileSync('public/index.html','utf8'),css=fs.readFileSync('public/styles.css','utf8'),app=fs.readFileSync('public/app.js','utf8');
-assert.equal((app.match(/fetch\('\/api\/catalog\/available'\)/g)||[]).length,1,'similar films do not add a catalog read');
+assert.equal((app.match(/fetchUserRead\('\/api\/catalog\/available'\)/g)||[]).length,1,'similar films do not add a catalog read');
 const similarSource=app.slice(app.indexOf('function similarVerifiedIdentity'),app.indexOf('function findsLabels'));
 assert.doesNotMatch(similarSource,/fetch\(|XMLHttpRequest|Worker\(/,'ranking stays inside the films and catalog answer already in memory');
 assert.match(html,/id="film-similar"/);

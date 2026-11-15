@@ -4,7 +4,7 @@ let WINDOW_START=null,WINDOW_END=null;
 let MAX_YEAR = Number(new Intl.DateTimeFormat('en',{timeZone:'Europe/Madrid',year:'numeric'}).format(new Date()));
 let report = null;
 let enrichment={profile:null,films:{}};
-let ratingsLoaded=false;
+let ratingsLoaded=false,enrichmentUnavailable=false;
 const MECHANIC_LABELS={heist:'Ограбление',scam:'Афера',investigation:'Расследование',mystery:'Загадка',puzzle:'Головоломка',chase_escape:'Погоня / побег',rescue:'Спасение',escort_protection:'Защита / сопровождение',survival:'Выживание',siege:'Осада',ticking_clock:'Гонка со временем',expedition_discovery:'Экспедиция / исследование',plan_counterplan:'План / контрплан',multi_party_conflict:'Несколько сторон'};
 const normalizeMood=value=>typeof value==='string'?value.normalize('NFKC').toLocaleLowerCase('ru').replace(/\s+/g,' ').trim():'';
 const MOOD_LABELS={tense:'Напряжённый',dark:'Мрачный',light:'Лёгкий',adventurous:'Приключенческий',dynamic:'Динамичный',epic:'Масштабный',violent:'Жёсткий',funny:'Комедийный',black_humor:'Чёрный юмор',satirical:'Сатирический',absurd:'Абсурдный',romantic:'Романтический',warm:'Тёплый',touching:'Трогательный',inspiring:'Вдохновляющий',melancholic:'Меланхоличный',tragic:'Трагический',contemplative:'Созерцательный',surreal:'Сюрреалистический',eerie:'Мистический / пугающий',paranoid:'Параноидальный',noir:'Нуарный',military:'Военная тема',historical:'Историческая тема',family:'Семья и отношения',friendship:'Дружба и команда',political:'Политика и общество',revenge:'Месть и возмездие'};
@@ -1753,7 +1753,8 @@ function renderFinds(now=nowMs()){
  const person=context.people,blocked=!context.valid||context.startedOnly||context.viewing==='rewatch';
  const shown=!!(person?.active&&findsFresh()&&!blocked);
  const pending=shown&&person.pending;
- const status=!shown?'':person.reason==='checking'?'<p class="finds-person-status" role="status">Проверяем фильмы этого человека…</p>':person.reason==='error'?'<p class="finds-person-status" role="alert">Не удалось проверить фильмы этого человека. Список watchlist не изменён.</p>':person.reason==='refused'?'<p class="finds-person-status" role="status">Связь этого человека с каталогом не подтверждена. Список watchlist не изменён.</p>':person.ready&&list.length===0?'<p class="finds-person-status" role="status">В «Находках» нет подходящих фильмов этого человека. Список watchlist не изменён.</p>':'';
+ const catalogUnavailable=findsSource.error&&!findsSource.ready;
+ const status=catalogUnavailable?'<p class="finds-person-status" role="alert">Каталог сейчас недоступен. Это не пустой список.</p>':!shown?'':person.reason==='checking'?'<p class="finds-person-status" role="status">Проверяем фильмы этого человека…</p>':person.reason==='error'?'<p class="finds-person-status" role="alert">Не удалось проверить фильмы этого человека. Список watchlist не изменён.</p>':person.reason==='refused'?'<p class="finds-person-status" role="status">Связь этого человека с каталогом не подтверждена. Список watchlist не изменён.</p>':person.ready&&list.length===0?'<p class="finds-person-status" role="status">В «Находках» нет подходящих фильмов этого человека. Список watchlist не изменён.</p>':'';
  // A re-render replaces the buttons; keyboard focus on a mark or undo button is put back on its replacement.
  const active=document.activeElement,refocus=active?.dataset?.findsWatched?`[data-finds-watched="${active.dataset.findsWatched}"]`:active?.dataset?.findsUndo?`[data-finds-undo="${active.dataset.findsUndo}"]`:null;
  const notice=$('#finds-notice');if(notice){const html=findsNoticeHTML();if(notice.innerHTML!==html)notice.innerHTML=html;notice.hidden=!findsNotice;}
@@ -1767,11 +1768,19 @@ function renderFinds(now=nowMs()){
  renderSimilar(now);
  return list;
 }
+async function fetchUserRead(url){
+ let response=await fetch(url);
+ const retry=response.status===503&&typeof response.headers?.get==='function'?response.headers.get('Retry-After'):null;
+ if(retry==null)return response;
+ const parsed=Number(retry),ms=Math.min(2000,Math.max(0,Number.isFinite(parsed)?parsed*1000:400));
+ await new Promise(resolve=>setTimeout(resolve,ms));
+ return fetch(url);
+}
 async function loadCatalog(){
  if(findsLoading)return 'busy';
  findsLoading=true;
  try{
-  const response=await fetch('/api/catalog/available');
+  const response=await fetchUserRead('/api/catalog/available');
   if(!response.ok)throw new Error();
   const data=await response.json();
   if(!data||!Array.isArray(data.films))throw new Error();
@@ -1809,7 +1818,7 @@ function render(){
   resultsView={visible:visible.length,valid};
   renderFinds();
   armSoonTick();
-  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
+  const emptyCopy=$('#empty p');if(emptyCopy)emptyCopy.textContent=enrichmentUnavailable&&!ratingsLoaded?'Прогнозы сейчас недоступны. Это не пустая коллекция.':blackZone()&&state.lastChanceOnly?'Последний шанс сейчас не к чему применить: доступных показов нет.':'Измени название, выбери другой жанр или расширь диапазон лет.';
   updateProgrammeStatus();
   const shows=visible.reduce((n,f)=>n+periodShows(f).length,0);
   $('#result-count').textContent=valid?`${visible.length} ${filmWord(visible.length)} · ${shows} ${showWord(shows)}`:!validYear?'Проверь диапазон лет':'Проверь длительность';
@@ -2213,7 +2222,7 @@ async function init(){
  startLiveRefresh();
 }
 
-async function loadEnrichment(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetch('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;updateFacetOptions();renderPreservingScroll();return true;}catch{if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
+async function loadEnrichment(options={}){if(enrichmentLoading)return 'busy';enrichmentLoading=true;try{const response=await fetchUserRead('/api/enrichment/view');if(!response.ok)throw new Error();const data=await response.json();if(!data||typeof data.films!=='object')throw new Error();const key=JSON.stringify(data);if(key===enrichmentKey)return true;enrichmentKey=key;enrichment=data;ratingsLoaded=true;enrichmentUnavailable=false;updateFacetOptions();renderPreservingScroll();return true;}catch{enrichmentUnavailable=true;if(!ratingsLoaded&&!options.quiet)render();return false;}finally{enrichmentLoading=false;}}
  const FOOTER_RUN_STATUS={idle:'не запускался',running:'выполняется',completed:'завершён',blocked:'приостановлен',interrupted:'прерван'};
 const INTEGRATION_STATE={healthy:'работает',degraded:'требует внимания',failed:'сбой',stale:'давний успех',unknown:'нет данных',off:'выключено',running:'выполняется',waiting:'ожидает'};
 const INTEGRATION_CODE={ok:'',stale:'последний успех давно',no_data:'',running:'',ratings_blocked:'список оценок временно недоступен',ratings_incomplete:'список оценок прочитан не полностью',ratings_rate_limit:'слишком много запросов',ratings_failed:'оценки прочитать не удалось',ratings_pending:'чтение оценок не завершилось, причина неизвестна',watchlist_failed:'watchlist прочитать не удалось',watchlist_stuck:'синхронизация не завершилась',epg_http:'загрузка EPG не удалась',epg_window:'EPG не покрывает текущее окно',epg_parse:'разбор EPG не удался',epg_failed:'обновление EPG не завершилось',resolver_waiting:'',resolver_backoff:'распознавание подождёт: слишком много запросов',resolver_unconfigured:'распознавание не настроено',resolver_failed:'распознавание остановилось',resolver_no_recent_progress:'нет подтверждённого выполнения · вероятна внешняя блокировка; проверь Usage',prediction_interrupted:'запуск прерван',prediction_blocked:'прогнозы приостановлены',prediction_partial:'часть прогнозов не сохранилась',metadata_attention:'метаданные и локализация требуют внимания'};
