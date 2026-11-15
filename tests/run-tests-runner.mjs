@@ -265,7 +265,7 @@ fs.unlinkSync(me);`;
       const holders = [1, 2].map(index => planTests({directory: trap, serialOnly: new Set(['s1.mjs', 's2.mjs']), weights, shard: {index, count: 2}}).serial);
       assert.ok(holders.every(list => list.length === 1), `each shard of 2 carries exactly one serial-only file: ${JSON.stringify(holders)}`);
     }
-    const whole = planTests({directory: 'tests'});
+    const whole = planTests({directory: 'tests', suite: 'all'});
     const weightOf = file => WEIGHTS[file] ?? DEFAULT_WEIGHT;
     const isMutation = file => /-mutation\.mjs$/.test(file);
     const lightest = Math.min(...Object.values(WEIGHTS));
@@ -275,7 +275,7 @@ fs.unlinkSync(me);`;
     const heaviestMutation = Object.entries(WEIGHTS).filter(entry => isMutation(entry[0])).sort((a, b) => b[1] - a[1]).slice(0, 2).map(entry => entry[0]);
     // The contract holds for the two shards the suite used first and for the three it runs in CI now (a third shard gives each runner real margin under the 180 s gate).
     for (const count of [2, 3]) {
-      const parts = Array.from({length: count}, (_, index) => planTests({directory: 'tests', shard: {index: index + 1, count}}));
+      const parts = Array.from({length: count}, (_, index) => planTests({directory: 'tests', suite: 'all', shard: {index: index + 1, count}}));
       const filesOf = part => [...part.parallel, ...part.serial];
       assert.deepEqual(parts.flatMap(filesOf).sort(), [...whole.parallel, ...whole.serial].sort(), `the ${count} shards of the real suite are the whole suite, once`);
       // AIR-374: the shards are balanced by WEIGHTS (greedy, heaviest first), not by file count: their weights differ by less than the lightest listed file, and the two heaviest files are apart
@@ -304,7 +304,7 @@ fs.unlinkSync(me);`;
       const mutationWeight = parts.map(part => filesOf(part).filter(isMutation).reduce((sum, file) => sum + weightOf(file), 0));
       assert.ok(Math.max(...mutationWeight) <= 1.15 * (mutationWeight.reduce((a, b) => a + b, 0) / count), `no shard of ${count} collects the mutation files: ${mutationWeight.join(' vs ')}`);
       assert.notEqual(parts.findIndex(part => part.parallel.includes(heaviestMutation[0])), parts.findIndex(part => part.parallel.includes(heaviestMutation[1])), `the two heaviest mutation files are in different shards of ${count}`);
-      assert.deepEqual(planTests({directory: 'tests', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
+      assert.deepEqual(planTests({directory: 'tests', suite: 'all', shard: {index: count, count}}), parts[count - 1], 'the split does not depend on who asks');
     }
     assert.deepEqual(whole.parallel.slice(0, 3), Object.entries(WEIGHTS).sort((a, b) => b[1] - a[1]).slice(0, 3).map(entry => entry[0]), 'the whole plan starts with the heaviest files');
     assert.deepEqual(parseShard('2/3'), {index: 2, count: 3});
