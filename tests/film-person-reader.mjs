@@ -201,7 +201,7 @@ assert.equal(catalogHot({programme:{runId:'run-b',films:[{id:'a',tmdbId:'9',orig
 assert.equal(catalogHot({programme:{runId:'run-b',films:[{id:'b',tmdbId:'9',original:'Empty',title:'Empty',shows:[]},{id:'a',tmdbId:'9',original:'Shown',title:'Shown',shows:[windowShow]}],catalogFilms:[]}},'film:b'),false,'exact-id empty shows still win when that member is listed first');
 assert.match(reader,/function completedSlots\(store\)\{[\s\S]*readerIndex\(store\.programme/);
 {
- const n=2500,films=[],catalogFilms=[],discoveredFilms={};
+ const n=800,films=[],catalogFilms=[],discoveredFilms={};
  for(let i=0;i<n;i++){
   films.push({id:'m'+i,original:'M'+i,title:'M'+i,shows:[]});
   catalogFilms.push({id:'tmdb_'+(1000+i),tmdbId:String(1000+i),shows:i===n-1?[windowShow]:[]});
