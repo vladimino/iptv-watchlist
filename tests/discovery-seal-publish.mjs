@@ -112,7 +112,7 @@ async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_
  assert.equal(count(file,"source_key='active' AND residence='active' AND programme_run_id='run-new'"),0);
 }
 
-// 3. The catalog is brought up to date by its difference, in bounded steps; films that left are superseded.
+// 3. After M5 a leftover layout-1 catalog step under a D1 pin writes no admissions: live D1 rows stay as they were.
 {
  const file=migrate();await committedOld(file);
  const bkt=bucket();
@@ -120,31 +120,15 @@ async function takeLease(env,file){sql(file,'UPDATE discovery_lease SET expires_
  const seed=stepEnv(file,bkt);const l0=await takeLease(seed,file);
  const before={};for(let id=1;id<=60;id++)before['tmdb_'+id]=film(id,'Было '+id);
  await Authority.upsertAdmissions(seed,before,{lease:l0});await Authority.releaseLease(seed,l0);
- // The new catalog: films 1..60 retitled (all differ), 61..80 added, none removed except 1..5.
  const next={};for(let id=6;id<=80;id++)next['tmdb_'+id]=film(id,'Стало '+id);
  await bkt.put('epg/seal/run-new/payload.json',JSON.stringify({runId:'run-new',catalog:next,expectedProgrammeRunId:null}));
  const run={runId:'run-new',stage:'seal',seal:{jobId:'job-1',phase:'catalog'}};
- let rounds=0,result;
- do{
-  const env=stepEnv(file,bkt);const lease=await takeLease(env,file);
-  result=await call('sealCatalogStep')(env,run,lease,Date.now()-1);rounds++;
- }while(!result.done&&rounds<30);
- if(process.env.DEBUG_SEAL)console.log(JSON.stringify(result),rounds,JSON.stringify(sql(file,"SELECT state, COUNT(*) n FROM discovery_admission GROUP BY state")));
- assert.ok(result.done);
- assert.ok(rounds>=3,'bounded steps: '+rounds);
- // The merge keeps films the catalog already knew, so 1..5 stay as they were and 6..80 are the new ones.
- const rows=sql(file,"SELECT film_id, state, payload_json FROM discovery_admission ORDER BY film_id");
- assert.equal(rows.filter(r=>r.state==='current').length,80);
- for(const r of rows){const id=Number(r.film_id.slice(5));assert.equal(JSON.parse(r.payload_json).title,(id<=5?'Было ':'Стало ')+id);}
- // Nothing left to do on a repeat.
  const env=stepEnv(file,bkt);const lease=await takeLease(env,file);
- const again=await call('sealCatalogStep')(env,run,lease,Date.now()+60000);
- if(process.env.DEBUG_SEAL){const probe=stepEnv(file,bkt);const pay=JSON.parse(await (await bkt.get('epg/seal/run-new/payload.json')).text());const nx=call('mergeCatalogIdentity')(pay.catalog,await call('loadJSON')(probe,'epg/discovered-films.json'),'run-new');const cur=await call('loadJSON')(probe,'epg/discovered-films.json');for(const id of Object.keys(nx))if(JSON.stringify(nx[id])!==JSON.stringify(cur[id]))console.log('DIFF',id,JSON.stringify(nx[id]),JSON.stringify(cur[id]));}
- assert.equal(again.written,0);assert.ok(again.done);
- // A film that does leave is superseded, not deleted.
- const gone=stepEnv(file,bkt);const lg=await takeLease(gone,file);
- await Authority.supersedeAdmissions(gone,['tmdb_1','tmdb_2'],{lease:lg});
- assert.deepEqual(sql(file,"SELECT film_id FROM discovery_admission WHERE state='superseded' ORDER BY film_id").map(r=>r.film_id),['tmdb_1','tmdb_2']);
+ const result=await call('sealCatalogStep')(env,run,lease,Date.now()+60000);
+ assert.ok(result.done);assert.equal(result.written,0);
+ const rows=sql(file,"SELECT film_id, state, json_extract(payload_json,'$.title') AS title FROM discovery_admission WHERE state='current' ORDER BY film_id");
+ assert.equal(rows.length,60);
+ assert.ok(rows.every(r=>r.title.startsWith('Было ')));
 }
 
 // 4. The whole staged publication: the commit stages and returns at once, and bounded steps seal, update the catalog and
@@ -183,7 +167,9 @@ for(const mode of ['document','emit']){
  assert.equal(sql(file,'SELECT state FROM discovery_transfer')[0].state,'committed');
  assert.equal(count(file,"residence='active' AND programme_run_id='run-old'"),120);
  assert.equal(events.length,0,'nothing is published by the commit');
- assert.ok(await bkt.head('epg/seal/run-new/payload.json'));
+ assert.ok(await bkt.head('epg/seal/run-new/publication.json'));
+ assert.equal(await bkt.head('epg/seal/run-new/payload.json'),null);
+ assert.equal(run.seal.layout,2);assert.ok(run.seal.publicationEtag);assert.ok(run.seal.etag);assert.notEqual(run.seal.publicationEtag,run.seal.etag);
  // Bounded steps, the same step handler a client calls, until the run is complete.
  // The first call goes through the step handler a client reaches (`epg_sync_step`), with the run read from storage.
  {
@@ -204,8 +190,8 @@ for(const mode of ['document','emit']){
  do{
   steps++;phases.push(run.seal?.phase);
   const env={DB:d1Standin(file),BUCKET:bkt,discoveryLease:null};
-  if(run.seal?.phase==='catalog'&&!cancelledCatalog){
-   // AIR-362: a catalog step cancelled by the client keeps its 90 s lease. Calls before expiry wait for the holder's real
+  if(run.seal?.phase==='ledger'&&run.seal.cursor>0&&!cancelledCatalog){
+   // AIR-362: a seal step cancelled by the client keeps its 90 s lease. Calls before expiry wait for the holder's real
    // expiry and move nothing; the first call after it takes the lease by CAS and the run still ends complete.
    cancelledCatalog=true;
    const expiresAt=Date.now()+90000;
@@ -229,7 +215,8 @@ for(const mode of ['document','emit']){
  }while(result.stage!=='complete'&&steps<40);
  assert.equal(result.stage,'complete');
  assert.ok(steps>=3&&steps<40,'steps: '+steps);
- // AIR-353: the publication is three separate steps after the catalog, each answering `continue` until the last.
+ // AIR-353 / ADR 0145: after the ledger, three publication steps, each answering `continue` until the last. Layout 2 has no catalog phase.
+ assert.ok(!phases.includes('catalog'),'layout 2 never enters catalog: '+phases.join(','));
  assert.deepEqual(phases.slice(-3),['publish','finalize','queue'],'phases: '+phases.join(','));
  assert.equal(phases.filter(phase=>phase==='publish').length,1);
  const order=events.map(e=>e[0]);
@@ -245,8 +232,9 @@ for(const mode of ['document','emit']){
  assert.ok(events.findIndex(e=>e[0]==='publish')<events.findIndex(e=>e[0]==='queue'));
  assert.equal(run.stage,'complete');assert.equal(run.seal,undefined);
  assert.equal(count(file,"source_key='active' AND residence='active' AND programme_run_id='run-new'"),NEW.length);
- assert.equal(Object.keys((await Authority.routeRead({DB:d1Standin(file),BUCKET:bkt,discoveryLease:null},'epg/discovered-films.json')).value).length,45);
- assert.equal(await bkt.head('epg/seal/run-new/payload.json'),null,'the staging payload is removed');
+ assert.equal(Object.keys((await Authority.routeRead({DB:d1Standin(file),BUCKET:bkt,discoveryLease:null},'epg/discovered-films.json')).value).length,0,'layout 2 writes no catalog admissions');
+ assert.equal(await bkt.head('epg/seal/run-new/publication.json'),null,'the staged publication is removed');
+ assert.equal(await bkt.head('epg/seal/run-new/payload.json'),null,'a leftover payload is also removed');
 }
 
 // AIR-353: each publication step after the pointer is idempotent and a failing step leaves the phase where it was, so
@@ -506,4 +494,50 @@ for(const mode of ['document','emit']){
  assert.equal(payload.catalog,undefined,'the catalog is dropped when the payload is parsed');
  assert.deepEqual(payload.report,{films:[]});assert.equal(payload.fence,'g');
 }
+
+// ADR 0145 layout 2: publication etag is independent of the ledger etag; missing or mismatched publication fails closed with no writes.
+{
+ const bkt=bucket();
+ const report={runId:'run-d',updatedAt:'2026-11-15T10:00:00.000Z',films:[],watchlistCount:0,stats:{}};
+ const body=JSON.stringify({runId:'run-d',report,watchlist:{films:[]},uncertain:[],fence:'f0',expectedProgrammeRunId:'run-old'});
+ const stored=await bkt.put('epg/seal/run-d/publication.json',body);
+ const ledgerEtag='ledger-etag';
+ assert.notEqual(stored.etag,ledgerEtag);
+ let writes=0;
+ const counting={
+  async put(key,value,...rest){writes++;return bkt.put(key,value,...rest);},
+  async get(...a){return bkt.get(...a);},
+  async head(...a){return bkt.head(...a);},
+  async delete(...a){return bkt.delete(...a);},
+ };
+ const env={BUCKET:counting};
+ const seal=(over={})=>({jobId:'j',phase:'publish',layout:2,publicationKey:'epg/seal/run-d/publication.json',publicationEtag:stored.etag,sourceKey:'epg/generations/run-d/discovery-latest.json',etag:ledgerEtag,...over});
+ context.PublishedEpg={async currentGeneration(){writes++;return {programmeRunId:'run-old',phase:'published',fence:'f0'};},async publishGeneration(){writes++;return {ok:true};},async writeMirrors(){return true;}};
+ context.copyEpgGeneration=async()=>{writes++;};
+ context.queueCommittedDiscovery=async()=>{writes++;};
+ writes=0;
+ await assert.rejects(()=>context.sealPublishStep(env,{runId:'run-d',stage:'seal',seal:seal({publicationEtag:'wrong'})},null),/changed during the seal/);
+ assert.equal(writes,0,'a mismatched publication etag writes nothing');
+ writes=0;
+ await assert.rejects(()=>context.sealPublishStep({BUCKET:{async get(){return null;}}},{runId:'run-d',stage:'seal',seal:seal()},null),/Seal publication is missing/);
+ assert.equal(writes,0,'a missing publication writes nothing');
+ writes=0;
+ await assert.rejects(()=>context.sealPublishStep(env,{runId:'run-d',stage:'seal',seal:seal({publicationEtag:null})},null),/Seal publication etag is missing/);
+ assert.equal(writes,0);
+ const parsed=await call('sealPayload')(env,{runId:'run-d',seal:seal()});
+ assert.equal(parsed.fence,'f0');assert.equal(parsed.catalog,undefined);
+ assert.equal(seal().etag,ledgerEtag);
+}
+
+// ADR 0145: a leftover `catalog` phase on layout 2 skips into publish with no admission write.
+{
+ const bkt=bucket();
+ const stored=await bkt.put('epg/seal/run-s/publication.json',JSON.stringify({runId:'run-s',report:{films:[]},watchlist:{films:[]},uncertain:[],fence:'g'}));
+ let wrote=0;
+ context.DiscoveryAuthority={...Authority,async upsertAdmissions(){wrote++;return {written:[],refused:[],batches:0,reads:0,remaining:0};}};
+ const run={runId:'run-s',stage:'seal',seal:{jobId:'j',phase:'catalog',layout:2,publicationKey:'epg/seal/run-s/publication.json',publicationEtag:stored.etag,etag:'ledger'}};
+ const out=await call('sealCatalogStep')({BUCKET:bkt},run,{},Date.now()+1e9);
+ assert.equal(out.done,true);assert.equal(wrote,0);
+}
+
 console.log('discovery seal publish ok');

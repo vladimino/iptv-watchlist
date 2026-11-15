@@ -211,22 +211,22 @@ sequenceDiagram
 
 ### Seal in a successor instance ([ADR 0144](../adr/0144-epg-seal-successor-workflow-instance.md), implemented by AIR-484; production acceptance awaits a natural run)
 
-**State:** the diagram is implemented in `src/epg-orchestration.js`; it has not yet run in production. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. The staged payload is today's single `epg/seal/<runId>/payload.json`, unchanged; its format belongs to AIR-485. A pending claim, even of a previous Madrid day, takes priority over today's start.
+**State:** the diagram is implemented in `src/epg-orchestration.js`; it has not yet run in production. The successor is the next series id (a terminal Workflow id cannot be created again) and is **not** claimed to get a fresh isolate. After ADR 0145 the producing instance stores `epg/seal/<runId>/publication.json` (no catalog) with `run.seal.layout: 2` and `publicationEtag` beside the ledger `etag`, then saves `sync.json` at `stage: seal`. A leftover `payload.json` run is finished by the legacy reader. A pending claim, even of a previous Madrid day, takes priority over today's start.
 
 ```mermaid
 sequenceDiagram
     participant P as Producing instance
-    participant R2 as R2 payload.json
+    participant R2 as R2 publication.json
     participant C as D1 control document
     participant S as Successor instance
     participant H as Hourly ensure
-    P->>R2: Store payload.json and save sync.json at stage seal
+    P->>R2: Store publication.json and save sync.json at stage seal
     P->>C: CAS claim, next series, no failure recorded
     P->>S: create() with the next series id
     Note over P: Ends normally. Takes no more step leases.
     S->>C: Admit against claim and mode revision
-    S->>R2: Read payload.json as today
-    S->>C: Seal phases and publish exactly once
+    S->>R2: Read publication.json as today
+    S->>C: Seal phases ledger then publish, no catalog phase
     Note over H,S: Claim pending while sync.json still says seal
     H->>C: Read claim and successor status
     Note left of H: Absent or unknown, create the same id or attach
