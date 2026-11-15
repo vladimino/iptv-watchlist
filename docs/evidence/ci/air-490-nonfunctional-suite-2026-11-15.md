@@ -87,6 +87,18 @@ Same commands the three required jobs run, on this machine: 4 CPUs, so the runne
 
 Planned weight of those shards is 334.5, 414.5 and 414.5 (the first shard starts 80 units ahead). All three shard runs passed, and `npm run build` passed after the unsharded run. The non-functional plan is 39 files and weight 836.5; it was not timed here.
 
+## GitHub `Run tests` on the pull request
+
+Run [43712689876](https://github.com/vladimino/iptv-watchlist/actions/runs/43712689876), pull request #649, HEAD `5c184111`, attempt 1, event `pull_request`, 2026-11-15 12:12–12:14 UTC. Node.js 20, `ubuntu-latest`, jobs 6. All three core jobs passed. `Deploy to Cloudflare` was skipped, which is what the workflow does on a pull request. The wall below is the runner's own line; the GitHub step clock agrees to the second.
+
+| Job | Files | Wall | Summed file time | Slowest file |
+| --- | ---: | ---: | ---: | --- |
+| Test and build, shard 1/3 | 119 | 49.2 s | 275.7 s | `generation-stage.mjs` 49.2 s |
+| Test shard 2 of 3 | 138 | 87.9 s | 474.1 s | `generation-stage-withheld.mjs` 38.9 s |
+| Test shard 3 of 3 | 141 | 66.7 s | 362.6 s | `projector-bulk-spike.mjs` 23.7 s |
+
+One run. A later runner can print a different wall for the same SHA. That difference is a health figure and does not block the merge.
+
 ## What this record does not prove
 
-It does not prove a green or red run of the nightly workflow on GitHub. `workflow_dispatch` applies only after the workflow file is on the default branch. It does not claim the GitHub `Run tests` duration of any shard: the table above is local. A functional failure in a required job still fails that job.
+It does not prove a green or red run of the nightly workflow on GitHub. `workflow_dispatch` applies only after the workflow file is on the default branch. A functional failure in a required job still fails that job.
