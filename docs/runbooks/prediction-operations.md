@@ -4,6 +4,16 @@
 
 [Prediction-runner API contract](../reference/api/prediction-runner.md). Expected task behavior and hourly discovery catch-up are defined in [Scheduled Tasks](../reference/scheduled-tasks.md); verify actual settings in the live registry.
 
+
+
+## Research depth and full-text fallback diagnostics
+
+The Predictions Task's recurring schedule is a target, not a Worker Cron or an exact trigger guarantee. Read the live Scheduled Tasks registry to determine which task is enabled, its actual recurrence, `last_run` timestamps and saved report. Do not launch a manual run or reset leases to populate diagnostics. The [maintained prompt](../reference/scheduled-task-prompts/hourly-predictions-batch-v2.md) defines the per-film research audit and full-text fallback behavior.
+
+For each naturally occurring run, compare the saved Task result with approved read-only Worker status and existing diagnostics when needed. Separate **technical success** (batch completed, submitted items and per-film validation valid) from **research success** (a genuinely read original review, a traceable author and URL, and a concrete execution finding beyond the synopsis). Research audit rows correspond only to films actually selected and examined; `already_running`, `noop` or an early block can produce zero rows. Count actual searches (maximum two per film), independent authored reviews separately from URLs, and full/partial/snippet accesses (F/P/S). Check `gateStatus`, `gateReason`, source URL, author, execution finding and `fullTextFallback` outcome. An opened but unread page is an attempt, not `full_text`; reported CAPTCHA, cache miss and other access failures must reflect observed responses. A successful Worker schema validator does not prove that a source was read or a finding was accurate.
+
+When original full text is unavailable, verify a meaningful alternate-title/author/language pivot if a second search is allowed, actual attempts to read other discovered original reviews, and an honest final fallback reason within the existing budget. Preserve uncertainty about independent availability checks performed after the Task run: a later read cannot establish what the Task could access earlier. Do not modify Scheduled Tasks, Worker flags, the queue, or submission state without explicit authorization. [The historical prediction evidence ledger](../evidence/prediction/README.md) records dated rollout decisions and observations; this runbook states the reusable verification procedure.
+
 ## Proportionate triage
 
 For a single deferred film, ordinary backoff or an interrupted but recoverable run, prefer the next Scheduled Task and its built-in retry/resume. Do **not** require a complete queue audit, full R2 snapshot, new model batch, manual lease reset or per-item diagnostic inspection just to establish that one retryable failure occurred. Read the queue/runner summary first; use film diagnostics only for persistent, identity-sensitive or unexplained failures, and broad parity only for a demonstrated cross-film inconsistency. Keep owner gates for manual producer calls and hard ownership/lease fences: retrying a non-idempotent model submission blindly can duplicate work or corrupt run state. [Risk-proportional policy](../process/agent-workflow.md#risk-proportional-operational-safeguards).
