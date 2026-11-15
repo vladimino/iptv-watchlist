@@ -16,9 +16,17 @@ const now=Date.now();
 const H=3600000;
 const show=(start)=>({channelId:'c',channel:'C',start,end:start+H});
 const film=(id,tmdb,extra={})=>({id,tmdbId:String(tmdb),canonicalIdentity:'tmdb:'+tmdb,title:id,original:id,year:2020,genres:[],directors:[],actors:[],...extra});
-const liveD1={value:null,unreadable:false};
+const liveD1={value:null,unreadable:false,advanceAfterFirst:false,next:null};
 const ctx=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Intl,Map,Set,JSON,TextEncoder,Uint8Array,crypto:webcrypto,console,PublishedEpg:{
- currentGeneration:async()=>liveD1.value,
+ currentGeneration:async()=>{
+  if(liveD1.advanceAfterFirst){
+   const first=liveD1.value;
+   liveD1.advanceAfterFirst=false;
+   liveD1.value=liveD1.next;
+   return first;
+  }
+  return liveD1.value;
+ },
  readDocumentAt:async(_env,run,kind)=>{
   if(!liveD1.value)throw new Error('D1 programme is not the authority');
   if(liveD1.unreadable)return null;
@@ -41,6 +49,7 @@ async function reconcile(){
 // PublishedEpg is defined (as in the Worker bundle) but currentGeneration is null: the R2 path. Record shows rank the queue; hotEnteredAt is not a tie-break.
 {
  liveD1.value=null;
+ liveD1.advanceAfterFirst=false;
  records.set('epg/published-generation.json',{programmeRunId:'run-q',phase:'published'});
  records.set('programme.json',{runId:'run-q',films:[]});
  records.set('epg/discovered-films.json',{
@@ -54,6 +63,7 @@ async function reconcile(){
 // D1/open pin: completed programme showings only. A same-run stale catalog showing is not hot; an assigned catalog Film is.
 {
  liveD1.value={programmeRunId:'run-q',generation:7,phase:'published',fence:'f'};
+ liveD1.advanceAfterFirst=false;
  liveD1.unreadable=false;
  records.set('programme.json',{runId:'run-q',films:[]});
  const catalog={
@@ -77,6 +87,30 @@ async function reconcile(){
  const response=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/queue/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),env);
  assert.equal(response.status,502,'an unreadable D1 programme does not rebuild from catalog shows');
  liveD1.unreadable=false;
+}
+
+// D1 publishes run-B after the caller read run-A: do not rank A's catalog shows; rebuild from B or fail closed.
+{
+ liveD1.value={programmeRunId:'run-A',generation:7,phase:'published',fence:'fa'};
+ liveD1.next={programmeRunId:'run-B',generation:8,phase:'published',fence:'fb'};
+ liveD1.advanceAfterFirst=true;
+ liveD1.unreadable=false;
+ records.delete('enrichment/prediction-queue.json');
+ records.set('programme.json',{runId:'run-A',films:[]});
+ const catalog={hot:film('hot','8',{shows:[show(now-H)],showsProgrammeRunId:'run-A'})};
+ records.set('epg/discovered-films.json',catalog);
+ records.set('epg/generations/run-A/discovered-films.json',catalog);
+ records.set('epg/generations/run-B/discovered-films.json',catalog);
+ const response=await ctx.worker.fetch(new Request('https://site.example/api/enrichment/queue/reconcile',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),env);
+ const queue=records.get('enrichment/prediction-queue.json');
+ assert.notEqual(queue?.programmeRunId,'run-A','a D1 pin for B never stores a run-A queue');
+ if(response.status===200){
+  assert.equal(queue.programmeRunId,'run-B');
+  assert.equal(queue.hotPending.includes('hot'),false,'legacy catalog shows of A do not rank under B');
+ }else{
+  assert.equal(response.status,502);
+  assert.equal(queue,undefined);
+ }
 }
 
 console.log('prediction queue hotEnteredAt tie-break and completed-read showings ok');
