@@ -46,12 +46,13 @@ The hourly cron's Discovery reconcile (`reconcileDiscoveryWorkflow`) is independ
 **User catalog versus the generation fence ([ADR 0147](../adr/0147-discovery-user-read-snapshot-fence.md)).** `GET /api/catalog/available` and `GET /api/enrichment/view` read the catalog as one admission snapshot. They do not fail because continuation or status writers moved `discovery_authority.generation`. A real pin change, a non-seal `loading` transfer, a held cutover or an unreadable authority is HTTP 503 with `code` and `Retry-After: 1`, logged only if it still escapes as an unhandled route error. A 502 `discovery_fence` on those two paths is a defect, not an expected wait.
 
 ```mermaid
+%%{init: {"flowchart": {"htmlLabels": true, "wrappingWidth": 220, "nodeSpacing": 28, "rankSpacing": 36}}}%%
 flowchart TD
-    userGet["User catalog GET"]
-    snapshot["One admission SELECT"]
-    paged["Paged ledger walk"]
-    genBump["Continuation bumps generation"]
-    pin["Pin or transfer epoch"]
+    userGet["User catalog<br/>GET"]
+    snapshot["One admission<br/>SELECT"]
+    paged["Paged ledger<br/>walk"]
+    genBump["Continuation<br/>bumps generation"]
+    pin["Pin or transfer<br/>epoch"]
     ok["200 catalog"]
     wait["503 Retry-After"]
     userGet --> snapshot
