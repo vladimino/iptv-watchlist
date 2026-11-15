@@ -19,7 +19,7 @@ Read-only GitHub Actions observations after AIR-490, from the `Run tests` **step
 | [43712962750](https://github.com/vladimino/iptv-watchlist/actions/runs/43712962750) | PR | 48 s | 89 s | 55 s |
 | [43712689876](https://github.com/vladimino/iptv-watchlist/actions/runs/43712689876) | PR | 50 s | 88 s | 67 s |
 
-Across these 24 shard steps the mean was approximately **65.4 seconds**, with an observed range of **39–90 seconds**. The highest observation is 90 seconds, giving a factor-of-two headroom to the 180-second quality target. This is a small, non-independent sample; it is not a guarantee of future runner speed, and a quality threshold must not be converted into a delivery blocker because of it.
+Across these 24 shard steps the mean was approximately **65.5 seconds**, with an observed range of **39–90 seconds**. The highest observation is 90 seconds, giving a factor-of-two headroom to the 180-second quality target. This is a small, non-independent sample; it is not a guarantee of future runner speed, and a quality threshold must not be converted into a delivery blocker because of it.
 
 ## Historical boundary
 
