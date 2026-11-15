@@ -202,7 +202,7 @@ export async function completeChain(env,{fence:f,revision,at}={}){
  requireFence(f,['chain']);
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),...completeChainStatements(f,at,revision)]);
+ await commit(env,gate,[fence(gate),...fenceStatements(f),...completeChainStatements(f,at,revision)]);
  const chain=await readChain(env,f.programmeRunId);
  if(Number.isInteger(Number(chain?.revision)))f.revision=Number(chain.revision);
  return {state:'complete',chain};

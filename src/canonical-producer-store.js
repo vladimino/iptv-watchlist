@@ -260,11 +260,12 @@ export async function commitSlice(env,{run,next,writes=[],counts={},at}={}){
 }
 
 // The pass-complete commit: the ONLY writer of `applied_generation` (an EPG run: equal to its `source_generation`) with `pass_state='passed'`, `open_at_completion` (the number of live membership-affecting results) and the completion time.
+// With a chain GATE this is the SAME batch as owner_state='complete' (ADR 0141 I-11).
 export async function commitPassComplete(env,{run,openAtCompletion,at}={}){
  if(!plain(run)||run.origin!=='epg'||typeof run.source_generation!=='string'||!Number.isInteger(openAtCompletion)||openAtCompletion<0||typeof at!=='string')throw invalid();
  const gate=await routeOf(env);
  if(!gate.open)return SKIPPED;
- await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,renew:true}),casRun(run),
+ await commit(env,gate,[fence(gate),...producerExtras(env,gate,{at,renew:true,complete:true}),casRun(run),
   ["UPDATE canonical_producer_run SET pass_state='passed',applied_generation=source_generation,open_at_completion=?,completed_at=?,stopped_by=NULL,revision=revision+1,updated_at=? WHERE origin=? AND run_key=? AND revision=?",[openAtCompletion,at,at,run.origin,run.run_key,run.revision]],changesOne()],'slice',run);
  return {state:'committed',run:await readRun(env,{origin:run.origin,runKey:run.run_key})};
 }

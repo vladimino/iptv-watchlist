@@ -1,6 +1,6 @@
 // AIR-497 / ADR 0141. Bounded Producer Workflow chain. Dormant unless the Film/Person marker is d1/open
 // AND env.PRODUCER_WORKFLOW exists. Launched ONLY from hourly reconcileProducerChain. No new cron, flag or Task.
-import {readAuthority} from './film-person-authority.js';
+import {database,many,readAuthority} from './film-person-authority.js';
 import {readDocument,readMembers,readAuthority as readPublished} from './published-epg.js';
 import {buildEpgPlan,runEpgProducerPass,retryEpgProducerResults,readCanonicalFreshness} from './canonical-producer-driver.js';
 import {reconcileEpgRun} from './canonical-epg-person-producer.js';
@@ -67,9 +67,8 @@ function peopleOf(film){
  }
  return out;
 }
-function planFromSealed({programme,watchlist,watchMembers,programmeMembers}){
+function planFromSealed({programme,watchlist,watchMembers,previousIds=[]}){
  const listed=idsOf(watchlist,watchMembers);
- const programmeIds=idsOf(programme,programmeMembers);
  const byFilm=new Map();
  for(const film of [...(programme?.films||[]),...(watchlist?.films||[])]){
   const id=canonicalFilmId(film?.id);
@@ -81,12 +80,8 @@ function planFromSealed({programme,watchlist,watchMembers,programmeMembers}){
   seen.add(id);
   films.push({id,facts:filmFactsOf(byFilm.get(id)||{id},true)});
  }
- const departed=[];
- for(const id of programmeIds){
-  if(seen.has(id))continue;
-  seen.add(id);
-  departed.push(id);
- }
+ const listedSet=new Set(listed);
+ const departed=[...new Set(previousIds.map(canonicalFilmId).filter(id=>id&&!listedSet.has(id)))].sort();
  const personRows=[],persons=[],credits=[],personSeen=new Set();
  for(const item of films){
   const people=peopleOf(byFilm.get(item.id)||{});
@@ -112,10 +107,11 @@ export async function acquireSealedSnapshot(env,programmeRunId){
  const programme=await readDocument(env,programmeRunId,'programme');
  const watchlist=await readDocument(env,programmeRunId,'watchlist');
  const members=await readMembers(env,programmeRunId,'watchlist');
- const programmeMembers=await readMembers(env,programmeRunId,'programme');
+ let previousIds=[];
+ try{previousIds=(await many(database(env),'SELECT film_id AS filmId FROM watchlist_film',[])).map(row=>row.filmId);}catch{previousIds=[];}
  const after=await readPublished(env);
  if(!after?.ready||after.programmeRunId!==programmeRunId||Number(after.generation)!==g0)return {ok:false,code:'producer_input_superseded'};
- const planned=planFromSealed({programme,watchlist,watchMembers:members,programmeMembers});
+ const planned=planFromSealed({programme,watchlist,watchMembers:members,previousIds});
  return {ok:true,generation:g0,programmeRunId,...planned,label:snapshotLabel(programmeRunId,g0),members,watchlist};
 }
 
@@ -240,24 +236,27 @@ export async function runProducerWorkflow(env,payload,step){
    await stopChain(scoped,{fence,revision:fence.revision,at,stoppedBy:'receipt_state_conflict'}).catch(()=>{});
    return {state:'stopped',code:'receipt_state_conflict',receipts};
   }
-  const pass=await runEpgProducerPass(scoped,passParams);
+  const pass=await runEpgProducerPass(scoped,{
+   ...passParams,
+   beforePassComplete:async()=>{
+    const after=await reconcileReceiptsStep(scoped,plan,fence);
+    if(receiptsBlockCompletion(after))return {stop:true,code:'receipt_state_conflict'};
+   },
+  });
   totals.invocations++;totals.calls+=meter.calls;totals.statements+=meter.statements;
   totals.maxCalls=Math.max(totals.maxCalls,meter.calls);totals.maxStatements=Math.max(totals.maxStatements,meter.statements);
-  if(pass.state==='complete'){
-   let after;
-   try{after=await reconcileReceiptsStep(scoped,plan,fence);}
+  if(pass.state==='already_complete'){
+   const row=await readChain(scoped,P);
+   if(row?.owner_state==='complete')return {state:'complete',pass};
+   try{await completeChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString()});}
    catch(error){
-    const code=error?.code||'receipt_state_conflict';
+    const code=error?.code||'producer_not_owner';
     await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:code}).catch(()=>{});
     return {state:'stopped',code,pass};
    }
-   if(receiptsBlockCompletion(after)){
-    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'receipt_state_conflict'}).catch(()=>{});
-    return {state:'stopped',code:'receipt_state_conflict',pass,receipts:after};
-   }
-   await completeChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString()});
    return {state:'complete',pass};
   }
+  if(pass.state==='complete')return {state:'complete',pass};
   if(pass.state==='skipped')return {state:'dormant',pass};
   if(pass.state==='stopped'||pass.state==='error'){
    await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:pass.code||'unclassified'}).catch(()=>{});
