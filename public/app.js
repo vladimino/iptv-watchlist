@@ -1108,9 +1108,15 @@ function lastChanceBadge(film){
  if(!isLastChance(film))return '';
  return lastChanceMark(archiveDeadline(film));
 }
+function catalogBadge(film){
+ if(!film?.catalogOnly)return '';
+ return '<span class="finds-badge" title="Фильм вне твоего watchlist, не новинка проката" aria-label="Вне watchlist">NEW</span>';
+}
 function card(film){
  const item=filmEnrichmentItem(film),hasScore=item.actualRating!==null&&item.actualRating!==undefined||!!item.prediction;
- return `<article class="movie-card${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${posterFrame(film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`,soonBadge(film))}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film)}</h3><p class="original">${escapeHTML(film.original)}</p><span class="film-year">${film.year}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${film.genres.map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='soon'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':''}${startedButton(film)}</article>`;
+ const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${film.year||"Кино"}</div>`;
+ const badges=catalogBadge(film)+soonBadge(film);
+ return `<article class="movie-card${film.catalogOnly?' is-catalog':''}${startedIds.has(String(film.id))?' is-started':''}${hasScore?' has-score':''}" data-film-id="${escapeHTML(film.id)}">${recommendation(film)}<div class="film-head">${posterFrame(poster,badges)}<div class="film-info"><h3><a class="film-open" href="${filmPath(film)}" data-film-id="${escapeHTML(filmPermalinkId(film))}">${escapeHTML(film.title)}</a>${letterboxdLink(film,{catalog:!!film.catalogOnly})}</h3><p class="original">${escapeHTML(film.original||'')}</p><span class="film-year">${film.year||''}${film.runtime?` · ${Math.round(film.runtime)} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div>${lastChanceBadge(film)}</div></div>${moodTags(film)}${synopsis(film)}${credits(film)}<div class="screenings">${state.period!=='soon'?group(film,'archive'):''}${state.period!=='archive'?group(film,'future'):''}</div>${!periodShows(film,'all').length?'<p class="archive-only">Нет показов в текущем окне программы</p>':''}${startedButton(film)}</article>`;
 }
 function visibleFilms(){const now=nowMs();return films.filter(eligible).filter(f=>inSelectedScope(f)).sort((a,b)=>{const title=a.title.localeCompare(b.title,'ru',{sensitivity:'base'})||String(a.id).localeCompare(String(b.id));if(state.sort==='title')return title;if(state.sort==='relevance'){const parsed=searchTokens(state.query);const rank=item=>{const value=searchRank(item,parsed.normalized,parsed.tokens);return value===null?99:value;};return rank(a)-rank(b)||title;}if(state.sort==='personal'){const x=personal(a),y=personal(b);if(x.rating===null)return y.rating===null?title:1;if(y.rating===null)return -1;return y.rating-x.rating||Number(y.actual)-Number(x.actual)||y.probability-x.probability||title;}if(state.sort==='expiring'){const deadline=f=>{const time=archiveDeadline(f);return time!==null&&time>now?time:Infinity;};return deadline(a)-deadline(b)||title;}return title;});}
 
@@ -1331,7 +1337,7 @@ function findsUntil(film,now,scope=findsScope()){
  const shows=findsShows(film,now,scope);return shows.length?Math.max(...shows.map(show=>show.start))+72*3600000:null;
 }
 function findsIdentity(film){return String(film.canonicalIdentity||(film.tmdbId?'tmdb:'+film.tmdbId:'')||film.id);}
-function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film of films||[]){ids.add(String(film.id));if(film.tmdbId)tmdb.add(String(film.tmdbId));}return {ids,tmdb};}
+function watchlistIdentities(){const ids=new Set(),tmdb=new Set();for(const film of films||[]){if(film.catalogOnly)continue;ids.add(String(film.id));if(film.tmdbId)tmdb.add(String(film.tmdbId));}return {ids,tmdb};}
 function effectiveConfidence(prediction){
  if(!prediction||typeof prediction!=='object'||Array.isArray(prediction))return '';
  const model=typeof prediction.confidence==='string'?prediction.confidence:'';
@@ -1874,11 +1880,15 @@ function installProgramme(data){
  if(programmeSeen&&key===programmeKey)return false;
  const previousMax=MAX_YEAR,followYear=!programmeSeen||state.to===previousMax;
  programmeSeen=true;programmeKey=key;report=data;
- MAX_YEAR=Math.max(previousMax,...report.films.map(f=>Number(f.year)||0));
+ ({start:WINDOW_START,cutoff:CUTOFF,end:WINDOW_END}=programmeWindow(report));
+ const shape=(f,catalog)=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:(f.shows||[]).map(s=>({...s,offset:(s.start-CUTOFF)/3600000})),catalogOnly:!!catalog,onWatchlist:catalog?false:f.onWatchlist!==false});
+ const members=(report.films||[]).map(f=>shape(f,false));
+ const memberTmdb=new Set(members.map(f=>f.tmdbId==null?'':String(f.tmdbId)).filter(Boolean));
+ const extras=(report.catalogFilms||[]).filter(f=>f&&(f.tmdbId==null||!memberTmdb.has(String(f.tmdbId)))).map(f=>shape(f,true));
+ films=[...members,...extras];
+ MAX_YEAR=Math.max(previousMax,...films.map(f=>Number(f.year)||0));
  if(followYear)state.to=MAX_YEAR;
  setYearBounds(followYear);
- ({start:WINDOW_START,cutoff:CUTOFF,end:WINDOW_END}=programmeWindow(report));
- films=report.films.map(f=>({...f,genres:f.genres?.length?f.genres:['Жанр не указан'],shows:(f.shows||[]).map(s=>({...s,offset:(s.start-CUTOFF)/3600000}))}));
  genres=[...new Set(films.flatMap(f=>f.genres))].sort((a,b)=>a.localeCompare(b,'ru'));
  syncPeopleSources();
  return true;
