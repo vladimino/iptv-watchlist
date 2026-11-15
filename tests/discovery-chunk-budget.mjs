@@ -68,14 +68,14 @@ async function fixture({latencyMs=0,onQuery=null,extraHot=0,mix=0,decisions={},d
 }
 
 // The discovery source as a vm context, with a controllable clock and a TMDB stub that records its queries.
-function chunkContext({clock,onFetch,respond=null,fetchStatus=null}){
+function chunkContext({clock,onFetch,respond=null,fetchStatus=null,throwTimeout=false}){
  const queueRefreshes=[];
  const realNow=Date.now.bind(Date);
  const FakeDate=class extends Date{static now(){return realNow()+clock.offset;}};
  const searched=[],timeouts=[];
  const signals={timeout(ms){timeouts.push(ms);return AbortSignal.timeout(ms);}};
  const context=vm.createContext({console,Date:FakeDate,Promise,URL,URLSearchParams,AbortSignal:signals,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
-  fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);if(fetchStatus)return Promise.resolve(new Response(JSON.stringify({}),{status:fetchStatus,headers:{'Content-Type':'application/json','Retry-After':'60'}}));return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
+  fetch(url){const parsed=new URL(url),query=parsed.searchParams.get('query');searched.push(query);if(onFetch)onFetch(query,searched.length);if(throwTimeout){const error=new Error('The operation was aborted');error.name='TimeoutError';return Promise.reject(error);}if(fetchStatus)return Promise.resolve(new Response(JSON.stringify({}),{status:fetchStatus,headers:{'Content-Type':'application/json','Retry-After':'60'}}));return Promise.resolve(new Response(JSON.stringify(respond?respond(parsed):{results:[]}),{status:200,headers:{'Content-Type':'application/json'}}));},
   DiscoveryAuthority:Authority,pinEpg:async value=>value,
   refreshPredictionQueue:async(target,report,trigger)=>{queueRefreshes.push(trigger);},
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
@@ -764,6 +764,82 @@ const knownFilm=index=>{const key='mix'+String(index).padStart(2,'0'),tmdb=1000+
  assert.equal(ok.deferred,0);
  assert.equal(ok.checked,HOT.length);
  assert.ok(searched.length>=HOT.length);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+{
+ const {file,env}=await fixture();
+ sql(file,"UPDATE discovery_observation SET seen_in_latest=0 WHERE observation_key<>'h-b'");
+ const clock={offset:0};
+ const {context}=chunkContext({clock,onFetch(){clock.offset+=30000;}});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const starved=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(starved.checked,0);
+ assert.equal(starved.deferred,1);
+ assert.equal(starved.remaining,0);
+ assert.ok(starved.waitingRetry>=1);
+ assert.equal(starved.stage,'partial');
+ assert.ok(starved.retryAt);
+ const hop=context.continuationAfterChunk(starved,20,'hop-1',new Date().toISOString(),RUN);
+ assert.equal(hop.stage,'paused');
+ assert.notEqual(hop.stage,'complete');
+ assert.equal(hop.reason,'backoff');
+ await Authority.releaseLease(env,lease.lease);
+ sql(file,"UPDATE discovery_decision SET retry_at='2020-01-01T00:00:00.000Z', payload_json=json_set(payload_json,'$.retryAt',json('\"2020-01-01T00:00:00.000Z\"')) WHERE json_extract(payload_json,'$.deferReason')='wall_budget'");
+ sql(file,"UPDATE discovery_status SET retry_at=NULL, payload_json=json_set(payload_json,'$.retryAt',null)");
+ const later=chunkContext({clock:{offset:0},respond:()=>({results:[]})});
+ const lease2=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease2.lease;
+ const resumed=await later.context.resolveDiscoveryChunk(env,{films:[]},24,lease2.lease);
+ assert.equal(resumed.checked,1,'the same generation processes the deferred key after retryAt');
+ assert.equal(resumed.stage,'complete');
+ assert.equal(resumed.remaining,0);
+ assert.equal(resumed.waitingRetry,0);
+ await Authority.releaseLease(env,lease2.lease);
+}
+
+{
+ const {file,env}=await fixture({extraHot:3});
+ const clock={offset:0};
+ const {context}=chunkContext({clock,onFetch(){clock.offset+=36000;}});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ let checkpoints=0;
+ const late=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease,async()=>{checkpoints++;});
+ assert.equal(late.deferred,0,'a miss past persistLimit does not start another D1 batch');
+ assert.equal(checkpoints,1);
+ assert.ok(late.timings.totalMs<=40000,'checkpoint stays inside the wall: '+late.timings.totalMs);
+ assert.notEqual(late.stage,'complete');
+ assert.equal(Number(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'")[0].n),0);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+{
+ const {file,env}=await fixture({extraHot:2});
+ const clock={offset:0};
+ const {context}=chunkContext({clock,throwTimeout:true});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const timed=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(timed.deferred,1);
+ assert.equal(timed.error,null);
+ assert.equal(sql(file,"SELECT COUNT(*) AS n FROM discovery_decision WHERE json_extract(payload_json,'$.deferReason')='wall_budget'")[0].n,1);
+ await Authority.releaseLease(env,lease.lease);
+}
+
+{
+ const {file,env}=await fixture({extraHot:4});
+ const clock={offset:0};
+ const {context}=chunkContext({clock,onFetch(query){
+  clock.offset+=30000;
+  const key=String(query||'').replace(/^Film /,'');
+  const row=sql(file,`SELECT evidence_key AS k FROM discovery_observation WHERE observation_key='${key}'`)[0];
+  if(!row)return;
+  sql(file,`INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('${key}','${RUN}',1,'no_confident_match',5,'${row.k}','repeated_uncertain_match',NULL,NULL,NULL,NULL,'owner-hash','${JSON.stringify({status:'no_confident_match',attempts:5,terminalReason:'repeated_uncertain_match',evidenceKey:row.k,owner:true})}')`);
+ }});
+ const lease=await Authority.acquireLease(env,{programmeRunId:RUN});env.discoveryLease=lease.lease;
+ const raced=await context.resolveDiscoveryChunk(env,{films:[]},24,lease.lease);
+ assert.equal(raced.deferred,0);
+ const owner=sql(file,"SELECT json_extract(payload_json,'$.owner') AS o, json_extract(payload_json,'$.deferReason') AS d FROM discovery_decision");
+ assert.ok(owner.some(row=>row.o===1||row.o===true),'owner decision stands');
+ assert.equal(owner.filter(row=>row.d==='wall_budget').length,0);
  await Authority.releaseLease(env,lease.lease);
 }
 

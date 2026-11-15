@@ -1,9 +1,9 @@
 # ADR 0146: A TMDB-touched Discovery candidate that cannot be stored is deferred per key, not as a series backoff
 
-**Status:** Accepted  
+**Status:** Proposed  
 **Original decision date:** 2026-11-15  
 **Recorded at:** 2026-11-15  
-**Approval source:** Product Owner scope on [AIR-492](https://trello.com/c/09ys5uPy) (RCA plus minimal fairness fix; no new flag, Task, Workflow, schema or EPG ownership change)  
+**Approval source:** not documented — AIR-492 authorizes RCA plus a minimal fairness fix; this record is the Executor's proposed durable semantics until the owner accepts them  
 **Related work:** [AIR-492](https://trello.com/c/09ys5uPy), [ADR 0109](0109-discovery-keyset-candidate-selection.md), [AIR-425](https://trello.com/c/oxFXx6Bn)  
 **Supersedes:** ADR 0109 in part: the stored `partial` / `wall_budget` / five-minute status `retryAt` when a candidate was started and TMDB ran, but no decision could be counted  
 **Superseded by:** None
@@ -19,10 +19,10 @@ Raising `PAGED_CHUNK_BUDGET_MS` or shortening the five-minute backoff is out of 
 ## Decision
 
 1. When a paged-chunk candidate **increments `tmdbCalls`** and then cannot be stored (budget exhaustion after that call, TMDB `TimeoutError` / `AbortError`, or `saveCandidate` `late`), the chunk writes one fenced `writeDecisionDelta` for that key: same previous payload if any, same `evidenceKey`, **no** `attempts` increment, **not** `verified` / not counted in `checked`, `retryAt` five minutes ahead, `deferReason: wall_budget` in the JSON payload. SQL `retry_at` already excludes that row from `selectActionableObservations` until the fence expires.
-2. The series status **does not** set `retryAt` in that case. Continuation is the ordinary `paused` hop with `remainingChunks-1`, not `reason: backoff`. Other eligible keys of the same generation are selected on the next hop.
-3. `selectAfter` may include a deferred key in the handled prefix (it has a stored fence). Unprocessed pending keys without a stored defer are still not jumped (ADR 0109).
+2. While other observations are still eligible now, the series status **does not** set `retryAt`; continuation is the ordinary `paused` hop with `remainingChunks-1`. When eligible-now `remaining` is 0 but `waitingRetry` (current-window rows fenced only by a future `retry_at` **and** `deferReason: wall_budget`) is positive, the hop stays `partial`, stores series `retryAt` at that `MIN(retry_at)`, and must **not** checkpoint `complete`. After that time the same generation resumes. Completing a generation requires eligible-now remaining 0 **and** `waitingRetry` 0. Uncertain-match `retry_at` without that defer reason does not keep the generation open.
+3. `selectAfter` may include a deferred key in the handled prefix only when `writeDecisionDelta` listed that key in `written`. A CAS skip (`conflict`, `observation_gone`, `evidence_changed`) restores the in-memory previous decision and does not advance the cursor. Unprocessed pending keys without a stored defer are still not jumped (ADR 0109).
 4. A hop that starts **no** TMDB candidate (selection overran, or writes so slow that nothing fits) still stores `error: wall_budget` and a five-minute series `retryAt`. TMDB HTTP 429 still sets a series `retryAt` from `Retry-After`.
-5. `remaining` subtracts deferred keys as well as settled ones. `deferred` is a bounded count on the chunk summary and step diagnostic. No new table, index, flag, cron, Task or Workflow.
+5. Eligible-now `remaining` subtracts settled and newly deferred keys. `waitingRetry` is the SQL count of current-window unresolved rows that are ineligible only because of a future `retry_at` with `deferReason: wall_budget` (including this hop's durable defers). `deferred` is the number of keys this hop actually wrote. A TMDB miss past `persistLimit()` does not start a defer batch; the candidate stays pending and the reserved checkpoint still runs. No new table, index, flag, cron, Task or Workflow. `persistLimit` reserves that one defer write plus the final status/checkpoint writes. A CAS skip is not counted as handled.
 
 What is **not** decided: changing the 40 s wall or the 16-request cap; hot-first order across the whole ledger; treating `unknown` in historical Workflow records as proven `wall_budget`.
 
