@@ -1,9 +1,9 @@
 # ADR 0149: A concert telecast is not a Film without independent EPG broadcast evidence
 
-**Status:** Proposed  
+**Status:** **Accepted** (2026-11-15; the Product Owner accepted ADR 0149 as written at [PR #664 HEAD `4bfa73a7`](https://github.com/vladimino/iptv-watchlist/pull/664#issuecomment-6902506002). This records classification-boundary acceptance, not permission to correct already verified Films or to run Discovery/EPG/TMDB/Tasks or change storage)  
 **Original decision date:** 2026-11-15  
 **Recorded at:** 2026-11-15  
-**Approval source:** [AIR-496](https://trello.com/c/4NxERbZW) (bug scope); independent review of PR #664 HEAD `0f3a2e2e` required a narrower predicate. Owner acceptance of this revised boundary is still required.  
+**Approval source:** Owner comment on [PR #664](https://github.com/vladimino/iptv-watchlist/pull/664#issuecomment-6902506002), 15 November 2026 (Europe/Madrid): ADR 0149 accepted at HEAD `4bfa73a7ae2331db4a000517e9b8606803a6b8ef`, including the missing-category / Film-category trade-off. Not authorization for `discovery_identity_correct` of `tmdb_1326142` or `tmdb_238858`. Independent [TECHNICAL PASS](https://github.com/vladimino/iptv-watchlist/pull/664#pullrequestreview-5913197258), [exact-HEAD CI](https://github.com/vladimino/iptv-watchlist/actions/runs/43767876226), and [Chromium GitHub-rendered Mermaid QA](https://github.com/vladimino/iptv-watchlist/pull/664#issuecomment-6902456295).  
 **Related work:** [AIR-94](https://trello.com/c/bWYwLgqo) title screen, [AIR-480](https://trello.com/c/ZS0Xdrlq) / [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md)  
 **Supersedes:** None. Qualifies [ADR 0010](0010-scored-detail-verification.md) by adding one detail-gate refusal. Does not change the title screen of [non-film screening](../reference/domain/nonfilm-screening.md).  
 **Superseded by:** None
