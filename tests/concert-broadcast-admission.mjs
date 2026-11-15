@@ -1,7 +1,13 @@
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import * as Authority from '../src/discovery-authority.js';
+import {MemoryBucket} from './memory-bucket.mjs';
+import {d1Standin} from './d1-standin.mjs';
+import {sqliteSync} from './sqlite-session.mjs';
 
 // AIR-496: a TMDB Movies concert recording is not a Film admission. Title screening still
 // leaves Live/Concert titles as candidates; the detail gate withholds verification.
@@ -21,7 +27,8 @@ const candidate=(title,year,duration,extra={})=>{
  return {key:parts.normalizedTitle+'|'+(year??''),title:parts.title,normalizedTitle:parts.normalizedTitle,year:year??parts.year,duration,durations:[duration],seenInLatestSnapshot:true,shows:[{...show,end:now+duration*60000}],lastAiring:now,airings:1,...extra};
 };
 function movieDetail(id,title,year,runtime,genres){
- return new Response(JSON.stringify({id:Number(id),title,original_title:title,release_date:year+'-01-01',runtime,overview:'A synopsis',genres:genres.map(name=>({name})),poster_path:'/poster.jpg',credits:{crew:[{id:1,name:'Director',job:'Director'}],cast:[{id:2,name:'Artist'}]},translations:{translations:[]},alternative_titles:{titles:[]}}));
+ const cards=genres.map(genre=>typeof genre==='object'?genre:{name:genre});
+ return new Response(JSON.stringify({id:Number(id),title,original_title:title,release_date:year+'-01-01',runtime,overview:'A synopsis',genres:cards,poster_path:'/poster.jpg',credits:{crew:[{id:1,name:'Director',job:'Director'}],cast:[{id:2,name:'Artist'}]},translations:{translations:[]},alternative_titles:{titles:[]}}));
 }
 function searchHit(id,title,year){
  return new Response(JSON.stringify({total_pages:1,results:[{id:Number(id),title,original_title:title,release_date:year+'-01-01'}]}));
@@ -64,7 +71,7 @@ assert(scanned.has('Схватка'));
 assert.equal(scanned.get('Robbie Williams: Live at the Apple Music Festival').categories.join('|'),'Концерт');
 assert.equal(scan.stats.filteredNonMovies,0);
 
-const robbie=await resolve(candidate('Robbie Williams: Live at the Apple Music Festival',2016,82,{categories:['Концерт']}),[{id:1326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:['Музыка']}]);
+const robbie=await resolve(candidate('Robbie Williams: Live at the Apple Music Festival',2016,82,{categories:['Концерт']}),[{id:1326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}]}]);
 assert.equal(robbie.records.get('epg/discovery-resolution.json')['robbie williams live at the apple music festival|2016'].status,'no_confident_match');
 assert.equal(robbie.records.get('epg/discovery-resolution.json')['robbie williams live at the apple music festival|2016'].reason,'concert_recording');
 assert.equal(robbie.records.get('epg/discovered-films.json').tmdb_1326142,undefined);
@@ -75,7 +82,7 @@ assert.ok(!robbieQueue||!(robbieQueue.hotPending||[]).includes('tmdb_1326142'));
 assert.ok(!robbieQueue||!(robbieQueue.pending||[]).includes('tmdb_1326142'));
 
 const rieuTitle='Rieu Royale - André Rieu Coronation Concert Live in Amsterdam';
-const rieu=await resolve(candidate(rieuTitle,2013,140,{categories:['Music']}),[{id:238858,title:rieuTitle,year:2013,runtime:140,genres:['Music','TV Movie']}]);
+const rieu=await resolve(candidate(rieuTitle,2013,140,{categories:['Music']}),[{id:238858,title:rieuTitle,year:2013,runtime:140,genres:[{id:10402,name:'Music'},{id:10770,name:'TV Movie'}]}]);
 const rieuKey=rieu.records.get('epg/discovery-latest.json').items[0].key;
 assert.equal(rieu.records.get('epg/discovery-resolution.json')[rieuKey].status,'no_confident_match');
 assert.equal(rieu.records.get('epg/discovery-resolution.json')[rieuKey].reason,'concert_recording');
@@ -83,14 +90,49 @@ assert.equal(rieu.records.get('epg/discovered-films.json').tmdb_238858,undefined
 const rieuQueue=rieu.records.get('enrichment/prediction-queue.json');
 assert.ok(!rieuQueue||!(rieuQueue.hotPending||[]).includes('tmdb_238858'));
 
-const sense=await resolve(candidate('Stop Making Sense',1984,88),[{id:841,title:'Stop Making Sense',year:1984,runtime:88,genres:['Documentary','Music']}]);
+const sense=await resolve(candidate('Stop Making Sense',1984,88,{categories:['Концерт']}),[{id:841,title:'Stop Making Sense',year:1984,runtime:88,genres:[{id:99,name:'Documentary'},{id:10402,name:'Music'}]}]);
 assert.equal(sense.records.get('epg/discovery-resolution.json')['stop making sense|1984'].status,'verified');
 assert.equal(sense.records.get('epg/discovered-films.json').tmdb_841.canonicalIdentity,'tmdb:841');
 assert.ok(sense.records.get('enrichment/prediction-queue.json').hotPending.includes('tmdb_841'));
 
-const heat=await resolve(candidate('Heat',1995,170),[{id:949,title:'Heat',year:1995,runtime:170,genres:['Crime','Drama','Action']}]);
+const heat=await resolve(candidate('Heat',1995,170),[{id:949,title:'Heat',year:1995,runtime:170,genres:[{id:18,name:'Drama'},{id:80,name:'Crime'}]}]);
 assert.equal(heat.records.get('epg/discovery-resolution.json')['heat|1995'].status,'verified');
 assert.equal(heat.records.get('epg/discovered-films.json').tmdb_949.tmdbId,'949');
 assert.ok(heat.records.get('enrichment/prediction-queue.json').hotPending.includes('tmdb_949'));
+
+const tvMovie=await resolve(candidate('Made For Television',1999,96),[{id:7001,title:'Made For Television',year:1999,runtime:96,genres:[{id:10770,name:'TV Movie'}]}]);
+assert.equal(tvMovie.records.get('epg/discovery-resolution.json')['made for television|1999'].status,'verified');
+const musicOnly=await resolve(candidate('Pink Floyd Live At Pompeii',1972,92),[{id:18648,title:'Pink Floyd Live At Pompeii',year:1972,runtime:92,genres:[{id:10402,name:'Music'}]}]);
+assert.equal(musicOnly.records.get('epg/discovery-resolution.json')['pink floyd live at pompeii|1972'].status,'verified');
+
+{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-air-496-'));
+ const file=path.join(root,'d1.sqlite');
+ const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
+ const applied=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
+ if(applied.status!==0)throw new Error(applied.stderr||'migration failed');
+ sqliteSync(['-bail',file],{input:"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1;",encoding:'utf8'});
+ const RUN='run-496';
+ const db=d1Standin(file);
+ const env={DB:db,BUCKET:new MemoryBucket(),discoveryLease:null,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
+ const lease=(await Authority.acquireLease(env,{programmeRunId:RUN})).lease;
+ env.discoveryLease=lease;
+ const item=candidate('Robbie Williams: Live at the Apple Music Festival',2016,82,{categories:['Концерт']});
+ await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease,items:(async function*(){yield item;})()});
+ const context=vm.createContext({console,Date,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
+  fetch(url){const text=String(url);if(text.includes('/movie/1326142'))return Promise.resolve(movieDetail(1326142,'Robbie Williams: Live at the Apple Music Festival',2016,82,[{id:10402,name:'Музыка'}]));if(text.includes('/search/movie?'))return Promise.resolve(searchHit(1326142,'Robbie Williams: Live at the Apple Music Festival',2016));return Promise.resolve(new Response(JSON.stringify({results:[]}),{status:200}));},
+  DiscoveryAuthority:Authority,pinEpg:async value=>value,refreshPredictionQueue:async()=>null,
+  loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
+  saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
+ for(const fileName of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(fileName,'utf8'),context);
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},4,lease);
+ assert.equal(result.paged,true);
+ const stored=(await Authority.routeRead(env,'epg/discovery-resolution.json')).value;
+ assert.equal(stored[item.key].status,'no_confident_match');
+ assert.equal(stored[item.key].reason,'concert_recording');
+ const admissions=(await Authority.routeRead(env,'epg/discovered-films.json')).value||{};
+ assert.equal(admissions.tmdb_1326142,undefined);
+ await Authority.releaseLease(env,lease);
+}
 
 console.log('Concert broadcast admission: two TMDB concert recordings withheld, concert film and feature admitted, EPG Live/Concert titles unscreened');

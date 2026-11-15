@@ -27,7 +27,9 @@ Owner identification: the EPG objects were concert telecasts, not Films. Predict
 
 ## Fix (offline)
 
-The gate withholds `detail_verified` when TMDB genres are only Music and/or TV Movie (`concert_recording` → `no_confident_match`). Documentary or other feature genres still verify. Title screening is unchanged. Tests: `tests/concert-broadcast-admission.mjs`, `tests/resolution-acceptance.mjs`.
+The gate withholds `detail_verified` only when XMLTV category is concert/music (not film) and TMDB has Music id `10402` without Documentary or another feature genre (`concert_recording` → `no_confident_match`). TV Movie alone still verifies. Music-only without that category still verifies. Title screening is unchanged. Tests: `tests/concert-broadcast-admission.mjs` (R2 resolver and a D1 paged chunk), `tests/resolution-acceptance.mjs`.
+
+A category-less Music match may still admit: that false-negative-for-telecasts / false-positive-for-films trade-off is explicit in ADR 0149. Live XMLTV and TMDB genre arrays of the two production titles were not inspected.
 
 ## Already stored rows
 
