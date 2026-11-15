@@ -41,6 +41,15 @@ function detailNorm(value){return String(value??'').normalize('NFKC').toLowerCas
 function detailNumber(value){if(value==null||value==='')return null;const number=Number(value);return Number.isFinite(number)?number:null;}
 function detailTitles(movie){return [movie?.title,movie?.original,...(movie?.aliases||[])].filter(Boolean);}
 function detailYearCompatible(observationYear,candidateYear){return observationYear==null||candidateYear==null||Math.abs(observationYear-candidateYear)<=1;}
+function genreToken(value){return detailNorm(typeof value==='string'?value:(value&&value.name)||'');}
+const CONCERT_RECORDING_GENRES=new Set(['music','музыка','музыкальный','музика']);
+const TV_MOVIE_GENRES=new Set(['tv movie','телефильм','телефільм']);
+function concertRecordingMovie(movie){
+ const names=[...(movie?.genres||[])].map(genreToken).filter(Boolean);
+ if(!names.length)return false;
+ const allowed=new Set([...CONCERT_RECORDING_GENRES,...TV_MOVIE_GENRES]);
+ return names.every(name=>allowed.has(name))&&names.some(name=>CONCERT_RECORDING_GENRES.has(name)||TV_MOVIE_GENRES.has(name));
+}
 function verifyTmdbDetail(detail,tmdbId,observation,competitors,structural){
  const movie=detail?.evidence?.movie;
  if(detail?.authority!=='tmdb_detail'||!movie||typeof movie!=='object')return {ok:false,hold:'needs',reason:'detail_incomplete'};
@@ -84,6 +93,9 @@ function acceptScoredIdentity(input={}){
   const detail=verifyTmdbDetail(input.tmdbDetail,tmdbId,input.observation,input.competitors,input.score?.titleBasis?.structural||null);
   if(!detail.ok&&detail.hold==='candidate')return {...result,outcome:'candidate_decision',reason:detail.reason,candidateDecision:{status:detail.status,observationKey,reason:detail.reason,evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
   if(!detail.ok)return {...result,outcome:'needs_verification',reason:detail.reason};
+  if(!confirmed&&concertRecordingMovie(input.tmdbDetail?.evidence?.movie)){
+   return {...result,outcome:'candidate_decision',reason:'concert_recording',candidateDecision:{status:'no_confident_match',observationKey,reason:'concert_recording',evidence:scoringEvidence(score),provenance:{...provenance,authority:'tmdb_detail'}}};
+  }
   const observationYear=detailNumber(input.observation?.year),yearGap=observationYear==null||detail.releaseYear==null?null:Math.abs(observationYear-detail.releaseYear);
   if(!confirmed&&yearGap===1&&shortTitle(input.observation?.normalizedTitle||input.observation?.title)){
    const competingEditions=(input.competitors||[]).filter(film=>String(film?.tmdbId)!==tmdbId&&detailTitles(film).some(title=>detailNorm(title)===detail.matchedTitle)).map(film=>({tmdbId:String(film.tmdbId),year:detailNumber(film.year)}));

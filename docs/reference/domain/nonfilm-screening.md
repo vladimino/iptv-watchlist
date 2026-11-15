@@ -24,7 +24,9 @@ EPG discovery drops obvious series episodes and TV shows before any TMDB Movies 
 | `broadcast_episode` | `Выпуск N`, `Выпуск №N`, `Спецвыпуск N`; `N-M серии` | — |
 | `xmltv_episode_num` | Programme XML with `<episode-num system="xmltv_ns">` whose episode part has a number, or `system="onscreen"` with an episode code or season and episode | An `episode-num` without an episode number |
 
-Words such as `Live`, `концерт`, `документальный`, `интервью` and `шоу` never screen a title: concert and documentary films are films. The screen never queries TMDB TV.
+Words such as `Live`, `концерт`, `документальный`, `интервью` and `шоу` never screen a title: concert and documentary films stay candidates. A TMDB Movies card that is only Music or TV Movie is refused later by the scored identity gate (`concert_recording`), not here. The screen never queries TMDB TV.
+
+XMLTV `<category>` is copied onto the discovery candidate (`categories`, at most eight values). It is evidence, not a screen: a `Концерт` category does not drop the title, and a `Фильм` category does not admit it.
 
 ## Reversibility
 

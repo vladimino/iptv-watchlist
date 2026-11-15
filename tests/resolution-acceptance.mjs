@@ -240,4 +240,16 @@ const cheburashka=score(observe('чебурашка 2|2025','Чебурашка 
 assert.equal(cheburashka.reason,'accepted_unique_evidence');
 assert.equal(bound(cheburashka,{observation:{normalizedTitle:'чебурашка 2',year:2025,durations:[103]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'1228477',evidence:{movie:{id:'1228477',title:'Чебурашка 2',original:'Cheburashka',aliases:[],year:2026,runtime:103}}}}).outcome,'detail_verified');
 
+const robbieScore=score(observe('robbie williams live at the apple music festival|2016','Robbie Williams: Live at the Apple Music Festival',2016,82),[film('1326142','Robbie Williams: Live at the Apple Music Festival',2016,82)]);
+const robbieDetail={authority:'tmdb_detail',tmdbId:'1326142',evidence:{movie:{id:'1326142',title:'Robbie Williams: Live at the Apple Music Festival',original:'Robbie Williams: Live at the Apple Music Festival',aliases:[],year:2016,runtime:82,genres:['Музыка']}}};
+const robbieHold=bound(robbieScore,{observation:{normalizedTitle:'robbie williams live at the apple music festival',year:2016,durations:[82]},tmdbDetail:robbieDetail});
+assert.equal(robbieHold.outcome,'candidate_decision');
+assert.equal(robbieHold.reason,'concert_recording');
+assert.equal(robbieHold.candidateDecision.status,'no_confident_match');
+assert.equal(robbieHold.transition,null);
+const robbieOwner={authority:'owner',tmdbId:'1326142',evidence:{authority:'owner',reviewed:true,tmdbId:'1326142'}};
+assert.equal(bound(robbieScore,{observation:{normalizedTitle:'robbie williams live at the apple music festival',year:2016,durations:[82]},tmdbDetail:robbieDetail,confirmation:robbieOwner}).outcome,'detail_verified');
+const senseScore=score(observe('stop making sense|1984','Stop Making Sense',1984,88),[film('841','Stop Making Sense',1984,88)]);
+assert.equal(bound(senseScore,{observation:{normalizedTitle:'stop making sense',year:1984,durations:[88]},tmdbDetail:{authority:'tmdb_detail',tmdbId:'841',evidence:{movie:{id:'841',title:'Stop Making Sense',original:'Stop Making Sense',aliases:[],year:1984,runtime:88,genres:['Documentary','Music']}}}}).outcome,'detail_verified');
+
 console.log('Scored identity acceptance passed.');
