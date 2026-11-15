@@ -1,9 +1,9 @@
 # ADR 0146: A TMDB-touched Discovery candidate that cannot be stored is deferred per key, not as a series backoff
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Original decision date:** 2026-11-15  
 **Recorded at:** 2026-11-15  
-**Approval source:** not documented — AIR-492 authorizes RCA plus a minimal fairness fix; this record is the Executor's proposed durable semantics until the owner accepts them  
+**Approval source:** Product Owner explicit design approval, 15 November 2026, recorded at [PR #658 comment](https://github.com/vladimino/iptv-watchlist/pull/658#issuecomment-6899635604) (conversation provenance; not a GitHub comment authored by the owner). The 40 s chunk budget and 16 TMDB requests per chunk are unchanged; retuning them is a separate future decision.  
 **Related work:** [AIR-492](https://trello.com/c/09ys5uPy), [ADR 0109](0109-discovery-keyset-candidate-selection.md), [AIR-425](https://trello.com/c/oxFXx6Bn)  
 **Supersedes:** ADR 0109 in part: the stored `partial` / `wall_budget` / five-minute status `retryAt` when a candidate was started and TMDB ran, but no decision could be counted  
 **Superseded by:** None
