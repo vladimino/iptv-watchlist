@@ -730,9 +730,7 @@ async function metadataSync(env,run){
 async function persistWatchlist(env,run,report){
  // ADR 0142 decision 14: one EPG sync, one generation increment. The publish commit already stored the watchlist.
  // saveWatchlist would bump generation a second time; under a live D1 pin the tail writes nothing.
- if(typeof PublishedEpg!=='undefined'){
-  try{if(await PublishedEpg.currentGeneration(env))return;}catch{return;}
- }
+ if(typeof PublishedEpg!=='undefined'&&await PublishedEpg.currentGeneration(env))return;
  const list=await loadJSON(env,'watchlist.json');
  if(report.films?.length===report.watchlistCount&&list?.updatedAt!==report.updatedAt){
   const next={updatedAt:report.updatedAt,films:report.films.map(({shows,...f})=>f)};
