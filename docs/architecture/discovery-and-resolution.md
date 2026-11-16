@@ -25,7 +25,7 @@ flowchart TD
     ownerread["Owner page /admin/limbo:<br/>read-only explanation of one observation"]
     reconsider["discovery_reconsider:<br/>confirmed terminal no_more_evidence only;<br/>resolver lease, CAS, receipt"]
     identity["discovery_identity_correct:<br/>one movie id, assign or reject;<br/>resolver lease, CAS, receipt"]
-    exclude["catalog_policy_exclude:<br/>one Documentary or concert Film;<br/>admission superseded, related rejects,<br/>queue settle then rebuild"]
+    exclude["catalog_policy_exclude:<br/>one Documentary/concert Film;<br/>supersede, reject, settle queue"]
     epg --> ledger --> eligible
     eligible -->|no| unresolved
     eligible -->|yes| defer
@@ -54,11 +54,11 @@ flowchart TD
     verified -->|one key, one shard; no ledger scan| ownerread
     ownerread -->|explicit owner confirmation of one key| reconsider
     ownerread -->|explicit owner confirmation of one key and one movie id| identity
-    owner -->|explicit owner confirmation of one Film id| exclude
+    owner -->|one Film id, owner confirm| exclude
     reconsider -->|lifts terminal fence of one decision; no TMDB, no chunk| ledger
     identity -->|writes one current decision; no TMDB, no chunk| ledger
-    exclude -->|supersedes admission; rejects related decisions; no TMDB, no chunk| ledger
-    exclude -->|drops current catalog copy of that Film| catalogue
+    exclude -->|supersede admission; no TMDB| ledger
+    exclude -->|drop catalog copy of that Film| catalogue
     reconsider -.->|refreshes its record| obsindex
     identity -.->|refreshes the index that held the row| obsindex
     identity -.->|moves a verified row| verified
