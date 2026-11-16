@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import {pathToFileURL} from 'node:url';
-import {scoped} from '../scripts/bundle-scope.mjs';
+import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
@@ -16,8 +16,9 @@ const {PRODUCER_OPERATIONS,PRODUCER_WIRING,handoffReadiness}=await load('canonic
 const {activationAudit}=await load('film-person-open-handoff.js');
 const {
  applyRatedAdmissionRetention,applyFilmAdmission,FILM_ADMISSION_OPERATION,FILM_RETENTION_OPERATION,
- RATED_ADMISSION_KINDS,RATED_ADMISSION_ORIGIN,ratedAdmissionRegistry,ratedAdmissionSettled,
+ RATED_ADMISSION_KINDS,RATED_ADMISSION_ORIGIN,ratedAdmissionRegistry,ratedAdmissionSettled,ratedAdmissionSliceSettled,
  ratedAdmissionRecord,carryRatedAdmissionIntent,resolveExistingRetentionFilm,UNIT_CAP,
+ departedWatchlistLids,watchlistRetentionWork,assertRatedAdmissionAccepted,
 }=M;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-rated-admission-'));
@@ -181,38 +182,161 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
  assert.ok(/scopedImports\('src\/film-admission\.js','CanonicalFilmAdmission'/.test(build));
 }
 
-function persistCtx(CanonicalRatedAdmission,files){
- const LetterboxdFacts={applyWatchlistScan:async()=>({written:1})};
- const env={BUCKET:{get:async key=>files.has(key)?{json:async()=>structuredClone(files.get(key))}:null,put:async(key,body)=>{files.set(key,JSON.parse(body));}}};
- const ctx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,CanonicalRatedAdmission,LetterboxdFacts,fetch:async()=>{throw new Error('unexpected fetch');}});
- vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
- return ctx;
+function factsBucket(){
+ const records=new Map(),etags=new Map();let revision=0;
+ return {
+  records,etags,
+  async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key)),text:async()=>JSON.stringify(records.get(key))}:null;},
+  async put(key,value,options={}){
+   const condition=options.onlyIf||{};
+   if(condition.etagDoesNotMatch==='*'&&records.has(key)||condition.etagMatches&&condition.etagMatches!==etags.get(key))return null;
+   records.set(key,typeof value==='string'?JSON.parse(value):value);etags.set(key,String(++revision));return {etag:etags.get(key)};
+  },
+  async delete(key){records.delete(key);},
+ };
+}
+function seedFilm(file,id,tmdb,lid){
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ("+q(id)+",1,"+q(T)+");INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q(id)+",'tmdb',"+q(tmdb)+",1,0,NULL)"+(lid?",("+q(id)+",'letterboxd',"+q(lid)+",1,0,NULL)":"")+";");
 }
 
 {
- const files=new Map([['enrichment/view-index.json',{gone:{watchlist:true}}]]);
- let calls=0;
- const CanonicalRatedAdmission={
-  applyRatedAdmissionRetention:async(_env,opts)=>{
-   calls++;
-   if(calls===1){const error=new Error('injected');error.code='d1_error';throw error;}
-   return {state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[]};
-  },
-  ratedAdmissionSettled:out=>M.ratedAdmissionSettled(out),
-  ratedAdmissionRecord:out=>M.ratedAdmissionRecord(out),
-  carryRatedAdmissionIntent:out=>M.carryRatedAdmissionIntent(out),
+ const file=database('open');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const listed=[];
+ for(let i=0;i<26;i++){
+  const lid='f'+String(i).padStart(2,'0'),tmdb=String(2000+i);
+  listed.push({id:lid,tmdbId:tmdb});
+  seedFilm(file,'film:tmdb:'+tmdb,tmdb,lid);
+  await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:lid,tmdb});
+ }
+ seedFilm(file,'film:tmdb:1999','1999','gone');
+ await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:'gone',tmdb:'1999'});
+ await Facts.applyWatchlistScan({BUCKET:env.BUCKET},{scanId:'prior',observedAt:T0,films:[...listed,{id:'gone',tmdbId:'1999'}]});
+ assert.equal(env.BUCKET.records.get('enrichment/view-index.json').gone.watchlist,true);
+ let scans=0;
+ const LetterboxdFacts={
+  applyWatchlistScan:async(...args)=>{scans++;return Facts.applyWatchlistScan(...args);},
  };
- const ctx=persistCtx(CanonicalRatedAdmission,files);
- const run={runId:'scan-1',watchlistObservedAt:T,ratedAdmissionIntent:[{requestId:'old'}]};
- ctx.run=run;
- const report={films:[{id:'28nq',tmdbId:'11'}],watchlistCount:1};
- ctx.report=report;
- await vm.runInContext('persistScan(env,run,report)',ctx);
- assert.equal(run.canonicalRatedAdmissionErrors,1);
- await vm.runInContext('persistScan(env,run,report)',ctx);
- assert.equal(calls,2);
+ const workerCtx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,CanonicalRatedAdmission:M,LetterboxdFacts,fetch:async()=>{throw new Error('unexpected fetch');}});
+ vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),workerCtx);
+ const run={runId:'scan-26',watchlistObservedAt:T,seal:{phase:'finalize',units:{handover:'ok',watchlist:'ok'},attempts:{}},events:[]};
+ const report={films:listed,watchlistCount:26,updatedAt:T};
+ workerCtx.run=run;workerCtx.report=report;
+ await env.BUCKET.put('sync.json',JSON.stringify(run));
+ let passes=0;
+ for(;passes<8;passes++){
+  try{
+   await vm.runInContext('persistScan(env,run,report)',workerCtx);
+   break;
+  }catch(error){assert.equal(error.code,'rated_admission_incomplete');}
+ }
+ assert.equal(passes,2,'26 listed + 1 departed need three UNIT_CAP=12 passes');
+ assert.equal(scans,1,'applyWatchlistScan once');
+ assert.equal(env.BUCKET.records.get('enrichment/view-index.json').gone.watchlist,false);
+ assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:tmdb:1999'"),0);
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),27);
  assert.equal(run.ratedAdmissionIntent,undefined);
+ assert.equal(run.ratedAdmissionScan,undefined);
+ const intentBytes=JSON.stringify(env.BUCKET.records.get('sync.json').ratedAdmissionIntent||[]);
+ assert.ok(intentBytes.length<80,'no unbounded intent on the completed run');
+}
+
+{
+ const file=database('open');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone,CanonicalRatedAdmission:M});
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const origin={archiveSha256:SHA,generatedAt:T,generatedAtSource:'archive_name'};
+ const item={lid:'alien',tmdb:'348',identity:'inferred',admit:{title:'Alien',year:1979},facts:{watched:true,rating:4}};
+ factsCtx.CanonicalRatedAdmission={
+  ...M,
+  applyRatedAdmissionRetention:async()=>{const error=new Error('injected before receipt');error.code='d1_error';throw error;},
+ };
+ await assert.rejects(Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]}),e=>e.code==='d1_error');
+ assert.equal(env.BUCKET.records.get('letterboxd/admissions/verified-films.json')?.films?.tmdb_348?.tmdb,'348');
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_rated_admission'),0);
+ factsCtx.CanonicalRatedAdmission=M;
+ const committed=await Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]});
+ assert.equal(committed.replay,false);
+ assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:348'"),'348');
+ const replay=await Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]});
+ assert.equal(replay.replay,true);
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_rated_admission'),1);
+}
+
+{
+ const file=database('open');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ let n=0;
+ const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone,CanonicalRatedAdmission:{
+  ...M,
+  applyRatedAdmissionRetention:async(...args)=>{
+   n++;
+   if(n===1)return {state:'unknown',applied:0,failed:0,unknown:1,preflightFailed:0,refused:0,deferred:0,intent:[{requestId:'u1'}],units:[{state:'unknown'}]};
+   return M.applyRatedAdmissionRetention(...args);
+  },
+ }});
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const origin={archiveSha256:SHA,generatedAt:T,generatedAtSource:'archive_name'};
+ const item={lid:'heat',tmdb:'949',identity:'inferred',admit:{title:'Heat',year:1995},facts:{watched:true,rating:4}};
+ await assert.rejects(Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]}),e=>e.code==='rated_admission_incomplete');
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_rated_admission'),0);
+ const second=await Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]});
+ assert.equal(second.replay,false);
+ assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:949'"),'949');
+}
+
+{
+ const file=database('open');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone,CanonicalRatedAdmission:M});
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:'taken',tmdb:'1'});
+ const origin={archiveSha256:SHA,generatedAt:T,generatedAtSource:'archive_name'};
+ const item={lid:'taken',tmdb:'603',identity:'inferred',admit:{title:'Taken',year:2008},facts:{watched:true,rating:3}};
+ const out=await Facts.commitBaselineChunk({BUCKET:env.BUCKET,DB:env.DB},{origin,chunk:0,items:[item]});
+ assert.equal(out.conflicts,1);
+ assert.equal(env.BUCKET.records.get('letterboxd/admissions/verified-films.json')?.films?.tmdb_603,undefined);
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_rated_admission'),0);
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id='film:tmdb:603'"),0);
+}
+
+{
+ const file=database('open');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ let applies=0;
+ const wrap={
+  ...M,
+  applyRatedAdmissionRetention:async(...args)=>{
+   applies++;
+   if(applies===1){const error=new Error('injected');error.code='d1_error';throw error;}
+   if(applies===2)return {state:'unknown',applied:0,failed:0,unknown:1,preflightFailed:0,refused:0,deferred:0,intent:[],units:[]};
+   return M.applyRatedAdmissionRetention(...args);
+  },
+ };
+ const ctx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,URL,URLSearchParams,structuredClone,fetch:async()=>{throw new Error('no fetch');},CanonicalRatedAdmission:wrap});
+ vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8'),ctx);
+ vm.runInContext(scoped('src/letterboxd-match.js','LetterboxdMatch'),ctx);
+ vm.runInContext(scoped('src/domain/letterboxd-rated-admission.js','LetterboxdRatedAdmission'),ctx);
+ vm.runInContext(scopedReplacing('src/letterboxd-identity.js','LetterboxdIdentity','const normTitle=LetterboxdMatch.normTitle;\n'),ctx);
+ vm.runInContext(fs.readFileSync('src/letterboxd-rated-candidates.js','utf8'),ctx);
+ const Candidates=vm.runInContext('LetterboxdRatedCandidates',ctx);
+ const sha=SHA;
+ const generatedAt=T;
+ await env.BUCKET.put('letterboxd/imports/'+sha+'/rated-candidates.json',JSON.stringify({schemaVersion:1,archiveSha256:sha,generatedAt,candidates:{sc603:{code:'sc603',state:'admitting',intendedTmdb:'603',filmPath:'/film/heat/',name:'Heat',year:1995,rating:4}},checkpoint:{cursor:'sc603',stopped:null}}));
+ await assert.rejects(Candidates.identityStep({BUCKET:env.BUCKET,DB:env.DB},{sha,code:'sc603'}),e=>e.code==='d1_error');
+ await assert.rejects(Candidates.identityStep({BUCKET:env.BUCKET,DB:env.DB},{sha,code:'sc603'}),e=>e.code==='rated_admission_incomplete');
+ const third=await Candidates.identityStep({BUCKET:env.BUCKET,DB:env.DB},{sha,code:'sc603'});
+ assert.equal(third.verified,true);
+ assert.equal(one(file,"SELECT tmdb FROM film_rated_admission WHERE film_id='film:tmdb:603'"),'603');
 }
 
 console.log('canonical-rated-admission-producer: ok');
-void applyFilmAdmission;void ratedAdmissionRegistry;void UNIT_CAP;void resolveExistingRetentionFilm;void RATED_ADMISSION_ORIGIN;void FILM_ADMISSION_OPERATION;void FILM_RETENTION_OPERATION;void ratedAdmissionRecord;
+void applyFilmAdmission;void ratedAdmissionRegistry;void UNIT_CAP;void resolveExistingRetentionFilm;void RATED_ADMISSION_ORIGIN;void FILM_ADMISSION_OPERATION;void FILM_RETENTION_OPERATION;void ratedAdmissionRecord;void departedWatchlistLids;void watchlistRetentionWork;void assertRatedAdmissionAccepted;void ratedAdmissionSliceSettled;

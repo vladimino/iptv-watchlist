@@ -186,10 +186,40 @@ export function mergeRatedAdmissionIntent(previous=[],next=[]){
  for(const unit of next||[])if(unit?.requestId)map.set(unit.requestId,unit);
  return [...map.values()];
 }
+export function ratedAdmissionSliceSettled(out){
+ if(!out||out.state==='skipped')return true;
+ return !(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.deferred||0));
+}
 export function ratedAdmissionSettled(out){
  if(!out||out.state==='skipped')return true;
- if(out.state==='incomplete')return false;
- return !(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0));
+ if(!ratedAdmissionSliceSettled(out))return false;
+ return !(Number(out.refused||0));
+}
+export function assertRatedAdmissionAccepted(out){
+ if(out?.state==='skipped')return out;
+ if(ratedAdmissionSettled(out))return out;
+ const error=failed('rated_admission_incomplete');
+ error.detail=ratedAdmissionRecord(out);
+ throw error;
+}
+export function departedWatchlistLids(view,listedIds){
+ const set=new Set((listedIds||[]).map(id=>String(id)));
+ const out=[];
+ for(const [id,item] of Object.entries(view||{})){
+  if(!item||item.watchlist!==true)continue;
+  if(!LID.test(id)||id.startsWith('tmdb_'))continue;
+  if(!set.has(id))out.push(id);
+ }
+ return out;
+}
+export function watchlistRetentionWork({listed=[],departed=[],observedAt,scanId}={}){
+ const at=instant(observedAt);
+ if(!at)return [];
+ const evidence={scanId:scanId||null,source:'letterboxd_watchlist'};
+ return [
+  ...(listed||[]).map(item=>({lid:String(item.lid||item.id||''),tmdbId:item.tmdbId,watchlist:true,observedAt:at,evidence})),
+  ...(departed||[]).map(lid=>({lid:String(lid),watchlist:false,observedAt:at,evidence:{...evidence,left:true}})),
+ ];
 }
 export function ratedAdmissionRecord(out){
  if(!out)return null;
@@ -197,7 +227,7 @@ export function ratedAdmissionRecord(out){
  return {state:out.state,applied:out.applied,noop:out.noop,skipped:out.skipped,failed:out.failed,absent:out.absent,unknown:out.unknown,preflightFailed:out.preflightFailed,refused:out.refused,units,reconciled:out.reconciled,refusedDetail:out.refusedDetail};
 }
 export function carryRatedAdmissionIntent(out){
- if(!out||ratedAdmissionSettled(out))return [];
+ if(!out||ratedAdmissionSliceSettled(out))return [];
  return Array.isArray(out.intent)?out.intent:[];
 }
 export function ratedAdmissionRegistry(env,{intent=[],now}={}){
@@ -252,11 +282,12 @@ export async function applyRatedAdmissionRetention(env,{event,admissions=[],rete
  if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer',receipt:false};
  const nowFn=clockOf(now);
  const origin=RATED_ADMISSION_ORIGIN;
- const planned=await planRatedAdmissionIntent(env,{event,admissions,retentions,now:nowFn});
- const merged=mergeRatedAdmissionIntent(previousIntent,planned.units);
  const cap=Math.min(Math.max(Number(limit)||UNIT_CAP,1),UNIT_CAP);
- const intent=merged.slice(0,cap);
- const deferred=merged.slice(cap);
+ const retry=mergeRatedAdmissionIntent(previousIntent,[]).slice(0,cap);
+ const room=Math.max(0,cap-retry.length);
+ const planned=await planRatedAdmissionIntent(env,{event,admissions:(admissions||[]).slice(0,room),retentions:(retentions||[]).slice(0,room),now:nowFn});
+ const intent=mergeRatedAdmissionIntent(retry,planned.units).slice(0,cap);
+ const deferred=[];
  const counts={applied:0,noop:0,skipped:0,failed:0,absent:planned.absent.length,unknown:0,preflightFailed:planned.refused.filter(item=>item.preflight).length,refused:planned.refused.length};
  const outcomes=[];
  const applyOf={
