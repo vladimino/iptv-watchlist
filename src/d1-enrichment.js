@@ -3,10 +3,10 @@
 // discovered films, the discovery resolution and the Letterboxd diary), builds the whole Film/Person view with the same reader and
 // the same derivation as the offline import, and compares each Film and Person with the change key D1 holds for it. Only a changed
 // one is written, in one D1 batch that also stores its new key, so a key never claims a write that did not commit. A Film that no R2
-// source lists, and that no watchlist fact admits, loses its watchlist membership and is marked absent. A Film a watchlist fact admits stays in the view; only its membership is removed. The run works from a cron trigger, never from a sync
-// or discovery step, so it adds nothing to the R2 pipeline. D1_ENRICHMENT_WRITE: off (default) reads nothing; dry reads R2 and
-// the D1 keys and logs the diff without writing; on writes. Every batch starts with the lease fence, so a run that lost its lease
-// writes nothing and an older run cannot overwrite a newer one.
+// source lists, and that no watchlist fact admits, loses its watchlist membership and is marked absent. A Film a watchlist fact admits stays in the view; only its membership is removed.
+// AIR-308 (ADR 0155): the Worker cron does not call this function. D1_ENRICHMENT_WRITE is ignored. A call returns retired
+// before any lease, window, R2 read or D1 write unless the offline test harness global is set, which production never sets.
+// Every historical batch still starts with the lease fence, so a harness run that lost its lease writes nothing.
 const D1_ENRICHMENT_PROJECTION='enrichment';
 const METADATA_SYNC_PROJECTION='metadata_sync';
 const D1_ENRICHMENT_LEASE_MS=10*60000;
@@ -58,7 +58,12 @@ function d1EnrichmentPhases(db){
 }
 const D1_ENRICHMENT_NO_TIMER={phases:{},detail:{},time:(name,fn)=>fn(),sync:(name,fn)=>fn()};
 
-function d1EnrichmentMode(env){const value=env?.D1_ENRICHMENT_WRITE;return value==='on'?'on':value==='dry'?'dry':'off';}
+// AIR-308: the binding is retired. Production always gets null, so a stray call cannot select on or dry.
+// Offline projector tests set D1_ENRICHMENT_TEST_HARNESS on their vm global; the Worker bundle never does.
+function d1EnrichmentMode(env){
+ if(globalThis.D1_ENRICHMENT_TEST_HARNESS!==true)return null;
+ const value=env?.D1_ENRICHMENT_WRITE;return value==='on'?'on':value==='dry'?'dry':'off';
+}
 
 // The repository's database interface over the D1 binding. Reads go out at once and count against the run's query budget.
 // Writes inside transaction() are collected and sent as one db.batch, which D1 applies atomically.
@@ -413,6 +418,7 @@ async function d1EnrichmentCheckpoints(db,{inputs,keys,timer,storedPage,bucketMi
 }
 async function runD1EnrichmentProjection(env,{now=Date.now(),trigger='cron',queryBudget=D1_ENRICHMENT_QUERY_BUDGET,wallMs:wallOption,window:windowOptions={},storedPage=D1_ENRICHMENT_STORED_PAGE,bucketMin=D1_ENRICHMENT_BUCKET_MIN_ENTITIES,bulk:bulkOverrides={}}={}){
  const mode=d1EnrichmentMode(env);
+ if(mode==null)return {mode:null,retired:true,skipped:'retired'};
  if(mode==='off')return {mode,skipped:'off'};
  if(!env.DB||!env.BUCKET)return {mode,skipped:'binding_missing'};
  const begun=Date.now();let started=begun;
@@ -1051,14 +1057,14 @@ async function d1EnrichmentStatus(binding,env){
  const predictionReady=predictionNames.every(name=>present.includes(name));
  const predictionAbsent=predictionNames.every(name=>!present.includes(name));
  const version=(await binding.prepare('SELECT version FROM schema_contract WHERE id=1').bind().first())?.version??null;
- if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)||(Number(version)>=7&&syncTable&&cacheReady&&(predictionReady||predictionAbsent))))return {mode,schema:false,schemaVersion:version,projectionTables:tables};
+ if(tables.length!==3||!(version===4||(version===5&&syncTable)||(version===6&&syncTable&&cacheReady)||(Number(version)>=7&&syncTable&&cacheReady&&(predictionReady||predictionAbsent))))return {mode,retired:true,schema:false,schemaVersion:version,projectionTables:tables};
  const [run,counts]=await Promise.all([
   binding.prepare('SELECT lease_until leaseUntil,started_at startedAt,finished_at finishedAt,outcome,summary_json summary FROM projection_run WHERE projection=?').bind(D1_ENRICHMENT_PROJECTION).first(),
   binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent,MAX(projected_at) AS lastWriteAt FROM projection_state WHERE projection=?").bind(D1_ENRICHMENT_PROJECTION).first(),
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
  const lastWriteAt=counts?.lastWriteAt||null,lastWriteMs=Date.parse(lastWriteAt||'');
- const status={mode,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastWriteAt,lastWriteAgeSec:Number.isFinite(lastWriteMs)?Math.max(0,Math.round((Date.now()-lastWriteMs)/1000)):null,windowMode:d1EnrichmentWindowMode(env),lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
+ const status={mode,retired:true,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastWriteAt,lastWriteAgeSec:Number.isFinite(lastWriteMs)?Math.max(0,Math.round((Date.now()-lastWriteMs)/1000)):null,windowMode:d1EnrichmentWindowMode(env),lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
  if(Number(version)>=5){
   const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
   status.schemaVersion=version;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;

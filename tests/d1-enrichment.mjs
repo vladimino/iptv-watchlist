@@ -19,9 +19,19 @@ import {seedProjection} from '../scripts/d1-projection-seed.mjs';
 
 const source=fs.readFileSync('src/d1-enrichment.js','utf8');
 assert.doesNotMatch(source,/\bBUCKET\.(put|delete)\b/,'the projector never writes R2');
-assert.match(fs.readFileSync('src/worker.js','utf8'),/async scheduled\(controller,env,execution\)\{[\s\S]*runD1EnrichmentProjection\(env/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\(/,'the cron handler does not call the projector');
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection\([^)]*\)[^\n]*metadataSync|metadataSync[^\n]*runD1EnrichmentProjection/,'no sync step runs the projector');
 assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*"\]/);
+{
+ const closed=projectorContext({harness:false});
+ let touched=0;
+ const db=new Proxy({},{get(){touched++;throw new Error('db touched');}});
+ const summary=await closed.runD1EnrichmentProjection({DB:db,BUCKET:{},D1_ENRICHMENT_WRITE:'on'});
+ assert.deepEqual(JSON.parse(JSON.stringify(summary)),{mode:null,retired:true,skipped:'retired'});
+ assert.equal(touched,0,'a set D1_ENRICHMENT_WRITE does not touch D1');
+ assert.equal(closed.d1EnrichmentMode({D1_ENRICHMENT_WRITE:'on'}),null);
+ assert.equal(closed.d1EnrichmentMode({D1_ENRICHMENT_WRITE:'dry'}),null);
+}
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-enrichment-'));
 let databases=0;
@@ -287,12 +297,12 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
 {
  const {db:v3}=migrated(['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity']);
  const plain=value=>JSON.parse(JSON.stringify(value));
- assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',schema:false,schemaVersion:3,projectionTables:[]});
+ assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',retired:true,schema:false,schemaVersion:3,projectionTables:[]});
  // A partial 0004 is not schema v4: the three tables without the version, or the version without a table.
  v3.sql(fs.readFileSync('migrations/0004_projection_state.sql','utf8').replace(/UPDATE schema_contract[^;]*;/,''));
- assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',schema:false,schemaVersion:3,projectionTables:['projection_fence','projection_run','projection_state']});
+ assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',retired:true,schema:false,schemaVersion:3,projectionTables:['projection_fence','projection_run','projection_state']});
  v3.sql('UPDATE schema_contract SET version=4 WHERE id=1;DROP TABLE projection_fence');
- assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',schema:false,schemaVersion:4,projectionTables:['projection_run','projection_state']});
+ assert.deepEqual(plain(await projector.d1EnrichmentStatus(v3,{})),{mode:'off',retired:true,schema:false,schemaVersion:4,projectionTables:['projection_run','projection_state']});
  assert.equal((await run(env)).outcome,'complete');
  const status=await projector.d1EnrichmentStatus(db,{D1_ENRICHMENT_WRITE:'on'});
  assert.deepEqual([status.mode,status.schema,status.checkpoints,status.absent,status.lastRun.outcome,status.lastRun.leaseHeld],['on',true,one(db,'SELECT COUNT(*) FROM projection_state'),one(db,"SELECT COUNT(*) FROM projection_state WHERE change_key='absent'"),'complete',false]);
@@ -565,7 +575,8 @@ assert.deepEqual(credits(db,'film:tmdb:100'),['a0:person:tmdb_actor/2','a1:perso
   const a=authority(),{db}=migrated(),summary=await withAuthority(a.api).runD1EnrichmentProjection({DB:db,BUCKET:d1World(),D1_ENRICHMENT_WRITE:'on'});
   assert.equal(summary.outcome,'complete');assert.equal(Object.keys(summary).includes('discoveryGate'),false);assert.equal(summary.discoveryGeneration,7);
  }
- assert.match(fs.readFileSync('src/worker.js','utf8'),/Promise\.allSettled\(\[[^\]]*runD1EnrichmentProjection[^\]]*Monitor\.run/,'the projector and the monitor run under one allSettled');
+ assert.match(fs.readFileSync('src/worker.js','utf8'),/Promise\.allSettled\(\[[^\]]*RatingsOrchestration\.ensure[^\]]*Monitor\.run/,'the ratings ensure and the monitor run under one allSettled');
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/runD1EnrichmentProjection/,'AIR-308: scheduled does not name the projector');
 }
 
 console.log('D1 enrichment projector (ADR 0056): fail-closed inputs, consistent cut (writers idle, etags unchanged), absent and membership guards at 394 watchlist Films, off reads nothing, dry writes nothing, on writes and converges, keys ignore the run clock, D1-only watchlist TMDB credits survive and renumber as Letterboxd credits come and go, R2 roster wins duplicates, catalog credits follow R2, fingerprint/prediction dimensions kept, absent released once, lease and lost-lease fence, budget resume, group fallback, status and seed passed, a missing rated-archive object admits nobody');

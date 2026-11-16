@@ -6,8 +6,8 @@ import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import {personOverridesFromSource} from '../scripts/snapshot-store.mjs';
 
-export function projectorContext({log=()=>{},globals={}}={}){
- const context=vm.createContext({Date,Map,Set,WeakMap,JSON,Object,URL,Math,Number,String,Array,Promise,TextEncoder,Uint8Array,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console:{log}});
+export function projectorContext({log=()=>{},globals={},harness=true}={}){
+ const context=vm.createContext({Date,Map,Set,WeakMap,JSON,Object,URL,Math,Number,String,Array,Promise,TextEncoder,Uint8Array,encodeURIComponent,decodeURIComponent,crypto:webcrypto,console:{log},D1_ENRICHMENT_TEST_HARNESS:harness});
  const overrides=personOverridesFromSource(fs.readFileSync('src/sources.js','utf8'));
  Object.assign(context,globals);
  context.FILM_TITLE_DICTIONARY=JSON.parse(fs.readFileSync('data/film-titles.json','utf8'));

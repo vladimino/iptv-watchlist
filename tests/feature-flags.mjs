@@ -129,7 +129,7 @@ assert.deepEqual(live.report.summary,{registered:REGISTERED.length,set:12,absent
 const leaky=await flags({D1_ENRICHMENT_WRITE:'sk-'+SECRET,LETTERBOXD_FACTS:'On',LETTERBOXD_DIARY_HISTORY:{token:SECRET},LIFECYCLE_LOCALIZATION:'on:metadata,'+SECRET,DISCOVERY_LEDGER_MODE:'bounded ',REMOVAL_RATING_LOOKUP:'on'.repeat(150)});
 assert.doesNotMatch(leaky.text,new RegExp(SECRET),'a value outside the known tokens never leaves the Worker');
 const k=name=>entry(leaky.report,name);
-assert.deepEqual([k('D1_ENRICHMENT_WRITE').raw,k('D1_ENRICHMENT_WRITE').redacted,k('D1_ENRICHMENT_WRITE').shape,k('D1_ENRICHMENT_WRITE').issue,k('D1_ENRICHMENT_WRITE').effective],[null,true,{type:'string',length:('sk-'+SECRET).length},'unrecognized','off']);
+assert.deepEqual([k('D1_ENRICHMENT_WRITE').raw,k('D1_ENRICHMENT_WRITE').redacted,k('D1_ENRICHMENT_WRITE').shape,k('D1_ENRICHMENT_WRITE').issue,k('D1_ENRICHMENT_WRITE').effective,k('D1_ENRICHMENT_WRITE').retired],[null,true,{type:'string',length:('sk-'+SECRET).length},'retired',null,true]);
 assert.deepEqual([k('LETTERBOXD_FACTS').raw,k('LETTERBOXD_FACTS').redacted,k('LETTERBOXD_FACTS').issue,k('LETTERBOXD_FACTS').effective],[null,true,'retired',null],'a near miss of a retired switch is redacted, not echoed');
 assert.deepEqual([k('LETTERBOXD_DIARY_HISTORY').raw,k('LETTERBOXD_DIARY_HISTORY').shape,k('LETTERBOXD_DIARY_HISTORY').issue,k('LETTERBOXD_DIARY_HISTORY').effective,k('LETTERBOXD_DIARY_HISTORY').retired],[null,{type:'object'},'retired',null,true],'a non-string on the retired diary switch is redacted and inert');
 assert.deepEqual([k('LIFECYCLE_LOCALIZATION').raw,k('LIFECYCLE_LOCALIZATION').issue,k('LIFECYCLE_LOCALIZATION').effective],[null,'unrecognized_tokens','on'],'an unknown token redacts the whole list; the recognized token still decides');
@@ -138,7 +138,9 @@ assert.deepEqual([k('REMOVAL_RATING_LOOKUP').raw,k('REMOVAL_RATING_LOOKUP').shap
 assert.equal(leaky.report.summary.redacted,5);
 // No registered flag trims. A padded on is shown and is not the effective mode.
 const padded=entry((await flags({D1_ENRICHMENT_WRITE:' on '})).report,'D1_ENRICHMENT_WRITE');
-assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective],[' on ',false,'case_or_whitespace','off']);
+assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective,padded.retired],[' on ',false,'retired',null,true]);
+const kept=entry((await flags({D1_ENRICHMENT_WRITE:'on'})).report,'D1_ENRICHMENT_WRITE');
+assert.deepEqual([kept.raw,kept.valid,kept.issue,kept.effective],['on',false,'retired',null],'a leftover on does not select a mode');
 
 // AIR-366: MONITOR is a permanent on/off gate. The retired dry token is not a mode: it is reported invalid and the effective mode is off.
 {
