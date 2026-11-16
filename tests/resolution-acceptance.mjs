@@ -262,6 +262,15 @@ assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieD
 assert.equal(bound(robbieScore,{observation:robbieObservation,tmdbDetail:robbieDetail,confirmation:robbieOwner,film:{id:'tmdb_1326142',canonicalIdentity:'tmdb:1326142',externalIds:[{scheme:'tmdb',value:'1326142',trusted:true,conflicting:false}]},appliedObservationKeys:['robbie williams live at the apple music festival|2016']}).outcome,'already_applied');
 const tvMovieScore=score(observe('made for tv|1999','Made For Tv',1999,96),[film('7001','Made For Tv',1999,96)]);
 assert.equal(bound(tvMovieScore,{observation:{normalizedTitle:'made for tv',year:1999,durations:[96],categories:['Концерт']},tmdbDetail:policyDetail('7001','Made For Tv',1999,96,[{id:10770,name:'TV Movie'}],{genreIds:[10770]})}).outcome,'detail_verified');
+const tvConcert=policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7102',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance of the tour.',genreIds:[10770]});
+assert.equal(tvConcert.outcome,'candidate_decision');
+assert.equal(tvConcert.reason,'concert_recording');
+assert.equal(tvConcert.transition,null);
+const tvConcertOwner={authority:'owner',tmdbId:'7102',evidence:{authority:'owner',reviewed:true,tmdbId:'7102'}};
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7102',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance of the tour.',genreIds:[10770],confirmation:tvConcertOwner}).reason,'concert_recording');
+assert.equal(policyBound('television feature|1999','Television Feature',1999,96,'7103',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance.',genreIds:[10770]}).reason,'concert_recording');
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7104',[{id:10770,name:'TV Movie'}],{categories:['Фильм'],overview:'A filmed live performance of the tour.',genreIds:[10770]}).outcome,'detail_verified');
+assert.equal(policyBound('telefilm live at the hall|1998','Telefilm Live at the Hall',1998,90,'7105',['телефильм'],{categories:['Концерт'],overview:'A synopsis.'}).reason,'concert_recording');
 for(const [label,genres,categories,overview] of [
  ['documentary only',[{id:99,name:'Documentary'}],['Фильм'],'A feature about climbing.'],
  ['documentary only, no category',[{id:99,name:'Documentary'}],[],''],
@@ -305,6 +314,9 @@ for(const categories of [['Фильм'],[],['Концерт'],['Music']]){
 assert.equal(policyBound('live by night|2016','Live by Night',2016,129,'259693',[{id:80,name:'Crime'},{id:18,name:'Drama'}],{overview:'A crime story.'}).outcome,'detail_verified');
 assert.equal(policyBound('the concert|2009','The Concert',2009,119,'19407',[{id:35,name:'Comedy'},{id:18,name:'Drama'}],{categories:['Фильм'],overview:'A drama about musicians who missed a concert.'}).outcome,'detail_verified');
 assert.equal(policyBound('rhythm of the road|2011','Rhythm of the Road',2011,100,'88001',[{id:10402,name:'Music'}],{overview:'A fictional band spends a summer writing songs.',genreIds:[10402]}).outcome,'detail_verified');
+assert.equal(policyBound('summer notes|2014','Summer Notes',2014,102,'88011',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'Two musicians live in Paris and form a band.',genreIds:[10402]}).outcome,'detail_verified');
+assert.equal(policyBound('quiet days|2014','Quiet Days',2014,102,'88012',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'The singers live above the club and write songs.',genreIds:[10402]}).outcome,'detail_verified');
+assert.equal(policyBound('band live in paris|2012','Band Live in Paris',2012,100,'88013',[{id:10402,name:'Music'}],{categories:['Фильм'],overview:'Two musicians live in Paris and form a band.',genreIds:[10402]}).reason,'concert_recording');
 assert.equal(policyBound('ordinary film|1995','Ordinary Film',1995,170,'949',[{id:18,name:'Drama'},{id:80,name:'Crime'}]).outcome,'detail_verified');
 
 console.log('Scored identity acceptance passed.');

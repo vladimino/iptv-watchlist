@@ -46,10 +46,12 @@ function genreId(value){const id=typeof value==='number'?value:value&&typeof val
 const TMDB_GENRE_MUSIC=10402,TMDB_GENRE_DOCUMENTARY=99,TMDB_GENRE_TV_MOVIE=10770;
 const MUSIC_GENRE_NAMES=new Set(['music','музыка','музыкальный','музика']);
 const DOCUMENTARY_GENRE_NAMES=new Set(['documentary','документальный','документальний']);
-const NON_FEATURE_GENRE_NAMES=new Set([...MUSIC_GENRE_NAMES,...DOCUMENTARY_GENRE_NAMES,'tv movie','телефильм','телефільм']);
+const TV_MOVIE_GENRE_NAMES=new Set(['tv movie','телефильм','телефільм']);
+const NON_FEATURE_GENRE_NAMES=new Set([...MUSIC_GENRE_NAMES,...DOCUMENTARY_GENRE_NAMES,...TV_MOVIE_GENRE_NAMES]);
 const FILM_EPG_CATEGORY=new Set(['фильм','фільм','кино','кіно','телефильм','телефільм','movie','film','cinema']);
 const CONCERT_EPG_CATEGORY=new Set(['концерт','concert','concerts','live','музыка','музика','music']);
 const PERFORMANCE_PHRASES=['live at','live in','live from','in concert','concert film','concert recording','filmed live','live performance','recorded live','performing live','запись концерта','запись выступления','живой концерт'];
+const OVERVIEW_PHRASES=PERFORMANCE_PHRASES.filter(phrase=>phrase!=='live in');
 const WEAK_CONCERT_TOKENS=new Set(['live','concert','концерт']);
 function genreFacts(movie){
  const ids=new Set(),unnamed=[];
@@ -73,22 +75,29 @@ function concertBroadcastCategory(categories){
  if(parts.some(part=>FILM_EPG_CATEGORY.has(part)))return false;
  return parts.some(part=>CONCERT_EPG_CATEGORY.has(part));
 }
-function performanceText(movie,observation){
- return detailNorm([observation?.normalizedTitle,observation?.title,movie?.title,movie?.original,movie?.overview,...(movie?.aliases||[])].filter(Boolean).join(' '));
+function titlePerformanceText(movie,observation){
+ return detailNorm([observation?.normalizedTitle,observation?.title,movie?.title,movie?.original,...(movie?.aliases||[])].filter(Boolean).join(' '));
 }
-function strongPerformance(text){
+function overviewPerformanceText(movie){return detailNorm(movie?.overview||'');}
+function phraseHit(text,phrases){
+ if(!text)return false;
  const padded=' '+text+' ';
- if(PERFORMANCE_PHRASES.some(phrase=>padded.includes(' '+phrase+' ')))return true;
- return text.includes('концертн');
+ return phrases.some(phrase=>padded.includes(' '+phrase+' '));
 }
+function recordingPhrase(text,phrases){return phraseHit(text,phrases)||!!text&&text.includes('концертн');}
 function admissionPolicy(movie,observation){
  const facts=genreFacts(movie);
  if(listedGenre(facts,TMDB_GENRE_DOCUMENTARY,DOCUMENTARY_GENRE_NAMES))return 'documentary';
- if(!listedGenre(facts,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES)||featureGenre(facts))return null;
- if(concertBroadcastCategory(observation?.categories))return 'concert';
- const text=performanceText(movie,observation);
- if(strongPerformance(text))return 'concert';
- if(text.split(' ').some(token=>WEAK_CONCERT_TOKENS.has(token)))return 'ambiguous';
+ if(featureGenre(facts))return null;
+ const titles=titlePerformanceText(movie,observation),overview=overviewPerformanceText(movie);
+ const strong=recordingPhrase(titles,PERFORMANCE_PHRASES)||recordingPhrase(overview,OVERVIEW_PHRASES);
+ const category=concertBroadcastCategory(observation?.categories);
+ if(listedGenre(facts,TMDB_GENRE_MUSIC,MUSIC_GENRE_NAMES)){
+  if(category||strong)return 'concert';
+  if(titles.split(' ').some(token=>WEAK_CONCERT_TOKENS.has(token)))return 'ambiguous';
+  return null;
+ }
+ if(listedGenre(facts,TMDB_GENRE_TV_MOVIE,TV_MOVIE_GENRE_NAMES)&&category&&strong)return 'concert';
  return null;
 }
 function verifyTmdbDetail(detail,tmdbId,observation,competitors,structural){

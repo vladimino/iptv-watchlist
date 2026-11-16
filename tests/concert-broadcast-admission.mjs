@@ -138,6 +138,14 @@ const ambiguous=await resolve(candidate('The Concert',2009,119,{categories:['Ф�
 withheld(ambiguous.records,'the concert|2009',19406,'concert_recording_ambiguous');
 const tvMovie=await resolve(candidate('Made For Television',1999,96,{categories:['Концерт']}),[{id:7001,title:'Made For Television',year:1999,runtime:96,genres:[{id:10770,name:'TV Movie'}]}]);
 admitted(tvMovie.records,'made for television|1999','7001');
+const tvConcert=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Концерт']}),[{id:7102,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],overview:'A filmed live performance of the tour.'}]);
+withheld(tvConcert.records,'hall live at the arena|1998',7102,'concert_recording');
+const tvPhraseOnly=await resolve(candidate('Hall Live at the Arena',1998,90,{categories:['Фильм']}),[{id:7104,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],overview:'A filmed live performance of the tour.'}]);
+admitted(tvPhraseOnly.records,'hall live at the arena|1998','7104');
+const summer=await resolve(candidate('Summer Notes',2014,102,{categories:['Фильм']}),[{id:88011,title:'Summer Notes',year:2014,runtime:102,genres:[{id:10402,name:'Music'}],overview:'Two musicians live in Paris and form a band.'}]);
+admitted(summer.records,'summer notes|2014','88011');
+const quiet=await resolve(candidate('Quiet Days',2014,102,{categories:['Фильм']}),[{id:88012,title:'Quiet Days',year:2014,runtime:102,genres:[{id:10402,name:'Music'}],overview:'The singers live above the club and write songs.'}]);
+admitted(quiet.records,'quiet days|2014','88012');
 
 {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-air-501-'));
@@ -155,7 +163,10 @@ admitted(tvMovie.records,'made for television|1999','7001');
   {id:1326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}],categories:['Концерт']},
   {id:51497,title:'Free Solo',year:2018,runtime:100,genres:[{id:99,name:'Documentary'}],categories:['Фильм']},
   {id:18648,title:'Pink Floyd Live At Pompeii',year:1972,runtime:92,genres:[{id:10402,name:'Music'}],categories:[]},
-  {id:424694,title:'Bohemian Rhapsody',year:2018,runtime:134,genres:[{id:18,name:'Drama'},{id:10402,name:'Music'}],categories:['Фильм'],overview:'The story of Freddie Mercury and Queen, including their Live Aid concert.'}
+  {id:424694,title:'Bohemian Rhapsody',year:2018,runtime:134,genres:[{id:18,name:'Drama'},{id:10402,name:'Music'}],categories:['Фильм'],overview:'The story of Freddie Mercury and Queen, including their Live Aid concert.'},
+  {id:7102,title:'Hall Live at the Arena',year:1998,runtime:90,genres:[{id:10770,name:'TV Movie'}],categories:['Концерт'],overview:'A filmed live performance of the tour.'},
+  {id:88011,title:'Summer Notes',year:2014,runtime:102,genres:[{id:10402,name:'Music'}],categories:['Фильм'],overview:'Two musicians live in Paris and form a band.'},
+  {id:88012,title:'Quiet Days',year:2014,runtime:102,genres:[{id:10402,name:'Music'}],categories:['Фильм'],overview:'The singers live above the club and write songs.'}
  ];
  const items=catalog.map(movie=>candidate(movie.title,movie.year,movie.runtime,{categories:movie.categories}));
  await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease,items:(async function*(){for(const item of items)yield item;})()});
@@ -165,7 +176,7 @@ admitted(tvMovie.records,'made for television|1999','7001');
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const fileName of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(fileName,'utf8'),context);
- const result=await context.resolveDiscoveryChunk(env,{films:[]},4,lease);
+ const result=await context.resolveDiscoveryChunk(env,{films:[]},8,lease);
  assert.equal(result.paged,true);
  assert.equal(result.error,null);
  const stored=(await Authority.routeRead(env,'epg/discovery-resolution.json')).value;
@@ -178,6 +189,12 @@ admitted(tvMovie.records,'made for television|1999','7001');
  assert.equal(admissions.tmdb_51497,undefined);
  assert.equal(admissions.tmdb_18648,undefined);
  assert.equal(admissions.tmdb_424694.canonicalIdentity,'tmdb:424694');
+ assert.equal(stored['hall live at the arena|1998'].reason,'concert_recording');
+ assert.equal(admissions.tmdb_7102,undefined);
+ assert.equal(stored['summer notes|2014'].status,'verified');
+ assert.equal(admissions.tmdb_88011.canonicalIdentity,'tmdb:88011');
+ assert.equal(stored['quiet days|2014'].status,'verified');
+ assert.equal(admissions.tmdb_88012.canonicalIdentity,'tmdb:88012');
  const authority=db.sql("SELECT mode, cutover, programme_run_id FROM published_epg_authority WHERE id=1")[0];
  assert.equal(authority.mode,'r2');
  assert.equal(authority.programme_run_id,null);
