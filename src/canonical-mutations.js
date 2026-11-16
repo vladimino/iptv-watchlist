@@ -8,6 +8,7 @@
 // (film, person, role) keeps its ordinal, a new one is appended or takes a free explicit ordinal, nothing is renumbered, and the
 // D1-only TMDB credits (AIR-286) are never deleted by a roster write.
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
+import {bindProducerFence,fenceStatements} from './canonical-producer-fence.js';
 
 export const MUTATION_STATEMENT_CAP=60;
 const FILM_ID=/^film:.+/;
@@ -83,10 +84,11 @@ async function commit(env,gate,statements,entities,tail=[]){
 }
 
 // The pieces the other fenced writers of the canonical domain reuse (the localization source writer); not a second API.
-export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
+export const fenced={assertSql,FENCE,REVISION,BUMP,appliedTail,receiptTail,bindProducerFence,head:(gate,entities)=>head(gate,entities),commit:(env,gate,statements,entities,tail)=>commit(env,gate,statements,entities,tail),filmId,personId,revisionOf,text,json};
 
 function head(gate,entities){
  const out=[[FENCE,[gate.generation]]];
+ if(gate.producerFence)out.push(...fenceStatements(gate.producerFence));
  for(const entity of entities)out.push([REVISION,[entity.kind,entity.id,entity.expected]]);
  return out;
 }
@@ -101,7 +103,7 @@ export async function mutateFilm(env,input){
  if(!Number.isInteger(film.contractVersion))throw failed('film_person_invalid');
  const tail=receiptTail(input.receiptMark,{kind:'film',id});
  if(input.requireExisting!==undefined&&input.requireExisting!==true)throw failed('film_person_invalid');
- const gate=assertWritable(await readAuthority(env));
+ const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
  const db=database(env);
  const redirect=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]);
  if(redirect)throw failed('film_person_redirect');
@@ -142,7 +144,7 @@ export async function mutatePerson(env,input){
  if(input.presence!==undefined&&input.presence!=='existing'&&input.presence!=='absent')throw failed('film_person_invalid');
  if(input.uniqueTrusted!==undefined&&input.uniqueTrusted!==true)throw failed('film_person_invalid');
  const tail=receiptTail(input.receiptMark,{kind:'person',id});
- const gate=assertWritable(await readAuthority(env));
+ const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
  const entities=[{kind:'person',id,expected}];
  const statements=head(gate,entities);
  if(input.presence==='existing')statements.push([assertSql('EXISTS (SELECT 1 FROM person WHERE id=?)'),[id]]);
@@ -173,7 +175,7 @@ export async function mergeFilms(env,input){
  const from=filmId(input?.from),to=filmId(input?.to),at=text(input?.at);
  if(from===to)throw failed('film_person_invalid');
  const expectedFrom=revisionOf(input?.expected?.from),expectedTo=revisionOf(input?.expected?.to);
- const gate=assertWritable(await readAuthority(env));
+ const gate=bindProducerFence(env,assertWritable(await readAuthority(env)));
  const db=database(env);
  const existing=await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[from]);
  if(existing){
