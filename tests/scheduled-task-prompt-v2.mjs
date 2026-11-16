@@ -42,6 +42,8 @@ for(const val of [prompt,dry])assert.ok(/attempted_found, но snippets сами
 assert.ok(!/другой v2 Task или ещё не выключенный legacy/.test(prompt),'scheduled prompt cannot assume historic enabled state');
 assert.ok(!/FROZEN_MANIFEST|tmdb_800815|5bd010a00102b73a9c8bd24ef67cb56ca17f86918aca7d4715de20752e5dca7e/.test(prompt),'production uses only the live batch manifest, never frozen S5-C test inputs');
 assert.ok(/prediction_batch_start\(\{trigger:'scheduled', manifestSize\}\)/.test(prompt),'production starts its own scheduled batch manifest');
+assert.ok(prompt.includes("prediction_batch_manifest({runId,part:'envelope'})")&&prompt.includes("prediction_batch_manifest({runId,part:'profile'})")&&prompt.includes("prediction_batch_manifest({runId,part:'contract'})")&&prompt.includes("prediction_batch_manifest({runId,part:'film',filmId})"),'owned-run fallback fetches individual manifest parts, not a second start');
+assert.ok(prompt.includes("неизвестен runId")||prompt.includes("отсутствии достоверного runId"),'fallback fails closed if run identity is lost');
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
 assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'production submit uses the owned live runId and epoch');
 assert.ok(/prediction_batch_submit\(\{runId:'dry-run',epoch:1,dryRun:true/.test(dry),'separate A/B template retains frozen dry-run submit');
@@ -76,7 +78,7 @@ const mcp=fs.readFileSync('src/mcp.js','utf8');
 const tools=new Set([...mcp.matchAll(/\{name:'([a-z_]+)',title:/g)].map(x=>x[1]));
 const calls=text=>new Set([...text.matchAll(/\b((?:prediction|enrichment|epg|ratings)_[a-z_]+)\(/g)].map(x=>x[1]));
 const forbiddenOf=text=>text.split('\n').find(l=>l.startsWith('ЗАПРЕЩЕНО:'));
-const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_validate','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
+const SCHEDULED_ALLOWED=new Set(['prediction_batch_start','prediction_batch_manifest','prediction_batch_validate','prediction_batch_submit','prediction_heartbeat','prediction_complete']),DRY_ALLOWED=new Set(['prediction_batch_validate','prediction_batch_submit']);
 for(const [text,allowed,forbidden] of [[prompt,SCHEDULED_ALLOWED,['prediction_start','prediction_next','prediction_submit','prediction_validate','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']],[dry,DRY_ALLOWED,['prediction_batch_start','prediction_start','prediction_next','prediction_submit','prediction_validate','prediction_heartbeat','prediction_complete','epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step']]]){
  const line=forbiddenOf(text);assert.ok(line,'forbidden list present');
  for(const t of forbidden){assert.ok(tools.has(t),t+' is a real tool');assert.ok(line.includes(t),t+' is forbidden');}
