@@ -1131,6 +1131,9 @@ export const FILES={
  "prediction-recovery.mjs": {
   "suite": "core"
  },
+ "prediction-retry-exhausted.mjs": {
+  "suite": "core"
+ },
  "prediction-repository.mjs": {
   "suite": "core"
  },

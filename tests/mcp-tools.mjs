@@ -423,6 +423,7 @@ assert.equal(diagnosticOverview.body.result.structuredContent.pending.eligibleNo
 assert.equal(diagnosticOverview.body.result.structuredContent.pending.hot,5);
 assert.equal(diagnosticOverview.body.result.structuredContent.pending.cold,0);
 assert.equal(diagnosticOverview.body.result.structuredContent.pending.deferredByRetry,5);
+assert.equal(diagnosticOverview.body.result.structuredContent.pending.retryExhausted,0);
 assert.equal(diagnosticOverview.body.result.structuredContent.atomic,false);
 assert.notEqual(diagnosticOverview.body.result.structuredContent.state,'drained');
 assert.ok(diagnosticGets.length>0&&diagnosticGets.length<=12,diagnosticGets.join(','));

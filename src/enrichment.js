@@ -1446,10 +1446,50 @@ async function mutatePredictionQueue(env,apply,trigger,seed=null){
  }
  throw new PredictionQueueConflictError(trigger);
 }
+// Ten saved per-film retryable failures exhaust automatic selection. Eligibility is this counter, not a Film status.
+const PREDICTION_RETRY_ATTEMPT_BUDGET=10;
+const PREDICTION_RETRY_EXHAUSTED_KEEP=500;
+function retryablePerFilmFailure(failure){
+ if(!failure||typeof failure!=='object')return false;
+ if(failure.scope==='run')return false;
+ const kind=failure.kind;
+ return kind==='parse_error'||kind==='validation_error'||kind==='validation_failure';
+}
+function retryBudgetExhausted(record){return Number.isInteger(record?.attempts)&&record.attempts>=PREDICTION_RETRY_ATTEMPT_BUDGET;}
+function countsTowardFormatStorm(validation){
+ if(!validation||typeof validation!=='object')return true;
+ if(validation.stage==='caller_reported'&&validation.claimed?.reason==='insufficient_evidence')return false;
+ return true;
+}
+function recountQueueLanes(queue){
+ const pendingSet=new Set(queue.pending||[]);
+ queue.priorityCount=queue.hotPending.length;queue.coldRemaining=queue.coldPending.length;queue.urgentCount=queue.hotPending.filter(id=>queue.priority[id]?.rank===0).length;queue.coldWithoutPrediction=queue.coldPending.filter(id=>!pendingSet.has(id)).length;
+}
+function holdRetryExhaustedFilm(queue,id){
+ const gone=String(id);
+ const inLane=queue.pending.includes(gone)||queue.hotPending.includes(gone)||queue.coldPending.includes(gone)||queue.priority[gone]||queue.work?.[gone];
+ if(!inLane)return false;
+ const keep=list=>list.filter(item=>item!==gone);
+ queue.pending=keep(queue.pending);queue.hotPending=keep(queue.hotPending);queue.coldPending=keep(queue.coldPending);
+ delete queue.priority[gone];if(queue.work)delete queue.work[gone];
+ recountQueueLanes(queue);
+ return true;
+}
+function boundRetryRecords(retries,currentIds){
+ const keep=[];
+ for(const [id,record] of Object.entries(retries||{})){
+  if(currentIds.has(id)||retryBudgetExhausted(record))keep.push([id,record]);
+ }
+ if(keep.length<=PREDICTION_RETRY_EXHAUSTED_KEEP+currentIds.size)return Object.fromEntries(keep);
+ const current=keep.filter(([id])=>currentIds.has(id)&&!retryBudgetExhausted(retries[id]));
+ const exhausted=keep.filter(([,record])=>retryBudgetExhausted(record)).sort((a,b)=>Date.parse(b[1].failedAt||0)-Date.parse(a[1].failedAt||0)).slice(0,PREDICTION_RETRY_EXHAUSTED_KEEP);
+ return Object.fromEntries([...exhausted,...current]);
+}
 // A retry record only grows while its film is outstanding: attempts and retryAt never go back, and the same run's record
-// is written once.
+// is written once. Systemic run failures do not increment the per-film budget.
 function mergeRetryRecord(existing,failure,runId){
  if(existing?.lastRunId===runId)return existing;
+ if(!retryablePerFilmFailure(failure))return existing||null;
  const attempts=Math.max(failure.attempts||0,(existing?.attempts||0)+1),failedMs=Date.parse(failure.failedAt)||Date.now();
  return {...failure,attempts,retryAt:Math.max(failure.retryAt||0,existing?.retryAt||0,failedMs+Math.min(6*3600000,3600000*2**(attempts-1))),lastRunId:runId};
 }
@@ -1459,7 +1499,9 @@ function recordRunRetries(queue,run){
  for(const [id,failure] of Object.entries(run.failures||{})){
   const record=failure&&typeof failure==='object'?failure:{kind:failure};
   const merged=mergeRetryRecord(queue.retries[id],{kind:record.kind||'storage_error',scope:record.scope||'run',retryable:true,failedAt:record.failedAt||run.completedAt||new Date().toISOString(),retryAt:record.retryAt||0,attempts:record.attempts||0,...(record.validation?{validation:record.validation}:{})},run.runId);
-  if(merged!==queue.retries[id]){queue.retries[id]=merged;added=true;}
+  if(!merged||merged===queue.retries[id])continue;
+  queue.retries[id]=merged;added=true;
+  if(retryBudgetExhausted(merged))holdRetryExhaustedFilm(queue,id);
  }
  return added;
 }
@@ -1578,8 +1620,9 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  // ADR 0142 decision 13: the late tie-break uses the earliest start of the Film's completed (or, outside D1, record) showings, then discoveredAt, then the id. hotEnteredAt is not read.
  const earliestStart=film=>{const starts=(film.shows||[]).map(show=>Number(show.start)).filter(Number.isFinite);return starts.length?Math.min(...starts):0;};
  missing.sort((a,b)=>{const x=priority[a.id],y=priority[b.id];return x.rank-y.rank||(x.rank===0?x.expiresInMs-y.expiresInMs:0)||Number(y.availableNow||y.availableToday)-Number(x.availableNow||x.availableToday)||Number(!!index?.[a.id]?.prediction)-Number(!!index?.[b.id]?.prediction)||Number(!!work[a.id]?.migration)-Number(!!work[b.id]?.migration)||earliestStart(a)-earliestStart(b)||(Date.parse(b.discoveredAt)||0)-(Date.parse(a.discoveredAt)||0)||String(a.id).localeCompare(String(b.id),'en');});
- const hotPending=missing.filter(f=>priority[f.id].hot).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))],currentIds=new Set(missing.map(f=>String(f.id))),retries=Object.fromEntries(Object.entries(previous?.retries||{}).filter(([id])=>currentIds.has(id)));
- const hotCount=films.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-hotPending.length,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
+ const currentIds=new Set(missing.map(f=>String(f.id))),retries=boundRetryRecords(previous?.retries||{},currentIds),exhausted=id=>retryBudgetExhausted(retries[id]);
+ const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
+ const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
  const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:source.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  return queue;
 }
@@ -1611,8 +1654,7 @@ function settleQueueFilms(queue,ids){
  const hotGone=queue.hotPending.filter(id=>gone.has(id)).length,keep=list=>list.filter(id=>!gone.has(id));
  queue.pending=keep(queue.pending);queue.hotPending=keep(queue.hotPending);queue.coldPending=keep(queue.coldPending);
  for(const id of gone){delete queue.priority[id];if(queue.work)delete queue.work[id];if(queue.retries)delete queue.retries[id];}
- const pendingSet=new Set(queue.pending);
- queue.priorityCount=queue.hotPending.length;queue.coldRemaining=queue.coldPending.length;queue.urgentCount=queue.hotPending.filter(id=>queue.priority[id]?.rank===0).length;queue.coldWithoutPrediction=queue.coldPending.filter(id=>!pendingSet.has(id)).length;
+ recountQueueLanes(queue);
  queue.hotPredicted=(queue.hotPredicted||0)+hotGone;queue.advancedAt=new Date().toISOString();
  return queue;
 }
@@ -1775,9 +1817,11 @@ function predictionBatchesProcessed(run){return Math.max(0,(run.batchCount||1)-1
 // Read-only slices of the stored queue: outstanding work, the part the runner would take now and the part a retry
 // timestamp defers. `nextRetryAt` is the earliest numeric retryAt of a deferred outstanding film, not a schedule time.
 function predictionQueueSlices(queue,now=Date.now()){
- if(!Array.isArray(queue?.hotPending)||!Array.isArray(queue?.coldPending))return {hotPending:queue?.priorityCount??null,coldPending:queue?.coldRemaining??null,outstanding:null,eligibleNow:null,deferredByRetry:null,nextRetryAt:null};
- const outstanding=[...new Set([...queue.hotPending,...queue.coldPending])],deferred=outstanding.filter(id=>queue.retries?.[id]?.retryAt>now),nextMs=deferred.map(id=>queue.retries[id].retryAt).filter(value=>typeof value==='number').sort((a,b)=>a-b)[0];
- return {hotPending:queue.hotPending.length,coldPending:queue.coldPending.length,outstanding:outstanding.length,eligibleNow:queueReadyIds(queue,now).length,deferredByRetry:deferred.length,nextRetryAt:Number.isFinite(nextMs)?new Date(nextMs).toISOString():null};
+ if(!Array.isArray(queue?.hotPending)||!Array.isArray(queue?.coldPending))return {hotPending:queue?.priorityCount??null,coldPending:queue?.coldRemaining??null,outstanding:null,eligibleNow:null,deferredByRetry:null,retryExhausted:null,nextRetryAt:null};
+ const outstanding=[...new Set([...queue.hotPending,...queue.coldPending])].filter(id=>!retryBudgetExhausted(queue.retries?.[id]));
+ const deferred=outstanding.filter(id=>queue.retries?.[id]?.retryAt>now),nextMs=deferred.map(id=>queue.retries[id].retryAt).filter(value=>typeof value==='number').sort((a,b)=>a-b)[0];
+ const retryExhausted=Object.values(queue.retries||{}).filter(retryBudgetExhausted).length;
+ return {hotPending:queue.hotPending.length,coldPending:queue.coldPending.length,outstanding:outstanding.length,eligibleNow:queueReadyIds(queue,now).length,deferredByRetry:deferred.length,retryExhausted,nextRetryAt:Number.isFinite(nextMs)?new Date(nextMs).toISOString():null};
 }
 // `inputs` are the objects a queue rebuild of this request already read; with them nothing large is read again.
 async function predictionEventSnapshot(env,queue,batchSize=null,inputs=null){
@@ -1963,9 +2007,14 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
-function queueReadyIds(queue,now=Date.now()){const ids=queue.priorityCount?queue.hotPending:queue.coldPending;return (ids||queue.pending||[]).filter(id=>!(queue.retries?.[id]?.retryAt>now));}
+function queueLaneIds(queue){
+ const hot=(queue.hotPending||[]).filter(id=>!retryBudgetExhausted(queue.retries?.[id]));
+ if(hot.length)return hot;
+ return (queue.coldPending||queue.pending||[]).filter(id=>!retryBudgetExhausted(queue.retries?.[id]));
+}
+function queueReadyIds(queue,now=Date.now()){return queueLaneIds(queue).filter(id=>!(queue.retries?.[id]?.retryAt>now));}
 // The ids a batch takes, in queue order: migration work (ADR-0035 section 6) fills at most FINGERPRINT_MIGRATION_SHARE of the
 // slots, rounded up; the other slots go to missing work. Slots migration cannot fill stay empty rather than widening the share.
 function queueBatchIds(queue,ready,slots){
@@ -2092,7 +2141,7 @@ async function batchSelection(env,{profile,report,queue,pin=null,limit=BATCH_RUN
  const freshness=await predictionFreshness(env,profile),items=[],skipped={missingAdmission:[],alreadyCurrent:[]},notEligible=[];
  const queued=new Set([...(queue.pending||[]),...(queue.hotPending||[]),...(queue.coldPending||[])]),ready=queueReadyIds(queue),readySet=new Set(ready);
  let rest;
- if(pin){rest=[];for(const id of [...new Set(pin.filmIds.map(String))]){if(!queued.has(id))notEligible.push({filmId:id,reason:'not_queued'});else if(!readySet.has(id))notEligible.push({filmId:id,reason:'retry_backoff'});else rest.push(id);}}
+  if(pin){rest=[];for(const id of [...new Set(pin.filmIds.map(String))]){if(retryBudgetExhausted(queue.retries?.[id]))notEligible.push({filmId:id,reason:'retry_exhausted'});else if(!queued.has(id))notEligible.push({filmId:id,reason:'not_queued'});else if(!readySet.has(id))notEligible.push({filmId:id,reason:'retry_backoff'});else rest.push(id);}}
  else rest=[...ready];
  let scanned=0;
  // Read only as many film payloads as the client-requested cap needs: do not load a full 100-film payload set when the caller asked for five.
@@ -2505,7 +2554,7 @@ async function batchSubmitItem(env,ctx,item){
    delete run.failures[id];const outcome=old?'recalculated':'created';run.results[id]=outcome;run.submitted[id]={outcome,inputDigest:digest,assessment:assessmentStatus,...(compatibility?{compatibility}:{}),committedAt:at};
    result={filmId:id,status:outcome,assessment:assessmentStatus,...(compatibility?{compatibility}:{})};
   }
-  if(['created','recalculated'].includes(run.results[id]))run.firstSubmitAt||=new Date().toISOString();run.formatFailureStreak=0;
+   if(['created','recalculated'].includes(run.results[id]))run.firstSubmitAt||=new Date().toISOString();run.formatFailureStreak=0;
   return {result,settled:true};
  }catch(error){
   if(error instanceof BatchGateLost)return {result:{filmId:id,status:'blocked',reason:error.status},stop:error.status};
@@ -2515,7 +2564,7 @@ async function batchSubmitItem(env,ctx,item){
   if(!retryable)return {result:{filmId:id,status:'blocked',reason:'storage_error'},stop:'storage_error'};
   run.failures[id]={kind:failureStage,scope:'item',retryable:true,failedAt:at,retryAt,attempts,...(validation?{validation}:{})};run.results[id]='failed';run.retryHeal='pending';
   run.submitted[id]={outcome:'validation_failure',inputDigest:digest,committedAt:at};
-  run.formatFailureStreak=(run.formatFailureStreak||0)+1;if(run.formatFailureStreak>=5)run.systemicStopReason='format_error_storm';
+  if(countsTowardFormatStorm(validation)){run.formatFailureStreak=(run.formatFailureStreak||0)+1;if(run.formatFailureStreak>=5)run.systemicStopReason='format_error_storm';}
   if(validationStage){const stages=[...(run.itemValidation?.stages||[]),{stage:validationStage,reportedBy}].slice(-8);run.itemValidation={consecutive:run.formatFailureStreak||0,stages};}
   return {result:{filmId:id,status:'validation_failure',error:failureStage,retryable:true,retryAt,...(validation?{validation}:{}),assessment:item.assessment!==undefined?'not_applicable':'not_sent'},failure:id};
  }
@@ -2523,7 +2572,7 @@ async function batchSubmitItem(env,ctx,item){
 // The retry record of a failed film goes to the queue at once, as in a v5 submit; a concurrent record of the same film can only raise attempts and retryAt, and the run and the answer follow it.
 async function batchRecordRetry(env,run,id,result){
  const failure=run.failures[id];if(!failure)return;let record=null;
- await mutatePredictionQueue(env,queue=>{queue.retries||={};const merged=mergeRetryRecord(queue.retries[id],failure,run.runId);if(merged===queue.retries[id])return null;queue.retries[id]=record=merged;return queue;},'submit_failure');
+ await mutatePredictionQueue(env,queue=>{queue.retries||={};const merged=mergeRetryRecord(queue.retries[id],failure,run.runId);if(!merged||merged===queue.retries[id])return null;queue.retries[id]=record=merged;if(retryBudgetExhausted(merged))holdRetryExhaustedFilm(queue,id);return queue;},'submit_failure');
  if(record&&(record.attempts!==failure.attempts||record.retryAt!==failure.retryAt)){failure.attempts=record.attempts;failure.retryAt=record.retryAt;result.retryAt=record.retryAt;}
 }
 // Progress of a v2 run is ordered behind an authoritative checkpoint. The run record is saved first (guarded: gate token, epoch, lease) with the Event as `progressIntent` and the counters
@@ -2819,13 +2868,13 @@ async function enrichmentSubmit(env,body,requestId){
    const at=new Date().toISOString(),retryable=failureStage==='parse_error',previous=await loadJSON(env,predictionQueueKey),attempts=(previous?.retries?.[id]?.attempts||0)+1,retryAt=Date.now()+Math.min(6*3600000,3600000*2**(attempts-1));
    const validation=validationStage?{stage:validationStage,reportedBy,issues}:null;
    run.failures[id]={kind:failureStage,scope:retryable?'item':'run',retryable:true,failedAt:at,retryAt,attempts,...(validation?{validation}:{})};run.results[id]='failed';if(run.mode==='queued')run.retryHeal='pending';results.push({filmId:id,status:retryable?'retryable_failure':'failed',error:failureStage,failureScope:retryable?'item':'run',retryable:true,retryAt,...(validation?{validation}:{})});
-   if(retryable){run.formatFailureStreak=(run.formatFailureStreak||0)+1;if(run.formatFailureStreak>=5)run.systemicStopReason='format_error_storm';}else run.systemicStopReason=failureStage;
+   if(retryable){if(countsTowardFormatStorm(validation)){run.formatFailureStreak=(run.formatFailureStreak||0)+1;if(run.formatFailureStreak>=5)run.systemicStopReason='format_error_storm';}}else run.systemicStopReason=failureStage;
    if(validationStage){const stages=[...(run.itemValidation?.stages||[]),{stage:validationStage,reportedBy}].slice(-8);run.itemValidation={consecutive:run.formatFailureStreak||0,stages};}
   }
   run.lastActivityAt=new Date().toISOString();const renewed=await runnerLease(env,run.runId);if(renewed.status!=='owned')return json(renewed,409);run.lastHeartbeatAt=renewed.heartbeatAt;await savePredictionRun(env,run);
   // Retry state is persisted immediately, not postponed until the eventual run completion.
   if(run.failures[id]){const failure=run.failures[id];let record=null;
-   await mutatePredictionQueue(env,queue=>{queue.retries||={};const merged=mergeRetryRecord(queue.retries[id],failure,run.runId);if(merged===queue.retries[id])return null;queue.retries[id]=record=merged;return queue;},'submit_failure');
+   await mutatePredictionQueue(env,queue=>{queue.retries||={};const merged=mergeRetryRecord(queue.retries[id],failure,run.runId);if(!merged||merged===queue.retries[id])return null;queue.retries[id]=record=merged;if(retryBudgetExhausted(merged))holdRetryExhaustedFilm(queue,id);return queue;},'submit_failure');
    // A concurrent record of the same film (another run's) can only raise attempts and retryAt; the run and the answer follow it.
    if(record&&(record.attempts!==failure.attempts||record.retryAt!==failure.retryAt)){failure.attempts=record.attempts;failure.retryAt=record.retryAt;const answer=results.findLast(r=>r.filmId===id);if(answer?.retryAt!==undefined)answer.retryAt=record.retryAt;await savePredictionRun(env,run);}}
   if(run.systemicStopReason)break;

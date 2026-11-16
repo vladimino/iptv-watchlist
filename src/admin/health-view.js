@@ -36,6 +36,7 @@ const HEALTH_REASON_TEXT = {
   metadata_missing: 'Метаданные отсутствуют.',
   eligible_work_without_runs: 'Есть работа для прогнозов, но запусков или проверок не было.',
   all_deferred_by_retry: 'Вся оставшаяся работа отложена повторами.',
+  prediction_retry_exhausted: 'Автоматический повтор прогноза исчерпан; нужен разбор владельца.',
   continuation_running_stale: 'Continuation числится запущенным дольше двух lease.',
   continuation_not_advanced: 'Continuation не продвинулся после истечения gate.',
   poster_missing: 'У фильма нет постера.',
