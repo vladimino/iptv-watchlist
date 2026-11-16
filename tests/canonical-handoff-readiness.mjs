@@ -56,8 +56,8 @@ if(on('2')){
  assert.equal(out.ready,false);
  const expected=[
   ...ALL_EXCEPTIONS.filter(item=>item.status!=='accepted').map(item=>'exception_not_accepted:'+item.id),
-  // Discovery admission, EPG Producer Workflow and metadata_sync units are registered; rated_admission_retention still needs its kinds.
-  ...PRODUCER_WIRING.filter(item=>!['discovery_admission','epg_commit','metadata_sync'].includes(item.name)).map(item=>'producer_not_wired:'+item.name),
+  // Discovery admission, EPG Producer Workflow, metadata_sync and rated_admission_retention units are registered.
+  ...PRODUCER_WIRING.filter(item=>!['discovery_admission','epg_commit','metadata_sync','rated_admission_retention'].includes(item.name)).map(item=>'producer_not_wired:'+item.name),
   ...CANONICAL_READER_REGISTRY.filter(item=>item.class==='freeze'&&!item.moved).map(item=>'reader_not_moved:'+item.name),
   ...EMPTY_CLASSES.map(item=>'empty_class_not_loaded:'+item.name+':0/'+item.expected),
  ];
@@ -67,7 +67,7 @@ if(on('2')){
  {const {EXPECTED}=await import('../scripts/film-person-prepared-loader.mjs');assert.deepEqual(Object.fromEntries(EMPTY_CLASSES.map(item=>[item.name,item.expected])),{...EXPECTED},'the readiness counts equal the loader EXPECTED (no drift)');}
  assert.ok(!out.blockers.includes('empty_class_not_loaded:retention:0/401'),'the superseded 401 is not the retention expectation');
  assert.deepEqual(PRODUCER_WIRING.map(item=>item.name),['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_metadata','film_mutation','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);assert.equal(RECEIPTS_PROTOCOL.minSchema,19);
  fs.writeFileSync(path.join(root,'today.json'),JSON.stringify(out.blockers));
 }
 
@@ -230,7 +230,7 @@ if(on('5')){
  assert.deepEqual((await flagged.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers,today,'a wired flag has no effect');
  const unregistered=await load(text.replace(/export const PRODUCER_OPERATIONS=operationRegistry\(\[[\s\S]*?\]\);/,"export const PRODUCER_OPERATIONS=operationRegistry([]);"),'unregistered.mjs');
  const without=(await unregistered.handoffReadiness(envOf(production(fresh())),{now:NOW})).blockers;
- assert.deepEqual(without.filter(item=>!today.includes(item)).sort(),['producer_not_wired:discovery_admission','producer_not_wired:epg_commit','producer_not_wired:metadata_sync','receipts_protocol_unregistered'],'clearing the registry restores the protocol and the wired producers');
+ assert.deepEqual(without.filter(item=>!today.includes(item)).sort(),['producer_not_wired:discovery_admission','producer_not_wired:epg_commit','producer_not_wired:metadata_sync','producer_not_wired:rated_admission_retention','receipts_protocol_unregistered'],'clearing the registry restores the protocol and the wired producers');
 }
 
 // 6. The registries agree with the repository: a producer marked wired needs the Worker bundle to carry the adapters; receipts registered need the migration; nothing is
@@ -248,6 +248,8 @@ if(on('6')){
   film_sync_state:'src/canonical-metadata-sync-producer.js',
   localization_source:'src/canonical-metadata-sync-producer.js',
   localization_conflict:'src/canonical-metadata-sync-producer.js',
+  film_admission:'src/canonical-rated-admission-producer.js',
+  film_retention:'src/canonical-rated-admission-producer.js',
  };
  assert.ok(!/canonical-producers/.test(bundle),'the readiness registry is not bundled');
  for(const kind of PRODUCER_OPERATIONS.keys()){

@@ -598,6 +598,16 @@ function recordRatingChange(record,incoming,effective){
     if(!plannedKey(linkIndex||{},links)){await noteConflict(env,links,'alias_conflict');conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
     admitted=await admitInferredFilm(env,item,origin);
     if(admitted==='conflict'){conflicts++;films.push({lid:item.lid,factKey:null,conflict:true});continue;}
+    if((admitted==='admitted'||admitted==='present')&&typeof CanonicalRatedAdmission!=='undefined'){
+     try{
+      const key='tmdb_'+item.tmdb;
+      const {value:doc}=await readJSON(env,ADMISSIONS_KEY);
+      const receipt=doc?.films?.[key];
+      if(receipt)await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{event:'inferred:'+origin.archiveSha256+':'+item.lid,admissions:[{receiptKey:key,receipt}]});
+     }catch(error){
+      if(error?.code==='film_person_held'||error?.code==='film_person_unavailable'||error?.code==='film_person_not_open'||error?.code==='film_person_generation_moved')throw error;
+     }
+    }
    }
    const factKey=await linkOrNote(env,links);
    if(!factKey){

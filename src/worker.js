@@ -860,7 +860,32 @@ async function persistWatchlist(env,run,report){
 }
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
- if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
+ if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt){
+  await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});
+  if(typeof CanonicalRatedAdmission!=='undefined'){
+   try{
+    const view=await loadJSON(env,'enrichment/view-index.json')||{};
+    const listed=new Set((report.films||[]).map(f=>String(f.id)));
+    const retentions=[
+     ...(report.films||[]).map(f=>({lid:f.id,tmdbId:f.tmdbId,watchlist:true,observedAt:run.watchlistObservedAt,evidence:{scanId:run.runId,source:'letterboxd_watchlist'}})),
+     ...Object.entries(view).filter(([id,item])=>item&&item.watchlist===true&&!listed.has(id)).map(([id])=>({lid:id,watchlist:false,observedAt:run.watchlistObservedAt,evidence:{scanId:run.runId,source:'letterboxd_watchlist',left:true}})),
+    ];
+    const canonical=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{
+     event:'watchlist:'+String(run.runId||''),
+     retentions,
+     intent:run.ratedAdmissionIntent||[],
+    });
+    run.canonicalRatedAdmission=CanonicalRatedAdmission.ratedAdmissionRecord(canonical);
+    const carried=CanonicalRatedAdmission.carryRatedAdmissionIntent(canonical);
+    if(carried.length)run.ratedAdmissionIntent=carried;
+    else delete run.ratedAdmissionIntent;
+   }catch(error){
+    const code=error&&error.code;
+    if(code==='film_person_held'||code==='film_person_unavailable'||code==='film_person_not_open'||code==='film_person_generation_moved')throw error;
+    run.canonicalRatedAdmissionErrors=(run.canonicalRatedAdmissionErrors||0)+1;
+   }
+  }
+ }}
 // AIR-390: the journal written with the watchlist and the scan is every event except the `epg` one. The `epg` event is written
 // by flushEpgEvent once the run is complete, so its `at` is the completion time that sync.json also carries.
 // AIR-379. Before a watchlist event that reports removals is written, the confirmed ratings that the fact store ALREADY holds are put on its

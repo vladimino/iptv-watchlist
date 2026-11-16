@@ -56,7 +56,7 @@ const seed=(file)=>{
 const film=over=>({id:'28nq',tmdbId:'1656',title:'Heat',original:'Heat',url:'https://letterboxd.com/film/heat-1995/',year:1995,runtime:170,synopsis:'A group of professional bank robbers.',poster:'p',metadataAt:T,synopsisFetchedAt:T,peopleVersion:1,peopleNamesVersion:2,peopleLocalizedAt:T,directors:[{id:'director/michael-mann',name:'Майкл Манн',original:'Michael Mann'}],actors:[],...over});
 const titles={'28nq':{tmdbId:'1656',title:'Схватка',status:'provisional',sources:['https://www.wikidata.org/wiki/Q202001']}};
 const people={'director/michael-mann':{name:'Майкл Манн',original:'Michael Mann'}};
-const KEYS=['film_credits','film_facts','film_metadata','film_mutation','film_sync_state','localization_conflict','localization_source','person_mutation','person_state'];
+const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state'];
 
 assert.equal(canonicalMetadataFilmId(film()),FID);
 assert.equal(titleSourceOf(film(),titles).source.value,'Схватка');
@@ -142,14 +142,14 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),KEYS);
  for(const kind of METADATA_SYNC_KINDS)assert.equal(PRODUCER_OPERATIONS.get(kind).atomic,true);
  const flipped=PRODUCER_WIRING.filter(item=>item.requires.every(kind=>[...PRODUCER_OPERATIONS.values()].some(op=>op.operation===kind&&op.atomic===true))).map(item=>item.name);
- assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission']);
+ assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
  const audit=activationAudit();
  assert.equal(audit.producers.find(item=>item.name==='metadata_sync').wired,true);
- assert.equal(audit.producers.find(item=>item.name==='rated_admission_retention').wired,false);
+ assert.equal(audit.producers.find(item=>item.name==='rated_admission_retention').wired,true);
  const ready=await handoffReadiness(envOf(database('prepared')),{now:T});
  assert.equal(ready.ready,false);
  assert.ok(!ready.blockers.includes('producer_not_wired:metadata_sync'));
- assert.ok(ready.blockers.includes('producer_not_wired:rated_admission_retention'));
+ assert.ok(!ready.blockers.includes('producer_not_wired:rated_admission_retention'));
 }
 
 {

@@ -365,7 +365,7 @@ if(section('7')){
  assert.ok(!/\b(fetch|setTimeout|setInterval|scheduled|R2|BUCKET|waitUntil)\b/.test(code_),'no network, timer, cron or R2 reference');
  assert.ok(!/\b(INSERT|UPDATE|DELETE)\b\s+(INTO|FROM)?\s*\w/.test(code_),'the module holds no SQL of its own');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-epg-producer'),'the Worker does not name it');
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_metadata','film_mutation','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const epg=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epg.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
 }

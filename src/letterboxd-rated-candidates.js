@@ -302,6 +302,17 @@ const LetterboxdRatedCandidates = (() => {
     const held = await readClaim(env, key, code, tmdb, film.filmPath);
     if (!held.ok) return refusedClaim(code, held.reason);
     const admitted = await writeAdmission(env, film);
+    if (admitted.ok && typeof CanonicalRatedAdmission !== 'undefined') {
+      try {
+        await CanonicalRatedAdmission.applyRatedAdmissionRetention(env, {
+          event: 'rated:' + sha + ':' + code,
+          admissions: [{receiptKey: film.filmId, receipt: admitted.film}],
+        });
+      } catch (error) {
+        const closed = error && (error.code === 'film_person_held' || error.code === 'film_person_unavailable' || error.code === 'film_person_not_open' || error.code === 'film_person_generation_moved');
+        if (closed) throw error;
+      }
+    }
     if (!admitted.ok) {
       const still = await readClaim(env, key, code, tmdb, film.filmPath);
       if (still.ok) await markReview(env, key, code, admitted.reason, {tmdb, filmPath: film.filmPath});

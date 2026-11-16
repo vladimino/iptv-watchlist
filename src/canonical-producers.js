@@ -18,6 +18,7 @@ import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readA
 import {writerRoute} from './canonical-writer-route.js';
 import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
 import {metadataSyncOperations} from './canonical-metadata-sync-producer.js';
+import {ratedAdmissionOperations} from './canonical-rated-admission-producer.js';
 import {filmFactsOperation} from './canonical-producer-adapters.js';
 import {personMutationOperation} from './canonical-person-mutation-producer.js';
 import {FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,unitOperation} from './canonical-person-adapters.js';
@@ -58,7 +59,7 @@ export const PRODUCER_WIRING=Object.freeze([
  Object.freeze({name:'epg_commit',site:'Producer Workflow chain from EpgOrchestration.ensure (canonical-producer-workflow.js)',requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])}),
  Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
  Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
- Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
+ Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, letterboxd-facts.js, worker.js persistScan)',requires:Object.freeze(['film_admission','film_retention'])}),
 ]);
 // P3c: the Discovery admission registers its atomic `film_mutation` spec. The registry is static, so its re-plan is the honest "no source here" (null): a receipt that reaches the generic registry is never replayed blind. The REAL settlement is
 // the origin's own inline reconcile, which binds the same spec to the environment and re-plans from the current `discovery_admission` row (`discoveryAdmissionRegistry` in src/canonical-discovery-admission-producer.js, called by `admitDiscoveryFilms`).
@@ -69,6 +70,7 @@ export const PRODUCER_OPERATIONS=operationRegistry([
  unitOperation(PERSON_STATE_OPERATION,{replan:async()=>null}),
  unitOperation(FILM_CREDITS_OPERATION,{replan:async()=>null}),
  ...metadataSyncOperations({replan:async()=>null}),
+ ...ratedAdmissionOperations({replan:async()=>null}),
 ]);
 // P4: the readers are NOT listed here. handoffReadiness derives them from CANONICAL_READER_REGISTRY of src/canonical-catalog-reader.js (the one registry, owner decision 4): every entry of
 // class 'freeze' with moved:false is `reader_not_moved:<name>`; an entry of class 'exception' never blocks and must not be marked moved.

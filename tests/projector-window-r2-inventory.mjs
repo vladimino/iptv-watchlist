@@ -214,6 +214,7 @@ const NAMING={
  'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
+ 'persistScan@src/worker.js':'publication scan path; reads view-index to plan watchlist false retention, writes no frozen mirror',
  'sealPublishStep@src/worker.js':'publication path, under the sealStep lease',
 };
 const seen=new Set([...naming(chunk),...naming(publication)]);
