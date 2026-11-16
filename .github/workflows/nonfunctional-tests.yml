@@ -1,11 +1,12 @@
 # AIR-490. Mutant-kill checks and runner wall-clock checks. A red run is a regression signal.
 # It is not a needs of Deploy to Cloudflare and it is not a branch-protection required check.
-# 04:00 UTC is 05:00 Europe/Madrid while the offset is UTC+1 and 06:00 while it is UTC+2.
+# 04:17 UTC is 05:17 Europe/Madrid while the offset is UTC+1 and 06:17 while it is UTC+2.
+# Minute 17 avoids GitHub's documented high-load drop of scheduled runs at :00.
 name: Non-functional tests
 
 on:
   schedule:
-    - cron: '0 4 * * *'
+    - cron: '17 4 * * *'
   workflow_dispatch:
 
 permissions:
