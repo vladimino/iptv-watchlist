@@ -1834,7 +1834,70 @@ function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
 function resolverMatches(programmeRunId,reportRunId){if(!programmeRunId||!reportRunId)return true;return programmeRunId===reportRunId;}
-function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null}){
+const PREDICTION_HARD_STOP=new Set(['quota','storage_error','model_error','model_unavailable','api_error','format_error_storm']);
+const PREDICTION_PROGRESS_STALE_MS=6*3600000;
+const PREDICTION_DRAINED=new Set(['queue_empty','eligible_queue_empty','retry_backoff','manifest_spent']);
+function predictionRunFact(row,now){
+ if(!row||typeof row!=='object')return null;
+ const reason=row.stopReason||row.reason||null;
+ const added=Number.isInteger(row.added)?row.added:Object.values(row.results||{}).filter(value=>value==='created').length;
+ const updated=Number.isInteger(row.updated)?row.updated:Object.values(row.results||{}).filter(value=>value==='recalculated').length;
+ const failed=Number.isInteger(row.failed)?row.failed:Object.keys(row.failures||{}).length;
+ const status=row.status||row.state||null;
+ const startedAt=integrationTime(row.startedAt||row.createdAt||row.diagnosticStartedAt);
+ const endedAt=integrationTime(row.endedAt||row.completedAt||row.finishedAt);
+ return {runId:row.runId||null,status,reason,added,updated,failed,startedAt,endedAt,at:endedAt||startedAt};
+}
+function predictionFactMs(fact){const at=integrationTime(fact?.endedAt||fact?.startedAt||fact?.at);return at?Date.parse(at):NaN;}
+function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
+ const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
+ const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
+ if(live)return integrationEntry('predictions','capability','running','running',null,null);
+ const facts=[];
+ const seen=new Set();
+ const push=row=>{const fact=predictionRunFact(row,now);if(!fact||!fact.runId||seen.has(fact.runId))return;seen.add(fact.runId);facts.push(fact);};
+ for(const row of recentRuns||[])push(row);
+ push(run);
+ facts.sort((a,b)=>(Date.parse(b.at||0)-Date.parse(a.at||0))||String(b.runId).localeCompare(String(a.runId)));
+ if(!facts.length)return integrationEntry('predictions','capability','unknown','no_data',null,null);
+ const slices=predictionQueueSlices(queue,now);
+ const queueReadable=Number.isInteger(slices.eligibleNow)||Number.isInteger(slices.outstanding);
+ const workLeft=Number.isInteger(slices.eligibleNow)?slices.eligibleNow>0:false;
+ const isHard=fact=>PREDICTION_HARD_STOP.has(fact.reason);
+ const isComplete=fact=>fact.status==='complete'||fact.status==='completed';
+ const isDrained=fact=>isComplete(fact)&&PREDICTION_DRAINED.has(fact.reason)&&(fact.failed||0)===0;
+ const isProgress=fact=>(fact.added||0)>0||(fact.updated||0)>0||isDrained(fact);
+ const isFailedOnly=fact=>isComplete(fact)&&(fact.added||0)===0&&(fact.updated||0)===0&&(fact.failed||0)>0;
+ const isInterrupt=fact=>{
+  if(!fact||isHard(fact)||isProgress(fact)||isFailedOnly(fact))return false;
+  if(['partial','blocked','interrupted'].includes(fact.status))return true;
+  if(fact.status==='running')return true;
+  return ['external_termination','lease_expired','lease_lost','time_budget','already_running','runner_aborted'].includes(fact.reason);
+ };
+ const latest=facts[0];
+ const lastProgress=facts.find(isProgress);
+ const lastHard=facts.find(isHard);
+ const lastSuccessAt=lastProgress?integrationTime(lastProgress.endedAt||lastProgress.startedAt):null;
+ const lastFailureAt=integrationTime(latest.endedAt||latest.startedAt);
+ const hardUnresolved=lastHard&&(!lastProgress||predictionFactMs(lastHard)>=predictionFactMs(lastProgress));
+ let consecutiveInterrupts=0;
+ for(const fact of facts){if(isInterrupt(fact))consecutiveInterrupts++;else break;}
+ if(hardUnresolved)return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,integrationTime(lastHard.endedAt||lastHard.startedAt)||lastFailureAt);
+ if(consecutiveInterrupts>=2&&workLeft)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
+ const progressAge=lastSuccessAt?now-Date.parse(lastSuccessAt):null;
+ const latestAge=latest.at?now-Date.parse(latest.at):null;
+ if(workLeft&&(progressAge==null||progressAge>PREDICTION_PROGRESS_STALE_MS)){
+  if(lastSuccessAt)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',lastSuccessAt,lastFailureAt);
+  if(latestAge!=null&&latestAge>PREDICTION_PROGRESS_STALE_MS)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+  if(isFailedOnly(latest)||facts.filter(fact=>isInterrupt(fact)||isFailedOnly(fact)).length>=2)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+  if(!queueReadable)return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
+  if(isInterrupt(latest))return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
+ }
+ if(isComplete(latest)&&latest.failed&&!isDrained(latest))return integrationEntry('predictions','capability','degraded','prediction_partial',lastSuccessAt,lastFailureAt);
+ if(lastSuccessAt)return integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,isInterrupt(latest)||isFailedOnly(latest)?lastFailureAt:null);
+ return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
+}
+function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
  const watchlistSuccess=[sync?.stage==='complete'&&!sync.error?integrationTime(sync.updatedAt):null,integrationTime(report?.watchlistUpdatedAt),integrationTime(watchlistIngest?.lastSuccessAt)].filter(Boolean).sort((a,b)=>Date.parse(a)-Date.parse(b)).at(-1)||null;
@@ -1918,9 +1981,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(currentResolverSuccess)return integrationEntry('resolver','source',fresh(currentResolverSuccess),freshCode(currentResolverSuccess),currentResolverSuccess,null);
   return integrationEntry('resolver','source','unknown','no_data',null,null);
  })();
- const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
- const predictionSuccess=['completed'].includes(runStatus)?integrationTime(run.completedAt):null,predictionFailure=['blocked','interrupted'].includes(runStatus)?integrationTime(run.completedAt||run.createdAt):null;
- const predictions=runStatus==='idle'?integrationEntry('predictions','capability','unknown','no_data',null,null):runStatus==='running'?integrationEntry('predictions','capability','running','running',null,null):runStatus==='interrupted'?integrationEntry('predictions','capability','degraded','prediction_interrupted',null,predictionFailure):runStatus==='blocked'?integrationEntry('predictions','capability','degraded','prediction_blocked',null,predictionFailure):run?.failures&&Object.keys(run.failures).length?integrationEntry('predictions','capability','degraded','prediction_partial',predictionSuccess,predictionFailure):integrationEntry('predictions','capability',fresh(predictionSuccess),freshCode(predictionSuccess),predictionSuccess,null);
+ const predictions=predictionCapabilityHealth({run,live,now,recentRuns,queue});
  const films=report?.watchlistCount||report?.films?.length||0,missing=(report?.stats?.metadataMissing||0)+(report?.stats?.titleMissing||0)+(report?.stats?.titleProvisional||0);
  const sources=[watchlist,ratingsSource,epg,resolver,predictions];
  if(films>=10&&missing/films>=.2)sources.push(integrationEntry('metadata','source','degraded','metadata_attention',null,null));
@@ -1988,13 +2049,14 @@ async function footerStatus(env){
  const authority=typeof DiscoveryAuthority!=='undefined'?await guard('discovery_authority',()=>DiscoveryAuthority.readAuthority(env)):null;
  const decisions=authority?.ready?{}:await guard('decisions',()=>loadJSON(env,'epg/discovery-resolution.json'));
  const ledger=await guard('ledger',()=>ledgerStatusAggregates(pinned,decisions||{},Date.now()));
- const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,watchlist,metadataR2]=await Promise.all([
+ const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,watchlist,metadataR2,predictionRuns]=await Promise.all([
   guard('profile',()=>loadJSON(env,profileKey)),guard('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),guard('programme',()=>footerPublishedDocument(pinned,'programme.json')),guard('catalog',()=>loadJSON(pinned,'epg/discovered-films.json')),
   guard('queue',()=>loadJSON(env,predictionQueueKey)),guard('run',()=>loadJSON(env,ENRICHMENT_KEY+'latest-run.json')),guard('lease',()=>loadJSON(env,RUNNER_LEASE_KEY)),guard('sync',()=>loadJSON(env,'sync.json')),guard('ratings_status',()=>loadJSON(env,RATINGS_STATUS_KEY)),
   guard('discovery_status',()=>loadJSON(env,'epg/discovery-status.json')),guard('continuation',()=>loadJSON(env,'epg/resolver-continuation.json')),guard('watchlist_ingest',()=>loadJSON(env,'watchlist-ingest.json')),guard('resolver_lease',()=>loadJSON(env,'epg/resolver-lease.json')),
   // AIR-389 / AIR-499: watchlist is still one published object; metadata.json is frozen at open, so D1 replaces it after these reads name the ids.
   guard('watchlist',()=>footerPublishedDocument(pinned,'watchlist.json')),
-  filmPersonGate?.mode==='d1'?Promise.resolve(undefined):guard('metadata',()=>loadJSON(env,'metadata.json'))
+  filmPersonGate?.mode==='d1'?Promise.resolve(undefined):guard('metadata',()=>loadJSON(env,'metadata.json')),
+  guard('prediction_runs',async()=>(await diagnosticHistory(env,8)).runs)
  ]);
  let metadata=metadataR2;
  if(filmPersonGate?.mode==='d1')metadata=await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate);
@@ -2017,7 +2079,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease,recentRuns:predictionRuns,queue:storedQueue}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue){
  const hot=(queue.hotPending||[]).filter(id=>!retryBudgetExhausted(queue.retries?.[id]));
@@ -2080,7 +2142,7 @@ async function settleExpiredDiagnostics(env,now=Date.now()){
 }
 async function diagnosticHistory(env,limit=10){
  const page=await env.BUCKET.list({prefix:RUN_DIAGNOSTICS_PREFIX,limit}),rows=[];
- for(const item of page.objects){const row=await loadJSON(env,item.key);if(row)rows.push(projectedDiagnostic(row));}
+ for(const item of page.objects||[]){const row=await loadJSON(env,item.key);if(row)rows.push(projectedDiagnostic(row));}
  return {runs:rows.sort((a,b)=>Date.parse(b.startedAt)-Date.parse(a.startedAt)||b.runId.localeCompare(a.runId)).slice(0,limit).map(presentDiagnostic)};
 }
 // AIR-417 / AIR-424. While an EPG publication holds or loads the Discovery authority, the catalog cannot be read and the queue cannot be rebuilt.

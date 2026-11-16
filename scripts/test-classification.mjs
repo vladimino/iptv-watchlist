@@ -412,6 +412,10 @@ export const FILES={
  "discovery-bounded-d1-rehearsal.mjs": {
   "suite": "core"
  },
+ "discovery-bundle-slot-scan.mjs": {
+  "suite": "core",
+  "note": "The built Worker bundle must resolve slotScanConfirmation inside assignObservationSlots. A direct module import does not load that scope."
+ },
  "discovery-bounded-drain.mjs": {
   "suite": "core"
  },
@@ -1150,6 +1154,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-recovery.mjs": {
+  "suite": "core"
+ },
+ "prediction-footer-health.mjs": {
   "suite": "core"
  },
  "prediction-retry-exhausted.mjs": {
