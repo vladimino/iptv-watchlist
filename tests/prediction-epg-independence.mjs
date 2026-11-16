@@ -40,15 +40,44 @@ const item=(w,id)=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction
 
 {
  const w=await ready(4);
- await w.ctx.mutatePredictionQueue(w.env,q=>{q.refreshedAt='1990-01-01T00:00:00.000Z';return q;},'test_age');
+ const origin=new Date(Date.now()-30*3600000).toISOString();
+ await w.ctx.mutatePredictionQueue(w.env,q=>{q.refreshedAt=origin;q.priorityAsOf=origin;q.priorityBasis='completed';for(const id of Object.keys(q.priority))q.priority[id]={...q.priority[id],hot:true,basis:'completed'};return q;},'test_age');
+ assert.equal(queueDoc(w).priorityAsOf,origin,'mutate stored the origin');
  w.records.set('sync.json',{runId:'seal-run',stage:'finalize'});
  w.records.set('programme.json',{runId:'seal-run',films:[{id:'tmdb_1',title:'Hot',shows:[{start:Date.now()}]}]});
- const rebuilt=await w.api('queue/reconcile',{});
- assert.equal(rebuilt.status,200,JSON.stringify(rebuilt.data).slice(0,200));
- const next=queueDoc(w);
- assert.equal(next.priorityBasis,'neutral');
- assert.equal(Object.values(next.priority).every(p=>p.hot===false),true,'shows older than the carry window are not current');
- assert.equal(next.programmeRunId!=='seal-run',true);
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const carried=queueDoc(w);
+ assert.equal(carried.priorityBasis,'carried');
+ assert.equal(carried.priorityAsOf,origin,'the first carry keeps the completed snapshot time');
+ assert.equal(Object.values(carried.priority).some(p=>p.hot===true),true);
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const again=queueDoc(w);
+ assert.equal(again.priorityAsOf,origin,'a second rebuild does not move the carry origin');
+ assert.equal(again.priorityBasis,'carried');
+ await w.ctx.mutatePredictionQueue(w.env,q=>{q.priorityAsOf=new Date(Date.now()-37*3600000).toISOString();return q;},'test_expire');
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const expired=queueDoc(w);
+ assert.equal(expired.priorityBasis,'neutral');
+ assert.equal(Object.values(expired.priority).every(p=>p.hot===false),true,'a fresh refreshedAt does not extend a carry past 36 hours');
+ assert.equal(expired.programmeRunId!=='seal-run',true);
+}
+{
+ const w=await ready(2);
+ sql(w.file,'DELETE FROM discovery_admission');
+ const only={id:'wl_only',title:'Only Watchlist',year:1999,genres:[]};
+ w.records.set('watchlist.json',{films:[only]});
+ w.records.set('sync.json',{runId:'seal-watch',stage:'finalize'});
+ w.records.set('programme.json',{runId:'seal-watch',films:[{id:'tmdb_9',title:'Partial',shows:[{start:Date.now()}]}]});
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ assert.ok(queueDoc(w).pending.includes('wl_only'),'a watchlist film absent from Discovery is queued');
+ const started=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:5});
+ assert.equal(started.status,200,JSON.stringify(started.data).slice(0,300));
+ assert.ok(started.data.films.some(f=>f.filmId==='wl_only'),'it reaches the manifest');
+ assert.equal(started.data.skipped.missingAdmission,0);
+ const submitted=await w.api('batch/submit',{runId:started.data.runId,epoch:started.data.lease.epoch,items:[item(w,'wl_only')]});
+ assert.equal(submitted.status,200,JSON.stringify(submitted.data).slice(0,240));
+ assert.equal(submitted.data.results[0].status,'created');
+ assert.equal(w.records.get('sync.json').stage,'finalize');
 }
 
 {

@@ -1578,6 +1578,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
   return [id,neutralPredictionPriority()];
  }));
  if(!authoritative&&priorityBasis!=='carried'){priorityBasis='neutral';priorityProgrammeRunId=previous?.programmeRunId||'priority-neutral';}
+ const priorityAsOf=authoritative?new Date(now).toISOString():priorityBasis==='carried'?(previous?.priorityAsOf||previous?.refreshedAt||null):null;
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
  const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
  // The fingerprint transition rule (ADR-0035) decides; the strict fingerprint outcome is counted beside it. Each outstanding
@@ -1620,7 +1621,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const currentIds=new Set(missing.map(f=>String(f.id))),retries=boundRetryRecords(previous?.retries||{},currentIds),exhausted=id=>retryBudgetExhausted(retries[id]);
  const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
  const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
- const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
+ const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,priorityAsOf,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  return queue;
 }
 // AIR-431. The Prediction queue advances on its own state. A runner step (next, submit, complete) no longer rebuilds the queue from the
@@ -1653,10 +1654,15 @@ function priorityRefreshDue(queue,report,sync){
  return queue.programmeRunId!==report.runId;
 }
 function neutralPredictionPriority(){return {hot:false,availableNow:false,availableToday:false,availableUntil:null,rank:2,expiresInMs:Infinity,basis:'neutral'};}
+// The 36h bound is the completed snapshot's own time, not the last rebuild. A carried queue keeps that instant in priorityAsOf.
+function priorityOriginMs(previous){
+ if(previous?.priorityAsOf)return Date.parse(previous.priorityAsOf);
+ if(previous?.priorityBasis==='carried')return NaN;
+ return Date.parse(previous?.refreshedAt||'');
+}
 function carriedPredictionPriority(previous,id,now){
- const age=previous?.refreshedAt?now-Date.parse(previous.refreshedAt):Infinity;
- const basis=previous?.priorityBasis;
- const fromCompleted=basis==='completed'||basis===undefined||basis==='carried';
+ const origin=priorityOriginMs(previous),age=Number.isFinite(origin)?now-origin:Infinity;
+ const basis=previous?.priorityBasis,fromCompleted=basis==='completed'||basis===undefined||basis==='carried';
  const stored=previous?.priority?.[id];
  if(fromCompleted&&age<=PRIORITY_CARRY_MS&&stored&&typeof stored==='object')return {...stored,basis:'carried'};
  return null;
@@ -1730,14 +1736,18 @@ async function currentPredictionQueue(env,report,profile,trigger,{force=false,fa
 // Films by id, for the metadata of a batch: the watchlist first, then the admitted catalog films by indexed id lookup (never the whole
 // catalog). Outside D1 authority the R2 catalog serves them.
 async function readFilmsById(env,report,ids,known=undefined){
- const wanted=[...new Set((ids||[]).map(String))],found=new Map(),watchlist=new Map(eligibleEnrichmentFilms(report).map(f=>[String(f.id),f])),rest=[];
+ const wanted=[...new Set((ids||[]).map(String))],found=new Map(),watchlist=new Map(eligibleEnrichmentFilms(report).map(f=>[String(f.id),f]));let rest=[];
  for(const id of wanted){const film=watchlist.get(id);if(film)found.set(id,film);else rest.push(id);}
  if(!rest.length)return found;
  if(known){for(const id of rest){const film=known[id]||Object.values(known).find(f=>String(f?.id)===id);if(film)found.set(id,film);}return found;}
  const authority=typeof DiscoveryAuthority==='undefined'?null:await DiscoveryAuthority.readAdmissionsById(env,rest);
- if(authority?.handled){for(const [id,film] of authority.films)found.set(id,film);return found;}
- const catalog=await loadJSON(env,'epg/discovered-films.json')||{};
- for(const id of rest){const film=catalog[id]||Object.values(catalog).find(f=>String(f?.id)===id);if(film)found.set(id,film);}
+ if(authority?.handled){for(const [id,film] of authority.films)found.set(id,film);}
+ else{const catalog=await loadJSON(env,'epg/discovered-films.json')||{};for(const id of rest){const film=catalog[id]||Object.values(catalog).find(f=>String(f?.id)===id);if(film)found.set(id,film);}}
+ const still=rest.filter(id=>!found.has(id));
+ if(still.length&&!showsAuthoritative(await loadJSON(env,'sync.json'),report&&Array.isArray(report.films)?report:{runId:report?.runId||null,films:[]})){
+  const list=await loadJSON(env,'watchlist.json');
+  if(Array.isArray(list?.films)){const extra=new Map(eligibleEnrichmentFilms({films:list.films}).map(f=>[String(f.id),f]));for(const id of still){const film=extra.get(id);if(film)found.set(id,film);}}
+ }
  return found;
 }
 async function queueStatus(env){return queueStatusView(await loadJSON(env,predictionQueueKey));}

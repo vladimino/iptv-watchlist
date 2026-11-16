@@ -10,7 +10,8 @@
 ## What held
 
 - With `sync.stage` `seal`, a programme report already renamed to that unsealed `runId`, and a stored queue from `p1`, `prediction_batch_start` (`manifestSize: 5`) returned five film inputs, `batch_submit` created them, and `prediction_complete` (`manifest_spent`) succeeded. `sync.json` and `programme.json` were unchanged. A retry record on a film outside the manifest stayed at 3 attempts. The queue `programmeRunId` stayed `p1`.
-- A queue whose `refreshedAt` is in 1990, rebuilt while `finalize` is open, stored `priorityBasis: neutral` and no hot film, and did not adopt the unsealed `runId`.
+- A carried priority keeps `priorityAsOf` from the completed snapshot. A second rebuild does not move it. Setting that instant 37 hours back makes the next rebuild neutral even though `refreshedAt` is recent.
+- A film that exists only in `watchlist.json`, not in the partial programme and not in Discovery, is queued during `finalize`, appears in the manifest and submits. It is not settled as a missing admission.
 - After one film was predicted, adding a show on the same completed programme and reconciling the queue left that film out of the next manifest.
 
 ## What this does not show
