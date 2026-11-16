@@ -73,6 +73,12 @@ async function lbaRead(env,key){
 }
 // The version of a key now, without parsing it: a changed etag between the first read and this one is drift.
 async function lbaVersion(env,key){
+ if(key===LBA_METADATA_KEY&&typeof CanonicalCatalogReader!=='undefined'){
+  try{
+   const gate=await CanonicalCatalogReader.catalogReaderGate(env);
+   if(gate.mode==='d1')return 'd1:'+gate.generation;
+  }catch{return 'unavailable';}
+ }
  if(typeof RatingsD1!=='undefined'&&RatingsD1.ratingsMutableKey(key)){
   try{
    const owned=await RatingsD1.readOwned(env,key);
@@ -124,6 +130,7 @@ async function lbaOutcomes(item,record,floors,origin){
 
 async function lbaCompare(env,parsed,origin){
  const {env:readEnv,versions}=lbaReadOnly(env);
+ const filmPersonGate=typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env);
  const ratingsGate=await lbaRatingsGate(env);
  const sources={};
  let programme=null,publishedFence=null;
@@ -134,12 +141,20 @@ async function lbaCompare(env,parsed,origin){
   }
  }catch{sources.programme={evidence:'unavailable',reason:'storage_unavailable'};}
  try{
-  const snapshot=await adminLoadSnapshot(readEnv,false);
+  const snapshot=await adminLoadSnapshot(readEnv,false,filmPersonGate);
   if(snapshot.error)sources.programme={evidence:'unavailable',reason:snapshot.error};
   else{programme=snapshot.programme.body;sources.programme={evidence:'observed',key:snapshot.pointer?.authority==='d1'?'published_epg_document':epgGenerationKey(snapshot.tuple.programmeRunId,'programme.json'),programmeRunId:snapshot.tuple.programmeRunId,films:Array.isArray(programme?.films)?programme.films.length:0};}
- }catch{sources.programme={evidence:'unavailable',reason:'storage_unavailable'};}
- const [metadata,pointer,links,filmsList,watchlist,receipt,intent]=await Promise.all([LBA_METADATA_KEY,LBA_RATINGS_POINTER_KEY,LetterboxdFacts.FACTS_KEYS.links,LetterboxdFacts.FACTS_KEYS.filmsList,LetterboxdFacts.FACTS_KEYS.watchlist,lbaImportKey(origin.sha256,'receipt'),lbaImportKey(origin.sha256,'intent')].map(key=>lbaRead(readEnv,key)));
- sources.metadata={evidence:metadata.evidence,key:LBA_METADATA_KEY};
+ }catch(error){if(ADMIN_FILM_PERSON_REFUSALS.includes(error?.code))throw error;sources.programme={evidence:'unavailable',reason:'storage_unavailable'};}
+ const ids=[...new Set((parsed.films||[]).map(film=>film.letterboxdId||film.id||film.code).filter(Boolean).map(String))];
+ for(const film of Array.isArray(programme?.films)?programme.films:[])if(film?.id!=null)ids.push(String(film.id));
+ let metadata;
+ if(filmPersonGate?.mode==='d1'){
+  const records=await CanonicalCatalogReader.catalogMetadataFromD1(env,ids,filmPersonGate);
+  lbaNote(readEnv,LBA_METADATA_KEY,'d1:'+filmPersonGate.generation);
+  metadata={evidence:'observed',value:records,etag:'d1:'+filmPersonGate.generation,authority:'d1'};
+ }else metadata=await lbaRead(readEnv,LBA_METADATA_KEY);
+ const [pointer,links,filmsList,watchlist,receipt,intent]=await Promise.all([LBA_RATINGS_POINTER_KEY,LetterboxdFacts.FACTS_KEYS.links,LetterboxdFacts.FACTS_KEYS.filmsList,LetterboxdFacts.FACTS_KEYS.watchlist,lbaImportKey(origin.sha256,'receipt'),lbaImportKey(origin.sha256,'intent')].map(key=>lbaRead(readEnv,key)));
+ sources.metadata={evidence:metadata.evidence,key:filmPersonGate?.mode==='d1'?'film_metadata':LBA_METADATA_KEY};
  let ratings=null;
  if(pointer.evidence==='observed'&&pointer.value?.projected===true&&typeof pointer.value.generationId==='string'){
   const key=lbaRatingsGenerationKey(pointer.value.generationId),generation=await lbaRead(readEnv,key);
@@ -238,6 +253,7 @@ async function lbaCompare(env,parsed,origin){
   try{later=await PublishedEpg.currentGeneration(env);}catch{later=null;}
   if(!later||later.fence!==publishedFence)changed.push('published_epg_authority');
  }
+ if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  const ratedAdmission=typeof LetterboxdRatedAdmission==='undefined'?null:LetterboxdRatedAdmission.classifyArchive({films:parsed.films,matches});
  return {
   sources,omitted:LBA_OMITTED,receipt:receiptState,matches,hypothesis,indexSummary:index.summary,items,ratedAdmission,
@@ -320,7 +336,8 @@ async function adminLetterboxdArchiveRoute(request,env,url){
   });
   await lbaAttachBatches(preview,comparison,started);
   return json({...preview,reads:comparison.reads});
- }catch{
+ }catch(error){
+  const refused=adminStorageRefusal(error);if(refused)return refused;
   return adminError('preview_failed',500);
  }finally{lbaFreeSlot(started);}
 }

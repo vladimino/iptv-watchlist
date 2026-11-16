@@ -40,7 +40,7 @@ assert.equal(OPEN_HANDOFF_MIN_VERSION,23);
 assert.equal(ACTIVATION_CONSUMERS.length,CANONICAL_READER_REGISTRY.length);
 const audit=activationAudit();
 assert.equal(audit.consumers.length,CANONICAL_READER_REGISTRY.length);
-assert.equal(audit.consumers.filter(item=>item.class==='freeze'&&item.moved!==true).length,6);
+assert.equal(audit.consumers.filter(item=>item.class==='freeze'&&item.moved!==true).length,2);
 assert.equal(audit.consumers.filter(item=>item.kind==='adr0117_exception').length,5);
 assert.ok(audit.consumers.some(item=>item.name==='metadata cache mirror object of the D1 metadata cache'&&item.kind==='adr0117_exception'));
 assert.ok(audit.consumers.find(item=>item.name.startsWith('metadataSync'))?.moved);

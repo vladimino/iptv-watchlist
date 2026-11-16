@@ -122,6 +122,9 @@ export const FILES={
  "canonical-catalog-metadata.mjs": {
   "suite": "core"
  },
+ "canonical-admin-dictionaries.mjs": {
+  "suite": "core"
+ },
  "canonical-mirror-put.mjs": {
   "suite": "core"
  },

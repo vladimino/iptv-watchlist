@@ -15,12 +15,12 @@ Exactly these objects, in this order, on every request. There is no `BUCKET.list
 | 1 | `epg/published-generation.json` | Must be `phase: published` with a `programmeRunId` of letters, digits, `_` or `-` (at most 80). Otherwise 503 `programme_unavailable`. The etag is kept |
 | 2 | `epg/generations/<programmeRunId>/programme.json` | Must exist and carry `runId` equal to the pointer's run. Otherwise 503 `programme_unavailable`; the root `programme.json` is **not** read instead |
 | 3 | `epg/published-generation.json` again | If the etag or the run differs from step 1, the programme body is discarded and the read starts over once. A second move is 503 `programme_unavailable` without a client pin and 409 `stale_pin` with one |
-| 4 | `titles.json`, `people.json` | The provisional title cache and the cached person names. A missing dictionary is an empty map and a `null` version, not an error |
+| 4 | `titles.json`, `people.json` | While Film/Person is `legacy`/`r2`/`prepared`: the provisional title cache and the cached person names. A missing dictionary is an empty map and a `null` version, not an error. At Film/Person `open` those objects are frozen and are not read; the same facts come from bounded D1 (`catalogTitlesFromD1` / `catalogPeopleFromD1`, chunks of 1500 ids). `titlesVersion` / `peopleVersion` are then `d1:<generation>`. `held`, an unreadable marker or a generation move is `503` `storage_unavailable` with a typed `reason` and does not fall back to R2 |
 | 5 | `admin/owner-reviews.json`, or `owner_review_entry` when that marker is `d1` | The owner-review overlay for Film titles and Person names ([ADR 0072](../../adr/0072-owner-reviewed-localization-overlay.md)). While `owner_review_authority` is absent or `mode` is `r2`, a missing object is an empty document and a `null` version, not an error. Its etag is `reviewsVersion`. The body is not written by this read. When `mode` is `d1` ([ADR 0081](../../adr/0081-d1-authoritative-owner-reviews.md), Accepted), this step reads the rows. `reviewsVersion` is `d1:<generation>`. The read does not write the rows and does not repair the R2 mirror. A pin from the other mode does not match. Version 9 without the tables, or an invalid marker, is 503 `storage_unavailable` and does not fall back to the object. Migration `0009` is applied and the marker is `d1` at generation 1, so production reads the rows. `reviewsVersion` is `d1:1` ([activation record](../../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)) |
 
 Each object's version is its R2 etag; when the object exists and the etag is empty, the version is the SHA-256 of the loaded bytes. A missing etag is never "unchanged". `updatedAt` is not a match key.
 
-While `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md)), steps 1 and 3 are one read of that D1 pointer and step 2 is `published_epg_document` for the same run. The generation etag in the pin is the D1 fence token, and the programme etag is the SHA-256 of the D1 document. The root `programme.json` is still not read. A failed D1 read is `503`, not a fallthrough to another R2 generation. Dictionaries stay R2. Owner reviews follow `owner_review_authority`; production is `d1`, so that overlay is the rows and the object is the mirror ([activation record](../../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)). The poster and discovery-index reads use the same D1 run and still load their R2 generation copies. This is the current production path: the published-EPG marker is `d1/open`, and the independent owner-review marker is `d1`. The former R2 published-EPG path applies only while that marker remains `r2` or its migration is absent.
+While `published_epg_authority.mode` is `d1` ([ADR 0079](../../adr/0079-d1-authoritative-published-epg.md)), steps 1 and 3 are one read of that D1 pointer and step 2 is `published_epg_document` for the same run. The generation etag in the pin is the D1 fence token, and the programme etag is the SHA-256 of the D1 document. The root `programme.json` is still not read. A failed D1 read is `503`, not a fallthrough to another R2 generation. Dictionaries follow the Film/Person marker (R2 until `open`, then D1 as in step 4). Owner reviews follow `owner_review_authority`; production is `d1`, so that overlay is the rows and the object is the mirror ([activation record](../../evidence/d1-migration/air-314-owner-review-activate-2026-11-03.md)). The poster and discovery-index reads use the same D1 run and still load their R2 generation copies. This is the current production path: the published-EPG marker is `d1/open`, and the independent owner-review marker is `d1`. The former R2 published-EPG path applies only while that marker remains `r2` or its migration is absent.
 
 A failure of R2 itself (an exception from the binding) is 503 `storage_unavailable`. No retry reaches a writer and nothing is repaired.
 
@@ -90,7 +90,7 @@ Parameters are validated before the snapshot is read, so a bad `limit`, `q`, `qu
 | 405 | `method_not_allowed` | not a GET |
 | 409 | `stale_pin` | the pin is not the tuple just read, or the pointer moved twice during a pinned read |
 | 503 | `programme_unavailable` | no published pointer, a run id that is unsafe, a missing generation programme object or one of another run, or the pointer moved twice during an unpinned read |
-| 503 | `storage_unavailable` | the R2 binding threw |
+| 503 | `storage_unavailable` | the R2 binding threw, or Film/Person is `held` / unreadable / generation-moved (`reason` is the typed code; no R2 dictionary fallback) |
 
 ## Data health: `GET /api/admin/health`
 
@@ -528,6 +528,7 @@ Only `watched.csv`, `ratings.csv`, `watchlist.csv` and `diary.csv` at the top le
 | 422 | `archive_invalid` with `code` and `file` | the ZIP reader refused: `not_zip`, `archive_too_large`, `zip64_unsupported`, `multi_disk_unsupported`, `too_many_entries`, `central_directory_invalid`, `entry_name_invalid`, `duplicate_entry`, `encrypted_entry`, `unsupported_method`, `local_header_invalid`, `entry_truncated`, `entry_overlap`, `entry_too_large`, `total_too_large`, `ratio_exceeded`, `entry_size_mismatch`, `inflate_failed`, `checksum_failed`, `invalid_utf8`, `too_many_rows`, `time_budget`, `aborted` |
 | 422 | `csv_invalid` with `file` and `record` | a CSV file the parser cannot read |
 | 422 | `missing_watched` | the archive has no `watched.csv` |
+| 503 | `storage_unavailable` | Film/Person `held`, unreadable marker or generation move while comparing; typed `reason`, no R2 fallback for the frozen mirrors |
 | 500 | `preview_failed` | anything else; no detail is returned |
 
 **One archive request per isolate.** A worst-case preview needs about half of the isolate's 128 MB, so the handler holds one slot per isolate and answers 429 to a second concurrent preview or apply on the same isolate. The slot is the start time of the running request and is taken over after 60 s, because a request the runtime cancels never reaches its `finally`. Length and content type are checked before the slot is taken.
@@ -539,7 +540,7 @@ Through a bucket wrapper that exposes only `get`; no key is listed:
 | Read | Use |
 | --- | --- |
 | The admin snapshot (six reads above) | The published programme for the matcher; failure leaves matching `partial` |
-| `metadata.json` | Catalog metadata for the matcher |
+| `metadata.json` | While Film/Person is `legacy`/`r2`/`prepared`: catalog metadata for the matcher. At `open` the frozen object is not read; the same fields come from bounded D1 (`catalogMetadataFromD1` of the ZIP and programme ids). `held` / unreadable / generation move refuse the preview with `503` `storage_unavailable` |
 | `enrichment/ratings/published.json`, then its generation when `projected: true` | The ratings the matcher uses as evidence |
 | `letterboxd/facts/links.json` | The link index: which films already have a fact record and under which key |
 | `letterboxd/facts/scans/films-list.json`, `letterboxd/facts/scans/watchlist.json` | The scan summaries, the floor of every observation ([ADR 0024](../../adr/0024-letterboxd-scan-summary.md)) |
