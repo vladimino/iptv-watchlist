@@ -86,7 +86,7 @@ Dependencies between holdpoints: H0 before any producer wiring merge and before 
 **Status: BLOCKED, no GO.** The text below is design only.
 **Would authorize (when unblocked):** one activation plan with bounded reads, the projector lease and exclusive window, a final empty projector pass, the single flip batch, readback, the receipt-baseline recording, the catch-up reconcile and the release; and no other writes.
 **Preconditions:** all 30 blockers cleared (table above) **and** the extra items: held drill passed on a safe copy, mirror classification recorded, activation tooling and a receipt-baseline emitter reviewed and merged, H0 and H1 done and read back, a quiet window agreed in Madrid time, no pending/failed/unknown receipt (none can exist before `open`), every consumer verified on D1 (readers).
-**Design sequence** (from ADR 0117 and the open handoff runbook; the tooling does not exist yet):
+**Design sequence** (from ADR 0117 and the open handoff runbook; the operator exists in-repo as `src/film-person-open-handoff.js` and is not a production GO):
 1. Bounded read-only preflight (counts only): marker `prepared`/`open`/1, fence ok, baseline `verified` with the recorded reference, schema 19, `canonical_revision` `COUNT(*), MAX(revision)` (expected 0; refused above the 5,000 cap), lease free, window idle, Discovery, EPG, Ratings and Predictions quiet, `handoffReadiness` `ready:true`.
 2. Take the projector lease and the exclusive window (ADR 0103; required for H2 by E3); STOP if either is not granted.
 3. Final projector pass with an empty plan; STOP if it plans any write.

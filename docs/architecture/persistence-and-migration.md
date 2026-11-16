@@ -98,7 +98,7 @@ Migration `0020` ([migration index](../../migrations/README.md), [schema referen
 
 ## Canonical producer chain (schema 23, applied 16 Nov 2026)
 
-Migration `0023` ([migration index](../../migrations/README.md), [schema reference](../reference/data/d1-schema.md#canonical-producer-chain-schema-v23-applied-16-nov-2026), [ADR 0141](../adr/0141-producer-workflow-chain-protocol.md)) adds the empty ownership row `canonical_producer_chain`. A deploy does not apply it. It was applied on 16 Nov 2026 under a separate owner GO ([procedure](../runbooks/film-person-0023-apply.md), [evidence](../evidence/d1-migration/air-499-0023-apply-2026-11-16.md)). The Worker may bind `PRODUCER_WORKFLOW`; `reconcileProducerChain` still returns dormant while the Film/Person marker is not `d1`/`open`. The diagrams on this page are unchanged.
+Migration `0023` ([migration index](../../migrations/README.md), [schema reference](../reference/data/d1-schema.md#canonical-producer-chain-schema-v23-applied-16-nov-2026), [ADR 0141](../adr/0141-producer-workflow-chain-protocol.md)) adds the empty ownership row `canonical_producer_chain`. A deploy does not apply it. It was applied on 16 Nov 2026 under a separate owner GO ([procedure](../runbooks/film-person-0023-apply.md), [evidence](../evidence/d1-migration/air-499-0023-apply-2026-11-16.md)). The Worker may bind `PRODUCER_WORKFLOW`; `reconcileProducerChain` still returns dormant while the Film/Person marker is not `d1`/`open`. The unbundled `open` operator (`src/film-person-open-handoff.js`) is not a Worker path and authorizes no flip; the diagrams on this page are unchanged.
 
 ## Projector write path (ADR 0106, flag off)
 
