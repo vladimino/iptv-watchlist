@@ -90,14 +90,14 @@ context.zeroCoverage={...context.input,coverage:{confirmedFilmsTotal:0,currentPr
 const zeroCoverage=vm.runInContext('footerStatusText(zeroCoverage)',context);
 assert.equal(zeroCoverage.local,'0/0 с актуальным прогнозом · 0%','an explicit zero stays a measured zero');
 assert.equal(zeroCoverage.windowCoverage,'0/0 с актуальным прогнозом · 0%');
-assert.equal(text.runLabel,'Последний run');assert.equal(text.runLine,'завершён · 27 фильмов без актуального прогноза','a stored queue_empty never claims a drained queue while films are outstanding');assert.match(text.nextLine,/Следующий запуск по расписанию: около /);assert.match(text.nextRun,/^около /);
+assert.equal(text.runLabel,'Последний run');assert.equal(text.runLine,'завершён · 27 фильмов без актуального прогноза','a stored queue_empty never claims a drained queue while films are outstanding');assert.equal(text.nextLine,'Следующий запуск по расписанию: —');assert.equal(text.nextRun,'—');
 // Queue outcome comes from the stored slices, never from the stop reason alone (Europe/Madrid times).
 const fullCoverage={confirmedFilmsTotal:100,currentPredictionsTotal:100,windowFilmsTotal:20,windowCurrentPredictions:20,cacheOffWindowTotal:80,localPercent:100,windowPercent:100};
 const outcome=(predictions,lastRun={status:'completed',reason:'eligible_queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:1},coverage=context.input.coverage)=>{context.outcome={...context.input,coverage,predictions:{...context.input.predictions,...predictions},lastRun};return vm.runInContext('footerStatusText(outcome)',context);};
 let line=outcome({pendingHot:0,pendingCold:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:12,failed:0},fullCoverage);
 assert.equal(line.runLine,'завершён · все фильмы с актуальными прогнозами');assert.equal(line.nextBatch,'очередь пуста');assert.equal(line.deferred,'нет');
 line=outcome({pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:'2026-10-13T21:00:00Z',nextBatchSize:0});
-assert.equal(line.runLine,'завершён · 1 фильм ожидает повторной попытки не раньше 23:00');assert.equal(line.nextBatch,'ждёт повторной попытки');assert.match(line.deferred,/^1 фильм · не раньше 13 окт\., 23:00$/);assert.match(line.nextLine,/^Следующий запуск по расписанию: около 12:00$/,'the schedule estimate stays separate from the film retry time');
+assert.equal(line.runLine,'завершён · 1 фильм ожидает повторной попытки не раньше 23:00');assert.equal(line.nextBatch,'ждёт повторной попытки');assert.match(line.deferred,/^1 фильм · не раньше 13 окт\., 23:00$/);assert.equal(line.nextLine,'Следующий запуск по расписанию: —','the Worker does not show a ChatGPT Task time beside the film retry time');
 line=outcome({pendingHot:2,pendingCold:0,outstanding:2,eligibleNow:0,deferredByRetry:2,nextRetryAt:'2026-10-14T01:00:00Z',nextBatchSize:0});
 assert.equal(line.runLine,'завершён · 2 фильма ожидают повторной попытки не раньше 14 окт., 03:00');
 line=outcome({pendingHot:0,pendingCold:5,outstanding:5,eligibleNow:0,deferredByRetry:5,nextRetryAt:'2026-10-13T21:00:00Z',nextBatchSize:0});
@@ -121,7 +121,7 @@ assert.equal(line.runLine,'завершён · данные об очереди 
 line=outcome({pendingHot:0,pendingCold:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null,nextBatchSize:0},{status:'completed',reason:'queue_empty',startedAt:'2026-10-13T09:00:00Z',added:0,failed:0});
 assert.equal(line.runLine,'завершён · остались фильмы без прогноза');assert.equal(line.nextBatch,'нет готовых фильмов');
 for(const sample of [text,line])for(const value of Object.values(sample))if(typeof value==='string')assert.doesNotMatch(value,/очередь обработана|обработана полностью|пакет завершён/);
-context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.match(active.nextLine,/Следующий запуск по расписанию: около /);assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
+context.active={...context.input,lastRun:{status:'running',reason:null,startedAt:'2026-10-13T09:00:00Z',added:4,failed:0}};const active=vm.runInContext('footerStatusText(active)',context);assert.equal(active.runLabel,'Текущий run');assert.equal(active.runHeading,'Текущий запуск');assert.equal(active.runLine,'выполняется');assert.equal(active.nextLine,'Следующий запуск по расписанию: —');assert.doesNotMatch(active.runLine,/Последний run|следующий запуск/i);
 for(const line of [text.profile,text.local,text.windowCoverage,text.runLine,text.nextLine,text.integrationAggregate])assert(line.length<100,'collapsed lines stay compact');
 assert.equal(text.integrationAggregate,'нет данных');
 context.ratingsBlocked={integrations:{aggregate:'attention',attentionCount:1,sources:[{id:'letterboxd_ratings',state:'degraded',code:'ratings_blocked',lastSuccessAt:'2026-10-01T09:00:00Z',lastFailureAt:'2026-10-13T08:00:00Z'},{id:'predictions',state:'healthy',code:'ok',lastSuccessAt:'2026-10-13T09:08:00Z'},{id:'epg',state:'healthy',code:'ok',lastSuccessAt:'2026-10-13T08:00:00Z'}]}};
@@ -166,7 +166,7 @@ assert.equal(unconfirmed.integrations.resolver,'требует внимания 
 assert.match(unconfirmed.integrations.predictions,/^работает/);
 assert.doesNotMatch(unconfirmed.integrations.resolver,/квот|лимит|quota|выполняется/i);
 assert.doesNotMatch(unconfirmed.runLine,/лимит|квот|ошибка/);
-assert.match(unconfirmed.nextLine,/^Следующий запуск по расписанию: около 14:20$/);
+assert.equal(unconfirmed.nextLine,'Следующий запуск по расписанию: —');
 context.waitingGate={integrations:{aggregate:'healthy',attentionCount:0,sources:[{id:'resolver',state:'waiting',code:'resolver_waiting',lastSuccessAt:'2026-10-31T10:26:39Z',lastBatchAt:'2026-10-31T10:26:39Z',gateAt:'2026-10-31T11:00:00Z'}]}};
 const waitingGate=vm.runInContext('footerStatusText(waitingGate)',context);
 assert.equal(waitingGate.integrationAggregate,'всё работает');

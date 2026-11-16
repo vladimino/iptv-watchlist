@@ -25,7 +25,7 @@ const diagnostic = (over = {}) => ({
 });
 const input = (over = {}) => ({
   filmId: 'f1', now: NOW, snapshotReasons: [], sources: {film: 'recorded', queue: 'recorded', profile: 'recorded'}, catalogMember: true,
-  queueActivityAt: iso(-H), nominalNextRunAt: iso(20 * 60000),
+  queueActivityAt: iso(-H), nominalNextRunAt: null,
   runner: {lease: 'recorded', leaseRunId: 'run-1', leaseExpiresAt: NOW - 1000, run: 'recorded', runId: 'run-1', selectedIds: ['f1'], resultIds: []},
   ...over,
   diagnostic: diagnostic(over.diagnostic),
@@ -64,7 +64,7 @@ assert.equal(compatible.work, null);
 
 // 2. Queued and ready, a recent queue check: the next scheduled run takes it.
 const ready = check(assess(), 'wait', 'queued_ready', 'scheduled_run', 'ordinary_schedule');
-assert.equal(ready.nextExpected.at, iso(20 * 60000));
+assert.equal(ready.nextExpected.at, null, 'the Worker does not invent the next ChatGPT Task time');
 assert.equal(ready.work, 'prediction_only');
 assert.equal(ready.facts.prediction.profileCompatible, false);
 assert.equal(ready.evidence.completeness, 'complete');
