@@ -202,6 +202,8 @@ for(const [size,films,expected] of [[undefined,40,40],[1,40,1],[5,40,5],[10,40,1
  assert.equal(event.presentation,'batch_v2_terminal');assert.equal(event.protocol,'batch_v2');
  assert.equal(event.id,'enrichment-'+start.data.runId);assert.equal(event.stage,'complete');
  assert.equal(event.stopReason,'manifest_spent');assert.equal(event.failed,0);assert.equal(event.selectedCount,5);
+ assert.equal(event.details.processed,5);assert.equal(event.details.success.length,5);assert.equal(event.details.failure.length,0);
+ assert.equal(event.details.success[0].rating,w.prediction.predictedRating);
  const parked=w.records.get('enrichment/stop-events/'+start.data.runId+'.json');
  assert.equal(parked?.delivered,true);assert.equal(parked.event.presentation,'batch_v2_terminal');
  const again=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
