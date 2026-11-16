@@ -166,7 +166,7 @@ await drain();assert.deepEqual(puts,[]);assert.equal(hops.length,0);assert.deepE
 assert.equal((await call('/api/enrichment/discovery/resolve',{limit:1,chunks:0},{headers:{...browserHeaders,Origin:origin}})).status,200);
 
 // Scan reads the configured XMLTV source and starts the chain through the loopback.
-// Production always seals bounded, so the rewrite route answers 409 unless an isolated full env is used (ADR 0155).
+// Production always seals bounded, so the rewrite route answers 409 unless an isolated full env is used (ADR 0156).
 seed(5);
 response=await call('/api/enrichment/discovery/scan',{});
 assert.equal(response.status,409);assert.deepEqual(fetches,[]);

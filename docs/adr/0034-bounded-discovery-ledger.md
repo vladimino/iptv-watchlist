@@ -6,7 +6,7 @@
 **Approval source:** explicit owner acceptance on 2026-10-27 after independent technical review and merge of [AIR-219](https://trello.com/c/AKHjmhXR); the [AIR-211 review](https://github.com/vladimino/iptv-watchlist/pull/164) asked for a bounded active ledger that keeps resolution and history and lets earlier candidates return safely, without automatic pruning  
 **Related work:** [AIR-211](https://trello.com/c/UHYcomzg) ([evidence](../evidence/epg-memory-pressure-2026-10-27.md)), [AIR-199](https://trello.com/c/GCfptxao), [AIR-212](https://trello.com/c/c1NQNHRa) ([ADR 0030](0030-discovery-queued-at-publication.md)), implementation [AIR-220](https://trello.com/c/uPvMc5ww), rehearsal [AIR-221](https://trello.com/c/9ZiVygrd), rollout [AIR-222](https://trello.com/c/9Y4G9DG6)  
 **Supersedes:** None. Refines [ADR 0007](0007-persistent-discovery-evidence.md) (persistent observations) without removing any of its guarantees.  
-**Superseded by:** [ADR 0155](0155-retire-discovery-ledger-mode.md) in part (the production mode switch and flag-based rollback R1). The archive protocol of this record stays
+**Superseded by:** [ADR 0156](0156-retire-discovery-ledger-mode.md) in part (the production mode switch and flag-based rollback R1). The archive protocol of this record stays
 
 ## Context
 
@@ -144,7 +144,7 @@ A stale commit is rejected at step 3: its predecessor was already superseded by 
 
 ### 5. Modes, compatibility and rollback
 
-`DISCOVERY_LEDGER_MODE` originally had three values (the production switch is retired by [ADR 0155](0155-retire-discovery-ledger-mode.md); production always seals as `bounded`):
+`DISCOVERY_LEDGER_MODE` originally had three values (the production switch is retired by [ADR 0156](0156-retire-discovery-ledger-mode.md); production always seals as `bounded`):
 
 - `full` (default; today's behaviour);
 - `bounded`;
@@ -157,7 +157,7 @@ Compatibility:
 
 **Rollback** has two levels, both owner-approved:
 
-- **R1 (operational).** Switch `bounded` to `frozen`. Nothing is rebuilt or deleted. The active ledger grows again from that point, as today. [ADR 0155](0155-retire-discovery-ledger-mode.md) retired this as a production flag: R1 is now a code revert that still reads the switch.
+- **R1 (operational).** Switch `bounded` to `frozen`. Nothing is rebuilt or deleted. The active ledger grows again from that point, as today. [ADR 0156](0156-retire-discovery-ledger-mode.md) retired this as a production flag: R1 is now a code revert that still reads the switch.
 - **R2 (code).** Revert to an archive-unaware Worker. Only after an **offline**, fenced reconstruction:
   - take a consistent snapshot (section 4);
   - rebuild the full ledger locally, with payload parity against active ∪ archive;

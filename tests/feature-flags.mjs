@@ -105,7 +105,7 @@ const fingerprintRule=l('PREDICTION_FINGERPRINT_COMPATIBILITY');
 assert.deepEqual([fingerprintRule.state,fingerprintRule.raw,fingerprintRule.retired,fingerprintRule.valid,fingerprintRule.issue,fingerprintRule.effective],['set','selective',true,false,'retired',null],'the retired fingerprint rule switch is inert and the production selective is visible (ADR 0047)');
 const fingerprintWriter=l('FINGERPRINT_VERSION_OBJECTS');
 assert.deepEqual([fingerprintWriter.state,fingerprintWriter.raw,fingerprintWriter.retired,fingerprintWriter.valid,fingerprintWriter.issue,fingerprintWriter.effective],['set','on',true,false,'retired',null],'the retired fingerprint writer switch is inert and the production on is visible (ADR 0046)');
-assert.deepEqual([l('DISCOVERY_LEDGER_MODE').state,l('DISCOVERY_LEDGER_MODE').raw,l('DISCOVERY_LEDGER_MODE').retired,l('DISCOVERY_LEDGER_MODE').valid,l('DISCOVERY_LEDGER_MODE').issue,l('DISCOVERY_LEDGER_MODE').effective],['set','bounded',true,false,'retired',null],'the retired ledger-mode switch is inert and a leftover bounded is visible (ADR 0155)');
+assert.deepEqual([l('DISCOVERY_LEDGER_MODE').state,l('DISCOVERY_LEDGER_MODE').raw,l('DISCOVERY_LEDGER_MODE').retired,l('DISCOVERY_LEDGER_MODE').valid,l('DISCOVERY_LEDGER_MODE').issue,l('DISCOVERY_LEDGER_MODE').effective],['set','bounded',true,false,'retired',null],'the retired ledger-mode switch is inert and a leftover bounded is visible (ADR 0156)');
 assert.match(l('DISCOVERY_LEDGER_MODE').note,/inert/);
 const mark=l('FINDS_WATCHED_MARK');
 assert.deepEqual([mark.state,mark.raw,mark.retired,mark.valid,mark.issue,mark.effective],['set','on',true,false,'retired',null],'the retired watched-mark switch is inert and the production on is visible (ADR 0042)');

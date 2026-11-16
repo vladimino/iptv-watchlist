@@ -2,7 +2,7 @@
 
 **Recovery proportionality:** a failed or deferred **single discovery observation** is normally recovered by the published next eligible chunk, not by replaying the entire discovery archive, exporting a full R2 snapshot or rebuilding a global ledger. These expensive procedures below are reserved for actual archive corruption, authority rollback or bulk split. Preserve the resolver lease, generation fencing, owner authorization for explicit runs and the rule of one chunk per request; they prevent two writers from overwriting the same decision map. A safe status read is not a reason to reset a lease or force a whole chunk early. See [risk classification](../process/agent-workflow.md#risk-proportional-operational-safeguards).
 
-This page describes how to operate the bounded discovery archive of [ADR 0034](../adr/0034-bounded-discovery-ledger.md) after [ADR 0155](../adr/0155-retire-discovery-ledger-mode.md) retired the production `DISCOVERY_LEDGER_MODE` switch. It does not grant permission for anything. A deploy does not delete the leftover Cloudflare binding. The production EPG seal always archives as `bounded`. `full` and `frozen` remain only on the isolated EPG diagnostic canary and in offline fixtures.
+This page describes how to operate the bounded discovery archive of [ADR 0034](../adr/0034-bounded-discovery-ledger.md) after [ADR 0156](../adr/0156-retire-discovery-ledger-mode.md) retired the production `DISCOVERY_LEDGER_MODE` switch. It does not grant permission for anything. A deploy does not delete the leftover Cloudflare binding. The production EPG seal always archives as `bounded`. `full` and `frozen` remain only on the isolated EPG diagnostic canary and in offline fixtures.
 
 ## What the EPG commit writes
 
@@ -93,7 +93,7 @@ This is a production write of one decision. Agents do not run it. The owner does
 
 ## Rollback
 
-- **R1 (stop archiving):** a code revert to a Worker that still reads `DISCOVERY_LEDGER_MODE`, with that binding restored to `frozen` (or absent while an archive exists). On the retired Worker a leftover `frozen` or `full` binding is ignored and the seal stays bounded ([ADR 0155](../adr/0155-retire-discovery-ledger-mode.md)). Nothing is rebuilt or deleted.
+- **R1 (stop archiving):** a code revert to a Worker that still reads `DISCOVERY_LEDGER_MODE`, with that binding restored to `frozen` (or absent while an archive exists). On the retired Worker a leftover `frozen` or `full` binding is ignored and the seal stays bounded ([ADR 0156](../adr/0156-retire-discovery-ledger-mode.md)). Nothing is rebuilt or deleted.
 - **R2 (code revert to an archive-unaware Worker):** only after an offline, fenced reconstruction:
   1. take a consistent snapshot;
   2. rebuild the full ledger locally, checking payload parity against active ∪ archive;
@@ -155,7 +155,7 @@ The production split replaces the Worker's own first bounded commit, which would
 
 ## Switching `frozen` to `bounded` under D1 authority (historical)
 
-Production already seals as `bounded` and the Worker variable is retired ([ADR 0155](../adr/0155-retire-discovery-ledger-mode.md)). The steps below are the earlier owner-approved switch; they are not a current flag operation.
+Production already seals as `bounded` and the Worker variable is retired ([ADR 0156](../adr/0156-retire-discovery-ledger-mode.md)). The steps below are the earlier owner-approved switch; they are not a current flag operation.
 
 This is the plan for one operation, written so that it can be approved or refused as a whole. It granted nothing: setting `DISCOVERY_LEDGER_MODE=bounded` was a production writer change and needed its own operation-specific owner approval. The memory and drain figures are in the [AIR-429 evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md); the earlier rehearsal is [AIR-426](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md); the rule is [ADR 0112](../adr/0112-bounded-ledger-departure-budget.md) (Accepted as a design; it does not authorize the switch).
 

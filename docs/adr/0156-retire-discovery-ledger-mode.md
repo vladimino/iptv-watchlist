@@ -1,4 +1,4 @@
-# ADR 0155: The EPG seal always runs the bounded discovery archive protocol, and DISCOVERY_LEDGER_MODE is retired
+# ADR 0156: The EPG seal always runs the bounded discovery archive protocol, and DISCOVERY_LEDGER_MODE is retired
 
 **Status:** Accepted  
 **Original decision date:** 2026-11-04 (owner disposition `retire after Discovery cutover`); code retirement 2026-11-16  

@@ -185,7 +185,7 @@ function planLedgerDrain(backlogKeys,latestKeys,cap){
  const limit=Number.isSafeInteger(cap)&&cap>=0?cap:0,departing=new Set(absent.slice(0,limit)),held=new Set(absent.slice(limit));
  return {held:key=>held.has(key),backlog:held.size,archiving:departing.size,cap:limit};
 }
-// Production EPG seal is always bounded (ADR 0155). `full` and `frozen` remain only on an isolated diagnostic env
+// Production EPG seal is always bounded (ADR 0156). `full` and `frozen` remain only on an isolated diagnostic env
 // (`epgDiagnostic`) or an offline fixture that carries the same marker; a leftover Worker binding is ignored.
 function discoveryLedgerMode(env){
  if(env?.epgDiagnostic){

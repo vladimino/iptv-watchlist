@@ -271,7 +271,7 @@ The detailed status separates normalized EPG candidate titles, excluded non-movi
 
 Measurements: [AIR-344 evidence](../../evidence/discovery/air-344-status-memory-2026-11-04.md).
 
-**Bounded ledger ([ADR 0034](../../adr/0034-bounded-discovery-ledger.md); production seal [ADR 0155](../../adr/0155-retire-discovery-ledger-mode.md)).**
+**Bounded ledger ([ADR 0034](../../adr/0034-bounded-discovery-ledger.md); production seal [ADR 0156](../../adr/0156-retire-discovery-ledger-mode.md)).**
 
 - **Modes.** The EPG commit always writes a **bounded** active ledger: `epg/discovery-latest.json` holds the latest scan's candidates (plus any remaining drain backlog). Candidates that left the EPG move losslessly into the archive `epg/discovery-archive/v1/`: write-once hash-segment and manifest versions behind the compare-and-swap pointer `current.json`. The commit writes the archive under the discovery lease, fenced on the published pointer etag it read, and merges re-entering candidates back from it. `full` and `frozen` exist only on the isolated EPG diagnostic canary and in offline fixtures. The former `DISCOVERY_LEDGER_MODE` Worker binding is retired and inert.
 - **Decisions.** `epg/discovery-resolution.json` is never touched by archiving.

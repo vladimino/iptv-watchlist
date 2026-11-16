@@ -219,7 +219,7 @@ for(const mode of ['frozen','full']){
  assert.deepEqual(plain(active(store)),plain(active(ref)),'frozen without an archive writes exactly the full-mode ledger');
 }
 
-// 12. Production env ignores a leftover DISCOVERY_LEDGER_MODE binding (ADR 0155): absent, full and frozen all archive.
+// 12. Production env ignores a leftover DISCOVERY_LEDGER_MODE binding (ADR 0156): absent, full and frozen all archive.
 {
  const mode=call('discoveryLedgerMode');
  assert.equal(mode({}),'bounded');

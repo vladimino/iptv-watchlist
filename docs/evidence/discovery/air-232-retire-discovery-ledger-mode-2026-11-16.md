@@ -1,6 +1,6 @@
 # AIR-232: retire `DISCOVERY_LEDGER_MODE` (offline code, 16 November 2026)
 
-**Scope:** Offline implementation of [ADR 0155](../../adr/0155-retire-discovery-ledger-mode.md). No production write, no Cloudflare binding edit, no EPG or Discovery run.
+**Scope:** Offline implementation of [ADR 0156](../../adr/0156-retire-discovery-ledger-mode.md). No production write, no Cloudflare binding edit, no EPG or Discovery run.
 
 **Method:** Code and tests on `origin/main` `7cc03162146c7d249e1544b636b74f2c36d80aa2` plus this delivery. Pre-change production readout is the owner-only MCP `feature_flags` capture recorded on [AIR-232](https://trello.com/c/L0cbxhu5) at 2026-11-16 18:57:56 UTC.
 
