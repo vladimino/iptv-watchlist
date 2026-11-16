@@ -43,7 +43,7 @@ AIR-500 classified 9 832 current movie admissions: 6 499 `valid_film`, 76 `n
 | Object | Change |
 | --- | --- |
 | Decision `беглец\|1993` | `needs_verification`; `tmdbId`/`filmId` cleared; `9278` on `rejectedTmdbIds`; owner identity on this key |
-| Current discovery shows of this key | deleted in the same batch (the 2 rows) |
+| Current discovery shows of this key | deleted in the same batch (the 2 rows). Receipt `application.shows` is `cleared_assigned_rows` because the previous decision is a verified movie assignment. A D1 reject of an unverified hypothesis would stay `not_this_action` and would not run that DELETE. |
 | Decision and show `корпорация бессмертие\|` | unchanged (1 show remains) |
 | Admission `tmdb_9278` | unchanged |
 | Fingerprint / pointer / queue for `tmdb_9278` | unchanged |

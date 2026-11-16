@@ -226,8 +226,8 @@ export function appliedIdentityDecision(previous, command, {at, requestId, progr
 // assign target was present as a canonical film at execution.
 export function identityApplication(effect, offer, command) {
   if (effect === 'reject') {
-    const shows = offer?.authority === 'd1' ? 'cleared_assigned_rows' : 'not_this_action';
-    return {decision: 'written', shows, catalog: null, consumers: ['resolution_decision']};
+    const assigned = offer?.authority === 'd1' && offer?.current?.status === 'verified' && identityMovieId(offer.current.tmdbId);
+    return {decision: 'written', shows: assigned ? 'cleared_assigned_rows' : 'not_this_action', catalog: null, consumers: ['resolution_decision']};
   }
   const catalog = command?.catalog === true;
   return {decision: 'written', shows: catalog ? (offer?.effect?.when || 'next_series') : 'awaiting_catalog_film', catalog, consumers: ['resolution_decision']};

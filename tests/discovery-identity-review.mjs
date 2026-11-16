@@ -222,7 +222,9 @@ const rejectedRun = await post('identity-correct', {confirmation: rejectedIssue.
 assert.equal(rejectedRun.body.state, 'succeeded', JSON.stringify(rejectedRun.body));
 assert.equal(rejectedRun.body.application.shows, 'not_this_action');
 assert.equal(Identity.identityApplication('reject', {authority: 'r2'}, {}).shows, 'not_this_action');
-assert.equal(Identity.identityApplication('reject', {authority: 'd1'}, {}).shows, 'cleared_assigned_rows');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1'}, {}).shows, 'not_this_action');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1', current: {status: 'needs_verification', tmdbId: '11'}}, {tmdbId: '11'}).shows, 'not_this_action', 'a D1 reject of a non-verified hypothesis does not claim show deletion');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1', current: {status: 'verified', tmdbId: '9278'}}, {tmdbId: '9278'}).shows, 'cleared_assigned_rows');
 const blocked = (await json(MAP))[KEY];
 assert.deepEqual(blocked.rejectedTmdbIds, ['11']);
 assert.notEqual(blocked.status, 'verified');
