@@ -25,8 +25,7 @@ sequenceDiagram
     else New run
         MCP->>Queue: Acquire lease
         MCP->>R2: Persist interrupted state for the recovered lease holder only
-        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys, cursor enrichment/run-diagnostics-settle.json. A live runner lease holder is not interrupted from a stale diagnostic timestamp. GET status/runs and MCP enrichment_status project expiry and write nothing. Event delivery is on prediction_start under the writer lease; GET /api/events writes nothing.
-        loop While eligible items remain
+        loop eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
             Queue-->>MCP: Film and current artifact facts
@@ -41,7 +40,10 @@ sequenceDiagram
                 MCP->>D1: Commit the pointer and the queue
                 Note over MCP,D1: The written film leaves the stored queue, no catalog read
             else Isolated invalid output
-                MCP->>Queue: Record per-film failure and retryAt (conditional write)
+                MCP->>Queue: Record per-film failure and retryAt, conditional write
+                alt Ten saved per-film attempts
+                    Queue->>Queue: Keep the exhausted retry record and drop the film from pending lanes
+                end
             end
             opt Long model call
                 Client->>MCP: prediction_heartbeat
@@ -50,13 +52,13 @@ sequenceDiagram
         end
         Client->>MCP: prediction_complete when required
         MCP->>Queue: Record completion in a conditional write of the stored queue, release lease
-        MCP->>R2: Settle at most 10 expired diagnostic rows; skip the live lease holder
+        MCP->>R2: Settle at most 10 expired diagnostic rows, skip the live lease holder
     end
 ```
 
 Migration `0007` is applied and the production prediction marker is `d1`. In the historical `r2` mode, the persist step writes the mutable objects in R2. The contract starts at schema version 7 when this domain is installed. A later contract with none of the prediction tables stays on the objects. A partial set of those tables fails the step and does not read the objects. After the marker is `d1` the same step writes the immutable body in R2, checks it, and commits the pointer and the queue in D1 ([ADR 0078](../adr/0078-d1-authoritative-prediction-domain.md)). The `d1` branch is now live; the `r2` branch remains the compatibility/rollback contract.
 
-The fingerprint schema/hash tracks the film independently from a personal prediction, which also requires the current profile version/hash and prompt version. A profile change makes predictions stale without forcing a fingerprint regeneration; EPG showtimes do not invalidate either. The persist step writes the immutable content body and generation record first and then `fingerprint.json` as a pointer with provenance ([fingerprint compatibility](../reference/domain/fingerprint-compatibility.md#storage)); a declared fingerprint schema or prompt transition re-queues only the films it reaches, bounded within each batch, under the transition rule ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md); no switch since [ADR 0047](../adr/0047-retire-fingerprint-compatibility-switch.md)), and a run ends when the Worker's versions change under it. One malformed film output is deferred with exponential backoff rather than discarding successes. This diagram is a conceptual view of the runner protocol, not an assertion that every branch occurs on each invocation.
+The fingerprint schema/hash tracks the film independently from a personal prediction, which also requires the current profile version/hash and prompt version. A profile change makes predictions stale without forcing a fingerprint regeneration; EPG showtimes do not invalidate either. The persist step writes the immutable content body and generation record first and then `fingerprint.json` as a pointer with provenance ([fingerprint compatibility](../reference/domain/fingerprint-compatibility.md#storage)); a declared fingerprint schema or prompt transition re-queues only the films it reaches, bounded within each batch, under the transition rule ([ADR-0035](../adr/0035-selective-fingerprint-transition-compatibility.md); no switch since [ADR 0047](../adr/0047-retire-fingerprint-compatibility-switch.md)), and a run ends when the Worker's versions change under it. One malformed film output is deferred with exponential backoff rather than discarding successes. After ten saved per-film retryable failures the identity stays in `retries` and leaves automatic selection ([ADR 0152](../adr/0152-prediction-retry-attempt-budget.md)); it is not marked predicted and is not a catalog exclusion. This diagram is a conceptual view of the runner protocol, not an assertion that every branch occurs on each invocation.
 
 The "Read schema" step and the "Isolated invalid output" branch share [one validation contract](../reference/api/enrichment.md#submit-validation-contract): the schema the client reads carries the exact rules the Worker validates with, and a rejected submit returns the violated field and code from that closed vocabulary alongside the per-film failure and `retryAt`. The Worker remains the only validator and the only writer; the client's preflight is a convenience that cannot admit a payload the Worker would reject.
 
@@ -160,7 +162,7 @@ flowchart TD
     read["Read the queue<br/>and its etag"]
     kind{"Rebuild, or<br/>record one change?"}
     inputs["Read profile, view index,<br/>catalogue; published programme<br/>if the queue's generation differs"]
-    build["Rebuild membership;<br/>carry retries, last batch<br/>and counters from the queue read"]
+    build["Rebuild membership;<br/>carry retries including exhausted holds,<br/>last batch and counters from the queue read"]
     amend["Apply the run's<br/>bookkeeping, if any"]
     change["Apply the change to<br/>the queue read; retry records<br/>only grow; written films<br/>leave the queue"]
     fence["Renew the caller's lease,<br/>if it holds one"]

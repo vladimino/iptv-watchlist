@@ -317,8 +317,8 @@ const base={
  r=await ask(fake({marker:{mode:'bogus',cutover:'open',generation:0}}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a malformed marker');
  r=await ask(fake({tables:false}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a missing companion table');
  r=await ask(fake({broken:/film_person_authority/}));assert.deepEqual([r.status,r.body.reason],[503,'film_person_unavailable'],'a failed marker read');
- // Discovery found answers without the Film authority being read.
- r=await ask(fake({marker:{mode:'d1',cutover:'held',generation:2}}),'7');assert.equal(r.status,200,'a Discovery Film is not gated here');
+ // AIR-499: optional metadata at held is typed STOP, not a Discovery-only 200 with R2 metadata.json.
+ r=await ask(fake({marker:{mode:'d1',cutover:'held',generation:2}}),'7');assert.deepEqual([r.status,r.body.reason],[503,'film_person_held'],'held stops the film page before frozen metadata.json');
  // Canonical guards. The owner's R2 retirement, a D1 contradiction, a redirected Film.
  records.set(RET,{schemaVersion:1,retirements:[]});r=await ask(fake());assert.equal(r.status,200,'an empty retirements object retires nobody');
  records.set(RET,{schemaVersion:99,nonsense:true});r=await ask(fake());assert.deepEqual([r.status,r.body.reason],[503,'discovery_unavailable'],'an unreadable retirements object fails closed');

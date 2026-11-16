@@ -119,6 +119,12 @@ export const FILES={
  "canonical-catalog-titles.mjs": {
   "suite": "core"
  },
+ "canonical-catalog-metadata.mjs": {
+  "suite": "core"
+ },
+ "canonical-mirror-put.mjs": {
+  "suite": "core"
+ },
  "canonical-dictionary-producer-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."
@@ -1129,6 +1135,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-recovery.mjs": {
+  "suite": "core"
+ },
+ "prediction-retry-exhausted.mjs": {
   "suite": "core"
  },
  "prediction-repository.mjs": {

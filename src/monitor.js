@@ -62,7 +62,7 @@ const Monitor=(()=>{
   const known=Date.parse(previous?.progressAt||'');
   const candidates=[productive,moved?now:null,Number.isFinite(known)?known:null].filter(value=>value!==null);
   const lastProgressAt=candidates.length?Math.max(...candidates):now;
-  const outstanding=[...new Set([...(queue.hotPending||[]),...(queue.coldPending||[])])];
+  const outstanding=[...new Set([...(queue.hotPending||[]),...(queue.coldPending||[])])].filter(id=>!(Number.isInteger(queue.retries?.[id]?.attempts)&&queue.retries[id].attempts>=10));
   const deferred=outstanding.map(id=>queue.retries?.[id]?.retryAt).filter(value=>typeof value==='number'&&value>now);
   return {present:true,pendingCount:Array.isArray(queue.pending)?queue.pending.length:0,processedTotal,lastProgressAt:iso(lastProgressAt),
    eligibleNow:outstanding.length-deferred.length,nextRetryAt:deferred.length?iso(Math.min(...deferred)):null,blockedReason:queue.lastBatch?.stage==='blocked'?String(queue.lastBatch.reason||'').slice(0,40):null};

@@ -48,8 +48,31 @@ function canonicalPersonId(raw){
  if(!s)return null;
  return s.startsWith('person:')?s:'person:'+s;
 }
-function filmFactsOf(film,watchlisted){
- return {watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+function clockOf(value){return typeof value==='string'&&value.length?value:null;}
+function plain(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}
+function sealedDimension(raw,name){
+ if(!plain(raw)||raw.dimension!==name||typeof raw.status!=='string'||!clockOf(raw.updatedAt)||!plain(raw.provenance))return null;
+ if(!Number.isInteger(raw.attempts)||typeof raw.nextAction!=='string')return null;
+ return {
+  dimension:name,status:raw.status,source:typeof raw.source==='string'?raw.source:null,sourceVersion:raw.sourceVersion??null,
+  provenance:raw.provenance,value:raw.value??null,updatedAt:clockOf(raw.updatedAt),attempts:raw.attempts,nextAction:raw.nextAction,
+  lastError:raw.lastError??null,failureReason:raw.failureReason??null,retryAt:raw.retryAt??null,
+  ...(typeof raw.authority==='string'?{authority:raw.authority}:{}),
+ };
+}
+export function filmFactsOf(film,watchlisted){
+ const facts={watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+ const metadataAt=clockOf(film?.metadataAt);
+ if(metadataAt)facts.metadata={schemaVersion:1,year:film.year??null,runtime:film.runtime??null,synopsis:film.synopsis??null,poster:film.poster??null,url:film.url??null,genres:Array.isArray(film.genres)?film.genres:[],peopleVersion:film.peopleVersion??null,payload:{},r2Key:null,contentSha256:null,updatedAt:metadataAt};
+ const dimensions={};
+ const identity=sealedDimension(film?.dimensions?.identity,'identity');
+ const metadataDim=sealedDimension(film?.dimensions?.metadata,'metadata');
+ if(identity)dimensions.identity=identity;
+ if(metadataDim)dimensions.metadata=metadataDim;
+ if(identity||metadataDim)facts.dimensions=dimensions;
+ const sync={metadataAt,synopsisFetchedAt:clockOf(film?.synopsisFetchedAt),peopleNamesVersion:Number.isInteger(film?.peopleNamesVersion)?film.peopleNamesVersion:null,peopleLocalizedAt:clockOf(film?.peopleLocalizedAt)};
+ if(sync.metadataAt||sync.synopsisFetchedAt||sync.peopleNamesVersion!=null||sync.peopleLocalizedAt)facts.sync=sync;
+ return facts;
 }
 function idsOf(document,members){
  if(Array.isArray(members)&&members.length)return members.map(row=>canonicalFilmId(row.filmId)).filter(Boolean);

@@ -68,6 +68,22 @@ async function publishedOwnerReviews(env){
 // serves only the vm-scoped tests that load the Worker without it; tests/canonical-catalog-titles.mjs asserts the bundle).
 const TITLE_READ_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
 const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader.catalogReaderGate(env);
+// Frozen titles.json / people.json stay R2 only while the Film/Person marker is not open. At open (and held / unreadable) the
+// Producer Workflow is the writer; these sync steps must not refresh the frozen mirrors. The lock is re-read at the write, after any
+// localization await, so a prepared→open flip mid-step cannot land a canonical R2 put.
+async function frozenCanonicalMirrorsLocked(env){
+ if(typeof CanonicalCatalogReader==='undefined')return false;
+ try{
+  if(typeof CanonicalCatalogReader.canonicalMirrorsWritable==='function')return !(await CanonicalCatalogReader.canonicalMirrorsWritable(env));
+  const gate=await CanonicalCatalogReader.catalogReaderGate(env);
+  return gate.mode==='d1';
+ }catch{return true;}
+}
+async function saveCanonicalMirror(env,key,value){
+ if(await frozenCanonicalMirrorsLocked(env))return false;
+ const saved=await saveJSON(env,key,value);
+ return saved?.skipped!=='canonical_mirror_frozen';
+}
 async function localizedTitleStore(env,pinned,gate,films){
  if(!gate)return (await loadJSON(pinned,'titles.json'))||{};
  if(gate.mode==='d1')return CanonicalCatalogReader.catalogTitlesFromD1(env,films,gate);
@@ -81,6 +97,23 @@ async function titleReadFinish(env,gate,response){
  return response;
 }
 const titleReadRefusal=error=>TITLE_READ_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
+function catalogBridgeIds({catalog,programme,watchlist,index,film}){
+ const ids=[];
+ if(film?.id!=null)ids.push(String(film.id));
+ for(const record of Object.values(catalog||{}))if(record?.id!=null)ids.push(String(record.id));
+ for(const item of [...(programme?.films||[]),...(watchlist?.films||[])])if(item?.id!=null)ids.push(String(item.id));
+ for(const id of Object.keys(index||{}))ids.push(String(id));
+ return ids;
+}
+async function catalogMetadataRead(env,ids){
+ if(typeof CanonicalCatalogReader==='undefined')return {gate:null,records:(await loadJSON(env,'metadata.json'))||{}};
+ const gate=await CanonicalCatalogReader.catalogReaderGate(env);
+ if(gate.mode!=='d1')return {gate,records:(await loadJSON(env,'metadata.json'))||{}};
+ return {gate,records:await CanonicalCatalogReader.catalogMetadataFromD1(env,ids,gate)};
+}
+async function catalogMetadataFinish(env,gate){
+ if(gate)await CanonicalCatalogReader.catalogReaderStill(env,gate);
+}
 async function epgPublication(env){
  return epgPublicationReadOnly(env);
 }
@@ -466,17 +499,28 @@ async function catalogFilmRoute(env,tmdbId){
  const degraded=[],optional=async(name,load)=>{try{return await load();}catch{degraded.push(name);return null;}};
  const publication=await optional('publication',()=>epgPublicationReadOnly(env));
  const pinnedRunId=publication?.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
- const [programme,watchlist,index,profile,metadata]=await Promise.all([
+ const [programme,watchlist,index,profile]=await Promise.all([
   pinnedRunId?optional('programme',()=>catalogGenerationCopy(env,publication,pinnedRunId,'programme.json')):null,
   optional('watchlist',()=>publication?.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json')),
   optional('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),
   optional('profile',()=>loadJSON(env,profileKey)),
-  optional('metadata',()=>loadJSON(env,'metadata.json')),
  ]);
+ let metadata=null,metaGate=null;
+ try{
+  const read=await catalogMetadataRead(env,catalogBridgeIds({film:found.film,watchlist,programme,index}));
+  metadata=read.records;metaGate=read.gate;
+ }
+ catch(error){
+  const refused=titleReadRefusal(error);
+  if(refused)return refused;
+  degraded.push('metadata');
+ }
  const runId=programme?.runId&&programme.runId===pinnedRunId?pinnedRunId:null;
  if(pinnedRunId&&!runId&&!degraded.includes('programme'))degraded.push('programme');
  const freshness=profile?await optional('freshness',()=>predictionFreshness(env,profile)):null;
  const page=catalogFilmPage({film:found.film,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
+ try{await catalogMetadataFinish(env,metaGate);}
+ catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
  return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
 }
 // The owner's watched mark on a Finds card (ADR-0032): one verified film of the published catalog copy, named by its TMDB id only.
@@ -558,11 +602,13 @@ async function catalogAvailableRoute(env){
  const pinnedRunId=publication.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
  const generationCopy=name=>catalogGenerationCopy(env,publication,pinnedRunId,name);
  const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
- let programme,catalog,watchlist,index,profile,metadata,titleExclusion;
+ let programme,catalog,watchlist,index,profile,metadata,titleExclusion,metaGate=null;
  try{
-  [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+  [programme,catalog,watchlist,index,profile,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadFindsTitleExclusion(env,now)]);
+  const read=await catalogMetadataRead(env,catalogBridgeIds({catalog,programme,watchlist,index}));
+  metadata=read.records;metaGate=read.gate;
  }catch(error){
-  const refused=discoveryUserReadRefusal(error);
+  const refused=discoveryUserReadRefusal(error)||titleReadRefusal(error);
   if(refused)return refused;
   throw error;
  }
@@ -571,7 +617,10 @@ async function catalogAvailableRoute(env){
  if(!programme?.runId||!Array.isArray(programme.films))return json({error:'No published programme'},503);
  // The ratings seed is applied to an in-memory copy. GET /api/enrichment/view uses the same overlay and neither persists it.
  const seeded=overlayRatingsSeed(index);
- return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,completedOnly:publication.authority==='d1'&&!!pinnedRunId,now,titleExclusion,freshness:await predictionFreshness(env,profile),watchedMarkEnabled:true}));
+ const freshness=await predictionFreshness(env,profile);
+ try{await catalogMetadataFinish(env,metaGate);}
+ catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
+ return json(catalogAvailable({catalog,programme,watchlist,index:seeded,profile,metadata,programmeRunId:pinnedRunId||programme.runId,pinned:!!pinnedRunId,completedOnly:publication.authority==='d1'&&!!pinnedRunId,now,titleExclusion,freshness,watchedMarkEnabled:true}));
 }
 function publicEpgKey(name){return name==='programme.json'?name:'epg/'+name;}
 async function updatePublishedFiles(env,files){
@@ -586,6 +635,10 @@ async function updatePublishedFiles(env,files){
 // AIR-348 / ADR 0100: a mutation boundary of an EPG step. A step that no longer holds its lease under the mode revision it was admitted
 // with (the owner closed admission, or the lease ran out) stops here and the write does not happen. A no-op outside such a step.
 async function epgStepGuard(env){if(env?.epgStep&&typeof EpgOrchestration!=='undefined')await EpgOrchestration.assertStep(env);}
+async function putStoredJson(env,key,text){
+ if((key==='titles.json'||key==='people.json')&&await frozenCanonicalMirrorsLocked(env))return {skipped:'canonical_mirror_frozen'};
+ return env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});
+}
 const saveJSON=async(env,key,value)=>{
  // AIR-442: in a request with a scope, a write of bytes identical to what the step already knows is stored under this key is not repeated; any other write drops what the scope knows
  // before it is attempted (a failure leaves it unknown) and records the value after it succeeded.
@@ -603,10 +656,16 @@ const saveJSON=async(env,key,value)=>{
   if(routed?.handled)return learned({etag:'d1'});
   const text=routed?.text??JSON.stringify(value);
   let settled=false;
-  try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});settled=true;return learned(saved);}
+  try{
+   const saved=await putStoredJson(env,key,text);
+   if(saved?.skipped==='canonical_mirror_frozen')return saved;
+   settled=true;return learned(saved);
+  }
   finally{if(routed?.token&&settled)await PredictionD1.completePredictionWrite(env,key,routed.token);}
  }
- return learned(await env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}}));
+ const saved=await putStoredJson(env,key,JSON.stringify(value));
+ if(saved?.skipped==='canonical_mirror_frozen')return saved;
+ return learned(saved);
 };
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
@@ -617,14 +676,24 @@ function eventRemovedFilm(film,titles=new Map()){const rating=removalRating(film
 async function ratingsFilmLabels(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))],out=new Map();
  if(!wanted.length)return out;
- const [metadata,titles]=await Promise.all([loadJSON(env,'metadata.json').catch(()=>null),loadJSON(env,'titles.json').catch(()=>null)]);
- const meta=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata:{},names=titles&&typeof titles==='object'&&!Array.isArray(titles)?titles:{},bridge=catalogLidTmdb({metadata:meta});
+ const {gate,records:meta}=await catalogMetadataRead(env,wanted);
+ let names={};
+ try{
+  if(gate)names=gate.mode==='d1'?await CanonicalCatalogReader.catalogTitlesFromD1(env,wanted.map(id=>({id,tmdbId:meta[id]?.tmdbId})),gate):(await loadJSON(env,'titles.json').catch(()=>null))||{};
+  else names=(await loadJSON(env,'titles.json').catch(()=>null))||{};
+ }catch(error){if(TITLE_READ_REFUSALS.includes(error?.code))throw error;names={};}
+ const namesObj=names&&typeof names==='object'&&!Array.isArray(names)?names:{};
+ const byLid=(!gate||gate.mode!=='d1')?catalogLidTmdb({metadata:meta}):null;
  for(const id of wanted){
-  const film=meta[id],cached=names[id];
+  const film=meta[id],cached=namesObj[id];
   const named=film&&typeof film==='object'?eventFilm({...film,id}):null;
   const title=(named&&typeof named.title==='string'&&named.title.trim())||(cached&&typeof cached.title==='string'&&cached.title.trim())||null;
-  out.set(id,{title,year:named&&Number.isInteger(named.year)?named.year:null,tmdb:bridge.get(id)||null});
+  const bridged=byLid?byLid.get(id):null;
+  const direct=film&&film.tmdbId!=null&&/^[1-9]\d*$/.test(String(film.tmdbId))?String(film.tmdbId):null;
+  const tmdb=byLid?bridged||null:direct;
+  out.set(id,{title,year:named&&Number.isInteger(named.year)?named.year:null,tmdb});
  }
+ await catalogMetadataFinish(env,gate);
  return out;
 }
 const eventTitles=report=>new Map((report?.films||[]).map(f=>[String(f.id),f.title]));
@@ -728,13 +797,14 @@ async function beginSync(env){
 async function metadataSync(env,run){
  const working=await MetadataCache.loadMetadataWorkingSet(env);const cache=working.records;const creditsChanged=new Set();const next=run.pending.slice(run.cursor,run.cursor+24);const onlyNames=next.every(id=>cache[id]?.peopleVersion===1&&Date.now()-Date.parse(cache[id].metadataAt)<30*86400000);const ids=next.slice(0,onlyNames?24:12);
  for(let i=0;i<ids.length;i+=3)await Promise.all(ids.slice(i,i+3).map(async id=>{const idx=run.watchlist.findIndex(f=>f.id===id);try{const film=run.watchlist[idx],fresh=film.peopleVersion===1&&film.metadataAt&&Date.now()-Date.parse(film.metadataAt)<30*86400000;if(fresh&&film.synopsisFetchedAt){if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const html=await getHTML(film.url);if(fresh){film.synopsis=parseSynopsis(html);film.synopsisFetchedAt=new Date().toISOString();cache[id]={...cache[id],synopsis:film.synopsis,synopsisFetchedAt:film.synopsisFetchedAt};if(film.peopleNamesVersion!==2)creditsChanged.add(id);return;}const result=parseFilm(html,film);cache[id]=result;run.watchlist[idx]=result;creditsChanged.add(id);}catch(e){run.failures.push({id,error:e.message});}}));
- const titles=await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));const localizationMode=metadataLocalizationMode(env);
+ const freeze=await frozenCanonicalMirrorsLocked(env);
+ const titles=freeze?{}:await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));const localizationMode=metadataLocalizationMode(env);
  try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
- await saveJSON(env,'titles.json',titles);
- const people=await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
+ await saveCanonicalMirror(env,'titles.json',titles);
+ const people=freeze?{}:await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
  try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  for(const f of batch)cache[f.id]=f;
- await saveJSON(env,'people.json',people);
+ await saveCanonicalMirror(env,'people.json',people);
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
 // AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so
@@ -1760,10 +1830,11 @@ async function epgSync(env,run){
  await epgStepGuard(env);
  if(run.events){const committed=await loadJSON(env,'programme.json');if(committed?.runId===run.runId){await tracedPhase(run.runId,'generation_copy',()=>copyEpgGeneration(env,run.runId));await queueCommittedDiscovery(env,run);return completeWithRatings(env,run,committed);}}
  await epgWindowPrecheck(env);
- const titles=await loadJSON(env,'titles.json')||{};
- try{await localizeFilmTitles(run.watchlist,titles,'on');await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
- const people=await loadJSON(env,'people.json')||{};
- try{await localizeByLetterboxd(run.watchlist,people);await saveJSON(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ const freeze=await frozenCanonicalMirrorsLocked(env);
+ const titles=freeze?{}:await loadJSON(env,'titles.json')||{};
+ try{await localizeFilmTitles(run.watchlist,titles,'on');await saveCanonicalMirror(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
+ const people=freeze?{}:await loadJSON(env,'people.json')||{};
+ try{await localizeByLetterboxd(run.watchlist,people);await saveCanonicalMirror(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  applyEpgLocalization(run.watchlist,people);
  // AIR-263: the source fetch and the scan are one traced phase; an error logs `error` and rethrows unchanged.
  const sources=sourceConfig(env);

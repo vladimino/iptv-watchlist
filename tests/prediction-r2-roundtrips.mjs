@@ -165,15 +165,8 @@ assert.ok(steady.next<=43,'next '+steady.next);assert.ok(steady.submit<=31,'subm
  assert.equal(records.get('enrichment/view-index.json')[item.filmId]?.prediction,undefined,'the index lacks the prediction the failed write was to add');
  resetLeases();
  const second=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(second.status,200,JSON.stringify(second.data).slice(0,200));
- const deferred=await api('next',{runId:second.data.runId,batchSize:12});assert.equal(deferred.status,200);
- assert.ok(queue().retries[item.filmId]?.retryAt>Date.now(),'the storage failure put the film into retry backoff');
- assert.ok(!deferred.data.items.some(entry=>entry.filmId===item.filmId),'a film in backoff is not offered');
- // The backoff is over: the next run selects the film, finds its stored prediction current and repairs the index entry from it; no second version.
- const q=structuredClone(queue());q.retries[item.filmId].retryAt=0;records.set('enrichment/prediction-queue.json',q);etags.set('enrichment/prediction-queue.json',String(++revision));
- resetLeases();
- const third=await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(third.status,200,JSON.stringify(third.data).slice(0,200));
- assert.ok(records.get('enrichment/runs/'+third.data.runId+'.json').selectedIds.includes(item.filmId),'the film is selected again');
- const repaired=await api('next',{runId:third.data.runId,batchSize:12});assert.equal(repaired.status,200);
+ assert.ok(!queue().retries[item.filmId],'a storage failure does not consume the per-film retry budget');
+ const repaired=await api('next',{runId:second.data.runId,batchSize:12});assert.equal(repaired.status,200);
  assert.ok(!repaired.data.items.some(entry=>entry.filmId===item.filmId),'the stored prediction is current: the film is not offered again');
  assert.ok(records.get('enrichment/view-index.json')[item.filmId]?.prediction,'the index entry was repaired from the stored prediction');
  assert.equal(versions(),1,'and no second version was written');

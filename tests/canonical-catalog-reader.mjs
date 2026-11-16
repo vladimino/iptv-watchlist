@@ -55,6 +55,44 @@ if(ONLY!=='route')for(const state of STATES){
  else await assert.rejects(()=>reader.catalogReaderGate(env),code(refusal(state)),state);
 }
 if(ONLY!=='route')assert.equal((await canonicalReaderMode({DB:d1Standin(database('open'))})).mode,'d1','the bulk read model shares the one gate');
+if(ONLY!=='route'){
+ for(const state of ['legacy','r2','prepared'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),true,state);
+ assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database('open'),'open')}),false,'open');
+ for(const state of ['held','unknown-row','unknown-table','unknown-read'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),false,state);
+ const file=database('prepared'),env={DB:d1Standin(file)};
+ const stored={titles:1,people:1};
+ const write=async(key)=>{if(!(await reader.canonicalMirrorsWritable(env)))return false;stored[key]=(stored[key]||0)+1;return true;};
+ assert.equal(await write('titles'),true,'prepared still writes');
+ sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");
+ assert.equal(await write('titles'),false,'flip between localize and write skips titles.json');
+ assert.equal(await write('people'),false,'flip between localize and write skips people.json');
+ assert.deepEqual(stored,{titles:2,people:1});
+ sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
+ assert.equal(await write('titles'),false,'held skips');
+ const cutover=database('prepared'),cutoverEnv={DB:d1Standin(cutover)};
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),true);
+ sqlite(cutover,"UPDATE projector_window SET state='held',owner='air-499',requested_at="+(Date.now()-1000)+",expires_at="+(Date.now()+60000)+" WHERE id=1");
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),false,'exclusive window held refuses frozen mirror puts');
+ const inner=d1Standin(database('prepared'));
+ const windowFail={prepare(sql){if(/FROM projector_window/.test(sql))throw new Error('D1 timeout');return inner.prepare(sql);}};
+ assert.equal(await reader.canonicalMirrorsWritable({DB:windowFail}),false,'unreadable projector_window is not permission to write');
+ {
+  const worker=fs.readFileSync('src/worker.js','utf8');
+  const freeze=worker.slice(worker.indexOf('async function frozenCanonicalMirrorsLocked'),worker.indexOf('async function localizedTitleStore'));
+  const save=worker.slice(worker.indexOf('async function epgStepGuard'),worker.indexOf('function confirmedHalfStar'));
+  const puts=[];
+  const env={
+   epgStep:true,
+   DB:windowFail,
+   BUCKET:{put:async(name)=>{puts.push(name);return {etag:'e'};}},
+  };
+  const context=vm.createContext({env,CanonicalCatalogReader:{canonicalMirrorsWritable:reader.canonicalMirrorsWritable},EpgOrchestration:{assertStep:async()=>{}},JSON,undefined});
+  vm.runInContext(freeze+'\n'+save+'\nthis.saveJSON=saveJSON;',context);
+  const result=await vm.runInContext('saveJSON(env,"titles.json",{ok:true})',context);
+  assert.equal(result.skipped,'canonical_mirror_frozen');
+  assert.deepEqual(puts,[],'unreadable exclusive window: zero BUCKET.put');
+ }
+}
 
 // 2. The D1 fallback reader: only at open; every other state refuses before a catalog statement. There is no R2 handle in this environment at all.
 if(ONLY!=='route'){
