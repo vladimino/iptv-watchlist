@@ -190,6 +190,7 @@ for(const name of ['epg_sync_start','epg_sync_step','prediction_start','predicti
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,false,name);
 }
 assert.deepEqual(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.mode.enum,['dry_run','apply']);
+assert.equal(tools.find(item=>item.name==='film_person_open_handoff').inputSchema.properties.expectedReference.maxLength,96);
 assert.equal(tools.find(item=>item.name==='epg_sync_step').annotations.openWorldHint,true);
 const faultSchema=tools.find(item=>item.name==='prediction_complete').inputSchema.properties.fault;
 assert.equal(faultSchema.type,'object');
