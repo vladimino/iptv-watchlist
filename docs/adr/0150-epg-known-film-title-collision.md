@@ -1,9 +1,9 @@
 # ADR 0150: A shared EPG title is a known Film only when one trusted identity remains
 
-**Status:** **Proposed** (2026-11-16). [AIR-488](https://trello.com/c/p5PCEB0c) approves the outcome: do not attach a known Film on an unresolved title collision, and keep a match when the year and the identity are actually shown. It does not approve the numeric bands below. Those stay proposed until the owner accepts this record. Not permission to rerun EPG, Discovery or TMDB, or to correct stored identities.  
+**Status:** **Accepted** (2026-11-16; the Product Owner accepted this record, including the contradiction band `max(45 minutes, 40% of known runtime)`, the yearless near band `max(8 minutes, 12%)`, the ±1 title-year allowance, and the per-slot confirmation rule, at [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774) against HEAD `2332450bd7851fddc0a51858c55e03483cab6536`. Not permission to rerun EPG, Discovery or TMDB, or to correct stored identities.)  
 **Original decision date:** 2026-11-16  
 **Recorded at:** 2026-11-16  
-**Approval source:** None for the bands. The outcome is the AIR-488 scope the owner ordered implemented on 16 November 2026 (Europe/Madrid).  
+**Approval source:** Owner comment on [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774), 16 November 2026 (Europe/Madrid)  
 **Related work:** [AIR-480](https://trello.com/c/ZS0Xdrlq) / [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md); [AIR-503](https://trello.com/c/t9fZCHLQ) remains a separate duration audit  
 **Supersedes:** None. Replaces the `scanEPG` branch that accepted a watchlist film on year alone or, when the title had no year, on runtime alone.  
 **Superseded by:** None
@@ -20,7 +20,7 @@ A slot becomes a watchlist Film only when the prebuilt alias index leaves one tr
 2. **Year absent.** An identity supports the slot only when its runtime is within `max(8 minutes, 12%)`. It is assigned only when it is the only identity inside the contradiction band above. Another identity in the near or middle band, or with no usable runtime, is `identity_collision`. A single indexed film with a near runtime still matches.
 3. **Outcome.** A collision or a contradiction does not attach a showing and does not delete a film. Inside the hot window the slot is the existing discovery observation. The uncertain diagnostic carries the reason. `stats.identityCollision` counts those hot-window slots and stores no titles. A `catalogOnly` match confirms that TMDB id on **that slot** (`confirmedSlots`). The observation's `confirmedTmdbId` is set only when every retained slot confirms the same id, so one slot cannot make the cheap pass verify the whole observation as `known_epg_alias`. Assignment then reads `confirmedSlots`: `scan_confirmed` applies only to a slot whose own id equals the decision. An observation stored before this list still uses the observation id for every slot. Days 2–7 still retain only a unique non-catalog watchlist match; a collision there is omitted, not assigned. Slot ownership stays one owner per `(channel, start)` ([ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md)). There is no per-slot TMDB request and no new publisher.
 
-The contradiction band is the open product choice. At 109 minutes, `max(45, 40%)` is 45 minutes, so a title year of 2005 still matches a 150-minute airing of a 109-minute film. A tighter band would withhold more real cuts. A looser band would attach more homonyms. AIR-488 did not pick the number.
+The owner accepted the contradiction band with that trade-off. At 109 minutes, `max(45, 40%)` is 45 minutes, so a title year of 2005 still matches a 150-minute airing of a 109-minute film.
 
 Films absent from the watchlist and from the catalog passed into the scan are not visible. The scan does not invent them.
 
