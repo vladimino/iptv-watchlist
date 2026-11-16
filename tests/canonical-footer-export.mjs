@@ -175,4 +175,77 @@ const record=(body,key)=>(body.records||[]).find(item=>item.key===key);
  assert.equal(r.body.reason,'film_person_generation_moved');
 }
 
+function seedH95Footer(){
+ records.clear();reads.length=0;
+ const now=Date.now(),hour=3600000;
+ records.set('epg/published-generation.json',{phase:'published',programmeRunId:G1});
+ const lid={id:'h95',tmdbId:'7',title:'Heat',original:'Heat',year:1995,runtime:170,genres:[],poster:null,url:null,directors:[],actors:[],shows:[{channelId:'c1',channel:'One',start:now-hour,end:now+hour}],showsProgrammeRunId:G1};
+ const catalogFilm={...lid,id:'tmdb_7',canonicalIdentity:'tmdb:7'};
+ for(const key of ['epg/discovered-films.json','epg/generations/'+G1+'/discovered-films.json'])records.set(key,{tmdb_7:structuredClone(catalogFilm)});
+ for(const key of ['programme.json','epg/generations/'+G1+'/programme.json'])records.set(key,{runId:G1,updatedAt:T,watchlistCount:1,films:[structuredClone(lid)],stats:{}});
+ records.set('watchlist.json',{updatedAt:T,films:[{id:'h95',tmdbId:'7',title:'Heat'}]});
+ records.set('epg/generations/'+G1+'/watchlist.json',structuredClone(records.get('watchlist.json')));
+ records.set('metadata.json',{'h95':{id:'h95',tmdbId:'7',title:'Stale'}});
+ records.set('titles.json',{});
+ records.set(vm.runInContext('profileKey',ctx),{version:1,profileHash:'p1'});
+ const pred=(id,rating)=>({fingerprintHash:'fp-'+id,impactFeatures:{fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,fingerprintPromptVersion:1},prediction:{predictedRating:rating,probability4Plus:.9,confidence:'high',tasteProfileVersion:1,tasteProfileHash:'p1',fingerprintHash:'fp-'+id,fingerprintSchemaVersion:1,predictionPromptVersion:1}});
+ records.set(vm.runInContext('ENRICHMENT_KEY',ctx)+'view-index.json',{h95:{watched:true},tmdb_7:pred('7',4.8)});
+}
+
+const H95_FILM=`
+UPDATE film_external_id SET trusted=0, conflicting=1 WHERE film_id='film:heat-1995' AND scheme='tmdb' AND value='7';
+INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES
+ ('film:h95',1,'tmdb:7','Heat','${T}');
+INSERT INTO film_metadata (film_id,schema_version,year,runtime,synopsis,poster,url,genres_json,people_version,payload_json,r2_key,content_sha256,updated_at) VALUES
+ ('film:h95',1,1995,NULL,NULL,NULL,NULL,'[]',NULL,'{}',NULL,NULL,'${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES
+ ('film:h95','letterboxd','h95',1,0,NULL),
+ ('film:h95','tmdb','7',1,0,NULL);
+`;
+const TWO_TMDB=H95_FILM+"INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:h95','tmdb','8',1,0,NULL);\n";
+const UNTRUSTED=H95_FILM+`
+INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:other',1,NULL,'Other','${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:other','tmdb','7',0,0,NULL);
+`;
+
+function assertUnbridgedFooter(body,label){
+ assert.equal(body.collection.state,'ok',label);
+ assert.equal(body.collection.watchlist,1,label+': one watchlist lid');
+ assert.equal(body.collection.watched,1,label+': watched stays the unbridged lid');
+ assert.ok(body.collection.total>=2,label+': catalog tmdb:7 is a second identity, not merged: '+JSON.stringify(body.collection));
+ assert.equal(body.recommendations.newUnseen.state,'ok',label);
+ assert.equal(body.recommendations.newUnseen.rating45plus,1,label+': unproven lid must not hide the catalog film from newUnseen');
+}
+
+{
+ seedH95Footer();
+ const file=database('open');
+ sqlite(file,TWO_TMDB);
+ const open=await footer({DB:standin(file,'open')});
+ assert.equal(open.status,200);
+ assertUnbridgedFooter(open.body,'two D1 TMDB claims');
+ const dump=await exported({DB:standin(file,'open')});
+ assert.equal(dump.status,200);
+ assert.equal(record(dump.body,'metadata.json').value.h95.tmdbId,null);
+ assert.equal(record(dump.body,'metadata.json').value.h95.identityBlocked,true,'export keeps the identity-blocked signal');
+}
+{
+ seedH95Footer();
+ const file=database('open');
+ sqlite(file,UNTRUSTED);
+ const open=await footer({DB:standin(file,'open')});
+ assert.equal(open.status,200);
+ assertUnbridgedFooter(open.body,'untrusted duplicate TMDB claim');
+}
+{
+ seedFooter();
+ const open=await footer({DB:standin(database('open'),'open')});
+ assert.equal(open.status,200);
+ assert.equal(open.body.collection.state,'ok');
+ assert.equal(open.body.collection.watched,1,'trusted D1 claim still bridges');
+ const dump=await exported({DB:standin(database('open'),'open')});
+ assert.equal(record(dump.body,'metadata.json').value['heat-1995'].identityBlocked,undefined);
+}
+
 console.log('canonical-footer-export: footer/status and diagnostics/export?group=global keep R2 at prepared, bounded D1 at open, STOP on held/unreadable/generation move without frozen-key GET');
+

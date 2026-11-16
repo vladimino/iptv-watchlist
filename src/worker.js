@@ -224,7 +224,17 @@ function catalogLidTmdb({metadata,watchlist,programme,catalog}){
   if(CATALOG_TMDB_ID.test(lid)||!/^[1-9]\d*$/.test(tmdb)||conflicted.has(lid))return;
   if(!byLid.has(lid))byLid.set(lid,tmdb);else if(byLid.get(lid)!==tmdb){byLid.delete(lid);conflicted.add(lid);}
  };
- for(const [id,record] of Object.entries(metadata||{}))add(record?.id??id,record?.tmdbId);
+ for(const [id,record] of Object.entries(metadata||{})){
+  const lid=String(record?.id??id);
+  // D1 identityBlocked is the negative canonical verdict (conflicting/untrusted TMDB or Letterboxd claims).
+  // A null tmdbId alone is absence, not a veto; watchlist/programme must not restore a blocked lid.
+  if(record?.identityBlocked===true){
+   conflicted.add(lid);byLid.delete(lid);
+   if(record.id!=null){const own=String(record.id);conflicted.add(own);byLid.delete(own);}
+   continue;
+  }
+  add(record?.id??id,record?.tmdbId);
+ }
  for(const film of [...(watchlist?.films||[]),...(programme?.films||[])])add(film?.id,film?.tmdbId);
  for(const film of Object.values(catalog||{}))if(film?.tmdbId&&film.canonicalIdentity==='tmdb:'+String(film.tmdbId))add(film.id,film.tmdbId);
  return byLid;

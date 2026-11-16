@@ -202,7 +202,8 @@ function identityClaim(rows,scheme,value){
 // Slice 3 (AIR-499): metadata.json consumers of the film page, Finds and ratings labels. Bounded SELECTs of the requested ids
 // (chunks of TITLE_READ_CHUNK); missing optional poster/title/year is an empty field, not a read error. TMDB is the Film's
 // identity claim (every stored tmdb / letterboxd row for that value is assessed; any non-owner claim is a conflict) — never
-// inferred from a title.
+// inferred from a title. A conflict sets identityBlocked:true with tmdbId null so catalogLidTmdb cannot restore the lid
+// from watchlist/programme; a missing TMDB claim is tmdbId null without that flag.
 export async function catalogMetadataFromD1(env,ids,gate){
  if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');
  const db=database(env);
@@ -251,10 +252,18 @@ export async function catalogMetadataFromD1(env,ids,gate){
   let filmId=byFilm.has(own)?own:(spelled&&byFilm.has(spelled)?spelled:null);
   if(!filmId){
    const lid=identityClaim(externals,'letterboxd',id);
-   if(!lid.conflict&&lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
+   if(lid.conflict){
+    out[id]={id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
+    continue;
+   }
+   if(lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
    else if(tmdb){
     const claim=identityClaim(externals,'tmdb',tmdb[1]);
-    if(!claim.conflict&&claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
+    if(claim.conflict){
+     out[id]={id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
+     continue;
+    }
+    if(claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
    }
   }
   if(!filmId)continue;
@@ -266,6 +275,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const original=typeof row.original_title==='string'&&row.original_title?row.original_title:null;
   const title=typeof row.title==='string'&&row.title?row.title:original;
   const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title,original};
+  if(tmdbClaim.conflict||lidClaim.conflict)record.identityBlocked=true;
   out[id]=record;
   if(lidClaim.value&&lidClaim.value!==id)out[lidClaim.value]={...record,id:lidClaim.value};
  }

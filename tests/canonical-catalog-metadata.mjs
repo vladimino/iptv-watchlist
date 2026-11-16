@@ -203,6 +203,7 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
  const orphan=await reader.catalogMetadataFromD1(env,['orphan'],await reader.catalogReaderGate(env));
  assert.equal(orphan.orphan.tmdb,undefined);
  assert.equal(orphan.orphan.tmdbId,null);
+ assert.equal(orphan.orphan.identityBlocked,undefined,'a missing TMDB claim is not identityBlocked');
  assert.equal(orphan.orphan.title,'No Title');
  assert.equal(orphan.orphan.original,'No Title');
 }
@@ -216,6 +217,7 @@ INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenanc
  const env={DB:standin(file,'open')};
  const heat=await reader.catalogMetadataFromD1(env,['heat-1995'],await reader.catalogReaderGate(env));
  assert.equal(heat['heat-1995'].tmdbId,null,'an untrusted claim of the same TMDB id is a conflict, not ignored');
+ assert.equal(heat['heat-1995'].identityBlocked,true);
 }
 
 console.log('canonical-catalog-metadata: film/available/ratings labels keep R2 at prepared, read bounded D1 at open, and STOP on held/unreadable/generation move without metadata.json fallback');
