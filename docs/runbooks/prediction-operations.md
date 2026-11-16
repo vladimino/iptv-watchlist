@@ -20,6 +20,8 @@ For a single deferred film, ordinary backoff or an interrupted but recoverable r
 
 ## Hourly discovery preflight and orphaned checkpoints
 
+An EPG run that is still in `seal` or `finalize`, or a programme report whose `runId` does not match a completed sync, is not a reason to skip Predictions. The Worker keeps scoring trusted films from the stored queue; showtimes affect only hot/cold order, and only from a completed snapshot or from last-known priority no older than 36 hours ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)). Do not start a manual EPG or prediction run to prove that.
+
 The hourly Task's discovery catch-up runs **before** prediction processing, but a blocked discovery continuation must not stop safe prediction work. Read `probe_read`, `epg_status` and `epg_pipeline_status`; verify the currently published `programmeRunId` and the pinned continuation generation. Only a server-authorized existing-generation continuation may be advanced by a separate, owner-authorized writer execution. A healthy paused checkpoint may allow ordinary sequential `epg_sync_step` calls; each call runs no more than one discovery chunk.
 
 For `continuation.stage=running`, do **not** treat elapsed wall time, a stale event, or the `running` value alone as permission to recover. Use the Worker's read-only `continuationHealth`:

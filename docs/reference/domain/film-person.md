@@ -215,7 +215,7 @@ D1 table `film_sync_state` ([ADR 0070](../../adr/0070-metadatasync-freshness-clo
 
 ## Availability and published generations
 
-`availabilityProjection()` computes `availableUntil` as the latest known show start plus **72 hours**; `hot` evaluates shows from **72 hours back** through **24 hours ahead** (upper bound exclusive). Shows and `epgLastAiring` are not stable Film attributes and never invalidate fingerprint.
+`availabilityProjection()` computes `availableUntil` as the latest known show start plus **72 hours**; `hot` evaluates shows from **72 hours back** through **24 hours ahead** (upper bound exclusive). Shows and `epgLastAiring` are not stable Film attributes and never invalidate a fingerprint or a personal prediction. They also do not decide whether the film may be queued: an unsealed EPG generation does not remove eligibility ([ADR 0154](../../adr/0154-prediction-eligibility-independent-of-epg.md)).
 
 An explicit `shows: []` is known **no availability**. When a published programme run is known, missing `shows` or a mismatched `showsProgrammeRunId` must not produce hot. `epgLastAiring` is a fallback only when no explicit shows, no shows programme run and no published run are known. A new published EPG generation atomically replaces the current show set; it does not append old availability. See [candidate discovery](candidate-discovery.md).
 

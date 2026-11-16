@@ -217,6 +217,7 @@ const NAMING={
  'persistWatchlist@src/worker.js':'publication path, under the lease',
  'persistScan@src/worker.js':'publication scan path; reads view-index to plan watchlist false retention, writes no frozen mirror',
  'sealPublishStep@src/worker.js':'publication path, under the sealStep lease',
+ 'buildPredictionQueue@src/enrichment.js':'reads watchlist.json only while the programme snapshot is unsealed, for membership; it writes neither watchlist nor a projector input',
 };
 const seen=new Set([...naming(chunk),...naming(publication)]);
 for(const key of seen)assert.ok(NAMING[key],'a reachable function names a projector input and is not classified: '+key);
