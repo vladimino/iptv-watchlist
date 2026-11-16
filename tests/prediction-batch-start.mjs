@@ -317,6 +317,15 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const again=await batch(w);assert.equal(again.status,200,'the next start works on the changed queue');assert.equal(again.data.lease.epoch,2);
 }
 {
+ // A detailed advance-gate code after the refresh stays cause "stale" (AIR-510). The rebuilt queue is then stamped with another programme run, so the second preflight is programme_changed.
+ const w=await ready(8);await reconcile(w);
+ const programme=w.records.get('programme.json');w.records.set('programme.json',{...programme,runId:'p2'});
+ const batchFn=w.env.DB.batch.bind(w.env.DB);let armed=false;
+ w.env.DB.batch=async statements=>{const out=await batchFn(statements);if(!armed&&statements.some(s=>/prediction_queue/i.test(s.text)&&!/^\s*SELECT/i.test(s.text))){armed=true;sql(w.file,"UPDATE prediction_queue SET chunk_text=replace(chunk_text,'\"programmeRunId\":\"p2\"','\"programmeRunId\":\"p-stale\"')");}return out;};
+ const r=await batch(w);
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,240));assert.equal(r.data.code,'queue_changed');assert.equal(r.data.queueRefreshed,true);assert.equal(r.data.cause,'stale');
+}
+{
  // (b2) the same write after the lease is taken
  const w=await ready(130);await reconcile(w);
  const dry=await batch(w,{dryRun:true}),selected=new Set(dry.data.films.map(f=>f.filmId)),outside=Array.from({length:130},(_,i)=>'tmdb_'+(i+1)).find(id=>!selected.has(id));

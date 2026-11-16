@@ -2453,7 +2453,7 @@ async function batchStartWork(env,body,requestId,tally){
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
   pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
-  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true,cause:typeof pre.stale==='string'?pre.stale:'stale'});
+  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true,cause:'stale'});
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
