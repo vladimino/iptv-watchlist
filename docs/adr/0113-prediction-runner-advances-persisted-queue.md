@@ -6,7 +6,7 @@
 **Approval source:** explicit Product Owner acceptance on 2026-11-11, recorded in [AIR-431](https://trello.com/c/LXGD3quG#comment-6af40c27885ba32fbdde2189) after explanation of the decision and trade-offs; the scope of AIR-431 authorized implementation, not approval of this ADR  
 **Related work:** [AIR-431](https://trello.com/c/LXGD3quG), AIR-417, [AIR-424](https://trello.com/c/KZ51Kn7N), [ADR 0064](0064-prediction-queue-conditional-writes.md), [ADR 0085](0085-d1-authoritative-discovery.md)  
 **Supersedes:** None  
-**Superseded by:** None
+**Superseded by:** The programme-identity clause of decision 1 only, by [ADR 0154](0154-prediction-eligibility-independent-of-epg.md). The rest of this record stands.
 
 ## Context
 

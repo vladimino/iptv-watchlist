@@ -274,7 +274,7 @@ for(const [films,expected] of [[1,1],[100,100],[130,100]]){
 {
  const w=await ready(6);await reconcile(w);
  w.records.set('programme.json',{runId:'p2',films:[]});w.records.set('sync.json',{runId:'p2',stage:'complete'});
- const dry=await batch(w,{dryRun:true});assert.equal(dry.status,409);assert.equal(dry.data.code,'queue_stale');assert.equal(dry.data.cause,'programme_changed');
+ const dry=await batch(w,{dryRun:true});assert.equal(dry.status,200,JSON.stringify(dry.data).slice(0,200));assert.equal(dry.data.dryRun,true,'a completed programme id does not stale a dry run');
 }
 
 // 13. A refusal creates no run, Event, diagnostics row or `latest-run`; the only effects it may have are the ones D7-A names.
@@ -317,11 +317,11 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const again=await batch(w);assert.equal(again.status,200,'the next start works on the changed queue');assert.equal(again.data.lease.epoch,2);
 }
 {
- // A detailed advance-gate code after the refresh stays cause "stale" (AIR-510). The rebuilt queue is then stamped with another programme run, so the second preflight is programme_changed.
+ // A detailed advance-gate code after the refresh stays cause "stale" (AIR-510). The rebuilt queue is then stamped with another profile version, so the second preflight is profile_changed. A programme run id is not that gate (ADR 0154).
  const w=await ready(8);await reconcile(w);
- const programme=w.records.get('programme.json');w.records.set('programme.json',{...programme,runId:'p2'});
+ const programme=w.records.get('programme.json');w.records.set('programme.json',{...programme,runId:'p2'});w.records.set('sync.json',{runId:'p2',stage:'complete'});
  const batchFn=w.env.DB.batch.bind(w.env.DB);let armed=false;
- w.env.DB.batch=async statements=>{const out=await batchFn(statements);if(!armed&&statements.some(s=>/prediction_queue/i.test(s.text)&&!/^\s*SELECT/i.test(s.text))){armed=true;sql(w.file,"UPDATE prediction_queue SET chunk_text=replace(chunk_text,'\"programmeRunId\":\"p2\"','\"programmeRunId\":\"p-stale\"')");}return out;};
+ w.env.DB.batch=async statements=>{const out=await batchFn(statements);if(!armed&&statements.some(s=>/prediction_queue/i.test(s.text)&&!/^\s*SELECT/i.test(s.text))){armed=true;sql(w.file,"UPDATE prediction_queue SET chunk_text=replace(chunk_text,'\"profileVersion\":1','\"profileVersion\":99')");}return out;};
  const r=await batch(w);
  assert.equal(r.status,409,JSON.stringify(r.data).slice(0,240));assert.equal(r.data.code,'queue_changed');assert.equal(r.data.queueRefreshed,true);assert.equal(r.data.cause,'stale');
 }

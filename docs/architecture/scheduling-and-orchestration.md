@@ -46,6 +46,8 @@ sequenceDiagram
     end
 ```
 
+The hourly Predictions Task does not wait for the EPG Workflow to finish a seal. An unsealed generation leaves the stored prediction queue runnable ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)).
+
 ### Hourly prediction pipeline
 
 ```mermaid

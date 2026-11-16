@@ -1556,16 +1556,28 @@ async function consistentQueueReport(pinned,report){
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const pinned=await queuePin(env,report);
  const source=await consistentQueueReport(pinned,report);
- const [profile,storedIndex,catalog]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned)]);
+ const [profile,storedIndex,catalog,sync,watchlistDoc]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json'),loadJSON(env,'watchlist.json')]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
- if(!profile||!source?.films)return null;
- if(capture)Object.assign(capture,{report:source,profile,index,catalog});
+ if(!profile)return null;
+ const safeSource=source&&Array.isArray(source.films)?source:{runId:source?.runId||null,films:[]};
+ if(capture)Object.assign(capture,{report:safeSource,profile,index,catalog});
  const now=Date.now();
+ const authoritative=showsAuthoritative(sync,safeSource);
  // ADR 0142: completed-only ranking is a live D1 published pin whose run matches the completed programme, not the mere presence of the PublishedEpg module (the Worker always bundles it; currentGeneration null is the R2 path).
- const completedOnly=pinned?.epgPin?.authority==='d1'&&!!pinned.epgPin.programmeRunId&&source?.runId===pinned.epgPin.programmeRunId;
- const completed=completedOnly?completedShowsByTmdb(source):new Map();
- const films=allEnrichmentFilms(source,catalog).map(film=>withCompletedShows(film,completed,source.runId,completedOnly));
- const watchlistIds=new Set(eligibleEnrichmentFilms(source).map(f=>String(f.id))),priority=Object.fromEntries(films.map(f=>[String(f.id),predictionPriority(f,now)]));
+ const completedOnly=authoritative&&pinned?.epgPin?.authority==='d1'&&!!pinned.epgPin.programmeRunId&&safeSource.runId===pinned.epgPin.programmeRunId;
+ const completed=completedOnly?completedShowsByTmdb(safeSource):new Map();
+ const membership=authoritative?safeSource:Array.isArray(watchlistDoc?.films)?{films:watchlistDoc.films}:{films:safeSource.films};
+ const films=allEnrichmentFilms(membership,catalog).map(film=>authoritative?withCompletedShows(film,completed,safeSource.runId,completedOnly):{...film,shows:[],epgLastAiring:null});
+ const watchlistIds=new Set(eligibleEnrichmentFilms(membership).map(f=>String(f.id)));
+ let priorityBasis='completed',priorityProgrammeRunId=safeSource.runId;
+ const priority=Object.fromEntries(films.map(f=>{
+  const id=String(f.id);
+  if(authoritative)return [id,{...predictionPriority(f,now),basis:'completed'}];
+  const carried=carriedPredictionPriority(previous,id,now);
+  if(carried){priorityBasis='carried';priorityProgrammeRunId=previous.programmeRunId||priorityProgrammeRunId;return [id,carried];}
+  return [id,neutralPredictionPriority()];
+ }));
+ if(!authoritative&&priorityBasis!=='carried'){priorityBasis='neutral';priorityProgrammeRunId=previous?.programmeRunId||'priority-neutral';}
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
  const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
  // The fingerprint transition rule (ADR-0035) decides; the strict fingerprint outcome is counted beside it. Each outstanding
@@ -1608,7 +1620,7 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const currentIds=new Set(missing.map(f=>String(f.id))),retries=boundRetryRecords(previous?.retries||{},currentIds),exhausted=id=>retryBudgetExhausted(retries[id]);
  const hotPending=missing.filter(f=>priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),coldPending=missing.filter(f=>!priority[f.id].hot&&!exhausted(String(f.id))).map(f=>String(f.id)),pending=[...hotPending,...coldPending.filter(id=>watchlistIds.has(id))];
  const hotCount=films.filter(f=>priority[f.id].hot).length,missingHot=missing.filter(f=>priority[f.id].hot).length,hotPredicted=hotCount-missingHot,hotCatalogPredicted=films.filter(f=>priority[f.id].hot&&!watchlistIds.has(String(f.id))&&fresh.get(String(f.id))).length,addedHot=previous?.hotPending?hotPending.filter(id=>!previous.hotPending.includes(id)).length:0;
- const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:source.runId,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
+ const queue={schemaVersion:3,hotCount,coldCount:films.length-hotCount,coldWithoutPrediction:coldPending.filter(id=>!watchlistIds.has(id)).length,hotPredicted,profileVersion:profile.version,profileHash:profile.profileHash,programmeRunId:priorityProgrammeRunId,priorityBasis,refreshedAt:new Date().toISOString(),trigger,pending,hotPending,coldPending,priorityCount:hotPending.length,coldRemaining:coldPending.length,urgentCount:hotPending.filter(id=>priority[id].rank===0).length,priority:Object.fromEntries(missing.map(f=>[String(f.id),priority[f.id]])),retries,lastBatch:previous?.lastBatch||null,lastCheckAt:previous?.lastCheckAt||null,metrics:{hotAddedTotal:(previous?.metrics?.hotAddedTotal||0)+addedHot,hotProcessedTotal:previous?.metrics?.hotProcessedTotal||0},compatibility,fingerprintCompatibility:fingerprintCompatibilityBlock,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,work:Object.fromEntries(pending.map(id=>[id,work[id]]).filter(([,w])=>w)),discovery:{ready:hotCatalogPredicted>=100,minimum:100,target:200,hotPredicted:hotCatalogPredicted,reason:hotCatalogPredicted>=100?'usable_hot_sample':'warming_hot_sample'}};
  return queue;
 }
 // AIR-431. The Prediction queue advances on its own state. A runner step (next, submit, complete) no longer rebuilds the queue from the
@@ -1623,9 +1635,30 @@ const manifestFilmSpent=(run,id)=>SETTLED_STATUSES.includes(run.results?.[id])||
 const manifestFullySpent=run=>Array.isArray(run?.selectedIds)&&run.selectedIds.length>0&&run.selectedIds.every(id=>manifestFilmSpent(run,id));
 const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(queue.pending)&&Array.isArray(queue.hotPending)&&Array.isArray(queue.coldPending)&&!!queue.priority&&typeof queue.priority==='object'&&Number.isInteger(queue.priorityCount);
 // Why a persisted queue cannot be advanced as it is (null: it can). The same inputs a rebuild stamps into the queue.
+// ADR 0154. A completed programme authorizes hot/cold order only. An unfinished seal, a new programmeRunId or missing shows never block scoring.
+const PRIORITY_CARRY_MS=36*3600000;
+function showsAuthoritative(sync,report){
+ if(!report?.runId||!Array.isArray(report.films)||!sync?.runId)return false;
+ if(sync.stage==='complete'&&sync.runId===report.runId)return true;
+ // The published programme is still the previous generation while a newer run is unsealed.
+ return sync.stage!=='complete'&&sync.runId!==report.runId;
+}
+function priorityRefreshDue(queue,report,sync){
+ if(!queueShapeValid(queue)||!showsAuthoritative(sync,report))return false;
+ if(queue.priorityBasis==='carried'||queue.priorityBasis==='neutral')return true;
+ return queue.programmeRunId!==report.runId;
+}
+function neutralPredictionPriority(){return {hot:false,availableNow:false,availableToday:false,availableUntil:null,rank:2,expiresInMs:Infinity,basis:'neutral'};}
+function carriedPredictionPriority(previous,id,now){
+ const age=previous?.refreshedAt?now-Date.parse(previous.refreshedAt):Infinity;
+ const basis=previous?.priorityBasis;
+ const fromCompleted=basis==='completed'||basis===undefined||basis==='carried';
+ const stored=previous?.priority?.[id];
+ if(fromCompleted&&age<=PRIORITY_CARRY_MS&&stored&&typeof stored==='object')return {...stored,basis:'carried'};
+ return null;
+}
 function queueAdvanceGate(queue,report,profile,registry){
  if(!queueShapeValid(queue))return 'queue_shape';
- if(!report?.runId||queue.programmeRunId!==report.runId)return 'programme_changed';
  if(!profile||queue.profileHash!==profile.profileHash||queue.profileVersion!==profile.version)return 'profile_changed';
  if(queue.fingerprintSchemaVersion!==FINGERPRINT_SCHEMA_VERSION||(queue.fingerprintPromptVersion??1)!==FINGERPRINT_PROMPT_VERSION||queue.predictionPromptVersion!==PREDICTION_PROMPT_VERSION)return 'contract_changed';
  if(queue.fingerprintCompatibility?.registryDigest!==registry)return 'registry_changed';
@@ -2360,14 +2393,16 @@ async function batchPreflight(env,body,tally=null){
  if(tally)tally.preflights++;
  const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
  if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
- if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return {response:json({error:'No completed programme snapshot'},409)};
- const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,report,profile,(await fingerprintRegistryDigests()).registry);
- if(why)return {profile,report,stale:why,revision,manifestSize};
+ const programme=report&&Array.isArray(report.films)?report:{runId:report?.runId||null,films:[]};
+ const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry);
+ const priorityDue=!why&&priorityRefreshDue(stored,programme,sync);
+ if(why)return {profile,report:programme,stale:why,priorityDue:false,revision,manifestSize};
+ if(!stored)return {profile,report:programme,stale:'queue_shape',priorityDue:false,revision,manifestSize};
  try{
-  const selection=await batchSelection(env,{profile,report,queue:stored,pin:body.pin||null,limit:manifestSize});
+  const selection=await batchSelection(env,{profile,report:programme,queue:stored,pin:body.pin||null,limit:manifestSize});
   if(tally)tally.scannedFilms+=selection.scanned;
   const manifest=await buildBatchManifest(env,{profile,items:selection.items,runId:BATCH_PLACEHOLDER_RUN,lease:{expiresAt:Date.now()+RUNNER_LEASE_TTL,epoch:99999},dryRun});
-  return {profile,report,queue:stored,revision,selection,manifest,manifestSize,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
+  return {profile,report:programme,queue:stored,revision,selection,manifest,manifestSize,priorityDue,bytes:batchBytes({...manifest.body,...batchPlaceholderExtras(selection,dryRun)})};
  }catch(error){
   if(CATALOG_HELD_CODES.includes(error?.code))return {response:catalogHeldResponse(error.code)};
   throw error;
@@ -2379,7 +2414,7 @@ const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.b
 // The settlement looks at the films the manifest would be built from (the client-requested size), not at a default 100: a film behind that window leaves the queue when it is reached.
 async function batchRefreshQueue(env,body,pre,tally=null){
  let queue=pre.queue,settled=0;const limit=resolveManifestSize(body).size;
- if(pre.stale)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:false,fallback:true});
+ if(pre.stale||pre.priorityDue)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:!pre.stale&&!!pre.priorityDue,fallback:true});
  const context=await advanceContext(env,pre.report,pre.profile);
  for(let round=0;round<3;round++){
   const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue,limit}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
@@ -2447,13 +2482,13 @@ async function batchStartWork(env,body,requestId,tally){
  const unsettled=await timedStage(env,'settle_previous',()=>atStage('settle_previous',()=>settlePreviousRun(env)));if(unsettled)return unsettled;
  const held=await timedStage(env,'catalog_gate',()=>atStage('catalog_gate',()=>catalogHeldCause(env)));if(held)return catalogHeldResponse(held);
  let queueRefreshed=false,queueSettled=0;
- if(pre.stale||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
+ if(pre.stale||pre.priorityDue||pre.selection.skipped.missingAdmission.length||pre.selection.skipped.alreadyCurrent.length){
   forgetAuthority(env);
   try{const refreshed=await timedStage(env,'queue_refresh',()=>atStage('queue_refresh',()=>batchRefreshQueue(env,body,pre,tally)));queueRefreshed=true;queueSettled=refreshed.settled;}
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
   pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
-  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true,cause:'stale'});
+  if(pre.stale||pre.priorityDue)return batchBlocked('queue_changed',{queueRefreshed:true,cause:pre.stale?'stale':'priority'});
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
@@ -2476,7 +2511,7 @@ async function batchStartWork(env,body,requestId,tally){
   forgetAuthority(env);
   const again=await timedStage(env,'preflight_lease',()=>batchPreflight(env,body,tally));
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
-  if(again.stale||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
+  if(again.stale||again.priorityDue||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.priorityDue?'priority':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
   answer={...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})};
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
@@ -2931,7 +2966,7 @@ async function savePredictionRun(env,run){const stored=await saveJSON(env,runKey
 async function enrichmentStart(env,body,acquired=null){
  const mode=body.mode||'queued';if(!['watchlist_available','watchlist_all'].includes(body?.scope)||(body.limit!==undefined&&(!Number.isInteger(body.limit)||body.limit<1))||!['queued','legacy'].includes(mode)||(body.batchSize!==undefined&&(!Number.isInteger(body.batchSize)||body.batchSize<1||body.batchSize>MAX_PREDICTION_BATCH)))return json({error:'Invalid scope, mode or batchSize'},400);
  if(body.capacity!==undefined&&(!isObject(body.capacity)||body.capacity.remainingPercent!==undefined&&(!Number.isFinite(body.capacity.remainingPercent)||body.capacity.remainingPercent<0||body.capacity.remainingPercent>100)))return json({error:'Invalid capacity'},400);
- const [profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);if(!profile)return json({error:'Taste profile is not configured'},409);if(!report?.runId||!report?.films||!sync||sync.stage!=='complete'&&sync.runId===report.runId)return json({error:'No completed programme snapshot'},409);
+ const [profile,loadedReport]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);if(!profile)return json({error:'Taste profile is not configured'},409);const report=loadedReport&&Array.isArray(loadedReport.films)?loadedReport:{runId:loadedReport?.runId||null,films:[]};
  // The rebuild already read the programme, the catalog and the index of this generation; the start reuses them instead of reading each again
  // (AIR-417: three copies of the catalog and programme and two of the index in one request exceeded the isolate memory).
  const inputs={},startQueue=mode==='queued'?await atStage('queue_refresh',()=>currentPredictionQueue(env,report,profile,body.trigger==='scheduled'?'scheduled':'manual',{force:true,fallback:true,capture:inputs})):null,reused=mode==='queued'&&inputs.report?.runId===report.runId&&inputs.catalog!==undefined,legacyFilms=mode==='queued'?null:eligibleEnrichmentFilms(report),eligibleCount=mode==='queued'?(startQueue.hotCount||0)+(startQueue.coldCount||0):legacyFilms.length,plan=mode==='queued'?adaptivePredictionBatch(startQueue,body.capacity):null,queueStale=startQueue?.queueStale||null;
