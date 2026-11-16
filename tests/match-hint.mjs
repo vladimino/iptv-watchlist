@@ -43,15 +43,17 @@ context.watchlist=[
 ];
 const scanned=await vm.runInContext('scanEPG(stream,watchlist,now)',context);
 const story=scanned.films.find(film=>film.id==='story');
-const old=scanned.films.find(film=>film.id==='d84');
 assert.equal(story.shows[0].basis,'title_unique');
 assert.equal(story.shows[0].matchReason,null);
-assert.equal(old.shows[0].basis,'title_duration');
-assert.equal(old.shows[0].matchReason,'ambiguous_short_title_without_year');
-const evil=scanned.films.find(film=>film.id==='re');
-assert.equal(evil.shows[0].basis,'title_duration');
-assert.equal(evil.shows[0].matchReason,'contradicted_runtime');
+// ADR 0150: a yearless title shared by another indexed identity is not attached, even when one runtime is nearer.
+assert.equal(scanned.films.some(film=>film.id==='d84'),false);
+const yearless=scanned.discovery.find(item=>item.key==='dune|');
+assert.equal(yearless.confirmedTmdbId,null);
+assert.equal(scanned.uncertain.some(item=>item.title==='Dune'&&item.reason==='identity_collision'),true);
+// A year that matches the film does not survive a runtime beyond the contradiction band.
+assert.equal(scanned.films.some(film=>film.id==='re'),false);
+assert.equal(scanned.uncertain.some(item=>item.title==='Resident Evil (2002)'&&item.reason==='contradictory_runtime'),true);
 assert.equal(scanned.films.some(film=>film.id==='d21'||film.id==='d22'),false);
-assert.equal(scanned.uncertain.some(item=>item.title==='Dune (2021)'&&item.reason==='ambiguous'),true);
+assert.equal(scanned.uncertain.some(item=>item.title==='Dune (2021)'&&item.reason==='identity_collision'),true);
 assert.doesNotMatch(fs.readFileSync('wrangler.jsonc','utf8'),/SCORED_RESOLUTION/);
-console.log('Match hint: unique yearless title is unmarked, a short collision keeps the warning passed');
+console.log('Match hint: a unique yearless title stays unmarked; a shared title or a contradicted runtime is not attached');

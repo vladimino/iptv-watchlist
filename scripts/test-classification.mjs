@@ -607,6 +607,9 @@ export const FILES={
  "epg-status-ledger-mode.mjs": {
   "suite": "core"
  },
+ "epg-title-collision.mjs": {
+  "suite": "core"
+ },
  "epg-trace-boundaries.mjs": {
   "suite": "core"
  },
