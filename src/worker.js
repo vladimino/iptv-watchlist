@@ -824,8 +824,10 @@ async function metadataSync(env,run){
     titles,people,failedIds:(run.failures||[]).map(item=>item.id),
     intent:run.metadataSyncIntent||[],
    });
-   run.canonicalMetadata=canonical;
-   if(canonical&&canonical.intent)run.metadataSyncIntent=canonical.intent;
+   run.canonicalMetadata=CanonicalMetadataSync.metadataSyncRecord(canonical);
+   const carried=CanonicalMetadataSync.carryMetadataSyncIntent(canonical);
+   if(carried.length)run.metadataSyncIntent=carried;
+   else delete run.metadataSyncIntent;
    if(!CanonicalMetadataSync.metadataSyncSettled(canonical)){
     run.updatedAt=new Date().toISOString();
     await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);

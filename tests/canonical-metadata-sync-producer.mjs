@@ -19,6 +19,7 @@ const {
  applyMetadataSync,applyFilmMetadata,METADATA_SYNC_KINDS,canonicalMetadataFilmId,titleSourceOf,personSourcesOf,
  metadataFactsInput,syncFactsInput,FILM_METADATA_OPERATION,FILM_SYNC_OPERATION,LOCALIZATION_SOURCE_OPERATION,LOCALIZATION_CONFLICT_OPERATION,
  resolveExistingFilmId,metadataSyncRegistry,metadataSyncSettled,METADATA_SYNC_ORIGIN,
+ planMetadataSyncIntent,metadataSyncRecord,carryMetadataSyncIntent,
 }=M;
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-metadata-sync-'));
@@ -81,6 +82,9 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  const env=envOf(file);
  const out=await applyMetadataSync(env,{event:'metadata:run-1',films:[film()],titles,people,now:()=>T});
  assert.equal(out.state,'complete');
+ assert.equal(out.intent.length,0);
+ assert.equal(carryMetadataSyncIntent(out).length,0);
+ assert.equal('intent' in metadataSyncRecord(out),false);
  assert.ok(out.applied>=2,JSON.stringify(out));
  const kinds=rows(file,'SELECT operation FROM canonical_write_receipt ORDER BY created_at').map(row=>row.operation);
  assert.deepEqual(kinds.filter(k=>METADATA_SYNC_KINDS.includes(k)).slice(0,2),[FILM_METADATA_OPERATION,FILM_SYNC_OPERATION]);
@@ -186,15 +190,15 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  const file=database('open');
  assert.equal(sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ("+q(hid)+",1,'tmdb:1656','Heat','"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q(hid)+",'letterboxd','28nq',1,0,NULL);INSERT INTO person (id,role_id,contract_version,updated_at) VALUES ("+q(PID)+",'director/michael-mann',1,'"+T+"');INSERT INTO film_dimension (film_id,dimension,status,source,source_version,provenance_json,value,authority,attempts,next_action,updated_at) VALUES ("+q(hid)+",'localization','reviewed','owner','owner','{\"authority\":\"owner\"}','Жара','owner',0,'none','"+T+"');").status,0);
  const env=envOf(file);
- const first=await applyMetadataSync(env,{event:'metadata:intent',films:[film({id:'28nq',tmdbId:null})],titles,people,now:()=>T});
- assert.ok(first.intent.some(unit=>unit.operation===LOCALIZATION_SOURCE_OPERATION&&unit.target.kind==='person'));
- assert.ok(first.intent.some(unit=>unit.operation===LOCALIZATION_CONFLICT_OPERATION&&unit.target.kind==='film'));
+ const planned=await planMetadataSyncIntent(env,{event:'metadata:intent',films:[film({id:'28nq',tmdbId:null})],titles,people,now:()=>T});
+ assert.ok(planned.units.some(unit=>unit.operation===LOCALIZATION_SOURCE_OPERATION&&unit.target.kind==='person'));
+ assert.ok(planned.units.some(unit=>unit.operation===LOCALIZATION_CONFLICT_OPERATION&&unit.target.kind==='film'));
  const later=()=>new Date(Date.parse(T)+3600000).toISOString();
- const replay=await applyMetadataSync(env,{event:'metadata:intent',films:[],titles:{},people:{},intent:first.intent,now:later});
+ const replay=await applyMetadataSync(env,{event:'metadata:intent',films:[],titles:{},people:{},intent:planned.units,now:later});
  assert.equal(replay.state,'complete');
  assert.equal(one(file,'SELECT value FROM person_localization_source WHERE person_id='+q(PID)),'Майкл Манн');
  assert.ok(rows(file,'SELECT reason FROM localization_conflict WHERE entity_id='+q(hid)).some(row=>String(row.reason).includes('held_by_owner')));
- const ops=metadataSyncRegistry(env,{intent:first.intent,now:later});
+ const ops=metadataSyncRegistry(env,{intent:planned.units,now:later});
  const considered=await reconcileOwnOrigin(env,{origin:METADATA_SYNC_ORIGIN,operations:ops,now:later});
  assert.ok(Number.isInteger(considered.considered));
 }
@@ -209,27 +213,38 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  const cursorAt=workerText.indexOf('run.cursor+=ids.length',hookStart);
  const hook=workerText.slice(hookStart,cursorAt);
  assert.ok(/metadataSyncSettled\(canonical\)/.test(hook));
+ assert.ok(/metadataSyncRecord\(canonical\)/.test(hook));
+ assert.ok(/carryMetadataSyncIntent\(canonical\)/.test(hook));
+ assert.ok(/delete run\.metadataSyncIntent/.test(hook));
  assert.ok(/canonicalMetadataIncomplete:true/.test(hook));
  assert.ok(!/run\.cursor\+=/.test(hook),'incomplete canonical metadata must not advance the cursor');
  const build=fs.readFileSync('build.mjs','utf8');
  assert.ok(/scopedImports\('src\/canonical-metadata-sync-producer\.js','CanonicalMetadataSync'/.test(build));
 }
 
+function workerCtx(CanonicalMetadataSync,files){
+ const env={BUCKET:{get:async key=>files.has(key)?{json:async()=>structuredClone(files.get(key))}:null,put:async(key,body)=>{files.set(key,JSON.parse(body));}}};
+ const ctx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,CanonicalMetadataSync,fetch:async()=>{throw new Error('unexpected fetch');}});
+ vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
+ return ctx;
+}
+const filmRow=id=>({id,url:'https://letterboxd.com/film/heat-1995/',title:'Heat',original:'Heat',year:1995,aliases:['Heat'],tmdbId:'1656',metadataAt:T,synopsisFetchedAt:T,peopleVersion:1,peopleNamesVersion:2,directors:[{id:'director/michael-mann',name:'Майкл Манн'}],actors:[]});
+
 {
  const files=new Map();
- const env={BUCKET:{get:async key=>files.has(key)?{json:async()=>structuredClone(files.get(key))}:null,put:async(key,body)=>{files.set(key,JSON.parse(body));}}};
  let applyCalls=0;
  const CanonicalMetadataSync={
   applyMetadataSync:async()=>{
    applyCalls++;
    if(applyCalls===1){const error=new Error('D1_ERROR: injected');error.code='d1_error';throw error;}
-   return {state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[{requestId:'r1'}]};
+   return {state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[]};
   },
   metadataSyncSettled:out=>M.metadataSyncSettled(out),
+  metadataSyncRecord:out=>M.metadataSyncRecord(out),
+  carryMetadataSyncIntent:out=>M.carryMetadataSyncIntent(out),
  };
- const ctx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,CanonicalMetadataSync,fetch:async()=>{throw new Error('unexpected fetch');}});
- vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),ctx);
- const original={id:'28nq',url:'https://letterboxd.com/film/heat-1995/',title:'Heat',original:'Heat',year:1995,aliases:['Heat'],tmdbId:'1656',metadataAt:T,synopsisFetchedAt:T,peopleVersion:1,peopleNamesVersion:2,directors:[{id:'director/michael-mann',name:'Майкл Манн'}],actors:[]};
+ const ctx=workerCtx(CanonicalMetadataSync,files);
+ const original=filmRow('28nq');
  files.set('metadata.json',{'28nq':original});
  const run={runId:'test-cursor',stage:'metadata',watchlist:[structuredClone(original)],pending:['28nq'],cursor:0,remaining:1,failures:[]};
  ctx.run=run;
@@ -240,7 +255,76 @@ assert.equal(personSourcesOf(film(),people)[0].id,PID);
  const second=await vm.runInContext('metadataSync(env,run)',ctx);
  assert.equal(second.canonicalMetadataIncomplete,undefined);
  assert.equal(run.cursor,1);
+ assert.equal(run.metadataSyncIntent,undefined);
+ assert.equal(files.get('sync.json').metadataSyncIntent,undefined);
  assert.equal(applyCalls,2);
+}
+
+{
+ const files=new Map();
+ const seen=[];
+ const CanonicalMetadataSync={
+  applyMetadataSync:async(_env,opts)=>{
+   seen.push((opts.intent||[]).map(unit=>unit.requestId));
+   return {state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[{requestId:'done-'+seen.length,input:{heavy:true}}]};
+  },
+  metadataSyncSettled:out=>M.metadataSyncSettled(out),
+  metadataSyncRecord:out=>M.metadataSyncRecord(out),
+  carryMetadataSyncIntent:out=>M.carryMetadataSyncIntent(out),
+ };
+ const ctx=workerCtx(CanonicalMetadataSync,files);
+ const rows=Array.from({length:25},(_,i)=>filmRow(String(i).padStart(4,'0')));
+ files.set('metadata.json',Object.fromEntries(rows.map(row=>[row.id,row])));
+ const run={runId:'two-batch',stage:'metadata',watchlist:rows.map(row=>structuredClone(row)),pending:rows.map(row=>row.id),cursor:0,remaining:25,failures:[]};
+ ctx.run=run;
+ const first=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(first.stage,'metadata');
+ assert.equal(run.cursor,24);
+ assert.equal(run.metadataSyncIntent,undefined);
+ assert.equal(run.canonicalMetadata.intent,undefined);
+ assert.equal(seen[0].length,0);
+ const second=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(second.stage,'epg');
+ assert.equal(run.cursor,25);
+ assert.equal(run.metadataSyncIntent,undefined);
+ assert.equal(files.get('sync.json').metadataSyncIntent,undefined);
+ assert.equal(seen[1].length,0);
+}
+
+{
+ const files=new Map();
+ const seen=[];
+ const CanonicalMetadataSync={
+  applyMetadataSync:async(_env,opts)=>{
+   seen.push((opts.intent||[]).map(unit=>unit.requestId));
+   if(seen.length===1)return {state:'incomplete',applied:0,failed:1,unknown:0,preflightFailed:0,refused:0,intent:[{requestId:'held-1',operation:'film_metadata',input:{x:1}}]};
+   return {state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,refused:0,intent:[]};
+  },
+  metadataSyncSettled:out=>M.metadataSyncSettled(out),
+  metadataSyncRecord:out=>M.metadataSyncRecord(out),
+  carryMetadataSyncIntent:out=>M.carryMetadataSyncIntent(out),
+ };
+ const ctx=workerCtx(CanonicalMetadataSync,files);
+ const rows=Array.from({length:25},(_,i)=>filmRow(String(i).padStart(4,'0')));
+ files.set('metadata.json',Object.fromEntries(rows.map(row=>[row.id,row])));
+ const run={runId:'fail-then-clear',stage:'metadata',watchlist:rows.map(row=>structuredClone(row)),pending:rows.map(row=>row.id),cursor:0,remaining:25,failures:[]};
+ ctx.run=run;
+ const fail=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(fail.canonicalMetadataIncomplete,true);
+ assert.equal(run.cursor,0);
+ assert.equal(run.metadataSyncIntent[0].requestId,'held-1');
+ assert.equal(files.get('sync.json').metadataSyncIntent[0].requestId,'held-1');
+ assert.equal(run.canonicalMetadata.intent,undefined);
+ const retry=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(retry.canonicalMetadataIncomplete,undefined);
+ assert.equal(run.cursor,24);
+ assert.equal(run.metadataSyncIntent,undefined);
+ assert.equal([...seen[1]].join(),'held-1');
+ const next=await vm.runInContext('metadataSync(env,run)',ctx);
+ assert.equal(next.stage,'epg');
+ assert.equal(run.cursor,25);
+ assert.equal(run.metadataSyncIntent,undefined);
+ assert.equal(seen[2].length,0);
 }
 
 console.log('canonical-metadata-sync-producer: ok');

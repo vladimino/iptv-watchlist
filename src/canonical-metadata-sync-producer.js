@@ -332,6 +332,19 @@ export function metadataSyncSettled(out){
  return !(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0));
 }
 
+// Diagnostics stored on sync.json: counters and unit states only. Never the planned inputs (those stay on
+// metadataSyncIntent, and only while the current batch is unsettled).
+export function metadataSyncRecord(out){
+ if(!out)return null;
+ const units=(out.units||[]).map(unit=>({kind:unit.kind,id:unit.id,state:unit.state,requestId:unit.requestId,receipted:!!unit.receipted,...(unit.errorClass?{errorClass:unit.errorClass}:{})}));
+ return {state:out.state,applied:out.applied,noop:out.noop,skipped:out.skipped,failed:out.failed,absent:out.absent,unknown:out.unknown,preflightFailed:out.preflightFailed,refused:out.refused,units,reconciled:out.reconciled,refusedDetail:out.refusedDetail};
+}
+
+export function carryMetadataSyncIntent(out){
+ if(!out||metadataSyncSettled(out))return [];
+ return Array.isArray(out.intent)?out.intent:[];
+}
+
 export function metadataSyncRegistry(env,{intent=[],now}={}){
  const nowFn=clockOf(now);
  const byRequest=new Map((intent||[]).filter(unit=>unit?.requestId).map(unit=>[unit.requestId,unit]));
@@ -422,5 +435,5 @@ export async function applyMetadataSync(env,{event,films=[],titles={},people={},
  let reconciled={considered:0};
  try{reconciled=await reconcileOwnOrigin(env,{origin,operations,now:nowFn,policy});}catch(error){if(CLOSED.has(error?.code))throw error;counts.failed++;}
  const incomplete=counts.failed>0||counts.unknown>0||counts.preflightFailed>0||counts.refused>0;
- return {state:incomplete?'incomplete':'complete',...counts,units:outcomes,intent,reconciled,refusedDetail:planned.refused};
+ return {state:incomplete?'incomplete':'complete',...counts,units:outcomes,intent:incomplete?intent:[],reconciled,refusedDetail:planned.refused};
 }
