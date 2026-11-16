@@ -25,9 +25,7 @@ sequenceDiagram
     else New run
         MCP->>Queue: Acquire lease
         MCP->>R2: Persist interrupted state for the recovered lease holder only
-        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys
-        Note over MCP,D1: A live lease holder is not interrupted from a stale diagnostic timestamp
-        Note over MCP,D1: GET status and enrichment_status write nothing; events go out on prediction_start
+        MCP->>MCP: Diagnostics settle on complete; GET writes nothing
         loop eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
