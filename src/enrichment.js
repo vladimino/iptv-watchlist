@@ -1066,6 +1066,7 @@ async function reconstructMissingBatchV2StopRecord(env,latest,pending){
 }
 async function recordRunStop(env,id,reason,fallback={}){
  let run=await checkedRun(env,id)||{runId:id,mode:'queued',trigger:fallback.trigger==='scheduled'?'scheduled':'manual',createdAt:new Date().toISOString(),selectedIds:[],results:{},failures:{}};
+ if(fallback.protocol===BATCH_PROTOCOL&&run.protocol!==BATCH_PROTOCOL)run.protocol=BATCH_PROTOCOL;
  if(run.recoveredByRunId){const pending=await loadJSON(env,STOP_EVENT_PREFIX+id+'.json');if(pending&&!pending.delivered)await saveJSON(env,STOP_EVENT_PREFIX+id+'.json',{...pending,delivered:true,superseded:true});return {status:'superseded',runId:id,continuedByRunId:run.recoveredByRunId,mustComplete:false};}
  const settled=await settleRunRetries(env,run,'stop_retries'),key=STOP_EVENT_PREFIX+id+'.json',existing=await loadJSON(env,key);let record=existing;
  if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
@@ -1376,13 +1377,14 @@ async function observedPrediction(env,body,work,stage,requestId){
  const correlation=safeRequestId(requestId)||crypto.randomUUID();
  const started=Date.now(),attemptedAt=new Date(started).toISOString(),traceId=body?.diagnosticRunId||body?.runId||null;
  const stopId=()=>body?.runId||'blocked-'+(body?.trigger==='scheduled'?'scheduled':'manual')+'-'+Math.floor(Date.now()/3600000);
+ const stopFallback=extra=>({start:stage==='start',trigger:body?.trigger,...(body?.protocol===BATCH_PROTOCOL?{protocol:BATCH_PROTOCOL}:{}),...extra});
  const entered=predictionStep({step:stage,requestId:correlation,attemptedAt,outcome:'entered'});
  await safeAppendStep(env,traceId,entered);
  let response,data;try{response=await work();data=await response.clone().json();}catch(error){
   logPredictionFailure(stage,error,correlation,traceId);
   const id=stopId();
   await safeAppendStep(env,traceId||id,predictionStep({step:stage,requestId:correlation,attemptedAt,outcome:'failed',httpStatus:502,elapsedMs:Date.now()-started,errorClass:'storage_error'}));
-  const stop=await recordRunStop(env,id,'storage_error',{start:stage==='start',trigger:body?.trigger});
+  const stop=await recordRunStop(env,id,'storage_error',stopFallback());
   return withPredictionCorrelation(json({...stop,error:'storage_error'},502),correlation);
  }
  const normal=['queue_empty','eligible_queue_empty','retry_backoff'];
@@ -1390,7 +1392,7 @@ async function observedPrediction(env,body,work,stage,requestId){
  const stop=data.code==='prediction_retry_heal_pending'||data.code==='prediction_catalog_held'||data.recoverable===true?null:data.status==='lease_lost'?'lease_lost':data.mustComplete&&!normal.includes(data.stopReason)?data.stopReason:data.status==='blocked'&&data.reason!=='retry_backoff'?data.reason:response.status>=500?'storage_error':response.status===409&&data.error?.includes('Profile changed')?'profile_changed':stage==='start'&&response.status===409&&data.error?'model_unavailable':null;
  const errorClass=stop==='lease_lost'||stop==='storage_error'||stop==='format_error_storm'?stop:null;
  const produced=predictionStep({step:stage,requestId:correlation,attemptedAt,completedAt:new Date().toISOString(),outcome:'produced',httpStatus:response.status,elapsedMs:Date.now()-started,errorClass});
- if(stop){const id=stopId();const final=await recordRunStop(env,id,stop,{...data,start:stage==='start',trigger:body?.trigger});await safeAppendStep(env,traceId||id,produced);return withPredictionCorrelation(json({...data,...final,stage:stage==='start'?'blocked':final.stage,status:stage==='start'?'blocked':data.status||'partial'},response.status),correlation);}
+ if(stop){const id=stopId();const final=await recordRunStop(env,id,stop,stopFallback(data));await safeAppendStep(env,traceId||id,produced);return withPredictionCorrelation(json({...data,...final,stage:stage==='start'?'blocked':final.stage,status:stage==='start'?'blocked':data.status||'partial'},response.status),correlation);}
  await safeAppendStep(env,traceId,produced);
  return withPredictionCorrelation(response,correlation);
 }
@@ -2553,7 +2555,7 @@ async function batchStartWork(env,body,requestId,tally){
 // After the lease is held and the snapshot revalidated: this run's diagnostics row, pending Events, recovery of the one previous lease holder, and the run itself. Historic diagnostic settlement is complete, not start.
 async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attempt}){
  const {profile,report,queue,selection}=pre,plan=adaptivePredictionBatch(queue,body.capacity);
- const response=await observedPrediction(env,{...body,diagnosticRunId:runId},async()=>{
+ const response=await observedPrediction(env,{...body,runId,diagnosticRunId:runId,protocol:BATCH_PROTOCOL},async()=>{
   attempt.leaseAcquiredAt=lease.heartbeatAt;attempt.lastHeartbeatAt=lease.heartbeatAt;
   const previousRun=lease.recoveredRunId?await checkedRun(env,lease.recoveredRunId):null;
   attempt.startResult=previousRun&&['running','interrupted'].includes(previousRun.status)?'recovered_stale_lease':'running';
