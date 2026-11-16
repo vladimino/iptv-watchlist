@@ -581,7 +581,7 @@ if(section('10')){
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&!selfs.includes(full)){const text=fs.readFileSync(full,'utf8');if(/canonical-epg-person-producer|canonical-person-adapters/.test(text))importers.push(full);}}};
  walk('src');
  // AIR-374 S4-4: the dormant driver (src/canonical-producer-driver.js) composes it; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
- assert.deepEqual(importers.filter(file=>file!=='src/canonical-epg-person-producer.js').sort(),['src/canonical-producer-driver.js','src/canonical-producer-workflow.js'],'the driver and the Producer Workflow import them');
+ assert.deepEqual(importers.filter(file=>file!=='src/canonical-epg-person-producer.js').sort(),['src/canonical-producer-driver.js','src/canonical-producer-workflow.js','src/canonical-producers.js','src/film-person-open-handoff.js'],'the driver, Workflow, producers registry and open-handoff operator import them');
  for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!/canonical-epg-person-producer|canonical-person-adapters/.test(fs.readFileSync(file,'utf8')),file+' does not name them');
  assert.ok(/canonical-epg-person-producer/.test(fs.readFileSync('build.mjs','utf8')),'AIR-497 bundles the EPG Person producer');
  const text=name=>fs.readFileSync(path.join(SRC,name),'utf8');
@@ -595,10 +595,10 @@ if(section('10')){
  }
  assert.ok(/recordPersonState\(/.test(adapters)&&/mutateFilm\(/.test(adapters)&&/receiptMark/.test(adapters),'the writes are the existing writers with the receipt tail');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-epg-person-producer'),'the Worker does not name it');
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation'],'only the Discovery admission operation (AIR-374 P3c) is registered; this change registers nothing');
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_mutation','person_mutation','person_state']);
  const epgWiring=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
- assert.ok(epgWiring.requires.some(kind=>!PRODUCER_OPERATIONS.has(kind)),'epg_commit stays unwired (producer_not_wired:epg_commit remains a blocker)');
+ assert.ok(epgWiring.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)),'epg_commit is wired to the Producer Workflow units');
  const readiness=await handoffReadiness(envOf(database('prepared')),{now:T});
- assert.ok(readiness.blockers.includes('producer_not_wired:epg_commit')&&readiness.ready===false);
+ assert.ok(!readiness.blockers.includes('producer_not_wired:epg_commit')&&readiness.blockers.includes('producer_not_wired:metadata_sync')&&readiness.ready===false);
 }
 console.log('canonical-epg-person-producer: ok');

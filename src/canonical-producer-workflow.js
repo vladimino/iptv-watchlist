@@ -48,8 +48,20 @@ function canonicalPersonId(raw){
  if(!s)return null;
  return s.startsWith('person:')?s:'person:'+s;
 }
-function filmFactsOf(film,watchlisted){
- return {watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+function clockOf(value){return typeof value==='string'&&value.length?value:null;}
+export function filmFactsOf(film,watchlisted){
+ const facts={watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
+ const updatedAt=clockOf(film?.metadataAt)||clockOf(film?.updatedAt)||clockOf(film?.synopsisFetchedAt);
+ if(updatedAt){
+  facts.metadata={schemaVersion:1,year:film.year??null,runtime:film.runtime??null,synopsis:film.synopsis??null,poster:film.poster??null,url:film.url??null,genres:Array.isArray(film.genres)?film.genres:[],peopleVersion:film.peopleVersion??null,payload:{},r2Key:null,contentSha256:null,updatedAt};
+  facts.dimensions={
+   identity:{dimension:'identity',status:'provisional',source:'tmdb',sourceVersion:null,provenance:null,value:film.canonicalIdentity||null,updatedAt,attempts:0,nextAction:'none'},
+   metadata:{dimension:'metadata',status:'provisional',source:'letterboxd',sourceVersion:null,provenance:null,value:null,updatedAt,attempts:0,nextAction:'none'},
+  };
+ }
+ const sync={metadataAt:clockOf(film?.metadataAt),synopsisFetchedAt:clockOf(film?.synopsisFetchedAt),peopleNamesVersion:Number.isInteger(film?.peopleNamesVersion)?film.peopleNamesVersion:null,peopleLocalizedAt:clockOf(film?.peopleLocalizedAt)};
+ if(sync.metadataAt||sync.synopsisFetchedAt||sync.peopleNamesVersion!=null||sync.peopleLocalizedAt)facts.sync=sync;
+ return facts;
 }
 function idsOf(document,members){
  if(Array.isArray(members)&&members.length)return members.map(row=>canonicalFilmId(row.filmId)).filter(Boolean);

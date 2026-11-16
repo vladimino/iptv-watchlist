@@ -455,12 +455,13 @@ for(const stage of ['legacy','r2','prepared']){
 
 // 9. Registry and readiness: the atomic `film_mutation` spec is registered, exactly its dependent producer flips, the other kinds are unchanged, and nothing else registers.
 {
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()],['film_mutation']);
+ assert.ok(PRODUCER_OPERATIONS.has('film_mutation'));
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_mutation','person_mutation','person_state']);
  const spec=PRODUCER_OPERATIONS.get('film_mutation');
  assert.equal(spec.atomic,true);assert.equal(spec.operation,'film_mutation');
  for(const hook of ['readback','replay','revalidate'])assert.equal(typeof spec[hook],'function');
  const flipped=PRODUCER_WIRING.filter(item=>item.requires.every(kind=>[...PRODUCER_OPERATIONS.values()].some(op=>op.operation===kind&&op.atomic===true))).map(item=>item.name);
- assert.deepEqual(flipped,['discovery_admission']);
+ assert.deepEqual(flipped,['epg_commit','discovery_admission']);
  assert.throws(()=>discoveryAdmissionOperation({}),code('film_person_invalid'));
 }
 
