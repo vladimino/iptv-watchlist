@@ -44,7 +44,7 @@ export function workflowFactsProbe(sample=filmFactsOf(WORKFLOW_FACTS_SAMPLE,true
 }
 export const WORKFLOW_FILM_FACTS=workflowFactsProbe().present;
 export const WORKFLOW_FILM_FACTS_ABSENT=workflowFactsProbe().absent;
-export const NEXT_MINIMAL_FIX='Move remaining freeze consumers to D1 (ADR 0117 decision 4) and register atomic operations for every remaining PRODUCER_WIRING kind. Until then activationReadiness.ready is false and apply STOPs.';
+export const NEXT_MINIMAL_FIX='Register atomic operations for every remaining PRODUCER_WIRING kind (metadata_sync, rated_admission_retention). Until then activationReadiness.ready is false and apply STOPs.';
 export const PRODUCER_WIRING=Object.freeze([
  Object.freeze({name:'epg_commit',site:'Producer Workflow chain from EpgOrchestration.ensure (canonical-producer-workflow.js)',requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])}),
  Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),

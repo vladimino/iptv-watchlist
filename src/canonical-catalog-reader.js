@@ -202,7 +202,8 @@ function identityClaim(rows,scheme,value){
 // Slice 3 (AIR-499): metadata.json consumers of the film page, Finds and ratings labels. Bounded SELECTs of the requested ids
 // (chunks of TITLE_READ_CHUNK); missing optional poster/title/year is an empty field, not a read error. TMDB is the Film's
 // identity claim (every stored tmdb / letterboxd row for that value is assessed; any non-owner claim is a conflict) — never
-// inferred from a title.
+// inferred from a title. A conflict sets identityBlocked:true with tmdbId null so catalogLidTmdb cannot restore the lid
+// from watchlist/programme; a missing TMDB claim is tmdbId null without that flag.
 export async function catalogMetadataFromD1(env,ids,gate){
  if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');
  const db=database(env);
@@ -251,10 +252,18 @@ export async function catalogMetadataFromD1(env,ids,gate){
   let filmId=byFilm.has(own)?own:(spelled&&byFilm.has(spelled)?spelled:null);
   if(!filmId){
    const lid=identityClaim(externals,'letterboxd',id);
-   if(!lid.conflict&&lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
+   if(lid.conflict){
+    out[id]={id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
+    continue;
+   }
+   if(lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
    else if(tmdb){
     const claim=identityClaim(externals,'tmdb',tmdb[1]);
-    if(!claim.conflict&&claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
+    if(claim.conflict){
+     out[id]={id,tmdbId:null,identityBlocked:true,poster:null,year:null,url:null,title:null,original:null};
+     continue;
+    }
+    if(claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
    }
   }
   if(!filmId)continue;
@@ -266,6 +275,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const original=typeof row.original_title==='string'&&row.original_title?row.original_title:null;
   const title=typeof row.title==='string'&&row.title?row.title:original;
   const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title,original};
+  if(tmdbClaim.conflict||lidClaim.conflict)record.identityBlocked=true;
   out[id]=record;
   if(lidClaim.value&&lidClaim.value!==id)out[lidClaim.value]={...record,id:lidClaim.value};
  }
@@ -276,7 +286,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
 // The remaining-readers registry (AIR-374 P4): every reader or writer of a former mutable canonical R2 mirror (titles.json, people.json, metadata.json) and every named exception
 // (owner decision 4: what stays R2 after `open`). `class` is 'freeze' (the mirror is frozen at open and the reader must read D1: moved:false is still open work) or 'exception'
 // (stays as it is: an independent mirror, an input artifact, an immutable source or receipt, view-index prediction retention). Plain data, no imports: the computed handoff readiness
-// (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs, tests/canonical-catalog-metadata.mjs, tests/canonical-admin-dictionaries.mjs or tests/catalog-film.mjs).
+// (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs, tests/canonical-catalog-metadata.mjs, tests/canonical-admin-dictionaries.mjs, tests/canonical-footer-export.mjs or tests/catalog-film.mjs).
 export const CANONICAL_READER_REGISTRY=[
  {name:'catalog film route rated-archive fallback (retirements, receipt)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'/api/d1/* catalog routes',file:'src/catalog-d1.js',class:'freeze',moved:true},
@@ -291,8 +301,8 @@ export const CANONICAL_READER_REGISTRY=[
  {name:'admin limbo titles.json and people.json',file:'src/admin/limbo.js',class:'freeze',moved:true},
  {name:'admin health source list titles.json and people.json',file:'src/admin/health.js',class:'freeze',moved:true},
  {name:'admin Letterboxd archive metadata.json',file:'src/admin/letterboxd-archive.js',class:'freeze',moved:true},
- {name:'footer metadata.json',file:'src/enrichment.js',class:'freeze',moved:false},
- {name:'migration export of the mirrors (group global)',file:'src/enrichment.js',class:'freeze',moved:false},
+ {name:'footer metadata.json',file:'src/enrichment.js',class:'freeze',moved:true},
+ {name:'migration export of the mirrors (group global)',file:'src/enrichment.js',class:'freeze',moved:true},
  {name:'metadata cache mirror object of the D1 metadata cache',file:'src/metadata-cache.js',class:'exception',moved:false},
  {name:'enrichment projector reads the mirror objects as its source until the producers are wired',file:'src/d1-enrichment.js',class:'exception',moved:false},
  {name:'programme.json and watchlist.json (independent EPG mirrors)',file:'src/worker.js',class:'exception',moved:false},
