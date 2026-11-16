@@ -92,7 +92,7 @@ function record(state){
 // 2b-2. With an archive already in place the loop reads each existing segment first, and `readMs` counts exactly those reads (700 ms each here).
 {
  const state=await setup();
- await commit(state,1,undefined);await commit(state,2,'bounded');
+ await commit(state,1,'full');await commit(state,2,'bounded');
  assert.ok(state.bkt.objects.get(POINTER),'an archive exists');
  const RealDate=context.Date;let skew=0,reads=0;
  context.Date=class extends RealDate{constructor(...args){super(...(args.length?args:[RealDate.now()+skew]));}static now(){return RealDate.now()+skew;}};

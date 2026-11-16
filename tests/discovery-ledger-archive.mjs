@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {withLedgerMode} from './ledger-mode-fixture.mjs';
 
 function makeStore(){
  const records=new Map(),etags=new Map(),gets=[],puts=[];let revision=0;
@@ -42,7 +43,7 @@ function scan(day,universe=100){
 }
 const runId=day=>'00000000-0000-4000-8000-'+String(day).padStart(12,'0');
 async function commit(store,day,mode,{expectThrow=false,latest=scan(day),id=runId(day)}={}){
- const env={BUCKET:store,DISCOVERY_LEDGER_MODE:mode};
+ const env=withLedgerMode({BUCKET:store},mode);
  store.set('sync.json',{runId:id,stage:'epg',updatedAt:new Date(BASE+day*DAY).toISOString()});
  const files={'discovered-films.json':{},'programme.json':{runId:id,films:[],updatedAt:new Date(BASE+day*DAY).toISOString()}};
  try{await publish(env,id,latest,{programmeRunId:id,updatedAt:new Date(BASE+day*DAY).toISOString()},files);}
@@ -103,7 +104,7 @@ assertParity(full,bounded,'day 14');
 
 // 3. Status: the pipeline status reports the archive block and unique ledgerTotal without reading any archive segment.
 bounded.gets.length=0;
-const statusEnv={BUCKET:bounded,DISCOVERY_LEDGER_MODE:'bounded'};
+const statusEnv={BUCKET:bounded};
 const status=await (await worker.fetch(new Request('https://iptv.vladimino.workers.dev/api/enrichment/pipeline/status'),statusEnv,{waitUntil(){}})).json();
 assert.equal(status.ledgerTotal,active(full).items.length);assert.equal(status.archive.ledgerMode,'bounded');assert.equal(status.archive.activeItems,active(bounded).items.length);
 assert.equal(bounded.gets.filter(key=>key.startsWith('epg/discovery-archive/')).length,0,'status reads no archive object');
@@ -147,9 +148,9 @@ for(const [label,match] of [['first segment',key=>key.includes('/segments/')],['
  assert.equal(published(store),runId(14));assert.notEqual(pointerEtag(store),pointerEtag(bounded),'R swapped the archive pointer');
  store.onPut=null;
  // S is a scan in which R's departures are still on air: day 14's scan again under a new run id.
- const env={BUCKET:store,DISCOVERY_LEDGER_MODE:'bounded'},id=runId(99);store.set('sync.json',{runId:id,stage:'epg'});
+ const env={BUCKET:store},id=runId(99);store.set('sync.json',{runId:id,stage:'epg'});
  await publish(env,id,scan(14),{programmeRunId:id},{'discovered-films.json':{},'programme.json':{runId:id,films:[]}});
- const ref=cloneStore(full);ref.set('sync.json',{runId:id,stage:'epg'});await publish({BUCKET:ref,DISCOVERY_LEDGER_MODE:'full'},id,scan(14),{programmeRunId:id},{'discovered-films.json':{},'programme.json':{runId:id,films:[]}});
+ const ref=cloneStore(full);ref.set('sync.json',{runId:id,stage:'epg'});await publish(withLedgerMode({BUCKET:ref},'full'),id,scan(14),{programmeRunId:id},{'discovered-films.json':{},'programme.json':{runId:id,films:[]}});
  assertParity(ref,store,'P→R→S');assertCounts(store,ref,'P→R→S');
  // R's manifest is the archive state S started from; every key R archived that S kept active must be in alsoArchived.
  const rManifest=store.records.get('epg/discovery-archive/v1/manifests/'+store.records.get('epg/discovery-archive/v1/current.json').manifestId+'.json');
@@ -168,9 +169,9 @@ for(const [label,match] of [['first segment',key=>key.includes('/segments/')],['
  }
  store.onPut=null;store.gets.length=0;
  const startManifest=store.records.get('epg/discovery-archive/v1/manifests/'+store.records.get('epg/discovery-archive/v1/current.json').manifestId+'.json');
- const env={BUCKET:store,DISCOVERY_LEDGER_MODE:'bounded'},id=runId(98);store.set('sync.json',{runId:id,stage:'epg'});
+ const env={BUCKET:store},id=runId(98);store.set('sync.json',{runId:id,stage:'epg'});
  await publish(env,id,scan(14),{programmeRunId:id},{'discovered-films.json':{},'programme.json':{runId:id,films:[]}});
- const ref=cloneStore(full);ref.set('sync.json',{runId:id,stage:'epg'});await publish({BUCKET:ref,DISCOVERY_LEDGER_MODE:'full'},id,scan(14),{programmeRunId:id},{'discovered-films.json':{},'programme.json':{runId:id,films:[]}});
+ const ref=cloneStore(full);ref.set('sync.json',{runId:id,stage:'epg'});await publish(withLedgerMode({BUCKET:ref},'full'),id,scan(14),{programmeRunId:id},{'discovered-films.json':{},'programme.json':{runId:id,films:[]}});
  assertParity(ref,store,'long chain');assertCounts(store,ref,'long chain');
  const segmentReads=new Set(store.gets.filter(key=>key.includes('/segments/'))),named=startManifest.segments.filter(entry=>entry.object).map(entry=>entry.object);
  for(const object of named)assert.ok(segmentReads.has(object),'the recount read every segment version of the starting manifest');
@@ -218,4 +219,22 @@ for(const mode of ['frozen','full']){
  assert.deepEqual(plain(active(store)),plain(active(ref)),'frozen without an archive writes exactly the full-mode ledger');
 }
 
-console.log('Discovery ledger archive (ADR 0034): multi-day parity, exact boundary, unique counts, write-once versions, decisions untouched, status and chunk read boundary, gated routes, kill windows with retry, P→R→S, long-chain recount, fences, frozen and full-with-archive passed');
+// 12. Production env ignores a leftover DISCOVERY_LEDGER_MODE binding (ADR 0156): absent, full and frozen all archive.
+{
+ const mode=call('discoveryLedgerMode');
+ assert.equal(mode({}),'bounded');
+ assert.equal(mode({DISCOVERY_LEDGER_MODE:'full'}),'bounded');
+ assert.equal(mode({DISCOVERY_LEDGER_MODE:'frozen'}),'bounded');
+ assert.equal(mode({DISCOVERY_LEDGER_MODE:'bounded'}),'bounded');
+ assert.equal(mode(withLedgerMode({},'full')),'full');
+ assert.equal(mode(withLedgerMode({},'frozen')),'frozen');
+ const leftover=makeStore();
+ leftover.set('sync.json',{runId:runId(0),stage:'epg'});
+ await publish({BUCKET:leftover,DISCOVERY_LEDGER_MODE:'full'},runId(0),scan(0),{programmeRunId:runId(0)},{'discovered-films.json':{},'programme.json':{runId:runId(0),films:[]}});
+ leftover.set('sync.json',{runId:runId(1),stage:'epg'});
+ await publish({BUCKET:leftover,DISCOVERY_LEDGER_MODE:'frozen'},runId(1),scan(1),{programmeRunId:runId(1)},{'discovered-films.json':{},'programme.json':{runId:runId(1),films:[]}});
+ assert.equal(active(leftover).ledgerMode,'bounded');
+ assert.ok(leftover.records.has('epg/discovery-archive/v1/current.json'),'a stale full/frozen binding still archives');
+}
+
+console.log('Discovery ledger archive (ADR 0034/0154): multi-day parity, exact boundary, unique counts, write-once versions, decisions untouched, status and chunk read boundary, gated routes, kill windows with retry, P→R→S, long-chain recount, fences, frozen and full-with-archive, leftover production binding ignored passed');
