@@ -1064,7 +1064,7 @@ async function d1EnrichmentStatus(binding,env){
  ]);
  let summary=null;try{summary=run?.summary?JSON.parse(run.summary):null;}catch{}
  const lastWriteAt=counts?.lastWriteAt||null,lastWriteMs=Date.parse(lastWriteAt||'');
- const status={mode,retired:true,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastWriteAt,lastWriteAgeSec:Number.isFinite(lastWriteMs)?Math.max(0,Math.round((Date.now()-lastWriteMs)/1000)):null,windowMode:d1EnrichmentWindowMode(env),lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
+ const status={mode,retired:true,schema:true,checkpoints:counts?.total??0,absent:counts?.absent??0,lastWriteAt,lastWriteAgeSec:Number.isFinite(lastWriteMs)?Math.max(0,Math.round((Date.now()-lastWriteMs)/1000)):null,windowMode:mode===null?null:d1EnrichmentWindowMode(env),lastRun:run?{startedAt:run.startedAt,finishedAt:run.finishedAt,outcome:run.outcome,leaseHeld:!!run.leaseUntil,summary}:null};
  if(Number(version)>=5){
   const sync=await binding.prepare("SELECT COUNT(*) AS total,SUM(change_key='absent') AS absent FROM projection_state WHERE projection=?").bind(METADATA_SYNC_PROJECTION).first();
   status.schemaVersion=version;status.syncCheckpoints=sync?.total??0;status.syncAbsent=sync?.absent??0;

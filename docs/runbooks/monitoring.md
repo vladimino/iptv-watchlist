@@ -53,7 +53,7 @@ A growing `outbox` with a `lastDeliveryFailure` means alerts are not reaching th
 
 ## D1 projector grouped write path
 
-With `D1_ENRICHMENT_BULK=on` ([ADR 0106](../adr/0106-bulk-projector-write-path.md), [reference](../reference/data/d1-schema.md)) the projector run summary (the `d1_enrichment_projection` log line, `projection_run.summary_json`, `GET /api/d1/status` `projector.lastRun.summary`) carries a `bulk` object. With the flag off, `bulk` is absent and the summary is what it was. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
+This section describes historical projector summaries that can still exist in `projection_run` and be returned by `GET /api/d1/status`. The production projector and its `D1_ENRICHMENT_BULK` selector are retired ([ADR 0155](../adr/0155-retire-enrichment-projector-cron.md), AIR-512), so the live Worker cannot create a new grouped run. In the offline historical harness, a grouped run carries a `bulk` object; a per-entity run does not. The fields are whole numbers, fixed names and one short error sample: no payload, id, key or SQL.
 
 | Field | Meaning |
 | --- | --- |

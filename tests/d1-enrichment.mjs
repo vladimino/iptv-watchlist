@@ -26,11 +26,16 @@ assert.match(fs.readFileSync('wrangler.jsonc','utf8'),/"crons": \["0 \* \* \* \*
  const closed=projectorContext({harness:false});
  let touched=0;
  const db=new Proxy({},{get(){touched++;throw new Error('db touched');}});
- const summary=await closed.runD1EnrichmentProjection({DB:db,BUCKET:{},D1_ENRICHMENT_WRITE:'on'});
+ const bucket=new Proxy({},{get(){touched++;throw new Error('bucket touched');}});
+ const summary=await closed.runD1EnrichmentProjection({DB:db,BUCKET:bucket,D1_ENRICHMENT_WRITE:'on',D1_ENRICHMENT_WINDOW:'on',D1_ENRICHMENT_BULK:'on'});
  assert.deepEqual(JSON.parse(JSON.stringify(summary)),{mode:null,retired:true,skipped:'retired'});
- assert.equal(touched,0,'a set D1_ENRICHMENT_WRITE does not touch D1');
+ assert.equal(touched,0,'set enrichment selectors do not touch D1 or R2 outside the offline harness');
  assert.equal(closed.d1EnrichmentMode({D1_ENRICHMENT_WRITE:'on'}),null);
  assert.equal(closed.d1EnrichmentMode({D1_ENRICHMENT_WRITE:'dry'}),null);
+ const tableNames=['projection_state','projection_run','projection_fence','film_sync_state','metadata_cache','metadata_cache_authority','metadata_cache_cas'];
+ const statusBinding={prepare(sql){return {bind(){return this;},async all(){return {results:/owner_review_/.test(sql)?[]:tableNames.map(name=>({name}))};},async first(){if(/schema_contract/.test(sql))return {version:7};if(/COUNT\(\*\).*projection_state/.test(sql))return {total:0,absent:0,lastWriteAt:null};return null;}};}};
+ const status=await closed.d1EnrichmentStatus(statusBinding,{D1_ENRICHMENT_WINDOW:'on'});
+ assert.equal(status.windowMode,null,'the production status does not expose a retired window selector as effective');
 }
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-d1-enrichment-'));
