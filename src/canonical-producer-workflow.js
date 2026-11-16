@@ -196,7 +196,14 @@ async function drainEpgReceipts(env,plan,fence){
    const error=Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
    throw error;
   }
-  if((summary.considered||0)<RECEIPT_PAGE)return summary;
+  if((summary.considered||0)<RECEIPT_PAGE){
+   let open=[];
+   try{
+    open=await many(database(scoped),"SELECT request_id FROM canonical_write_receipt WHERE origin='epg' AND state IN ('pending','failed','unknown') LIMIT 1",[]);
+   }catch{throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});}
+   if(open.length)throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
+   return summary;
+  }
  }
  throw Object.assign(new Error('receipt_state_conflict'),{code:'receipt_state_conflict'});
 }
@@ -221,7 +228,7 @@ export async function runProducerWorkflow(env,payload,step){
   const scoped=meteredEnv({...env,producerFence:fence},meter);
   const stored=await readChain(scoped,P);
   const pinned=parseReleasePin(stored?.release_pin);
-  const snap=await acquireSealedSnapshot(scoped,P,pinned.length?{previousIds:pinned}:{});
+  const snap=await acquireSealedSnapshot(scoped,P,stored?.release_pin?{previousIds:pinned}:{});
   if(!snap.ok){
    if(snap.code==='producer_input_superseded'||snap.code==='producer_generation_superseded'){
     if(rebases>=CHAIN_REBASE_CAP){await stopChain(scoped,{fence,revision:fence.revision,at:new Date().toISOString(),stoppedBy:'producer_input_unstable'});return {state:'stopped',code:'producer_input_unstable'};}

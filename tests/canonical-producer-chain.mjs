@@ -336,3 +336,67 @@ assert.equal(Fence.CHAIN_LEASE_MS,5*60000);
  assert.equal(one(file,'SELECT owner_state FROM canonical_producer_chain'),'stopped');
  assert.match(fs.readFileSync('src/canonical-producer-workflow.js','utf8'),/RECEIPT_PAGES/);
 }
+
+{
+ const file=database();
+ const sha='2'.repeat(64);
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
+  "INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:tmdb:3',1,'Gone','"+AT+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:3','"+AT+"');"+
+  "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const first=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'):fn()});
+ assert.equal(first.state,'complete');
+ assert.equal(one(file,'SELECT release_pin FROM canonical_producer_chain'),'film:tmdb:3');
+ assert.equal(sqlite(file,"UPDATE published_epg_authority SET generation=11 WHERE id=1").status,0);
+ const chain=await Chain.readChain(env,P);
+ const reopened=await Chain.reopenChain(env,{chain,generation:11,at:AT,nowMs:Date.parse(AT)});
+ assert.equal(reopened.state,'pending');
+ assert.equal(reopened.chain.release_pin,null,'a new generation drops the old pin');
+ sqlite(file,"DELETE FROM watchlist_film;INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:1','"+AT+"')");
+ sqlite(file,"DELETE FROM published_epg_document;INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[]}'),('run-p','watchlist',0,'{\"films\":[]}');DELETE FROM published_epg_member");
+ const claimed=await Chain.claimChain(env,{programmeRunId:P,epoch:reopened.epoch,instanceId:reopened.instanceId,nonce:'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',generation:11,revision:reopened.chain.revision,at:AT,nowMs:Date.parse(AT)});
+ assert.equal(claimed.state,'owned');
+ const snap=await acquireSealedSnapshot(env,P);
+ assert.deepEqual(snap.departed,['film:tmdb:1'],'after the pin is cleared the new generation releases A');
+}
+
+{
+ const file=database();
+ const sha='3'.repeat(64);
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
+  "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1')");
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const first=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('cccccccc-cccc-cccc-cccc-cccccccccccc'):fn()});
+ assert.equal(first.state,'complete');
+ assert.equal(one(file,'SELECT release_pin FROM canonical_producer_chain'),'empty');
+ sqlite(file,"INSERT INTO film (id,contract_version,original_title,updated_at) VALUES ('film:tmdb:9',1,'Later','"+AT+"');INSERT INTO watchlist_film (film_id,updated_at) VALUES ('film:tmdb:9','"+AT+"')");
+ const live=await acquireSealedSnapshot(env,P);
+ assert.deepEqual(live.departed,['film:tmdb:9']);
+ const pinned=await acquireSealedSnapshot(env,P,{previousIds:Chain.parseReleasePin(one(file,'SELECT release_pin FROM canonical_producer_chain'))});
+ assert.deepEqual(pinned.departed,[],'an empty pin is a frozen empty set, not a missing pin');
+}
+
+{
+ const file=database();
+ const sha='4'.repeat(64);
+ const empty='4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945';
+ const tomorrow='2026-11-17T12:00:00.000Z';
+ sqlite(file,"INSERT INTO canonical_receipt_watermark (id,marker_generation,entries,film_count,film_max_revision,person_count,person_max_revision,taken_at) VALUES (1,2,0,0,0,0,0,'"+AT+"');INSERT INTO canonical_receipt_baseline_seal (id,film_digest,person_digest,sealed_at) VALUES (1,'"+empty+"','"+empty+"','"+AT+"');"+
+  "INSERT INTO published_epg_generation (programme_run_id,phase,published_at,payload_sha256,created_at) VALUES ('run-p','published','"+AT+"','"+sha+"','"+AT+"');"+
+  "INSERT INTO published_epg_document (programme_run_id,kind,ordinal,payload_json) VALUES ('run-p','programme',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}'),('run-p','watchlist',0,'{\"films\":[{\"id\":\"tmdb_1\",\"title\":\"A\"}]}');"+
+  "INSERT INTO published_epg_member (programme_run_id,kind,ordinal,film_id) VALUES ('run-p','watchlist',0,'tmdb_1'),('run-p','programme',0,'tmdb_1');"+
+  "INSERT INTO canonical_write_receipt (request_id,operation,origin,target_kind,target_id,content_digest,planned_revision,marker_generation,state,attempts,next_attempt_at,created_at,updated_at) VALUES ('epg:future','film_facts','epg','film','film:tmdb:stuck','"+'c'.repeat(64)+"',0,2,'pending',1,'"+tomorrow+"','"+AT+"','"+AT+"')");
+ const env=envOf(file);
+ const launched=await Chain.launchChain(env,{programmeRunId:P,generation:10,at:AT,nowMs:Date.parse(AT)});
+ const result=await runProducerWorkflow(env,{programmeRunId:P,epoch:launched.epoch||1},{do:(name,fn)=>name==='nonce'?Promise.resolve('dddddddd-dddd-dddd-dddd-dddddddddddd'):fn()});
+ assert.equal(result.state,'stopped');
+ assert.equal(result.code,'receipt_state_conflict','a future-due epg receipt still blocks current');
+}

@@ -131,8 +131,8 @@ async function restart(env,{programmeRunId,generation,revision,epoch,at,nowMs,fr
  const lease=iso((nowMs??Date.parse(at))+CHAIN_CLAIM_WINDOW_MS);
  const states=fromStates.map(()=>'?').join(',');
  await commit(env,gate,[fence(gate),authorityPin(programmeRunId,generation),
-  ['UPDATE canonical_producer_chain SET owner_epoch=?,owner_instance=?,owner_state=\'pending\',claim_nonce=NULL,input_generation=?,lease_expires_at=?,'+countField+'='+countField+'+1,'+setSql+'revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND revision=? AND owner_state IN ('+states+')',
-   [nextEpoch,nextId,generation,lease,...setParams,at,programmeRunId,epoch,revision,...fromStates]],changesOne()]);
+  ['UPDATE canonical_producer_chain SET owner_epoch=?,owner_instance=?,owner_state=\'pending\',claim_nonce=NULL,input_generation=?,lease_expires_at=?,release_pin=CASE WHEN input_generation=? THEN release_pin ELSE NULL END,'+countField+'='+countField+'+1,'+setSql+'revision=revision+1,updated_at=? WHERE programme_run_id=? AND owner_epoch=? AND revision=? AND owner_state IN ('+states+')',
+   [nextEpoch,nextId,generation,lease,generation,...setParams,at,programmeRunId,epoch,revision,...fromStates]],changesOne()]);
  return {state:'pending',chain:await readChain(env,programmeRunId),epoch:nextEpoch,instanceId:nextId};
 }
 
