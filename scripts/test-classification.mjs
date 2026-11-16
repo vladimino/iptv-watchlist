@@ -119,6 +119,9 @@ export const FILES={
  "canonical-catalog-titles.mjs": {
   "suite": "core"
  },
+ "canonical-catalog-metadata.mjs": {
+  "suite": "core"
+ },
  "canonical-mirror-put.mjs": {
   "suite": "core"
  },

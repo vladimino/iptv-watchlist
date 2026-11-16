@@ -145,6 +145,101 @@ export async function catalogTitlesFromD1(env,films,gate){
  return out;
 }
 
+const META_SQL=`SELECT f.id AS film_id,f.original_title AS original_title,m.year AS year,m.poster AS poster,m.url AS url,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id IN (SELECT value FROM json_each(?)) LIMIT ?`;
+const EXT_FILM_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND film_id IN (SELECT value FROM json_each(?))`;
+const EXT_VALUE_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND value IN (SELECT value FROM json_each(?))`;
+// Same rule as catalogAdmittedFilmFromD1: ALL claims of the scheme (and of the typed value when given) are
+// assessed; any claim that is not the one owner's trusted, non-conflicting row is a conflict. Untrusted or
+// conflicting rows are not ignored.
+function identityClaim(rows,scheme,value){
+ const pool=(rows||[]).filter(row=>row.scheme===scheme&&(value==null||String(row.value)===String(value)));
+ const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
+ if(value!=null){
+  const owner=pool.find(isOwn)?.film_id??null;
+  if(pool.some(row=>!(isOwn(row)&&row.film_id===owner)))return {value:null,conflict:true,filmId:null};
+  if(owner==null)return {value:null,conflict:false,filmId:null};
+  return {value:String(value),conflict:false,filmId:owner};
+ }
+ const owner=pool.find(isOwn);
+ const ownerVal=owner?.value??null,ownerFilm=owner?.film_id??null;
+ if(pool.some(row=>!(isOwn(row)&&String(row.value)===String(ownerVal)&&row.film_id===ownerFilm)))return {value:null,conflict:true,filmId:null};
+ if(ownerVal==null)return {value:null,conflict:false,filmId:null};
+ return {value:String(ownerVal),conflict:false,filmId:ownerFilm};
+}
+
+// Slice 3 (AIR-499): metadata.json consumers of the film page, Finds and ratings labels. Bounded SELECTs of the requested ids
+// (chunks of TITLE_READ_CHUNK); missing optional poster/title/year is an empty field, not a read error. TMDB is the Film's
+// identity claim (every stored tmdb / letterboxd row for that value is assessed; any non-owner claim is a conflict) — never
+// inferred from a title.
+export async function catalogMetadataFromD1(env,ids,gate){
+ if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
+ if(wanted.length>TITLE_READ_MAX_FILMS)throw failed('canonical_read_unavailable');
+ const out={};
+ if(!wanted.length){await catalogReaderStill(env,gate);return out;}
+ const keys=[];
+ for(const id of wanted){
+  keys.push('film:'+id);
+  const tmdb=/^tmdb_(\d+)$/.exec(id);
+  if(tmdb)keys.push('film:tmdb:'+tmdb[1]);
+ }
+ const unique=[...new Set(keys)];
+ const films=[],externals=[];
+ try{
+  for(let at=0;at<unique.length;at+=TITLE_READ_CHUNK){
+   const chunk=unique.slice(at,at+TITLE_READ_CHUNK);
+   films.push(...await many(db,META_SQL,[JSON.stringify(chunk),chunk.length]));
+   externals.push(...await many(db,EXT_FILM_SQL,[JSON.stringify(chunk)]));
+  }
+  const extra=[];
+  const values=[...wanted];
+  for(const id of wanted){const tmdb=/^tmdb_(\d+)$/.exec(id);if(tmdb)values.push(tmdb[1]);}
+  for(const row of externals)if(row.value!=null)values.push(String(row.value));
+  const valueKeys=[...new Set(values)];
+  for(let at=0;at<valueKeys.length;at+=TITLE_READ_CHUNK){
+   const chunk=valueKeys.slice(at,at+TITLE_READ_CHUNK);
+   extra.push(...await many(db,EXT_VALUE_SQL,[JSON.stringify(chunk)]));
+  }
+  const missing=[...new Set(extra.map(row=>row.film_id).filter(id=>!unique.includes(id)))];
+  externals.push(...extra);
+  for(let at=0;at<missing.length;at+=TITLE_READ_CHUNK){
+   const chunk=missing.slice(at,at+TITLE_READ_CHUNK);
+   films.push(...await many(db,META_SQL,[JSON.stringify(chunk),chunk.length]));
+   externals.push(...await many(db,EXT_FILM_SQL,[JSON.stringify(chunk)]));
+  }
+ }catch(error){throw failed('canonical_read_unavailable',error);}
+ const byFilm=new Map();
+ for(const row of films)byFilm.set(row.film_id,row);
+ const extByFilm=new Map();
+ for(const row of externals){if(!extByFilm.has(row.film_id))extByFilm.set(row.film_id,[]);extByFilm.get(row.film_id).push(row);}
+ for(const id of wanted){
+  const own='film:'+id,tmdb=/^tmdb_(\d+)$/.exec(id),spelled=tmdb?'film:tmdb:'+tmdb[1]:null;
+  let filmId=byFilm.has(own)?own:(spelled&&byFilm.has(spelled)?spelled:null);
+  if(!filmId){
+   const lid=identityClaim(externals,'letterboxd',id);
+   if(!lid.conflict&&lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
+   else if(tmdb){
+    const claim=identityClaim(externals,'tmdb',tmdb[1]);
+    if(!claim.conflict&&claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
+   }
+  }
+  if(!filmId)continue;
+  const row=byFilm.get(filmId),ext=extByFilm.get(filmId)||[];
+  const tmdbLocal=identityClaim(ext,'tmdb');
+  const tmdbClaim=tmdbLocal.conflict||tmdbLocal.value==null?tmdbLocal:identityClaim(externals,'tmdb',tmdbLocal.value);
+  const lidLocal=identityClaim(ext,'letterboxd');
+  const lidClaim=lidLocal.conflict||lidLocal.value==null?lidLocal:identityClaim(externals,'letterboxd',lidLocal.value);
+  const title=typeof row.title==='string'&&row.title?row.title:(typeof row.original_title==='string'&&row.original_title?row.original_title:null);
+  const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title};
+  out[id]=record;
+  if(lidClaim.value&&lidClaim.value!==id)out[lidClaim.value]={...record,id:lidClaim.value};
+ }
+ await catalogReaderStill(env,gate);
+ return out;
+}
+
 // The remaining-readers registry (AIR-374 P4): every reader or writer of a former mutable canonical R2 mirror (titles.json, people.json, metadata.json) and every named exception
 // (owner decision 4: what stays R2 after `open`). `class` is 'freeze' (the mirror is frozen at open and the reader must read D1: moved:false is still open work) or 'exception'
 // (stays as it is: an independent mirror, an input artifact, an immutable source or receipt, view-index prediction retention). Plain data, no imports: the computed handoff readiness
@@ -154,9 +249,9 @@ export const CANONICAL_READER_REGISTRY=[
  {name:'/api/d1/* catalog routes',file:'src/catalog-d1.js',class:'freeze',moved:true},
  {name:'GET /api/programme titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'GET /api/watchlist titles.json',file:'src/worker.js',class:'freeze',moved:true},
- {name:'catalog film route optional metadata.json',file:'src/worker.js',class:'freeze',moved:false},
- {name:'catalog available route metadata.json',file:'src/worker.js',class:'freeze',moved:false},
- {name:'ratingsFilmLabels metadata.json and titles.json',file:'src/worker.js',class:'freeze',moved:false},
+ {name:'catalog film route optional metadata.json',file:'src/worker.js',class:'freeze',moved:true},
+ {name:'catalog available route metadata.json',file:'src/worker.js',class:'freeze',moved:true},
+ {name:'ratingsFilmLabels metadata.json and titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'metadataSync titles.json, people.json and metadata.json working set (writer)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'epgSync title and people localization (writer of titles.json, people.json)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'admin read titles.json and people.json',file:'src/admin/read.js',class:'freeze',moved:false},
