@@ -117,7 +117,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:16,wrapper:49,dynamic:19}, // AIR-499: titles.json/people.json R2 puts collapsed into putStoredJson (one env.BUCKET.put)
+ 'src/worker.js':{r2:16,wrapper:51,dynamic:19}, // AIR-499: titles.json/people.json R2 puts collapsed into putStoredJson; two extra saveJSON on incomplete metadataSync (cursor held)
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
