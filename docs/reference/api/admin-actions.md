@@ -128,7 +128,7 @@ Not covered by this capability: `discovery_retry` (a due retry is already taken 
 
 ## Identity correction: `discovery_identity_correct@1`
 
-The second discovery capability ([ADR 0080](../../adr/0080-discovery-identity-correction.md), Proposed). It assigns or rejects **one** numeric TMDB movie id on **one** current observation. It calls no TMDB, runs no chunk, writes no D1 object and changes no other decision. A title match is not a candidate. Routes and the action record are in the [admin API](admin.md#identity-correction-post-apiadmindiscovery-recoveryidentity-confirm). The pure rules are `src/domain/discovery-identity-review.js`.
+The second discovery capability ([ADR 0080](../../adr/0080-discovery-identity-correction.md), Accepted). It assigns or rejects **one** numeric TMDB movie id on **one** current observation. It calls no TMDB, runs no chunk and changes no other decision. While Discovery authority is D1 and `cutover` is `open`, confirm and execute write the D1 decision, intent and receipt; a reject also deletes current-generation `published_epg_show` rows with `basis='discovery'` and `match_reason` equal to that observation key ([ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 4). It does not update `discovery_admission` or the prediction queue. A title match is not a candidate. Routes and the action record are in the [admin API](admin.md#identity-correction-post-apiadmindiscovery-recoveryidentity-confirm). The pure rules are `src/domain/discovery-identity-review.js`.
 
 The declaration is:
 
@@ -147,13 +147,13 @@ The declaration is:
 | Executor lease | The resolver lease, refused when live or unreadable, and renewed before the map write |
 | Commit with CAS | R2 `onlyIf.etagMatches` on the decision map, after the decision digest matched the index hash and the version prefix. The running intent with the before-image is stored first |
 | Receipt | `receiptOf` in the action record. A replay of a stored receipt returns it with `durable: true`, including an `unknown` receipt. A decision read-back is not a stored receipt: if the final action-record put fails or loses its compare-and-swap after the decision landed, the answer is `decisionReadBack` with `durable: false` and no success. The same confirmation then stores the receipt only when it matches the stored issuance on every bound field, and does not put the map again. A changed timestamp, expiry, scope or effect is `confirmation_mismatch`. An original issuance that has expired, when the decision already matches, is `confirmation_expired` with `decisionReadBack: true` and no new receipt. A `running` intent whose decision does not read back as that submission stays unknown and is not rewritten |
-| What changed | The JSON field `application` is outside the receipt: `consumers` is always `["resolution_decision"]`. `shows` is `next_ordinary_chunk`, `after_series_wait` or `next_series` when the assigned film is already in the catalogue, `awaiting_catalog_film` when a confirmed id has no catalogue object, and `not_this_action` for a reject |
+| What changed | The JSON field `application` is outside the receipt: `consumers` is always `["resolution_decision"]`. `shows` is `next_ordinary_chunk`, `after_series_wait` or `next_series` when the assigned film is already in the catalogue, `awaiting_catalog_film` when a confirmed id has no catalogue object, `cleared_assigned_rows` for a reject under D1 Discovery authority, and `not_this_action` for a reject on the R2 path |
 
 The catalogue etag is not part of the pin. Confirm and execute each re-read the one catalogue object for an assign. A catalogue change that fails the command writes no decision. A resolution-map change changes the pin, so execute usually refuses `stale_pin` before the digest compare.
 
 A reject appends the id to `rejectedTmdbIds` (at most eight movie ids), clears `terminalReason` and `retryAt` on that decision, and does not clear another observation. The next ordinary chunk may evaluate a different id. It copies `ownerIdentity` and `rejectedTmdbIds`, does not auto-verify the rejected id, searches again when that id is the first accepted score, and does not fetch its movie detail. Similar titles are not blocked.
 
-Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction ([AIR-132](https://trello.com/c/3AXbSoHe)), a television id, a published-EPG mode of `d1`, an unreadable published-EPG marker, and any store whose published-generation marker is not absent and not `r2`.
+Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction ([AIR-132](https://trello.com/c/3AXbSoHe)), a television id, retiring a catalog admission, and rewriting the prediction queue. A held Discovery marker, or a published-EPG marker that is neither `r2` nor a ready D1 Discovery authority, writes nothing.
 
 ## Transport shape
 

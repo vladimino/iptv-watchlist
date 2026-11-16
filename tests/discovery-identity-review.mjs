@@ -221,6 +221,8 @@ assert.equal(rejectedIssue.issued.status, 200, JSON.stringify(rejectedIssue.issu
 const rejectedRun = await post('identity-correct', {confirmation: rejectedIssue.issued.body.confirmation});
 assert.equal(rejectedRun.body.state, 'succeeded', JSON.stringify(rejectedRun.body));
 assert.equal(rejectedRun.body.application.shows, 'not_this_action');
+assert.equal(Identity.identityApplication('reject', {authority: 'r2'}, {}).shows, 'not_this_action');
+assert.equal(Identity.identityApplication('reject', {authority: 'd1'}, {}).shows, 'cleared_assigned_rows');
 const blocked = (await json(MAP))[KEY];
 assert.deepEqual(blocked.rejectedTmdbIds, ['11']);
 assert.notEqual(blocked.status, 'verified');
