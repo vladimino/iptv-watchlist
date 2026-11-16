@@ -14,7 +14,7 @@ export const PREFIX_ROUTES={
  '/api/admin/posters':['/api/admin/posters','/api/admin/posters?limit=3&cursor=a'],
  '/api/admin/prediction-recovery':['/api/admin/prediction-recovery?film=w1'],
  '/api/admin/discovery-recovery':['/api/admin/discovery-recovery?key=hot%20film%7C2020'],
- '/api/admin/discovery-recovery/':['/api/admin/discovery-recovery/receipt?idempotencyKey=idem-000000000000001','/api/admin/discovery-recovery/identity-receipt?idempotencyKey=idem-000000000000001'],
+ '/api/admin/discovery-recovery/':['/api/admin/discovery-recovery/receipt?idempotencyKey=idem-000000000000001','/api/admin/discovery-recovery/identity-receipt?idempotencyKey=idem-000000000000001','/api/admin/discovery-recovery/policy-exclude?filmId=tmdb_1'],
  '/api/admin/letterboxd-archive/':['/api/admin/letterboxd-archive/apply'],
  '/api/admin/letterboxd-archive/identity-retry':[],
  '/api/catalog/watched':['/api/catalog/watched'],

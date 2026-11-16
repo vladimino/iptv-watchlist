@@ -65,6 +65,7 @@ const classes={
  'admin/discovery-recovery.js|env.BUCKET.put|layout.manifestKey(run)':{count:2,input:false,guard:null},
  'admin/discovery-recovery.js|env.BUCKET.put|diActionKey(body.idempotencyKey)':{count:1,input:false,guard:null},
  'admin/discovery-recovery.js|env.BUCKET.put|diActionKey(submitted.idempotencyKey)':{count:3,input:false,guard:null},
+ 'admin/discovery-recovery.js|env.BUCKET.put|peActionKey(idempotencyKey)':{count:1,input:false,guard:null,note:'catalog_policy_exclude receipt; not a projector input'},
 };
 
 const found=new Map();

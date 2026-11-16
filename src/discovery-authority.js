@@ -32,6 +32,35 @@ export const INDEX_CAP=3000;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
 export const BIND_CAP=100;
+export const POLICY_EXCLUDE_CAP=16;
+const POLICY_FILM_ID=/^tmdb_[1-9]\d{0,11}$/;
+function catalogPolicyKind(film,observation){
+ if(typeof admissionPolicy==='function')return admissionPolicy(film,observation);
+ const names=[...(film?.genres||[])].map(value=>String(typeof value==='string'?value:(value&&value.name)||'').normalize('NFKC').toLowerCase());
+ const ids=new Set([...(film?.genreIds||[])].map(Number).filter(id=>id>0));
+ for(const value of film?.genres||[]){const id=typeof value==='number'?value:value&&typeof value==='object'?Number(value.id):NaN;if(id>0)ids.add(id);}
+ if(ids.has(99)||names.some(name=>name==='documentary'||name==='документальный'||name==='документальний'))return 'documentary';
+ const titles=String([observation?.normalizedTitle,observation?.title,film?.title,film?.original,...(film?.aliases||[])].filter(Boolean).join(' ')).normalize('NFKC').toLowerCase();
+ const overview=String(film?.overview||'').normalize('NFKC').toLowerCase();
+ const music=ids.has(10402)||names.some(name=>name==='music'||name==='музыка'||name==='музыкальный'||name==='музика');
+ const strong=/\blive at\b|\blive from\b|\bin concert\b|concert film|concert recording|filmed live|live performance|recorded live|performing live|запись концерта|запись выступления|живой концерт|концертн/.test(titles+' '+overview)||/\blive in\b/.test(titles);
+ if(music&&strong)return 'concert';
+ return null;
+}
+function rejectedPolicyDecision(previous,tmdbId){
+ const prior=previous&&typeof previous==='object'?previous:{};
+ const rejected=[...(Array.isArray(prior.rejectedTmdbIds)?prior.rejectedTmdbIds:[]).map(String),String(tmdbId)].filter((id,index,list)=>list.indexOf(id)===index).slice(0,8);
+ const clears=prior.tmdbId==null?false:String(prior.tmdbId)===String(tmdbId);
+ return {
+  ...prior,
+  status:prior.status==='verified'||typeof prior.status!=='string'||!prior.status?'needs_verification':prior.status,
+  tmdbId:clears?null:prior.tmdbId??null,
+  filmId:clears?null:prior.filmId??null,
+  canonicalIdentity:clears?null:prior.canonicalIdentity??null,
+  identitySource:clears?null:prior.identitySource??null,
+  terminalReason:null,retryAt:null,rejectedTmdbIds:rejected,
+ };
+}
 const GENERATION_KEY=/^epg\/generations\/([^/]+)\/(discovery-latest|discovered-films)\.json$/;
 function generationRequest(key){
  const match=GENERATION_KEY.exec(key);
@@ -1848,6 +1877,66 @@ export async function ownerDecision(env,spec){
  catch{return {outcome:'unknown'};}
  const after=await readIntent(env,spec.idempotencyKey);
  return {outcome:'written',receipt:after.intent?.receipt||spec.receipt||null};
+}
+export async function readPolicyExcludePreview(env,filmId){
+ const gate=await readAuthority(env);
+ if(!gate.ready)return {handled:false};
+ if(gate.held)return {handled:true,available:false,reason:'held'};
+ const id=typeof filmId==='string'?filmId:'';
+ if(!POLICY_FILM_ID.test(id))return {handled:true,available:false,reason:'invalid'};
+ const tmdbId=id.slice(5);
+ const row=await one(database(env),'SELECT film_id, tmdb_id, media_kind, state, payload_json FROM discovery_admission WHERE film_id=?',[id]);
+ if(!row)return {handled:true,available:false,reason:'missing',filmId:id};
+ let film=null;try{film=row.payload_json?JSON.parse(row.payload_json):null;}catch{return {handled:true,available:false,reason:'malformed',filmId:id};}
+ const policy=film?catalogPolicyKind(film,null):null;
+ const decisions=await many(database(env),"SELECT observation_key, status, tmdb_id, film_id, decision_hash FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=?",[tmdbId]);
+ return {
+  handled:true,available:row.state==='current'&&(policy==='documentary'||policy==='concert'),
+  reason:row.state!=='current'?'already_applied':(policy==='documentary'||policy==='concert')?'eligible':'not_policy_excluded',
+  filmId:id,tmdbId,state:row.state,policy,generation:gate.generation,programmeRunId:gate.programmeRunId,
+  title:typeof film?.title==='string'?film.title:null,year:film?.year??null,genres:Array.isArray(film?.genres)?film.genres:[],
+  observations:decisions.map(row=>({key:row.observation_key,status:row.status,filmId:row.film_id,decisionHash:row.decision_hash})),
+ };
+}
+export async function ownerPolicyExclude(env,spec={}){
+ const gate=await readAuthority(env);
+ assertOpen(gate);
+ const lease=spec.lease||leaseOf(env);
+ if(!lease)return {outcome:'lease'};
+ const filmId=typeof spec.filmId==='string'?spec.filmId:'';
+ if(!POLICY_FILM_ID.test(filmId))return {outcome:'invalid'};
+ const tmdbId=filmId.slice(5);
+ const row=await one(database(env),'SELECT film_id, tmdb_id, media_kind, state, payload_json FROM discovery_admission WHERE film_id=?',[filmId]);
+ if(!row)return {outcome:'missing'};
+ if(row.media_kind!=='movie'||String(row.tmdb_id)!==tmdbId)return {outcome:'not_eligible',reason:'not_movie_admission'};
+ if(row.state!=='current')return {outcome:'already_applied',filmId,policy:spec.policy||null};
+ let film;try{film=JSON.parse(row.payload_json);}catch{return {outcome:'malformed'};}
+ const policy=catalogPolicyKind(film,spec.observation||null);
+ if(policy!=='documentary'&&policy!=='concert')return {outcome:'not_eligible',reason:'not_policy_excluded'};
+ if(spec.policy&&spec.policy!==policy)return {outcome:'conflict'};
+ const decisions=await many(database(env),"SELECT observation_key, decision_hash, payload_json FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=? AND (film_id=? OR film_id IS NULL)",[tmdbId,filmId]);
+ if(decisions.length>POLICY_EXCLUDE_CAP)return {outcome:'bounded'};
+ const prepared=[];
+ for(const decision of decisions){
+  let previous;try{previous=JSON.parse(decision.payload_json);}catch{return {outcome:'malformed'};}
+  const next=rejectedPolicyDecision(previous,tmdbId);
+  prepared.push({key:decision.observation_key,previous,next,expectedHash:decision.decision_hash,nextHash:await decisionHash(next)});
+ }
+ const at=new Date().toISOString();
+ const statements=[fence(gate,lease),[FENCE_SQL,[]]];
+ for(const item of prepared){
+  statements.push(['INSERT INTO discovery_decision_history (observation_key, revision, generation, written_at, writer, payload_json) SELECT ?, COALESCE((SELECT MAX(revision)+1 FROM discovery_decision_history WHERE observation_key=?),1), ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM discovery_decision WHERE observation_key=? AND decision_hash=?)',[item.key,item.key,gate.generation,at,spec.writer||'catalog_policy_exclude',JSON.stringify(item.next),item.key,item.expectedHash]]);
+  statements.push(['UPDATE discovery_decision SET programme_run_id=?, generation=?, status=?, attempts=?, evidence_key=?, terminal_reason=?, retry_at=?, tmdb_id=?, media_kind=?, film_id=?, decision_hash=?, payload_json=? WHERE observation_key=? AND decision_hash=?',[gate.programmeRunId,gate.generation+1,item.next.status??null,Number.isInteger(item.next.attempts)?item.next.attempts:null,item.next.evidenceKey??null,item.next.terminalReason??null,item.next.retryAt??null,item.next.tmdbId==null?null:String(item.next.tmdbId),item.next.tmdbId==null?null:mediaKind(item.next),item.next.filmId??null,item.nextHash,JSON.stringify(item.next),item.key,item.expectedHash]]);
+  statements.push(...assignedRowsDelete(item.key,item.previous,item.next));
+ }
+ statements.push(['UPDATE discovery_admission SET state=\'superseded\', generation=? WHERE film_id=? AND state=\'current\'',[gate.generation+1,filmId]]);
+ statements.push([FENCE_SQL,[]]);
+ if(statements.length>STATEMENT_CAP)return {outcome:'bounded'};
+ try{await commit(database(env),statements);}
+ catch{return {outcome:'unknown'};}
+ const after=await one(database(env),'SELECT state FROM discovery_admission WHERE film_id=?',[filmId]);
+ if(after?.state!=='superseded')return {outcome:'unknown'};
+ return {outcome:'written',filmId,policy,observations:prepared.map(item=>item.key),receipt:spec.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy,observations:prepared.map(item=>item.key)}};
 }
 async function commitOwnerWrite(env,spec,previous){
  const gate=await readAuthority(env);

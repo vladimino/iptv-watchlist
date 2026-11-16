@@ -872,7 +872,12 @@ async function ratingsBackfill(env,body){
  return json({programmeRunId:report.runId,total:films.length,cursor:body.cursor,nextCursor:body.cursor+selected.length,done:body.cursor+selected.length>=films.length,results});
 }
 function eligibleEnrichmentFilms(report){const ids=new Set();return (report.films||[]).filter(f=>{const id=String(f.id);if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||ids.has(id))return false;ids.add(id);return true;}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
-function allEnrichmentFilms(report,catalog){const watchlist=eligibleEnrichmentFilms(report),seen=new Set(),films=[];for(const film of [...watchlist,...Object.values(catalog||{}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'))]){const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))continue;seen.add(identity);films.push(film);}return films.sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
+function policyExcludedEnrichmentFilm(film){
+ if(typeof admissionPolicy!=='function')return false;
+ const policy=admissionPolicy(film,null);
+ return policy==='documentary'||policy==='concert';
+}
+function allEnrichmentFilms(report,catalog){const watchlist=eligibleEnrichmentFilms(report),seen=new Set(),films=[];for(const film of [...watchlist,...Object.values(catalog||{}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'))]){if(policyExcludedEnrichmentFilm(film))continue;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))continue;seen.add(identity);films.push(film);}return films.sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
 function modelMetadata(film){return {id:String(film.id),letterboxdUri:film.url?.startsWith('https://letterboxd.com/')?film.url:null,tmdbUri:film.tmdbId?'https://www.themoviedb.org/movie/'+film.tmdbId:null,title:film.title,original:film.original,year:film.year,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,runtime:film.runtime||null};}
 // Two different times, never interchangeable (see docs/reference/scheduled-tasks.md):
 // - nextCatchUpAt() is the Worker's own earliest-retry gate for discovery `wait`: the next whole UTC hour. It throttles
