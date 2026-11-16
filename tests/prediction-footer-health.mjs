@@ -30,13 +30,27 @@ function seedHealthySources(){
 function eligibleQueue(){
  records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:1,coldCount:0,hotPending:['watch-c'],coldPending:[],pending:['watch-c'],priorityCount:1,coldRemaining:0,retries:{},work:{'watch-c':{requiredWork:'prediction_only'}}});
 }
+function deferredQueue(){
+ records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:1,coldCount:0,hotPending:['watch-c'],coldPending:[],pending:['watch-c'],priorityCount:1,coldRemaining:0,retries:{'watch-c':{attempts:1,retryAt:now+3600000,retryable:true,scope:'item',kind:'parse_error'}},work:{'watch-c':{requiredWork:'prediction_only'}}});
+}
+function unreadQueue(){
+ records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:1,coldCount:1,priorityCount:1,coldRemaining:1,pending:['watch-c']});
+}
+function emptyQueue(){
+ records.set('enrichment/prediction-queue.json',{schemaVersion:3,hotCount:0,coldCount:0,hotPending:[],coldPending:[],pending:[],priorityCount:0,coldRemaining:0,retries:{}});
+}
 function diagKey(runId,at){return 'enrichment/run-diagnostics/'+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-'+runId+'.json';}
-function putRun({runId,status,reason,startedAt,endedAt,added,failed=0,latest=false}){
- const results={};for(let i=0;i<added;i++)results['film-'+runId+'-'+i]='created';
+function clearRuns(){
+ records.delete('enrichment/latest-run.json');
+ for(const key of [...records.keys()].filter(key=>key.startsWith('enrichment/run-diagnostics/')))records.delete(key);
+}
+function putRun({runId,status,reason,startedAt,endedAt,added,updated=0,failed=0,latest=false}){
+ const results={};for(let i=0;i<added;i++)results['film-'+runId+'-a'+i]='created';
+ for(let i=0;i<updated;i++)results['film-'+runId+'-u'+i]='recalculated';
  const failures={};for(let i=0;i<failed;i++)failures['fail-'+i]={kind:'parse_error'};
  const row={runId,status,trigger:'scheduled',createdAt:startedAt,completedAt:endedAt,stopReason:reason,reason,selectedIds:Object.keys(results),results,failures,selectionKind:{},batchCount:1};
  if(latest)records.set('enrichment/latest-run.json',row);
- records.set(diagKey(runId,startedAt),{runId,trigger:'scheduled',startedAt,endedAt,state:status==='complete'?'completed':status==='partial'?'blocked':status,stopReason:reason,added,failed});
+ records.set(diagKey(runId,startedAt),{runId,trigger:'scheduled',startedAt,endedAt,state:status==='complete'?'completed':status==='partial'?'blocked':status,stopReason:reason,added,updated,failed});
 }
 const sourceOf=(body,id)=>body.integrations.sources.find(item=>item.id===id);
 const footer=async()=>{const response=await context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env);assert.equal(response.status,200);return response.json();};
@@ -76,10 +90,88 @@ assert.notEqual(sourceOf(twice,'predictions').code,'prediction_blocked');
 assert.equal(twice.integrations.aggregate,'attention');
 assert.equal(twice.lastRun.status,'blocked');
 
-for(const key of [...records.keys()].filter(key=>key.startsWith('enrichment/run-diagnostics/')))records.delete(key);
+clearRuns();
 putRun({runId:'run-old',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T06:00:00Z',endedAt:'2026-11-16T06:10:00Z',added:5});
 putRun({runId:'run-late',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+eligibleQueue();
 const stall=await footer();
 assert.equal(sourceOf(stall,'predictions').code,'prediction_no_recent_progress');
 assert.notEqual(sourceOf(stall,'predictions').code,'prediction_blocked');
 assert.equal(stall.integrations.aggregate,'attention');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-ok',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T11:10:00Z',endedAt:'2026-11-16T11:18:00Z',added:4});
+putRun({runId:'run-quota-unresolved',status:'partial',reason:'quota',startedAt:'2026-11-16T12:00:00Z',endedAt:'2026-11-16T12:01:00Z',added:0});
+putRun({runId:'run-after-quota',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const quotaThenKill=await footer();
+assert.equal(sourceOf(quotaThenKill,'predictions').code,'prediction_blocked','an unresolved quota survives a later unsuccessful interrupt');
+assert.equal(sourceOf(quotaThenKill,'predictions').state,'degraded');
+assert.equal(quotaThenKill.lastRun.reason,'external_termination');
+assert.equal(quotaThenKill.integrations.aggregate,'attention');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-ok2',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T11:10:00Z',endedAt:'2026-11-16T11:18:00Z',added:4});
+putRun({runId:'run-quota-then',status:'partial',reason:'quota',startedAt:'2026-11-16T12:00:00Z',endedAt:'2026-11-16T12:01:00Z',added:0});
+putRun({runId:'run-recovered',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:40:00Z',endedAt:'2026-11-16T12:50:00Z',added:2,latest:true});
+const recovered=await footer();
+assert.equal(sourceOf(recovered,'predictions').code,'ok','later added work clears a hard stop');
+assert.equal(sourceOf(recovered,'predictions').state,'healthy');
+assert.equal(recovered.integrations.aggregate,'healthy');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-fail1',status:'complete',reason:'parse_error',startedAt:'2026-11-16T12:00:00Z',endedAt:'2026-11-16T12:10:00Z',added:0,failed:3});
+putRun({runId:'run-fail2',status:'complete',reason:'parse_error',startedAt:'2026-11-16T12:20:00Z',endedAt:'2026-11-16T12:30:00Z',added:0,failed:2});
+putRun({runId:'run-fail-kill',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const failedOnly=await footer();
+assert.notEqual(sourceOf(failedOnly,'predictions').state,'healthy','failed-only completes are not recovery');
+assert.notEqual(sourceOf(failedOnly,'predictions').code,'ok');
+assert.equal(sourceOf(failedOnly,'predictions').code,'prediction_no_recent_progress');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-drained',status:'complete',reason:'queue_empty',startedAt:'2026-11-16T12:40:00Z',endedAt:'2026-11-16T12:50:00Z',added:0,failed:0,latest:true});
+emptyQueue();
+const drained=await footer();
+assert.equal(sourceOf(drained,'predictions').state,'healthy','a drained complete with no added films is still progress');
+assert.equal(sourceOf(drained,'predictions').code,'ok');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-ancient',status:'partial',reason:'external_termination',startedAt:'2026-11-16T05:00:00Z',endedAt:'2026-11-16T05:01:00Z',added:0,latest:true});
+const noPrior=await footer();
+assert.equal(sourceOf(noPrior,'predictions').code,'prediction_no_recent_progress','an old attempt with no prior success and eligible work is a stall, not unknown forever');
+assert.equal(sourceOf(noPrior,'predictions').state,'degraded');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-first-kill',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const firstRecent=await footer();
+assert.equal(sourceOf(firstRecent,'predictions').code,'no_data','a single recent interrupt without prior progress is unknown, not blocked');
+assert.notEqual(sourceOf(firstRecent,'predictions').code,'prediction_blocked');
+
+clearRuns();
+deferredQueue();
+putRun({runId:'run-ok3',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:12:00Z',endedAt:'2026-11-16T12:20:00Z',added:3});
+putRun({runId:'run-deferred-kill',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const deferred=await footer();
+assert.equal(sourceOf(deferred,'predictions').state,'healthy','a deferred-only queue is not eligible-now stall');
+assert.notEqual(sourceOf(deferred,'predictions').code,'prediction_runs_interrupted');
+
+clearRuns();
+unreadQueue();
+putRun({runId:'run-ok4',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:12:00Z',endedAt:'2026-11-16T12:20:00Z',added:3});
+putRun({runId:'run-unread-kill',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const unread=await footer();
+assert.equal(sourceOf(unread,'predictions').state,'healthy','an unreadable queue does not invent eligible work');
+assert.notEqual(sourceOf(unread,'predictions').code,'prediction_blocked');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-ok5',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:12:00Z',endedAt:'2026-11-16T12:20:00Z',added:3});
+putRun({runId:'run-busy',status:'partial',reason:'already_running',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const overlap=await footer();
+assert.equal(sourceOf(overlap,'predictions').state,'healthy','already_running after recent progress is not a hard stop');
+assert.notEqual(sourceOf(overlap,'predictions').code,'prediction_blocked');

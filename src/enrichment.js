@@ -1836,16 +1836,19 @@ function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ra
 function resolverMatches(programmeRunId,reportRunId){if(!programmeRunId||!reportRunId)return true;return programmeRunId===reportRunId;}
 const PREDICTION_HARD_STOP=new Set(['quota','storage_error','model_error','model_unavailable','api_error','format_error_storm']);
 const PREDICTION_PROGRESS_STALE_MS=6*3600000;
+const PREDICTION_DRAINED=new Set(['queue_empty','eligible_queue_empty','retry_backoff','manifest_spent']);
 function predictionRunFact(row,now){
  if(!row||typeof row!=='object')return null;
  const reason=row.stopReason||row.reason||null;
  const added=Number.isInteger(row.added)?row.added:Object.values(row.results||{}).filter(value=>value==='created').length;
+ const updated=Number.isInteger(row.updated)?row.updated:Object.values(row.results||{}).filter(value=>value==='recalculated').length;
  const failed=Number.isInteger(row.failed)?row.failed:Object.keys(row.failures||{}).length;
  const status=row.status||row.state||null;
  const startedAt=integrationTime(row.startedAt||row.createdAt||row.diagnosticStartedAt);
  const endedAt=integrationTime(row.endedAt||row.completedAt||row.finishedAt);
- return {runId:row.runId||null,status,reason,added,failed,startedAt,endedAt,at:endedAt||startedAt};
+ return {runId:row.runId||null,status,reason,added,updated,failed,startedAt,endedAt,at:endedAt||startedAt};
 }
+function predictionFactMs(fact){const at=integrationTime(fact?.endedAt||fact?.startedAt||fact?.at);return at?Date.parse(at):NaN;}
 function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
  const fresh=value=>age(value)>INTEGRATION_STALE_MS?'stale':'healthy',freshCode=value=>fresh(value)==='stale'?'stale':'ok';
@@ -1858,34 +1861,41 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  facts.sort((a,b)=>(Date.parse(b.at||0)-Date.parse(a.at||0))||String(b.runId).localeCompare(String(a.runId)));
  if(!facts.length)return integrationEntry('predictions','capability','unknown','no_data',null,null);
  const slices=predictionQueueSlices(queue,now);
- const workLeft=Number.isInteger(slices.eligibleNow)?slices.eligibleNow>0:Number.isInteger(slices.outstanding)&&slices.outstanding>0;
+ const queueReadable=Number.isInteger(slices.eligibleNow)||Number.isInteger(slices.outstanding);
+ const workLeft=Number.isInteger(slices.eligibleNow)?slices.eligibleNow>0:false;
  const isHard=fact=>PREDICTION_HARD_STOP.has(fact.reason);
- const isProgress=fact=>(fact.added||0)>0||((fact.status==='complete'||fact.status==='completed')&&!isHard(fact));
+ const isComplete=fact=>fact.status==='complete'||fact.status==='completed';
+ const isDrained=fact=>isComplete(fact)&&PREDICTION_DRAINED.has(fact.reason);
+ const isProgress=fact=>(fact.added||0)>0||(fact.updated||0)>0||isDrained(fact);
+ const isFailedOnly=fact=>isComplete(fact)&&!isProgress(fact)&&(fact.failed||0)>0;
  const isInterrupt=fact=>{
-  if(!fact||isHard(fact)||isProgress(fact))return false;
+  if(!fact||isHard(fact)||isProgress(fact)||isFailedOnly(fact))return false;
   if(['partial','blocked','interrupted'].includes(fact.status))return true;
   if(fact.status==='running')return true;
   return ['external_termination','lease_expired','lease_lost','time_budget','already_running','runner_aborted'].includes(fact.reason);
  };
  const latest=facts[0];
  const lastProgress=facts.find(isProgress);
+ const lastHard=facts.find(isHard);
  const lastSuccessAt=lastProgress?integrationTime(lastProgress.endedAt||lastProgress.startedAt):null;
  const lastFailureAt=integrationTime(latest.endedAt||latest.startedAt);
+ const hardUnresolved=lastHard&&(!lastProgress||predictionFactMs(lastHard)>=predictionFactMs(lastProgress));
  let consecutiveInterrupts=0;
  for(const fact of facts){if(isInterrupt(fact))consecutiveInterrupts++;else break;}
- if(isHard(latest))return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,lastFailureAt);
+ if(hardUnresolved)return integrationEntry('predictions','capability','degraded','prediction_blocked',lastSuccessAt,integrationTime(lastHard.endedAt||lastHard.startedAt)||lastFailureAt);
  if(consecutiveInterrupts>=2&&workLeft)return integrationEntry('predictions','capability','degraded','prediction_runs_interrupted',lastSuccessAt,lastFailureAt);
  const progressAge=lastSuccessAt?now-Date.parse(lastSuccessAt):null;
- if(workLeft&&(progressAge==null||progressAge>PREDICTION_PROGRESS_STALE_MS)&&!live){
+ const latestAge=latest.at?now-Date.parse(latest.at):null;
+ if(workLeft&&(progressAge==null||progressAge>PREDICTION_PROGRESS_STALE_MS)){
   if(lastSuccessAt)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',lastSuccessAt,lastFailureAt);
+  if(latestAge!=null&&latestAge>PREDICTION_PROGRESS_STALE_MS)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+  if(isFailedOnly(latest)||facts.filter(fact=>isInterrupt(fact)||isFailedOnly(fact)).length>=2)return integrationEntry('predictions','capability','degraded','prediction_no_recent_progress',null,lastFailureAt);
+  if(!queueReadable)return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
   if(isInterrupt(latest))return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
  }
- if(latest.status==='complete'||latest.status==='completed'){
-  if(latest.failed)return integrationEntry('predictions','capability','degraded','prediction_partial',lastSuccessAt,lastFailureAt);
-  return lastSuccessAt?integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,null):integrationEntry('predictions','capability','unknown','no_data',null,null);
- }
- if(isInterrupt(latest))return lastSuccessAt?integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,lastFailureAt):integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
- return lastSuccessAt?integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,null):integrationEntry('predictions','capability','unknown','no_data',null,null);
+ if(isComplete(latest)&&latest.failed&&!isDrained(latest))return integrationEntry('predictions','capability','degraded','prediction_partial',lastSuccessAt,lastFailureAt);
+ if(lastSuccessAt)return integrationEntry('predictions','capability',fresh(lastSuccessAt),freshCode(lastSuccessAt),lastSuccessAt,isInterrupt(latest)||isFailedOnly(latest)?lastFailureAt:null);
+ return integrationEntry('predictions','capability','unknown','no_data',null,lastFailureAt);
 }
 function integrationHealth({sync,ratings,enabled,report,continuation,discoveryStatus,run,live,now,watchlistIngest,ratingsRun=null,ratingsBlocked=null,discoveryReady=null,resolverLease=null,recentRuns=null,queue=null}){
  const age=value=>{const at=integrationTime(value);return at?now-Date.parse(at):null;};
