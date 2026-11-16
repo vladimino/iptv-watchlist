@@ -1149,6 +1149,9 @@ export const FILES={
  "prediction-recovery.mjs": {
   "suite": "core"
  },
+ "prediction-footer-health.mjs": {
+  "suite": "core"
+ },
  "prediction-retry-exhausted.mjs": {
   "suite": "core"
  },
