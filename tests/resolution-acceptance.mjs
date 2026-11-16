@@ -269,8 +269,13 @@ assert.equal(tvConcert.transition,null);
 const tvConcertOwner={authority:'owner',tmdbId:'7102',evidence:{authority:'owner',reviewed:true,tmdbId:'7102'}};
 assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7102',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance of the tour.',genreIds:[10770],confirmation:tvConcertOwner}).reason,'concert_recording');
 assert.equal(policyBound('television feature|1999','Television Feature',1999,96,'7103',[{id:10770,name:'TV Movie'}],{categories:['Концерт'],overview:'A filmed live performance.',genreIds:[10770]}).reason,'concert_recording');
-assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7104',[{id:10770,name:'TV Movie'}],{categories:['Фильм'],overview:'A filmed live performance of the tour.',genreIds:[10770]}).outcome,'detail_verified');
+for(const categories of [['Фильм'],[]]){
+ assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7104',[{id:10770,name:'TV Movie'}],{categories,overview:'A filmed live performance of the tour.',genreIds:[10770]}).reason,'concert_recording',JSON.stringify(categories));
+}
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7108',[],{categories:['Фильм'],overview:'A filmed live performance of the tour.'}).reason,'concert_recording');
 assert.equal(policyBound('telefilm live at the hall|1998','Telefilm Live at the Hall',1998,90,'7105',['телефильм'],{categories:['Концерт'],overview:'A synopsis.'}).reason,'concert_recording');
+assert.equal(policyBound('hall live at the arena|1998','Hall Live at the Arena',1998,90,'7109',[{id:10770,name:'TV Movie'}],{categories:['Фильм'],overview:'A synopsis.',genreIds:[10770]}).outcome,'detail_verified');
+assert.equal(policyBound('arena night|1998','Arena Night',1998,90,'7110',[{id:10770,name:'TV Movie'}],{categories:['Фильм'],overview:'A filmed live performance of the tour.',genreIds:[10770]}).outcome,'detail_verified');
 for(const [label,genres,categories,overview] of [
  ['documentary only',[{id:99,name:'Documentary'}],['Фильм'],'A feature about climbing.'],
  ['documentary only, no category',[{id:99,name:'Documentary'}],[],''],
