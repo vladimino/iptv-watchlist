@@ -117,7 +117,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:16,wrapper:55,dynamic:19}, // AIR-499: titles.json/people.json R2 puts collapsed into putStoredJson; metadataSync incomplete saveJSON; persistScan cursor/factsApplied/completion saveJSON of sync.json (not a projector input)
+ 'src/worker.js':{r2:16,wrapper:57,dynamic:19}, // AIR-513: flushWatchlistEvent and the seal completion flush save sync.json (the run record), not a projector input
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -184,6 +184,7 @@ const classes={
  'sealPublishStep@src/worker.js':'under the sealStep lease',
  'sealQueueStep@src/worker.js':'under the sealStep lease',
  'flushEpgEvent@src/worker.js':'EPG event log and the run record (sync.json), not projector inputs; under the sealStep lease, finishSync or the complete-run continuation',
+ 'flushWatchlistEvent@src/worker.js':'watchlist event log and the run record (sync.json), not projector inputs; under the sealStep lease, finishSync or the complete-run continuation',
  'copyEpgGeneration@src/worker.js':'under the publication lease',
  'persistWatchlist@src/worker.js':'under the publication lease',
  'persistScan@src/worker.js':'publication scan: Letterboxd facts plus D1 retention cursor on sync.json; under the lease; not a projector input',
