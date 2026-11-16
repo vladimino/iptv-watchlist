@@ -3054,8 +3054,38 @@ function parseBatchStartToolText(text){
   return usableBatchManifest(value)?{ok:true,manifest:value}:{ok:false,code:'incomplete_manifest'};
  }catch{return {ok:false,code:'truncated_manifest'};}
 }
-async function ownedBatchManifest(env,runId){
+function batchManifestEnvelope(stored){
+ const {films,profile,contract,...rest}=stored;
+ return {kind:'envelope',...rest,parts:[{kind:'profile'},{kind:'contract'},...films.map((film,index)=>({kind:'film',index,filmId:film.filmId}))]};
+}
+function batchManifestPartBody(stored,part,filmId){
+ if(part==='envelope')return batchManifestEnvelope(stored);
+ if(part==='profile')return {kind:'profile',runId:stored.runId,manifestHash:stored.manifestHash,profile:stored.profile};
+ if(part==='contract')return {kind:'contract',runId:stored.runId,manifestHash:stored.manifestHash,contract:stored.contract};
+ if(part==='film'){
+  const film=(stored.films||[]).find(item=>item.filmId===filmId);
+  if(!film)return null;
+  return {kind:'film',runId:stored.runId,manifestHash:stored.manifestHash,film};
+ }
+ return undefined;
+}
+function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts){
+ if(!isObject(envelope)||envelope.kind!=='envelope'||!Array.isArray(envelope.parts))return {ok:false,code:'incomplete_manifest'};
+ if(!isObject(profilePart)||profilePart.kind!=='profile'||profilePart.manifestHash!==envelope.manifestHash)return {ok:false,code:'incomplete_manifest'};
+ if(!isObject(contractPart)||contractPart.kind!=='contract'||contractPart.manifestHash!==envelope.manifestHash)return {ok:false,code:'incomplete_manifest'};
+ const wanted=envelope.parts.filter(part=>part.kind==='film');
+ if(!Array.isArray(filmParts)||filmParts.length!==wanted.length)return {ok:false,code:'incomplete_manifest'};
+ const byId=new Map(filmParts.filter(part=>isObject(part)&&part.kind==='film'&&part.manifestHash===envelope.manifestHash&&isObject(part.film)).map(part=>[part.film.filmId,part.film]));
+ const films=[];
+ for(const part of wanted){const film=byId.get(part.filmId);if(!film)return {ok:false,code:'incomplete_manifest'};films.push(film);}
+ const {kind,parts,...rest}=envelope;
+ const manifest={...rest,profile:profilePart.profile,contract:contractPart.contract,films};
+ return usableBatchManifest(manifest)?{ok:true,manifest}:{ok:false,code:'incomplete_manifest'};
+}
+async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
  if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
+ if(!['envelope','profile','contract','film'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
+ if(part==='film'&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
  const run=await checkedRun(env,runId);
  if(!run)return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
  const lease=await loadJSON(env,RUNNER_LEASE_KEY);
@@ -3064,7 +3094,9 @@ async function ownedBatchManifest(env,runId){
  if(run.status!=='running')return {status:409,body:{error:'Run already complete',code:'run_not_running'}};
  const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+runId+'.json');
  if(!usableBatchManifest(stored))return {status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
- return {status:200,body:stored};
+ const body=batchManifestPartBody(stored,part,filmId);
+ if(body==null)return {status:404,body:{error:'Unknown film',code:'unknown_film'}};
+ return {status:200,body};
 }
 // A run is bound to the fingerprint schema, both prompt versions and the registry it started with (ADR-0035 section 6);
 // a deploy that changes any of them ends it, as a profile publication does. A run from before the prompt version was

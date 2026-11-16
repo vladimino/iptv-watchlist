@@ -51,7 +51,7 @@ A live Scheduled Task with `manifestSize=5` created the run and then stopped wit
 
 Task C (run `6e98e0fa-e4eb-408b-82de-dc289536b46f`, 22:33 Madrid) and Task D (run `cf083134-8093-4064-b4bb-98a4191f8391`, 22:41 Madrid) both received Worker `manifestBytes` 42,115 of the same five `selectedIds`. C called `prediction_complete(external_termination)` with zero submits; D submitted 5/5 and `manifest_spent`. The Worker start was HTTP 200 both times. Reordering fields in one JSON object does not make a truncated prefix parseable: `JSON.parse` fails, and the live Task prompt still needs `contract.schema.contract` plus every film `modelMetadata`.
 
-A real `batch_start` persist stores the exact start answer on the run as `manifestAnswer`. `prediction_batch_manifest` returns that object for the live lease holder and writes nothing. A truncated start text is `truncated_manifest` (fail closed: no invented films). A second `prediction_batch_start` stays `already_running`. Dry-run starts store nothing. No Task registry edit and no production start in this change; the installed prompt does not yet call the readback tool.
+A real `batch_start` persist stores the exact start answer at `enrichment/batch-manifest/<runId>.json`. `prediction_batch_manifest` returns one bounded JSON part (`envelope`, `profile`, `contract`, or one `film`) for the live lease holder and writes nothing. A truncated start text is `truncated_manifest` (fail closed: no invented films). An incomplete part set is not a usable manifest. A second `prediction_batch_start` stays `already_running`. Dry-run starts store nothing. No Task registry edit and no production start in this change. The installed prompt does not call the readback until a separate owner GO.
 
 ## Follow-ups
 

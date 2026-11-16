@@ -130,6 +130,7 @@ const forbidden=[
  ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
  ['prediction_batch_manifest',{runId:'../secret'}],
+ ['prediction_batch_manifest',{runId:'run-1',part:'all'}],
  ['prediction_batch_manifest',{prefix:'enrichment/'}],
  ['prediction_validate',{}],
  ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
