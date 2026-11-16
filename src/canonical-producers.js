@@ -17,6 +17,9 @@
 import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
+import {filmFactsOperation} from './canonical-producer-adapters.js';
+import {personMutationOperation} from './canonical-person-mutation-producer.js';
+import {FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,unitOperation} from './canonical-person-adapters.js';
 import {fenced,mutateFilm,mutatePerson} from './canonical-mutations.js';
 import {compareLocalization,recordLocalizationSources} from './localization-sources.js';
 import {admitRatedFilm,retainFilm,verifiedAdmission} from './film-admission.js';
@@ -51,14 +54,20 @@ export const GAPS=Object.freeze([
 // anything that is not atomic) holds an atomic operation for EVERY operation kind the producer needs (`requires`). There is no flag to flip: the P3 PR that wires a producer registers its operations
 // (a spec with readback, replay and atomic:true), and the Worker bundle must then carry this module (a test checks both). Today the registry is empty, so none is wired.
 export const PRODUCER_WIRING=Object.freeze([
- Object.freeze({name:'epg_commit',site:'epgSync commit (worker.js)',requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])}),
+ Object.freeze({name:'epg_commit',site:'Producer Workflow chain from EpgOrchestration.ensure (canonical-producer-workflow.js)',requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])}),
  Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
  Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
  Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
 ]);
 // P3c: the Discovery admission registers its atomic `film_mutation` spec. The registry is static, so its re-plan is the honest "no source here" (null): a receipt that reaches the generic registry is never replayed blind. The REAL settlement is
 // the origin's own inline reconcile, which binds the same spec to the environment and re-plans from the current `discovery_admission` row (`discoveryAdmissionRegistry` in src/canonical-discovery-admission-producer.js, called by `admitDiscoveryFilms`).
-export const PRODUCER_OPERATIONS=operationRegistry([discoveryAdmissionOperation({replan:async()=>null})]);
+export const PRODUCER_OPERATIONS=operationRegistry([
+ discoveryAdmissionOperation({replan:async()=>null}),
+ filmFactsOperation({replan:async()=>null}),
+ personMutationOperation({replan:async()=>null}),
+ unitOperation(PERSON_STATE_OPERATION,{replan:async()=>null}),
+ unitOperation(FILM_CREDITS_OPERATION,{replan:async()=>null}),
+]);
 // P4: the readers are NOT listed here. handoffReadiness derives them from CANONICAL_READER_REGISTRY of src/canonical-catalog-reader.js (the one registry, owner decision 4): every entry of
 // class 'freeze' with moved:false is `reader_not_moved:<name>`; an entry of class 'exception' never blocks and must not be marked moved.
 // ADR 0117 owner decision 5 / ADR 0119: durable cross-domain receipts inside the existing D1. The protocol is "registered" only when PRODUCER_OPERATIONS holds at least one atomic operation

@@ -18,6 +18,22 @@ export async function catalogReaderGate(env){
  return {mode:source==='d1'?'d1':'existing',generation:gate.generation,state:gate.state};
 }
 
+// Frozen titles.json / people.json may be written only while the marker is not d1/open (or held / unreadable). Re-read at the write, not before an await.
+export async function canonicalMirrorsWritable(env){
+ try{if((await catalogReaderGate(env)).mode==='d1')return false;}
+ catch{return false;}
+ const db=database(env);
+ if(!db)return false;
+ try{
+  const window=await one(db,'SELECT state,expires_at AS expiresAt FROM projector_window WHERE id=1');
+  if(window&&window.state==='held'&&Number(window.expiresAt)>Date.now())return false;
+ }catch(error){
+  if(/no such table/i.test(String(error?.message||error))||/no such table/i.test(String(error?.cause?.message||'')))return true;
+  return false;
+ }
+ return true;
+}
+
 // Read only, no gate: the stored admission and retention rows for ids (chunked by 80, two reads per chunk).
 export async function loadAdmissionRows(env,ids){
  const db=database(env);
@@ -141,8 +157,8 @@ export const CANONICAL_READER_REGISTRY=[
  {name:'catalog film route optional metadata.json',file:'src/worker.js',class:'freeze',moved:false},
  {name:'catalog available route metadata.json',file:'src/worker.js',class:'freeze',moved:false},
  {name:'ratingsFilmLabels metadata.json and titles.json',file:'src/worker.js',class:'freeze',moved:false},
- {name:'metadataSync titles.json, people.json and metadata.json working set (writer)',file:'src/worker.js',class:'freeze',moved:false},
- {name:'epgSync title and people localization (writer of titles.json, people.json)',file:'src/worker.js',class:'freeze',moved:false},
+ {name:'metadataSync titles.json, people.json and metadata.json working set (writer)',file:'src/worker.js',class:'freeze',moved:true},
+ {name:'epgSync title and people localization (writer of titles.json, people.json)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'admin read titles.json and people.json',file:'src/admin/read.js',class:'freeze',moved:false},
  {name:'admin limbo titles.json and people.json',file:'src/admin/limbo.js',class:'freeze',moved:false},
  {name:'admin health source list titles.json and people.json',file:'src/admin/health.js',class:'freeze',moved:false},

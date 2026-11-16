@@ -8,6 +8,10 @@ import {grantProjectorWindow,releaseProjectorWindow,requestProjectorWindow,WINDO
 import {writerRoute} from './canonical-writer-route.js';
 import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
 import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
+import {filmFactsOperation} from './canonical-producer-adapters.js';
+import {personMutationOperation} from './canonical-person-mutation-producer.js';
+import {FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,unitOperation} from './canonical-person-adapters.js';
+import {filmFactsOf} from './canonical-producer-workflow.js';
 import {BASELINE_CAP,listAttention,operationRegistry,recordBaseline,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
 
 export const OPEN_HANDOFF_MIN_VERSION=23;
@@ -19,12 +23,30 @@ export const OPERATOR_D1_TARGET=Object.freeze({
  databaseId:'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb',
  endpoint:'https://api.cloudflare.com/client/v4',
 });
-// What the Producer Workflow actually plans per Film (src/canonical-producer-workflow.js filmFactsOf). Not metadata, dimensions or sync clocks.
-export const WORKFLOW_FILM_FACTS=Object.freeze(['watchlist','canonicalIdentity','originalTitle']);
-export const WORKFLOW_FILM_FACTS_ABSENT=Object.freeze(['film_metadata','film_dimension','film_sync_state']);
-export const NEXT_MINIMAL_FIX='Move the 11 freeze consumers to D1 (ADR 0117 decision 4), register atomic operations for every remaining PRODUCER_WIRING kind, and extend Producer Workflow filmFactsOf with film_metadata, film_dimension and film_sync_state (or record an owner-accepted exception). Until then activationReadiness.ready is false and apply STOPs.';
+const WORKFLOW_FACTS_SAMPLE={
+ id:'probe',tmdbId:1,canonicalIdentity:'tmdb:1',original:'O',title:'T',metadataAt:'2026-01-01T00:00:00.000Z',synopsisFetchedAt:'2026-01-01T00:00:00.000Z',
+ peopleNamesVersion:2,peopleLocalizedAt:'2026-01-01T00:00:00.000Z',year:1999,runtime:90,synopsis:'s',poster:'p',url:'u',genres:[],
+ dimensions:{
+  identity:{dimension:'identity',status:'resolved',source:'tmdb',sourceVersion:'tmdb:1',provenance:{authority:'automatic'},value:'tmdb:1',updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none',lastError:null,failureReason:null,retryAt:null},
+  metadata:{dimension:'metadata',status:'resolved',source:'letterboxd',sourceVersion:'lb:1',provenance:{authority:'automatic'},value:null,updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none',lastError:null,failureReason:null,retryAt:null},
+ },
+};
+export function workflowFactsProbe(sample=filmFactsOf(WORKFLOW_FACTS_SAMPLE,true)){
+ const present=[];
+ if(sample&&sample.watchlist!=null)present.push('watchlist');
+ if(sample?.film?.canonicalIdentity!=null)present.push('canonicalIdentity');
+ if(sample?.film?.originalTitle!=null)present.push('originalTitle');
+ if(sample?.metadata)present.push('film_metadata');
+ if(sample?.dimensions)present.push('film_dimension');
+ if(sample?.sync)present.push('film_sync_state');
+ const required=['watchlist','canonicalIdentity','originalTitle','film_metadata','film_dimension','film_sync_state'];
+ return {present:Object.freeze(present),absent:Object.freeze(required.filter(kind=>!present.includes(kind)))};
+}
+export const WORKFLOW_FILM_FACTS=workflowFactsProbe().present;
+export const WORKFLOW_FILM_FACTS_ABSENT=workflowFactsProbe().absent;
+export const NEXT_MINIMAL_FIX='Move remaining freeze consumers to D1 (ADR 0117 decision 4) and register atomic operations for every remaining PRODUCER_WIRING kind. Until then activationReadiness.ready is false and apply STOPs.';
 export const PRODUCER_WIRING=Object.freeze([
- Object.freeze({name:'epg_commit',site:'epgSync commit (worker.js)',requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])}),
+ Object.freeze({name:'epg_commit',site:'Producer Workflow chain from EpgOrchestration.ensure (canonical-producer-workflow.js)',requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])}),
  Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
  Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
  Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
@@ -34,7 +56,13 @@ export const EMPTY_CLASSES=Object.freeze([
  Object.freeze({name:'retention',table:'film_retention',expected:398}),
  Object.freeze({name:'retirement',table:'tmdb_retirement_decision',expected:4}),
 ]);
-const PRODUCER_OPERATIONS=operationRegistry([discoveryAdmissionOperation({replan:async()=>null})]);
+const PRODUCER_OPERATIONS=operationRegistry([
+ discoveryAdmissionOperation({replan:async()=>null}),
+ filmFactsOperation({replan:async()=>null}),
+ personMutationOperation({replan:async()=>null}),
+ unitOperation(PERSON_STATE_OPERATION,{replan:async()=>null}),
+ unitOperation(FILM_CREDITS_OPERATION,{replan:async()=>null}),
+]);
 
 const DB_NOW_MS="(CAST(strftime('%s','now') AS INTEGER)*1000)";
 const DB_NOW_ISO="strftime('%Y-%m-%dT%H:%M:%fZ','now')";
@@ -62,12 +90,13 @@ export function activationAudit(){
  const consumers=CANONICAL_READER_REGISTRY.map(classifyConsumer);
  const atomic=kind=>{for(const spec of PRODUCER_OPERATIONS.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};
  const producers=PRODUCER_WIRING.map(item=>({name:item.name,site:item.site,requires:item.requires,wired:item.requires.every(kind=>atomic(kind))}));
+ const facts=workflowFactsProbe(filmFactsOf(WORKFLOW_FACTS_SAMPLE,true));
  const residuals=[
   ...consumers.filter(item=>item.class==='freeze'&&item.moved!==true).map(item=>'freeze_unmoved:'+item.name),
   ...producers.filter(item=>!item.wired).map(item=>'producer_not_wired:'+item.name),
-  ...WORKFLOW_FILM_FACTS_ABSENT.map(kind=>'workflow_facts_absent:'+kind),
+  ...facts.absent.map(kind=>'workflow_facts_absent:'+kind),
  ];
- return {consumers,producers,workflowFacts:WORKFLOW_FILM_FACTS,workflowFactsAbsent:WORKFLOW_FILM_FACTS_ABSENT,residuals};
+ return {consumers,producers,workflowFacts:facts.present,workflowFactsAbsent:facts.absent,residuals};
 }
 
 export const ACTIVATION_CONSUMERS=Object.freeze(activationAudit().consumers);

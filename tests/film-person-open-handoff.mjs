@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {applyFilmFacts} from '../src/canonical-producer-adapters.js';
+import {filmFactsOf} from '../src/canonical-producer-workflow.js';
 import {EMPTY_CLASSES as PRODUCER_EMPTY_CLASSES,PRODUCER_WIRING as PRODUCER_WIRING_SOURCE,handoffReadiness} from '../src/canonical-producers.js';
 import {grantProjectorWindow,requestProjectorWindow} from '../src/discovery-authority.js';
 import {projectorExpectation} from '../src/film-person-authority.js';
@@ -39,16 +40,33 @@ assert.equal(OPEN_HANDOFF_MIN_VERSION,23);
 assert.equal(ACTIVATION_CONSUMERS.length,CANONICAL_READER_REGISTRY.length);
 const audit=activationAudit();
 assert.equal(audit.consumers.length,CANONICAL_READER_REGISTRY.length);
-assert.equal(audit.consumers.filter(item=>item.class==='freeze'&&item.moved!==true).length,11);
+assert.equal(audit.consumers.filter(item=>item.class==='freeze'&&item.moved!==true).length,9);
 assert.equal(audit.consumers.filter(item=>item.kind==='adr0117_exception').length,5);
 assert.ok(audit.consumers.some(item=>item.name==='metadata cache mirror object of the D1 metadata cache'&&item.kind==='adr0117_exception'));
-assert.deepEqual([...WORKFLOW_FILM_FACTS],['watchlist','canonicalIdentity','originalTitle']);
-assert.ok(audit.residuals.some(item=>item==='workflow_facts_absent:film_metadata'));
+assert.ok(audit.consumers.find(item=>item.name.startsWith('metadataSync'))?.moved);
+assert.ok(audit.consumers.find(item=>item.name.startsWith('epgSync'))?.moved);
+assert.deepEqual([...WORKFLOW_FILM_FACTS],['watchlist','canonicalIdentity','originalTitle','film_metadata','film_dimension','film_sync_state']);
+assert.deepEqual([...audit.workflowFactsAbsent],[]);
+assert.ok(!audit.residuals.some(item=>item.startsWith('workflow_facts_absent:')));
 assert.ok(audit.residuals.some(item=>item.startsWith('producer_not_wired:')));
 assert.ok(audit.producers.find(item=>item.name==='discovery_admission').wired);
+assert.ok(audit.producers.find(item=>item.name==='epg_commit').wired);
+assert.ok(!audit.producers.find(item=>item.name==='metadata_sync').wired);
+assert.ok(!audit.producers.find(item=>item.name==='rated_admission_retention').wired);
 const workflowSrc=fs.readFileSync('src/canonical-producer-workflow.js','utf8');
-assert.match(workflowSrc,/function filmFactsOf\(film,watchlisted\)\{\n return \{watchlist:watchlisted,film:\{contractVersion:1,canonicalIdentity:film\?\.canonicalIdentity\|\|null,originalTitle:film\?\.original\|\|film\?\.title\|\|null\}\};\n\}/);
-assert.doesNotMatch(workflowSrc.slice(workflowSrc.indexOf('function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/metadata|sync_state|dimension/);
+assert.match(workflowSrc,/export function filmFactsOf\(film,watchlisted\)/);
+assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.metadata=/);
+assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/sealedDimension/);
+assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.sync=/);
+{
+ const clockOnly=filmFactsOf({id:'x',canonicalIdentity:'tmdb:1',original:'O',updatedAt:'2026-01-02T00:00:00.000Z'},true);
+ assert.equal(clockOnly.metadata,undefined);
+ assert.equal(clockOnly.dimensions,undefined);
+ assert.equal(clockOnly.sync,undefined);
+ const noProvenance=filmFactsOf({id:'x',canonicalIdentity:'tmdb:1',original:'O',metadataAt:'2026-01-01T00:00:00.000Z',dimensions:{identity:{dimension:'identity',status:'provisional',source:'tmdb',sourceVersion:null,provenance:null,value:'tmdb:1',updatedAt:'2026-01-01T00:00:00.000Z',attempts:0,nextAction:'none'}}},true);
+ assert.ok(noProvenance.metadata);
+ assert.equal(noProvenance.dimensions,undefined);
+}
 assert.equal(proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:false},described:{name:OPERATOR_D1_TARGET.databaseName,uuid:OPERATOR_D1_TARGET.databaseId}}).ok,true);
 assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:true},described:{name:OPERATOR_D1_TARGET.databaseName,uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
 assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,databaseId:'00000000-0000-0000-0000-000000000000',endpointOverride:false},described:{name:'iptv',uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
@@ -61,6 +79,12 @@ const bundled=fs.readFileSync('build.mjs','utf8');
 assert.match(bundled,/film-person-open-handoff/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/film-person-open-handoff/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers/);
+{
+ const worker=fs.readFileSync('src/worker.js','utf8');
+ assert.match(worker,/async function putStoredJson\(env,key,text\)\{\n if\(\(key==='titles\.json'\|\|key==='people\.json'\)&&await frozenCanonicalMirrorsLocked\(env\)\)return \{skipped:'canonical_mirror_frozen'\};\n return env\.BUCKET\.put\(key,text/);
+ assert.equal([...worker.matchAll(/saveCanonicalMirror\(env,'(titles|people)\.json'/g)].length,4);
+ assert.doesNotMatch(worker.replace(/async function saveCanonicalMirror[\s\S]*?return true;\n\}/,''),/saveJSON\(env,'(titles|people)\.json'/);
+}
 
 {
  const file=openDb();
@@ -69,8 +93,9 @@ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers
  assert.equal(ready.ready,false,ready.blockers.join(','));
  assert.ok(ready.blockers.some(item=>item.startsWith('freeze_unmoved:')));
  assert.ok(ready.blockers.some(item=>item.startsWith('producer_not_wired:')));
- assert.ok(ready.blockers.some(item=>item==='workflow_facts_absent:film_metadata'));
- assert.match(ready.nextMinimalFix,/Move the 11 freeze consumers/);
+ assert.ok(!ready.blockers.some(item=>item.startsWith('workflow_facts_absent:')));
+ assert.ok(!ready.blockers.some(item=>item==='producer_not_wired:epg_commit'));
+ assert.match(ready.nextMinimalFix,/Move remaining freeze consumers/);
  const handoff=await handoffReadiness(env,{now:T});
  assert.equal(handoff.ready,false);
  const dry=await activateOpen(env,{apply:false,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES});
