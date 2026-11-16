@@ -125,8 +125,8 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  assert.ok(!queue().pending.includes('tmdb_'+(TOTAL+4)),'and it is out of the queue');
 }
 
-// 3. A published programme transition: the persisted queue belongs to the old programme, so a rebuild is required.
-//    A generation-only storm does not hold the catalog; the rebuild lands on the new programme in the same step.
+// 3. A published programme transition does not stop the run and does not rebuild inside next (ADR 0154).
+//    Priority moves on the named refresh, not on this step. A generation-only storm does not hold the step.
 {
  stats.storm=false;resetLease();publish('p3');assert.equal((await api('queue/reconcile',{})).status,200);resetLease();
  const run3=(await api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}})).data;assert.equal(run3.status,'running',JSON.stringify(run3));
@@ -134,7 +134,7 @@ console.log('run under storm:',batches,'batches,',steps.next.length,'next,',step
  const waiting=await api('next',{runId:run3.runId,batchSize:20});
  assert.equal(waiting.status,200,JSON.stringify(waiting.data).slice(0,300));
  assert.equal(records.get('enrichment/runs/'+run3.runId+'.json').status,'running','the run keeps its lease and is not stopped');
- assert.equal(queue().programmeRunId,'p4','the queue was rebuilt on the published programme during the generation storm');
+ assert.equal(queue().programmeRunId,'p3','next does not rebuild the queue just because the published programme changed');
 }
 // 4. Reads stay independent of the storm: enrichment status reads no catalog and still reports the queue; the queue
 //    overview stays eligible/ready. The catalog snapshot is readable under a generation-only storm (ADR 0147).

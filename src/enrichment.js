@@ -1638,10 +1638,14 @@ const queueShapeValid=queue=>!!queue&&typeof queue==='object'&&Array.isArray(que
 // ADR 0154. A completed programme authorizes hot/cold order only. An unfinished seal, a new programmeRunId or missing shows never block scoring.
 const PRIORITY_CARRY_MS=36*3600000;
 function showsAuthoritative(sync,report){
- if(!report?.runId||!Array.isArray(report.films)||!sync?.runId)return false;
- if(sync.stage==='complete'&&sync.runId===report.runId)return true;
- // The published programme is still the previous generation while a newer run is unsealed.
- return sync.stage!=='complete'&&sync.runId!==report.runId;
+ if(!report?.runId||!Array.isArray(report.films))return false;
+ // No sync document: the programme object is the snapshot (R2-only and offline worlds).
+ if(!sync)return true;
+ // A completed sync confirms showtimes. A newer published programme may already have moved ahead of that row.
+ if(sync.stage==='complete')return true;
+ // An unsealed run that has not replaced the published programme leaves the previous snapshot in force.
+ if(sync.runId&&sync.runId!==report.runId)return true;
+ return false;
 }
 function priorityRefreshDue(queue,report,sync){
  if(!queueShapeValid(queue)||!showsAuthoritative(sync,report))return false;
@@ -1679,10 +1683,17 @@ function settleQueueFilms(queue,ids){
 // The gate repeated on the queue a conditional write actually mutates. `currentPredictionQueue` validated a snapshot; a retry of the write after a
 // conflict loads whatever is stored then (a reconcile, an EPG commit or a profile publication may have rebuilt it for another generation), so a
 // settlement never touches a queue the gate would refuse: it returns null and the queue stays as its own generation wrote it.
-async function advanceContext(env,report,profile){return {report,profile,registry:(await fingerprintRegistryDigests()).registry};}
+async function advanceContext(env,report,profile){return {report,profile,sync:await loadJSON(env,'sync.json'),registry:(await fingerprintRegistryDigests()).registry};}
+// A settlement computed against one programme must not land on a queue a later completed publication already rebuilt.
+// An unsealed programme is not that publication: scoring continues on the stored queue (ADR 0154).
+function settlementGenerationRefused(queue,context){
+ if(!queue?.programmeRunId||!context.report?.runId||queue.programmeRunId===context.report.runId)return false;
+ return showsAuthoritative(context.sync,context.report);
+}
 function guardedSettle(context,ids,trigger){
  return current=>{
   if(queueAdvanceGate(current,context.report,context.profile,context.registry))return null;
+  if(settlementGenerationRefused(current,context))return null;
   const next=settleQueueFilms(current,ids);if(next&&trigger)next.trigger=trigger;return next;
  };
 }
@@ -3127,7 +3138,7 @@ async function enrichmentComplete(env,body,requestId){
   const amend=queue=>{recordRunRetries(queue,run);if(queue.lastBatch?.runId!==run.runId)queue.metrics.hotProcessedTotal+=summary.hotProcessed;queue.lastBatch={runId:run.runId,trigger:run.trigger,startedAt:run.createdAt,finishedAt:run.completedAt,stage:run.status,profileVersion:run.tasteProfileVersion,batchSize:run.batchSize,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,checked:summary.checked,added:created,updated:recalculated,failed,remaining:queue.pending.length,hotRemaining:queue.priorityCount,coldRemaining:queue.coldRemaining,reason:run.reason||(body.reason==='manifest_spent'?'manifest_spent':null),perFilmMs:created+recalculated?(Date.parse(run.completedAt)-Date.parse(run.createdAt))/(created+recalculated):null};queue.lastCheckAt=run.completedAt;return queue;};
   const succeeded=Object.entries(run.results||{}).filter(([,status])=>SETTLED_STATUSES.includes(status)).map(([id])=>id);let queue;try{queue=await atStage('queue_refresh',async()=>{const report=await loadJSON(env,'programme.json'),stored=await currentPredictionQueue(env,report,profile,'batch_complete');if(!stored)return null;const context=await advanceContext(env,report,profile);
    // Under the gate on the queue this write actually mutates: a queue rebuilt for another generation meanwhile keeps its own settlement, `lastBatch` and counters; only this run's retries (which only grow) are added to it.
-   return await mutatePredictionQueue(env,current=>{if(queueAdvanceGate(current,report,profile,context.registry))return recordRunRetries(current,run)?current:null;settleQueueFilms(current,succeeded);current.trigger='batch_complete';return amend(current);},'batch_complete',stored);});}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
+   return await mutatePredictionQueue(env,current=>{if(queueAdvanceGate(current,report,profile,context.registry)||settlementGenerationRefused(current,context))return recordRunRetries(current,run)?current:null;settleQueueFilms(current,succeeded);current.trigger='batch_complete';return amend(current);},'batch_complete',stored);});}catch(error){const held=catalogHeldQueueError(error);if(held)return ownedCatalogHeld('complete',held,requestId,run.runId);throw error;}if(queue)delete run.retryHeal;remaining=queue?.pending.length??pending;hotRemaining=queue?.priorityCount??null;coldRemaining=queue?.coldRemaining??null;
   // A normal completion is "drained" only when the refreshed queue has no outstanding film; otherwise work remains that
   // this run could not take (deferred by retry or waiting behind hot). Run completion and a drained queue stay separate.
   // ADR 0136: a short batch that spent its selected manifest records stopReason manifest_spent (not time_budget, not a false queue_empty) while still reporting the real global outstanding counters.
