@@ -1,9 +1,9 @@
 # ADR 0153: One owner-fenced policy exclusion retires an already admitted Documentary or concert recording
 
-**Status:** **Proposed** (2026-11-16; writer architecture for [AIR-504](https://trello.com/c/jUaNE1Rs). Stays Proposed until the owner accepts this contract. This records no permission to run it in production)  
+**Status:** **Accepted** (2026-11-16; explicit Product Owner acceptance of the writer architecture recorded on [AIR-504](https://trello.com/c/jUaNE1Rs#comment-6afaef1360a439c34d32d291), after independent exact-HEAD review of [PR #676](https://github.com/vladimino/iptv-watchlist/pull/676#pullrequestreview-5919508974). This approval permits delivery of the implementation, **not** any production Film exclusion or other data mutation)  
 **Original decision date:** 2026-11-16  
 **Recorded at:** 2026-11-16  
-**Approval source:** [AIR-504](https://trello.com/c/jUaNE1Rs)  
+**Approval source:** [AIR-504 owner acceptance, 2026-11-16](https://trello.com/c/jUaNE1Rs#comment-6afaef1360a439c34d32d291)  
 **Related work:** [ADR 0150](0150-documentary-and-concert-film-exclusion.md), [ADR 0080](0080-discovery-identity-correction.md), [AIR-500](https://trello.com/c/dD3BRQ2H), [AIR-501](https://trello.com/c/ShipZn0N). Numbered 0153 because [ADR 0152](0152-prediction-retry-attempt-budget.md) is the AIR-505 retry budget.  
 **Supersedes:** None  
 **Superseded by:** None
