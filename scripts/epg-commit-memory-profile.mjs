@@ -251,7 +251,7 @@ xml.length=0;
 
 if(global.gc)global.gc();
 snap('baseline','exit');
-const env={BUCKET:store,DB:db,DISCOVERY_LEDGER_MODE:'frozen',LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.invalid/guide.xml'};
+const env={BUCKET:store,DB:db,epgDiagnostic:{domain:'offline-fixture',resourceId:'offline-fixture'},DISCOVERY_LEDGER_MODE:'frozen',LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.invalid/guide.xml'};
 const run={runId:RUN,stage:'epg',startedAt:new Date(now).toISOString(),pages:1,pending:[],watchlist:watch};
 const started=Date.now();
 let error=null,result=null;

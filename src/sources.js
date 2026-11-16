@@ -185,9 +185,15 @@ function planLedgerDrain(backlogKeys,latestKeys,cap){
  const limit=Number.isSafeInteger(cap)&&cap>=0?cap:0,departing=new Set(absent.slice(0,limit)),held=new Set(absent.slice(limit));
  return {held:key=>held.has(key),backlog:held.size,archiving:departing.size,cap:limit};
 }
-// `full` (default) keeps today's single growing ledger; `bounded` archives departures; `frozen` stops archiving but keeps the
-// archive as history. Only the exact strings are accepted.
-function discoveryLedgerMode(env){const value=env?.DISCOVERY_LEDGER_MODE;return value==='bounded'||value==='frozen'?value:'full';}
+// Production EPG seal is always bounded (ADR 0155). `full` and `frozen` remain only on an isolated diagnostic env
+// (`epgDiagnostic`) or an offline fixture that carries the same marker; a leftover Worker binding is ignored.
+function discoveryLedgerMode(env){
+ if(env?.epgDiagnostic){
+  const value=env.DISCOVERY_LEDGER_MODE;
+  return value==='frozen'||value==='full'||value==='bounded'?value:'bounded';
+ }
+ return 'bounded';
+}
 function fnv1a32(text){let hash=0x811c9dc5;for(const byte of new TextEncoder().encode(String(text))){hash^=byte;hash=Math.imul(hash,0x01000193)>>>0;}return hash>>>0;}
 function ledgerArchiveSegment(key,count=LEDGER_ARCHIVE_SEGMENTS){return fnv1a32(key)%count;}
 const ledgerArchiveSegmentKey=(segment,writeId)=>LEDGER_ARCHIVE_PREFIX+'segments/'+String(segment).padStart(3,'0')+'/'+writeId+'.json';

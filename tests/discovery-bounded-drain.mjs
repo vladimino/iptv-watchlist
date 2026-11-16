@@ -90,7 +90,7 @@ async function generation(state,model,day,mode,cap){
  for(const key of keysOf(scanOf(0)))model.active.set(key,true);
  assertParity(state,'day 0');
  let day=1;
- for(;day<=6;day++)await generation(state,model,day,undefined,CAP);
+ for(;day<=6;day++)await generation(state,model,day,'frozen',CAP);
  const backlogAtStart=[...model.active.values()].filter(seen=>!seen).length,activeAtStart=model.active.size;
  assert.ok(backlogAtStart>200,'a frozen period piled up a backlog: '+backlogAtStart);
  // The flag is set. Day 7 is the first bounded commit.
@@ -128,7 +128,7 @@ async function generation(state,model,day,mode,cap){
  const state=world(),model={active:new Map()};
  await bootstrap(state,0,scanOf(0));
  for(const key of keysOf(scanOf(0)))model.active.set(key,true);
- for(let day=1;day<=4;day++)await generation(state,model,day,undefined,CAP);
+ for(let day=1;day<=4;day++)await generation(state,model,day,'frozen',CAP);
  const step=await generation(state,model,5,'bounded',100000);
  assert.equal(step.plan.backlog,0);assert.ok(!('drain' in step.doc));
  assert.ok(setEquals(new Set(step.doc.items.map(item=>item.key)),keysOf(scanOf(5))),'with a large cap the active ledger is the scan at once');
@@ -141,7 +141,7 @@ async function generation(state,model,day,mode,cap){
   const state=world(),model={active:new Map()};
   await bootstrap(state,0,scanOf(0));
   for(const key of keysOf(scanOf(0)))model.active.set(key,true);
-  for(let day=1;day<=5;day++)await generation(state,model,day,undefined,CAP);
+  for(let day=1;day<=5;day++)await generation(state,model,day,'frozen',CAP);
   await generation(state,model,6,'bounded',CAP);
   return {state,model};
  };
@@ -174,7 +174,7 @@ async function generation(state,model,day,mode,cap){
  const state=world(),model={active:new Map()};
  await bootstrap(state,0,scanOf(0));
  for(const key of keysOf(scanOf(0)))model.active.set(key,true);
- for(let day=1;day<=5;day++)await generation(state,model,day,undefined,CAP);
+ for(let day=1;day<=5;day++)await generation(state,model,day,'frozen',CAP);
  await generation(state,model,6,'bounded',CAP);
  context.ledgerDrainCap=()=>CAP;
  const stable=()=>JSON.stringify({pointer:state.bkt.json(POINTER),d1:d1Counts(state.file),writes:state.bkt.puts.filter(key=>key!=='sync.json'&&key!==POINTER).length,published:state.published.programmeRunId});
@@ -201,7 +201,7 @@ async function generation(state,model,day,mode,cap){
  const state=world(),model={active:new Map()};
  await bootstrap(state,0,scanOf(0));
  for(const key of keysOf(scanOf(0)))model.active.set(key,true);
- for(let day=1;day<=6;day++)await generation(state,model,day,undefined,CAP);
+ for(let day=1;day<=6;day++)await generation(state,model,day,'frozen',CAP);
  context.ledgerDrainCap=()=>CAP;
  const collect=context.collectLedgerDecisions;
  context.collectLedgerDecisions=async(...args)=>{const out=await collect(...args);seen.push(out.departures.length);return out;};

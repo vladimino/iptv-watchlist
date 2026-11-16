@@ -954,6 +954,10 @@ export const FILES={
  "lifecycle-parity.mjs": {
   "suite": "core"
  },
+ "ledger-mode-fixture.mjs": {
+  "suite": "support",
+  "note": "Helper that marks an offline env as isolated so full/frozen ledger modes can be exercised without the retired production binding."
+ },
  "limbo-inventory.mjs": {
   "suite": "core"
  },

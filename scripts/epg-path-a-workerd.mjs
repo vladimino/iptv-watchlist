@@ -91,7 +91,6 @@ export async function measure({baseline,departures,returns}){
  const make=()=>new Miniflare(Object.assign(convertV4MiniflareOptions({
   modules:true,scriptPath:script,modulesRoot:work,compatibilityDate:'2026-10-18',compatibilityFlags:['nodejs_compat'],
   d1Databases:{DB:'path-a-db'},r2Buckets:{BUCKET:'path-a-bucket'},
-  bindings:{DISCOVERY_LEDGER_MODE:'bounded'},
  }),{resourcePersistencePath:persist}));
  // 1. let Miniflare create its local D1 file, then replace it with the baseline database (a plain sqlite file of the same schema and the published ledger).
  let mf=make();

@@ -20,6 +20,7 @@ import vm from 'node:vm';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {REPO,directoryBase,loadWorker,overlayStore} from './discovery-ledger-offline.mjs';
+import {withLedgerMode} from '../tests/ledger-mode-fixture.mjs';
 
 const BASE=Date.UTC(2026,10,1,12),DAY=86400000;
 const run=day=>'00000000-0000-4000-8000-'+String(day).padStart(12,'0');
@@ -32,7 +33,7 @@ async function commit(store,day,mode,latest,cap=null){
  const context=loadWorker(),id=run(day);
  if(cap!==null)context.ledgerDrainCap=()=>cap;
  await store.put('sync.json',JSON.stringify({runId:id,stage:'epg'}));
- await vm.runInContext('publishGenerationWithLedger',context)({BUCKET:store,...(mode?{DISCOVERY_LEDGER_MODE:mode}:{})},id,latest,{programmeRunId:id},{'programme.json':{runId:id,films:[]},'discovered-films.json':{}});
+ await vm.runInContext('publishGenerationWithLedger',context)(withLedgerMode({BUCKET:store},mode||'full'),id,latest,{programmeRunId:id},{'programme.json':{runId:id,films:[]},'discovered-films.json':{}});
 }
 async function build(dir,{total,seen,archived,churn}){
  // Day 0: one full ledger of total + archived observations. Day 1, bounded: the scan is the first `total`, so `archived` depart

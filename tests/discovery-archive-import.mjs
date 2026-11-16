@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
+import {withLedgerMode} from './ledger-mode-fixture.mjs';
 
 function makeStore(){
  const records=new Map(),etags=new Map(),gets=[],puts=[];let revision=0;
@@ -43,7 +44,7 @@ function scan(day,universe=100){
 }
 const runId=day=>'00000000-0000-4000-8000-'+String(day).padStart(12,'0');
 async function commit(store,day,mode,{expectThrow=false,latest=scan(day),id=runId(day)}={}){
- const env={BUCKET:store,DISCOVERY_LEDGER_MODE:mode};
+ const env=withLedgerMode({BUCKET:store},mode);
  store.set('sync.json',{runId:id,stage:'epg',updatedAt:new Date(BASE+day*DAY).toISOString()});
  const files={'discovered-films.json':{},'programme.json':{runId:id,films:[],updatedAt:new Date(BASE+day*DAY).toISOString()}};
  try{await publish(env,id,latest,{programmeRunId:id,updatedAt:new Date(BASE+day*DAY).toISOString()},files);}

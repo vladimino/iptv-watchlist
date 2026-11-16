@@ -11,6 +11,7 @@ import vm from 'node:vm';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {REPO,directoryBase,loadWorker,overlayStore} from './discovery-ledger-offline.mjs';
+import {withLedgerMode} from '../tests/ledger-mode-fixture.mjs';
 
 const SEEN=22000,BASE=Date.UTC(2026,9,27,12);
 const P_RUN='00000000-0000-4000-8000-000000000001',R_RUN='00000000-0000-4000-8000-000000000002';
@@ -47,7 +48,7 @@ async function buildFixtures(dir,ledgerBytes){
  const fullBytes=fs.statSync(path.join(fullDir,encodeURIComponent('epg/discovery-latest.json'))).size;
  // The bounded store: what one bounded commit of P's own scan makes from the full store (the AIR-222 split, offline).
  const boundedDir=path.join(dir,'bounded');fs.cpSync(fullDir,boundedDir,{recursive:true});
- const store=overlayStore(null,boundedDir),env={BUCKET:store,DISCOVERY_LEDGER_MODE:'bounded'};
+ const store=overlayStore(null,boundedDir),env={BUCKET:store};
  await store.put('sync.json',JSON.stringify({runId:P_RUN,stage:'epg'}));
  await store.put('epg/published-generation.json',JSON.stringify({programmeRunId:'00000000-0000-4000-8000-000000000000',phase:'published'}));
  await vm.runInContext('publishGenerationWithLedger',context)(env,P_RUN,scanOf(total,0),{programmeRunId:P_RUN},{'discovered-films.json':catalog,'programme.json':programme});
@@ -58,7 +59,7 @@ async function buildFixtures(dir,ledgerBytes){
 async function child(scenario,dir){
  const [mode,step]=scenario.split('-'),overlay=fs.mkdtempSync(path.join(dir,'run-'));
  try{
-  const context=loadWorker(),store=overlayStore(directoryBase(path.join(dir,mode)),overlay),env={BUCKET:store,DISCOVERY_LEDGER_MODE:mode,TMDB_API_READ_ACCESS_TOKEN:'t',TMDB_REQUEST_INTERVAL_MS:0};
+  const context=loadWorker(),store=overlayStore(directoryBase(path.join(dir,mode)),overlay),env=withLedgerMode({BUCKET:store,TMDB_API_READ_ACCESS_TOKEN:'t',TMDB_REQUEST_INTERVAL_MS:0},mode);
   const total=JSON.parse(fs.readFileSync(path.join(dir,'shape.json'),'utf8')).total;
   if(step==='commit'){
    await store.put('sync.json',JSON.stringify({runId:R_RUN,stage:'epg'}));

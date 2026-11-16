@@ -2,15 +2,17 @@
 
 **Recovery proportionality:** a failed or deferred **single discovery observation** is normally recovered by the published next eligible chunk, not by replaying the entire discovery archive, exporting a full R2 snapshot or rebuilding a global ledger. These expensive procedures below are reserved for actual archive corruption, authority rollback or bulk split. Preserve the resolver lease, generation fencing, owner authorization for explicit runs and the rule of one chunk per request; they prevent two writers from overwriting the same decision map. A safe status read is not a reason to reset a lease or force a whole chunk early. See [risk classification](../process/agent-workflow.md#risk-proportional-operational-safeguards).
 
-This page describes how to operate the discovery ledger modes of [ADR 0034](../adr/0034-bounded-discovery-ledger.md), implemented in [AIR-220](https://trello.com/c/uPvMc5ww). It does not grant permission for anything. A deploy changes nothing by itself: the default `DISCOVERY_LEDGER_MODE` is `full`, the unchanged single growing ledger. Setting `bounded`, splitting the existing production ledger and any rollback are separate owner-approved operations ([AIR-221](https://trello.com/c/9ZiVygrd) rehearsal, [AIR-222](https://trello.com/c/9Y4G9DG6) rollout).
+This page describes how to operate the bounded discovery archive of [ADR 0034](../adr/0034-bounded-discovery-ledger.md) after [ADR 0155](../adr/0155-retire-discovery-ledger-mode.md) retired the production `DISCOVERY_LEDGER_MODE` switch. It does not grant permission for anything. A deploy does not delete the leftover Cloudflare binding. The production EPG seal always archives as `bounded`. `full` and `frozen` remain only on the isolated EPG diagnostic canary and in offline fixtures.
 
-## What each mode does at the EPG commit
+## What the EPG commit writes
 
-| `DISCOVERY_LEDGER_MODE` | Archive absent | Archive present (`epg/discovery-archive/v1/current.json` exists) |
+Production always takes the **bounded** row. The other rows are the isolated diagnostic canary and historical rollback language of ADR 0034; they are not selected by a Worker binding.
+
+| Mode (diagnostic / historical) | Archive absent | Archive present (`epg/discovery-archive/v1/current.json` exists) |
 | --- | --- | --- |
-| unset or `full` | Single growing ledger, as before AIR-220 | Acts as `frozen`; never rebuilds the full ledger in the Worker |
+| `full` | Single growing ledger | Acts as `frozen`; never rebuilds the full ledger in the Worker |
 | `frozen` | Same as `full` (no marker written) | No new archive write. Departures stay in the active ledger; re-entries and counts still use the archive |
-| `bounded` | The first commit creates the archive from the departures of the previous ledger | Active ledger = the latest scan's candidates **plus**, while a backlog remains, the part of it that this commit does not archive yet ([ADR 0112](../adr/0112-bounded-ledger-departure-budget.md): the daily flow is archived at once, at most 4,000 observations of the backlog a commit); departures go into new write-once segment versions, a manifest version, then a CAS of `current.json`; then the generation is published |
+| `bounded` (production) | The first commit creates the archive from the departures of the previous ledger | Active ledger = the latest scan's candidates **plus**, while a backlog remains, the part of it that this commit does not archive yet ([ADR 0112](../adr/0112-bounded-ledger-departure-budget.md): the daily flow is archived at once, at most 4,000 observations of the backlog a commit); departures go into new write-once segment versions, a manifest version, then a CAS of `current.json`; then the generation is published |
 
 The commit runs this under the discovery lease. It stops without publishing if:
 
@@ -91,7 +93,7 @@ This is a production write of one decision. Agents do not run it. The owner does
 
 ## Rollback
 
-- **R1 (operational):** set `DISCOVERY_LEDGER_MODE=frozen`. Nothing is rebuilt or deleted, and the active ledger grows again from the next commit. Removing the value has the same effect while an archive exists.
+- **R1 (stop archiving):** a code revert to a Worker that still reads `DISCOVERY_LEDGER_MODE`, with that binding restored to `frozen` (or absent while an archive exists). On the retired Worker a leftover `frozen` or `full` binding is ignored and the seal stays bounded ([ADR 0155](../adr/0155-retire-discovery-ledger-mode.md)). Nothing is rebuilt or deleted.
 - **R2 (code revert to an archive-unaware Worker):** only after an offline, fenced reconstruction:
   1. take a consistent snapshot;
   2. rebuild the full ledger locally, checking payload parity against active ∪ archive;
@@ -151,9 +153,11 @@ The production split replaces the Worker's own first bounded commit, which would
   The verdict is in `report.json` (exit 0 GO, exit 3 NO-GO). On a production-sized snapshot it takes a few minutes, needs about 1.5 GB of RAM, and with `--heap` about 3 minutes more. See the dated [rehearsal evidence](../evidence/discovery-ledger-split-rehearsal-2026-10-27.md).
 - **Privacy.** Keys, titles and object bytes stay in the private output directory. Only `report.json` aggregates go to the repository or Trello.
 
-## Switching `frozen` to `bounded` under D1 authority
+## Switching `frozen` to `bounded` under D1 authority (historical)
 
-This is the plan for one operation, written so that it can be approved or refused as a whole. It grants nothing: setting `DISCOVERY_LEDGER_MODE=bounded` is a production writer change and needs its own operation-specific owner approval. The memory and drain figures are in the [AIR-429 evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md); the earlier rehearsal is [AIR-426](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md); the rule is [ADR 0112](../adr/0112-bounded-ledger-departure-budget.md) (Accepted as a design; it does not authorize the switch).
+Production already seals as `bounded` and the Worker variable is retired ([ADR 0155](../adr/0155-retire-discovery-ledger-mode.md)). The steps below are the earlier owner-approved switch; they are not a current flag operation.
+
+This is the plan for one operation, written so that it can be approved or refused as a whole. It granted nothing: setting `DISCOVERY_LEDGER_MODE=bounded` was a production writer change and needed its own operation-specific owner approval. The memory and drain figures are in the [AIR-429 evidence](../evidence/discovery/air-429-bounded-drain-2026-11-11.md); the earlier rehearsal is [AIR-426](../evidence/discovery/air-426-bounded-transition-rehearsal-2026-11-11.md); the rule is [ADR 0112](../adr/0112-bounded-ledger-departure-budget.md) (Accepted as a design; it does not authorize the switch).
 
 **What it does.** Nothing is switched by a deploy. With the flag set, every EPG commit archives the observations that left the scan since the previous generation (the daily flow) and at most 4,000 of the backlog the `frozen` ledger collected (26,491 on 10 November), lowest keys first. The rest stay active and not seen. The generation document carries `"drain":{"backlog":N,"cap":4000}` until the backlog is gone, and the status reports it in `archive.drain`. The backlog of B drains in at most `ceil(B / 4000)` commits (7 for 26,491), one per natural EPG publication, whatever the daily flow. Nothing is deleted.
 

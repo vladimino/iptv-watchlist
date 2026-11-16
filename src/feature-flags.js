@@ -7,7 +7,8 @@ const FEATURE_FLAG_REGISTRY_VERSION=1;
 const FEATURE_FLAG_RAW_MAX=200;
 const FEATURE_FLAGS=[
  {name:'LIFECYCLE_LOCALIZATION',modes:['off','shadow','on'],default:'off',tokens:['on:metadata','shadow:metadata'],retiredTokens:['on:epg','on:programme','on:watchlist','shadow:epg','shadow:programme','shadow:watchlist'],list:true,effective:env=>metadataLocalizationMode(env),scope:'metadata'},
- {name:'DISCOVERY_LEDGER_MODE',modes:['full','bounded','frozen'],default:'full',tokens:['full','bounded','frozen'],effective:env=>discoveryLedgerMode(env),note:'full acts as frozen once epg/discovery-archive/v1/ exists; this readout does not read storage'},
+ // Retired (AIR-232 / ADR 0155): production seal is always bounded; leftover bindings are ignored.
+ {name:'DISCOVERY_LEDGER_MODE',modes:[],default:null,tokens:['full','bounded','frozen'],retired:true,effective:()=>null,note:'inert; the EPG diagnostic canary still chooses full/frozen/bounded on its isolated env'},
  // Retired (AIR-325): Discovery always runs as the Cloudflare Workflow; the binding is ignored.
  {name:'DISCOVERY_EXECUTOR',modes:[],default:null,tokens:['external','workflow'],retired:true,effective:()=>null},
  // Retired: a migrated ratings run's per-film removal lookup does not read this binding (ADR 0077).
