@@ -252,6 +252,16 @@ const drama={id:'tmdb_72',tmdbId:'72',canonicalIdentity:'tmdb:72',title:'Drama',
 await Authority.replaceCatalog(env,{tmdb_70:docFilm,tmdb_71:concertFilm,tmdb_72:drama});
 const refusedDrama=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_72',lease:again.lease});
 assert.equal(refusedDrama.outcome,'not_eligible');
+const ambiguousLive={id:'tmdb_84',tmdbId:'84',canonicalIdentity:'tmdb:84',title:'Band Live',year:2013,runtime:90,genres:['музыка']};
+await Authority.replaceCatalog(env,{tmdb_70:docFilm,tmdb_71:concertFilm,tmdb_72:drama,tmdb_84:ambiguousLive});
+const previewAmbiguous=await Authority.readPolicyExcludePreview(env,'tmdb_84');
+assert.equal(previewAmbiguous.policy,'ambiguous');
+assert.equal(previewAmbiguous.available,true);
+assert.equal(previewAmbiguous.reason,'eligible');
+const excludedAmbiguous=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_84',lease:again.lease});
+assert.equal(excludedAmbiguous.outcome,'written');
+assert.equal(excludedAmbiguous.policy,'ambiguous');
+assert.equal(one(live.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_84'").state,'superseded');
 const previewDoc=await Authority.readPolicyExcludePreview(env,'tmdb_70');
 assert.equal(previewDoc.available,true);
 assert.equal(previewDoc.policy,'documentary');

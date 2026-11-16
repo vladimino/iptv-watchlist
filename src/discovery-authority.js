@@ -57,6 +57,7 @@ function catalogPolicyKind(film,observation){
  const music=ids.has(10402)||names.some(name=>name==='music'||name==='музыка'||name==='музыкальный'||name==='музика');
  const strong=/\blive at\b|\blive from\b|\bin concert\b|concert film|concert recording|filmed live|live performance|recorded live|performing live|запись концерта|запись выступления|живой концерт|концертн/.test(titles+' '+overview)||/\blive in\b/.test(titles);
  if(music&&strong)return 'concert';
+ if(music&&/\blive\b|\bconcert\b|\bконцерт\b/.test(titles))return 'ambiguous';
  return null;
 }
 function rejectedPolicyDecision(previous,tmdbId){
@@ -1915,7 +1916,7 @@ async function policyExcludePlan(env,filmId){
  const statements=policyExcludeStatementCount(decisions.length);
  let reason='eligible';
  if(row.state!=='current')reason='already_applied';
- else if(policy!=='documentary'&&policy!=='concert')reason='not_policy_excluded';
+ else if(policy!=='documentary'&&policy!=='concert'&&policy!=='ambiguous')reason='not_policy_excluded';
  else if(linked.length)reason='linked_admission';
  else if(statements>STATEMENT_CAP||decisions.length>POLICY_EXCLUDE_CAP)reason='bounded';
  return {
