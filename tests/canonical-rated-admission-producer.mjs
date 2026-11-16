@@ -129,6 +129,67 @@ const KEYS=['film_admission','film_credits','film_facts','film_metadata','film_m
 }
 
 {
+ const file=database('open');
+ sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:daU4',1,'tmdb_tv:64099','TV','"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:daU4','letterboxd','daU4',1,0,NULL),('film:daU4','tmdb','378779',0,0,NULL);INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES ('film:daU4','watchlist_fact',1,'{}','prior','2026-11-13T00:00:00.000Z','2026-11-13T00:00:00.000Z');");
+ const env=envOf(file);
+ assert.equal(await resolveExistingRetentionFilm(env,{lid:'daU4',tmdbId:'378779'}),'film:daU4');
+ const first=await applyRatedAdmissionRetention(env,{event:'wl:tv',retentions:[{lid:'daU4',tmdbId:'378779',watchlist:true,observedAt:T,evidence:{scanId:'s'}}],now:()=>T});
+ assert.equal(first.state,'complete');
+ assert.equal(one(file,"SELECT canonical_identity FROM film WHERE id='film:daU4'"),'tmdb_tv:64099');
+ assert.equal(one(file,"SELECT trusted FROM film_external_id WHERE film_id='film:daU4' AND scheme='tmdb'"),0);
+ assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:daU4'"),1);
+ const replay=await applyRatedAdmissionRetention(env,{event:'wl:tv2',retentions:[{lid:'daU4',tmdbId:'378779',watchlist:true,observedAt:T,evidence:{scanId:'s'}}],now:()=>T});
+ assert.ok(replay.noop>=1);
+ assert.equal(one(file,"SELECT COUNT(*) FROM film WHERE id LIKE 'film:tmdb:%'"),0);
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:otherTmdb',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:otherTmdb','tmdb','1',1,0,NULL),('film:daU4','letterboxd','xLid',1,0,NULL);");
+ await assert.rejects(resolveExistingRetentionFilm(env,{lid:'xLid',tmdbId:'1'}),e=>e.code==='identity_collision');
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:conf',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:conf','letterboxd','cLid',1,0,NULL),('film:conf','tmdb','2',0,1,NULL);");
+ await assert.rejects(resolveExistingRetentionFilm(env,{lid:'cLid',tmdbId:'2'}),e=>e.code==='identity_collision');
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:nolid',1,'"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:nolid','tmdb','3',0,0,NULL);");
+ await assert.rejects(resolveExistingRetentionFilm(env,{lid:'missingLid',tmdbId:'3'}),e=>e.code==='identity_collision');
+ sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ('film:from',1,'"+T+"'),('film:to',1,'"+T+"');INSERT INTO film_redirect (from_id,to_film_id,at) VALUES ('film:from','film:to','"+T+"');INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:from','letterboxd','redir',1,0,NULL),('film:from','tmdb','4',0,0,NULL);");
+ await assert.rejects(resolveExistingRetentionFilm(env,{lid:'redir',tmdbId:'4'}),e=>e.code==='film_person_redirect');
+}
+
+{
+ const file=database('open');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const listed=[];
+ for(let i=0;i<10;i++){
+  const lid='n'+String(i).padStart(2,'0'),tmdb=String(5000+i);
+  listed.push({id:lid,tmdbId:tmdb});
+  seedFilm(file,'film:tmdb:'+tmdb,tmdb,lid);
+  await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:lid,tmdb});
+ }
+ for(const [lid,tmdb] of [['g97G','11'],['3tCe','12'],['1IUo','13']]){
+  listed.push({id:lid,tmdbId:tmdb});
+  sqlite(file,"INSERT INTO film (id,contract_version,canonical_identity,updated_at) VALUES ("+q('film:'+lid)+",1,'tmdb_tv:1',"+q(T)+");INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q('film:'+lid)+",'letterboxd',"+q(lid)+",1,0,NULL),("+q('film:'+lid)+",'tmdb',"+q(tmdb)+",0,0,NULL);");
+  await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:lid,tmdb});
+ }
+ const LetterboxdFacts={applyWatchlistScan:async(...args)=>Facts.applyWatchlistScan(...args)};
+ const workerCtx=loadScanWorker(env,LetterboxdFacts);
+ const run={runId:'scan-live',stage:'seal',watchlistObservedAt:T,seal:{phase:'finalize',units:{},attempts:{}},events:[]};
+ const report={films:listed,watchlistCount:listed.length,updatedAt:T,runId:'scan-live'};
+ workerCtx.run=run;
+ await env.BUCKET.put('sync.json',JSON.stringify(run));
+ await putPayload(env,'scan-live',report);
+ const first=await vm.runInContext('sealFinalizeStep(env,run)',workerCtx);
+ assert.equal(first.discovery.nextAction,'continue');
+ assert.equal(run.error,undefined);
+ assert.equal(run.ratedAdmissionScan.cursor,12);
+ assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:g97G'"),1);
+ assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:3tCe'"),1);
+ const second=await vm.runInContext('sealFinalizeStep(env,run)',workerCtx);
+ assert.equal(run.seal.phase,'queue');
+ assert.equal(second.discovery.nextAction,'continue');
+ assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:1IUo'"),1);
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),13);
+}
+
+{
  const file=database('held');
  await assert.rejects(()=>applyRatedAdmissionRetention(envOf(file),{event:'x',admissions:[{receiptKey:'tmdb_1',receipt:receipt(1)}],now:()=>T}),e=>e.code==='film_person_held');
 }

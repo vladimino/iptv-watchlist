@@ -31,6 +31,16 @@ function typedClaim(rows,scheme,value){
  return {conflict:false,filmId:owner};
 }
 
+function sameFilmUntrustedTmdb(parts,tmdb,lidFilm){
+ if(!lidFilm||!TMDB.test(tmdb))return false;
+ const pool=(parts||[]).filter(row=>row.scheme==='tmdb'&&String(row.value)===String(tmdb));
+ if(!pool.length)return false;
+ if(pool.some(row=>Number(row.conflicting)===1))return false;
+ if(pool.some(row=>Number(row.trusted)===1&&row.film_id!==lidFilm))return false;
+ if(pool.some(row=>row.film_id!==lidFilm))return false;
+ return pool.every(row=>Number(row.trusted)!==1);
+}
+
 export async function resolveExistingRetentionFilm(env,{id,lid,tmdbId}={}){
  const db=database(env);
  if(!db)throw failed('film_person_unavailable');
@@ -43,9 +53,12 @@ export async function resolveExistingRetentionFilm(env,{id,lid,tmdbId}={}){
  if(spelled)parts.push(...await many(db,'SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=?',[spelled]));
  const tmdbClaim=TMDB.test(tmdb)?typedClaim(parts,'tmdb',tmdb):{conflict:false,filmId:null};
  const lidClaim=letterboxd?typedClaim(parts,'letterboxd',letterboxd):{conflict:false,filmId:null};
- if(tmdbClaim.conflict||lidClaim.conflict)throw failed('identity_collision');
- if(tmdbClaim.filmId&&lidClaim.filmId&&tmdbClaim.filmId!==lidClaim.filmId)throw failed('identity_collision');
- let filmId=tmdbClaim.filmId||lidClaim.filmId||null;
+ if(lidClaim.conflict)throw failed('identity_collision');
+ if(tmdbClaim.conflict){
+  if(!sameFilmUntrustedTmdb(parts,tmdb,lidClaim.filmId))throw failed('identity_collision');
+ }
+ else if(tmdbClaim.filmId&&lidClaim.filmId&&tmdbClaim.filmId!==lidClaim.filmId)throw failed('identity_collision');
+ let filmId=lidClaim.filmId||tmdbClaim.filmId||null;
  if(spelled){
   if(filmId&&filmId!==spelled)throw failed('identity_collision');
   if(!filmId&&await one(db,'SELECT id FROM film WHERE id=?',[spelled]))filmId=spelled;
