@@ -38,14 +38,22 @@ export const POLICY_EXCLUDE_CAP=Math.floor((STATEMENT_CAP-POLICY_EXCLUDE_OVERHEA
 function policyExcludeStatementCount(n){return POLICY_EXCLUDE_OVERHEAD+POLICY_EXCLUDE_STATEMENTS_PER*n;}
 const POLICY_DECISIONS_SQL="SELECT observation_key, status, tmdb_id, film_id, decision_hash, payload_json FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=? ORDER BY observation_key";
 const POLICY_FILM_ID=/^tmdb_[1-9]\d{0,11}$/;
+function storedOverview(film){
+ return typeof film?.overview==='string'&&film.overview?film.overview:(typeof film?.synopsis==='string'?film.synopsis:'');
+}
 function catalogPolicyKind(film,observation){
- if(typeof admissionPolicy==='function')return admissionPolicy(film,observation);
+ if(!film||typeof film!=='object')return null;
+ if(typeof filmAdmissionInput==='function'&&typeof admissionPolicy==='function'){
+  const mapped=filmAdmissionInput(film);
+  return mapped.movie?admissionPolicy(mapped.movie,observation||mapped.observation):null;
+ }
+ if(typeof admissionPolicy==='function')return admissionPolicy({...film,overview:storedOverview(film)},observation);
  const names=[...(film?.genres||[])].map(value=>String(typeof value==='string'?value:(value&&value.name)||'').normalize('NFKC').toLowerCase());
  const ids=new Set([...(film?.genreIds||[])].map(Number).filter(id=>id>0));
  for(const value of film?.genres||[]){const id=typeof value==='number'?value:value&&typeof value==='object'?Number(value.id):NaN;if(id>0)ids.add(id);}
  if(ids.has(99)||names.some(name=>name==='documentary'||name==='документальный'||name==='документальний'))return 'documentary';
  const titles=String([observation?.normalizedTitle,observation?.title,film?.title,film?.original,...(film?.aliases||[])].filter(Boolean).join(' ')).normalize('NFKC').toLowerCase();
- const overview=String(film?.overview||'').normalize('NFKC').toLowerCase();
+ const overview=String(storedOverview(film)).normalize('NFKC').toLowerCase();
  const music=ids.has(10402)||names.some(name=>name==='music'||name==='музыка'||name==='музыкальный'||name==='музика');
  const strong=/\blive at\b|\blive from\b|\bin concert\b|concert film|concert recording|filmed live|live performance|recorded live|performing live|запись концерта|запись выступления|живой концерт|концертн/.test(titles+' '+overview)||/\blive in\b/.test(titles);
  if(music&&strong)return 'concert';
