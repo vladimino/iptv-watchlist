@@ -2,6 +2,8 @@
 // persistence as the v5 runner, with the prediction domain in D1 mode as production runs it. Offline: a sqlite D1 stand-in and an in-memory R2. No Cloudflare,
 // TMDB, model or production call. `batch_submit`, the Scheduled Task and every activation are other deliveries; nothing here generates a prediction.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -468,17 +470,30 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200,JSON.stringify(v5.data).slice(0,160));assert.ok(!('protocol' in v5.data)||v5.data.protocol!=='batch_v2','a v5 start is not a v2 run');
 }
 
-// AIR-510: films and profile serialize before contract, so a prefix truncation still holds every film input.
+// AIR-510: a truncated ~42 KiB start text is not a usable manifest; the owned run readback is, without a second start.
 {
  const w=await ready(5);await reconcile(w);
  const r=await batch(w,{manifestSize:5});assert.equal(r.status,200);
- const text=JSON.stringify(r.data);
- const filmsAt=text.indexOf('"films":'),profileAt=text.indexOf('"profile":'),contractAt=text.indexOf('"contract":');
- assert.ok(filmsAt>0&&profileAt>filmsAt&&contractAt>profileAt,'serialized order is films, profile, contract');
- const ids=r.data.films.map(f=>f.filmId);assert.equal(ids.length,5);
- const prefix=text.slice(0,contractAt);
- for(const id of ids)assert.ok(prefix.includes('"'+id+'"'),id+' survives a drop of the trailing contract');
- assert.ok(prefix.includes('"body"'));
- try{JSON.parse(text.slice(0,Math.min(text.length-1,24000)));assert.fail('a mid-object slice must not parse as a complete manifest');}catch(error){assert.equal(error instanceof SyntaxError,true);}
+ const inflated={...r.data,profile:{...r.data.profile,body:{...r.data.profile.body,pad:'x'.repeat(Math.max(0,42115-JSON.stringify(r.data).length-40))}}};
+ const packed=JSON.stringify(inflated);assert.ok(packed.length>=40000,'a realistic ~42 KiB start payload');
+ const sliceAt=Math.min(packed.length-1,24000);
+ let parsed=null;try{parsed=JSON.parse(packed.slice(0,sliceAt));}catch{parsed=null;}
+ assert.equal(parsed,null,'a truncated ~42 KiB start text does not parse');
+ const fromText=w.ctx.parseBatchStartToolText(packed.slice(0,sliceAt));
+ assert.equal(fromText.ok,false);assert.equal(fromText.code,'truncated_manifest');
+ const stored=w.records.get('enrichment/batch-manifest/'+r.data.runId+'.json');
+ assert.ok(stored);assert.equal(stored.manifestHash,r.data.manifestHash);
+ assert.equal(w.ctx.usableBatchManifest(stored),true);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ w.ctx.__a={name:'prediction_batch_manifest',args:{runId:r.data.runId}};w.ctx.__env=w.env;
+ const read=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);
+ assert.equal(read.result.isError,undefined,JSON.stringify(read.result).slice(0,200));
+ assert.equal(read.result.structuredContent,undefined,'one MCP text copy, as batch_start');
+ const recovered=JSON.parse(read.result.content[0].text);
+ assert.equal(w.ctx.parseBatchStartToolText(read.result.content[0].text).ok,true);
+ assert.equal(recovered.runId,r.data.runId);assert.equal(recovered.lease.epoch,r.data.lease.epoch);assert.equal(recovered.manifestHash,r.data.manifestHash);
+ assert.equal(recovered.films.length,5);assert.ok(recovered.profile.body);assert.ok(recovered.contract.schema.contract.fingerprint.evidence);
+ for(const film of recovered.films){assert.ok(film.modelMetadata);assert.ok(r.data.films.some(f=>f.filmId===film.filmId));}
+ const second=await batch(w,{manifestSize:5});assert.equal(second.data.status,'already_running','readback is not a second start');
 }
 console.log('prediction-batch-start: ok');
