@@ -43,6 +43,10 @@ Code-only additive contract. Rollback is redeploy of the previous Worker. Alread
 - **Dated verification:** offline tests `tests/prediction-manifest-size.mjs`, `tests/scheduled-task-prompt-v2.mjs`; [evidence note](../evidence/prediction/air-463-manifest-size-complete-2026-11-13.md)
 - **Uncertainty:** production latency and Task throughput under four hourly invocations remain for AIR-451
 
+## Addendum 2026-11-16 — one client-visible copy (AIR-510)
+
+A live Scheduled Task with `manifestSize=5` created the run and then stopped with `external_termination` because the full tool result did not fit the Task working context. The Worker ceiling (256 KiB) had accepted the answer. Two copies of the same JSON (`content[0].text` and `structuredContent`) and the full schema document (profile-schema, prediction-schema and rules sections the prompt does not read) were the extra bytes. The MCP result for a successful `prediction_batch_start` now sends the JSON once, as text. `contract.schema` in that JSON keeps `contract`, the fingerprint vocabulary and `schemaDigest` of the full document. Film `modelMetadata`, stored fingerprints and `profile.body` are unchanged. `queue_changed` adds `cause` (`stale`, `revision` or `manifest`) and still does not retry. This addendum authorizes no Task edit and no production start.
+
 ## Follow-ups
 
 - [AIR-451](https://trello.com/c/NN3N6kRp) controlled cutover of hourly Tasks to batch v2 with `manifestSize=5`

@@ -2337,7 +2337,10 @@ async function buildBatchManifest(env,{profile,items,runId,lease,dryRun=false,ex
  const films=items.map(item=>({filmId:item.filmId,lane:item.lane,plan:item.plan,modelMetadata:batchCompact(modelMetadata(item.film)),...(item.plan==='prediction_only'?{fingerprint:batchCompact(item.state.fingerprint)}:{})}));
  // A dry-run manifest names each film's input so a later dry-run submit can tell whether the film's input is still the manifest's.
  if(dryRun)for(const film of films)film.inputHash=await batchFilmInputHash(film);
- const contract={fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,registryDigest,schema};
+ // The Scheduled Task keeps one tool result in its working context (AIR-510). The full schema document stays on GET /api/enrichment/schema and in the manifest hash.
+ // The answer keeps the path the prompt reads (`schema.contract`) and the closed fingerprint vocabulary, and names the full document by schemaDigest.
+ const fp=schema.fingerprint||{};
+ const contract={fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,registryDigest,schema:{schemaDigest:await contentHash(schema),contract:schema.contract,fingerprint:{fingerprintSchemaVersion:fp.fingerprintSchemaVersion,plotMechanics:fp.plotMechanics,execution:fp.execution,requiredExecution:fp.requiredExecution,moodLabels:fp.moodLabels,moodVocabulary:fp.moodVocabulary,moodMapping:fp.moodMapping}}};
  const profileBlock={version:profile.version,hash:profile.profileHash,lineage:Array.isArray(profile.lineage)?profile.lineage:[],body:profile.profile};
  const manifestHash=await contentHash({manifestFormat:BATCH_MANIFEST_FORMAT,profileHash:profile.profileHash,contract:{...contract,schema:await contentHash(schema)},films:films.map(f=>({filmId:f.filmId,lane:f.lane,plan:f.plan,modelMetadata:f.modelMetadata,fingerprintHash:f.fingerprint?.fingerprintHash||null}))});
  const body={status:'running',runId,protocol:BATCH_PROTOCOL,dryRun,lease:{expiresAt:lease.expiresAt,ttlMs:RUNNER_LEASE_TTL,epoch:lease.epoch},limits:batchLimits(),manifestFormat:BATCH_MANIFEST_FORMAT,manifestHash,profile:profileBlock,contract,films,...extra};
@@ -2450,7 +2453,7 @@ async function batchStartWork(env,body,requestId,tally){
   catch(error){if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
   // The preflight is repeated on the refreshed queue and is the baseline from here on. An overflow now has the refresh as its only effect.
   pre=await timedStage(env,'preflight_refreshed',()=>batchPreflight(env,body,tally));if(pre.response)return pre.response;
-  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true});
+  if(pre.stale)return batchBlocked('queue_changed',{queueRefreshed:true,cause:'stale'});
   if(pre.bytes>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf(pre,{queueRefreshed:true,...(queueSettled?{queueSettled}:{})});
  }
  // After the refresh the baseline can be idle too (the queue was stale, or every selected film was already current).
@@ -2473,7 +2476,7 @@ async function batchStartWork(env,body,requestId,tally){
   forgetAuthority(env);
   const again=await timedStage(env,'preflight_lease',()=>batchPreflight(env,body,tally));
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
-  if(again.stale||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{...(queueRefreshed?{queueRefreshed:true}:{})});}
+  if(again.stale||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
   answer={...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})};
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}

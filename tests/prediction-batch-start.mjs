@@ -35,7 +35,10 @@ const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=j
  assert.equal(m.profile.version,1);assert.equal(m.profile.hash,'p');assert.deepEqual(m.profile.body,{ratingScale:'Half stars'});assert.ok(Array.isArray(m.profile.lineage));
  // contract: the versions and the same schema document GET /api/enrichment/schema serves
  const schema=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/schema'),w.env)).json();
- assert.deepEqual(m.contract.schema,schema,'the manifest carries the schema document the Worker validates with');
+ assert.deepEqual(m.contract.schema.contract,schema.contract,'the manifest keeps the schema contract the prompt checks');
+ assert.deepEqual(m.contract.schema.fingerprint.plotMechanics,schema.fingerprint.plotMechanics);
+ assert.equal(m.contract.schema.schemaDigest.length,64);
+ assert.equal(m.contract.schema.profile,undefined,'the profile schema section is not repeated inside the manifest');
  assert.equal(m.contract.fingerprintSchemaVersion,w.ctx.FINGERPRINT_SCHEMA_VERSION??m.contract.fingerprintSchemaVersion);
  for(const key of ['fingerprintSchemaVersion','fingerprintPromptVersion','predictionPromptVersion','registryDigest'])assert.ok(m.contract[key]!==undefined&&m.contract[key]!==null,key);
  // every film: id, lane, plan and its full metadata (null fields are absent, nothing else is shortened)
@@ -312,6 +315,15 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  const lease=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_lease WHERE name='runner'")[0].d);assert.equal(lease.expiresAt,0,'the lease was released');assert.equal(lease.epoch,1,'only the acquire and the release happened');
  w.ctx.PredictionD1=original;
  const again=await batch(w);assert.equal(again.status,200,'the next start works on the changed queue');assert.equal(again.data.lease.epoch,2);
+}
+{
+ // A detailed advance-gate code after the refresh stays cause "stale" (AIR-510). The rebuilt queue is then stamped with another programme run, so the second preflight is programme_changed.
+ const w=await ready(8);await reconcile(w);
+ const programme=w.records.get('programme.json');w.records.set('programme.json',{...programme,runId:'p2'});
+ const batchFn=w.env.DB.batch.bind(w.env.DB);let armed=false;
+ w.env.DB.batch=async statements=>{const out=await batchFn(statements);if(!armed&&statements.some(s=>/prediction_queue/i.test(s.text)&&!/^\s*SELECT/i.test(s.text))){armed=true;sql(w.file,"UPDATE prediction_queue SET chunk_text=replace(chunk_text,'\"programmeRunId\":\"p2\"','\"programmeRunId\":\"p-stale\"')");}return out;};
+ const r=await batch(w);
+ assert.equal(r.status,409,JSON.stringify(r.data).slice(0,240));assert.equal(r.data.code,'queue_changed');assert.equal(r.data.queueRefreshed,true);assert.equal(r.data.cause,'stale');
 }
 {
  // (b2) the same write after the lease is taken
