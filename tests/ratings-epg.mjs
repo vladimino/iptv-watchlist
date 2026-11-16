@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
 // ADR 0074: the EPG commit never reads Diary. Unmigrated storage fails closed for every binding value. After the
-// migration the commit only enqueues removal references, durably and before it publishes, whatever the retired
+// migration the commit only enqueues removal references, durably, at completion (AIR-513), whatever the retired
 // RATINGS_PIPELINE binding holds, and requests nothing from Letterboxd for ratings.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
@@ -84,14 +84,17 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
  assert.equal(first.bucket.value('sync.json').removalRefs,undefined,'the start flushed the hand-over before replacing sync.json');
 }
 
-// 2. Active `separate`: the commit enqueues one reference per removed film to the run's removal event, before it
-// publishes, requests nothing for ratings, leaves no ratings marker and no hand-over in sync.json.
+// 2. Active `separate`: the commit enqueues one reference per removed film to the run's removal event after the
+// run completes (AIR-513: the reference key is the completion time, so it cannot be queued at scan time), requests
+// nothing for ratings, leaves no ratings marker and no hand-over in sync.json.
 {
  const order=[];
- const {bucket,net,replies,runId}=await lifecycle({extra:SEPARATE,prepare:({bucket})=>{migrated(bucket);const put=bucket.put.bind(bucket);bucket.put=async(key,...rest)=>{if(key===QUEUE||key==='epg/published-generation.json')order.push(key);return put(key,...rest);};}});
+ const {bucket,net,replies,runId}=await lifecycle({extra:SEPARATE,prepare:({bucket})=>{migrated(bucket);const put=bucket.put.bind(bucket);bucket.put=async(key,...rest)=>{if(key===QUEUE||key==='epg/published-generation.json'||String(key).startsWith('events/items/'))order.push(key);return put(key,...rest);};}});
  assert.equal(replies.at(-1).body.stage,'complete');assert.equal(replies.at(-1).body.ratingsPipeline,'separate');
  eq([net.diaryFetches(),net.memberFetches()],[[],[]],'no Diary page, no member page');
- eq(order.slice(0,2),[QUEUE,'epg/published-generation.json'],'the references are durable before the publish');
+ const publishedAt=order.indexOf('epg/published-generation.json'),queuedAt=order.indexOf(QUEUE);
+ assert.ok(publishedAt>=0&&queuedAt>publishedAt,'the programme is published before the removal queue is updated');
+ assert.ok(order.slice(publishedAt+1,queuedAt).some(key=>key.endsWith('-watchlist.json')),'the watchlist event is stored before its reference is queued');
  const sync=bucket.value('sync.json');
  eq([sync.ratingPending,sync.removalRefs,sync.removalLookups,sync.ratingAttempt,sync.ratingsPipeline],[undefined,undefined,undefined,undefined,'separate']);
  const event=sync.events.find(item=>item.type==='watchlist'),key=eventKeyOf(event.at,event.id);
@@ -121,7 +124,7 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
 // start flushes a hand-over left in a completed sync.json before it replaces it.
 {
  let killed=false;
- const {bucket,replies,post,runId}=await lifecycle({extra:SEPARATE,prepare:({bucket})=>{migrated(bucket);bucket.hooks.beforePut=(key,value)=>{if(key==='sync.json'&&!killed&&value.stage==='epg'&&value.events&&!value.removalRefs&&bucket.value('sync.json')?.removalRefs){killed=true;throw new Error('isolate killed');}};}});
+ const {bucket,replies,post,runId}=await lifecycle({extra:SEPARATE,prepare:({bucket})=>{migrated(bucket);bucket.hooks.beforePut=(key,value)=>{if(key==='sync.json'&&!killed&&value.stage==='complete'&&!value.removalRefs&&bucket.value('sync.json')?.removalRefs){killed=true;throw new Error('isolate killed');}};}});
  assert.ok(killed);
  assert.equal(replies.at(-1).body.stage,'complete');
  eq(bucket.value(QUEUE).films.film2.refs.length,1,'one reference despite the replay');

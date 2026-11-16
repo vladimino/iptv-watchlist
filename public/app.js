@@ -2416,7 +2416,17 @@ function batchV2TerminalHTML(event,delta,outcome,reason,hot,cold){
  const explain=ok||withErrors?'':(reason?`<p class="event-note">${reason}</p>`:'');
  return `<p>${title}</p><p class="event-note">Обработано: ${count(details.processed)}.</p>${remaining}${explain}${predictionDetailsHTML(details)}`;
 }
-function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=f=>`${escapeHTML(f.title)}${f.year?` (${escapeHTML(f.year)})`:''}`;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
+// AIR-513. A watchlist or viewing-mark film links to its local page. A verified `tmdb` uses `/film/tmdb_<n>` (the ratings helper).
+// Otherwise the stored id is used only when it is a film-route id and is not an unverified `tmdb_` prefix. No title or year is turned into an id.
+function eventFilmHTML(f){
+ const title=typeof f?.title==='string'?f.title:'';
+ const text=`${escapeHTML(title)}${f?.year?` (${escapeHTML(f.year)})`:''}`;
+ const tmdb=/^[1-9]\d{0,11}$/.test(String(f?.tmdb??''))?String(f.tmdb):null;
+ const id=String(f?.id??'');
+ const href=tmdb?filmHref('tmdb_'+tmdb):(FILM_ID.test(id)&&!id.startsWith('tmdb_')?filmHref(id):null);
+ return href?`<a href="${escapeHTML(href)}">${text}</a>`:text;
+}
+function eventHTML(event,olderEnrichment=null){const date=new Intl.DateTimeFormat('ru',{timeZone:'Europe/Madrid',day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(event.at));const film=eventFilmHTML;const removal=f=>{const rating=Number(f.rating),known=Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0;return `${film(f)}${known?` · ${rating.toFixed(1)} ★`:''}`;};let body='';
  if(event.type==='started'||event.type==='unstarted')body=`<p>${event.type==='started'?'Начал смотреть':'Снял отметку «Начал»'}: <strong>${film(event.film)}</strong></p>`;
  if(event.type==='epg')body=`<p>Обновлён EPG</p><dl><div><dt>Фильмов с показами</dt><dd>${event.films}</dd></div><div><dt>В архиве</dt><dd>${event.archive}</dd></div><div><dt>В следующие сутки</dt><dd>${event.future}</dd></div><div><dt>Всего показов</dt><dd>${event.broadcasts}</dd></div></dl>`;
  if(event.type==='ratings'){const n=v=>Number.isInteger(v)&&v>=0?v:0,d=event.diary&&typeof event.diary==='object'?event.diary:null,r=event.removal&&typeof event.removal==='object'?event.removal:{},causes={blocked:'Letterboxd заблокировал запрос',rate_limited:'Letterboxd ограничил частоту запросов',failed:'Diary не удалось прочитать',interrupted:'Выполнение прервано',abandoned:'Выполнение прервано'},title=event.state==='finished'?'Рейтинги обновлены':event.state==='error'?'Проверка рейтингов завершена с ошибкой':'Проверка рейтингов прервана',why=event.state!=='finished'&&causes[event.cause]?`<p class="event-note">${causes[event.cause]}</p>`:'',rows=[];if(d){rows.push(['Diary: записей проверено',n(d.rows)],['Новых фактов',n(d.written)],['Без изменений',n(d.unchanged)+n(d.skipped)]);if(n(d.conflicts))rows.push(['Конфликтов',n(d.conflicts)]);}if(n(r.rated))rows.push(['Оценок удалённых фильмов найдено',n(r.rated)]);rows.push(['Удалений обработано',n(r.resolved)]);body=`<p>${title}</p>${why}<dl>${rows.map(([name,value])=>`<div><dt>${name}</dt><dd>${value}</dd></div>`).join('')}</dl>${ratingsDetailsHTML(event.details)}${event.coverage==='recent_window'?'<p class="event-note">Проверена последняя страница Diary, не вся история.</p>':''}`;}

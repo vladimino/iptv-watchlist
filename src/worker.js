@@ -724,7 +724,8 @@ function withRemovalRatings(event,ratings,observedAt){
 async function enrichKnownRemovalEvent(env,run,ratings,observedAt){
  try{
   const index=(run?.events||[]).findIndex(item=>item?.type==='watchlist'&&item.removed?.length);if(index<0)return;
-  const current=await loadJSON(env,removalEventKey(run.events[index]))||run.events[index],next=withRemovalRatings(current,ratings,observedAt);if(!next)return;
+  const stored=await loadJSON(env,removalEventKey(run.events[index]));if(!stored)return;
+  const next=withRemovalRatings(stored,ratings,observedAt);if(!next)return;
   await writeEvent(env,next);run.events[index]=next;
  }catch{}
 }
@@ -937,7 +938,7 @@ async function storedRemovalRatings(env,event){
 async function persistEvents(env,run,report){
  for(let index=0;index<run.events.length;index++){
   const event=run.events[index];
-  if(event?.type==='epg')continue;
+  if(event?.type==='epg'||event?.type==='watchlist'&&!run.watchlistEventFixed)continue;
   const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
   await writeEvent(env,probe.event);
   if(probe.event!==event)run.events[index]=probe.event;
@@ -953,15 +954,55 @@ async function persistEvents(env,run,report){
 // has its event under the scan time (written by code before AIR-390, in a seal that spans a deploy) keeps it and gets no second one.
 async function prepareEpgCompletion(env,run,report){
  const base=(run.events||[]).find(item=>item?.type==='epg');
- if(!base||run.completedAt)return;
- if(await loadJSON(env,removalEventKey({at:report.updatedAt,id:base.id})))return;
- run.completedAt=new Date().toISOString();
- run.epgEventPending={...(base.at===report.updatedAt?base:epgEvent(report,base.id)),at:run.completedAt};
+ const legacyEpg=!!base&&!!await loadJSON(env,removalEventKey({at:report.updatedAt,id:base.id}));
+ if(!run.completedAt&&!legacyEpg){
+  run.completedAt=new Date().toISOString();
+  if(base)run.epgEventPending={...(base.at===report.updatedAt?base:epgEvent(report,base.id)),at:run.completedAt};
+ }
+ await stampWatchlistCompletion(env,run);
+}
+// AIR-513: the watchlist event's user-facing `at` is the run's successful completion, the same clock as the `epg` event.
+// The scan time stays on `run.watchlistObservedAt`. The journal object and the removal-reference key are fixed together here,
+// before either is written, and a retry keeps that timestamp. A key that is already referenced or already stored is left as it is.
+async function stampWatchlistCompletion(env,run){
+ const event=(run?.events||[]).find(item=>item?.type==='watchlist');
+ if(!event||!run.completedAt||run.watchlistEventFixed)return;
+ const currentKey=Number.isFinite(Date.parse(event.at))?removalEventKey(event):null;
+ const anchored=!!currentKey&&removalRefItems(run.removalRefs).some(item=>item.ref?.eventKey===currentKey);
+ if(anchored||currentKey&&await loadJSON(env,currentKey)){run.watchlistEventFixed=true;return;}
+ event.at=run.completedAt;
+ const films=Array.isArray(run.watchlistRemovalFilms)?run.watchlistRemovalFilms.filter(film=>film&&film.id):[];
+ if(films.length){
+  const ref=removalHandoverRef(run);
+  if(ref){
+   const prior=removalRefItems(run.removalRefs).filter(item=>item.ref?.eventKey!==ref.eventKey);
+   run.removalRefs=storedRemovalRefs([...prior,{ref,films}]);
+  }
+ }
+ delete run.watchlistRemovalFilms;
+ run.watchlistEventFixed=true;
+}
+async function flushWatchlistEvent(env,run){
+ if(!run?.watchlistEventFixed)return;
+ const index=(run.events||[]).findIndex(item=>item?.type==='watchlist');
+ if(index<0||!Number.isFinite(Date.parse(run.events[index].at)))return;
+ try{
+  const event=run.events[index],key=removalEventKey(event),existing=await loadJSON(env,key);
+  const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
+  if(existing&&probe.event===event)return;
+  await writeEvent(env,probe.event);
+  if(probe.event!==event)run.events[index]=probe.event;
+  if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
+  await saveJSON(env,'sync.json',run);
+ }catch(e){console.error(JSON.stringify({event:'watchlist_event_pending',runId:String(run.runId||'').slice(0,64)}));}
 }
 async function flushEpgEvent(env,run){
  if(!run.epgEventPending)return;
- try{await writeEvent(env,run.epgEventPending);delete run.epgEventPending;await saveJSON(env,'sync.json',run);}
- catch(e){console.error(JSON.stringify({event:'epg_event_pending',runId:String(run.runId||'').slice(0,64)}));}
+ try{
+  await writeEvent(env,run.epgEventPending);
+  const pending=run.epgEventPending;delete run.epgEventPending;
+  try{await saveJSON(env,'sync.json',run);}catch(e){run.epgEventPending=pending;throw e;}
+ }catch(e){console.error(JSON.stringify({event:'epg_event_pending',runId:String(run.runId||'').slice(0,64)}));}
 }
 async function finishSyncPersist(env,run,report){
  await persistWatchlist(env,run,report);
@@ -969,7 +1010,7 @@ async function finishSyncPersist(env,run,report){
  do{scan=await persistScan(env,run,report);}while(scan==='continue');
  await persistEvents(env,run,report);
 }
-async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
+async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);await flushWatchlistEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
 // refuses a generation that is no longer the published one, keeps a live writer and keeps the progress of a
@@ -1744,6 +1785,8 @@ async function sealQueueStep(env,run,deadline=Infinity){
  run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;delete run.seal;
  await saveJSON(env,'sync.json',run);
  await flushEpgEvent(env,run);
+ await flushWatchlistEvent(env,run);
+ if(run.ratingsPipeline==='separate'&&run.removalRefs&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  try{await env.BUCKET.delete(sealPublicationKey(run.runId));}catch{}
  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
@@ -1868,8 +1911,9 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
 async function completeWithRatings(env,run,report){
  const gate=await ratingsGate(env);
  if(gate.active){
-  await flushRemovalHandover(env,run);delete run.ratingPending;run.ratingsPipeline='separate';
+  delete run.ratingPending;run.ratingsPipeline='separate';
   const result=await tracedPhase(run.runId,'finish_sync',()=>finishSync(env,run,report),()=>({films:report.films?.length??0}));
+  if(run.removalRefs&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
   return {...result,ratingsPipeline:'separate'};
  }
  delete run.ratingPending;run.ratingsPipeline='blocked';run.ratingsMigration=gate.migration;
@@ -1916,7 +1960,7 @@ async function syncStep(env,pathname,body,step,entryAt=Date.now()){
  if(!run||body.runId!==run.runId){step.branch='run_mismatch';return json({error:'Run id mismatch'},409);}
  if(pathname==='/api/sync/metadata'){if(run.stage!=='metadata'){step.branch='stage_mismatch';return json({runId:run.runId,stage:run.stage,remaining:run.remaining});}step.branch='metadata';return json(await metadataSync(env,run));}
  if(pathname!=='/api/sync/epg'){step.branch='not_found';return json({error:'Not found'},404);}
- if(run.stage==='complete'){step.branch='continuation';await flushEpgEvent(env,run);if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}
+ if(run.stage==='complete'){step.branch='continuation';await flushEpgEvent(env,run);await flushWatchlistEvent(env,run);if((run.removalRefs||run.removalLookups)&&(await ratingsGate(env)).active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);if(run.ratingPending?.length)await closeInterruptedRatings(env,run);step.branch='delegated';const presented=await presentContinuationDiscovery(env);step.discovery=discoverySummary(presented.discovery);return json({runId:run.runId,stage:run.stage,ratingsPending:!!run.ratingPending?.length,...presented,diagnostic:step.diagnostic});}
  if(run.stage==='seal'){step.branch='seal';try{const result=await sealStep(env,run,entryAt);if(result.stage!=='complete'){step.discovery=discoverySummary(result.discovery);return json(result);}const presented=await presentQueuedDiscovery(env,await queueDiscovery(env,'epg_committed',run.runId));step.discovery=discoverySummary(presented.discovery);return json({...result,...presented});}catch(e){run.error=String(e.message).slice(0,200);run.updatedAt=new Date().toISOString();await saveJSON(env,'sync.json',run);throw e;}}
  if(run.stage!=='epg'){step.branch='stage_mismatch';return json({error:'Metadata stage is not complete'},409);}
  step.branch='epg_commit';
@@ -1949,7 +1993,7 @@ async function epgSync(env,run){
  // before the pointer moved) rebuilds them. A watchlist event that reports removals keeps its key: the removal hand-over (pending
  // on the run, or already in the removal queue) references it, and a rescan yields the same delta. Nothing is written to the journal here; finishSync writes the events after the publication.
  const supersededEpg=run.events?.find(item=>item?.type==='epg');
- if(!run.events||supersededEpg?.at!==report.updatedAt){const priorWatch=run.events?.find(item=>item?.type==='watchlist'),anchored=!!priorWatch&&priorWatch.removed?.length>0;const before=await loadJSON(env,'watchlist.json');run.events=[anchored?priorWatch:watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist'),epgEvent(report,run.runId+'-epg')];if(anchored){await saveJSON(env,'sync.json',run);}else{const removedFilms=()=>{const removed=new Set(run.events[0].removed.map(film=>String(film.id)));return (before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);};const films=removedFilms(),ref=films.length?removalHandoverRef(run):null;const prior=removalRefItems(run.removalRefs).filter(item=>!ref||item.ref.eventKey!==ref.eventKey);const next=ref?[...prior,{ref,films}]:prior;if(next.length)run.removalRefs=storedRemovalRefs(next);else delete run.removalRefs;await saveJSON(env,'sync.json',run);}}
+ if(!run.events||supersededEpg?.at!==report.updatedAt){const priorWatch=run.events?.find(item=>item?.type==='watchlist'),priorKey=priorWatch&&Number.isFinite(Date.parse(priorWatch.at))?removalEventKey(priorWatch):null,anchored=!!priorKey&&removalRefItems(run.removalRefs).some(item=>item.ref?.eventKey===priorKey);const before=await loadJSON(env,'watchlist.json');const fresh=watchlistEvent(before,nextWatchlist,previous,report,run.runId+'-watchlist');run.events=[anchored?priorWatch:fresh,epgEvent(report,run.runId+'-epg')];if(!anchored){const removed=new Set((fresh.removed||[]).map(film=>String(film.id)));const films=(before?.films||[]).filter(film=>removed.has(String(film.id))).map(removalLookupFilm).filter(Boolean);if(films.length)run.watchlistRemovalFilms=films;else delete run.watchlistRemovalFilms;const own='-'+run.runId+'-watchlist.json';const prior=removalRefItems(run.removalRefs).filter(item=>!String(item.ref?.eventKey||'').endsWith(own));if(prior.length)run.removalRefs=storedRemovalRefs(prior);else delete run.removalRefs;delete run.watchlistEventFixed;}await saveJSON(env,'sync.json',run);}
  if(gate.active&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  previous=null;
  const liveCatalog=typeof PublishedEpg!=='undefined'?await PublishedEpg.currentGeneration(env):null;

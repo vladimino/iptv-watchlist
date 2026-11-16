@@ -90,7 +90,7 @@ assert.equal(epg.at,doneRun.updatedAt,'the event time is the completion time of 
 assert.ok(Date.parse(epg.at)>=Date.parse(published.updatedAt),'completion is not before the scan');
 assert.equal(epg.broadcasts,published.films.reduce((n,f)=>n+f.shows.length,0),'the counts are those of the published report');
 assert.equal(epg.broadcasts,3);
-assert.equal(watchlistEvents().length,1);assert.equal(watchlistEvents()[0].id,runId+'-watchlist');assert.equal(watchlistEvents()[0].at,published.updatedAt,'a watchlist event with no removal to hand over is rebuilt for the published scan');
+assert.equal(watchlistEvents().length,1);assert.equal(watchlistEvents()[0].id,runId+'-watchlist');assert.equal(watchlistEvents()[0].at,doneRun.completedAt,'AIR-513: a watchlist event is dated at the successful completion, like the epg event');
 assert.ok(epg.key.includes(String(9999999999999-Date.parse(epg.at)).padStart(13,'0')),'the key orders by the completion time');
 assert.equal(events().filter(event=>event.at===staleAt).length,0,'nothing carries the superseded scan time');
 
@@ -103,7 +103,7 @@ assert.equal(epgEvents().length,1);assert.equal(watchlistEvents().length,1);
 runId=await readyToCommit();
 showCount=2;failPublish=null;
 let eventWrites=0;failPublish=key=>{if(key.startsWith('events/items/')){eventWrites++;return eventWrites===1;}return false;};
-const killed=await post('/api/sync/epg',{runId});assert.ok(killed.status>=500);
+const killed=await post('/api/sync/epg',{runId});assert.equal(killed.status,200,JSON.stringify(killed.data));
 failPublish=null;
 assert.equal(records.get('programme.json').runId,runId,'the generation is published');
 assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,0,'no event yet');
@@ -167,7 +167,8 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
  assert.equal(watch.length,1,'one watchlist event for the run');
  // The removal hand-over references this event by key, whether it is still pending on the run or already in the queue: the event keeps
  // its key (and so its first-scan time) rather than leaving the reference dangling. A rescan yields the same delta.
- assert.equal(watch[0].at,early.at,'a watchlist event that reports a removal keeps the key its hand-over references');
+ assert.equal(watch[0].at,records.get('sync.json').completedAt,'AIR-513: the removal event is dated at completion');
+ assert.notEqual(watch[0].at,early.at,'the scan time stays off the journal');
  assert.deepEqual(watch[0].removed.map(film=>film.id),['gone']);assert.equal(watch[0].added.length,0);
  const refs=records.get('sync.json').removalRefs;
  if(refs){const list=Array.isArray(refs)?refs:[refs];assert.ok(list.every(item=>item.ref.eventKey===key(watch[0])),'every removal reference names the written event');}
