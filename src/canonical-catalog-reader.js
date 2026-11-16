@@ -145,6 +145,38 @@ export async function catalogTitlesFromD1(env,films,gate){
  return out;
 }
 
+const PEOPLE_SQL=`SELECT p.role_id AS role_id,d.value AS value,d.status AS status,d.authority AS authority FROM person_dimension d INNER JOIN person p ON p.id=d.person_id WHERE d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' AND p.id IN (SELECT value FROM json_each(?)) ORDER BY p.role_id, CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT ?`;
+// Slice 4 (AIR-499): people.json consumers of the admin snapshot. Bounded SELECTs of the requested role ids (chunks of
+// TITLE_READ_CHUNK). The R2 cache is keyed by roleId; D1 stores person.id as person:<roleId>. Missing optional names are
+// omitted, not a read error.
+export async function catalogPeopleFromD1(env,ids,gate){
+ if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');
+ const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ const wanted=[...new Set((ids||[]).map(String).filter(Boolean))];
+ if(wanted.length>TITLE_READ_MAX_FILMS)throw failed('canonical_read_unavailable');
+ const out={};
+ if(wanted.length){
+  const keys=[...new Set(wanted.map(id=>id.startsWith('person:')?id:'person:'+id))];
+  const rows=[];
+  for(let at=0;at<keys.length;at+=TITLE_READ_CHUNK){
+   const chunk=keys.slice(at,at+TITLE_READ_CHUNK);
+   try{rows.push(...await many(db,PEOPLE_SQL,[JSON.stringify(chunk),chunk.length]));}
+   catch(error){throw failed('canonical_read_unavailable',error);}
+  }
+  const accept=new Set(wanted);
+  for(const row of rows){
+   const role=row.role_id;
+   if(!accept.has(role)&&!accept.has('person:'+role))continue;
+   if(out[role])continue;
+   const status=row.status==='reviewed'?'reviewed':'provisional';
+   out[role]={name:row.value,status,...(row.authority?{authority:row.authority}:{})};
+  }
+ }
+ await catalogReaderStill(env,gate);
+ return out;
+}
+
 const META_SQL=`SELECT f.id AS film_id,f.original_title AS original_title,m.year AS year,m.poster AS poster,m.url AS url,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id IN (SELECT value FROM json_each(?)) LIMIT ?`;
 const EXT_FILM_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND film_id IN (SELECT value FROM json_each(?))`;
 const EXT_VALUE_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND value IN (SELECT value FROM json_each(?))`;
@@ -231,8 +263,9 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const tmdbClaim=tmdbLocal.conflict||tmdbLocal.value==null?tmdbLocal:identityClaim(externals,'tmdb',tmdbLocal.value);
   const lidLocal=identityClaim(ext,'letterboxd');
   const lidClaim=lidLocal.conflict||lidLocal.value==null?lidLocal:identityClaim(externals,'letterboxd',lidLocal.value);
-  const title=typeof row.title==='string'&&row.title?row.title:(typeof row.original_title==='string'&&row.original_title?row.original_title:null);
-  const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title};
+  const original=typeof row.original_title==='string'&&row.original_title?row.original_title:null;
+  const title=typeof row.title==='string'&&row.title?row.title:original;
+  const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title,original};
   out[id]=record;
   if(lidClaim.value&&lidClaim.value!==id)out[lidClaim.value]={...record,id:lidClaim.value};
  }
@@ -243,7 +276,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
 // The remaining-readers registry (AIR-374 P4): every reader or writer of a former mutable canonical R2 mirror (titles.json, people.json, metadata.json) and every named exception
 // (owner decision 4: what stays R2 after `open`). `class` is 'freeze' (the mirror is frozen at open and the reader must read D1: moved:false is still open work) or 'exception'
 // (stays as it is: an independent mirror, an input artifact, an immutable source or receipt, view-index prediction retention). Plain data, no imports: the computed handoff readiness
-// (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs or tests/catalog-film.mjs).
+// (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs, tests/canonical-catalog-metadata.mjs, tests/canonical-admin-dictionaries.mjs or tests/catalog-film.mjs).
 export const CANONICAL_READER_REGISTRY=[
  {name:'catalog film route rated-archive fallback (retirements, receipt)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'/api/d1/* catalog routes',file:'src/catalog-d1.js',class:'freeze',moved:true},
@@ -254,10 +287,10 @@ export const CANONICAL_READER_REGISTRY=[
  {name:'ratingsFilmLabels metadata.json and titles.json',file:'src/worker.js',class:'freeze',moved:true},
  {name:'metadataSync titles.json, people.json and metadata.json working set (writer)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'epgSync title and people localization (writer of titles.json, people.json)',file:'src/worker.js',class:'freeze',moved:true},
- {name:'admin read titles.json and people.json',file:'src/admin/read.js',class:'freeze',moved:false},
- {name:'admin limbo titles.json and people.json',file:'src/admin/limbo.js',class:'freeze',moved:false},
- {name:'admin health source list titles.json and people.json',file:'src/admin/health.js',class:'freeze',moved:false},
- {name:'admin Letterboxd archive metadata.json',file:'src/admin/letterboxd-archive.js',class:'freeze',moved:false},
+ {name:'admin read titles.json and people.json',file:'src/admin/read.js',class:'freeze',moved:true},
+ {name:'admin limbo titles.json and people.json',file:'src/admin/limbo.js',class:'freeze',moved:true},
+ {name:'admin health source list titles.json and people.json',file:'src/admin/health.js',class:'freeze',moved:true},
+ {name:'admin Letterboxd archive metadata.json',file:'src/admin/letterboxd-archive.js',class:'freeze',moved:true},
  {name:'footer metadata.json',file:'src/enrichment.js',class:'freeze',moved:false},
  {name:'migration export of the mirrors (group global)',file:'src/enrichment.js',class:'freeze',moved:false},
  {name:'metadata cache mirror object of the D1 metadata cache',file:'src/metadata-cache.js',class:'exception',moved:false},
