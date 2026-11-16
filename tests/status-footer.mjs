@@ -7,7 +7,7 @@ const records=new Map(),writes=[];
 const env={BUCKET:{
  async get(key){return records.has(key)?{etag:'test',json:async()=>structuredClone(records.get(key))}:null;},
  async put(key,value){writes.push(key);records.set(key,JSON.parse(value));return {etag:'test'};},
- async list(){return {objects:[],truncated:false};}
+ async list({prefix,limit}={}){const objects=[...records.keys()].filter(key=>!prefix||key.startsWith(prefix)).slice(0,limit||1000).map(key=>({key}));return {objects,truncated:false};}
 }};
 let now=Date.parse('2026-10-13T09:30:00Z');
 class Clock extends Date{constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
@@ -393,6 +393,7 @@ let quota=await footerNow();
 assert.equal(quota.lastRun.status,'blocked');
 assert.equal(quota.lastRun.reason,'quota');
 assert.equal(quota.lastRun.finishedAt,'2026-10-25T01:08:00Z');
+assert.equal(sourceOf(quota,'predictions').code,'prediction_blocked','a stored quota stop still pauses the prediction capability');
 assert.equal(sourceOf(quota,'resolver').state,'healthy','a stored prediction quota does not become a recognition failure');
 assert.notEqual(sourceOf(quota,'epg').state,'failed');
 assert.notEqual(sourceOf(quota,'letterboxd_ratings').code,'resolver_no_recent_progress');
