@@ -35,7 +35,10 @@ const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=j
  assert.equal(m.profile.version,1);assert.equal(m.profile.hash,'p');assert.deepEqual(m.profile.body,{ratingScale:'Half stars'});assert.ok(Array.isArray(m.profile.lineage));
  // contract: the versions and the same schema document GET /api/enrichment/schema serves
  const schema=await (await w.ctx.worker.fetch(new Request('https://site.example/api/enrichment/schema'),w.env)).json();
- assert.deepEqual(m.contract.schema,schema,'the manifest carries the schema document the Worker validates with');
+ assert.deepEqual(m.contract.schema.contract,schema.contract,'the manifest keeps the schema contract the prompt checks');
+ assert.deepEqual(m.contract.schema.fingerprint.plotMechanics,schema.fingerprint.plotMechanics);
+ assert.equal(m.contract.schema.schemaDigest.length,64);
+ assert.equal(m.contract.schema.profile,undefined,'the profile schema section is not repeated inside the manifest');
  assert.equal(m.contract.fingerprintSchemaVersion,w.ctx.FINGERPRINT_SCHEMA_VERSION??m.contract.fingerprintSchemaVersion);
  for(const key of ['fingerprintSchemaVersion','fingerprintPromptVersion','predictionPromptVersion','registryDigest'])assert.ok(m.contract[key]!==undefined&&m.contract[key]!==null,key);
  // every film: id, lane, plan and its full metadata (null fields are absent, nothing else is shortened)

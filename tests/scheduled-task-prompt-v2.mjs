@@ -140,7 +140,7 @@ const validSample=x=>check(schema.$defs.sample,x),validResult=x=>check(schema.$d
 async function world(films){
  const w=await flowWorld({films});assert.equal((await w.api('queue/reconcile',{})).status,200);
  vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
- w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text)};};
+ w.call=async(name,args)=>{w.ctx.__a={name,args};w.ctx.__env=w.env;const r=await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx);const res=r.result;return {isError:!!res.isError,data:res.isError?res.content[0].text:JSON.parse(res.content[0].text),structured:res.structuredContent,textBytes:new TextEncoder().encode(res.content[0].text).length};};
  return w;
 }
 const hex=h=>/^[0-9a-f]{8,64}$/.test(String(h))?String(h):sha(String(h)).slice(0,16); // the flow world's stand-in profile hash is 'p'; production hashes are hex
@@ -200,6 +200,9 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const w=await world(130);
  const start=await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5});assert.ok(!start.isError,JSON.stringify(start.data).slice(0,200));
  const manifest=start.data;assert.equal(manifest.films.length,5,'the template selects five films');assert.equal(manifest.manifestSize,5);assert.equal(manifest.filmsSelected,5);
+ assert.equal(start.structured,undefined,'the MCP result carries the manifest once, as text');
+ assert.ok(manifest.profile.body&&manifest.contract.schema.contract.fingerprint.evidence&&manifest.films.every(f=>f.modelMetadata&&f.filmId),'profile, schema contract and every film input are in that one text');
+ assert.ok(start.textBytes<48*1024,'a five-film manifest text stays inside the client-visible budget');
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
  assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');
  const ids=manifest.films.map(f=>f.filmId),badParse=ids[1],badContent=ids[3];

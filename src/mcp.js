@@ -306,7 +306,10 @@ async function mcpCallTool(params,protocolVersion,env,execution){
    if(!mcpIsObject(args.pin)||Object.keys(args.pin).some(key=>key!=='filmIds')||!Array.isArray(args.pin.filmIds)||!args.pin.filmIds.length||args.pin.filmIds.length>manifestCap||args.pin.filmIds.some(id=>typeof id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(id)))return {result:mcpToolError('"pin" must be {filmIds}: 1 to '+manifestCap+' film ids (the effective manifestSize).')};
   }
   const body={scope:'watchlist_all',mode:'queued',trigger:args.trigger};if(args.capacity)body.capacity=args.capacity;if(args.manifestSize!==undefined)body.manifestSize=args.manifestSize;if(args.dryRun===true)body.dryRun=true;if(args.pin)body.pin={filmIds:args.pin.filmIds};
-  return mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/batch/start',body));
+  const answered=await mcpDomain(()=>mcpEnrichment(env,execution,'POST','/api/enrichment/batch/start',body));
+  // One copy in the tool result. structuredContent repeated the same JSON and the Scheduled Task working context dropped the manifest (AIR-510).
+  if(answered.result&&!answered.result.isError){const {structuredContent,...result}=answered.result;return {result};}
+  return answered;
  }
  if(params.name==='prediction_batch_submit'){
   if(!mcpRunId(args.runId))return {result:mcpToolError('"runId" must be 1–100 letters, digits, "_" or "-".')};
