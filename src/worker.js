@@ -344,6 +344,7 @@ function catalogAvailable({catalog,programme,watchlist,index,profile,metadata,pr
  for(const record of Object.values(catalog||{})){
   const film=withCompletedShows(record,completed,programmeRunId,completedOnly);
   if(!film||!film.tmdbId||film.canonicalIdentity!=='tmdb:'+String(film.tmdbId))continue;
+  if(typeof policyExcludedPresentedFilm==='function'&&policyExcludedPresentedFilm(film))continue;
   const id=String(film.id),identity=film.canonicalIdentity;
   if(excluded.has(id)||excluded.has(identity))continue;
   const item=index?.[id];
