@@ -1692,12 +1692,13 @@ function settleQueueFilms(queue,ids){
 // The gate repeated on the queue a conditional write actually mutates. `currentPredictionQueue` validated a snapshot; a retry of the write after a
 // conflict loads whatever is stored then (a reconcile, an EPG commit or a profile publication may have rebuilt it for another generation), so a
 // settlement never touches a queue the gate would refuse: it returns null and the queue stays as its own generation wrote it.
-async function advanceContext(env,report,profile){return {report,profile,sync:await loadJSON(env,'sync.json'),registry:(await fingerprintRegistryDigests()).registry};}
-// A settlement computed against one programme must not land on a queue a later completed publication already rebuilt.
-// An unsealed programme is not that publication: scoring continues on the stored queue (ADR 0154).
+async function advanceContext(env,report,profile){return {report,profile,registry:(await fingerprintRegistryDigests()).registry};}
+// A settlement computed against one programme must not land on a queue a later publication already rebuilt for another.
+// A carried or neutral queue keeps the previous programme id on purpose while scoring continues (ADR 0154).
 function settlementGenerationRefused(queue,context){
  if(!queue?.programmeRunId||!context.report?.runId||queue.programmeRunId===context.report.runId)return false;
- return showsAuthoritative(context.sync,context.report);
+ if(queue.priorityBasis==='carried'||queue.priorityBasis==='neutral')return false;
+ return true;
 }
 function guardedSettle(context,ids,trigger){
  return current=>{
@@ -2441,7 +2442,7 @@ const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.b
 async function batchRefreshQueue(env,body,pre,tally=null){
  let queue=pre.queue,settled=0;const limit=resolveManifestSize(body).size;
  if(pre.stale||pre.priorityDue)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:!pre.stale&&!!pre.priorityDue,fallback:true});
- const context=queue?.programmeRunId===pre.report?.runId?{report:pre.report,profile:pre.profile,sync:null,registry:(await fingerprintRegistryDigests()).registry}:await advanceContext(env,pre.report,pre.profile);
+ const context=await advanceContext(env,pre.report,pre.profile);
  for(let round=0;round<3;round++){
   const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue,limit}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
   if(tally){tally.refreshRounds++;tally.scannedFilms+=selection.scanned;}
