@@ -1,7 +1,7 @@
 // AIR-369 / ADR 0099 (Accepted), decomposition C3a; ADR 0086 and 0087. D1-owned canonical Film admission for VERIFIED rated-archive Films
-// and the watchlist retention fact that keeps a Film after it leaves the current lists. Inactive: nothing in the Worker imports this module
-// (it is not bundled; no route, job or cron calls it), schema 15 is a file only, and while the marker is r2 or prepared the enrichment
-// projector stays the only canonical writer, so the two writers refuse before they reach the database. The R2 object
+// and the watchlist retention fact that keeps a Film after it leaves the current lists. The AIR-499 producer `rated_admission_retention`
+// imports this module (bundled). Below the marker `open` both writers refuse before they reach the database; the enrichment projector
+// stays the only canonical writer at r2/prepared. The R2 object
 // letterboxd/admissions/verified-films.json stays the immutable evidence and receipt (never a second mutable owner after a cutover) and the
 // enrichment/view-index.json `watchlist` boolean stops being the thing that decides which Films exist. The pre-Film rated-candidate queue is
 // not here (AIR-343): only an entry that carries every verification fact becomes a Film.
@@ -10,10 +10,11 @@
 // - compareAdmissions is the compare-only report of R2 inputs against D1 rows; readRatedAdmissions / readRetention need the marker open.
 import {assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {fenced} from './canonical-mutations.js';
-import {archiveAdmissionsFromDocument,watchlistAdmissionsFromIndex} from './enrichment-projection.js';
+import {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions} from './canonical-catalog-reader.js';
+const writeFenced=fenced.commit;
 
 export const RATED_RECEIPT_KEY='letterboxd/admissions/verified-films.json';
-export {ADMISSION_READ_CHUNK} from './canonical-catalog-reader.js';
+export {ADMISSION_READ_CHUNK,loadAdmissionRows,readAdmissions};
 export const COMPARE_LIST_CAP=200;
 const KEY=/^tmdb_([1-9]\d{0,11})$/;
 const HEX64=/^[0-9a-f]{64}$/;
@@ -101,7 +102,7 @@ export async function admitRatedFilm(env,input){
  statements.push(["INSERT INTO film_alias (film_id,kind,value,provenance_json) VALUES (?,'letterboxd_short_code',?,?) ON CONFLICT(film_id,kind,value) DO NOTHING",[id,admission.sourceCode,stable({source:'letterboxd_rated_admission',archiveSha256:admission.archiveSha256})]]);
  statements.push(["INSERT INTO film_rated_admission (film_id,tmdb,source_code,archive_sha256,title,year,receipt_key,receipt_film_key,verified_at,request_id,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET archive_sha256=excluded.archive_sha256,title=COALESCE(excluded.title,film_rated_admission.title),year=COALESCE(excluded.year,film_rated_admission.year),request_id=excluded.request_id,updated_at=excluded.updated_at WHERE film_rated_admission.tmdb=excluded.tmdb AND film_rated_admission.source_code=excluded.source_code",[id,admission.tmdb,admission.sourceCode,admission.archiveSha256,admission.title,admission.year,RATED_RECEIPT_KEY,admission.receiptFilmKey,admission.verifiedAt,requestId,at]]);
  statements.push([fenced.BUMP,['film',id,at]]);
- try{await fenced.commit(env,gate,statements,entities,tail);}
+ try{await writeFenced(env,gate,statements,entities,tail);}
  catch(error){
   const message=String(error?.cause?.message||'');
   if(error?.code==='film_person_unavailable'&&/UNIQUE constraint failed: film_rated_admission/i.test(message))throw failed('admission_conflict',error);
@@ -139,17 +140,38 @@ export async function retainFilm(env,input){
  statements.push([fenced.assertSql('EXISTS (SELECT 1 FROM film WHERE id=?) AND NOT EXISTS (SELECT 1 FROM film_redirect WHERE from_id=?)'),[id,id]]);
  statements.push(["INSERT INTO film_retention (film_id,basis,watchlist,evidence_json,request_id,observed_at,updated_at) VALUES (?,'watchlist_fact',?,?,?,?,?) ON CONFLICT(film_id) DO UPDATE SET watchlist=excluded.watchlist,evidence_json=excluded.evidence_json,request_id=excluded.request_id,observed_at=excluded.observed_at,updated_at=excluded.updated_at WHERE excluded.observed_at>film_retention.observed_at",[id,input.watchlist?1:0,evidence,requestId,observed,at]]);
  statements.push([fenced.BUMP,['film',id,at]]);
- await fenced.commit(env,gate,statements,entities,tail);
+ await writeFenced(env,gate,statements,entities,tail);
  return {id,revision:expected+1,retained:true,written:true};
 }
 
 // The two D1 readers (loadAdmissionRows, readAdmissions) live in canonical-catalog-reader.js, the one import-free read module the Worker bundles (AIR-374 P4);
 // they are re-exported here so every existing caller and test keeps this path.
-export {loadAdmissionRows,readAdmissions} from './canonical-catalog-reader.js';
 
 // Compare-only (inactive): the R2 inputs (verified-films.json body, view-index body) against D1 rows keyed by the same movie id / lid. Nothing is
 // written. `receipts` entries that are not verified are listed as `unverified` and are never expected in D1. Each list is capped.
 // rows: {admissions:[{filmId,tmdb,sourceCode,archiveSha256}], retained:[{filmId,letterboxdIds:[...]}]}
+const ADMISSION_LID=/^[A-Za-z0-9_-]{1,80}$/;
+const ARCHIVE_FILM=/^tmdb_[1-9]\d{0,11}$/;
+function watchlistAdmissionsFromIndex(index){
+ const out={};
+ if(!index||typeof index!=='object'||Array.isArray(index))return out;
+ for(const [id,item] of Object.entries(index)){
+  if(!ADMISSION_LID.test(id)||id.startsWith('tmdb_')||!item||typeof item.watchlist!=='boolean')continue;
+  out[id]=item.watchlist;
+ }
+ return out;
+}
+function archiveAdmissionsFromDocument(document){
+ const out={};
+ if(!document||document.schemaVersion!==1||!document.films||typeof document.films!=='object'||Array.isArray(document.films))return out;
+ for(const [id,item] of Object.entries(document.films)){
+  if(!ARCHIVE_FILM.test(id)||!item||typeof item!=='object'||Array.isArray(item))continue;
+  if(Object.prototype.hasOwnProperty.call(item,'watchlist'))continue;
+  if(String(item.tmdb)!==id.slice(5))continue;
+  out[id]={tmdb:String(item.tmdb)};
+ }
+ return out;
+}
 export function compareAdmissions({receipts=null,viewIndex=null,rows={admissions:[],retained:[]}}={}){
  const capped=list=>list.length>COMPARE_LIST_CAP?list.slice(0,COMPARE_LIST_CAP):list;
  const verified=new Map(),unverified=[];

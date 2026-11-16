@@ -271,6 +271,14 @@ const LetterboxdRatedCandidates = (() => {
     const state = outcome === 'intent_conflict' ? 'admitting' : outcome === 'verified_conflict' || outcome === 'already' ? 'verified' : outcome === 'removed' || outcome === 'needs_review' ? outcome : 'pending';
     return {pending: true, fetched: true, verified: false, code, state, reason: outcome, phase: 'identity'};
   }
+  async function applyCanonicalRatedAdmission(env, event, receiptKey, receipt) {
+    if (typeof CanonicalRatedAdmission === 'undefined' || !receipt) return;
+    const out = await CanonicalRatedAdmission.applyRatedAdmissionRetention(env, {
+      event,
+      admissions: [{receiptKey, receipt}],
+    });
+    CanonicalRatedAdmission.assertRatedAdmissionAccepted(out);
+  }
   // Fence the intended movie, read it back, then admit that one source code and only then write the rating.
   // A removed, reviewed or differently claimed row is not admitted and is not marked verified.
   async function commitVerified(env, sha, code, item, tmdb, evidence, generatedAt) {
@@ -297,11 +305,16 @@ const LetterboxdRatedCandidates = (() => {
       outcome = 'claimed';
       return current;
     });
-    if (outcome === 'already') return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), filmId: film.filmId, phase: 'identity'};
+    if (outcome === 'already') {
+      const stored = await writeAdmission(env, film);
+      if (stored.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, stored.film);
+      return {pending: true, fetched: true, verified: true, code, tmdb: String(tmdb), filmId: film.filmId, phase: 'identity'};
+    }
     if (outcome !== 'claimed' && outcome !== 'held') return refusedClaim(code, outcome);
     const held = await readClaim(env, key, code, tmdb, film.filmPath);
     if (!held.ok) return refusedClaim(code, held.reason);
     const admitted = await writeAdmission(env, film);
+    if (admitted.ok) await applyCanonicalRatedAdmission(env, 'rated:' + sha + ':' + code, film.filmId, admitted.film);
     if (!admitted.ok) {
       const still = await readClaim(env, key, code, tmdb, film.filmPath);
       if (still.ok) await markReview(env, key, code, admitted.reason, {tmdb, filmPath: film.filmPath});

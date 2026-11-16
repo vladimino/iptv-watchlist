@@ -860,7 +860,60 @@ async function persistWatchlist(env,run,report){
 }
 async function persistScan(env,run,report){
  // A complete watchlist is one observation of every listed film (ADR-0024).
- if(report.films?.length===report.watchlistCount&&run.watchlistObservedAt)await LetterboxdFacts.applyWatchlistScan(env,{scanId:run.runId,observedAt:run.watchlistObservedAt,films:report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}))});}
+ if(!(report.films?.length===report.watchlistCount&&run.watchlistObservedAt))return 'ok';
+ const scanId=String(run.runId||'');
+ const films=report.films.map(f=>({id:f.id,tmdbId:f.tmdbId}));
+ let writerOpen=false;
+ if(typeof CanonicalRatedAdmission!=='undefined')writerOpen=!!(await CanonicalRatedAdmission.ratedAdmissionWriterOpen(env));
+ if(!writerOpen){
+  delete run.ratedAdmissionScan;
+  delete run.ratedAdmissionIntent;
+  await LetterboxdFacts.applyWatchlistScan(env,{scanId,observedAt:run.watchlistObservedAt,films});
+  return 'ok';
+ }
+ if(!run.ratedAdmissionScan||run.ratedAdmissionScan.scanId!==scanId){
+  const view=await loadJSON(env,'enrichment/view-index.json')||{};
+  const listedIds=(report.films||[]).map(f=>String(f.id));
+  run.ratedAdmissionScan={scanId,observedAt:run.watchlistObservedAt,departed:CanonicalRatedAdmission.departedWatchlistLids(view,listedIds),cursor:0,factsApplied:false};
+  await saveJSON(env,'sync.json',run);
+ }
+ if(!run.ratedAdmissionScan.factsApplied){
+  await LetterboxdFacts.applyWatchlistScan(env,{scanId,observedAt:run.watchlistObservedAt,films});
+  run.ratedAdmissionScan={...run.ratedAdmissionScan,factsApplied:true};
+  await saveJSON(env,'sync.json',run);
+ }
+ const scan=run.ratedAdmissionScan;
+ const listed=(report.films||[]).map(f=>({lid:String(f.id),tmdbId:f.tmdbId}));
+ const queue=CanonicalRatedAdmission.watchlistRetentionWork({listed,departed:scan.departed,observedAt:scan.observedAt,scanId});
+ const cap=CanonicalRatedAdmission.UNIT_CAP;
+ const retry=run.ratedAdmissionIntent||[];
+ const room=Math.max(0,cap-retry.length);
+ const cursor=Number(scan.cursor||0);
+ const slice=queue.slice(cursor,cursor+room);
+ const canonical=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{
+  event:'watchlist:'+scanId+':'+cursor,
+  retentions:slice,
+  intent:retry,
+  limit:cap,
+ });
+ run.canonicalRatedAdmission=CanonicalRatedAdmission.ratedAdmissionRecord(canonical);
+ const carried=CanonicalRatedAdmission.carryRatedAdmissionIntent(canonical);
+ if(carried.length)run.ratedAdmissionIntent=carried;
+ else delete run.ratedAdmissionIntent;
+ const sliceOk=CanonicalRatedAdmission.ratedAdmissionSliceSettled(canonical);
+ if(sliceOk)run.ratedAdmissionScan={...scan,factsApplied:true,cursor:cursor+slice.length};
+ await saveJSON(env,'sync.json',run);
+ if(!sliceOk){
+  const error=new Error('rated_admission_incomplete');
+  error.code='rated_admission_incomplete';
+  throw error;
+ }
+ if(run.ratedAdmissionScan.cursor<queue.length)return 'continue';
+ delete run.ratedAdmissionScan;
+ delete run.ratedAdmissionIntent;
+ await saveJSON(env,'sync.json',run);
+ return 'ok';
+}
 // AIR-390: the journal written with the watchlist and the scan is every event except the `epg` one. The `epg` event is written
 // by flushEpgEvent once the run is complete, so its `at` is the completion time that sync.json also carries.
 // AIR-379. Before a watchlist event that reports removals is written, the confirmed ratings that the fact store ALREADY holds are put on its
@@ -910,7 +963,12 @@ async function flushEpgEvent(env,run){
  try{await writeEvent(env,run.epgEventPending);delete run.epgEventPending;await saveJSON(env,'sync.json',run);}
  catch(e){console.error(JSON.stringify({event:'epg_event_pending',runId:String(run.runId||'').slice(0,64)}));}
 }
-async function finishSyncPersist(env,run,report){await persistWatchlist(env,run,report);await persistScan(env,run,report);await persistEvents(env,run,report);}
+async function finishSyncPersist(env,run,report){
+ await persistWatchlist(env,run,report);
+ let scan='ok';
+ do{scan=await persistScan(env,run,report);}while(scan==='continue');
+ await persistEvents(env,run,report);
+}
 async function finishSync(env,run,report){await finishSyncPersist(env,run,report);await prepareEpgCompletion(env,run,report);run.stage='complete';run.updatedAt=run.completedAt||new Date().toISOString();delete run.watchlist;delete run.pending;await saveJSON(env,'sync.json',run);await flushEpgEvent(env,run);try{await tracedPhase(run.runId,'queue_refresh',()=>refreshPredictionQueue(env,report,'programme_updated'));}catch(e){run.enrichmentQueueError=(String(e.message)+(e?.guard?':'+String(e.guard):'')).slice(0,160);await saveJSON(env,'sync.json',run);}return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats};}
 // AIR-212: opens the discovery series for the generation this run has just published, before the commit's
 // memory-heavy tail (finishSync, the prediction queue, ratings). queueDiscovery is idempotent and fenced: it
@@ -1594,9 +1652,9 @@ async function sealPayload(env,run,{keepCatalog=false}={}){
 }
 // A step is a list of units. The first unit that is not finished always runs, so every call makes progress; no later unit
 // starts once the request's budget has passed, and the step then saves what is finished in `run.seal.units` and answers
-// `continue` in the same phase. A unit answers 'ok' or 'failed' (a thrown error is fatal and keeps the phase). A failed unit
-// is not recorded as done: the next call tries it again, up to SEAL_UNIT_ATTEMPTS times, and then it is recorded as
-// 'gave_up' and named in `run.sealDegraded` and in the answer, never as done.
+// `continue` in the same phase. A unit answers 'ok', 'continue' (progress, unit not done, not a failure) or 'failed'
+// (a thrown error is fatal and keeps the phase). A failed unit is not recorded as done: the next call tries it again, up to
+// SEAL_UNIT_ATTEMPTS times, and then it is recorded as 'gave_up' and named in `run.sealDegraded` and in the answer, never as done.
 const SEAL_UNIT_ATTEMPTS=3;
 async function sealUnits(env,run,deadline,list){
  const units=run.seal.units||(run.seal.units={}),attempts=run.seal.attempts||(run.seal.attempts={});
@@ -1607,6 +1665,7 @@ async function sealUnits(env,run,deadline,list){
   await epgStepGuard(env);
   const outcome=await tracedPhase(run.runId,'seal_'+unit.phase,unit.work);
   ran++;
+  if(outcome==='continue')return {done:false};
   if(outcome==='failed'){
    attempts[unit.name]=(attempts[unit.name]||0)+1;
    if(attempts[unit.name]<SEAL_UNIT_ATTEMPTS)return {done:false,retry:unit.name};
@@ -1666,7 +1725,7 @@ async function sealFinalizeStep(env,run,deadline=Infinity){
    return 'ok';
   }},
   {name:'watchlist',phase:'finalize_watchlist',work:async()=>{await persistWatchlist(env,run,report);return 'ok';}},
-  {name:'scan',phase:'finalize_scan',work:async()=>{await persistScan(env,run,report);return 'ok';}},
+  {name:'scan',phase:'finalize_scan',work:async()=>{const outcome=await persistScan(env,run,report);return outcome==='continue'?'continue':'ok';}},
   {name:'events',phase:'finalize_events',work:async()=>{await persistEvents(env,run,report);return 'ok';}},
  ]);
  if(!out.done)return await sealCheckpoint(env,run,out);

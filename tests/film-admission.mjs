@@ -343,8 +343,9 @@ async function seedFilm(env,id,externalIds=[]){return mutateFilm(env,{id,expecte
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('film-admission'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers.filter(file=>!file.endsWith('film-admission.js')&&!file.endsWith('canonical-producers.js')),[],'no source file imports film-admission');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-admission'),file+' does not bundle or name it');
+ assert.deepEqual(importers.filter(file=>!file.endsWith('film-admission.js')&&!file.endsWith('canonical-producers.js')&&!file.endsWith('canonical-rated-admission-producer.js')).sort(),[],'only the producers registry and the rated_admission_retention unit import film-admission');
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('film-admission'),file+' does not name it');
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes("scopedImports('src/film-admission.js','CanonicalFilmAdmission'"));
  assert.ok(fs.readFileSync('migrations/README.md','utf8').includes(NEW),'migrations/README.md lists 0015');
  for(const file of ['src/canonical-repository.js','src/d1-enrichment.js','src/letterboxd-rated-candidates.js','src/enrichment-projection.js'])assert.ok(!/film_rated_admission|film_retention/.test(fs.readFileSync(file,'utf8')),file+' does not touch the admission tables');
  assert.ok(fs.readFileSync('src/letterboxd-rated-candidates.js','utf8').includes(RATED_RECEIPT_KEY),'the receipt object is the existing verified-films.json');

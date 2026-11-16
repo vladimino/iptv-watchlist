@@ -48,11 +48,11 @@ assert.ok(audit.consumers.find(item=>item.name.startsWith('epgSync'))?.moved);
 assert.deepEqual([...WORKFLOW_FILM_FACTS],['watchlist','canonicalIdentity','originalTitle','film_metadata','film_dimension','film_sync_state']);
 assert.deepEqual([...audit.workflowFactsAbsent],[]);
 assert.ok(!audit.residuals.some(item=>item.startsWith('workflow_facts_absent:')));
-assert.ok(audit.residuals.some(item=>item.startsWith('producer_not_wired:')));
+assert.ok(!audit.residuals.some(item=>item.startsWith('producer_not_wired:')));
 assert.ok(audit.producers.find(item=>item.name==='discovery_admission').wired);
 assert.ok(audit.producers.find(item=>item.name==='epg_commit').wired);
 assert.ok(audit.producers.find(item=>item.name==='metadata_sync').wired);
-assert.ok(!audit.producers.find(item=>item.name==='rated_admission_retention').wired);
+assert.ok(audit.producers.find(item=>item.name==='rated_admission_retention').wired);
 const workflowSrc=fs.readFileSync('src/canonical-producer-workflow.js','utf8');
 assert.match(workflowSrc,/export function filmFactsOf\(film,watchlisted\)/);
 assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.metadata=/);
@@ -89,16 +89,17 @@ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers
 {
  const file=openDb();
  const env=envOf(file);
- const ready=await activationReadiness(env,{now:T,expectedGeneration:1,expectedReference:REF,classes:CLASSES});
+ const ready=await activationReadiness(env,{now:T,expectedGeneration:1,expectedReference:REF});
  assert.equal(ready.ready,false,ready.blockers.join(','));
  assert.ok(!ready.blockers.some(item=>item.startsWith('freeze_unmoved:')));
- assert.ok(ready.blockers.some(item=>item.startsWith('producer_not_wired:')));
+ assert.ok(!ready.blockers.some(item=>item.startsWith('producer_not_wired:')));
+ assert.ok(ready.blockers.some(item=>item.startsWith('empty_class_not_loaded:')));
  assert.ok(!ready.blockers.some(item=>item.startsWith('workflow_facts_absent:')));
  assert.ok(!ready.blockers.some(item=>item==='producer_not_wired:epg_commit'));
- assert.match(ready.nextMinimalFix,/remaining PRODUCER_WIRING/);
+ assert.match(ready.nextMinimalFix,/Producer wiring is complete/);
  const handoff=await handoffReadiness(env,{now:T});
  assert.equal(handoff.ready,false);
- const dry=await activateOpen(env,{apply:false,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES});
+ const dry=await activateOpen(env,{apply:false,expectedGeneration:1,expectedReference:REF,now:T});
  assert.equal(dry.outcome,'dry_run');
  assert.equal(dry.readiness.ready,false);
  assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'prepared');
@@ -139,7 +140,7 @@ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers
 
 {
  const file=openDb();
- const blocked=await activateOpen(envOf(file),{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'op-1'});
+ const blocked=await activateOpen(envOf(file),{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,owner:'op-1'});
  assert.equal(blocked.outcome,'stop');
  assert.equal(blocked.reason,'preflight');
  const out=await runExclusiveHandoff(envOf(file),{expectedGeneration:1,expectedReference:REF,owner:'op-1'});

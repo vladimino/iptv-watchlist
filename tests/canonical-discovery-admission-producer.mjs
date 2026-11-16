@@ -456,12 +456,12 @@ for(const stage of ['legacy','r2','prepared']){
 // 9. Registry and readiness: the atomic `film_mutation` spec is registered, exactly its dependent producer flips, the other kinds are unchanged, and nothing else registers.
 {
  assert.ok(PRODUCER_OPERATIONS.has('film_mutation'));
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_metadata','film_mutation','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_admission','film_credits','film_facts','film_metadata','film_mutation','film_retention','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const spec=PRODUCER_OPERATIONS.get('film_mutation');
  assert.equal(spec.atomic,true);assert.equal(spec.operation,'film_mutation');
  for(const hook of ['readback','replay','revalidate'])assert.equal(typeof spec[hook],'function');
  const flipped=PRODUCER_WIRING.filter(item=>item.requires.every(kind=>[...PRODUCER_OPERATIONS.values()].some(op=>op.operation===kind&&op.atomic===true))).map(item=>item.name);
- assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission']);
+ assert.deepEqual(flipped,['epg_commit','metadata_sync','discovery_admission','rated_admission_retention']);
  assert.throws(()=>discoveryAdmissionOperation({}),code('film_person_invalid'));
 }
 
