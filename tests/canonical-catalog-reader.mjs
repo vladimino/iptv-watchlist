@@ -73,6 +73,25 @@ if(ONLY!=='route'){
  assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),true);
  sqlite(cutover,"UPDATE projector_window SET state='held',owner='air-499',requested_at="+(Date.now()-1000)+",expires_at="+(Date.now()+60000)+" WHERE id=1");
  assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),false,'exclusive window held refuses frozen mirror puts');
+ const inner=d1Standin(database('prepared'));
+ const windowFail={prepare(sql){if(/FROM projector_window/.test(sql))throw new Error('D1 timeout');return inner.prepare(sql);}};
+ assert.equal(await reader.canonicalMirrorsWritable({DB:windowFail}),false,'unreadable projector_window is not permission to write');
+ {
+  const worker=fs.readFileSync('src/worker.js','utf8');
+  const freeze=worker.slice(worker.indexOf('async function frozenCanonicalMirrorsLocked'),worker.indexOf('async function localizedTitleStore'));
+  const save=worker.slice(worker.indexOf('async function epgStepGuard'),worker.indexOf('function confirmedHalfStar'));
+  const puts=[];
+  const env={
+   epgStep:true,
+   DB:windowFail,
+   BUCKET:{put:async(name)=>{puts.push(name);return {etag:'e'};}},
+  };
+  const context=vm.createContext({env,CanonicalCatalogReader:{canonicalMirrorsWritable:reader.canonicalMirrorsWritable},EpgOrchestration:{assertStep:async()=>{}},JSON,undefined});
+  vm.runInContext(freeze+'\n'+save+'\nthis.saveJSON=saveJSON;',context);
+  const result=await vm.runInContext('saveJSON(env,"titles.json",{ok:true})',context);
+  assert.equal(result.skipped,'canonical_mirror_frozen');
+  assert.deepEqual(puts,[],'unreadable exclusive window: zero BUCKET.put');
+ }
 }
 
 // 2. The D1 fallback reader: only at open; every other state refuses before a catalog statement. There is no R2 handle in this environment at all.

@@ -27,7 +27,10 @@ export async function canonicalMirrorsWritable(env){
  try{
   const window=await one(db,'SELECT state,expires_at AS expiresAt FROM projector_window WHERE id=1');
   if(window&&window.state==='held'&&Number(window.expiresAt)>Date.now())return false;
- }catch{/* table absent is no exclusive window */}
+ }catch(error){
+  if(/no such table/i.test(String(error?.message||error))||/no such table/i.test(String(error?.cause?.message||'')))return true;
+  return false;
+ }
  return true;
 }
 
