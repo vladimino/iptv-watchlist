@@ -1959,7 +1959,10 @@ function footerGuard(env,degraded){
     // A host without clearTimeout (a test context that exposes only setTimeout) must not be kept alive by a timer nobody can clear.
     if(typeof clearTimeout!=='function'&&timer&&typeof timer.unref==='function')timer.unref();
    })]);
-  }catch{if(!degraded.includes(name))degraded.push(name);return null;}
+  }catch(error){
+   if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code))throw error;
+   if(!degraded.includes(name))degraded.push(name);return null;
+  }
   finally{if(timer!==null&&typeof clearTimeout==='function')clearTimeout(timer);}
  };
 }
@@ -1973,8 +1976,26 @@ async function footerPublishedDocument(pinned,key){
  }
  return loadJSON(pinned,key);
 }
+function canonicalCatalogReadRefusal(error){
+ return ['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)
+  ?json({error:'storage_unavailable',reason:error.code},503):null;
+}
+function canonicalIdentityIds(values){
+ const ids=new Set();
+ const add=id=>{if(id!=null&&id!=='')ids.add(String(id));};
+ for(const value of values||[]){
+  if(!value||typeof value!=='object')continue;
+  if(Array.isArray(value.films)){for(const film of value.films)add(film?.id);continue;}
+  for(const [key,item] of Object.entries(value)){
+   add(key);
+   if(item&&typeof item==='object'&&!Array.isArray(item))add(item.id);
+  }
+ }
+ return [...ids];
+}
 async function footerStatus(env){
  const degraded=[],guard=footerGuard(env,degraded);
+ const filmPersonGate=typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env);
  const pinned=await guard('publication',()=>pinEpg(env))||env;
  const ratingsState=typeof LetterboxdRatings!=='undefined'?await guard('ratings',async()=>{const state=await LetterboxdRatings.migrationState(env);return state.migration==='complete'?{run:LetterboxdRatings.health(await LetterboxdRatings.readRun(env),Date.now())}:{blocked:{migration:state.migration}};}):null;
  const ratingsRun=ratingsState?.run??null,ratingsBlocked=ratingsState?.blocked??null;
@@ -1982,14 +2003,18 @@ async function footerStatus(env){
  const authority=typeof DiscoveryAuthority!=='undefined'?await guard('discovery_authority',()=>DiscoveryAuthority.readAuthority(env)):null;
  const decisions=authority?.ready?{}:await guard('decisions',()=>loadJSON(env,'epg/discovery-resolution.json'));
  const ledger=await guard('ledger',()=>ledgerStatusAggregates(pinned,decisions||{},Date.now()));
- const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,watchlist,metadata]=await Promise.all([
+ const [profile,index,report,catalog,storedQueue,run,lease,sync,ratings,discoveryStatus,continuation,watchlistIngest,resolverLease,watchlist,metadataR2]=await Promise.all([
   guard('profile',()=>loadJSON(env,profileKey)),guard('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),guard('programme',()=>footerPublishedDocument(pinned,'programme.json')),guard('catalog',()=>loadJSON(pinned,'epg/discovered-films.json')),
   guard('queue',()=>loadJSON(env,predictionQueueKey)),guard('run',()=>loadJSON(env,ENRICHMENT_KEY+'latest-run.json')),guard('lease',()=>loadJSON(env,RUNNER_LEASE_KEY)),guard('sync',()=>loadJSON(env,'sync.json')),guard('ratings_status',()=>loadJSON(env,RATINGS_STATUS_KEY)),
   guard('discovery_status',()=>loadJSON(env,'epg/discovery-status.json')),guard('continuation',()=>loadJSON(env,'epg/resolver-continuation.json')),guard('watchlist_ingest',()=>loadJSON(env,'watchlist-ingest.json')),guard('resolver_lease',()=>loadJSON(env,'epg/resolver-lease.json')),
-  // AIR-389: two more single-object reads, for the collection and the new-film counts.
-  guard('watchlist',()=>footerPublishedDocument(pinned,'watchlist.json')),guard('metadata',()=>loadJSON(env,'metadata.json'))
+  // AIR-389 / AIR-499: watchlist is still one published object; metadata.json is frozen at open, so D1 replaces it after these reads name the ids.
+  guard('watchlist',()=>footerPublishedDocument(pinned,'watchlist.json')),
+  filmPersonGate?.mode==='d1'?Promise.resolve(undefined):guard('metadata',()=>loadJSON(env,'metadata.json'))
  ]);
+ let metadata=metadataR2;
+ if(filmPersonGate?.mode==='d1')metadata=await CanonicalCatalogReader.catalogMetadataFromD1(env,canonicalIdentityIds([report,catalog,watchlist,index]),filmPersonGate);
  const freshness=await guard('freshness',()=>predictionFreshness(env,profile));
+ if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  // Coverage needs the programme, the catalog, the view index and the freshness rule. If any of them could not be read the numbers are unknown, not zero or 100%.
  // A programme or catalog object that is simply absent (the read answered null) is as unreadable as one that failed: it is not an empty collection with 100% coverage.
  if(!footerPlainObject(report)&&!degraded.includes('programme'))degraded.push('programme_missing');
@@ -3228,7 +3253,29 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  // Read-only audit export. No lazy rating initialization, source fetch, or enrichment generation.
  if(path==='/api/enrichment/diagnostics/export'&&request.method==='GET'){
   const group=url.searchParams.get('group')||'global';
-  if(group==='global'){const keys=['enrichment/diagnostics/baseline.json','enrichment/diagnostics/rating-observations.json','enrichment/view-index.json','enrichment/profile/current.json','epg/discovered-films.json','programme.json','watchlist.json','metadata.json','titles.json'];const records=await Promise.all(keys.map(async key=>{const object=await env.BUCKET.get(key);return {key,uploadedAt:object?.uploaded?.toISOString?.()||null,etag:object?.etag||null,value:object?await object.json():null};}));return json({exportedAt:new Date().toISOString(),group,records});}
+  if(group==='global'){
+  try{
+   const keys=['enrichment/diagnostics/baseline.json','enrichment/diagnostics/rating-observations.json','enrichment/view-index.json','enrichment/profile/current.json','epg/discovered-films.json','programme.json','watchlist.json','metadata.json','titles.json'];
+   const filmPersonGate=typeof CanonicalCatalogReader==='undefined'?null:await CanonicalCatalogReader.catalogReaderGate(env);
+   const frozen=new Set(['metadata.json','titles.json']);
+   const records=await Promise.all(keys.map(async key=>{
+    if(filmPersonGate?.mode==='d1'&&frozen.has(key))return {key,uploadedAt:null,etag:'d1:'+filmPersonGate.generation,value:null};
+    const object=await env.BUCKET.get(key);
+    return {key,uploadedAt:object?.uploaded?.toISOString?.()||null,etag:object?.etag||null,value:object?await object.json():null};
+   }));
+   if(filmPersonGate?.mode==='d1'){
+    const wanted=canonicalIdentityIds(records.filter(item=>item.value&&!frozen.has(item.key)).map(item=>item.value));
+    const meta=await CanonicalCatalogReader.catalogMetadataFromD1(env,wanted,filmPersonGate);
+    const titles=await CanonicalCatalogReader.catalogTitlesFromD1(env,wanted.map(id=>({id,tmdbId:meta[id]?.tmdbId})),filmPersonGate);
+    for(const item of records){
+     if(item.key==='metadata.json')item.value=meta;
+     if(item.key==='titles.json')item.value=titles;
+    }
+   }
+   if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
+   return json({exportedAt:new Date().toISOString(),group,records});
+  }catch(error){const refused=canonicalCatalogReadRefusal(error);if(refused)return refused;throw error;}
+ }
   const prefixes={films:'enrichment/films/',sources:'enrichment/sources/',profiles:'enrichment/profile/versions/',runs:'enrichment/runs/'},prefix=prefixes[group],cursor=url.searchParams.get('cursor')||undefined;
   if(!prefix||cursor&&cursor.length>4000)return json({error:'Invalid export group or cursor'},400);
   const page=await env.BUCKET.list({prefix,limit:24,...(cursor?{cursor}:{})}),records=await Promise.all(page.objects.map(async item=>{const object=await env.BUCKET.get(item.key);return {key:item.key,uploadedAt:object?.uploaded?.toISOString?.()||item.uploaded?.toISOString?.()||null,etag:object?.etag||item.etag||null,value:object?await object.json():null};}));return json({exportedAt:new Date().toISOString(),group,records,nextCursor:page.truncated?page.cursor:null});
@@ -3251,7 +3298,10 @@ if(['POST','PUT'].includes(request.method)){try{body=await request.json();}catch
  if(path==='/api/enrichment/runs'&&request.method==='GET'){const text=url.searchParams.get('limit')||'10';if(!/^\d+$/.test(text)||Number(text)<1||Number(text)>100)return json({error:'Invalid limit (1–100)'},400);return json(await diagnosticHistory(env,Number(text)));}
  if(path==='/api/enrichment/queue/reconcile'&&request.method==='POST'){const report=await loadJSON(env,'programme.json');let queue;try{queue=await refreshPredictionQueue(env,report,'manual_reconcile');}catch(e){if(e?.name==='PredictionQueueConflictError')return json({error:'Prediction queue changed during write; read it again',code:e.code},409);throw e;}return queue?json(await queueStatus(env)):json({error:'Programme or taste profile unavailable'},409);}
  if(path==='/api/enrichment/queue/status'&&request.method==='GET')return json(await queueStatus(env)||{status:'not_initialized',pendingCount:null,...scheduledRunFields()});
- if(path==='/api/enrichment/footer/status'&&request.method==='GET')return json(await footerStatus(env));
+ if(path==='/api/enrichment/footer/status'&&request.method==='GET'){
+  try{return json(await footerStatus(env));}
+  catch(error){const refused=canonicalCatalogReadRefusal(error);if(refused)return refused;throw error;}
+ }
  if(path==='/api/enrichment/next'&&request.method==='POST')return timedPredictionStep(env,'next',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>enrichmentNext(timed,body,requestId)),'next',requestId));
  if(path==='/api/enrichment/submit'&&request.method==='POST')return timedPredictionStep(env,'submit',body,requestId,timed=>observedPrediction(timed,body,()=>predictionWriter(timed,()=>enrichmentSubmit(timed,body,requestId)),'submit',requestId));
  if(path==='/api/enrichment/complete'&&request.method==='POST')return observedPrediction(env,body,()=>predictionWriter(env,()=>enrichmentComplete(env,body,requestId)),'complete',requestId);

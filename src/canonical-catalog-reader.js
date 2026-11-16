@@ -276,7 +276,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
 // The remaining-readers registry (AIR-374 P4): every reader or writer of a former mutable canonical R2 mirror (titles.json, people.json, metadata.json) and every named exception
 // (owner decision 4: what stays R2 after `open`). `class` is 'freeze' (the mirror is frozen at open and the reader must read D1: moved:false is still open work) or 'exception'
 // (stays as it is: an independent mirror, an input artifact, an immutable source or receipt, view-index prediction retention). Plain data, no imports: the computed handoff readiness
-// (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs, tests/canonical-catalog-metadata.mjs, tests/canonical-admin-dictionaries.mjs or tests/catalog-film.mjs).
+// (P6) consumes it. `moved:true` means the reader is marker-gated and reads D1 at open (proved by tests/canonical-catalog-titles.mjs, tests/canonical-catalog-metadata.mjs, tests/canonical-admin-dictionaries.mjs, tests/canonical-footer-export.mjs or tests/catalog-film.mjs).
 export const CANONICAL_READER_REGISTRY=[
  {name:'catalog film route rated-archive fallback (retirements, receipt)',file:'src/worker.js',class:'freeze',moved:true},
  {name:'/api/d1/* catalog routes',file:'src/catalog-d1.js',class:'freeze',moved:true},
@@ -291,8 +291,8 @@ export const CANONICAL_READER_REGISTRY=[
  {name:'admin limbo titles.json and people.json',file:'src/admin/limbo.js',class:'freeze',moved:true},
  {name:'admin health source list titles.json and people.json',file:'src/admin/health.js',class:'freeze',moved:true},
  {name:'admin Letterboxd archive metadata.json',file:'src/admin/letterboxd-archive.js',class:'freeze',moved:true},
- {name:'footer metadata.json',file:'src/enrichment.js',class:'freeze',moved:false},
- {name:'migration export of the mirrors (group global)',file:'src/enrichment.js',class:'freeze',moved:false},
+ {name:'footer metadata.json',file:'src/enrichment.js',class:'freeze',moved:true},
+ {name:'migration export of the mirrors (group global)',file:'src/enrichment.js',class:'freeze',moved:true},
  {name:'metadata cache mirror object of the D1 metadata cache',file:'src/metadata-cache.js',class:'exception',moved:false},
  {name:'enrichment projector reads the mirror objects as its source until the producers are wired',file:'src/d1-enrichment.js',class:'exception',moved:false},
  {name:'programme.json and watchlist.json (independent EPG mirrors)',file:'src/worker.js',class:'exception',moved:false},

@@ -125,6 +125,9 @@ export const FILES={
  "canonical-admin-dictionaries.mjs": {
   "suite": "core"
  },
+ "canonical-footer-export.mjs": {
+  "suite": "core"
+ },
  "canonical-mirror-put.mjs": {
   "suite": "core"
  },
