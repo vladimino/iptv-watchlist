@@ -25,7 +25,6 @@ sequenceDiagram
     else New run
         MCP->>Queue: Acquire lease
         MCP->>R2: Persist interrupted state for the recovered lease holder only
-        MCP->>MCP: Diagnostics settle on complete; GET writes nothing
         loop eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
@@ -53,7 +52,7 @@ sequenceDiagram
         end
         Client->>MCP: prediction_complete when required
         MCP->>Queue: Record completion in a conditional write of the stored queue, release lease
-        MCP->>R2: Settle at most 10 expired diagnostic rows; skip the live lease holder
+        MCP->>R2: Settle at most 10 expired diagnostic rows, skip the live lease holder
     end
 ```
 
