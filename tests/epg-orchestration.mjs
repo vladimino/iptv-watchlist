@@ -258,8 +258,8 @@ const control=async harness=>(await harness.epg.readControl(harness.env)).record
 }
 
 // The scripted pipeline: a fixture sync.json that moves forward the way the real steps move it.
-function pipeline({metadataSteps=2,busyOnce=false,fail=null,windowBusy=null}={}){
- let busy=busyOnce,metadataLeft=metadataSteps,steps=0,windowLeft=windowBusy?.times??0,busyUntil=0;
+function pipeline({metadataSteps=2,busyOnce=false,fail=null,windowBusy=null,journalKeepPending=false,journalFailClearOnce=false}={}){
+ let busy=busyOnce,metadataLeft=metadataSteps,steps=0,windowLeft=windowBusy?.times??0,busyUntil=0,journalClears=0;
  return async(pathname,body,state)=>{
   steps++;
   // ADR 0103: a projector window answers a structured, non-failure busy to its absolute deadline, at the stage given. The next step of
@@ -274,6 +274,12 @@ function pipeline({metadataSteps=2,busyOnce=false,fail=null,windowBusy=null}={})
   if(body.runId!==state.sync.runId)return {status:409,body:{error:'Run id mismatch'}};
   if(pathname==='/api/sync/epg'&&state.sync.stage==='complete'){
    const next={...state.sync,updatedAt:at(state.now())};
+   const event=(next.events||[]).find(item=>item?.type==='watchlist');
+   if(event&&Number.isFinite(Date.parse(event.at))){
+    const key='events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
+    state.objects={...(state.objects||{}),[key]:JSON.parse(JSON.stringify(event))};
+   }
+   if(journalKeepPending||(journalFailClearOnce&&journalClears++===0)){state.sync=next;return {body:{runId:next.runId,stage:'complete'}};}
    delete next.epgEventPending;delete next.watchlistEventPending;
    state.sync=next;
    return {body:{runId:next.runId,stage:'complete'}};
@@ -550,6 +556,43 @@ for(const stage of ['epg','seal']){
  assert.equal(paths[0],'/api/sync/epg');
  assert.equal(h.state.calls[0].body.runId,'old-owed');
  assert.equal((await control(h)).publishedRunId,'run-1');
+}
+
+// 7g. AIR-513: the event object exists but clearing watchlistEventPending fails once; the next action finishes the same key.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const atEvent=at(due);
+ const event={id:'owed-watchlist',type:'watchlist',at:atEvent,added:[],removed:[]};
+ const key='events/items/'+String(9999999999999-Date.parse(atEvent)).padStart(13,'0')+'-owed-watchlist.json';
+ const h=cloudflare({pipeline:pipeline({metadataSteps:0,journalFailClearOnce:true})});
+ const r=runner(h,{startAt:due});
+ await h.epg.ensure(h.env,{now:due});
+ h.state.sync={runId:'owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),watchlistEventPending:true,watchlistEventFixed:true,events:[event]};
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
+ assert.equal(outcome.reason,'complete');
+ assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/epg'&&c.body.runId==='owed').length,2);
+ assert.ok(h.state.objects[key]);
+ assert.equal(h.state.sync.watchlistEventPending,undefined);
+ assert.ok(r.log.some(n=>n.startsWith('sleep')),'the uncleared marker sleeps once, it does not spin');
+}
+
+// 7h. AIR-513: a persistently owed complete run sleeps between steps; it does not fire hundreds of immediate complete actions.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const h=cloudflare({pipeline:pipeline({metadataSteps:0,journalKeepPending:true})});
+ const r=runner(h,{startAt:due});
+ await h.epg.ensure(h.env,{now:due});
+ h.state.sync={runId:'stuck',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),watchlistEventPending:true};
+ let acts=0;
+ const step={
+  async do(name,fn){const value=await r.step.do(name,fn);if(String(name).startsWith('act-')&&++acts>=4)throw new Error('stop after four journal retries');return value;},
+  async sleepUntil(name,date){return r.step.sleepUntil(name,date);},
+ };
+ await h.epg.run(h.env,{runKey:'2026-11-07',series:0,epoch:1},step,{now:r.clock,clock:r.clock,random:()=>0.5}).catch(()=>{});
+ assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/epg').length,4);
+ assert.equal(r.log.filter(n=>n.startsWith('sleep')).length,3);
+ assert.ok(r.clock()-due>=3*MIN,'each still-owed complete step waits the first cooldown');
+ assert.equal((await control(h)).doneAt,null);
 }
 
 // 8. Read-after-unknown: a run of this date that already completed (someone else drove it, or the control write was lost) is the

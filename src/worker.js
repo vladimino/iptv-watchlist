@@ -1011,12 +1011,13 @@ async function flushWatchlistEvent(env,run){
  try{
   const event=run.events[index],key=removalEventKey(event),existing=await loadJSON(env,key);
   const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
-  if(existing&&probe.event===event){delete run.watchlistEventPending;return true;}
-  await writeEvent(env,probe.event);
-  if(probe.event!==event)run.events[index]=probe.event;
-  if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
+  if(!(existing&&probe.event===event)){
+   await writeEvent(env,probe.event);
+   if(probe.event!==event)run.events[index]=probe.event;
+   if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
+  }
   delete run.watchlistEventPending;
-  try{await saveJSON(env,'sync.json',run);}catch{}
+  await saveJSON(env,'sync.json',run);
   return true;
  }catch(e){
   run.watchlistEventPending=true;

@@ -202,6 +202,29 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
  assert.equal(watchlistEvents().filter(event=>event.id===runC+'-watchlist').length,1);
 }
 
+// 4e. The watchlist object exists but clearing watchlistEventPending fails: the next step persists the clear on the same key.
+{
+ const runE=await readyToCommit();
+ set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[{id:'film1',title:'Heat',original:'Heat',year:1995},{id:'gone',title:'Gone',original:'Gone',year:1999,tmdbId:'4242',tmdbLink:movieLink('4242'),url:'https://letterboxd.com/film/gone/'}]});
+ showCount=1;failPublish=null;
+ let watchPuts=0,clearFails=0;
+ failPublish=(key,body)=>{
+  if(String(key).endsWith('-watchlist.json')&&watchPuts<1){watchPuts++;return true;}
+  if(key==='sync.json'&&body.stage==='complete'&&!body.watchlistEventPending&&watchlistEvents().some(event=>event.id===runE+'-watchlist')&&clearFails<1){clearFails++;return true;}
+  return false;
+ };
+ const first=await post('/api/sync/epg',{runId:runE});assert.equal(first.status,200,JSON.stringify(first.data));
+ assert.equal(watchlistEvents().filter(event=>event.id===runE+'-watchlist').length,0);
+ await post('/api/sync/epg',{runId:runE});await settle();
+ const keys=watchlistEvents().filter(event=>event.id===runE+'-watchlist').map(event=>event.key);
+ assert.equal(keys.length,1,'the event is written once');
+ assert.equal(records.get('sync.json').watchlistEventPending,true,'a failed clear keeps the retry marker');
+ await post('/api/sync/epg',{runId:runE});await settle();
+ assert.equal(records.get('sync.json').watchlistEventPending,undefined);
+ assert.deepEqual(watchlistEvents().filter(event=>event.id===runE+'-watchlist').map(event=>event.key),keys);
+ failPublish=null;
+}
+
 // 4d. AIR-513: only a resolved TMDB movie identity is stored; TV, unresolved and mismatched numbers stay off the event and the API.
 {
  const runD=await readyToCommit();

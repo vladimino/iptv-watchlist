@@ -368,7 +368,7 @@ function frozenDay(run){
    // AIR-464: a run adopted from another Madrid day (ADR 0092 resume) publishes that day, not this control's day. Its completion never
    // certifies this control; the next action finds a complete run of another day, which is not usable, and starts this day's run.
    if(started!==runKey)return {...base,note:'foreign_run_sealed'};
-   if(await journalOwed(fe,after||run))return base;
+   if(await journalOwed(fe,after||run))return {...base,wake:now+policy().COOLDOWNS_MS[0],note:'journal_pending'};
    return {...base,finished:true,published:after?.runId||run.runId};
   }
   return base;
