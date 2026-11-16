@@ -6,8 +6,9 @@ Counts and digests only in any evidence; no ids, titles, payloads or credentials
 
 ## What exists
 
-- `src/film-person-open-handoff.js` (unbundled): `activationReadiness`, `activateOpen`, `flipOpen`.
-- `scripts/film-person-open-handoff.mjs`: REST dry-run (SELECTs). `--apply` is refused (`transport_not_worker_batch`): grant/seal need Worker `D1Database.batch()`.
+- `src/film-person-open-handoff.js` (bundled for MCP only): `activationReadiness`, `activateOpen`, `flipOpen`, `handleOpenHandoffTool`.
+- MCP tool `film_person_open_handoff` on `/mcp` (Cloudflare Access JWT, owner-only). `mode: dry_run` writes nothing. `mode: apply` with `confirmGo: true` uses Worker `env.DB.batch()`. No public HTTP write, cron or Scheduled Task calls it.
+- `scripts/film-person-open-handoff.mjs`: REST dry-run (SELECTs). `--apply` is refused (`transport_not_worker_batch`).
 - Offline coverage: `tests/film-person-open-handoff.mjs`.
 
 `handoffReadiness` in `src/canonical-producers.js` is **not** the activation gate and is not rewritten. `activationReadiness` is the operational gate **and** it promotes every `activationAudit()` residual to a blocker: eleven freeze-unmoved consumers (ADR 0117 decision 4: they must move to D1; they are not dual D1 writers and they are not treated as D1-authoritative), unwired natural producers, and Producer Workflow `filmFactsOf` missing `film_metadata` / `film_dimension` / `film_sync_state`. Five ADR 0117 exceptions (including the metadata-cache mirror) stay exceptions and are not residuals. **`--apply` STOPs while any residual remains.** Next minimal fix: move those eleven freeze consumers to D1, register atomic operations for every remaining `PRODUCER_WIRING` kind, and extend `filmFactsOf` (or record an owner-accepted exception). The four `moved:true` freeze readers are already D1 at `open`.
@@ -24,16 +25,28 @@ Needs D1 operator credentials (`D1_BACKFILL_*`). It writes nothing. `outcome: dr
 
 ## Apply (still needs a named L3 GO)
 
+Production apply is the owner-only MCP tool on the deployed Worker (Access JWT). It never uses the REST `/query` adapter:
+
 ```
-node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<64-hex> --apply --confirm-go
+film_person_open_handoff
+  mode: apply
+  confirmGo: true
+  expectedGeneration: 1
+  expectedReference: <64-hex>
 ```
 
-`--apply` without `--confirm-go` is refused. `--apply` also requires `--expected-generation` and `--expected-reference` before any lease or window write. While `activationReadiness.ready` is false (current residuals), `--apply` STOPs at preflight and takes no lease. The sequence once those blockers are gone:
+`confirmGo` false or omitted is refused. `expectedGeneration` and `expectedReference` are required. While `activationReadiness.ready` is false (current residuals), apply STOPs at preflight and takes no lease. The REST CLI remains dry-run only:
+
+```
+node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<64-hex>
+```
+
+The sequence once those blockers are gone:
 
 1. `activationReadiness` (H1 class counts 708 / 398 / 4, marker `prepared` at the expected generation, verified baseline reference, idle leases and window, Discovery `d1`/`open`, schema ≥ 23, writer route `projector`).
 2. Take the enrichment projector lease as this owner only; STOP on a competing live lease.
 3. `requestProjectorWindow` then `grantProjectorWindow` (ADR 0103, 300 s cap); STOP if not granted; Discovery lease moves onto this owner.
-4. **One guarded UPDATE** plus readback, then grant/`recordBaseline` through **Worker `D1Database.batch()`** (Cloudflare-documented rollback). The REST `/query` CLI adapter is not that API: explicit `BEGIN`/`COMMIT` is unsupported on D1, and REST `{batch:[...]}` is not documented as transactional, so **`scripts/film-person-open-handoff.mjs --apply` STOPs with `transport_not_worker_batch`** and takes no lease. Dry-run stays REST SELECTs. A lost read after a committed UPDATE is `unknown` (keep the exclusive window). `--apply` on a Worker binding still proves D1 `iptv` UUID `3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb` and requires `--expected-generation` / `--expected-reference`.
+4. **One guarded UPDATE** plus readback, then grant/`recordBaseline` through **Worker `D1Database.batch()`** (Cloudflare-documented rollback). The REST `/query` CLI adapter is not that API: explicit `BEGIN`/`COMMIT` is unsupported on D1, and REST `{batch:[...]}` is not documented as transactional, so **`scripts/film-person-open-handoff.mjs --apply` STOPs with `transport_not_worker_batch`** and takes no lease. Dry-run stays REST SELECTs. The MCP `apply` path is the Worker binding. A lost read after a committed UPDATE is `unknown` (keep the exclusive window). Apply still requires the expected generation and baseline reference.
 5. Re-check exclusive ownership on the database clock, then `recordBaseline` / `verifyBaseline` / `readUnreceipted` / `listAttention`. If the window or lease has expired, STOP and keep them. No producer write is allowed between flip and seal (`receipt_baseline_missing`). A Worker tick cannot use the projector: `projectorExpectation` is null at `d1`.
 6. Readback: generation G+1, writer `canonical`, projector not writable, sealed/verified receipts, no unreceipted or attention rows.
 7. Release **only** this owner's lease and window.

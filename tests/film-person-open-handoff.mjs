@@ -1,21 +1,24 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {applyFilmFacts} from '../src/canonical-producer-adapters.js';
-import {handoffReadiness} from '../src/canonical-producers.js';
+import {EMPTY_CLASSES as PRODUCER_EMPTY_CLASSES,PRODUCER_WIRING as PRODUCER_WIRING_SOURCE,handoffReadiness} from '../src/canonical-producers.js';
 import {grantProjectorWindow,requestProjectorWindow} from '../src/discovery-authority.js';
 import {projectorExpectation} from '../src/film-person-authority.js';
 import {writerRoute} from '../src/canonical-writer-route.js';
 import {CANONICAL_READER_REGISTRY} from '../src/canonical-catalog-reader.js';
 import {
  ACTIVATION_CONSUMERS,
+ EMPTY_CLASSES,
  OPEN_HANDOFF_MIN_VERSION,
  OPERATOR_D1_TARGET,
+ PRODUCER_WIRING,
  WORKFLOW_FILM_FACTS,
  activationAudit,
  activateOpen,
  activationReadiness,
  exclusiveOwned,
  flipOpen,
+ handleOpenHandoffTool,
  runExclusiveHandoff,
  parseOpenHandoffArgs,
  proveOperatorTarget,
@@ -51,9 +54,13 @@ assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:t
 assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,databaseId:'00000000-0000-0000-0000-000000000000',endpointOverride:false},described:{name:'iptv',uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
 assert.throws(()=>parseOpenHandoffArgs(['--nope']),/film_person_invalid/);
 assert.deepEqual(parseOpenHandoffArgs(['--apply','--confirm-go','--expected-generation=1','--expected-reference=t']),{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:'t'});
+assert.deepEqual(EMPTY_CLASSES,PRODUCER_EMPTY_CLASSES);
+assert.deepEqual(PRODUCER_WIRING,PRODUCER_WIRING_SOURCE);
 
-const bundled=fs.readFileSync('build.mjs','utf8')+' '+fs.readFileSync('src/worker.js','utf8');
-assert.doesNotMatch(bundled,/film-person-open-handoff/);
+const bundled=fs.readFileSync('build.mjs','utf8');
+assert.match(bundled,/film-person-open-handoff/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/film-person-open-handoff/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers/);
 
 {
  const file=openDb();
@@ -77,6 +84,32 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
  const rest=await activateOpen({...env,d1Transport:'rest'},{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'rest'});
  assert.equal(rest.reason,'transport_not_worker_batch');
  assert.equal(q(file,'SELECT generation FROM film_person_authority WHERE id=1').generation,1);
+ const mcpRest=await handleOpenHandoffTool({...env,d1Transport:'rest'},{mode:'apply',confirmGo:true,expectedGeneration:1,expectedReference:REF});
+ assert.equal(mcpRest.reason,'transport_not_worker_batch');
+ const mcpMissing=await handleOpenHandoffTool(env,{mode:'apply',expectedGeneration:1,expectedReference:REF});
+ assert.equal(mcpMissing.reason,'confirm_go_required');
+ const mcpLive=await handleOpenHandoffTool(env,{mode:'apply',confirmGo:true,expectedGeneration:1,expectedReference:REF});
+ assert.equal(mcpLive.reason,'preflight');
+ assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'prepared');
+}
+
+{
+ const file=openDb();
+ const env=envOf(file);
+ const live=activationAudit();
+ const fixture={
+  consumers:live.consumers.map(item=>item.class==='freeze'?{...item,moved:true,kind:'d1_reader',d1Authoritative:true,d1Writer:false}:item),
+  producers:live.producers.map(item=>({...item,wired:true})),
+  workflowFacts:WORKFLOW_FILM_FACTS,
+  workflowFactsAbsent:[],
+  residuals:[],
+ };
+ const ready=await activationReadiness(env,{now:T,expectedGeneration:1,expectedReference:REF,classes:CLASSES,audit:fixture});
+ assert.equal(ready.ready,true,ready.blockers.join(','));
+ const applied=await activateOpen(env,{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,audit:fixture,owner:'op-mcp'});
+ assert.equal(applied.outcome,'activated',JSON.stringify(applied));
+ assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'d1');
+ assert.equal(q(file,'SELECT generation FROM film_person_authority WHERE id=1').generation,2);
 }
 
 {

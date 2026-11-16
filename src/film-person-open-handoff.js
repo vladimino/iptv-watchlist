@@ -1,12 +1,14 @@
-// AIR-499. Protected Film/Person `prepared` → `open` operator. UNBUNDLED: the Worker does not import this module, no route, cron
-// or MCP tool calls it, and a merge authorizes no production flip. The flip is ONE guarded UPDATE plus readback (no REST
+// AIR-499. Protected Film/Person `prepared` → `open` operator. Bundled only so the owner-only MCP tool
+// `film_person_open_handoff` can call Worker `env.DB.batch()`. No public HTTP write, cron or Scheduled Task
+// invokes it. A merge authorizes no production flip. The flip is ONE guarded UPDATE plus readback (no REST
 // `changes()` CAS pair). Exclusive window/lease predicates use the database clock, not the preflight timestamp.
+// The dormant producer-readiness module stays unbundled: wiring and H1 counts are copied here and asserted equal in tests.
 import {database,failed,many,one,projectorExpectation,readAuthority} from './film-person-authority.js';
 import {grantProjectorWindow,releaseProjectorWindow,requestProjectorWindow,WINDOW_DEADLINE_MS} from './discovery-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
-import {EMPTY_CLASSES,PRODUCER_OPERATIONS,PRODUCER_WIRING} from './canonical-producers.js';
-import {BASELINE_CAP,listAttention,recordBaseline,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
+import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
+import {BASELINE_CAP,listAttention,operationRegistry,recordBaseline,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
 
 export const OPEN_HANDOFF_MIN_VERSION=23;
 export const OPEN_HANDOFF_PROJECTION='enrichment';
@@ -20,7 +22,19 @@ export const OPERATOR_D1_TARGET=Object.freeze({
 // What the Producer Workflow actually plans per Film (src/canonical-producer-workflow.js filmFactsOf). Not metadata, dimensions or sync clocks.
 export const WORKFLOW_FILM_FACTS=Object.freeze(['watchlist','canonicalIdentity','originalTitle']);
 export const WORKFLOW_FILM_FACTS_ABSENT=Object.freeze(['film_metadata','film_dimension','film_sync_state']);
-export const NEXT_MINIMAL_FIX='Move the 11 freeze consumers to D1 (ADR 0117 decision 4), register atomic operations for every remaining PRODUCER_WIRING kind, and extend Producer Workflow filmFactsOf with film_metadata, film_dimension and film_sync_state (or record an owner-accepted exception). Until then activationReadiness.ready is false and --apply STOPs.';
+export const NEXT_MINIMAL_FIX='Move the 11 freeze consumers to D1 (ADR 0117 decision 4), register atomic operations for every remaining PRODUCER_WIRING kind, and extend Producer Workflow filmFactsOf with film_metadata, film_dimension and film_sync_state (or record an owner-accepted exception). Until then activationReadiness.ready is false and apply STOPs.';
+export const PRODUCER_WIRING=Object.freeze([
+ Object.freeze({name:'epg_commit',site:'epgSync commit (worker.js)',requires:Object.freeze(['film_mutation','person_mutation','film_metadata','film_dimension','film_sync_state','film_membership','person_state'])}),
+ Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
+ Object.freeze({name:'discovery_admission',site:'Discovery catalog admission (discovery-authority.js)',requires:Object.freeze(['film_mutation'])}),
+ Object.freeze({name:'rated_admission_retention',site:'rated admission and watchlist retention (letterboxd-rated-candidates.js, enrichment.js)',requires:Object.freeze(['film_admission','film_retention'])}),
+]);
+export const EMPTY_CLASSES=Object.freeze([
+ Object.freeze({name:'ratedAdmission',table:'film_rated_admission',expected:708}),
+ Object.freeze({name:'retention',table:'film_retention',expected:398}),
+ Object.freeze({name:'retirement',table:'tmdb_retirement_decision',expected:4}),
+]);
+const PRODUCER_OPERATIONS=operationRegistry([discoveryAdmissionOperation({replan:async()=>null})]);
 
 const DB_NOW_MS="(CAST(strftime('%s','now') AS INTEGER)*1000)";
 const DB_NOW_ISO="strftime('%Y-%m-%dT%H:%M:%fZ','now')";
@@ -102,12 +116,12 @@ export async function exclusiveOwned(env,{owner}={}){
  return !!(window&&lease&&discovery);
 }
 
-export async function activationReadiness(env,{now=new Date().toISOString(),expectedGeneration=null,expectedReference=null,classes=EMPTY_CLASSES}={}){
+export async function activationReadiness(env,{now=new Date().toISOString(),expectedGeneration=null,expectedReference=null,classes=EMPTY_CLASSES,audit=null}={}){
  const blockers=[];
- const audit=activationAudit();
+ const report=audit||activationAudit();
  const nowMs=ms(now),nowIso=iso(now);
  if(!Number.isFinite(nowMs))blockers.push('now_invalid');
- if(audit.consumers.length!==CANONICAL_READER_REGISTRY.length)blockers.push('audit_incomplete');
+ if(report.consumers.length!==CANONICAL_READER_REGISTRY.length)blockers.push('audit_incomplete');
  let gate=null;
  try{gate=await readAuthority(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
  if(gate){
@@ -116,7 +130,7 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
   if(Number.isInteger(expectedGeneration)&&gate.generation!==expectedGeneration)blockers.push('generation_mismatch:'+gate.generation+'/'+expectedGeneration);
  }
  const db=database(env);
- if(!db){blockers.push('no_database');return {ready:false,blockers,audit,generation:null,version:null};}
+ if(!db){blockers.push('no_database');return {ready:false,blockers,audit:report,generation:null,version:null};}
  let version=0,tables=new Set();
  try{
   version=Number((await one(db,'SELECT version AS contract_version FROM schema_contract WHERE id=1'))?.contract_version);
@@ -163,13 +177,13 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
    if(found!==item.expected)blockers.push('empty_class_not_loaded:'+item.name+':'+found+'/'+item.expected);
   }catch{blockers.push('empty_class_unreadable:'+item.name);}
  }
- for(const item of audit.consumers){
+ for(const item of report.consumers){
   if(item.kind==='d1_reader'&&item.moved!==true)blockers.push('canonical_reader_not_moved:'+item.name);
   if(item.kind==='frozen_r2_writer'&&item.dualD1!==false)blockers.push('frozen_mirror_misclassified:'+item.name);
   if(item.kind==='adr0117_exception'&&item.moved===true)blockers.push('exception_marked_moved:'+item.name);
  }
- for(const item of audit.residuals)if(!blockers.includes(item))blockers.push(item);
- return {ready:blockers.length===0,blockers,audit,nextMinimalFix:NEXT_MINIMAL_FIX,generation:gate?.generation??null,version};
+ for(const item of report.residuals)if(!blockers.includes(item))blockers.push(item);
+ return {ready:blockers.length===0,blockers,audit:report,nextMinimalFix:NEXT_MINIMAL_FIX,generation:gate?.generation??null,version};
 }
 
 export async function flipOpen(env,{expectedGeneration,expectedReference,owner}={}){
@@ -270,15 +284,25 @@ export async function runExclusiveHandoff(env,{expectedGeneration,expectedRefere
  }
 }
 
-export async function activateOpen(env,{apply=false,confirmGo=false,expectedGeneration,expectedReference,now=new Date().toISOString(),owner=null,classes=EMPTY_CLASSES}={}){
+export async function activateOpen(env,{apply=false,confirmGo=false,expectedGeneration,expectedReference,now=new Date().toISOString(),owner=null,classes=EMPTY_CLASSES,audit=null}={}){
  if(apply&&confirmGo!==true)return stop('confirm_go_required');
  if(apply&&(!Number.isInteger(expectedGeneration)||!expectedReference))return stop('go_operands_required');
  if(apply&&env?.d1Transport==='rest')return stop('transport_not_worker_batch');
  const clock=now;
- const readiness=await activationReadiness(env,{now:clock,expectedGeneration,expectedReference,classes});
+ const readiness=await activationReadiness(env,{now:clock,expectedGeneration,expectedReference,classes,audit});
  if(!apply)return {outcome:'dry_run',apply:false,readiness};
  if(!readiness.ready)return stop('preflight',{readiness});
  return runExclusiveHandoff(env,{expectedGeneration,expectedReference,owner:owner||OPEN_HANDOFF_OWNER_PREFIX+':'+iso(clock),readiness});
+}
+
+// Owner-only MCP entry. Never sets d1Transport:'rest'. Does not accept an audit override: live residuals still STOP.
+export async function handleOpenHandoffTool(env,args={}){
+ if(!args||typeof args!=='object'||Array.isArray(args))throw failed('film_person_invalid');
+ if(args.mode!=='dry_run'&&args.mode!=='apply')throw failed('film_person_invalid');
+ if(args.confirmGo!==undefined&&args.confirmGo!==true&&args.confirmGo!==false)throw failed('film_person_invalid');
+ if(!Number.isInteger(args.expectedGeneration))throw failed('film_person_invalid');
+ if(typeof args.expectedReference!=='string'||!args.expectedReference.length||args.expectedReference.length>80)throw failed('film_person_invalid');
+ return activateOpen(env,{apply:args.mode==='apply',confirmGo:args.confirmGo===true,expectedGeneration:args.expectedGeneration,expectedReference:args.expectedReference});
 }
 
 export function parseOpenHandoffArgs(argv){
