@@ -204,6 +204,7 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
  assert.equal(orphan.orphan.tmdb,undefined);
  assert.equal(orphan.orphan.tmdbId,null);
  assert.equal(orphan.orphan.title,'No Title');
+ assert.equal(orphan.orphan.original,'No Title');
 }
 {
  const file=database('open');

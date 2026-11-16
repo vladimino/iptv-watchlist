@@ -256,7 +256,7 @@ async function lbaCompare(env,parsed,origin){
  if(filmPersonGate)await CanonicalCatalogReader.catalogReaderStill(env,filmPersonGate);
  const ratedAdmission=typeof LetterboxdRatedAdmission==='undefined'?null:LetterboxdRatedAdmission.classifyArchive({films:parsed.films,matches});
  return {
-  sources,omitted:LBA_OMITTED,receipt:receiptState,matches,hypothesis,indexSummary:index.summary,items,ratedAdmission,
+  filmPersonGate,sources,omitted:LBA_OMITTED,receipt:receiptState,matches,hypothesis,indexSummary:index.summary,items,ratedAdmission,
   recordReads:{limit,needed:toRead.length,done:recordReads},
   consistency:{status:changed.length?'drift':'stable',changed},
   reads:[...versions.keys()],
@@ -335,6 +335,7 @@ async function adminLetterboxdArchiveRoute(request,env,url){
    archive:opened.presented,parsed:opened.parsed,comparison,now:started,archiveStaleMs:DataHealth.DATA_HEALTH_THRESHOLDS.archiveStaleMs,
   });
   await lbaAttachBatches(preview,comparison,started);
+  if(comparison.filmPersonGate&&typeof CanonicalCatalogReader!=='undefined')await CanonicalCatalogReader.catalogReaderStill(env,comparison.filmPersonGate);
   return json({...preview,reads:comparison.reads});
  }catch(error){
   const refused=adminStorageRefusal(error);if(refused)return refused;

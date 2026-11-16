@@ -210,7 +210,9 @@ function adminPersonRecord(person,people,clock,reviews){
  const roleId=typeof person?.id==='string'?person.id:'';
  if(!roleId)return null;
  const cache=people?.[roleId]&&typeof people[roleId]==='object'?people[roleId]:null;
- const view=personView({roleId,original:person.original||cache?.original||null,dictionary:REVIEWED_PEOPLE[roleId]||null,cacheName:cache?.name||null,now:clock});
+ const reviewedCache=cache?.status==='reviewed'&&cache.name;
+ const dictionary=REVIEWED_PEOPLE[roleId]||(reviewedCache?{name:cache.name,status:'verified',source:cache.authority||'d1'}:null);
+ const view=personView({roleId,original:person.original||cache?.original||null,dictionary,cacheName:reviewedCache?null:(cache?.name||null),now:clock});
  const stored=reviews?.[view?.id]||null;
  const subject=adminPersonSubject(view,stored,clock);
  if(!subject)return null;
@@ -301,7 +303,7 @@ async function adminLoadSnapshot(env,hasPin,passedGate){
   const programmeUpdatedAt=typeof programme.body.updatedAt==='string'&&programme.body.updatedAt?programme.body.updatedAt:programme.uploaded||(typeof pointer.body.publishedAt==='string'?pointer.body.publishedAt:null);
   const titlesUpdatedAt=titles.present?(typeof titles.body?.updatedAt==='string'&&titles.body.updatedAt?titles.body.updatedAt:titles.uploaded):null;
   const peopleUpdatedAt=people.present?(typeof people.body?.updatedAt==='string'&&people.body.updatedAt?people.body.updatedAt:people.uploaded):null;
-  const skewReasons=adminSkew(programmeUpdatedAt,titles,titlesUpdatedAt,people,peopleUpdatedAt);
+  const skewReasons=filmPersonGate?.mode==='d1'?[]:adminSkew(programmeUpdatedAt,titles,titlesUpdatedAt,people,peopleUpdatedAt);
   const clockMs=adminClock(programmeUpdatedAt),clock=clockMs===null?null:new Date(clockMs).toISOString();
   const reviewBody=reviews.present&&reviews.body&&typeof reviews.body==='object'&&!Array.isArray(reviews.body)?reviews.body:{};
   const records=adminProjection(programme.body,titles.present&&titles.body&&typeof titles.body==='object'?titles.body:{},people.present&&people.body&&typeof people.body==='object'?people.body:{},clock,reviewBody);

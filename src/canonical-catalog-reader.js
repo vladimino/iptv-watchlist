@@ -145,7 +145,7 @@ export async function catalogTitlesFromD1(env,films,gate){
  return out;
 }
 
-const PEOPLE_SQL=`SELECT p.role_id AS role_id,d.value AS value FROM person_dimension d INNER JOIN person p ON p.id=d.person_id WHERE d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' AND p.id IN (SELECT value FROM json_each(?)) ORDER BY p.role_id LIMIT ?`;
+const PEOPLE_SQL=`SELECT p.role_id AS role_id,d.value AS value,d.status AS status,d.authority AS authority FROM person_dimension d INNER JOIN person p ON p.id=d.person_id WHERE d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' AND p.id IN (SELECT value FROM json_each(?)) ORDER BY p.role_id, CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT ?`;
 // Slice 4 (AIR-499): people.json consumers of the admin snapshot. Bounded SELECTs of the requested role ids (chunks of
 // TITLE_READ_CHUNK). The R2 cache is keyed by roleId; D1 stores person.id as person:<roleId>. Missing optional names are
 // omitted, not a read error.
@@ -168,7 +168,9 @@ export async function catalogPeopleFromD1(env,ids,gate){
   for(const row of rows){
    const role=row.role_id;
    if(!accept.has(role)&&!accept.has('person:'+role))continue;
-   out[role]={name:row.value};
+   if(out[role])continue;
+   const status=row.status==='reviewed'?'reviewed':'provisional';
+   out[role]={name:row.value,status,...(row.authority?{authority:row.authority}:{})};
   }
  }
  await catalogReaderStill(env,gate);
@@ -261,8 +263,9 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const tmdbClaim=tmdbLocal.conflict||tmdbLocal.value==null?tmdbLocal:identityClaim(externals,'tmdb',tmdbLocal.value);
   const lidLocal=identityClaim(ext,'letterboxd');
   const lidClaim=lidLocal.conflict||lidLocal.value==null?lidLocal:identityClaim(externals,'letterboxd',lidLocal.value);
-  const title=typeof row.title==='string'&&row.title?row.title:(typeof row.original_title==='string'&&row.original_title?row.original_title:null);
-  const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title};
+  const original=typeof row.original_title==='string'&&row.original_title?row.original_title:null;
+  const title=typeof row.title==='string'&&row.title?row.title:original;
+  const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title,original};
   out[id]=record;
   if(lidClaim.value&&lidClaim.value!==id)out[lidClaim.value]={...record,id:lidClaim.value};
  }
