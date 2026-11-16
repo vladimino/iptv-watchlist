@@ -148,19 +148,29 @@ export async function catalogTitlesFromD1(env,films,gate){
 const META_SQL=`SELECT f.id AS film_id,f.original_title AS original_title,m.year AS year,m.poster AS poster,m.url AS url,(SELECT d.value FROM film_dimension d WHERE d.film_id=f.id AND d.dimension='localization' AND d.status IN ('provisional','reviewed') AND d.value IS NOT NULL AND d.value<>'' ORDER BY CASE d.status WHEN 'reviewed' THEN 0 ELSE 1 END LIMIT 1) AS title FROM film f LEFT JOIN film_metadata m ON m.film_id=f.id WHERE f.id IN (SELECT value FROM json_each(?)) LIMIT ?`;
 const EXT_FILM_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND film_id IN (SELECT value FROM json_each(?))`;
 const EXT_VALUE_SQL=`SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme IN ('tmdb','letterboxd') AND value IN (SELECT value FROM json_each(?))`;
-function trustedClaim(rows,scheme){
- const hits=(rows||[]).filter(row=>row.scheme===scheme&&Number(row.trusted)===1&&!Number(row.conflicting));
- if(!hits.length)return {value:null,conflict:false};
- const values=[...new Set(hits.map(row=>String(row.value)))];
- if(values.length!==1)return {value:null,conflict:true};
- const films=[...new Set(hits.map(row=>row.film_id))];
- if(films.length!==1)return {value:null,conflict:true};
- return {value:values[0],conflict:false,filmId:films[0]};
+// Same rule as catalogAdmittedFilmFromD1: ALL claims of the scheme (and of the typed value when given) are
+// assessed; any claim that is not the one owner's trusted, non-conflicting row is a conflict. Untrusted or
+// conflicting rows are not ignored.
+function identityClaim(rows,scheme,value){
+ const pool=(rows||[]).filter(row=>row.scheme===scheme&&(value==null||String(row.value)===String(value)));
+ const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
+ if(value!=null){
+  const owner=pool.find(isOwn)?.film_id??null;
+  if(pool.some(row=>!(isOwn(row)&&row.film_id===owner)))return {value:null,conflict:true,filmId:null};
+  if(owner==null)return {value:null,conflict:false,filmId:null};
+  return {value:String(value),conflict:false,filmId:owner};
+ }
+ const owner=pool.find(isOwn);
+ const ownerVal=owner?.value??null,ownerFilm=owner?.film_id??null;
+ if(pool.some(row=>!(isOwn(row)&&String(row.value)===String(ownerVal)&&row.film_id===ownerFilm)))return {value:null,conflict:true,filmId:null};
+ if(ownerVal==null)return {value:null,conflict:false,filmId:null};
+ return {value:String(ownerVal),conflict:false,filmId:ownerFilm};
 }
 
 // Slice 3 (AIR-499): metadata.json consumers of the film page, Finds and ratings labels. Bounded SELECTs of the requested ids
-// (chunks of TITLE_READ_CHUNK); missing optional poster/title/year is an empty field, not a read error. TMDB is only a trusted
-// non-conflicting film_external_id claim — never inferred from a title.
+// (chunks of TITLE_READ_CHUNK); missing optional poster/title/year is an empty field, not a read error. TMDB is the Film's
+// identity claim (every stored tmdb / letterboxd row for that value is assessed; any non-owner claim is a conflict) — never
+// inferred from a title.
 export async function catalogMetadataFromD1(env,ids,gate){
  if(gate?.mode!=='d1')throw failed('canonical_read_not_authoritative');
  const db=database(env);
@@ -186,6 +196,7 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const extra=[];
   const values=[...wanted];
   for(const id of wanted){const tmdb=/^tmdb_(\d+)$/.exec(id);if(tmdb)values.push(tmdb[1]);}
+  for(const row of externals)if(row.value!=null)values.push(String(row.value));
   const valueKeys=[...new Set(values)];
   for(let at=0;at<valueKeys.length;at+=TITLE_READ_CHUNK){
    const chunk=valueKeys.slice(at,at+TITLE_READ_CHUNK);
@@ -207,17 +218,19 @@ export async function catalogMetadataFromD1(env,ids,gate){
   const own='film:'+id,tmdb=/^tmdb_(\d+)$/.exec(id),spelled=tmdb?'film:tmdb:'+tmdb[1]:null;
   let filmId=byFilm.has(own)?own:(spelled&&byFilm.has(spelled)?spelled:null);
   if(!filmId){
-   const lid=trustedClaim(externals.filter(row=>row.scheme==='letterboxd'&&String(row.value)===id),'letterboxd');
-   if(lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
+   const lid=identityClaim(externals,'letterboxd',id);
+   if(!lid.conflict&&lid.filmId&&byFilm.has(lid.filmId))filmId=lid.filmId;
    else if(tmdb){
-    const claim=trustedClaim(externals.filter(row=>row.scheme==='tmdb'&&String(row.value)===tmdb[1]),'tmdb');
-    if(claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
+    const claim=identityClaim(externals,'tmdb',tmdb[1]);
+    if(!claim.conflict&&claim.filmId&&byFilm.has(claim.filmId))filmId=claim.filmId;
    }
   }
   if(!filmId)continue;
   const row=byFilm.get(filmId),ext=extByFilm.get(filmId)||[];
-  const tmdbClaim=trustedClaim(ext,'tmdb');
-  const lidClaim=trustedClaim(ext,'letterboxd');
+  const tmdbLocal=identityClaim(ext,'tmdb');
+  const tmdbClaim=tmdbLocal.conflict||tmdbLocal.value==null?tmdbLocal:identityClaim(externals,'tmdb',tmdbLocal.value);
+  const lidLocal=identityClaim(ext,'letterboxd');
+  const lidClaim=lidLocal.conflict||lidLocal.value==null?lidLocal:identityClaim(externals,'letterboxd',lidLocal.value);
   const title=typeof row.title==='string'&&row.title?row.title:(typeof row.original_title==='string'&&row.original_title?row.original_title:null);
   const record={id,tmdbId:tmdbClaim.conflict||tmdbClaim.value==null?null:tmdbClaim.value,poster:row.poster??null,year:row.year??null,url:row.url??null,title};
   out[id]=record;

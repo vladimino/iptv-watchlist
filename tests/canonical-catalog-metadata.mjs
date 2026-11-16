@@ -134,6 +134,30 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
  assert.equal(r.status,503);
  assert.equal(r.body.reason,'film_person_generation_moved');
 }
+{
+ const file=database('open');seedCatalog();
+ let gates=0;
+ const env={BUCKET:bucket,DB:standin(file,'open',{onQuery:async text=>{if(/FROM film_person_authority/.test(text)){gates++;if(gates===3)sqlite(file,TO_HELD);}}})};
+ const r=await getFilm('7',env);
+ assert.equal(r.status,503,'open film rechecks the marker after predictionFreshness');
+ assert.equal(r.body.reason,'film_person_generation_moved');
+}
+{
+ const file=database('prepared');seedCatalog();
+ let gates=0;
+ const env={BUCKET:bucket,DB:standin(file,'prepared',{onQuery:async text=>{if(/FROM film_person_authority/.test(text)){gates++;if(gates===2)sqlite(file,TO_OPEN);}}})};
+ const r=await getFilm('7',env);
+ assert.equal(r.status,503,'prepared film rechecks after predictionFreshness, not only at the metadata gate');
+ assert.equal(r.body.reason,'film_person_generation_moved');
+}
+{
+ const file=database('open');seedCatalog();
+ let gates=0;
+ const env={BUCKET:bucket,DB:standin(file,'open',{onQuery:async text=>{if(/FROM film_person_authority/.test(text)){gates++;if(gates===3)sqlite(file,TO_HELD);}}})};
+ const r=await ask('/api/catalog/available',env);
+ assert.equal(r.status,503,'available rechecks after predictionFreshness');
+ assert.equal(r.body.reason,'film_person_generation_moved');
+}
 
 {
  seedCatalog();
@@ -152,7 +176,18 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
  const env={BUCKET:bucket,DB:standin(database('prepared'),'prepared')};
  const map=await vm.runInContext('ratingsFilmLabels',ctx)(env,['heat-1995']);
  assert.equal(map.get('heat-1995').title,'Stale');
+ assert.equal(map.get('heat-1995').tmdb,'7');
  assert.ok(reads.includes('metadata.json'));
+}
+{
+ seedCatalog();
+ records.set('metadata.json',{
+  'heat-1995':{id:'heat-1995',tmdbId:'7',year:1995,title:'Stale'},
+  'heat-dup':{id:'heat-1995',tmdbId:'8',year:1995,title:'Other'}
+ });
+ const env={BUCKET:bucket,DB:standin(database('prepared'),'prepared')};
+ const map=await vm.runInContext('ratingsFilmLabels',ctx)(env,['heat-1995']);
+ assert.equal(map.get('heat-1995').tmdb,null,'R2 labels keep catalogLidTmdb: two stored TMDB ids unbridge the lid');
 }
 {
  seedCatalog();
@@ -169,6 +204,17 @@ const getFilm=async(id,env)=>{const r=await worker.fetch(new Request('https://ip
  assert.equal(orphan.orphan.tmdb,undefined);
  assert.equal(orphan.orphan.tmdbId,null);
  assert.equal(orphan.orphan.title,'No Title');
+}
+{
+ const file=database('open');
+ sqlite(file,`
+INSERT INTO film (id,contract_version,canonical_identity,original_title,updated_at) VALUES ('film:other',1,NULL,'Other','${T}');
+INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ('film:other','tmdb','7',0,0,NULL);
+`);
+ const reader=await import('../src/canonical-catalog-reader.js');
+ const env={DB:standin(file,'open')};
+ const heat=await reader.catalogMetadataFromD1(env,['heat-1995'],await reader.catalogReaderGate(env));
+ assert.equal(heat['heat-1995'].tmdbId,null,'an untrusted claim of the same TMDB id is a conflict, not ignored');
 }
 
 console.log('canonical-catalog-metadata: film/available/ratings labels keep R2 at prepared, read bounded D1 at open, and STOP on held/unreadable/generation move without metadata.json fallback');
