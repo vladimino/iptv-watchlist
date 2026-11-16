@@ -129,6 +129,9 @@ const forbidden=[
  ['prediction_pending',{limit:100}],
  ['prediction_pending',{limit:1,cursor:'not-a-cursor'}],
  ['prediction_pending',{limit:1,prefix:'enrichment/'}],
+ ['prediction_batch_manifest',{runId:'../secret'}],
+ ['prediction_batch_manifest',{runId:'run-1',part:'all'}],
+ ['prediction_batch_manifest',{prefix:'enrichment/'}],
  ['prediction_validate',{}],
  ['prediction_validate',{fingerprint:{},key:'enrichment/x'}],
  ['prediction_validate',{fingerprint:'text'}],
@@ -181,7 +184,7 @@ for(const tool of tools){
  if(tool.name==='prediction_batch_submit'){assert.ok(properties.includes(PREFLIGHT_ISSUE_SHAPE),'the claimed issue shape is published, a validation path and code and nothing else');assert.equal((properties.match(/"path"/g)||[]).length,2,'the only "path" in the schema is the preflight issue shape (properties and required)');assert.ok(JSON.stringify(tool.inputSchema).includes('"required":["kind","reason"]'),'batch v2 failure.reason is required in the MCP schema');}
 }
 assert.equal(tools.find(item=>item.name==='enrichment_status').annotations.readOnlyHint,true);
-for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending']){
+for(const name of ['prediction_queue_overview','prediction_film_diagnostics','prediction_validate','prediction_batch_validate','prediction_pending','prediction_batch_manifest']){
  assert.equal(tools.find(item=>item.name===name).annotations.readOnlyHint,true,name);
  assert.equal(tools.find(item=>item.name===name).annotations.destructiveHint,false,name);
  assert.equal(tools.find(item=>item.name===name).annotations.openWorldHint,false,name);

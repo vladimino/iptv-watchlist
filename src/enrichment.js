@@ -2404,16 +2404,25 @@ async function buildBatchManifest(env,{profile,items,runId,lease,dryRun=false,ex
  // The Scheduled Task keeps one tool result in its working context (AIR-510). The full schema document stays on GET /api/enrichment/schema and in the manifest hash.
  // The answer keeps the path the prompt reads (`schema.contract`) and the closed fingerprint vocabulary, and names the full document by schemaDigest.
  const fp=schema.fingerprint||{};
- const contract={fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,registryDigest,schema:{schemaDigest:await contentHash(schema),contract:schema.contract,fingerprint:{fingerprintSchemaVersion:fp.fingerprintSchemaVersion,plotMechanics:fp.plotMechanics,execution:fp.execution,requiredExecution:fp.requiredExecution,moodLabels:fp.moodLabels,moodVocabulary:fp.moodVocabulary,moodMapping:fp.moodMapping}}};
+ const contract={fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,registryDigest,schema:{schemaDigest:await contentHash(schema),contract:schema.contract,fingerprint:{fingerprintSchemaVersion:fp.fingerprintSchemaVersion,plotMechanics:fp.plotMechanics,execution:fp.execution,requiredExecution:fp.requiredExecution,moodLabels:fp.moodLabels}}};
  const profileBlock={version:profile.version,hash:profile.profileHash,lineage:Array.isArray(profile.lineage)?profile.lineage:[],body:profile.profile};
  const manifestHash=await contentHash({manifestFormat:BATCH_MANIFEST_FORMAT,profileHash:profile.profileHash,contract:{...contract,schema:await contentHash(schema)},films:films.map(f=>({filmId:f.filmId,lane:f.lane,plan:f.plan,modelMetadata:f.modelMetadata,fingerprintHash:f.fingerprint?.fingerprintHash||null}))});
- const body={status:'running',runId,protocol:BATCH_PROTOCOL,dryRun,lease:{expiresAt:lease.expiresAt,ttlMs:RUNNER_LEASE_TTL,epoch:lease.epoch},limits:batchLimits(),manifestFormat:BATCH_MANIFEST_FORMAT,manifestHash,profile:profileBlock,contract,films,...extra};
+ // Films and profile before contract: a Scheduled Task that keeps only a prefix of the tool text still holds the five inputs (AIR-510 Task C, 16 Nov 2026).
+ const body=batchStartAnswer({status:'running',runId,protocol:BATCH_PROTOCOL,dryRun,lease:{expiresAt:lease.expiresAt,ttlMs:RUNNER_LEASE_TTL,epoch:lease.epoch},limits:batchLimits(),manifestFormat:BATCH_MANIFEST_FORMAT,manifestHash,films,profile:profileBlock,contract,...extra});
  const bytes=new TextEncoder().encode(JSON.stringify(body)).length;
  const sizes=films.map(f=>new TextEncoder().encode(JSON.stringify(f)).length),largest=sizes.reduce((best,n,i)=>n>sizes[best]?i:best,0);
  return {body,hash:manifestHash,bytes,films:films.length,largestFilmBytes:sizes.length?sizes[largest]:0,largestFilmId:films[largest]?.filmId??null};
 }
 const batchOverflow=(manifest,extra={})=>batchBlocked('manifest_too_large',{bytes:manifest.bytes,limit:BATCH_RUNNER.maxManifestBytes,films:manifest.films,largestFilmBytes:manifest.largestFilmBytes,largestFilmId:manifest.largestFilmId,...extra});
-const batchBytes=value=>new TextEncoder().encode(JSON.stringify(value)).length;
+const BATCH_START_KEY_ORDER=['status','runId','protocol','dryRun','lease','limits','manifestFormat','manifestHash','manifestSize','filmsSelected','films','profile'];
+function batchStartAnswer(fields){
+ const out={};
+ for(const key of BATCH_START_KEY_ORDER)if(key in fields)out[key]=fields[key];
+ for(const [key,value] of Object.entries(fields))if(!(key in out)&&key!=='contract')out[key]=value;
+ if('contract' in fields)out.contract=fields.contract;
+ return out;
+}
+const batchBytes=value=>new TextEncoder().encode(JSON.stringify(batchStartAnswer(value))).length;
 // The fields that follow the manifest in the answer. A preflight measures the answer with the widest values these can take, so a manifest that passes it cannot grow past the
 // limit when the real values are added; the exact answer is measured again before anything is persisted and before it is sent.
 const batchPlaceholderExtras=(selection,dryRun)=>({manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,filmsSelected:99999999,queueRefreshed:true,queueSettled:99999999,eligible:{hot:99999999,cold:99999999,ready:99999999},skipped:{missingAdmission:99999999,alreadyCurrent:99999999},pendingCount:99999999,hotRemaining:99999999,coldRemaining:99999999,...(dryRun?{notEligible:selection.notEligible}:{}),...scheduledRunFields()});
@@ -2496,7 +2505,7 @@ async function batchStartWork(env,body,requestId,tally){
  if(dryRun){
   // A dry run reads and writes nothing: it never rebuilds the queue, so a queue that fails the advance gate is refused.
   if(pre.stale)return batchBlocked('queue_stale',{cause:pre.stale,dryRun:true});
-  const answer={...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true};
+  const answer=batchStartAnswer({...pre.manifest.body,...batchRealExtras(pre.selection,pre.queue,{queueRefreshed:false,queueSettled:0,dryRun:true}),runId:null,dryRun:true});
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes)return batchOverflowOf({...pre,bytes:batchBytes(answer)},{dryRun:true});
   noteStep(env,()=>({manifestFilms:pre.manifest.films,manifestBytes:batchBytes(answer)}));
   return json(answer);
@@ -2546,7 +2555,7 @@ async function batchStartWork(env,body,requestId,tally){
   if(again.response){await runnerLease(env,runId,'release');return again.response;}
   if(again.stale||again.priorityDue||again.revision!==pre.revision||again.manifest.hash!==pre.manifest.hash){await runnerLease(env,runId,'release');return batchBlocked('queue_changed',{cause:again.stale?'stale':again.priorityDue?'priority':again.revision!==pre.revision?'revision':'manifest',...(queueRefreshed?{queueRefreshed:true}:{})});}
   const exact=await buildBatchManifest(env,{profile:again.profile,items:again.selection.items,runId,lease});
-  answer={...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})};
+  answer=batchStartAnswer({...exact.body,...batchRealExtras(again.selection,again.queue,{queueRefreshed,queueSettled,dryRun:false})});
   if(batchBytes(answer)>BATCH_RUNNER.maxManifestBytes){await runnerLease(env,runId,'release');return batchOverflow({...exact,bytes:batchBytes(answer)},{queueRefreshed,...(queueSettled?{queueSettled}:{})});}
   pre={...again,manifest:exact,answer};
  }catch(error){await runnerLease(env,runId,'release');if(CATALOG_HELD_CODES.includes(error?.code))return catalogHeldResponse(error.code);throw error;}
@@ -2567,6 +2576,7 @@ async function batchPersistRun(env,{body,requestId,pre,lease,runId,answer,attemp
     if(recovered&&['running','interrupted'].includes(recovered.status)){recovered.status='interrupted';recovered.recoverable=true;recovered.reason='lease_expired';recovered.stopReason='lease_expired';recovered.completedAt=new Date().toISOString();recovered.recoveredByRunId=runId;await saveJSON(env,runKey(recovered.runId),recovered);await diagnosticCheckpoint(env,recovered);}
     const manifest=pre.manifest,selected=selection.items,createdAt=new Date().toISOString();
     const run={runId,pipelineVersion:PREDICTION_PIPELINE_VERSION,protocol:BATCH_PROTOCOL,epoch:lease.epoch??null,manifestHash:manifest.hash,manifestBytes:batchBytes(answer),manifestSize:selection.manifestSize??BATCH_RUNNER.maxManifestFilms,status:'running',mode:'queued',trigger:body.trigger==='scheduled'?'scheduled':'manual',createdAt,diagnosticStartedAt:attempt.diagnosticStartedAt,leaseAcquiredAt:lease.heartbeatAt||createdAt,startResult:attempt.startResult||(recovered?.recoverable?'recovered_stale_lease':'running'),lastActivityAt:createdAt,deadlineAt:null,lastHeartbeatAt:createdAt,batchCount:1,capacity:body.capacity||{},sourceProgrammeRunId:report.runId,tasteProfileVersion:profile.version,tasteProfileHash:profile.profileHash,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,fingerprintRegistryDigest:manifest.body.contract.registryDigest,eligibleCount:(queue.hotCount||0)+(queue.coldCount||0),batchSize:selected.length,adaptivePlan:plan,selectedIds:selected.map(item=>item.filmId),batchIds:selected.map(item=>item.filmId),selectionKind:Object.fromEntries(selected.map(item=>[item.filmId,item.lane])),baseline:Object.fromEntries(selected.map(item=>[item.filmId,item.state.predictions?.current?.generatedAt||null])),failures:{},results:{}};
+    await saveJSON(env,ENRICHMENT_KEY+'batch-manifest/'+run.runId+'.json',answer);
     await saveJSON(env,ENRICHMENT_KEY+'sources/'+run.runId+'.json',Object.fromEntries(selected.map(item=>[item.filmId,modelMetadata(item.film)])));
     await atStage('run_save',()=>savePredictionRun(env,run));
     await atStage('runner_started',()=>runnerStarted(env,run,!!recovered&&recovered.recoveredByRunId===runId||!!previous&&['running','partial'].includes(previous.status)&&previous.tasteProfileHash===profile.profileHash,queue,null));
@@ -3027,6 +3037,67 @@ function enrichmentSchemaDocument(){return {profile:{schemaVersion:1,required:['
 function predictionRunnerContract(){return {pipelineVersion:5,continuous:true,itemFailures:{reportVia:'submit items[].failure.kind',allowedKinds:['parse_error','validation_error'],retryable:true,retryBaseMs:3600000,stopAfterConsecutive:5,validation:{preflight:'GET /api/enrichment/schema contract',reportedVia:'submit results[].validation {stage, reportedBy, issues[{path, code}]}',stages:['caller_reported','fingerprint_schema','fingerprint_missing','prediction_schema'],issueCodes:ISSUE_CODES}},maxBatchFilms:20,maxRunFilms:null,maxRunMinutes:null,leaseTtlMs:RUNNER_LEASE_TTL,heartbeat:'/api/enrichment/heartbeat',read:'/api/enrichment/runner',modelBatching:{enabled:false,readyFingerprintsPerCall:1},batchRunner:{version:BATCH_RUNNER.version,protocol:BATCH_PROTOCOL,start:'/api/enrichment/batch/start',manifestFormat:BATCH_MANIFEST_FORMAT,...batchLimits(),requires:{predictionAuthority:'d1'}},instructions:['Start returns already_running: exit immediately, do not adopt its runId.','Repeat next/submit continuously across adaptive batches until queue empty or real quota/API/storage failure. No time or total-film cap.','Keep profile and scoring rules unchanged; reuse valid fingerprints and predictions. Submit each film immediately.','Lease TTL is 15 minutes. Heartbeat before model calls and after checkpoints; renew concurrently every 10 minutes during long calls. Expired ownership is replaced atomically and start returns running in the same trigger.','Malformed/invalid per-film outputs: submit {filmId,failure:{kind:parse_error}} as valid JSON, then continue next/submit. Never complete for one item parse_error.','Before submit, check the fingerprint and prediction against the schema contract (required execution dimensions, enum values, moodLabels 2–4). A Worker schema rejection is still a retryable parse_error for that film and returns results[].validation.issues [{path, code}] naming the field; fix that field for the following films, do not resubmit the deferred one in this run.','Stop only on mustComplete/systemic quota/API/storage/lease failure; complete with stopReason. Five consecutive distinct item format failures trigger format_error_storm.','A formed response does not prove the client received it. Send or read X-Request-Id. On an external or systemic stop, complete may include fault {origin, failedStep, providerErrorCode, httpStatus, receivedRequestId}. Omit fault when the cause is unknown. A fault on queue_empty or another normal completion is rejected.']};}
 function runSummary(r){return {runId:r.runId,processed:Object.values(r.results||{}).filter(x=>x!=='failed').length,batchCount:r.batchCount||1,lastHeartbeatAt:r.lastHeartbeatAt||null,hotRemaining:r.hotRemaining??null,coldRemaining:r.coldRemaining??null,stopReason:r.stopReason||null,sourceProgrammeRunId:r.sourceProgrammeRunId,tasteProfileVersion:r.tasteProfileVersion,tasteProfileHash:r.tasteProfileHash,fingerprintSchemaVersion:r.fingerprintSchemaVersion,predictionPromptVersion:r.predictionPromptVersion,eligibleCount:r.eligibleCount,selectedCount:r.selectedIds.length,batchSize:r.batchSize??r.selectedIds.length,adaptivePlan:r.adaptivePlan||null,deadlineAt:r.deadlineAt||null,status:r.status,trigger:r.trigger||'manual',startedAt:r.createdAt,finishedAt:r.completedAt||null,checked:Object.keys(r.results||{}).length,added:Object.values(r.results||{}).filter(x=>x==='created').length,updated:Object.values(r.results||{}).filter(x=>x==='recalculated').length,failed:Object.keys(r.failures||{}).length,hotProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='hot').length,coldProcessed:Object.entries(r.results||{}).filter(([id,status])=>['created','recalculated'].includes(status)&&r.selectionKind?.[id]==='cold').length};}
 async function checkedRun(env,id){if(!isText(id,100))return null;return loadJSON(env,runKey(id));}
+// AIR-510: a truncated MCP start text is not a usable manifest. The already-owned run keeps the exact start answer; this read returns it without a second prediction_batch_start.
+function usableBatchManifest(value){
+ if(!isObject(value)||typeof value.runId!=='string'||!value.runId)return false;
+ if(!isObject(value.lease)||!Number.isInteger(value.lease.epoch)||value.lease.epoch<1)return false;
+ if(typeof value.manifestHash!=='string'||!/^[0-9a-f]{64}$/.test(value.manifestHash))return false;
+ if(!isObject(value.profile)||!isObject(value.profile.body))return false;
+ if(!isObject(value.contract?.schema?.contract?.fingerprint?.evidence))return false;
+ if(!Array.isArray(value.films)||!value.films.length)return false;
+ return value.films.every(film=>isObject(film)&&typeof film.filmId==='string'&&isObject(film.modelMetadata));
+}
+function parseBatchStartToolText(text){
+ if(typeof text!=='string'||!text)return {ok:false,code:'truncated_manifest'};
+ try{
+  const value=JSON.parse(text);
+  return usableBatchManifest(value)?{ok:true,manifest:value}:{ok:false,code:'incomplete_manifest'};
+ }catch{return {ok:false,code:'truncated_manifest'};}
+}
+function batchManifestEnvelope(stored){
+ const {films,profile,contract,...rest}=stored;
+ return {kind:'envelope',...rest,parts:[{kind:'profile'},{kind:'contract'},...films.map((film,index)=>({kind:'film',index,filmId:film.filmId}))]};
+}
+function batchManifestPartBody(stored,part,filmId){
+ if(part==='envelope')return batchManifestEnvelope(stored);
+ if(part==='profile')return {kind:'profile',runId:stored.runId,manifestHash:stored.manifestHash,profile:stored.profile};
+ if(part==='contract')return {kind:'contract',runId:stored.runId,manifestHash:stored.manifestHash,contract:stored.contract};
+ if(part==='film'){
+  const film=(stored.films||[]).find(item=>item.filmId===filmId);
+  if(!film)return null;
+  return {kind:'film',runId:stored.runId,manifestHash:stored.manifestHash,film};
+ }
+ return undefined;
+}
+function assembleOwnedBatchManifest(envelope,profilePart,contractPart,filmParts){
+ if(!isObject(envelope)||envelope.kind!=='envelope'||!Array.isArray(envelope.parts))return {ok:false,code:'incomplete_manifest'};
+ if(!isObject(profilePart)||profilePart.kind!=='profile'||profilePart.manifestHash!==envelope.manifestHash)return {ok:false,code:'incomplete_manifest'};
+ if(!isObject(contractPart)||contractPart.kind!=='contract'||contractPart.manifestHash!==envelope.manifestHash)return {ok:false,code:'incomplete_manifest'};
+ const wanted=envelope.parts.filter(part=>part.kind==='film');
+ if(!Array.isArray(filmParts)||filmParts.length!==wanted.length)return {ok:false,code:'incomplete_manifest'};
+ const byId=new Map(filmParts.filter(part=>isObject(part)&&part.kind==='film'&&part.manifestHash===envelope.manifestHash&&isObject(part.film)).map(part=>[part.film.filmId,part.film]));
+ const films=[];
+ for(const part of wanted){const film=byId.get(part.filmId);if(!film)return {ok:false,code:'incomplete_manifest'};films.push(film);}
+ const {kind,parts,...rest}=envelope;
+ const manifest={...rest,profile:profilePart.profile,contract:contractPart.contract,films};
+ return usableBatchManifest(manifest)?{ok:true,manifest}:{ok:false,code:'incomplete_manifest'};
+}
+async function ownedBatchManifest(env,runId,{part='envelope',filmId}={}){
+ if(!isText(runId,100))return {status:400,body:{error:'Invalid runId',code:'invalid_run_id'}};
+ if(!['envelope','profile','contract','film'].includes(part))return {status:400,body:{error:'Invalid part',code:'invalid_part'}};
+ if(part==='film'&&(typeof filmId!=='string'||!filmId))return {status:400,body:{error:'filmId required',code:'invalid_film_id'}};
+ const run=await checkedRun(env,runId);
+ if(!run)return {status:404,body:{error:'Unknown run',code:'unknown_run'}};
+ const lease=await loadJSON(env,RUNNER_LEASE_KEY);
+ if(!(lease?.runId===runId&&Number(lease.expiresAt)>Date.now()))return {status:409,body:{error:'lease_lost',code:'lease_lost'}};
+ if(run.protocol!==BATCH_PROTOCOL)return {status:409,body:{error:'wrong_protocol',code:'wrong_protocol'}};
+ if(run.status!=='running')return {status:409,body:{error:'Run already complete',code:'run_not_running'}};
+ const stored=await loadJSON(env,ENRICHMENT_KEY+'batch-manifest/'+runId+'.json');
+ if(!usableBatchManifest(stored))return {status:409,body:{error:'manifest_unavailable',code:'manifest_unavailable'}};
+ const body=batchManifestPartBody(stored,part,filmId);
+ if(body==null)return {status:404,body:{error:'Unknown film',code:'unknown_film'}};
+ return {status:200,body};
+}
 // A run is bound to the fingerprint schema, both prompt versions and the registry it started with (ADR-0035 section 6);
 // a deploy that changes any of them ends it, as a profile publication does. A run from before the prompt version was
 // recorded is bound to version 1, the reading of every earlier fingerprint.

@@ -47,6 +47,12 @@ Code-only additive contract. Rollback is redeploy of the previous Worker. Alread
 
 A live Scheduled Task with `manifestSize=5` created the run and then stopped with `external_termination` because the full tool result did not fit the Task working context. The Worker ceiling (256 KiB) had accepted the answer. Two copies of the same JSON (`content[0].text` and `structuredContent`) and the full schema document (profile-schema, prediction-schema and rules sections the prompt does not read) were the extra bytes. The MCP result for a successful `prediction_batch_start` now sends the JSON once, as text. `contract.schema` in that JSON keeps `contract`, the fingerprint vocabulary and `schemaDigest` of the full document. Film `modelMetadata`, stored fingerprints and `profile.body` are unchanged. `queue_changed` adds `cause` (`stale`, `revision` or `manifest`) and still does not retry. This addendum authorizes no Task edit and no production start.
 
+## Addendum 2026-11-16 — owned-run manifest readback (AIR-510 reopen)
+
+Task C (run `6e98e0fa-e4eb-408b-82de-dc289536b46f`, 22:33 Madrid) and Task D (run `cf083134-8093-4064-b4bb-98a4191f8391`, 22:41 Madrid) both received Worker `manifestBytes` 42,115 of the same five `selectedIds`. C called `prediction_complete(external_termination)` with zero submits; D submitted 5/5 and `manifest_spent`. The Worker start was HTTP 200 both times. Reordering fields in one JSON object does not make a truncated prefix parseable: `JSON.parse` fails, and the live Task prompt still needs `contract.schema.contract` plus every film `modelMetadata`.
+
+A real `batch_start` persist stores the exact start answer at `enrichment/batch-manifest/<runId>.json`. `prediction_batch_manifest` returns one bounded JSON part (`envelope`, `profile`, `contract`, or one `film`) for the live lease holder and writes nothing. A truncated start text is `truncated_manifest` (fail closed: no invented films). An incomplete part set is not a usable manifest. A second `prediction_batch_start` stays `already_running`. Dry-run starts store nothing. No Task registry edit and no production start in this change. The installed prompt does not call the readback until a separate owner GO.
+
 ## Follow-ups
 
 - [AIR-451](https://trello.com/c/NN3N6kRp) controlled cutover of hourly Tasks to batch v2 with `manifestSize=5`

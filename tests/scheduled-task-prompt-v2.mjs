@@ -202,6 +202,8 @@ const snapshot=w=>JSON.stringify([[...w.records.entries()],dump(w.file)]);
  const manifest=start.data;assert.equal(manifest.films.length,5,'the template selects five films');assert.equal(manifest.manifestSize,5);assert.equal(manifest.filmsSelected,5);
  assert.equal(start.structured,undefined,'the MCP result carries the manifest once, as text');
  assert.ok(manifest.profile.body&&manifest.contract.schema.contract.fingerprint.evidence&&manifest.films.every(f=>f.modelMetadata&&f.filmId),'profile, schema contract and every film input are in that one text');
+ const startText=JSON.stringify(manifest);
+ assert.ok(startText.indexOf('"films":')<startText.indexOf('"contract":'),'films are retained if the tool text is cut from the end');
  assert.ok(start.textBytes<48*1024,'a five-film manifest text stays inside the client-visible budget');
  const runId=manifest.runId;let epoch=manifest.lease.epoch;
  assert.equal((await w.call('prediction_batch_start',{trigger:'scheduled',manifestSize:5})).data.status,'already_running','a second start never adopts the run');

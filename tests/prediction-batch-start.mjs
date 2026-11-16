@@ -2,6 +2,8 @@
 // persistence as the v5 runner, with the prediction domain in D1 mode as production runs it. Offline: a sqlite D1 stand-in and an in-memory R2. No Cloudflare,
 // TMDB, model or production call. `batch_submit`, the Scheduled Task and every activation are other deliveries; nothing here generates a prediction.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {flowWorld,sql} from './prediction-d1-flow-lib.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
@@ -39,6 +41,8 @@ const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=j
  assert.deepEqual(m.contract.schema.fingerprint.plotMechanics,schema.fingerprint.plotMechanics);
  assert.equal(m.contract.schema.schemaDigest.length,64);
  assert.equal(m.contract.schema.profile,undefined,'the profile schema section is not repeated inside the manifest');
+ assert.equal(m.contract.schema.fingerprint.moodVocabulary,undefined);
+ assert.equal(m.contract.schema.fingerprint.moodMapping,undefined);
  assert.equal(m.contract.fingerprintSchemaVersion,w.ctx.FINGERPRINT_SCHEMA_VERSION??m.contract.fingerprintSchemaVersion);
  for(const key of ['fingerprintSchemaVersion','fingerprintPromptVersion','predictionPromptVersion','registryDigest'])assert.ok(m.contract[key]!==undefined&&m.contract[key]!==null,key);
  // every film: id, lane, plan and its full metadata (null fields are absent, nothing else is shortened)
@@ -464,5 +468,34 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.equal(contract.pipelineVersion,5);assert.equal(contract.maxBatchFilms,20);assert.equal(contract.maxRunFilms,null);assert.equal(contract.leaseTtlMs,15*60000);assert.deepEqual(contract.modelBatching,{enabled:false,readyFingerprintsPerCall:1});
  assert.deepEqual(contract.batchRunner,{version:2,protocol:'batch_v2',start:'/api/enrichment/batch/start',manifestFormat:'compact-1',maxManifestFilms:100,maxManifestBytes:262144,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:57344,callBudgetMs:25000,requires:{predictionAuthority:'d1'}});
  await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200,JSON.stringify(v5.data).slice(0,160));assert.ok(!('protocol' in v5.data)||v5.data.protocol!=='batch_v2','a v5 start is not a v2 run');
+}
+
+// AIR-510: a truncated ~42 KiB start text is not usable; bounded owned-run parts recover the full input without a second start.
+{
+ const w=await ready(5);
+ const pad='x'.repeat(7000);
+ for(let n=1;n<=5;n++)sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','"+pad+"') WHERE film_id='tmdb_"+n+"'");
+ await reconcile(w);
+ const r=await batch(w,{manifestSize:5});assert.equal(r.status,200);
+ const text=JSON.stringify(r.data);assert.ok(text.length>=40000,'persisted start is a realistic ~42 KiB payload, got '+text.length);
+ const sliceAt=Math.min(text.length-1,24000);
+ const fromText=w.ctx.parseBatchStartToolText(text.slice(0,sliceAt));
+ assert.equal(fromText.ok,false);assert.equal(fromText.code,'truncated_manifest');
+ const stored=w.records.get('enrichment/batch-manifest/'+r.data.runId+'.json');
+ assert.ok(stored);assert.ok(JSON.stringify(stored).length>=40000);assert.equal(stored.manifestHash,r.data.manifestHash);
+ vm.runInContext(fs.readFileSync('src/mcp.js','utf8').replace('export default','globalThis.mcpWorker=').replace(/^export /gm,''),w.ctx);
+ const call=async(args)=>{w.ctx.__a={name:'prediction_batch_manifest',args};w.ctx.__env=w.env;const res=(await vm.runInContext('mcpCallTool({name:__a.name,arguments:__a.args},"2025-06-18",__env,{waitUntil(){}})',w.ctx)).result;assert.equal(res.isError,undefined,JSON.stringify(res).slice(0,200));assert.equal(res.structuredContent,undefined);const body=JSON.parse(res.content[0].text);assert.ok(res.content[0].text.length<24000,'part stays under the observed truncation cut, '+body.kind+'='+res.content[0].text.length);return body;};
+ const envelope=await call({runId:r.data.runId});assert.equal(envelope.kind,'envelope');assert.equal(w.ctx.usableBatchManifest(envelope),false);
+ const profile=await call({runId:r.data.runId,part:'profile'});
+ const contract=await call({runId:r.data.runId,part:'contract'});
+ const films=[];
+ for(const part of envelope.parts.filter(p=>p.kind==='film'))films.push(await call({runId:r.data.runId,part:'film',filmId:part.filmId}));
+ const assembled=w.ctx.assembleOwnedBatchManifest(envelope,profile,contract,films);
+ assert.equal(assembled.ok,true);const recovered=assembled.manifest;
+ assert.equal(recovered.runId,r.data.runId);assert.equal(recovered.lease.epoch,r.data.lease.epoch);assert.equal(recovered.manifestHash,r.data.manifestHash);
+ assert.equal(recovered.films.length,5);assert.ok(recovered.profile.body);assert.ok(recovered.contract.schema.contract.fingerprint.evidence);
+ for(const film of recovered.films){assert.ok(film.modelMetadata?.synopsis);assert.ok(r.data.films.some(f=>f.filmId===film.filmId));}
+ assert.equal(w.ctx.assembleOwnedBatchManifest(envelope,profile,contract,films.slice(0,4)).ok,false,'an incomplete film set is not usable');
+ const second=await batch(w,{manifestSize:5});assert.equal(second.data.status,'already_running','readback is not a second start');
 }
 console.log('prediction-batch-start: ok');
