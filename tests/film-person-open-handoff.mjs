@@ -5,13 +5,19 @@ import {handoffReadiness} from '../src/canonical-producers.js';
 import {grantProjectorWindow,requestProjectorWindow} from '../src/discovery-authority.js';
 import {projectorExpectation} from '../src/film-person-authority.js';
 import {writerRoute} from '../src/canonical-writer-route.js';
+import {CANONICAL_READER_REGISTRY} from '../src/canonical-catalog-reader.js';
 import {
  ACTIVATION_CONSUMERS,
  OPEN_HANDOFF_MIN_VERSION,
+ OPERATOR_D1_TARGET,
+ WORKFLOW_FILM_FACTS,
+ activationAudit,
  activateOpen,
  activationReadiness,
+ exclusiveOwned,
  flipOpen,
  parseOpenHandoffArgs,
+ proveOperatorTarget,
  takeProjectorLease,
 } from '../src/film-person-open-handoff.js';
 import {d1Standin} from './d1-standin.mjs';
@@ -26,7 +32,22 @@ const openDb=()=>{const file=fresh();sqlite(file,DISCOVERY);return file;};
 const q=(file,sql)=>rows(file,sql)[0];
 
 assert.equal(OPEN_HANDOFF_MIN_VERSION,23);
-assert.equal(ACTIVATION_CONSUMERS.length,4);
+assert.equal(ACTIVATION_CONSUMERS.length,CANONICAL_READER_REGISTRY.length);
+const audit=activationAudit();
+assert.equal(audit.consumers.length,CANONICAL_READER_REGISTRY.length);
+assert.equal(audit.consumers.filter(item=>item.class==='freeze'&&item.moved!==true).length,11);
+assert.equal(audit.consumers.filter(item=>item.kind==='adr0117_exception').length,5);
+assert.ok(audit.consumers.some(item=>item.name==='metadata cache mirror object of the D1 metadata cache'&&item.kind==='adr0117_exception'));
+assert.deepEqual([...WORKFLOW_FILM_FACTS],['watchlist','canonicalIdentity','originalTitle']);
+assert.ok(audit.residuals.some(item=>item==='workflow_facts_absent:film_metadata'));
+assert.ok(audit.residuals.some(item=>item.startsWith('producer_not_wired:')));
+assert.ok(audit.producers.find(item=>item.name==='discovery_admission').wired);
+const workflowSrc=fs.readFileSync('src/canonical-producer-workflow.js','utf8');
+assert.match(workflowSrc,/function filmFactsOf\(film,watchlisted\)\{\n return \{watchlist:watchlisted,film:\{contractVersion:1,canonicalIdentity:film\?\.canonicalIdentity\|\|null,originalTitle:film\?\.original\|\|film\?\.title\|\|null\}\};\n\}/);
+assert.doesNotMatch(workflowSrc.slice(workflowSrc.indexOf('function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/metadata|sync_state|dimension/);
+assert.equal(proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:false},described:{name:OPERATOR_D1_TARGET.databaseName,uuid:OPERATOR_D1_TARGET.databaseId}}).ok,true);
+assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:true},described:{name:OPERATOR_D1_TARGET.databaseName,uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
+assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,databaseId:'00000000-0000-0000-0000-000000000000',endpointOverride:false},described:{name:'iptv',uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
 assert.throws(()=>parseOpenHandoffArgs(['--nope']),/film_person_invalid/);
 assert.deepEqual(parseOpenHandoffArgs(['--apply','--confirm-go','--expected-generation=1','--expected-reference=t']),{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:'t'});
 
@@ -129,13 +150,14 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 {
  const file=openDb();
  const env=envOf(file);
- const taken=await takeProjectorLease(env,{owner:'op-10',now:T});
+ const wall=Date.now();
+ const taken=await takeProjectorLease(env,{owner:'op-10',now:wall});
  assert.equal(taken.taken,true);
- const requested=await requestProjectorWindow(env,{owner:'op-10',now:Tms});
+ const requested=await requestProjectorWindow(env,{owner:'op-10',now:wall});
  assert.equal(requested.outcome,'requested');
- const granted=await grantProjectorWindow(env,{owner:'op-10',now:Tms});
+ const granted=await grantProjectorWindow(env,{owner:'op-10',now:wall});
  assert.equal(granted.outcome,'granted',JSON.stringify(granted));
- const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-10',now:T});
+ const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-10'});
  assert.equal(flipped.outcome,'flipped');
  assert.equal((await writerRoute(env)).writer,'canonical');
  assert.equal(projectorExpectation(q(file,'SELECT mode,cutover,generation FROM film_person_authority WHERE id=1')),null);
@@ -146,17 +168,18 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 
 {
  const file=openDb();
- const db=d1Standin(file,{onBatch:async statements=>{
-  if(statements.some(item=>/UPDATE film_person_authority SET mode='d1'/.test(item.text)))throw new Error('transport');
+ const wall=Date.now();
+ const db=d1Standin(file,{onQuery:async text=>{
+  if(/UPDATE film_person_authority SET mode='d1'/.test(text))throw new Error('transport');
  }});
  const env={DB:db};
- const taken=await takeProjectorLease(env,{owner:'op-11',now:T});
+ const taken=await takeProjectorLease(env,{owner:'op-11',now:wall});
  assert.equal(taken.taken,true);
- const requested=await requestProjectorWindow(env,{owner:'op-11',now:Tms});
+ const requested=await requestProjectorWindow(env,{owner:'op-11',now:wall});
  assert.equal(requested.outcome,'requested');
- const granted=await grantProjectorWindow(env,{owner:'op-11',now:Tms});
+ const granted=await grantProjectorWindow(env,{owner:'op-11',now:wall});
  assert.equal(granted.outcome,'granted');
- const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-11',now:T});
+ const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-11'});
  assert.equal(flipped.outcome,'stop');
  assert.equal(flipped.reason,'flip_not_applied');
  assert.equal(flipped.retry,false);
@@ -166,7 +189,7 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 {
  const file=openDb();
  sqlite(file,"UPDATE film_person_authority SET mode='d1', generation=2 WHERE id=1");
- const flipped=await flipOpen(envOf(file),{expectedGeneration:1,expectedReference:REF,owner:'ghost',now:T});
+ const flipped=await flipOpen(envOf(file),{expectedGeneration:1,expectedReference:REF,owner:'ghost'});
  assert.ok(['stop','unknown','unknown_committed'].includes(flipped.outcome));
  assert.notEqual(flipped.retry,true);
 }
@@ -179,8 +202,40 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 }
 
 {
- const src=fs.readFileSync('src/film-person-open-handoff.js','utf8');
- assert.match(src,/handoffReadiness/);
- assert.match(src,/frozen R2 mirrors/);
- assert.doesNotMatch(src,/PRODUCER_WIRING/);
+ const file=openDb();
+ const env=envOf(file);
+ const wall=Date.now();
+ await takeProjectorLease(env,{owner:'op-13',now:wall});
+ assert.equal((await requestProjectorWindow(env,{owner:'op-13',now:wall})).outcome,'requested');
+ assert.equal((await grantProjectorWindow(env,{owner:'op-13',now:wall})).outcome,'granted');
+ sqlite(file,'UPDATE projector_window SET expires_at=1 WHERE id=1');
+ const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-13'});
+ assert.equal(flipped.outcome,'stop');
+ assert.equal(flipped.reason,'flip_precondition');
+ assert.equal(q(file,'SELECT generation FROM film_person_authority WHERE id=1').generation,1);
+ assert.equal(await exclusiveOwned(env,{owner:'op-13'}),false);
+}
+
+{
+ const file=openDb();
+ let batches=0;
+ const db=d1Standin(file,{onBatch:async()=>{batches++;}});
+ const env={DB:db};
+ const wall=Date.now();
+ await takeProjectorLease(env,{owner:'op-14',now:wall});
+ assert.equal((await requestProjectorWindow(env,{owner:'op-14',now:wall})).outcome,'requested');
+ const before=batches;
+ assert.equal((await grantProjectorWindow(env,{owner:'op-14',now:wall})).outcome,'granted');
+ const afterGrant=batches;
+ const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-14'});
+ assert.equal(flipped.outcome,'flipped',JSON.stringify(flipped));
+ assert.equal(batches,afterGrant,'flip is one UPDATE via run(), not a REST batch');
+ assert.ok(afterGrant>before);
+}
+
+{
+ const src=fs.readFileSync('src/film-person-open-handoff.js','utf8')+' '+fs.readFileSync('scripts/film-person-open-handoff.mjs','utf8');
+ assert.match(src,/strftime\('%s','now'\)/);
+ assert.match(src,/proveOperatorTarget/);
+ assert.match(src,/PRODUCER_WIRING/);
 }

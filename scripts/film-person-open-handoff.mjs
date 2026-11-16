@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // AIR-499. Operator CLI for the Film/Person prepared → open handoff. Default is dry-run (readiness only).
 // `--apply --confirm-go` is required together for any write. A merge of this file is not a production GO.
-import {activateOpen,parseOpenHandoffArgs} from '../src/film-person-open-handoff.js';
+// The flip is a single UPDATE (binding.run), not a REST {batch} pair that depends on changes().
+import {activateOpen,parseOpenHandoffArgs,proveOperatorTarget,OPERATOR_D1_TARGET} from '../src/film-person-open-handoff.js';
 import {createD1Adapter,readTarget,renderSql} from './d1-backfill.mjs';
 
 export function bindingOfAdapter(adapter){
@@ -31,7 +32,21 @@ export async function main(argv=process.argv.slice(2),env=process.env,io=console
   return 2;
  }
  const target=readTarget(env);
+ if(args.apply){
+  if(target.endpointOverride||target.endpoint!==OPERATOR_D1_TARGET.endpoint||target.databaseId!==OPERATOR_D1_TARGET.databaseId||target.databaseName!==OPERATOR_D1_TARGET.databaseName){
+   io.error(JSON.stringify({outcome:'stop',reason:'target_mismatch',target:{endpoint:target.endpoint,databaseId:target.databaseId,databaseName:target.databaseName,endpointOverride:target.endpointOverride}}));
+   return 2;
+  }
+ }
  const adapter=createD1Adapter({target,databaseId:target.databaseId});
+ if(args.apply){
+  const described=await adapter.describe();
+  const proved=proveOperatorTarget({target,described});
+  if(!proved.ok){
+   io.error(JSON.stringify({outcome:'stop',reason:'target_mismatch',reasons:proved.reasons}));
+   return 2;
+  }
+ }
  const result=await activateOpen({DB:bindingOfAdapter(adapter)},{
   apply:args.apply,
   confirmGo:args.confirmGo,

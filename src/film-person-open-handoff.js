@@ -1,50 +1,61 @@
 // AIR-499. Protected Film/Person `prepared` → `open` operator. UNBUNDLED: the Worker does not import this module, no route, cron
-// or MCP tool calls it, and a merge authorizes no production flip. `transitionAuthority` only CAS-es the marker and fence; this
-// module adds the exclusive projector lease, the ADR 0103 window, the verified baseline reference and Discovery d1/open into THAT
-// SAME flip batch, then records and verifies the receipt baseline before it releases what it owns.
-//
-// `handoffReadiness` (src/canonical-producers.js) stays the honest P6 registry: producers still unwired and freeze readers still
-// unmoved. Activation uses `activationReadiness` instead, which treats GET programme/watchlist (already D1 at `open`) as the
-// canonical readers and the remaining freeze writers as frozen R2 mirrors, not dual D1 writers.
+// or MCP tool calls it, and a merge authorizes no production flip. The flip is ONE guarded UPDATE plus readback (no REST
+// `changes()` CAS pair). Exclusive window/lease predicates use the database clock, not the preflight timestamp.
 import {database,failed,many,one,projectorExpectation,readAuthority} from './film-person-authority.js';
 import {grantProjectorWindow,releaseProjectorWindow,requestProjectorWindow,WINDOW_DEADLINE_MS} from './discovery-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
-import {EMPTY_CLASSES} from './canonical-producers.js';
+import {EMPTY_CLASSES,PRODUCER_OPERATIONS,PRODUCER_WIRING} from './canonical-producers.js';
 import {BASELINE_CAP,listAttention,recordBaseline,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
 
 export const OPEN_HANDOFF_MIN_VERSION=23;
 export const OPEN_HANDOFF_PROJECTION='enrichment';
 export const OPEN_HANDOFF_LEASE_MS=10*60000;
 export const OPEN_HANDOFF_OWNER_PREFIX='air-499-open-handoff';
+export const OPERATOR_D1_TARGET=Object.freeze({
+ databaseName:'iptv',
+ databaseId:'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb',
+ endpoint:'https://api.cloudflare.com/client/v4',
+});
+// What the Producer Workflow actually plans per Film (src/canonical-producer-workflow.js filmFactsOf). Not metadata, dimensions or sync clocks.
+export const WORKFLOW_FILM_FACTS=Object.freeze(['watchlist','canonicalIdentity','originalTitle']);
+export const WORKFLOW_FILM_FACTS_ABSENT=Object.freeze(['film_metadata','film_dimension','film_sync_state']);
 
-const MOVED_READERS=Object.freeze(['GET /api/programme titles.json','GET /api/watchlist titles.json']);
-const FROZEN_MIRROR_WRITERS=Object.freeze([
- 'metadataSync titles.json, people.json and metadata.json working set (writer)',
- 'epgSync title and people localization (writer of titles.json, people.json)',
-]);
-
-// Honest consumer audit. Freeze entries that still write R2 titles/people at `open` are frozen-mirror drift, not a second D1 writer.
-export const ACTIVATION_CONSUMERS=Object.freeze([
- Object.freeze({name:'GET /api/programme titles.json',kind:'canonical_reader',atOpen:'d1'}),
- Object.freeze({name:'GET /api/watchlist titles.json',kind:'canonical_reader',atOpen:'d1'}),
- Object.freeze({name:'epgSync titles.json people.json',kind:'frozen_r2_mirror',atOpen:'freeze'}),
- Object.freeze({name:'metadataSync titles.json people.json',kind:'frozen_r2_mirror',atOpen:'freeze'}),
-]);
-
-const CAS_SQL='INSERT INTO film_person_cas (id,ok) VALUES (1,(SELECT CASE WHEN EXISTS (SELECT 1 FROM film_person_cas WHERE id=1) AND changes()>=1 THEN 1 ELSE 0 END)) ON CONFLICT(id) DO UPDATE SET ok=excluded.ok';
+const DB_NOW_MS="(CAST(strftime('%s','now') AS INTEGER)*1000)";
+const DB_NOW_ISO="strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const FLIP_SQL="UPDATE film_person_authority SET mode='d1', cutover='open', generation=generation+1 WHERE id=1 AND mode='prepared' AND cutover='open' AND generation=?"
  +" AND EXISTS (SELECT 1 FROM film_person_cas WHERE id=1 AND ok>=1)"
  +" AND EXISTS (SELECT 1 FROM film_person_baseline WHERE id=1 AND state='verified' AND reference=?)"
  +" AND EXISTS (SELECT 1 FROM schema_contract WHERE id=1 AND version>=?)"
  +" AND EXISTS (SELECT 1 FROM discovery_authority WHERE id=1 AND mode='d1' AND cutover='open')"
- +" AND EXISTS (SELECT 1 FROM projector_window WHERE id=1 AND state='held' AND owner=? AND expires_at>?)"
- +" AND EXISTS (SELECT 1 FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>?)"
- +" AND EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>?)";
+ +" AND EXISTS (SELECT 1 FROM projector_window WHERE id=1 AND state='held' AND owner=? AND expires_at>"+DB_NOW_MS+")"
+ +" AND EXISTS (SELECT 1 FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>"+DB_NOW_ISO+")"
+ +" AND EXISTS (SELECT 1 FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>"+DB_NOW_MS+")";
 
 function iso(now){return typeof now==='string'?now:new Date(now).toISOString();}
 function ms(now){const n=typeof now==='number'?now:Date.parse(iso(now));return Number.isFinite(n)?n:NaN;}
 function stop(reason,extra={}){return {outcome:'stop',reason,...extra};}
+
+export function classifyConsumer(item){
+ if(item.class==='exception')return {name:item.name,file:item.file,class:item.class,moved:item.moved,kind:'adr0117_exception',d1Authoritative:false,d1Writer:false};
+ if(item.class==='freeze'&&item.moved===true)return {name:item.name,file:item.file,class:item.class,moved:item.moved,kind:'d1_reader',d1Authoritative:true,d1Writer:false};
+ if(item.class==='freeze'&&/writer/i.test(item.name))return {name:item.name,file:item.file,class:item.class,moved:item.moved,kind:'frozen_r2_writer',d1Authoritative:false,d1Writer:false,dualD1:false};
+ return {name:item.name,file:item.file,class:item.class,moved:item.moved,kind:'frozen_r2_reader',d1Authoritative:false,d1Writer:false};
+}
+
+export function activationAudit(){
+ const consumers=CANONICAL_READER_REGISTRY.map(classifyConsumer);
+ const atomic=kind=>{for(const spec of PRODUCER_OPERATIONS.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};
+ const producers=PRODUCER_WIRING.map(item=>({name:item.name,site:item.site,requires:item.requires,wired:item.requires.every(kind=>atomic(kind))}));
+ const residuals=[
+  ...consumers.filter(item=>item.class==='freeze'&&item.moved!==true).map(item=>'freeze_unmoved:'+item.name),
+  ...producers.filter(item=>!item.wired).map(item=>'producer_not_wired:'+item.name),
+  ...WORKFLOW_FILM_FACTS_ABSENT.map(kind=>'workflow_facts_absent:'+kind),
+ ];
+ return {consumers,producers,workflowFacts:WORKFLOW_FILM_FACTS,workflowFactsAbsent:WORKFLOW_FILM_FACTS_ABSENT,residuals};
+}
+
+export const ACTIVATION_CONSUMERS=Object.freeze(activationAudit().consumers);
 
 async function liveLease(env,nowIso){
  const db=database(env);
@@ -82,10 +93,20 @@ async function releaseOwn(env,{owner,now,keep=false}={}){
  return {released:true,kept:false};
 }
 
+export async function exclusiveOwned(env,{owner}={}){
+ const db=database(env);
+ const window=await one(db,'SELECT state, owner, expires_at AS expiresAt FROM projector_window WHERE id=1 AND owner=? AND state=\'held\' AND expires_at>'+DB_NOW_MS,[owner]);
+ const lease=await one(db,'SELECT lease_id AS leaseId FROM projection_run WHERE projection=? AND lease_id=? AND lease_until>'+DB_NOW_ISO,[OPEN_HANDOFF_PROJECTION,owner]);
+ const discovery=await one(db,'SELECT lease_id AS leaseId FROM discovery_lease WHERE id=1 AND lease_id=? AND expires_at>'+DB_NOW_MS,[owner]);
+ return !!(window&&lease&&discovery);
+}
+
 export async function activationReadiness(env,{now=new Date().toISOString(),expectedGeneration=null,expectedReference=null,classes=EMPTY_CLASSES}={}){
  const blockers=[];
+ const audit=activationAudit();
  const nowMs=ms(now),nowIso=iso(now);
  if(!Number.isFinite(nowMs))blockers.push('now_invalid');
+ if(audit.consumers.length!==CANONICAL_READER_REGISTRY.length)blockers.push('audit_incomplete');
  let gate=null;
  try{gate=await readAuthority(env);}catch(error){blockers.push('marker_unreadable:'+(error?.code||'error'));}
  if(gate){
@@ -94,7 +115,7 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
   if(Number.isInteger(expectedGeneration)&&gate.generation!==expectedGeneration)blockers.push('generation_mismatch:'+gate.generation+'/'+expectedGeneration);
  }
  const db=database(env);
- if(!db){blockers.push('no_database');return {ready:false,blockers,consumers:ACTIVATION_CONSUMERS};}
+ if(!db){blockers.push('no_database');return {ready:false,blockers,audit,generation:null,version:null};}
  let version=0,tables=new Set();
  try{
   version=Number((await one(db,'SELECT version AS contract_version FROM schema_contract WHERE id=1'))?.contract_version);
@@ -141,29 +162,28 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
    if(found!==item.expected)blockers.push('empty_class_not_loaded:'+item.name+':'+found+'/'+item.expected);
   }catch{blockers.push('empty_class_unreadable:'+item.name);}
  }
- const byName=Object.fromEntries(CANONICAL_READER_REGISTRY.map(item=>[item.name,item]));
- for(const name of MOVED_READERS){
-  const item=byName[name];
-  if(!(item&&item.class==='freeze'&&item.moved===true))blockers.push('canonical_reader_not_moved:'+name);
+ for(const item of audit.consumers){
+  if(item.kind==='d1_reader'&&item.moved!==true)blockers.push('canonical_reader_not_moved:'+item.name);
+  if(item.kind==='frozen_r2_writer'&&item.dualD1!==false)blockers.push('frozen_mirror_misclassified:'+item.name);
+  if(item.kind==='adr0117_exception'&&item.moved===true)blockers.push('exception_marked_moved:'+item.name);
  }
- for(const name of FROZEN_MIRROR_WRITERS){
-  const item=byName[name];
-  if(!(item&&item.class==='freeze'&&item.moved===false))blockers.push('frozen_mirror_misclassified:'+name);
- }
- return {ready:blockers.length===0,blockers,consumers:ACTIVATION_CONSUMERS,generation:gate?.generation??null,version};
+ return {ready:blockers.length===0,blockers,audit,generation:gate?.generation??null,version};
 }
 
-export async function flipOpen(env,{expectedGeneration,expectedReference,owner,now}={}){
+export async function flipOpen(env,{expectedGeneration,expectedReference,owner}={}){
  const db=database(env);
- if(!db||typeof db.batch!=='function')throw failed('film_person_unavailable');
+ if(!db||typeof db.prepare!=='function')throw failed('film_person_unavailable');
  if(!Number.isInteger(expectedGeneration)||expectedGeneration<0||!expectedReference||!owner)throw failed('film_person_invalid');
- const nowMs=ms(now),nowIso=iso(now);
- const statements=[
-  [FLIP_SQL,[expectedGeneration,expectedReference,OPEN_HANDOFF_MIN_VERSION,owner,nowMs,OPEN_HANDOFF_PROJECTION,owner,nowIso,owner,nowMs]],
-  [CAS_SQL,[]],
- ];
- try{await db.batch(statements.map(([sql,params])=>db.prepare(sql).bind(...params)));}
- catch(error){
+ let before=null;
+ try{before=await readAuthority(env);}catch(error){return {outcome:'unknown',retry:false,error};}
+ if(before.state==='open'&&before.generation===expectedGeneration+1)return {outcome:'unknown_committed',retry:false,generation:before.generation};
+ if(before.state!=='prepared'||before.generation!==expectedGeneration)return {outcome:'stop',reason:'flip_precondition',retry:false,generation:before.generation,state:before.state};
+ const params=[expectedGeneration,expectedReference,OPEN_HANDOFF_MIN_VERSION,owner,OPEN_HANDOFF_PROJECTION,owner,owner];
+ try{
+  const statement=db.prepare(FLIP_SQL).bind(...params);
+  if(typeof statement.run!=='function')throw failed('film_person_unavailable');
+  await statement.run();
+ }catch(error){
   let after=null;
   try{after=await readAuthority(env);}catch{after=null;}
   if(after?.state==='open'&&after.generation===expectedGeneration+1)return {outcome:'unknown_committed',retry:false,generation:after.generation,error};
@@ -171,7 +191,7 @@ export async function flipOpen(env,{expectedGeneration,expectedReference,owner,n
   return {outcome:'unknown',retry:false,after,error};
  }
  const after=await readAuthority(env);
- if(after.state==='open'&&after.generation===expectedGeneration+1)return {outcome:'flipped',generation:after.generation,state:after.state};
+ if(after.state==='open'&&after.generation===expectedGeneration+1&&before.state==='prepared')return {outcome:'flipped',generation:after.generation,state:after.state};
  if(after.state==='prepared'&&after.generation===expectedGeneration)return {outcome:'stop',reason:'flip_precondition',retry:false,generation:after.generation};
  return {outcome:'unknown',retry:false,generation:after.generation,state:after.state};
 }
@@ -193,8 +213,17 @@ async function proveOpen(env,{expectedGeneration}){
  return {ok:reasons.length===0,reasons,gate,route,baseline,unreceipted,attention};
 }
 
-// apply:false is a dry preflight (no lease, window or marker write). apply:true performs the fenced sequence. confirmGo must be true
-// with apply; the CLI maps --confirm-go. An unknown flip never retries.
+export function proveOperatorTarget({target,described}={}){
+ const reasons=[];
+ if(!target||target.endpointOverride)reasons.push('endpoint_override');
+ if(target?.endpoint!==OPERATOR_D1_TARGET.endpoint)reasons.push('endpoint_mismatch');
+ if(target?.databaseName!==OPERATOR_D1_TARGET.databaseName)reasons.push('name_mismatch');
+ if(target?.databaseId!==OPERATOR_D1_TARGET.databaseId)reasons.push('uuid_mismatch');
+ if(described?.name!==OPERATOR_D1_TARGET.databaseName)reasons.push('describe_name_mismatch');
+ if(described?.uuid!==OPERATOR_D1_TARGET.databaseId)reasons.push('describe_uuid_mismatch');
+ return {ok:reasons.length===0,reasons};
+}
+
 export async function activateOpen(env,{apply=false,confirmGo=false,expectedGeneration,expectedReference,now=new Date().toISOString(),owner=null,classes=EMPTY_CLASSES}={}){
  if(apply&&confirmGo!==true)return stop('confirm_go_required');
  const clock=now;
@@ -202,40 +231,42 @@ export async function activateOpen(env,{apply=false,confirmGo=false,expectedGene
  if(!apply)return {outcome:'dry_run',apply:false,readiness};
  if(!readiness.ready)return stop('preflight',{readiness});
  const id=owner||OPEN_HANDOFF_OWNER_PREFIX+':'+iso(clock);
- const nowMs=ms(clock);
+ const wall=Date.now();
  let keep=false;
  try{
-  const lease=await takeProjectorLease(env,{owner:id,now:clock});
+  const lease=await takeProjectorLease(env,{owner:id,now:wall});
   if(!lease.taken)return stop(lease.reason||'projector_lease_lost',{readiness});
-  const requested=await requestProjectorWindow(env,{owner:id,deadlineMs:WINDOW_DEADLINE_MS,now:nowMs});
+  const requested=await requestProjectorWindow(env,{owner:id,deadlineMs:WINDOW_DEADLINE_MS,now:wall});
   if(requested.outcome!=='requested'){
-   await releaseOwn(env,{owner:id,now:clock});
+   await releaseOwn(env,{owner:id,now:wall});
    return stop('window_'+requested.outcome,{requested,readiness});
   }
-  const granted=await grantProjectorWindow(env,{owner:id,now:nowMs});
+  const granted=await grantProjectorWindow(env,{owner:id,now:wall});
   if(granted.outcome!=='granted'){
-   await releaseOwn(env,{owner:id,now:clock});
+   await releaseOwn(env,{owner:id,now:wall});
    return stop('window_'+granted.outcome,{granted,readiness});
   }
-  const flipped=await flipOpen(env,{expectedGeneration,expectedReference,owner:id,now:clock});
+  const flipped=await flipOpen(env,{expectedGeneration,expectedReference,owner:id});
   if(flipped.outcome!=='flipped'){
    keep=flipped.outcome==='unknown_committed'||flipped.outcome==='unknown';
-   if(!keep)await releaseOwn(env,{owner:id,now:clock});
+   if(!keep)await releaseOwn(env,{owner:id,now:wall});
    return stop(flipped.reason||flipped.outcome,{flipped,retry:false,keepLease:keep,readiness});
   }
   keep=true;
+  if(!(await exclusiveOwned(env,{owner:id})))return stop('exclusive_expired',{flipped,keepLease:true,readiness});
   let sealed;
-  try{sealed=await recordBaseline(env,{now:()=>iso(clock)});}
+  try{sealed=await recordBaseline(env,{now:()=>new Date().toISOString()});}
   catch(error){
    return stop('seal_failed',{error,keepLease:true,flipped,readiness});
   }
+  if(!(await exclusiveOwned(env,{owner:id})))return stop('exclusive_expired_after_seal',{flipped,sealed,keepLease:true,readiness});
   const proof=await proveOpen(env,{expectedGeneration});
   if(!proof.ok)return stop('readback_failed',{proof,sealed,keepLease:true,readiness});
-  await releaseOwn(env,{owner:id,now:clock});
+  await releaseOwn(env,{owner:id,now:Date.now()});
   keep=false;
   return {outcome:'activated',generation:flipped.generation,owner:id,sealed,proof,readiness};
  }catch(error){
-  if(!keep)await releaseOwn(env,{owner:id,now:clock}).catch(()=>{});
+  if(!keep)await releaseOwn(env,{owner:id,now:Date.now()}).catch(()=>{});
   return stop('activate_failed',{error,keepLease:keep,readiness});
  }
 }

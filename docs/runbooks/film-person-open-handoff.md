@@ -10,9 +10,9 @@ Counts and digests only in any evidence; no ids, titles, payloads or credentials
 - `scripts/film-person-open-handoff.mjs`: default dry-run; writes only with `--apply --confirm-go` together.
 - Offline coverage: `tests/film-person-open-handoff.mjs`.
 
-`handoffReadiness` in `src/canonical-producers.js` is **not** the activation gate. It still reports `producer_not_wired` and `reader_not_moved` for freeze writers that remain R2 mirrors. `activationReadiness` is the gate this operator uses: GET `/api/programme` and GET `/api/watchlist` already read D1 at `open`; `epgSync` / `metadataSync` `saveJSON` of `titles.json` / `people.json` are frozen-mirror drift, not a second D1 writer.
+`handoffReadiness` in `src/canonical-producers.js` is **not** the activation gate and is not rewritten. `activationReadiness` is the operational gate. `activationAudit()` classifies every `CANONICAL_READER_REGISTRY` row: the four `moved:true` freeze readers (programme/watchlist titles, `/api/d1/*`, catalog rated-archive fallback) are D1 at `open`; eleven freeze-unmoved consumers stay frozen R2 readers or writers (not dual D1 writers, and not D1-authoritative); five ADR 0117 exceptions stay as they are, including the metadata-cache mirror. The audit also records Producer Workflow `filmFactsOf` (watchlist, canonicalIdentity, originalTitle only — not metadata, dimensions or sync clocks) and that the projector is not writable at `open`. Residuals are listed, not hidden.
 
-`transitionAuthority` still only CAS-es the marker and `film_person_cas`. The operator's flip batch also asserts: schema ≥ 23, Discovery `d1`/`open`, verified `film_person_baseline.reference`, this owner's held projector window, this owner's live enrichment lease, and this owner's Discovery lease.
+The flip is one guarded `UPDATE` plus readback. SQL asserts schema ≥ 23, Discovery `d1`/`open`, verified `film_person_baseline.reference`, and this owner's unexpired window and leases against the **database clock**. Exclusive ownership is re-checked before and after `recordBaseline`.
 
 ## Dry-run (read-only)
 
@@ -33,8 +33,8 @@ node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-ref
 1. `activationReadiness` (H1 class counts 708 / 398 / 4, marker `prepared` at the expected generation, verified baseline reference, idle leases and window, Discovery `d1`/`open`, schema ≥ 23, writer route `projector`).
 2. Take the enrichment projector lease as this owner only; STOP on a competing live lease.
 3. `requestProjectorWindow` then `grantProjectorWindow` (ADR 0103, 300 s cap); STOP if not granted; Discovery lease moves onto this owner.
-4. **One flip batch** (`prepared`/`open`/G → `d1`/`open`/G+1) with the assertions above and the CAS fence. All or nothing.
-5. Immediately `recordBaseline` then `verifyBaseline`, `readUnreceipted`, `listAttention`. No producer write is allowed between flip and seal (`receipt_baseline_missing`). A Worker tick cannot use the projector: `projectorExpectation` is null at `d1`.
+4. **One guarded UPDATE** (`prepared`/`open`/G → `d1`/`open`/G+1) plus readback. Window and lease expiry are compared with the database clock (`strftime('%s','now')`), not the preflight timestamp. There is no REST `{batch}` pair that depends on `changes()` from a previous statement. All or nothing; unknown → STOP, no retry. `--apply` first proves D1 `iptv` UUID `3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb` via `describe()` and refuses an endpoint override.
+5. Re-check exclusive ownership on the database clock, then `recordBaseline` / `verifyBaseline` / `readUnreceipted` / `listAttention`. If the window or lease has expired, STOP and keep them. No producer write is allowed between flip and seal (`receipt_baseline_missing`). A Worker tick cannot use the projector: `projectorExpectation` is null at `d1`.
 6. Readback: generation G+1, writer `canonical`, projector not writable, sealed/verified receipts, no unreceipted or attention rows.
 7. Release **only** this owner's lease and window.
 
