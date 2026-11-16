@@ -818,15 +818,26 @@ async function metadataSync(env,run){
  await saveCanonicalMirror(env,'people.json',people);
  if(typeof CanonicalMetadataSync!=='undefined'){
   try{
-   await CanonicalMetadataSync.applyMetadataSync(env,{
+   const canonical=await CanonicalMetadataSync.applyMetadataSync(env,{
     event:'metadata:'+String(run.runId||''),
     films:run.watchlist.filter(film=>ids.includes(film.id)),
     titles,people,failedIds:(run.failures||[]).map(item=>item.id),
+    intent:run.metadataSyncIntent||[],
    });
+   run.canonicalMetadata=canonical;
+   if(canonical&&canonical.intent)run.metadataSyncIntent=canonical.intent;
+   if(!CanonicalMetadataSync.metadataSyncSettled(canonical)){
+    run.updatedAt=new Date().toISOString();
+    await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);
+    return {runId:run.runId,stage:'metadata',remaining:run.pending.length-run.cursor,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length,canonicalMetadataIncomplete:true};
+   }
   }catch(error){
    const code=error&&error.code;
    if(code==='film_person_held'||code==='film_person_unavailable'||code==='film_person_not_open'||code==='film_person_generation_moved')throw error;
    run.canonicalMetadataErrors=(run.canonicalMetadataErrors||0)+1;
+   run.updatedAt=new Date().toISOString();
+   await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);
+   return {runId:run.runId,stage:'metadata',remaining:run.pending.length-run.cursor,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length,canonicalMetadataIncomplete:true};
   }
  }
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};

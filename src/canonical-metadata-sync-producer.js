@@ -41,16 +41,39 @@ export function canonicalPersonId(raw){
  return s?(s.startsWith('person:')?s:'person:'+s):null;
 }
 
+// Same typed-claim rule as catalogMetadataFromD1: every stored row of the scheme/value is assessed; any claim that is not
+// the one owner's trusted, non-conflicting row is a collision. Untrusted and conflicting rows are not ignored.
+function typedClaim(rows,scheme,value){
+ const pool=(rows||[]).filter(row=>row.scheme===scheme&&String(row.value)===String(value));
+ const isOwn=row=>Number(row.trusted)===1&&Number(row.conflicting)===0;
+ const owner=pool.find(isOwn)?.film_id??null;
+ if(pool.some(row=>!(isOwn(row)&&row.film_id===owner)))return {conflict:true,filmId:null};
+ return {conflict:false,filmId:owner};
+}
+
 export async function resolveExistingFilmId(env,film){
  const db=database(env);
+ if(!db)throw failed('film_person_unavailable');
+ const raw=String(film?.id??'');
  const tmdb=String(film?.tmdbId??'');
- if(TMDB.test(tmdb)){
-  const held=await one(db,"SELECT film_id FROM film_external_id WHERE scheme='tmdb' AND value=? AND trusted=1 AND conflicting=0",[tmdb]);
-  if(held?.film_id)return held.film_id;
+ const spelled=raw.startsWith('film:')?raw:null;
+ const lid=spelled?null:(raw||null);
+ const parts=[];
+ if(TMDB.test(tmdb))parts.push(...await many(db,"SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme='tmdb' AND value=?",[tmdb]));
+ if(lid)parts.push(...await many(db,"SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE scheme='letterboxd' AND value=?",[lid]));
+ if(spelled)parts.push(...await many(db,'SELECT film_id,scheme,value,trusted,conflicting FROM film_external_id WHERE film_id=?',[spelled]));
+ const tmdbClaim=TMDB.test(tmdb)?typedClaim(parts,'tmdb',tmdb):{conflict:false,filmId:null};
+ const lidClaim=lid?typedClaim(parts,'letterboxd',lid):{conflict:false,filmId:null};
+ if(tmdbClaim.conflict||lidClaim.conflict)throw failed('identity_collision');
+ if(tmdbClaim.filmId&&lidClaim.filmId&&tmdbClaim.filmId!==lidClaim.filmId)throw failed('identity_collision');
+ let id=tmdbClaim.filmId||lidClaim.filmId||null;
+ if(spelled){
+  if(id&&id!==spelled)throw failed('identity_collision');
+  if(!id&&await one(db,'SELECT id FROM film WHERE id=?',[spelled]))id=spelled;
  }
- const id=canonicalMetadataFilmId(film);
  if(!id)return null;
- return (await one(db,'SELECT id FROM film WHERE id=?',[id]))?.id||null;
+ if(await one(db,'SELECT 1 AS x FROM film_redirect WHERE from_id=?',[id]))throw failed('film_person_redirect');
+ return id;
 }
 
 function metadataFields(film){
@@ -296,88 +319,108 @@ async function conflictsFor(env,kind,id,incoming,at){
  return [{value:incoming.value,source:incoming.source,reason:compared.outcome,at,provenance:incoming.provenance||{}}];
 }
 
-export async function applyMetadataSync(env,{event,films=[],titles={},people={},failedIds=[],now,policy=RETRY_POLICY}={}){
- if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer',receipt:false};
+export function mergeMetadataSyncIntent(previous=[],next=[]){
+ const map=new Map();
+ for(const unit of previous||[])if(unit?.requestId)map.set(unit.requestId,unit);
+ for(const unit of next||[])if(unit?.requestId)map.set(unit.requestId,unit);
+ return [...map.values()];
+}
+
+export function metadataSyncSettled(out){
+ if(!out||out.state==='skipped')return true;
+ if(out.state==='incomplete')return false;
+ return !(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0));
+}
+
+export function metadataSyncRegistry(env,{intent=[],now}={}){
+ const nowFn=clockOf(now);
+ const byRequest=new Map((intent||[]).filter(unit=>unit?.requestId).map(unit=>[unit.requestId,unit]));
+ const replan=async receipt=>byRequest.get(receipt.requestId)?.input??null;
+ return operationRegistry(metadataSyncOperations({replan,now:nowFn}));
+}
+
+export async function planMetadataSyncIntent(env,{event,films=[],titles={},people={},failedIds=[],now}={}){
  const nowFn=clockOf(now);
  const origin=METADATA_SYNC_ORIGIN;
  const failed=new Set(failedIds);
- const counts={applied:0,noop:0,skipped:0,failed:0,absent:0,unknown:0};
- const units=[];
+ const units=[],refused=[],absent=[];
  for(const film of films){
   if(!film||failed.has(film.id))continue;
   let id=null;
-  try{id=await resolveExistingFilmId(env,film);}catch(error){if(CLOSED.has(error?.code))throw error;counts.failed++;continue;}
-  if(!id){counts.absent++;continue;}
+  try{id=await resolveExistingFilmId(env,film);}
+  catch(error){
+   if(CLOSED.has(error?.code))throw error;
+   refused.push({filmId:film.id,errorClass:error?.code||'unclassified',preflight:true});
+   continue;
+  }
+  if(!id){absent.push(film.id);continue;}
   const at=instant(film.metadataAt)||instant(film.synopsisFetchedAt)||instant(film.peopleLocalizedAt)||nowFn();
   let snapshot;
-  try{snapshot=await readFilmSnapshot(env,id);}catch(error){if(CLOSED.has(error?.code))throw error;counts.failed++;continue;}
-  const meta=metadataFactsInput(snapshot,film,at);
-  const sync=syncFactsInput(snapshot,film,at);
-  const title=titleSourceOf(film,titles);
-  if(title)title.id=id;
-  const persons=personSourcesOf(film,people);
+  try{snapshot=await readFilmSnapshot(env,id);}
+  catch(error){
+   if(CLOSED.has(error?.code))throw error;
+   refused.push({filmId:film.id,errorClass:error?.code||'unclassified',preflight:true});
+   continue;
+  }
   const ev=String(event||'')+':'+id;
-  const run=async(kind,fn)=>{
-   try{
-    const out=await fn();
-    units.push({kind,id,state:out.state,requestId:out.requestId||null});
-    if(out.state==='applied'||out.state==='already')counts.applied++;
-    else if(out.state==='noop'||out.state==='absent'){if(out.state==='absent')counts.absent++;else counts.noop++;}
-    else if(out.state==='skipped')counts.skipped++;
-    else if(out.state==='unknown')counts.unknown++;
-    else counts.failed++;
-    return out;
-   }catch(error){
-    if(CLOSED.has(error?.code))throw error;
-    counts.failed++;
-    units.push({kind,id,state:'failed',errorClass:error?.code||'unclassified'});
-    return null;
-   }
+  const push=async(operation,suffix,target,input)=>{
+   if(!input)return;
+   const digest=operation===FILM_METADATA_OPERATION||operation===FILM_SYNC_OPERATION?await factsKindDigest(operation,input):await localizationDigest(operation,input);
+   const requestId=await producerRequestId({origin,operation,event:ev+suffix,target,digest});
+   units.push({requestId,operation,origin,event:ev+suffix,target,input});
   };
-  if(meta)await run(FILM_METADATA_OPERATION,()=>applyFilmMetadata(env,{origin,event:ev+':metadata',input:meta,now:nowFn,policy}));
-  if(sync)await run(FILM_SYNC_OPERATION,()=>applyFilmSyncState(env,{origin,event:ev+':sync',input:sync,now:nowFn,policy}));
+  await push(FILM_METADATA_OPERATION,':metadata',{kind:'film',id},metadataFactsInput(snapshot,film,at));
+  await push(FILM_SYNC_OPERATION,':sync',{kind:'film',id},syncFactsInput(snapshot,film,at));
+  const title=titleSourceOf(film,titles);
   const sources=[];
-  if(title)sources.push(title);
-  sources.push(...persons);
+  if(title)sources.push({kind:'film',id,source:title.source});
+  sources.push(...personSourcesOf(film,people));
   for(const item of sources){
    const locInput={kind:item.kind,id:item.id,at,sources:[item.source]};
-   await run(LOCALIZATION_SOURCE_OPERATION,()=>applyLocalizationSource(env,{origin,event:ev+':loc:'+item.kind+':'+item.id,input:locInput,now:nowFn,policy}));
+   await push(LOCALIZATION_SOURCE_OPERATION,':loc:'+item.kind+':'+item.id,{kind:item.kind,id:item.id},locInput);
    let held=[];
    try{held=await conflictsFor(env,item.kind,item.id,item.source,at);}catch(error){if(CLOSED.has(error?.code))throw error;}
-   if(held.length)await run(LOCALIZATION_CONFLICT_OPERATION,()=>applyLocalizationConflict(env,{origin,event:ev+':conflict:'+item.kind+':'+item.id,input:{kind:item.kind,id:item.id,at,conflicts:held},now:nowFn,policy}));
+   if(held.length)await push(LOCALIZATION_CONFLICT_OPERATION,':conflict:'+item.kind+':'+item.id,{kind:item.kind,id:item.id},{kind:item.kind,id:item.id,at,conflicts:held});
   }
  }
- const operations=metadataSyncRegistry(env,{films,titles,people,now:nowFn});
- let reconciled={considered:0};
- try{reconciled=await reconcileOwnOrigin(env,{origin,operations,now:nowFn,policy});}catch(error){if(CLOSED.has(error?.code))throw error;}
- return {state:'done',...counts,units,reconciled};
+ return {units,refused,absent};
 }
 
-export function metadataSyncRegistry(env,{films=[],titles={},people={},now}={}){
+export async function applyMetadataSync(env,{event,films=[],titles={},people={},failedIds=[],intent:previousIntent=[],now,policy=RETRY_POLICY}={}){
+ if(!(await producerRouteOpen(env)))return {state:'skipped',reason:'projector_is_writer',receipt:false};
  const nowFn=clockOf(now);
- const byFilm=new Map();
- for(const film of films){
-  const id=canonicalMetadataFilmId(film);
-  if(id)byFilm.set(id,film);
- }
- const replan=async receipt=>{
-  const film=byFilm.get(receipt.target.id);
-  if(!film)return null;
-  const snapshot=await readFilmSnapshot(env,receipt.target.id);
-  const at=instant(film.metadataAt)||nowFn();
-  if(receipt.operation===FILM_METADATA_OPERATION)return metadataFactsInput(snapshot,film,at);
-  if(receipt.operation===FILM_SYNC_OPERATION)return syncFactsInput(snapshot,film,at);
-  if(receipt.operation===LOCALIZATION_SOURCE_OPERATION){
-   if(receipt.target.kind==='film'){
-    const title=titleSourceOf(film,titles);
-    if(!title)return null;
-    return {kind:'film',id:receipt.target.id,at,sources:[title.source]};
-   }
-   const person=personSourcesOf(film,people).find(item=>item.id===receipt.target.id);
-   if(!person)return null;
-   return {kind:'person',id:person.id,at,sources:[person.source]};
-  }
-  return null;
+ const origin=METADATA_SYNC_ORIGIN;
+ const planned=await planMetadataSyncIntent(env,{event,films,titles,people,failedIds,now:nowFn});
+ const intent=mergeMetadataSyncIntent(previousIntent,planned.units);
+ const counts={applied:0,noop:0,skipped:0,failed:0,absent:planned.absent.length,unknown:0,preflightFailed:planned.refused.filter(item=>item.preflight).length,refused:planned.refused.length};
+ const outcomes=[];
+ const applyOf={
+  [FILM_METADATA_OPERATION]:(input,event)=>applyFilmMetadata(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
+  [FILM_SYNC_OPERATION]:(input,event)=>applyFilmSyncState(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
+  [LOCALIZATION_SOURCE_OPERATION]:(input,event)=>applyLocalizationSource(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
+  [LOCALIZATION_CONFLICT_OPERATION]:(input,event)=>applyLocalizationConflict(env,{origin,event,input,replan:async()=>input,now:nowFn,policy}),
  };
- return operationRegistry(metadataSyncOperations({replan,now:nowFn}));
+ for(const unit of intent){
+  try{
+   const out=await applyOf[unit.operation](unit.input,unit.event);
+   const receipted=out.receipt!==false&&out.requestId;
+   outcomes.push({kind:unit.operation,id:unit.target.id,state:out.state,requestId:out.requestId||unit.requestId,receipted:!!receipted});
+   if(out.state==='applied'||out.state==='already')counts.applied++;
+   else if(out.state==='noop')counts.noop++;
+   else if(out.state==='absent')counts.absent++;
+   else if(out.state==='skipped')counts.skipped++;
+   else if(out.state==='unknown')counts.unknown++;
+   else counts.failed++;
+  }catch(error){
+   if(CLOSED.has(error?.code))throw error;
+   counts.failed++;
+   outcomes.push({kind:unit.operation,id:unit.target.id,state:'failed',errorClass:error?.code||'unclassified',requestId:unit.requestId,receipted:false,preflight:true});
+   counts.preflightFailed++;
+  }
+ }
+ const operations=metadataSyncRegistry(env,{intent,now:nowFn});
+ let reconciled={considered:0};
+ try{reconciled=await reconcileOwnOrigin(env,{origin,operations,now:nowFn,policy});}catch(error){if(CLOSED.has(error?.code))throw error;counts.failed++;}
+ const incomplete=counts.failed>0||counts.unknown>0||counts.preflightFailed>0||counts.refused>0;
+ return {state:incomplete?'incomplete':'complete',...counts,units:outcomes,intent,reconciled,refusedDetail:planned.refused};
 }
