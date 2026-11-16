@@ -20,7 +20,7 @@ The bullets below are the contract of the retired Task as it ran before the cuto
 - **Completion:** read `epg_status`, `epg_pipeline_status` and `enrichment_queue`; distinguish published programme, pending discovery and `ratingsPending`. Ratings/Letterboxd HTTP 403 are not reasons to restart EPG. Do **not** run predictions or modify the Taste Profile in this task.
 - **Ratings ownership:** the task calls no ratings tool of its own. Production runs ratings through the [Cloudflare executor](#ratings-task-and-the-cloudflare-executor-air-347). Once the storage migration is complete, this task's `epg_sync_step` does not read Diary. An incomplete migration still publishes and records `ratingsPipeline: blocked`; it does not read Diary. A Ratings Workflow failure is not an EPG publication failure when `epg_status.stage` is `complete`.
 
-## Hourly Predictions Tasks (AIR-451)
+## Hourly Predictions Tasks (AIR-451) {#hourly-predictions}
 
 **Current producers.** Two independent hourly **batch v2** Tasks, each one invocation per hour in Europe/Madrid: **A** at `:00` and **B** at `:15`. [AIR-451](https://trello.com/c/NN3N6kRp) is still open: natural-run quality, throughput and jitter are not product-accepted here. **C** (`:30`) and **D** (`:45`) remain planned and need their own owner GO; they are not claimed live. This page records **no Task IDs and no prompt SHA-256**; those belong in the live registry and in dated evidence. A documentation merge does not create, enable, disable or edit a Task. The Worker does not encode these minutes.
 
