@@ -25,8 +25,10 @@ sequenceDiagram
     else New run
         MCP->>Queue: Acquire lease
         MCP->>R2: Persist interrupted state for the recovered lease holder only
-        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys, cursor enrichment/run-diagnostics-settle.json. A live runner lease holder is not interrupted from a stale diagnostic timestamp. GET status/runs and MCP enrichment_status project expiry and write nothing. Event delivery is on prediction_start under the writer lease; GET /api/events writes nothing.
-        loop While eligible items remain
+        Note over MCP,D1: Historic diagnostic settlement is prediction_complete, at most 10 keys
+        Note over MCP,D1: A live lease holder is not interrupted from a stale diagnostic timestamp
+        Note over MCP,D1: GET status and enrichment_status write nothing; events go out on prediction_start
+        loop eligible items remain
             Client->>MCP: prediction_next (one film)
             MCP->>Queue: Select hot first and cold only after hot drained
             Queue-->>MCP: Film and current artifact facts
@@ -41,9 +43,9 @@ sequenceDiagram
                 MCP->>D1: Commit the pointer and the queue
                 Note over MCP,D1: The written film leaves the stored queue, no catalog read
             else Isolated invalid output
-                MCP->>Queue: Record per-film failure and retryAt (conditional write)
+                MCP->>Queue: Record per-film failure and retryAt, conditional write
                 alt Ten saved per-film attempts
-                    Queue->>Queue: Keep retries[filmId], drop from pending lanes
+                    Queue->>Queue: Keep the exhausted retry record and drop the film from pending lanes
                 end
             end
             opt Long model call
