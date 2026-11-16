@@ -377,7 +377,7 @@ const tables=file=>{const have=new Set(rows(file,"SELECT name FROM sqlite_master
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-producers'))importers.push(full);}};
  walk('src');
- assert.deepEqual(importers,[],'AIR-374 P3c: nothing imports the readiness registry any more (the adapters and units take writerRoute from src/canonical-writer-route.js, which the Worker bundle can carry without an import cycle)');
+ assert.deepEqual(importers,[],'AIR-499: the open-handoff operator no longer imports the dormant producers module (wiring and H1 counts are copied and asserted equal)');
  for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producers'),file+' does not bundle it');
  const text=fs.readFileSync('src/canonical-producers.js','utf8');
  assert.ok(!/\bR2\b|fetch\(|env\.[A-Z_]+_BUCKET|\.get\(['"]/.test(text.replace(/\/\/.*$/gm,'')),'the module reads no R2 and calls no network');
