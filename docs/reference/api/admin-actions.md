@@ -175,7 +175,7 @@ The declaration is:
 | Issuance | The execute POST carries `{filmId, idempotencyKey}` and the Access action header. A stored R2 receipt for that key replays |
 | Executor lease | The resolver lease |
 | Commit with CAS | One fenced D1 batch (`ownerPolicyExclude`): decision history and reject payloads, assigned-row deletes, admission `superseded` |
-| Receipt | R2 `admin/actions/catalog_policy_exclude/v1/<idempotencyKey>.json`. A superseded admission on a later POST of the same film is `already_applied` |
+| Receipt | R2 `admin/actions/catalog_policy_exclude/v1/<idempotencyKey>.json`, bound to that `filmId`. A later POST of a different film with the same key is `idempotency_conflict`. A superseded admission on a later POST of the same film is `already_applied` and still retries the queue |
 | What changed | Catalog current snapshot, related decisions, discovery-basis shows of those keys, and the prediction-queue membership of that film |
 
 Not covered: bulk exclusion of the AIR-500 inventory, a schema change to `discovery_intent`, deleting personal history, moving the published EPG generation, and any production write. Shipping the capability does not authorize a live exclude.

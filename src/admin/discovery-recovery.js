@@ -836,9 +836,8 @@ async function peReconcileQueue(env,filmId){
  let head=null;
  try{head=await readQueueHead(env);}catch{return {outcome:'unknown'};}
  if(!head?.current)return {outcome:'absent'};
- let settled=null;
  try{
-  settled=await mutatePredictionQueue(env,current=>{
+  await mutatePredictionQueue(env,current=>{
    const next=settleQueueFilms(current,[id]);
    if(next)next.trigger='catalog_policy_exclude';
    return next;
@@ -850,10 +849,9 @@ async function peReconcileQueue(env,filmId){
   const report=await loadJSON(env,'programme.json');
   if(report)await refreshPredictionQueue(env,report,'catalog_policy_exclude');
  }catch{}
- try{head=await readQueueHead(env);}catch{return {outcome:settled&&!peQueuePresent(settled,id)?'removed':'unknown'};}
- const queue=head?.current||settled;
- if(!queue)return {outcome:'unknown'};
- return {outcome:peQueuePresent(queue,id)?'present':'removed'};
+ try{head=await readQueueHead(env);}catch{return {outcome:'unknown'};}
+ if(!head?.current)return {outcome:'unknown'};
+ return {outcome:peQueuePresent(head.current,id)?'present':'removed'};
 }
 async function peFinishExclude(env,filmId,payload){
  const queue=await peReconcileQueue(env,filmId);
@@ -889,7 +887,10 @@ async function peExecute(request,env,url){
  const stored=await env.BUCKET.get(peActionKey(idempotencyKey));
  if(stored){
   const record=await stored.json();
-  if(record?.receipt)return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',...record.receipt});
+  if(record?.receipt){
+   if(record.filmId!==filmId||record.receipt.filmId!==filmId||record.kind!=='catalog_policy_exclude_action'||record.receipt.capability!=='catalog_policy_exclude')return drRefused('idempotency_conflict',409);
+   return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',...record.receipt});
+  }
  }
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return drRefused('lease_held',409);

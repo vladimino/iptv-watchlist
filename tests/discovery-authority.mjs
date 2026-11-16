@@ -8,6 +8,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import * as Authority from '../src/discovery-authority.js';
+import * as PublishedEpg from '../src/published-epg.js';
 import {canonicalJson} from '../src/domain/discovery-observation-index.js';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import {MemoryBucket} from './memory-bucket.mjs';
@@ -261,6 +262,8 @@ assert.equal((await Authority.routeRead(env,'epg/discovered-films.json')).value.
 assert.equal(JSON.parse(one(live.db,"SELECT payload_json FROM discovery_decision WHERE observation_key='doc-obs'").payload_json).status,'needs_verification');
 assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='doc-obs' AND basis='discovery'"),0);
 assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='doc-obs' AND basis='title_year'"),1);
+const sealedProgramme={films:[]};
+assert.equal(PublishedEpg.completeProgramme(sealedProgramme,[]),sealedProgramme,'completed programme overlay is a no-op without discovery rows; title_year table rows are not that overlay');
 const replayDoc=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_70',lease:again.lease});
 assert.equal(replayDoc.outcome,'already_applied');
 const excludedConcert=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_71',lease:again.lease});
@@ -525,10 +528,11 @@ await Authority.releaseLease(httpEnv,httpLease.lease);
 httpEnv.discoveryLease=null;
 await httpBucket.put('epg/published-generation.json',JSON.stringify({phase:'published',programmeRunId:RUN}));
 const httpReads=[];
+let denyQueueGet=false,denyQueueAfterPut=false;
 const guardedBucket={
- async get(key){httpReads.push(key);return httpBucket.get(key);},
+ async get(key){httpReads.push(key);if(denyQueueGet&&key==='enrichment/prediction-queue.json')throw new Error('queue unread');return httpBucket.get(key);},
  async head(key){return httpBucket.head(key);},
- async put(key,body,options){return httpBucket.put(key,body,options);},
+ async put(key,body,options){const written=await httpBucket.put(key,body,options);if(denyQueueAfterPut&&key==='enrichment/prediction-queue.json')denyQueueGet=true;return written;},
  async delete(){throw new Error('delete');},
  async list(){throw new Error('list');},
 };
@@ -604,8 +608,10 @@ assert.equal(identityReceipt.body.record.receipt.state,'applied');
 const identityReplay=await call('/api/admin/discovery-recovery/identity-correct',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({confirmation:identityConfirmed.body.confirmation})});
 assert.equal(identityReplay.body.replayed,true,JSON.stringify(identityReplay.body));
 const policyFilm={id:'tmdb_70',tmdbId:'70',canonicalIdentity:'tmdb:70',title:'A Life',year:2020,genres:['документальный']};
+const otherPolicyFilm={id:'tmdb_82',tmdbId:'82',canonicalIdentity:'tmdb:82',title:'Another Life',year:2019,genres:['документальный']};
+const unreadPolicyFilm={id:'tmdb_83',tmdbId:'83',canonicalIdentity:'tmdb:83',title:'Unread Queue',year:2018,genres:['документальный']};
 const policyLease=await Authority.acquireLease(httpEnv,{programmeRunId:httpEnv.discoveryLease?.programmeRunId||null});
-await Authority.replaceCatalog(httpEnv,{tmdb_41:{id:'tmdb_41',tmdbId:'41',canonicalIdentity:'tmdb:41',title:'Яркий берег',year:1999},tmdb_70:policyFilm},{lease:policyLease.lease});
+await Authority.replaceCatalog(httpEnv,{tmdb_41:{id:'tmdb_41',tmdbId:'41',canonicalIdentity:'tmdb:41',title:'Яркий берег',year:1999},tmdb_70:policyFilm,tmdb_82:otherPolicyFilm,tmdb_83:unreadPolicyFilm},{lease:policyLease.lease});
 await Authority.releaseLease(httpEnv,policyLease.lease);
 httpEnv.discoveryLease=null;
 const policyPreview=await call('/api/admin/discovery-recovery/policy-exclude?filmId=tmdb_70');
@@ -633,6 +639,22 @@ assert.equal(queued.priority.tmdb_70,undefined);
 const policyReplay=await call('/api/admin/discovery-recovery/policy-exclude',{method:'POST',headers:ownerHeaders('catalog_policy_exclude'),body:JSON.stringify({filmId:'tmdb_70',idempotencyKey:'policy-exclude-00001'})});
 assert.equal(policyReplay.body.replayed,true,JSON.stringify(policyReplay.body));
 assert.equal(policyReplay.body.queue,'removed');
+const policyCross=await call('/api/admin/discovery-recovery/policy-exclude',{method:'POST',headers:ownerHeaders('catalog_policy_exclude'),body:JSON.stringify({filmId:'tmdb_82',idempotencyKey:'policy-exclude-00001'})});
+assert.equal(policyCross.status,409,JSON.stringify(policyCross.body));
+assert.equal(policyCross.body.refusal,'idempotency_conflict');
+assert.equal(one(httpDb.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_82'").state,'current');
+await httpBucket.put('enrichment/prediction-queue.json',JSON.stringify({
+ schemaVersion:3,profileVersion:1,profileHash:'p1',programmeRunId:RUN,refreshedAt:new Date().toISOString(),lastCheckAt:new Date().toISOString(),
+ lastBatch:{finishedAt:new Date().toISOString(),stage:'complete',reason:null},hotPending:[],coldPending:['tmdb_83'],pending:['tmdb_83'],
+ priority:{tmdb_83:{rank:2,hot:false}},priorityCount:0,coldRemaining:1,urgentCount:0,retries:{},work:{},
+}));
+denyQueueAfterPut=true;
+const policyUnread=await call('/api/admin/discovery-recovery/policy-exclude',{method:'POST',headers:ownerHeaders('catalog_policy_exclude'),body:JSON.stringify({filmId:'tmdb_83',idempotencyKey:'policy-exclude-00002'})});
+denyQueueAfterPut=false;denyQueueGet=false;
+assert.equal(policyUnread.status,409,JSON.stringify(policyUnread.body));
+assert.equal(policyUnread.body.refusal,'queue_unreconciled');
+assert.equal(policyUnread.body.queue,'unknown');
+assert.equal(one(httpDb.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_83'").state,'superseded');
 
 const hour=3600000,catalogNow=Date.now();
 const catalogShow=start=>({channelId:'c1',channel:'One',start,end:start+2*hour});
