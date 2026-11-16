@@ -429,7 +429,7 @@ The answer adds `application` and `reason` beside the receipt. `application.show
 
 ### Policy exclusion: `GET /api/admin/discovery-recovery/policy-exclude`
 
-`catalog_policy_exclude@1` ([ADR 0152](../../adr/0152-catalog-policy-exclusion.md); [capability](admin-actions.md#policy-exclusion-catalog_policy_exclude1)). The owner excludes one current Discovery movie admission that ADR 0150 classifies as a Documentary or a concert recording. GET is read-only. POST needs the Access assertion, same-origin `Origin`, `Content-Type: application/json` and `X-IPTV-Admin-Action: catalog_policy_exclude`.
+`catalog_policy_exclude@1` ([ADR 0153](../../adr/0153-catalog-policy-exclusion.md); [capability](admin-actions.md#policy-exclusion-catalog_policy_exclude1)). The owner excludes one current Discovery movie admission that ADR 0150 classifies as a Documentary or a concert recording. GET is read-only. POST needs the Access assertion, same-origin `Origin`, `Content-Type: application/json` and `X-IPTV-Admin-Action: catalog_policy_exclude`.
 
 **Preview.** `GET …/policy-exclude?filmId=tmdb_<id>`. The id matches `^tmdb_[1-9]\d{0,11}$`. The answer names `available`, `policy`, related observation keys, admission `state` and the generation pin. Discovery must be D1 `open`; otherwise 409 `unknown_authority`.
 

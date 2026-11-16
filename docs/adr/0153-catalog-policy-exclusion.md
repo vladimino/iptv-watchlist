@@ -1,10 +1,10 @@
-# ADR 0152: One owner-fenced policy exclusion retires an already admitted Documentary or concert recording
+# ADR 0153: One owner-fenced policy exclusion retires an already admitted Documentary or concert recording
 
 **Status:** **Proposed** (2026-11-16; writer architecture for [AIR-504](https://trello.com/c/jUaNE1Rs). Stays Proposed until the owner accepts this contract. This records no permission to run it in production)  
 **Original decision date:** 2026-11-16  
 **Recorded at:** 2026-11-16  
 **Approval source:** [AIR-504](https://trello.com/c/jUaNE1Rs)  
-**Related work:** [ADR 0150](0150-documentary-and-concert-film-exclusion.md), [ADR 0080](0080-discovery-identity-correction.md), [AIR-500](https://trello.com/c/dD3BRQ2H), [AIR-501](https://trello.com/c/ShipZn0N)  
+**Related work:** [ADR 0150](0150-documentary-and-concert-film-exclusion.md), [ADR 0080](0080-discovery-identity-correction.md), [AIR-500](https://trello.com/c/dD3BRQ2H), [AIR-501](https://trello.com/c/ShipZn0N). Numbered 0153 because [ADR 0152](0152-prediction-retry-attempt-budget.md) is the AIR-505 retry budget.  
 **Supersedes:** None  
 **Superseded by:** None
 

@@ -7,7 +7,7 @@
 
 ## Why identity_correct is not enough
 
-`discovery_identity_correct` rejects one observation. It does not change `discovery_admission`. `refreshPredictionQueue` rebuilds from current admissions plus the watchlist, so a rejected concert film returns to the hot queue. AIR-504 therefore adds `catalog_policy_exclude@1` ([ADR 0152](../../adr/0152-catalog-policy-exclusion.md)).
+`discovery_identity_correct` rejects one observation. It does not change `discovery_admission`. `refreshPredictionQueue` rebuilds from current admissions plus the watchlist, so a rejected concert film returns to the hot queue. AIR-504 therefore adds `catalog_policy_exclude@1` ([ADR 0153](../../adr/0153-catalog-policy-exclusion.md)).
 
 ## Reclassification of the 9 832 AIR-500 current movie admissions
 

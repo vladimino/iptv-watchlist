@@ -6,7 +6,7 @@ ADRs document durable accepted choices, not live feature flags, operational perm
 
 | ADR | Status | Decision and evidence |
 | --- | --- | --- |
-| [0152 — One owner-fenced policy exclusion retires an already admitted Documentary or concert recording](0152-catalog-policy-exclusion.md) | **Proposed** 2026-11-16 (writer architecture on [AIR-504](https://trello.com/c/jUaNE1Rs); owner has not accepted the ADR; no production exclude, Discovery run or storage write authorized) | `catalog_policy_exclude@1` would supersede one current movie admission whose payload is ADR 0150 `documentary` or `concert`, reject related movie decisions (cap `floor((STATEMENT_CAP-4)/3)` = 12), clear current-generation discovery-basis shows of those keys, settle the film out of the prediction queue and rebuild. Identity reject is not enough. Personal ratings, fingerprints and immutable predictions stay. The AIR-500 reclass is not a GO write set. |
+| [0153 — One owner-fenced policy exclusion retires an already admitted Documentary or concert recording](0153-catalog-policy-exclusion.md) | **Proposed** 2026-11-16 (writer architecture on [AIR-504](https://trello.com/c/jUaNE1Rs); owner has not accepted the ADR; no production exclude, Discovery run or storage write authorized) | `catalog_policy_exclude@1` would supersede one current movie admission whose payload is ADR 0150 `documentary` or `concert`, reject related movie decisions (cap `floor((STATEMENT_CAP-4)/3)` = 12), clear current-generation discovery-basis shows of those keys, settle the film out of the prediction queue and rebuild. Identity reject is not enough. Personal ratings, fingerprints and immutable predictions stay. The AIR-500 reclass is not a GO write set. |
 
 ## Accepted records
 
