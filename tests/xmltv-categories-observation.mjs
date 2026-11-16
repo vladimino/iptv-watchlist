@@ -11,7 +11,8 @@ import {sqliteSync} from './sqlite-session.mjs';
 
 // AIR-502: XMLTV <category> reaches the discovery candidate, the D1 observation
 // payload, and the detail gate. A missing field and an empty array are the same
-// missing-state for concert_recording. The scan does not invent a category.
+// missing-state: the scan does not invent a category. AIR-501 still refuses a
+// concert recording whose title already carries a performance phrase.
 
 function harness(){
  const live=vm.createContext({Response,Request,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,TextEncoder,TextDecoder,ReadableStream,Uint8Array,crypto:webcrypto,console,setTimeout});
@@ -83,8 +84,11 @@ const musicOnly=movie(1326142,'Robbie Williams: Live at the Apple Music Festival
 const robbieObs=observation('Robbie Williams: Live at the Apple Music Festival',2016,82,['Концерт']);
 assert.equal(bound(robbieObs,musicOnly,1326142,'robbie|2016').outcome,'candidate_decision');
 assert.equal(bound(robbieObs,musicOnly,1326142,'robbie|2016').reason,'concert_recording');
-assert.equal(bound(observation('Robbie Williams: Live at the Apple Music Festival',2016,82,[]),musicOnly,1326142,'robbie-empty|2016').outcome,'detail_verified');
-assert.equal(bound(observation('Robbie Williams: Live at the Apple Music Festival',2016,82,undefined),musicOnly,1326142,'robbie-absent|2016').outcome,'detail_verified');
+assert.equal(bound(observation('Robbie Williams: Live at the Apple Music Festival',2016,82,[]),musicOnly,1326142,'robbie-empty|2016').reason,'concert_recording');
+assert.equal(bound(observation('Robbie Williams: Live at the Apple Music Festival',2016,82,undefined),musicOnly,1326142,'robbie-absent|2016').reason,'concert_recording');
+const fictionMusic=movie(88001,'Rhythm of the Road',2011,100,[{id:10402,name:'Music'}]);
+assert.equal(bound(observation('Rhythm of the Road',2011,100,[]),fictionMusic,88001,'rhythm-empty|2011').outcome,'detail_verified');
+assert.equal(bound(observation('Rhythm of the Road',2011,100,undefined),fictionMusic,88001,'rhythm-absent|2011').outcome,'detail_verified');
 assert.equal(bound(observation('Heat',1995,96,['Фильм']),movie(949,'Heat',1995,96,[{id:18,name:'Drama'}]),949,'heat|1995').outcome,'detail_verified');
 
 {

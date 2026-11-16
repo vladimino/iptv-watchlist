@@ -6,7 +6,7 @@
 **Approval source:** Owner comment on [PR #664](https://github.com/vladimino/iptv-watchlist/pull/664#issuecomment-6902506002), 15 November 2026 (Europe/Madrid): ADR 0149 accepted at HEAD `4bfa73a7ae2331db4a000517e9b8606803a6b8ef`, including the missing-category / Film-category trade-off. Not authorization for `discovery_identity_correct` of `tmdb_1326142` or `tmdb_238858`. Independent [TECHNICAL PASS](https://github.com/vladimino/iptv-watchlist/pull/664#pullrequestreview-5913197258), [exact-HEAD CI](https://github.com/vladimino/iptv-watchlist/actions/runs/43767876226), and [Chromium GitHub-rendered Mermaid QA](https://github.com/vladimino/iptv-watchlist/pull/664#issuecomment-6902456295).  
 **Related work:** [AIR-94](https://trello.com/c/bWYwLgqo) title screen, [AIR-480](https://trello.com/c/ZS0Xdrlq) / [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md)  
 **Supersedes:** None. Qualifies [ADR 0010](0010-scored-detail-verification.md) by adding one detail-gate refusal. Does not change the title screen of [non-film screening](../reference/domain/nonfilm-screening.md).  
-**Superseded by:** None
+**Superseded by:** In part, [ADR 0150](0150-documentary-and-concert-film-exclusion.md). The original decision below stays as accepted history. ADR 0150 replaces the clauses that still verified a Music-only card without a concert category, a Documentary+Music card, a concert recording whose XMLTV category was missing or named a film, and an owner confirmation of a proven concert recording.
 
 ## Context
 

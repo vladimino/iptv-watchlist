@@ -12,7 +12,7 @@ flowchart TD
     scorer["Scorer: title, year,<br/>uniqueness, runtime"]
     score{"Accepted score and margin?"}
     detail["Fetch TMDB movie detail:<br/>id, titles, year, runtime"]
-    gate{"Independent identity gate:<br/>detail, competitors, generation,<br/>EPG concert category and TMDB Music"}
+    gate{"Identity gate<br/>no Documentary<br/>no concert film"}
     writer["Verified decision and<br/>film/catalogue upsert"]
     unresolved["Persist uncertainty / retryAt;<br/>do not create Film"]
     catalogue[("Film catalogue in R2:<br/>live copy and published generation copy")]
@@ -62,7 +62,7 @@ flowchart TD
 
 Before an observation reaches the ledger, and again before each resolver chunk, the [non-film screen](../reference/domain/nonfilm-screening.md) removes high-confidence series episodes and TV shows by title, or by XMLTV `episode-num` during the EPG scan. A reliable watchlist/catalog match or a verified decision outranks that screen. A stored `excluded_nonfilm` decision that the current rule no longer reproduces makes the observation eligible again in the normal cycle; it is not cleaned up or backfilled.
 
-The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness; multiple distinct editions with compatible titles and years remain competitors. `accepted`, `trusted: true`, an alias or another observation's verified decision is insufficient to write a Film. The detail gate checks the exact accepted ID, compatible title/year/runtime, competing editions, the same pinned programme generation, and that a concert telecast is not admitted from TMDB Music without an XMLTV concert/music category ([ADR 0149](../adr/0149-concert-recording-identity-gate.md)). A rejected, ambiguous, concert-recording or stale result must not be silently promoted.
+The scorer combines duplicate rows by **TMDB ID** before calculating uniqueness; multiple distinct editions with compatible titles and years remain competitors. `accepted`, `trusted: true`, an alias or another observation's verified decision is insufficient to write a Film. The detail gate checks the exact accepted ID, compatible title/year/runtime, competing editions, and the same pinned programme generation. It then refuses any TMDB Documentary and any recording of a real concert performance ([ADR 0150](../adr/0150-documentary-and-concert-film-exclusion.md)). Owner confirmation of the identity does not admit either proven type. A rejected, ambiguous, documentary, concert-recording or stale result must not be silently promoted. The refusal does not move the published EPG generation ([ADR 0142](../adr/0142-epg-owned-generation-addressed-discovery-slots.md)).
 
 The scored gate is the only resolver: the former `SCORED_RESOLUTION` rollout variable is retired from code ([ADR 0036](../adr/0036-scored-resolution-only.md)), and rolling the resolver back is a code revert, not a setting. The resolver does not plan title, year, spelling or numeral variant searches. `CANDIDATE_DISCOVERY` is retired and is not read ([ADR 0082](../adr/0082-retire-candidate-discovery.md), Accepted 2026-11-02). The dated [AIR-68 cutover](https://trello.com/c/qbLDc6Ql) enabled scored resolution and did not approve optional variants; those experiments stay historical. A chunk's status still carries `variantCalls`, `variantErrors`, `variantThrottled` and `variantSkipped`, each 0. Each explicit discovery step processes a bounded chunk; no recursive public self-fetch or unbounded TMDB work is implied. See [one-chunk ADR](../adr/0006-one-chunk-discovery.md).
 
