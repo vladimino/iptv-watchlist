@@ -154,6 +154,10 @@ assert.doesNotMatch(unsafeHTML,/href=|tmdb_999/);assert.match(unsafeHTML,/&lt;b&
 context.startedEvent={id:'s1',type:'started',at:'2026-10-23T10:00:00Z',film:{id:'heat-1995',title:'Heat',year:1995,tmdb:'165'}};
 context.unstartedEvent={id:'u1',type:'unstarted',at:'2026-10-23T11:00:00Z',film:{id:'not a film',title:'Loose'}};
 assert.match(vm.runInContext('eventHTML(startedEvent)',context),/Начал смотреть[\s\S]*href="\/film\/tmdb_165"/);
+context.apiWatchlist={id:'from-api',type:'watchlist',at:'2026-10-23T10:00:00Z',total:1,added:[{id:'heat',title:'Heat',year:1995,tmdb:'165'}],removed:[{id:'gone',title:'Gone',year:1999,tmdb:'4242',rating:4}]};
+const apiHTML=vm.runInContext('eventHTML(apiWatchlist)',context);
+assert.match(apiHTML,/href="\/film\/tmdb_165"/);assert.match(apiHTML,/href="\/film\/tmdb_4242"/);
+assert.match(apiHTML,/Gone \(1999\)<\/a> · 4\.0 ★/);
 assert.match(vm.runInContext('eventHTML(unstartedEvent)',context),/Снял отметку/);
 assert.doesNotMatch(vm.runInContext('eventHTML(unstartedEvent)',context),/href=/);
 context.ratedOnly={id:'rated-only',type:'watchlist',at:'2026-10-23T10:00:00Z',total:0,added:[],removed:[{id:'one',title:'One',year:2001,rating:5},{id:'two',title:'Two',year:2002,rating:0.5}]};

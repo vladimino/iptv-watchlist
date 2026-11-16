@@ -174,6 +174,31 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
  if(refs){const list=Array.isArray(refs)?refs:[refs];assert.ok(list.every(item=>item.ref.eventKey===key(watch[0])),'every removal reference names the written event');}
  await post('/api/sync/epg',{runId:runB});await settle();
  assert.equal(watchlistEvents().filter(event=>event.id===runB+'-watchlist').length,1,'a repeat step writes no second watchlist event');
+ const page=await read('/api/events');
+ const listed=page.events.find(event=>event.id===runB+'-watchlist')?.removed?.find(film=>film.id==='gone');
+ assert.equal(listed?.tmdb,'4242','GET /api/events keeps the stored TMDB id for the renderer');
+}
+
+// 4c. A failed watchlist-event PUT after publication: the complete run keeps the hand-over, writes no event, and a delayed start resumes it.
+{
+ const runC=await readyToCommit();
+ set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[{id:'film1',title:'Heat',original:'Heat',year:1995},{id:'gone',title:'Gone',original:'Gone',year:1999,tmdbId:'4242',url:'https://letterboxd.com/film/gone/'}]});
+ showCount=1;failPublish=null;
+ let watchPuts=0;
+ failPublish=key=>{if(String(key).endsWith('-watchlist.json')&&watchPuts<1){watchPuts++;return true;}return false;};
+ const killed=await post('/api/sync/epg',{runId:runC});
+ assert.equal(killed.status,200,JSON.stringify(killed.data));
+ failPublish=null;
+ assert.equal(watchPuts,1);
+ assert.equal(watchlistEvents().filter(event=>event.id===runC+'-watchlist').length,0,'the watchlist event is not written');
+ const persisted=records.get('sync.json');
+ assert.equal(persisted.stage,'complete');
+ assert.ok(persisted.removalRefs||persisted.watchlistRemovalFilms,'retry state stays on the run');
+ persisted.updatedAt=new Date(Date.now()-20*60000).toISOString();set('sync.json',persisted);
+ const start=await post('/api/sync/start',{});
+ assert.equal(start.data.runId,runC,'a delayed start resumes the published run instead of replacing it');
+ await post('/api/sync/epg',{runId:runC});await settle();
+ assert.equal(watchlistEvents().filter(event=>event.id===runC+'-watchlist').length,1);
 }
 
 // 5. Older events stay readable and ordered: the previous run's events are untouched.

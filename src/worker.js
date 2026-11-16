@@ -680,7 +680,8 @@ const saveJSON=async(env,key,value)=>{
 };
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
-const eventFilm=(film,titles=new Map())=>({id:String(film.id),title:(film.titleAuthority==='owner'&&(film.titleRu||film.title))||reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year});
+function eventTmdb(film){const raw=film?.tmdb??film?.tmdbId;return raw!=null&&/^[1-9]\d{0,11}$/.test(String(raw))?String(raw):null;}
+const eventFilm=(film,titles=new Map())=>{const tmdb=eventTmdb(film);return {id:String(film.id),title:(film.titleAuthority==='owner'&&(film.titleRu||film.title))||reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year,...(tmdb?{tmdb}:{})};};
 function eventRemovedFilm(film,titles=new Map()){const rating=removalRating(film);return {...eventFilm(film,titles),...(rating||{})};}
 // AIR-393: titles of the films a Ratings run changed, from what is already stored (the metadata cache and the title dictionary): no
 // external lookup. An id the stores do not know has no label. A TMDB link is given only where every stored id agrees (`catalogLidTmdb`).
@@ -789,6 +790,8 @@ async function beginSync(env){
  // ADR 0092: an unfinished ledger seal is durable state, not a freshness question. Its run is returned whatever its age, so a cancelled step is resumed by the same runId and never replaced by a new run.
  if(current?.stage==='seal')return {runId:current.runId,stage:current.stage,remaining:current.remaining,seal:current.seal?.phase||null};
  if(current&&['metadata','epg'].includes(current.stage)&&Date.now()-Date.parse(current.updatedAt)<15*60000)return {runId:current.runId,stage:current.stage,remaining:current.remaining};
+ if(current?.stage==='epg'){const published=await loadJSON(env,'programme.json');if(published?.runId===current.runId)return {runId:current.runId,stage:current.stage,remaining:current.remaining};}
+ if(current?.stage==='complete'&&(current.epgEventPending||await watchlistEventOwed(env,current)))return {runId:current.runId,stage:current.stage,remaining:current.remaining};
  // A job in D1 that sync.json does not name cannot be continued by a new run and is never reset silently.
  if(await sealedPublishAvailable(env)){const durable=await DiscoveryAuthority.sealState(env);if(durable.supported&&['items','archive'].includes(durable.phase))throw Object.assign(new Error('discovery_seal_unfinished'),{status:409,code:'discovery_seal_unfinished'});}
  // ADR 0135: a run created while the pause table exists carries its frozen `runKey`. Unreadable presence is not absence: no new run is started on it (an unfinished run was returned above).
@@ -982,19 +985,30 @@ async function stampWatchlistCompletion(env,run){
  delete run.watchlistRemovalFilms;
  run.watchlistEventFixed=true;
 }
+async function watchlistEventStored(env,run){
+ const event=(run?.events||[]).find(item=>item?.type==='watchlist');
+ if(!event||!Number.isFinite(Date.parse(event.at)))return true;
+ return !!(await loadJSON(env,removalEventKey(event)));
+}
+async function watchlistEventOwed(env,run){
+ if(Array.isArray(run?.watchlistRemovalFilms)&&run.watchlistRemovalFilms.length)return true;
+ if(!run?.watchlistEventFixed)return false;
+ return !(await watchlistEventStored(env,run));
+}
 async function flushWatchlistEvent(env,run){
- if(!run?.watchlistEventFixed)return;
+ if(!run?.watchlistEventFixed)return false;
  const index=(run.events||[]).findIndex(item=>item?.type==='watchlist');
- if(index<0||!Number.isFinite(Date.parse(run.events[index].at)))return;
+ if(index<0||!Number.isFinite(Date.parse(run.events[index].at)))return false;
  try{
   const event=run.events[index],key=removalEventKey(event),existing=await loadJSON(env,key);
   const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
-  if(existing&&probe.event===event)return;
+  if(existing&&probe.event===event)return true;
   await writeEvent(env,probe.event);
   if(probe.event!==event)run.events[index]=probe.event;
   if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
-  await saveJSON(env,'sync.json',run);
- }catch(e){console.error(JSON.stringify({event:'watchlist_event_pending',runId:String(run.runId||'').slice(0,64)}));}
+  try{await saveJSON(env,'sync.json',run);}catch{}
+  return true;
+ }catch(e){console.error(JSON.stringify({event:'watchlist_event_pending',runId:String(run.runId||'').slice(0,64)}));return false;}
 }
 async function flushEpgEvent(env,run){
  if(!run.epgEventPending)return;
@@ -1786,7 +1800,7 @@ async function sealQueueStep(env,run,deadline=Infinity){
  await saveJSON(env,'sync.json',run);
  await flushEpgEvent(env,run);
  await flushWatchlistEvent(env,run);
- if(run.ratingsPipeline==='separate'&&run.removalRefs&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
+ if(run.ratingsPipeline==='separate'&&run.removalRefs&&await watchlistEventStored(env,run)&&await flushRemovalHandover(env,run))await saveJSON(env,'sync.json',run);
  try{await env.BUCKET.delete(sealPayloadKey(run.runId));}catch{}
  try{await env.BUCKET.delete(sealPublicationKey(run.runId));}catch{}
  return {runId:run.runId,stage:run.stage,updatedAt:report.updatedAt,watchlistCount:report.watchlistCount,...report.stats,ratingsPipeline:run.ratingsPipeline||'separate',...(run.ratingsPipeline==='blocked'?{ratingsMigration:run.ratingsMigration}:{}),...(run.sealDegraded?.length?{degraded:run.sealDegraded}:{})};
@@ -1850,8 +1864,14 @@ function storedRemovalRefs(items){const list=items.filter(item=>item?.films?.len
 async function flushRemovalHandover(env,run){
  const items=[...removalRefItems(run.removalRefs),...(typeof LetterboxdRatings==='undefined'?[]:LetterboxdRatings.syncHandover(run))];
  if(!items.length)return false;
- for(const item of items)await enqueueRemovalRefs(env,item.films,item.ref);
- delete run.removalRefs;delete run.removalLookups;return true;
+ const ready=[],kept=[];
+ for(const item of items){
+  if(item.ref?.eventKey&&await loadJSON(env,item.ref.eventKey))ready.push(item);
+  else kept.push(item);
+ }
+ for(const item of ready)await enqueueRemovalRefs(env,item.films,item.ref);
+ if(kept.length)run.removalRefs=storedRemovalRefs(kept);else delete run.removalRefs;
+ delete run.removalLookups;return ready.length>0;
 }
 // AIR-270: the post-commit ratings work carries a durable attempt marker in sync.json. Each phase is saved (and logged)
 // before it starts, so a request killed for memory or time leaves `state: started` with the phase it died in. The next

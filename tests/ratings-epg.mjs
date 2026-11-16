@@ -130,11 +130,32 @@ async function lifecycle({root='.',extra={},prepare=null}={}){
  eq(bucket.value(QUEUE).films.film2.refs.length,1,'one reference despite the replay');
  bucket.hooks.beforePut=null;
  const sync=bucket.value('sync.json');
- bucket.set('sync.json',{...sync,removalRefs:{ref:{eventKey:eventKeyOf('2026-10-31T09:00:00.000Z','x-watchlist'),sourceRunId:'x',at:'2026-10-31T09:00:00.000Z'},films:[{id:'film9',url:'https://letterboxd.com/film/ninth/'}]}});
+ const leftoverAt='2026-10-31T09:00:00.000Z',leftoverKey=eventKeyOf(leftoverAt,'x-watchlist');
+ bucket.set(leftoverKey,{id:'x-watchlist',type:'watchlist',at:leftoverAt,total:0,added:[],removed:[{id:'film9',title:'Ninth'}]});
+ bucket.set('sync.json',{...sync,removalRefs:{ref:{eventKey:leftoverKey,sourceRunId:'x',at:leftoverAt},films:[{id:'film9',url:'https://letterboxd.com/film/ninth/'}]}});
  const next=await post('/api/sync/start',{});
  assert.ok(next.body.runId&&next.body.runId!==runId);
  eq(bucket.value(QUEUE).films.film9.refs[0].sourceRunId,'x','flushed before sync.json was replaced');
  assert.equal(bucket.value('sync.json').ratingPending,undefined,'a separate run carries no ratings marker');
+}
+
+// 3b. AIR-513: a failed watchlist-event PUT does not enqueue; continuation writes the same event then queues.
+{
+ let killed=false;
+ const {bucket,post,runId}=await lifecycle({extra:SEPARATE,prepare:({bucket})=>{migrated(bucket);bucket.hooks.beforePut=(key)=>{if(String(key).endsWith('-watchlist.json')&&!killed){killed=true;throw new Error('watchlist event put');}};}});
+ assert.ok(killed);
+ assert.deepEqual(Object.keys(bucket.value(QUEUE)?.films||{}),[],'no Ratings reference while the event is missing');
+ const sync=bucket.value('sync.json');
+ assert.ok(sync.removalRefs,'the hand-over stays on the run');
+ assert.equal(Object.keys(bucket.records).some(key=>String(key).endsWith('-watchlist.json')),false);
+ bucket.hooks.beforePut=null;
+ const again=await post('/api/sync/epg',{runId});
+ assert.equal(again.body.stage,'complete');
+ const event=sync.events.find(item=>item.type==='watchlist');
+ const key=eventKeyOf(bucket.value('sync.json').events.find(item=>item.type==='watchlist').at,event.id);
+ assert.ok(bucket.value(key),'the continuation wrote the watchlist event');
+ eq(Object.keys(bucket.value(QUEUE).films).sort(),['film2','film3']);
+ assert.equal(bucket.value('sync.json').removalRefs,undefined);
 }
 
 // 4. Ratings never block the EPG commit: a live ratings run holding its lease, and a Letterboxd that fails every Diary
