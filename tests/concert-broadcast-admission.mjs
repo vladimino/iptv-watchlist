@@ -209,4 +209,13 @@ admitted(quiet.records,'quiet days|2014','88012');
  await Authority.releaseLease(env,lease);
 }
 
+const queueCatalog={
+ tmdb_1:{id:'tmdb_1',tmdbId:'1',title:'A Life',genres:['документальный']},
+ tmdb_2:{id:'tmdb_2',tmdbId:'2',title:'Hall Live at Arena',genres:['музыка'],overview:'A concert recording filmed live on stage.'},
+ tmdb_3:{id:'tmdb_3',tmdbId:'3',title:'A Drama',genres:['драма']},
+};
+const queued=vm.runInContext('allEnrichmentFilms('+JSON.stringify({films:[{id:'tmdb_1',tmdbId:'1',title:'A Life',genres:['документальный']}]})+','+JSON.stringify(queueCatalog)+')',partsLive);
+assert.equal(queued.length,1);
+assert.equal(String(queued[0].id),'tmdb_3');
+
 console.log('Documentary and concert-recording admission: excluded identities withheld on R2 and D1, fiction admitted, EPG generation unchanged');

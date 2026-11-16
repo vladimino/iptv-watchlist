@@ -88,7 +88,7 @@ for(const [file,text] of texts)for(const m of text.matchAll(/([A-Za-z_$][A-Za-z0
  else assert.ok(r2||IN_MEMORY.has(who),file+': .delete( on a receiver that is neither the R2 binding nor a known Map or Set: '+who);
 }
 const FILE_SITES={
- 'src/admin/discovery-recovery.js':{r2:10,wrapper:0,dynamic:8},
+ 'src/admin/discovery-recovery.js':{r2:11,wrapper:0,dynamic:9},
  'src/admin/film-title-route.js':{r2:1,wrapper:0,dynamic:0},
  'src/admin/letterboxd-archive-apply.js':{r2:3,wrapper:0,dynamic:1},
  'src/admin/person-name-route.js':{r2:1,wrapper:0,dynamic:1},
@@ -161,6 +161,7 @@ const classes={
  'drActionWrite@src/admin/discovery-recovery.js':'admin recovery action receipt (not a projector input)',
  'drExecute@src/admin/discovery-recovery.js':'admin recovery, after renewDiscoveryLease',
  'drRefreshIndex@src/admin/discovery-recovery.js':'admin recovery observation index (not a projector input)',
+ 'peExecute@src/admin/discovery-recovery.js':'admin recovery policy-exclude receipt (not a projector input)',
  // The generic writers: the key comes from the caller, which is classified above; an owned key is D1-routed.
  'saveJSON@src/worker.js':'generic writer: DiscoveryAuthority.routeWrite for an owned key, else R2 (callers classified)',
  'putStoredJson@src/worker.js':'generic writer: titles.json/people.json freeze at BUCKET.put, else R2',

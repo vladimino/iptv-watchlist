@@ -153,7 +153,32 @@ The catalogue etag is not part of the pin. Confirm and execute each re-read the 
 
 A reject appends the id to `rejectedTmdbIds` (at most eight movie ids), clears `terminalReason` and `retryAt` on that decision, and does not clear another observation. The next ordinary chunk may evaluate a different id. It copies `ownerIdentity` and `rejectedTmdbIds`, does not auto-verify the rejected id, searches again when that id is the first accepted score, and does not fetch its movie detail. Similar titles are not blocked.
 
-Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction ([AIR-132](https://trello.com/c/3AXbSoHe)), a television id, retiring a catalog admission, and rewriting the prediction queue. A held Discovery marker, or a published-EPG marker that is neither `r2` nor a ready D1 Discovery authority, writes nothing.
+Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)), revoke of a stored correction ([AIR-132](https://trello.com/c/3AXbSoHe)), a television id, retiring a catalog admission, and rewriting the prediction queue. A held Discovery marker, or a published-EPG marker that is neither `r2` nor a ready D1 Discovery authority, writes nothing. Retiring an already admitted Documentary or concert recording from the catalog is [`catalog_policy_exclude@1`](#policy-exclusion-catalog_policy_exclude1), not this reject.
+
+## Policy exclusion: `catalog_policy_exclude@1`
+
+The third discovery capability ([ADR 0153](../../adr/0153-catalog-policy-exclusion.md), Proposed). It excludes **one** current movie admission `tmdb_<id>` whose stored payload is a Documentary or a concert recording under [ADR 0150](../../adr/0150-documentary-and-concert-film-exclusion.md). In one resolver-leased D1 batch it rejects every current movie decision with that TMDB id (at most 12, `floor((STATEMENT_CAP-4)/3)`), deletes current-generation `published_epg_show` rows with `basis='discovery'` for those observation keys, and sets the admission `state` to `superseded`. Preview and writer share that observation set; a current admission on a different film_id among those decisions is `linked_admission`. It then settles the film out of the prediction queue (`settleQueueFilms` via `mutatePredictionQueue`) and rebuilds (`refreshPredictionQueue`). It does not delete ratings, fingerprints, immutable predictions, Letterboxd facts, Film/Person R2 objects, or non-discovery EPG shows. It calls no TMDB and starts no chunk. `allEnrichmentFilms` skips ADR 0150 exclusions even when the film is still on the personal watchlist. Independently, `GET /api/programme` (and `GET /api/catalog/available`) withholds a proven Documentary or concert from the presented interesting-programme and Finds lists using the same `admissionPolicy` on stored metadata; `GET /api/watchlist` stays. Routes are in the [admin API](admin.md#policy-exclusion-get-apiadmindiscovery-recoverypolicy-exclude).
+
+The declaration is:
+
+- subject kind `film`, `healthActionCode: catalog_policy_exclude`;
+- budget: 12 records, 3 writes per record, 0 external calls;
+- retry: 1 attempt, no backoff;
+- compensation `manual`: restoring the admission is a separate owner-approved write;
+- `confirmTtlMs`: 10 minutes.
+
+| Principle | In `catalog_policy_exclude` |
+| --- | --- |
+| Eligibility | Ready D1 Discovery authority with `cutover` `open`. Current movie admission whose payload classifies as `documentary` or `concert`. A drama, an ambiguous Music-only Live token, a TV Movie without independent recording phrases, a missing admission and a non-movie id are not eligible |
+| Record version | The admission `film_id` plus the policy kind. A superseded row is `already_applied` for Discovery and still retries the queue |
+| Preview | `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` |
+| Issuance | The execute POST carries `{filmId, idempotencyKey}` and the Access action header. A stored R2 receipt for that key replays |
+| Executor lease | The resolver lease |
+| Commit with CAS | One fenced D1 batch (`ownerPolicyExclude`): decision history and reject payloads, assigned-row deletes, admission `superseded` |
+| Receipt | R2 `admin/actions/catalog_policy_exclude/v1/<idempotencyKey>.json`, bound to that `filmId`. A later POST of a different film with the same key is `idempotency_conflict`. A superseded admission on a later POST of the same film is `already_applied` and still retries the queue |
+| What changed | Catalog current snapshot, related decisions, discovery-basis shows of those keys, and the prediction-queue membership of that film |
+
+Not covered: bulk exclusion of the AIR-500 inventory, a schema change to `discovery_intent`, deleting personal history, moving the published EPG generation, and any production write. Shipping the capability does not authorize a live exclude.
 
 ## Transport shape
 

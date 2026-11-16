@@ -167,3 +167,16 @@ function acceptScoredIdentity(input={}){
  if(!confirmed)return {...result,outcome:'needs_verification',reason:'needs_verification'};
  return {...result,outcome:'trusted_acceptance',reason:'confirmed_identity',transition:{kind:'identity_transition',observationKey,tmdbId,programmeRunId:pinned,provenance,authority:input.confirmation.authority}};
 }
+function filmAdmissionInput(film){
+ if(!film||typeof film!=='object')return {movie:null,observation:null};
+ const overview=typeof film.overview==='string'&&film.overview?film.overview:(typeof film.synopsis==='string'?film.synopsis:'');
+ const movie={title:film.title,original:film.original,aliases:film.aliases,genres:film.genres,genreIds:film.genreIds,overview};
+ const observation={title:film.title,normalizedTitle:film.normalizedTitle||film.title,categories:Array.isArray(film.categories)?film.categories:[]};
+ return {movie,observation};
+}
+function policyExcludedPresentedFilm(film){
+ const {movie,observation}=filmAdmissionInput(film);
+ if(!movie)return false;
+ const policy=admissionPolicy(movie,observation);
+ return policy==='documentary'||policy==='concert';
+}

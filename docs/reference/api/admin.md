@@ -307,6 +307,8 @@ Source: [`src/admin/discovery-recovery.js`](../../../src/admin/discovery-recover
 | `POST /api/admin/discovery-recovery/identity-confirm` | Issues one assign or reject; changes no decision |
 | `POST /api/admin/discovery-recovery/identity-correct` | Executes one issued identity correction |
 | `GET /api/admin/discovery-recovery/identity-receipt?idempotencyKey=<key>` | Returns the stored identity record; read-only |
+| `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` | Read-only ADR 0150 preview of one current admission |
+| `POST /api/admin/discovery-recovery/policy-exclude` | Executes `catalog_policy_exclude@1` for that film |
 
 Any other method is 405 `method_not_allowed`, and an unknown path under `/api/admin/discovery-recovery/` is 404.
 
@@ -424,6 +426,16 @@ The answer adds `application` and `reason` beside the receipt. `application.show
 ```
 
 `command` is `{effect, tmdbId, basis}`. The receipt route is read-only and returns the same `{idempotencyKey, state, record}` shape as reconsideration.
+
+### Policy exclusion: `GET /api/admin/discovery-recovery/policy-exclude`
+
+`catalog_policy_exclude@1` ([ADR 0153](../../adr/0153-catalog-policy-exclusion.md); [capability](admin-actions.md#policy-exclusion-catalog_policy_exclude1)). The owner excludes one current Discovery movie admission that ADR 0150 classifies as a Documentary or a concert recording. GET is read-only. POST needs the Access assertion, same-origin `Origin`, `Content-Type: application/json` and `X-IPTV-Admin-Action: catalog_policy_exclude`.
+
+**Preview.** `GET …/policy-exclude?filmId=tmdb_<id>`. The id matches `^tmdb_[1-9]\d{0,11}$`. The answer names `available`, `policy`, related observation keys, admission `state` and the generation pin. Discovery must be D1 `open`; otherwise 409 `unknown_authority`.
+
+**Execute.** The body is `{filmId, idempotencyKey}`. The Worker takes the resolver lease, re-reads the admission, and runs `ownerPolicyExclude`. A drama or an ambiguous Music-only title is 409 `not_eligible`. A current admission on another film_id among the same TMDB decisions is 409 `not_eligible` (`linked_admission`). More than 12 related decisions (`floor((STATEMENT_CAP-4)/3)`) is 409 `budget_exceeded`. Reusing an idempotency key that already stored a receipt for another film is 409 `idempotency_conflict`. A already superseded admission retries only the queue reconcile (`already_applied`). Success supersedes the admission, rejects the related movie decisions, clears current-generation discovery-basis shows of those keys (the completed-programme overlay; sealed `title_year` / `title_unique` / `title_duration` rows stay with the generation), settles the film out of the prediction queue and rebuilds it. A queue that still holds the film, conflicts or cannot be read is 409 `queue_unreconciled` even if Discovery already wrote. It does not rewrite the published EPG generation, ratings, fingerprints or prediction bodies.
+
+This deploy does not run the writer against production.
 
 ### The observation recovery panel
 

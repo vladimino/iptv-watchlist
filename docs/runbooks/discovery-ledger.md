@@ -100,7 +100,7 @@ This is a production write of one decision. Agents do not run it. The owner does
 
   A plain code revert without these steps drops archived history.
 - Archive objects are never deleted by the Worker. Removing unreferenced versions is a separate, owner-approved maintenance decision.
-- **Observation index, reconsideration and identity correction.** A code revert stops the index writes and both actions. Index objects already written stay under their generation and are ignored by an older reader. A decision already reconsidered or identity-corrected stays so. Action records stay. Restoring a before-image is a separate owner-approved write, not a revert.
+- **Observation index, reconsideration, identity correction and policy exclusion.** A code revert stops the index writes and those actions. Index objects already written stay under their generation and are ignored by an older reader. A decision already reconsidered or identity-corrected stays so. A superseded policy-excluded admission stays superseded. Action records stay. Restoring a before-image or an admission is a separate owner-approved write, not a revert. Deploying `catalog_policy_exclude` does not exclude any production film.
 
 ## Offline split (AIR-221 rehearsal)
 

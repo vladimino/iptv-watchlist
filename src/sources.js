@@ -449,10 +449,18 @@ function availabilityDeadline(film){
 }
 function withAvailability(film){return {...film,availableUntil:availabilityDeadline(film)};}
 function programmeWithWatchlist(report,watchlist){
- if(report.films.length===report.watchlistCount||!watchlist?.films){for(const film of report.films)film.availableUntil=availabilityDeadline(film);return report;}
+ if(report.films.length===report.watchlistCount||!watchlist?.films){for(const film of report.films)film.availableUntil=availabilityDeadline(film);return withholdPolicyExcludedProgrammeFilms(report);}
  const scheduled=new Map(report.films.map(f=>[String(f.id),f]));
  const films=watchlist.films.map(f=>withAvailability({...f,...scheduled.get(String(f.id)),shows:scheduled.get(String(f.id))?.shows||[]}));
- return {...report,films,people:peopleCatalog(films)};
+ return withholdPolicyExcludedProgrammeFilms({...report,films,people:peopleCatalog(films)});
+}
+function withholdPolicyExcludedProgrammeFilms(report){
+ if(!report||typeof policyExcludedPresentedFilm!=='function')return report;
+ const films=(report.films||[]).filter(film=>!policyExcludedPresentedFilm(film));
+ if(films.length===(report.films||[]).length)return report;
+ const next={...report,films};
+ if(report.people)next.people=peopleCatalog(films);
+ return next;
 }
 
 // ADR 0142 decision 11 (presentation). `report.catalogFilms` are identity-only entries of the completed read. Film data comes from the current catalog record of the same TMDB id; an
@@ -467,6 +475,7 @@ function presentCatalogFilms(report,catalog){
   const record=entry.tmdbId==null?null:records.get(String(entry.tmdbId));
   if(!record||entry.canonicalIdentity!=='tmdb:'+record.tmdbId){unpresented++;continue;}
   const data={...record};for(const field of CATALOG_AVAILABILITY_FIELDS)delete data[field];
+  if(typeof policyExcludedPresentedFilm==='function'&&policyExcludedPresentedFilm(data)){unpresented++;continue;}
   const shows=entry.shows||[];
   films.push({...data,id:entry.id,tmdbId:String(record.tmdbId),canonicalIdentity:entry.canonicalIdentity,shows,availableUntil:shows.length?availabilityDeadline({shows}):null,onWatchlist:false});
  }

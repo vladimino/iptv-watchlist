@@ -1180,6 +1180,9 @@ export const FILES={
  "programme-freshness.mjs": {
   "suite": "core"
  },
+ "programme-policy-projection.mjs": {
+  "suite": "core"
+ },
  "projector-bulk-spike.mjs": {
   "suite": "core",
   "note": "Grouped writes must refuse a conflict and fall back to the same rows. That is a correctness check of the spike, not a benchmark gate."
