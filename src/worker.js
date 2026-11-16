@@ -97,6 +97,20 @@ async function titleReadFinish(env,gate,response){
  return response;
 }
 const titleReadRefusal=error=>TITLE_READ_REFUSALS.includes(error?.code)?json({error:'storage_unavailable',reason:error.code},503):null;
+function catalogBridgeIds({catalog,programme,watchlist,index,film}){
+ const ids=[];
+ if(film?.id!=null)ids.push(String(film.id));
+ for(const record of Object.values(catalog||{}))if(record?.id!=null)ids.push(String(record.id));
+ for(const item of [...(programme?.films||[]),...(watchlist?.films||[])])if(item?.id!=null)ids.push(String(item.id));
+ for(const id of Object.keys(index||{}))ids.push(String(id));
+ return ids;
+}
+async function catalogMetadataStore(env,ids){
+ if(typeof CanonicalCatalogReader==='undefined')return (await loadJSON(env,'metadata.json'))||{};
+ const gate=await CanonicalCatalogReader.catalogReaderGate(env);
+ if(gate.mode!=='d1')return (await loadJSON(env,'metadata.json'))||{};
+ return CanonicalCatalogReader.catalogMetadataFromD1(env,ids,gate);
+}
 async function epgPublication(env){
  return epgPublicationReadOnly(env);
 }
@@ -482,13 +496,19 @@ async function catalogFilmRoute(env,tmdbId){
  const degraded=[],optional=async(name,load)=>{try{return await load();}catch{degraded.push(name);return null;}};
  const publication=await optional('publication',()=>epgPublicationReadOnly(env));
  const pinnedRunId=publication?.phase==='published'&&publication.programmeRunId?publication.programmeRunId:null;
- const [programme,watchlist,index,profile,metadata]=await Promise.all([
+ const [programme,watchlist,index,profile]=await Promise.all([
   pinnedRunId?optional('programme',()=>catalogGenerationCopy(env,publication,pinnedRunId,'programme.json')):null,
   optional('watchlist',()=>publication?.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json')),
   optional('index',()=>loadJSON(env,ENRICHMENT_KEY+'view-index.json')),
   optional('profile',()=>loadJSON(env,profileKey)),
-  optional('metadata',()=>loadJSON(env,'metadata.json')),
  ]);
+ let metadata=null;
+ try{metadata=await catalogMetadataStore(env,catalogBridgeIds({film:found.film,watchlist,programme,index}));}
+ catch(error){
+  const refused=titleReadRefusal(error);
+  if(refused)return refused;
+  degraded.push('metadata');
+ }
  const runId=programme?.runId&&programme.runId===pinnedRunId?pinnedRunId:null;
  if(pinnedRunId&&!runId&&!degraded.includes('programme'))degraded.push('programme');
  const freshness=profile?await optional('freshness',()=>predictionFreshness(env,profile)):null;
@@ -576,9 +596,10 @@ async function catalogAvailableRoute(env){
  const watchlistLoad=publication.authority==='d1'&&pinnedRunId?PublishedEpg.readDocumentAt(env,pinnedRunId,'watchlist',publication.generation):loadJSON(env,'watchlist.json');
  let programme,catalog,watchlist,index,profile,metadata,titleExclusion;
  try{
-  [programme,catalog,watchlist,index,profile,metadata,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadJSON(env,'metadata.json'),loadFindsTitleExclusion(env,now)]);
+  [programme,catalog,watchlist,index,profile,titleExclusion]=await Promise.all([pinnedRunId?generationCopy('programme.json'):loadJSON(env,'programme.json'),pinnedRunId?generationCopy('discovered-films.json'):loadJSON(env,'epg/discovered-films.json'),watchlistLoad,loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadJSON(env,profileKey),loadFindsTitleExclusion(env,now)]);
+  metadata=await catalogMetadataStore(env,catalogBridgeIds({catalog,programme,watchlist,index}));
  }catch(error){
-  const refused=discoveryUserReadRefusal(error);
+  const refused=discoveryUserReadRefusal(error)||titleReadRefusal(error);
   if(refused)return refused;
   throw error;
  }
@@ -643,13 +664,21 @@ function eventRemovedFilm(film,titles=new Map()){const rating=removalRating(film
 async function ratingsFilmLabels(env,ids){
  const wanted=[...new Set((ids||[]).map(String).filter(Boolean))],out=new Map();
  if(!wanted.length)return out;
- const [metadata,titles]=await Promise.all([loadJSON(env,'metadata.json').catch(()=>null),loadJSON(env,'titles.json').catch(()=>null)]);
- const meta=metadata&&typeof metadata==='object'&&!Array.isArray(metadata)?metadata:{},names=titles&&typeof titles==='object'&&!Array.isArray(titles)?titles:{},bridge=catalogLidTmdb({metadata:meta});
+ const meta=await catalogMetadataStore(env,wanted);
+ let names={};
+ try{
+  if(typeof CanonicalCatalogReader!=='undefined'){
+   const gate=await CanonicalCatalogReader.catalogReaderGate(env);
+   names=gate.mode==='d1'?await CanonicalCatalogReader.catalogTitlesFromD1(env,wanted.map(id=>({id,tmdbId:meta[id]?.tmdbId})),gate):(await loadJSON(env,'titles.json').catch(()=>null))||{};
+  }else names=(await loadJSON(env,'titles.json').catch(()=>null))||{};
+ }catch(error){if(TITLE_READ_REFUSALS.includes(error?.code))throw error;names={};}
+ const namesObj=names&&typeof names==='object'&&!Array.isArray(names)?names:{};
  for(const id of wanted){
-  const film=meta[id],cached=names[id];
+  const film=meta[id],cached=namesObj[id];
   const named=film&&typeof film==='object'?eventFilm({...film,id}):null;
   const title=(named&&typeof named.title==='string'&&named.title.trim())||(cached&&typeof cached.title==='string'&&cached.title.trim())||null;
-  out.set(id,{title,year:named&&Number.isInteger(named.year)?named.year:null,tmdb:bridge.get(id)||null});
+  const tmdb=film&&film.tmdbId!=null&&/^[1-9]\d*$/.test(String(film.tmdbId))?String(film.tmdbId):null;
+  out.set(id,{title,year:named&&Number.isInteger(named.year)?named.year:null,tmdb});
  }
  return out;
 }
