@@ -47,6 +47,12 @@ Code-only additive contract. Rollback is redeploy of the previous Worker. Alread
 
 A live Scheduled Task with `manifestSize=5` created the run and then stopped with `external_termination` because the full tool result did not fit the Task working context. The Worker ceiling (256 KiB) had accepted the answer. Two copies of the same JSON (`content[0].text` and `structuredContent`) and the full schema document (profile-schema, prediction-schema and rules sections the prompt does not read) were the extra bytes. The MCP result for a successful `prediction_batch_start` now sends the JSON once, as text. `contract.schema` in that JSON keeps `contract`, the fingerprint vocabulary and `schemaDigest` of the full document. Film `modelMetadata`, stored fingerprints and `profile.body` are unchanged. `queue_changed` adds `cause` (`stale`, `revision` or `manifest`) and still does not retry. This addendum authorizes no Task edit and no production start.
 
+## Addendum 2026-11-16 — films and profile before contract (AIR-510 reopen)
+
+Task C (run `6e98e0fa-e4eb-408b-82de-dc289536b46f`, 22:33 Madrid) and Task D (run `cf083134-8093-4064-b4bb-98a4191f8391`, 22:41 Madrid) both received Worker `manifestBytes` 42,115 of the same five `selectedIds`. C called `prediction_complete(external_termination)` with zero submits; D submitted 5/5 and `manifest_spent`. The Worker start was HTTP 200 both times. The residual failure is client prefix retention of the tool text, not a second Worker byte ceiling.
+
+The serialized `batch_start` answer now puts `films` then `profile.body` before `contract`. A truncated prefix still contains every film id and the taste profile; a mid-object slice does not parse as a complete manifest. `schema.fingerprint` no longer repeats `moodVocabulary` and `moodMapping` (those stay on `GET /api/enrichment/schema`). Film `modelMetadata`, stored fingerprints, `profile.body` and `schema.contract` (including `fingerprint.evidence`) stay. No Task prompt edit, no second `prediction_batch_start`, no production writer.
+
 ## Follow-ups
 
 - [AIR-451](https://trello.com/c/NN3N6kRp) controlled cutover of hourly Tasks to batch v2 with `manifestSize=5`

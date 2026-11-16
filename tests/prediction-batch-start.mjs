@@ -39,6 +39,8 @@ const setCold=(w,ids)=>sql(w.file,"UPDATE discovery_admission SET payload_json=j
  assert.deepEqual(m.contract.schema.fingerprint.plotMechanics,schema.fingerprint.plotMechanics);
  assert.equal(m.contract.schema.schemaDigest.length,64);
  assert.equal(m.contract.schema.profile,undefined,'the profile schema section is not repeated inside the manifest');
+ assert.equal(m.contract.schema.fingerprint.moodVocabulary,undefined);
+ assert.equal(m.contract.schema.fingerprint.moodMapping,undefined);
  assert.equal(m.contract.fingerprintSchemaVersion,w.ctx.FINGERPRINT_SCHEMA_VERSION??m.contract.fingerprintSchemaVersion);
  for(const key of ['fingerprintSchemaVersion','fingerprintPromptVersion','predictionPromptVersion','registryDigest'])assert.ok(m.contract[key]!==undefined&&m.contract[key]!==null,key);
  // every film: id, lane, plan and its full metadata (null fields are absent, nothing else is shortened)
@@ -464,5 +466,19 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.equal(contract.pipelineVersion,5);assert.equal(contract.maxBatchFilms,20);assert.equal(contract.maxRunFilms,null);assert.equal(contract.leaseTtlMs,15*60000);assert.deepEqual(contract.modelBatching,{enabled:false,readyFingerprintsPerCall:1});
  assert.deepEqual(contract.batchRunner,{version:2,protocol:'batch_v2',start:'/api/enrichment/batch/start',manifestFormat:'compact-1',maxManifestFilms:100,maxManifestBytes:262144,generationSizeDefault:10,generationSizeRange:[1,10],submitMaxItems:10,submitMaxBodyBytes:57344,callBudgetMs:25000,requires:{predictionAuthority:'d1'}});
  await reconcile(w);const v5=await w.api('start',{scope:'watchlist_all',capacity:{remainingPercent:100}});assert.equal(v5.status,200,JSON.stringify(v5.data).slice(0,160));assert.ok(!('protocol' in v5.data)||v5.data.protocol!=='batch_v2','a v5 start is not a v2 run');
+}
+
+// AIR-510: films and profile serialize before contract, so a prefix truncation still holds every film input.
+{
+ const w=await ready(5);await reconcile(w);
+ const r=await batch(w,{manifestSize:5});assert.equal(r.status,200);
+ const text=JSON.stringify(r.data);
+ const filmsAt=text.indexOf('"films":'),profileAt=text.indexOf('"profile":'),contractAt=text.indexOf('"contract":');
+ assert.ok(filmsAt>0&&profileAt>filmsAt&&contractAt>profileAt,'serialized order is films, profile, contract');
+ const ids=r.data.films.map(f=>f.filmId);assert.equal(ids.length,5);
+ const prefix=text.slice(0,contractAt);
+ for(const id of ids)assert.ok(prefix.includes('"'+id+'"'),id+' survives a drop of the trailing contract');
+ assert.ok(prefix.includes('"body"'));
+ try{JSON.parse(text.slice(0,Math.min(text.length-1,24000)));assert.fail('a mid-object slice must not parse as a complete manifest');}catch(error){assert.equal(error instanceof SyntaxError,true);}
 }
 console.log('prediction-batch-start: ok');

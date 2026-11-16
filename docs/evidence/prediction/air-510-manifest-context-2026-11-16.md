@@ -17,3 +17,9 @@ A successful `prediction_batch_start` MCP result is the JSON text only. `contrac
 ## Not proven
 
 Whether the next natural A/B slot holds five film inputs is not proven here. No Task was edited and no production `prediction_batch_start` was called.
+
+## Reopen, 16 Nov 2026 22:50 Europe/Madrid
+
+Read-only `enrichment_status` after the controller comment: Task C run `6e98e0fa-e4eb-408b-82de-dc289536b46f` start HTTP 200 then `prediction_complete` HTTP 200, `stopReason=external_termination`, `callerFault.failedStep=start`, `firstSubmitAt=null`, added 0. Task D run `cf083134-8093-4064-b4bb-98a4191f8391` `manifest_spent`, added 5, firstSubmitAt set. The controller recorded the same `manifestHash` and `manifestBytes` 42,115 for both. Removing the duplicate `structuredContent` copy was not enough when the client keeps only a prefix of the remaining JSON.
+
+Follow-up change: serialize `films` then `profile` then `contract`; drop `moodVocabulary` and `moodMapping` from the copied `schema.fingerprint`. Offline tests: a prefix that ends at `"contract"` still contains every selected film id; a mid-object slice does not parse. Natural C/D slots after this deploy are the remaining acceptance. No Task edit and no production start in this change.
