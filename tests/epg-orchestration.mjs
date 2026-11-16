@@ -20,7 +20,7 @@ const H=3600000,MIN=60000;
 const at=ms=>new Date(ms).toISOString();
 const plain=value=>JSON.parse(JSON.stringify(value));
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
-const start=result=>{const {mirrors,...rest}=result;return rest;};
+const start=result=>{const {mirrors,producer,...rest}=result;return rest;};
 const source=fs.readFileSync('src/epg-orchestration.js','utf8');
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-epg-orchestration-'));
 let databases=0;
@@ -1004,7 +1004,7 @@ for(const stage of ['epg','seal']){
  {// a live successor is waited for, also after midnight, and today's run is not started
   const {h,r}=await claimed();
   const seen=await h.epg.ensure(h.env,{now:nextDue});
-  eq(seen,{started:false,reason:'in_progress',instanceId:'epg_20261107_1',mirrors:seen.mirrors});
+  eq(seen,{started:false,reason:'in_progress',instanceId:'epg_20261107_1',mirrors:seen.mirrors,producer:seen.producer});
   assert.equal(h.wf.creates.length,2);
  }
  {// the create never landed (absent): the same id is created again, no new series, no failure class beyond the budget record

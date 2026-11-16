@@ -1020,8 +1020,8 @@ const retry=(file,over={})=>retryEpgProducerResults(envOf(file),{...params(over)
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&entry.name!=='canonical-producer-driver.js'&&fs.readFileSync(full,'utf8').includes('canonical-producer-driver'))importers.push(full.replace(/\\/g,'/'));}};
  walk('src');
- assert.deepEqual(importers,[],'nothing in src imports the driver');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-driver'),file+' does not bundle it');
+ assert.deepEqual(importers,['src/canonical-producer-workflow.js'],'only the Producer Workflow imports the driver');
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes('canonical-producer-driver'),'the Workflow bundle scopes the driver');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-producer-driver'),'the Worker does not name it');
 }
 console.log('canonical-producer-driver: ok');

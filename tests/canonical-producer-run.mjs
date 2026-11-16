@@ -770,8 +770,9 @@ const rowOf=(extra={})=>R.resultRow({...PASS,state:'open',attempts:3,...extra});
  walk('src');
  // AIR-374 S4-3: the dormant store (src/canonical-producer-store.js) is the one module that turns its decisions into batches; it is itself unimported and unbundled (tests/canonical-producer-store.mjs).
  // AIR-374 S4-4: the dormant driver (src/canonical-producer-driver.js) composes the pure module with the store; it is itself unimported and unbundled (tests/canonical-producer-driver.mjs).
- assert.deepEqual(importers,['src/canonical-producer-driver.js','src/canonical-producer-store.js'],'only the dormant store and the dormant driver import the pure producer-run module');
- for(const file of ['build.mjs','package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-run'),file+' does not bundle it');
+ assert.deepEqual(importers.sort(),['src/canonical-producer-driver.js','src/canonical-producer-store.js'],'only the store and the driver import the pure producer-run module');
+ for(const file of ['package.json','wrangler.toml','wrangler.jsonc'])if(fs.existsSync(file))assert.ok(!fs.readFileSync(file,'utf8').includes('canonical-producer-run'),file+' does not name it');
+ assert.ok(fs.readFileSync('build.mjs','utf8').includes('canonical-producer-run'),'AIR-497 bundles the pure run module');
  assert.ok(!fs.readFileSync('src/worker.js','utf8').includes('canonical-producer-run'),'the Worker does not name it');
  const text=fs.readFileSync(self,'utf8');
  assert.deepEqual([...text.matchAll(/^import .* from '([^']+)'/gm)].map(match=>match[1]),['./canonical-receipts.js'],'its only import is the receipt module (pure helpers)');

@@ -522,7 +522,13 @@ function frozenDay(run){
  async function ensure(env,{now=Date.now(),random=Math.random}={}){
   const mirrors=await reconcileMirrors(env,{now});
   const result=await ensureWorkflow(env,{now,random});
-  return {...result,mirrors};
+  let producer={ran:false,reason:'unavailable'};
+  try{
+   if(typeof CanonicalProducerWorkflow!=='undefined'&&typeof CanonicalProducerWorkflow.reconcileProducerChain==='function'){
+    producer=await CanonicalProducerWorkflow.reconcileProducerChain(env,{now});
+   }
+  }catch(error){producer={ran:false,reason:error?.code||'error'};}
+  return {...result,mirrors,producer};
  }
  async function ensureWorkflow(env,{now=Date.now(),random=Math.random}={}){
   let mode;

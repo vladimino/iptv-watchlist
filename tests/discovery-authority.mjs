@@ -230,11 +230,15 @@ const assign=await Authority.ownerDecision(env,{idempotencyKey:'assign-key-00000
 assert.equal(assign.outcome,'written');
 assert.equal((await Authority.routeRead(env,'epg/discovery-resolution.json')).value['obs-1'].status,'verified');
 assert.equal(count(live.db,'SELECT COUNT(*) AS n FROM film'),0);
+live.db.sql("UPDATE published_epg_authority SET programme_run_id='run-b' WHERE id=1");
+live.db.sql("INSERT INTO published_epg_show (programme_run_id, film_id, channel_id, start_ms, end_ms, channel, epg_title, basis, match_reason) VALUES ('run-b','tmdb_41','c',1,2,'C',NULL,'discovery','obs-1'),('run-b','tmdb_41','d',3,4,'D',NULL,'discovery','other-key')");
 await Authority.putIntent(env,{idempotencyKey:'reject-key-0000001',kind:'identity_reject',observationKey:'obs-1'});
 const rejected={...assigned,status:'needs_verification',tmdbId:null,filmId:null,canonicalIdentity:null,rejectedTmdbIds:['41'],terminalReason:null,retryAt:null};
 const reject=await Authority.ownerDecision(env,{idempotencyKey:'reject-key-0000001',key:'obs-1',expectedHash:await Authority.decisionHash(assigned),next:rejected,lease:again.lease,writer:'discovery_identity_correct',receipt:{state:'applied',effect:'reject',tmdbId:'41'}});
 assert.equal(reject.outcome,'written');
 assert.deepEqual((await Authority.routeRead(env,'epg/discovery-resolution.json')).value['obs-1'].rejectedTmdbIds,['41']);
+assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='obs-1'"),0,'D1 reject drops this observation\'s assigned discovery shows');
+assert.equal(count(live.db,"SELECT COUNT(*) AS n FROM published_epg_show WHERE match_reason='other-key'"),1,'other observation shows stay');
 const collided=await Authority.ownerDecision(env,{idempotencyKey:'missing-key-000001',key:'obs-1',expectedHash:expected,next:assigned,lease:again.lease});
 assert.equal(collided.outcome,'missing');
 
