@@ -291,7 +291,7 @@ function parseFilm(html,base){
 function letterboxdPageTools(){return {parseFilm,attr,extractYear};}
 function xmlTime(s){const m=s.match(/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\s*([+-])(\d{2})(\d{2})$/);if(!m)return NaN;return Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5],+m[6])-(m[7]==='+'?1:-1)*(+m[8]*60 + +m[9])*60000;}
 const EPG_HOT_FUTURE_MS=24*3600000,EPG_RETAIN_FUTURE_MS=7*24*3600000;
-// ADR 0150: a shared normalized title is one identity only when year and runtime, together, leave a single trusted id.
+// ADR 0151: a shared normalized title is one identity only when year and runtime, together, leave a single trusted id.
 // Year within one and runtime within max(8 minutes, 12%) support a match. Runtime beyond max(45 minutes, 40%) contradicts it.
 // A second indexed identity that is not contradicted blocks assignment; the slot stays an ordinary discovery observation.
 function knownSlotDecision(candidates,titleYear,duration){

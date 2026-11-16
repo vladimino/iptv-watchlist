@@ -1,6 +1,6 @@
-# ADR 0150: A shared EPG title is a known Film only when one trusted identity remains
+# ADR 0151: A shared EPG title is a known Film only when one trusted identity remains
 
-**Status:** **Accepted** (2026-11-16; the Product Owner accepted this record, including the contradiction band `max(45 minutes, 40% of known runtime)`, the yearless near band `max(8 minutes, 12%)`, the ±1 title-year allowance, and the per-slot confirmation rule, at [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774) against HEAD `2332450bd7851fddc0a51858c55e03483cab6536`. Not permission to rerun EPG, Discovery or TMDB, or to correct stored identities.)  
+**Status:** **Accepted** (2026-11-16; the Product Owner accepted this record, including the contradiction band `max(45 minutes, 40% of known runtime)`, the yearless near band `max(8 minutes, 12%)`, the ±1 title-year allowance, and the per-slot confirmation rule, at [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774) against HEAD `2332450bd7851fddc0a51858c55e03483cab6536`. The number is 0151 because [ADR 0150](0150-documentary-and-concert-film-exclusion.md) was already Accepted on `main` for AIR-501. The accepted substance is unchanged. Not permission to rerun EPG, Discovery or TMDB, or to correct stored identities.)  
 **Original decision date:** 2026-11-16  
 **Recorded at:** 2026-11-16  
 **Approval source:** Owner comment on [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774), 16 November 2026 (Europe/Madrid)  

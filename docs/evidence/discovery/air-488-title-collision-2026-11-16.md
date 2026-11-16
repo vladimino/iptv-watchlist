@@ -26,7 +26,7 @@
 
 A yearless 155-minute slot that uniquely confirms the catalog film (155) and a yearless 105-minute slot that collides with a 100-minute watchlist film share one observation. In either feed order `confirmedTmdbId` is null. `confirmedSlots` names only the 155-minute slot. `slotScanConfirmation` plus `slotEligibility` then grants `scan_confirmed` to that slot alone.
 
-The owner accepted ADR 0150, including `max(45 minutes, 40%)` and `max(8 minutes, 12%)`, on 16 November 2026 (Europe/Madrid) in [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774). These fixtures still do not measure a live feed.
+The owner accepted these thresholds, including `max(45 minutes, 40%)` and `max(8 minutes, 12%)`, on 16 November 2026 (Europe/Madrid) in [PR #674](https://github.com/vladimino/iptv-watchlist/pull/674#issuecomment-6911666774). The record is ADR 0151: ADR 0150 on main is the documentary and concert gate. These fixtures still do not measure a live feed.
 
 ## Not measured
 

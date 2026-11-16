@@ -45,7 +45,7 @@ const scanned=await vm.runInContext('scanEPG(stream,watchlist,now)',context);
 const story=scanned.films.find(film=>film.id==='story');
 assert.equal(story.shows[0].basis,'title_unique');
 assert.equal(story.shows[0].matchReason,null);
-// ADR 0150: a yearless title shared by another indexed identity is not attached, even when one runtime is nearer.
+// ADR 0151: a yearless title shared by another indexed identity is not attached, even when one runtime is nearer.
 assert.equal(scanned.films.some(film=>film.id==='d84'),false);
 const yearless=scanned.discovery.find(item=>item.key==='dune|');
 assert.equal(yearless.confirmedTmdbId,null);
