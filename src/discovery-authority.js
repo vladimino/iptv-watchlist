@@ -7,7 +7,7 @@
 // or a failed read fails closed and does not serve the R2 ledger.
 // Nothing here inserts a film or a person, calls TMDB, or starts a chunk.
 import {discoveryAdmission,pauseRowWrite,admissionBounds,DISCOVERY_EPG_PRIORITY_POLL_MS} from './domain/epg-priority-pause.js';
-import {slotEligibility,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
+import {slotEligibility,slotScanConfirmation,decisionAnchor,slotMinutes,revalidationPlan,revalidatedDecision,REVALIDATION_LIMIT as SLOT_REVALIDATION_LIMIT} from './domain/slot-evidence.js';
 export const planRevalidation=revalidationPlan;
 export const REVALIDATION_LIMIT=SLOT_REVALIDATION_LIMIT;
 export const decisionAfterRevalidation=revalidatedDecision;
@@ -1256,7 +1256,7 @@ export async function assignObservationSlots(env,spec,context={}){
  let decision=null;
  try{decision=row?JSON.parse(row.payload_json):null;}catch{decision=null;}
  if(!row||!decision||row.status!=='verified'||row.media_kind!=='movie'||!row.film_id||!row.tmdb_id){outcomes.decision_changed++;return stop('decision_changed');}
- const observation=await one(db,"SELECT confirmed_tmdb_id, programme_run_id, seen_in_latest FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key=?",[key]);
+ const observation=await one(db,"SELECT confirmed_tmdb_id, payload_json, programme_run_id, seen_in_latest FROM discovery_observation WHERE source_key='active' AND residence='active' AND observation_key=?",[key]);
  if(!observation||observation.seen_in_latest!==1){outcomes.observation_inactive++;return stop('observation_inactive');}
  if(observation.programme_run_id!==run){outcomes.stale_run++;return stop('stale_run');}
  const film=String(row.film_id),tmdb=String(row.tmdb_id);
@@ -1264,12 +1264,14 @@ export async function assignObservationSlots(env,spec,context={}){
  let filmPresent;
  if(member)filmPresent=(await sealedMemberTmdb(db,run)).get(film)===tmdb;
  else filmPresent=!!await one(db,"SELECT 1 AS present FROM discovery_admission WHERE film_id=? AND media_kind='movie' AND tmdb_id=? AND state='current' AND ?=('tmdb_'||?)",[film,tmdb,film,tmdb]);
+ let payload=null;try{payload=observation.payload_json?JSON.parse(observation.payload_json):null;}catch{payload=null;}
+ const confirmation=payload&&Array.isArray(payload.confirmedSlots)?payload:{confirmedTmdbId:observation.confirmed_tmdb_id};
  const slots=(await many(db,"SELECT channel_id, start_ms, end_ms FROM discovery_observation_show WHERE source_key='active' AND observation_key=? ORDER BY ordinal",[key])).map(item=>({channelId:item.channel_id,startMs:item.start_ms,endMs:item.end_ms}));
  const held=new Map((await many(db,"SELECT channel_id, start_ms, film_id FROM published_epg_show WHERE programme_run_id=? AND basis='discovery' AND match_reason=?",[run,key])).map(item=>[item.channel_id+':'+item.start_ms,item.film_id]));
  const pending=[];
  for(const slot of slots){
   if(held.get(slot.channelId+':'+slot.startMs)===film){outcomes.present++;continue;}
-  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},observation.confirmed_tmdb_id).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift',minutes:slotMinutes(slot.startMs,slot.endMs)});continue;}
+  if(!slotEligibility(decision,{start:slot.startMs,end:slot.endMs},slotScanConfirmation(confirmation,{channelId:slot.channelId,start:slot.startMs})).eligible){outcomes.evidence_drift++;result.skipped.push({channelId:slot.channelId,startMs:slot.startMs,reason:'evidence_drift',minutes:slotMinutes(slot.startMs,slot.endMs)});continue;}
   pending.push(slot);
  }
  if(!pending.length)return result;

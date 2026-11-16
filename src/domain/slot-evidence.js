@@ -2,7 +2,7 @@
 //
 // A slot of an observation is eligible for the Film of the observation's verified decision when one of these holds:
 //  1. the owner assigned the decision (identitySource 'owner');
-//  2. the scan of the pinned run confirmed the same TMDB id on the observation;
+//  2. the scan of the pinned run confirmed the same TMDB id on this slot (a legacy observation without per-slot ids uses the observation id);
 //  3. the slot's duration is within the anchor tolerance of an anchored duration of the decision.
 // The anchor holds only durations that were verified one by one. The accumulated durations of an evidence key are observed, not verified.
 
@@ -48,6 +48,14 @@ export function decisionAnchor(decision){
  return recorded.length===1?recorded:[];
 }
 
+// Slots listed in confirmedSlots are confirmed one by one. An observation that has the list does not lend its id to a slot that is absent from it.
+export function slotScanConfirmation(observation,slot){
+ if(Array.isArray(observation?.confirmedSlots)){
+  const hit=observation.confirmedSlots.find(item=>item&&String(item.channelId)===String(slot?.channelId)&&Number(item.start)===Number(slot?.start??slot?.startMs));
+  return hit?.tmdbId??null;
+ }
+ return observation?.confirmedTmdbId??null;
+}
 export function slotEligibility(decision,slot,confirmedTmdbId=null){
  if(!decision||decision.status!=='verified')return {eligible:false,rule:null};
  if(decision.identitySource==='owner')return {eligible:true,rule:'owner'};

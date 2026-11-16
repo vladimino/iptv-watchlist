@@ -10,6 +10,8 @@ The ledger that receives an ordinary observation follows the discovery marker. [
 
 The owner-only `feature_flags` read at 2026-11-01T22:24:21.589Z reported the binding absent, effective off. The owner confirmed Worker `iptv` has no such binding. Removing the name from the registry is not proof a binding was deleted. The historical AIR-86 replay still plans the old queries from `scripts/air-86-variant-generator.js`, which the Worker does not load. The evidence files under `docs/evidence/scored-resolver/` stay in their original sense.
 
+Known-film assignment during the EPG scan is separate from this search. [ADR 0151](../../adr/0151-epg-known-film-title-collision.md) (Accepted) refuses a watchlist showing when two trusted identities share the normalized title and year plus runtime do not leave one of them. The withheld slot is the ordinary observation (`identity_collision` on the scan diagnostic). It is not a variant search and it does not call TMDB.
+
 [AIR-95](https://trello.com/c/kD8xjvVu) still lets the scorer treat one reversible form as title evidence when that form arrives through the ordinary search or a known alias: a numeral word, a trailing `1` removed from the title, or the single `е`/`э` swap. The movie title or original title must equal that form exactly. The detail gate repeats the same check. A prefix, a trailing `2` reduced to its stem, and a `tmdb_alias` still are not title evidence. The Worker no longer searches TMDB for those forms.
 
 ## Historical experiment
