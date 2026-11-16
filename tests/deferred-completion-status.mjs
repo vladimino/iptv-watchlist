@@ -31,7 +31,7 @@ next=(await api('next',{runId:start.runId})).data;assert.equal(next.mustComplete
 const finished=(await api('complete',{runId:start.runId,reason:'queue_empty'})).data;
 assert.equal(finished.status,'complete','a deferred run is a normal completion, not an error');assert.equal(finished.reason,null);assert.equal(finished.stopReason,'eligible_queue_empty','queue_empty is reserved for an empty outstanding set');
 assert.equal(finished.hotRemaining,1);assert.equal(finished.coldRemaining,0);assert.deepEqual(finished.counts,{created:0,recalculated:0,failed:1,pending:0});
-assert.deepEqual(plain(finished.snapshot.queue),{hotPending:1,coldPending:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:new Date(retryAt).toISOString()});
+assert.deepEqual(plain(finished.snapshot.queue),{hotPending:1,coldPending:0,outstanding:1,eligibleNow:0,deferredByRetry:1,retryExhausted:0,nextRetryAt:new Date(retryAt).toISOString()});
 assert.deepEqual([finished.snapshot.coverage.currentPredictionsTotal,finished.snapshot.coverage.confirmedFilmsTotal,finished.snapshot.coverage.windowCurrentPredictions,finished.snapshot.coverage.windowFilmsTotal],[2286,2287,1877,1878]);
 assert.equal(finished.snapshot.coverage.localPercent,99.9);assert.equal(finished.snapshot.coverage.windowPercent,99.9);
 const stored=records.get('enrichment/runs/'+start.runId+'.json');assert.equal(stored.stopReason,'eligible_queue_empty');assert.equal(records.get('enrichment/prediction-queue.json').lastBatch.stage,'complete');
@@ -47,7 +47,7 @@ const writesBefore=revision;
 const footer=await (await ctx.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env)).json();
 assert.equal(revision,writesBefore,'footer status is read-only');
 assert.equal(footer.lastRun.status,'completed');assert.equal(footer.lastRun.reason,'eligible_queue_empty');
-assert.deepEqual({pendingHot:footer.predictions.pendingHot,pendingCold:footer.predictions.pendingCold,outstanding:footer.predictions.outstanding,eligibleNow:footer.predictions.eligibleNow,deferredByRetry:footer.predictions.deferredByRetry,nextRetryAt:footer.predictions.nextRetryAt},{pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,nextRetryAt:new Date(retryAt).toISOString()});
+assert.deepEqual({pendingHot:footer.predictions.pendingHot,pendingCold:footer.predictions.pendingCold,outstanding:footer.predictions.outstanding,eligibleNow:footer.predictions.eligibleNow,deferredByRetry:footer.predictions.deferredByRetry,retryExhausted:footer.predictions.retryExhausted,nextRetryAt:footer.predictions.nextRetryAt},{pendingHot:1,pendingCold:0,outstanding:1,eligibleNow:0,deferredByRetry:1,retryExhausted:0,nextRetryAt:new Date(retryAt).toISOString()});
 assert.notEqual(footer.predictions.nextRetryAt,footer.predictions.nextScheduledRun);
 const footerText=render('footerStatusText',footer);
 assert.match(footerText.runLine,/^завершён · 1 фильм ожидает повторной попытки не раньше /);assert.match(footerText.runResult,/^завершён · 1 фильм ожидает повторной попытки/);assert.equal(footerText.nextBatch,'ждёт повторной попытки');assert.match(footerText.deferred,/^1 фильм · не раньше /);
@@ -64,7 +64,7 @@ next=(await api('next',{runId:start.runId})).data;assert.equal(next.items[0].fil
 await api('submit',{runId:start.runId,items:[{filmId:'tmdb_1',fingerprint,prediction}]});
 next=(await api('next',{runId:start.runId})).data;assert.equal(next.stopReason,'queue_empty');
 const drained=(await api('complete',{runId:start.runId,reason:next.stopReason})).data;
-assert.equal(drained.stopReason,'queue_empty');assert.deepEqual(plain(drained.snapshot.queue),{hotPending:0,coldPending:0,outstanding:0,eligibleNow:0,deferredByRetry:0,nextRetryAt:null});
+assert.equal(drained.stopReason,'queue_empty');assert.deepEqual(plain(drained.snapshot.queue),{hotPending:0,coldPending:0,outstanding:0,eligibleNow:0,deferredByRetry:0,retryExhausted:0,nextRetryAt:null});
 assert.equal(drained.snapshot.coverage.currentPredictionsTotal,2287);assert.equal(drained.snapshot.coverage.localPercent,100);
 const drainedHTML=render('eventHTML',plain([...records].find(([key,value])=>key.startsWith('events/items/')&&value.id==='enrichment-'+start.runId)[1]));
 assert.match(drainedHTML,/Все фильмы с актуальными прогнозами\./);assert.doesNotMatch(drainedHTML,/без (актуального )?прогноза|повторной попытки/);

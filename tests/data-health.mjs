@@ -421,6 +421,11 @@ assert.deepEqual([queueBeyond.severity, queueBeyond.reason, queueBeyond.threshol
 const queueUnknown = one(checkResult(evaluate(complete({predictionQueue: {observedAt: NOW, programmeRunId: 'gen-2', hotPending: ['film:h1'], retries: {}}}))), 'prediction_queue/incomplete/queue:prediction');
 assert.deepEqual([queueUnknown.severity, queueUnknown.reason, queueUnknown.evidence.completeness, queueUnknown.evidence.missing, queueUnknown.action.eligible], ['warning', 'progress_unknown', 'partial', ['lastCheckAt'], null]);
 assert.equal(evaluate(complete({predictionQueue: queue({pending: []})})).issues.length, 0, 'a drained queue is clear');
+const exhaustedOnly = one(checkResult(evaluate(complete({predictionQueue: queue({pending: [], retries: {'film:x': {attempts: 10, failedAt: NOW}}})}))), 'prediction_queue/incomplete/queue:prediction_retry_exhausted');
+assert.deepEqual([exhaustedOnly.reason, exhaustedOnly.affected, exhaustedOnly.action.reason], ['prediction_retry_exhausted', {count: 1, sample: ['film:x']}, 'manual_review_required']);
+const mixedQueue = checkResult(evaluate(complete({predictionQueue: queue({hotPending: ['film:h1'], retries: {'film:x': {attempts: 10, failedAt: NOW}, 'film:h1': {attempts: 1, retryAt: Date.parse(NOW) + 3 * H}}})})));
+assert.equal(one(mixedQueue, 'prediction_queue/incomplete/queue:prediction_retry_exhausted').affected.count, 1);
+assert.equal(one(mixedQueue, 'prediction_queue/incomplete/queue:prediction').reason, 'all_deferred_by_retry');
 // A stale prediction the refreshed queue does not list disagrees with the film; before the refresh it is only a note.
 const disagreement = checkResult(evaluate(complete({
   films: [film('film:missing', {prediction: {status: 'stale', updatedAt: at(-3 * H)}}), film('film:fresh', {prediction: {status: 'stale', updatedAt: at(-10 * 60000)}})],
