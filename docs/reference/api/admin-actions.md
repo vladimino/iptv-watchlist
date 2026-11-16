@@ -169,7 +169,7 @@ The declaration is:
 
 | Principle | In `catalog_policy_exclude` |
 | --- | --- |
-| Eligibility | Ready D1 Discovery authority with `cutover` `open`. Current movie admission whose payload classifies as `documentary` or `concert`. A drama, an ambiguous Music-only Live token, a TV Movie without independent recording phrases, a missing admission and a non-movie id are not eligible |
+| Eligibility | Ready D1 Discovery authority with `cutover` `open`. Current movie admission whose payload classifies as `documentary` or `concert` under the same ADR 0150 `admissionPolicy` as programme projection (stored synopsis fills overview). A drama, an ambiguous Music-only Live token, a TV Movie without independent recording phrases, a missing admission and a non-movie id are not eligible |
 | Record version | The admission `film_id` plus the policy kind. A superseded row is `already_applied` for Discovery and still retries the queue |
 | Preview | `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` |
 | Issuance | The execute POST carries `{filmId, idempotencyKey}` and the Access action header. A stored R2 receipt for that key replays |

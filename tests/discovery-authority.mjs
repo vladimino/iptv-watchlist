@@ -277,7 +277,12 @@ const linkedDoc={id:'tmdb_74',tmdbId:'74',canonicalIdentity:'tmdb:74',title:'Lin
 const linkedOther={id:'tmdb_75',tmdbId:'75',canonicalIdentity:'tmdb:75',title:'Other Film',year:2001,genres:['драма']};
 const capOver={id:'tmdb_80',tmdbId:'80',canonicalIdentity:'tmdb:80',title:'Over Cap',year:2020,runtime:90,genres:['документальный']};
 const capOk={id:'tmdb_81',tmdbId:'81',canonicalIdentity:'tmdb:81',title:'At Cap',year:2020,runtime:90,genres:['документальный']};
-await Authority.replaceCatalog(env,{tmdb_70:docFilm,tmdb_71:concertFilm,tmdb_72:drama,tmdb_73:rejectFilm,tmdb_74:linkedDoc,tmdb_75:linkedOther,tmdb_80:capOver,tmdb_81:capOk});
+const synopsisConcert={id:'tmdb_76',tmdbId:'76',canonicalIdentity:'tmdb:76',title:'Nazareth - No Means of Escape',year:2015,runtime:56,genres:['музыка'],synopsis:'A live concert film of the band on tour.'};
+await Authority.replaceCatalog(env,{tmdb_70:docFilm,tmdb_71:concertFilm,tmdb_72:drama,tmdb_73:rejectFilm,tmdb_74:linkedDoc,tmdb_75:linkedOther,tmdb_76:synopsisConcert,tmdb_80:capOver,tmdb_81:capOk});
+const synopsisPreview=await Authority.readPolicyExcludePreview(env,'tmdb_76');
+assert.equal(synopsisPreview.policy,'concert','stored synopsis maps to overview for ADR 0150 concert phrases');
+assert.equal(synopsisPreview.available,true);
+assert.equal(synopsisPreview.reason,'eligible');
 async function putDecision(key,decision,filmId){
  const hash=await Authority.decisionHash(decision);
  const filmSql=filmId==null?'NULL':"'"+filmId+"'";
