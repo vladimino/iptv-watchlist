@@ -69,6 +69,10 @@ if(ONLY!=='route'){
  assert.deepEqual(stored,{titles:2,people:1});
  sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
  assert.equal(await write('titles'),false,'held skips');
+ const cutover=database('prepared'),cutoverEnv={DB:d1Standin(cutover)};
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),true);
+ sqlite(cutover,"UPDATE projector_window SET state='held',owner='air-499',requested_at="+(Date.now()-1000)+",expires_at="+(Date.now()+60000)+" WHERE id=1");
+ assert.equal(await reader.canonicalMirrorsWritable(cutoverEnv),false,'exclusive window held refuses frozen mirror puts');
 }
 
 // 2. The D1 fallback reader: only at open; every other state refuses before a catalog statement. There is no R2 handle in this environment at all.

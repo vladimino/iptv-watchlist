@@ -46,7 +46,7 @@ function closure(entries){
  }
  return found;
 }
-const WRITE=/(\bBUCKET\.(?:put|delete)|\bbucket\.(?:put|delete)|\bsaveJSON|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputJSON)\(/;
+const WRITE=/(\bBUCKET\.(?:put|delete)|\bbucket\.(?:put|delete)|\bsaveJSON|\bputStoredJson|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputJSON)\(/;
 const writers=set=>[...set.keys()].filter(key=>WRITE.test(set.get(key).d.body)).sort();
 
 // The entry points. Chunk: the resolver chunk, the Workflow's chunk and the two admin routes that take the Discovery lease.
@@ -117,7 +117,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:17,wrapper:49,dynamic:19}, // AIR-499: four saveCanonicalMirror puts plus the helper's saveJSON(env,key); literal saveJSON(titles|people) sites removed
+ 'src/worker.js':{r2:16,wrapper:49,dynamic:19}, // AIR-499: titles.json/people.json R2 puts collapsed into putStoredJson (one env.BUCKET.put)
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -163,6 +163,7 @@ const classes={
  'drRefreshIndex@src/admin/discovery-recovery.js':'admin recovery observation index (not a projector input)',
  // The generic writers: the key comes from the caller, which is classified above; an owned key is D1-routed.
  'saveJSON@src/worker.js':'generic writer: DiscoveryAuthority.routeWrite for an owned key, else R2 (callers classified)',
+ 'putStoredJson@src/worker.js':'generic writer: titles.json/people.json freeze at BUCKET.put, else R2',
  // State that is not a projector input at all: the prediction queue, its D1 mirror, the removal queue.
  'writeQueue@src/prediction-d1.js':'prediction queue (not a projector input)',
  'mirror@src/prediction-d1.js':'prediction R2 mirror (not a projector input)',
@@ -209,6 +210,7 @@ for(const name of notDiscovery)assert.ok(inputs.has(name),'the projector reads '
 const naming=set=>[...set.keys()].filter(key=>notDiscovery.some(name=>set.get(key).d.body.includes("'"+name+"'"))).sort();
 const NAMING={
  'loadJSON@src/worker.js':'a read of published documents and other JSON; it does not write',
+ 'putStoredJson@src/worker.js':'frozen titles.json/people.json put after epgStepGuard; other keys are ordinary R2 JSON',
  'writeMirrors@src/published-epg.js':'writes those mirrors from the D1 document, idempotently',
  'persistWatchlist@src/worker.js':'publication path, under the lease',
  'sealPublishStep@src/worker.js':'publication path, under the sealStep lease',

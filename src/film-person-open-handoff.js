@@ -27,8 +27,8 @@ const WORKFLOW_FACTS_SAMPLE={
  id:'probe',tmdbId:1,canonicalIdentity:'tmdb:1',original:'O',title:'T',metadataAt:'2026-01-01T00:00:00.000Z',synopsisFetchedAt:'2026-01-01T00:00:00.000Z',
  peopleNamesVersion:2,peopleLocalizedAt:'2026-01-01T00:00:00.000Z',year:1999,runtime:90,synopsis:'s',poster:'p',url:'u',genres:[],
  dimensions:{
-  identity:{dimension:'identity',status:'resolved',source:'tmdb',sourceVersion:'tmdb:1',provenance:{authority:'automatic'},value:'tmdb:1',updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none'},
-  metadata:{dimension:'metadata',status:'resolved',source:'letterboxd',sourceVersion:'lb:1',provenance:{authority:'automatic'},value:null,updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none'},
+  identity:{dimension:'identity',status:'resolved',source:'tmdb',sourceVersion:'tmdb:1',provenance:{authority:'automatic'},value:'tmdb:1',updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none',lastError:null,failureReason:null,retryAt:null},
+  metadata:{dimension:'metadata',status:'resolved',source:'letterboxd',sourceVersion:'lb:1',provenance:{authority:'automatic'},value:null,updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none',lastError:null,failureReason:null,retryAt:null},
  },
 };
 export function workflowFactsProbe(sample=filmFactsOf(WORKFLOW_FACTS_SAMPLE,true)){

@@ -376,6 +376,25 @@ if(section('12')){
  const replay=await writeFilmFacts(env,{id:ID,expectedRevision:2,at:T2,requestId:'clock-only',film:planned.film,watchlist:planned.watchlist,...(planned.metadata?{metadata:planned.metadata}:{}),...(planned.dimensions?{dimensions:planned.dimensions}:{}),...(planned.sync?{sync:planned.sync}:{})});
  assert.equal(replay.written,false,'clocks-only facts open no lifecycle write');
  assert.deepEqual(stored(),before);
+ const sealed={
+  identity:{dimension:'identity',status:'resolved',source:'tmdb',sourceVersion:'tmdb:603',provenance:{authority:'automatic',tmdbId:'603'},value:null,updatedAt:T,attempts:1,nextAction:'none',lastError:null,failureReason:null,retryAt:null},
+  metadata:{dimension:'metadata',status:'failed',source:'letterboxd',sourceVersion:'lb:1',provenance:{authority:'automatic'},value:null,updatedAt:T,attempts:3,nextAction:'retry',lastError:'timeout',failureReason:'letterboxd_unavailable',retryAt:T2},
+ };
+ const {file:file2,env:env2}=fresh();
+ await seed(env2);
+ const failed=await writeFilmFacts(env2,facts({requestId:'failed-dim',dimensions:sealed}));
+ assert.equal(failed.written,true);
+ const errorRow=()=>rows(file2,"SELECT status,last_error,failure_reason,retry_at,attempts,next_action FROM film_dimension WHERE dimension='metadata'")[0];
+ const beforeError=errorRow();
+ assert.deepEqual(beforeError,{status:'failed',last_error:'timeout',failure_reason:'letterboxd_unavailable',retry_at:T2,attempts:3,next_action:'retry'});
+ const replayFailed=filmFactsOf({id:'tmdb:603',canonicalIdentity:'tmdb:603',original:'The Matrix',metadataAt:T,dimensions:sealed},true);
+ assert.equal(replayFailed.dimensions.metadata.lastError,'timeout');
+ assert.equal(replayFailed.dimensions.metadata.retryAt,T2);
+ const again=await writeFilmFacts(env2,{id:ID,expectedRevision:2,at:T2,requestId:'replay-failed',film:replayFailed.film,watchlist:replayFailed.watchlist,metadata:replayFailed.metadata,dimensions:replayFailed.dimensions,sync:replayFailed.sync});
+ assert.equal(errorRow().last_error,'timeout');
+ assert.equal(errorRow().retry_at,T2);
+ assert.deepEqual(errorRow(),beforeError);
+ void again;
  const importers=[];
  const walk=dir=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const full=path.join(dir,entry.name);if(entry.isDirectory())walk(full);else if(/\.(js|mjs)$/.test(entry.name)&&fs.readFileSync(full,'utf8').includes('canonical-film-writers'))importers.push(full.replace(/\\/g,'/'));}};
  walk('src');

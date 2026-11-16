@@ -81,7 +81,7 @@ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/film-person-open-ha
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers/);
 {
  const worker=fs.readFileSync('src/worker.js','utf8');
- assert.match(worker,/async function saveCanonicalMirror\(env,key,value\)\{\n if\(await frozenCanonicalMirrorsLocked\(env\)\)return false;\n await saveJSON\(env,key,value\);\n return true;\n\}/);
+ assert.match(worker,/async function putStoredJson\(env,key,text\)\{\n if\(\(key==='titles\.json'\|\|key==='people\.json'\)&&await frozenCanonicalMirrorsLocked\(env\)\)return \{skipped:'canonical_mirror_frozen'\};\n return env\.BUCKET\.put\(key,text/);
  assert.equal([...worker.matchAll(/saveCanonicalMirror\(env,'(titles|people)\.json'/g)].length,4);
  assert.doesNotMatch(worker.replace(/async function saveCanonicalMirror[\s\S]*?return true;\n\}/,''),/saveJSON\(env,'(titles|people)\.json'/);
 }

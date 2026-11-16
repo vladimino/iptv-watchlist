@@ -20,8 +20,15 @@ export async function catalogReaderGate(env){
 
 // Frozen titles.json / people.json may be written only while the marker is not d1/open (or held / unreadable). Re-read at the write, not before an await.
 export async function canonicalMirrorsWritable(env){
- try{return (await catalogReaderGate(env)).mode!=='d1';}
+ try{if((await catalogReaderGate(env)).mode==='d1')return false;}
  catch{return false;}
+ const db=database(env);
+ if(!db)return false;
+ try{
+  const window=await one(db,'SELECT state,expires_at AS expiresAt FROM projector_window WHERE id=1');
+  if(window&&window.state==='held'&&Number(window.expiresAt)>Date.now())return false;
+ }catch{/* table absent is no exclusive window */}
+ return true;
 }
 
 // Read only, no gate: the stored admission and retention rows for ids (chunked by 80, two reads per chunk).

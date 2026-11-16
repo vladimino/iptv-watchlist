@@ -73,16 +73,16 @@ const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:Canoni
 // localization await, so a prepared→open flip mid-step cannot land a canonical R2 put.
 async function frozenCanonicalMirrorsLocked(env){
  if(typeof CanonicalCatalogReader==='undefined')return false;
- if(typeof CanonicalCatalogReader.canonicalMirrorsWritable==='function')return !(await CanonicalCatalogReader.canonicalMirrorsWritable(env));
  try{
+  if(typeof CanonicalCatalogReader.canonicalMirrorsWritable==='function')return !(await CanonicalCatalogReader.canonicalMirrorsWritable(env));
   const gate=await CanonicalCatalogReader.catalogReaderGate(env);
   return gate.mode==='d1';
  }catch{return true;}
 }
 async function saveCanonicalMirror(env,key,value){
  if(await frozenCanonicalMirrorsLocked(env))return false;
- await saveJSON(env,key,value);
- return true;
+ const saved=await saveJSON(env,key,value);
+ return saved?.skipped!=='canonical_mirror_frozen';
 }
 async function localizedTitleStore(env,pinned,gate,films){
  if(!gate)return (await loadJSON(pinned,'titles.json'))||{};
@@ -602,6 +602,10 @@ async function updatePublishedFiles(env,files){
 // AIR-348 / ADR 0100: a mutation boundary of an EPG step. A step that no longer holds its lease under the mode revision it was admitted
 // with (the owner closed admission, or the lease ran out) stops here and the write does not happen. A no-op outside such a step.
 async function epgStepGuard(env){if(env?.epgStep&&typeof EpgOrchestration!=='undefined')await EpgOrchestration.assertStep(env);}
+async function putStoredJson(env,key,text){
+ if((key==='titles.json'||key==='people.json')&&await frozenCanonicalMirrorsLocked(env))return {skipped:'canonical_mirror_frozen'};
+ return env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});
+}
 const saveJSON=async(env,key,value)=>{
  // AIR-442: in a request with a scope, a write of bytes identical to what the step already knows is stored under this key is not repeated; any other write drops what the scope knows
  // before it is attempted (a failure leaves it unknown) and records the value after it succeeded.
@@ -619,10 +623,16 @@ const saveJSON=async(env,key,value)=>{
   if(routed?.handled)return learned({etag:'d1'});
   const text=routed?.text??JSON.stringify(value);
   let settled=false;
-  try{const saved=await env.BUCKET.put(key,text,{httpMetadata:{contentType:'application/json'}});settled=true;return learned(saved);}
+  try{
+   const saved=await putStoredJson(env,key,text);
+   if(saved?.skipped==='canonical_mirror_frozen')return saved;
+   settled=true;return learned(saved);
+  }
   finally{if(routed?.token&&settled)await PredictionD1.completePredictionWrite(env,key,routed.token);}
  }
- return learned(await env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'}}));
+ const saved=await putStoredJson(env,key,JSON.stringify(value));
+ if(saved?.skipped==='canonical_mirror_frozen')return saved;
+ return learned(saved);
 };
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}

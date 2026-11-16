@@ -52,10 +52,12 @@ function clockOf(value){return typeof value==='string'&&value.length?value:null;
 function plain(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}
 function sealedDimension(raw,name){
  if(!plain(raw)||raw.dimension!==name||typeof raw.status!=='string'||!clockOf(raw.updatedAt)||!plain(raw.provenance))return null;
+ if(!Number.isInteger(raw.attempts)||typeof raw.nextAction!=='string')return null;
  return {
   dimension:name,status:raw.status,source:typeof raw.source==='string'?raw.source:null,sourceVersion:raw.sourceVersion??null,
-  provenance:raw.provenance,value:raw.value??null,updatedAt:clockOf(raw.updatedAt),attempts:Number.isInteger(raw.attempts)?raw.attempts:0,
-  nextAction:typeof raw.nextAction==='string'?raw.nextAction:'none',...(typeof raw.authority==='string'?{authority:raw.authority}:{}),
+  provenance:raw.provenance,value:raw.value??null,updatedAt:clockOf(raw.updatedAt),attempts:raw.attempts,nextAction:raw.nextAction,
+  lastError:raw.lastError??null,failureReason:raw.failureReason??null,retryAt:raw.retryAt??null,
+  ...(typeof raw.authority==='string'?{authority:raw.authority}:{}),
  };
 }
 export function filmFactsOf(film,watchlisted){
