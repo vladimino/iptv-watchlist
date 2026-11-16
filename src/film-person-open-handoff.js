@@ -17,6 +17,8 @@ import {filmFactsOf} from './canonical-producer-workflow.js';
 import {BASELINE_CAP,listAttention,operationRegistry,recordBaseline,readUnreceipted,verifyBaseline} from './canonical-receipts.js';
 
 export const OPEN_HANDOFF_MIN_VERSION=23;
+// Path-prefixed baseline references (`cutover_accepted/v2:` + 64 hex = 84). Cap is not the 64-hex digest alone.
+export const OPEN_HANDOFF_REFERENCE_MAX=96;
 export const OPEN_HANDOFF_PROJECTION='enrichment';
 export const OPEN_HANDOFF_LEASE_MS=10*60000;
 export const OPEN_HANDOFF_OWNER_PREFIX='air-499-open-handoff';
@@ -334,7 +336,7 @@ export async function handleOpenHandoffTool(env,args={}){
  if(args.mode!=='dry_run'&&args.mode!=='apply')throw failed('film_person_invalid');
  if(args.confirmGo!==undefined&&args.confirmGo!==true&&args.confirmGo!==false)throw failed('film_person_invalid');
  if(!Number.isInteger(args.expectedGeneration))throw failed('film_person_invalid');
- if(typeof args.expectedReference!=='string'||!args.expectedReference.length||args.expectedReference.length>80)throw failed('film_person_invalid');
+ if(typeof args.expectedReference!=='string'||!args.expectedReference.length||args.expectedReference.length>OPEN_HANDOFF_REFERENCE_MAX)throw failed('film_person_invalid');
  return activateOpen(env,{apply:args.mode==='apply',confirmGo:args.confirmGo===true,expectedGeneration:args.expectedGeneration,expectedReference:args.expectedReference});
 }
 

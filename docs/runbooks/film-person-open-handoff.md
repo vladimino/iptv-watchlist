@@ -18,10 +18,10 @@ The flip is one guarded `UPDATE` plus readback. SQL asserts schema ≥ 23, Disco
 ## Dry-run (read-only)
 
 ```
-node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<64-hex>
+node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<exact film_person_baseline.reference>
 ```
 
-Needs D1 operator credentials (`D1_BACKFILL_*`). It writes nothing. `outcome: dry_run` plus `readiness.blockers` is evidence, not permission.
+Needs D1 operator credentials (`D1_BACKFILL_*`). It writes nothing. `outcome: dry_run` plus `readiness.blockers` is evidence, not permission. `expectedReference` is the exact verified `film_person_baseline.reference` (a path-prefixed digest such as `cutover_accepted/v2:` plus 64 hex, 84 characters). The MCP argument cap is 96; a 64-hex digest alone does not match the recorded reference.
 
 ## Apply (still needs a named L3 GO)
 
@@ -32,13 +32,13 @@ film_person_open_handoff
   mode: apply
   confirmGo: true
   expectedGeneration: 1
-  expectedReference: <64-hex>
+  expectedReference: <exact film_person_baseline.reference>
 ```
 
 `confirmGo` false or omitted is refused. `expectedGeneration` and `expectedReference` are required. While `activationReadiness.ready` is false (current residuals), apply STOPs at preflight and takes no lease. The REST CLI remains dry-run only:
 
 ```
-node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<64-hex>
+node scripts/film-person-open-handoff.mjs --expected-generation=1 --expected-reference=<exact film_person_baseline.reference>
 ```
 
 The sequence once those blockers are gone:
