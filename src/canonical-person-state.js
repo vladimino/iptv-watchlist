@@ -211,7 +211,7 @@ export async function recordPersonState(env,input){
  const id=fenced.personId(input?.id),expected=fenced.revisionOf(input?.expectedRevision),at=fenced.text(input?.at),requestId=fenced.text(input?.requestId);
  if(!plain(input?.person))throw failed('film_person_invalid');
  const tail=fenced.receiptTail(input.receiptMark,{kind:'person',id});
- const gate=assertWritable(await readAuthority(env));
+ const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
  const db=database(env);
  if(!(await one(db,'SELECT 1 AS x FROM person WHERE id=?',[id])))throw failed('film_person_reference');
  const stored=await one(db,`SELECT ${COLUMNS} FROM person_dimension WHERE person_id=? AND dimension='localization'`,[id]);
@@ -232,7 +232,7 @@ export async function recordLocalizationConflicts(env,input){
  const rows=planConflicts(kind,input?.id,input?.conflicts);
  const id=input.id,expected=fenced.revisionOf(input.expectedRevision),at=fenced.text(input.at),requestId=fenced.text(input.requestId);
  const tail=fenced.receiptTail(input.receiptMark,{kind,id});
- const gate=assertWritable(await readAuthority(env));
+ const gate=fenced.bindProducerFence(env,assertWritable(await readAuthority(env)));
  const db=database(env);
  if(kind==='film'&&await one(db,'SELECT to_film_id FROM film_redirect WHERE from_id=?',[id]))throw failed('film_person_redirect');
  if(!(await one(db,kind==='film'?'SELECT 1 AS x FROM film WHERE id=?':'SELECT 1 AS x FROM person WHERE id=?',[id])))throw failed('film_person_reference');

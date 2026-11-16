@@ -69,7 +69,7 @@ const refusedWith=(file,statements,pattern,label)=>{const [errors]=probe(file,[s
 
 // ===== 1. The migration: on top of a complete schema 19, empty, version 20, the exact object set, refusals, no downgrade =====
 if(on(1)){
- assert.deepEqual(chain.slice(-3),['0020_canonical_producer_run.sql','0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql'],'0020 is followed by 0021, the D1 pattern-limit rebuild (tests/migration-pattern-limit.mjs), then 0022, the inert EPG-priority pause (tests/epg-priority-gate.mjs)');
+ assert.deepEqual(chain.slice(-4),['0020_canonical_producer_run.sql','0021_d1_glob_pattern_limit.sql','0022_epg_priority_pause.sql','0023_canonical_producer_chain.sql'],'0020 is followed by 0021, 0022, then 0023 the dormant producer chain (tests/canonical-producer-chain.mjs)');
  assert.equal(Number(one(t20,'SELECT version FROM schema_contract WHERE id=1')),20);
  assert.equal(one(t20,'SELECT note FROM schema_contract WHERE id=1'),'Schema v20: durable canonical producer run and unit result tables (empty). Follows a complete version 19.');
  for(const table of [RUN,RES])assert.equal(Number(one(t20,'SELECT COUNT(*) FROM '+table)),0,table+' starts empty');
@@ -533,7 +533,8 @@ if(on(10)){
  assert.deepEqual(named('canonical_producer_run'),[],'no Worker code names the run table');
  assert.deepEqual(named('canonical_producer_unit_result'),[],'no Worker code names the result table');
  assert.deepEqual(named('0020_canonical_producer_run'),[]);
- assert.ok(!/canonical-producer-(run|store)/.test(fs.readFileSync('build.mjs','utf8')),'the pure module, the store and the migration are not bundled');
+ assert.ok(/canonical-producer-(run|store)/.test(fs.readFileSync('build.mjs','utf8')),'AIR-497 bundles the store and the pure run module for the dormant Producer Workflow');
+ assert.ok(!fs.readFileSync('wrangler.jsonc','utf8').includes('0020_canonical_producer_run'),'a deploy still applies no migration file');
  assert.ok(!fs.readFileSync('wrangler.jsonc','utf8').includes('migrations'),'wrangler.jsonc has no migrations directory: a deploy applies nothing');
  for(const file of fs.readdirSync('.github/workflows'))assert.ok(!/d1\s+(execute|migrations)|migrations\s+apply|0020_canonical/.test(fs.readFileSync('.github/workflows/'+file,'utf8')),file+' applies no migration');
  const statements=text20.split('\n').filter(line=>/^(INSERT|CREATE|UPDATE)\b/.test(line)).length;

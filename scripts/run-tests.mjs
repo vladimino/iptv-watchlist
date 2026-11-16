@@ -281,6 +281,7 @@ export const CORE_WEIGHTS={
  'canonical-handoff-readiness.mjs':2,
  'canonical-producer-adapters.mjs':2,
  'canonical-producer-store.mjs':2,
+ 'canonical-producer-chain.mjs':3,
  'canonical-producers.mjs':2,
  'canonical-read-model.mjs':2,
  'canonical-readiness-classes.mjs':2,
