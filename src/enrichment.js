@@ -1515,6 +1515,7 @@ async function refreshPredictionQueue(env,report,trigger='reconcile',{beforeWrit
   // replaces. A caller's programme of another generation than the stored queue is replaced by the published one.
   const head=typeof PredictionD1==='undefined'?null:await PredictionD1.openQueue(env),object=head?head.object:await env.BUCKET.get(predictionQueueKey),previous=head?head.queue:(object?await object.json():null);
   const source=previous?.programmeRunId&&previous.programmeRunId!==report?.runId?await loadJSON(env,'programme.json')||report:report;
+  if(!source?.runId&&!(Array.isArray(source?.films)&&source.films.length))return previous;
   const queue=await buildPredictionQueue(env,source,trigger,previous,capture);if(!queue)return null;
   const next=amend?amend(queue)||queue:queue;
   if(beforeWrite)await beforeWrite();
@@ -1556,13 +1557,14 @@ async function consistentQueueReport(pinned,report){
 async function buildPredictionQueue(env,report,trigger,previous,capture=null){
  const pinned=await queuePin(env,report);
  const source=await consistentQueueReport(pinned,report);
- const [profile,storedIndex,catalog,sync,watchlistDoc]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json'),loadJSON(env,'watchlist.json')]);
+ const [profile,storedIndex,catalog,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'view-index.json'),loadCatalogForQueue(pinned),loadJSON(env,'sync.json')]);
  const index=typeof PredictionD1==='undefined'?storedIndex:await PredictionD1.overlayIndex(env,storedIndex,canonicalMoodFacet);
  if(!profile)return null;
  const safeSource=source&&Array.isArray(source.films)?source:{runId:source?.runId||null,films:[]};
  if(capture)Object.assign(capture,{report:safeSource,profile,index,catalog});
  const now=Date.now();
  const authoritative=showsAuthoritative(sync,safeSource);
+ const watchlistDoc=authoritative?null:await loadJSON(env,'watchlist.json');
  // ADR 0142: completed-only ranking is a live D1 published pin whose run matches the completed programme, not the mere presence of the PublishedEpg module (the Worker always bundles it; currentGeneration null is the R2 path).
  const completedOnly=authoritative&&pinned?.epgPin?.authority==='d1'&&!!pinned.epgPin.programmeRunId&&safeSource.runId===pinned.epgPin.programmeRunId;
  const completed=completedOnly?completedShowsByTmdb(safeSource):new Map();
@@ -1578,7 +1580,8 @@ async function buildPredictionQueue(env,report,trigger,previous,capture=null){
   return [id,neutralPredictionPriority()];
  }));
  if(!authoritative&&priorityBasis!=='carried'){priorityBasis='neutral';priorityProgrammeRunId=previous?.programmeRunId||'priority-neutral';}
- const priorityAsOf=authoritative?new Date(now).toISOString():priorityBasis==='carried'?(previous?.priorityAsOf||previous?.refreshedAt||null):null;
+ const sameCompleted=authoritative&&previous?.priorityBasis==='completed'&&previous.programmeRunId===priorityProgrammeRunId&&previous.priorityAsOf;
+ const priorityAsOf=authoritative?(sameCompleted?previous.priorityAsOf:new Date(now).toISOString()):priorityBasis==='carried'?(previous?.priorityAsOf||previous?.refreshedAt||null):null;
  // The selective profile rule decides; the strict outcome is counted for every film beside it.
  const mode=PREDICTION_PROFILE_MODE,digest=await profileLineageDigests(profile),fresh=new Map(),compatibility={mode,evaluatorVersion:PREDICTION_COMPATIBILITY_VERSION,profileVersion:profile.version,films:films.length,missing:0,strict:{current:0,stale:0},selective:{current:0,compatible:0,stale:0},reasons:{},wouldKeep:0,wouldRequeue:0,strictDisagreements:0};
  // The fingerprint transition rule (ADR-0035) decides; the strict fingerprint outcome is counted beside it. Each outstanding
@@ -2412,11 +2415,13 @@ const batchRealExtras=(selection,queue,{queueRefreshed,queueSettled,dryRun})=>({
 // A queue that fails the advance gate is reported `stale`. `bytes` is the size of the whole answer with placeholder values for the fields only the real start knows.
 async function batchPreflight(env,body,tally=null){
  if(tally)tally.preflights++;
- const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report,sync]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json'),loadJSON(env,'sync.json')]);
+ const dryRun=body.dryRun===true,manifestSize=resolveManifestSize(body).size,[profile,report]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,'programme.json')]);
  if(!profile)return {response:json({error:'Taste profile is not configured'},409)};
  const programme=report&&Array.isArray(report.films)?report:{runId:report?.runId||null,films:[]};
  const read=await readQueueHead(env),stored=read.current,revision=read.head?.queueGeneration??null,why=queueAdvanceGate(stored,programme,profile,(await fingerprintRegistryDigests()).registry);
- const priorityDue=!why&&priorityRefreshDue(stored,programme,sync);
+ const priorityOpen=!why&&!!stored&&(stored.priorityBasis==='carried'||stored.priorityBasis==='neutral'||stored.programmeRunId!==programme.runId);
+ const sync=priorityOpen?await loadJSON(env,'sync.json'):null;
+ const priorityDue=priorityOpen&&priorityRefreshDue(stored,programme,sync);
  if(why)return {profile,report:programme,stale:why,priorityDue:false,revision,manifestSize};
  if(!stored)return {profile,report:programme,stale:'queue_shape',priorityDue:false,revision,manifestSize};
  try{
@@ -2436,7 +2441,7 @@ const batchOverflowOf=(pre,extra={})=>batchOverflow({...pre.manifest,bytes:pre.b
 async function batchRefreshQueue(env,body,pre,tally=null){
  let queue=pre.queue,settled=0;const limit=resolveManifestSize(body).size;
  if(pre.stale||pre.priorityDue)queue=await currentPredictionQueue(env,pre.report,pre.profile,body.trigger==='scheduled'?'scheduled':'manual',{force:!pre.stale&&!!pre.priorityDue,fallback:true});
- const context=await advanceContext(env,pre.report,pre.profile);
+ const context=queue?.programmeRunId===pre.report?.runId?{report:pre.report,profile:pre.profile,sync:null,registry:(await fingerprintRegistryDigests()).registry}:await advanceContext(env,pre.report,pre.profile);
  for(let round=0;round<3;round++){
   const selection=await batchSelection(env,{profile:pre.profile,report:pre.report,queue,limit}),settle=[...selection.skipped.missingAdmission,...selection.skipped.alreadyCurrent];
   if(tally){tally.refreshRounds++;tally.scannedFilms+=selection.scanned;}
