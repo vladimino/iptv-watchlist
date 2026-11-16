@@ -199,6 +199,18 @@ function seedFilm(file,id,tmdb,lid){
  sqlite(file,"INSERT INTO film (id,contract_version,updated_at) VALUES ("+q(id)+",1,"+q(T)+");INSERT INTO film_external_id (film_id,scheme,value,trusted,conflicting,provenance_json) VALUES ("+q(id)+",'tmdb',"+q(tmdb)+",1,0,NULL)"+(lid?",("+q(id)+",'letterboxd',"+q(lid)+",1,0,NULL)":"")+";");
 }
 
+function loadScanWorker(env,LetterboxdFacts){
+ const workerCtx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,console,CanonicalRatedAdmission:M,LetterboxdFacts,fetch:async()=>{throw new Error('unexpected fetch');}});
+ vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),workerCtx);
+ workerCtx.ratingsGate=async()=>({active:false,migration:'none'});
+ workerCtx.persistWatchlist=async()=>{};
+ workerCtx.persistEvents=async()=>{};
+ return workerCtx;
+}
+async function putPayload(env,runId,report){
+ await env.BUCKET.put('epg/seal/'+runId+'/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
+}
+
 {
  const file=database('open');
  const env=envOf(file);
@@ -206,7 +218,7 @@ function seedFilm(file,id,tmdb,lid){
  const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
  const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
  const listed=[];
- for(let i=0;i<26;i++){
+ for(let i=0;i<61;i++){
   const lid='f'+String(i).padStart(2,'0'),tmdb=String(2000+i);
   listed.push({id:lid,tmdbId:tmdb});
   seedFilm(file,'film:tmdb:'+tmdb,tmdb,lid);
@@ -215,33 +227,59 @@ function seedFilm(file,id,tmdb,lid){
  seedFilm(file,'film:tmdb:1999','1999','gone');
  await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:'gone',tmdb:'1999'});
  await Facts.applyWatchlistScan({BUCKET:env.BUCKET},{scanId:'prior',observedAt:T0,films:[...listed,{id:'gone',tmdbId:'1999'}]});
- assert.equal(env.BUCKET.records.get('enrichment/view-index.json').gone.watchlist,true);
  let scans=0;
- const LetterboxdFacts={
-  applyWatchlistScan:async(...args)=>{scans++;return Facts.applyWatchlistScan(...args);},
- };
- const workerCtx=vm.createContext({env,Response,URL,URLSearchParams,AbortSignal,Date,Map,Set,JSON,CanonicalRatedAdmission:M,LetterboxdFacts,fetch:async()=>{throw new Error('unexpected fetch');}});
- vm.runInContext(scoped('src/metadata-cache.js','MetadataCache')+'\n'+fs.readFileSync('src/domain/film-person.js','utf8')+'\n'+fs.readFileSync('src/sources.js','utf8')+'\n'+fs.readFileSync('src/worker.js','utf8').replace('export default','globalThis.worker='),workerCtx);
- const run={runId:'scan-26',watchlistObservedAt:T,seal:{phase:'finalize',units:{handover:'ok',watchlist:'ok'},attempts:{}},events:[]};
- const report={films:listed,watchlistCount:26,updatedAt:T};
+ const LetterboxdFacts={applyWatchlistScan:async(...args)=>{scans++;return Facts.applyWatchlistScan(...args);}};
+ const workerCtx=loadScanWorker(env,LetterboxdFacts);
+ const run={runId:'scan-61',stage:'seal',watchlistObservedAt:T,seal:{phase:'finalize',units:{},attempts:{}},events:[],error:undefined};
+ const report={films:listed,watchlistCount:61,updatedAt:T,runId:'scan-61'};
  workerCtx.run=run;workerCtx.report=report;
  await env.BUCKET.put('sync.json',JSON.stringify(run));
- let passes=0;
- for(;passes<8;passes++){
-  try{
-   await vm.runInContext('persistScan(env,run,report)',workerCtx);
-   break;
-  }catch(error){assert.equal(error.code,'rated_admission_incomplete');}
+ await putPayload(env,'scan-61',report);
+ let continues=0,last=null;
+ for(let i=0;i<20;i++){
+  last=await vm.runInContext('sealFinalizeStep(env,run)',workerCtx);
+  if(run.seal?.phase==='finalize'&&!run.seal.units?.scan)continues++;
+  assert.equal(run.error,undefined);
+  if(run.seal?.phase==='queue'||last.stage==='complete')break;
  }
- assert.equal(passes,2,'26 listed + 1 departed need three UNIT_CAP=12 passes');
- assert.equal(scans,1,'applyWatchlistScan once');
+ assert.equal(continues,5,'61 listed + 1 departed need six UNIT_CAP=12 scan slices; five are explicit continues');
+ assert.equal(run.seal.phase,'queue');
+ assert.equal(last.discovery.nextAction,'continue');
+ assert.equal(scans,1);
  assert.equal(env.BUCKET.records.get('enrichment/view-index.json').gone.watchlist,false);
  assert.equal(one(file,"SELECT watchlist FROM film_retention WHERE film_id='film:tmdb:1999'"),0);
- assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),27);
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),62);
  assert.equal(run.ratedAdmissionIntent,undefined);
  assert.equal(run.ratedAdmissionScan,undefined);
- const intentBytes=JSON.stringify(env.BUCKET.records.get('sync.json').ratedAdmissionIntent||[]);
- assert.ok(intentBytes.length<80,'no unbounded intent on the completed run');
+}
+
+{
+ const file=database('prepared');
+ const env=envOf(file);
+ env.BUCKET=factsBucket();
+ const factsCtx=vm.createContext({crypto,TextEncoder,console,Date,JSON,Map,Set,structuredClone});
+ const Facts=vm.runInContext(fs.readFileSync('src/letterboxd-facts.js','utf8')+';LetterboxdFacts',factsCtx);
+ const listed=[];
+ for(let i=0;i<26;i++){
+  const lid='p'+String(i).padStart(2,'0');
+  listed.push({id:lid,tmdbId:String(3000+i)});
+  await Facts.linkFilm({BUCKET:env.BUCKET},{letterboxd:lid,tmdb:String(3000+i)});
+ }
+ let scans=0;
+ const LetterboxdFacts={applyWatchlistScan:async(...args)=>{scans++;return Facts.applyWatchlistScan(...args);}};
+ const workerCtx=loadScanWorker(env,LetterboxdFacts);
+ const run={runId:'prep-26',stage:'seal',watchlistObservedAt:T,seal:{phase:'finalize',units:{},attempts:{}},events:[]};
+ const report={films:listed,watchlistCount:26,updatedAt:T,runId:'prep-26'};
+ workerCtx.run=run;
+ await env.BUCKET.put('sync.json',JSON.stringify(run));
+ await putPayload(env,'prep-26',report);
+ const first=await vm.runInContext('sealFinalizeStep(env,run)',workerCtx);
+ assert.equal(run.seal.phase,'queue');
+ assert.equal(first.discovery.nextAction,'continue');
+ assert.equal(run.ratedAdmissionScan,undefined);
+ assert.equal(scans,1);
+ assert.equal(env.BUCKET.records.get('sync.json').ratedAdmissionScan,undefined);
+ assert.equal(one(file,'SELECT COUNT(*) FROM film_retention'),0);
 }
 
 {

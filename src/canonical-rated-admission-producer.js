@@ -179,6 +179,7 @@ async function applyRetention(env,{origin,event,input,replan,now,policy=RETRY_PO
 
 export const applyFilmAdmission=(env,options)=>applyAdmission(env,options);
 export const applyFilmRetention=(env,options)=>applyRetention(env,options);
+export const ratedAdmissionWriterOpen=env=>producerRouteOpen(env);
 
 export function mergeRatedAdmissionIntent(previous=[],next=[]){
  const map=new Map();
