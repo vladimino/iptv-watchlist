@@ -672,13 +672,14 @@ for(const stage of ['epg','seal']){
  assert.ok(run.indexOf("beginSync(env)")>=0&&run.indexOf('openContinuationStep')>=0);
 }
 
-// 13. Cron coexistence: the executor's ensure, the projector, Ratings and the monitor are independent calls in one scheduled
-// handler; a failing or slow one blocks none of the others, and `ensure` takes no long operation.
+// 13. Cron coexistence: the executor's ensure, Ratings, Discovery reconcile and the monitor are independent calls in one scheduled
+// handler; a failing or slow one blocks none of the others, and `ensure` takes no long operation. AIR-308: the enrichment projector is not a member.
 {
  const worker=fs.readFileSync('src/worker.js','utf8');
  const handler=worker.slice(worker.indexOf('async scheduled('),worker.indexOf('async fetch('));
  assert.match(handler,/Promise\.allSettled\(\[/);
- for(const name of ['runD1EnrichmentProjection','RatingsOrchestration.ensure','EpgOrchestration.ensure','reconcileDiscoveryWorkflow','Monitor.run'])assert.ok(handler.includes(name),name+' is in the tick');
+ for(const name of ['RatingsOrchestration.ensure','EpgOrchestration.ensure','reconcileDiscoveryWorkflow','Monitor.run'])assert.ok(handler.includes(name),name+' is in the tick');
+ assert.doesNotMatch(handler,/runD1EnrichmentProjection/,'the enrichment projector is not in the tick');
  const h=cloudflare();
  h.env.EPG_WORKFLOW.create=async()=>{throw new Error('platform down');};
  const settled=await Promise.allSettled([h.epg.ensure(h.env,{now:Date.parse('2026-11-07T16:00:00Z')}),Promise.resolve('projector'),Promise.resolve('monitor')]);

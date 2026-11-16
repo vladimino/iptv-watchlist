@@ -113,7 +113,8 @@ function seed(programme) {
 const archiveSource = fs.readFileSync('src/admin/letterboxd-archive.js', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
 assert.doesNotMatch(archiveSource, /\benv\.(?!BUCKET\b)\w/);
 assert.doesNotMatch(archiveSource, /\.(put|delete|list)\(|\bfetch\(|console\.|waitUntil|caches\./);
-assert.match(fs.readFileSync('src/worker.js', 'utf8'), /async scheduled\(controller,env,execution\)\{[\s\S]*runD1EnrichmentProjection\(env/);
+assert.match(fs.readFileSync('src/worker.js', 'utf8'), /async scheduled\(controller,env,execution\)\{/);
+assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /runD1EnrichmentProjection\(/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /LetterboxdRatedCandidates|identity-step/);
 
 const view = vm.createContext({});
