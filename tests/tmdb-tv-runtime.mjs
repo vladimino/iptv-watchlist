@@ -18,6 +18,7 @@ assert.equal(spawnSync(process.execPath,['build.mjs'],{stdio:'ignore'}).status,0
 const logs=[],pages=new Map();
 let fetched=[];
 const context=vm.createContext({
+ D1_ENRICHMENT_TEST_HARNESS:true,
  console:{log:line=>{try{logs.push(JSON.parse(line));}catch{logs.push(line);}},warn(){},error(){}},
  Response,Request,Headers,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,structuredClone,setTimeout,clearTimeout,atob,btoa,
  fetch:async url=>{
