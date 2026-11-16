@@ -11,6 +11,7 @@ import {
  ACTIVATION_CONSUMERS,
  EMPTY_CLASSES,
  OPEN_HANDOFF_MIN_VERSION,
+ OPEN_HANDOFF_REFERENCE_MAX,
  OPERATOR_D1_TARGET,
  PRODUCER_WIRING,
  WORKFLOW_FILM_FACTS,
@@ -37,6 +38,7 @@ const openDb=()=>{const file=fresh();sqlite(file,DISCOVERY);return file;};
 const q=(file,sql)=>rows(file,sql)[0];
 
 assert.equal(OPEN_HANDOFF_MIN_VERSION,23);
+assert.equal(OPEN_HANDOFF_REFERENCE_MAX,96);
 assert.equal(ACTIVATION_CONSUMERS.length,CANONICAL_READER_REGISTRY.length);
 const audit=activationAudit();
 assert.equal(audit.consumers.length,CANONICAL_READER_REGISTRY.length);
@@ -117,6 +119,11 @@ assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers
  const mcpLive=await handleOpenHandoffTool(env,{mode:'apply',confirmGo:true,expectedGeneration:1,expectedReference:REF});
  assert.equal(mcpLive.reason,'preflight');
  assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'prepared');
+ const acceptedRef='cutover_accepted/v2:'+'a'.repeat(64);
+ assert.equal(acceptedRef.length,84);
+ const mcpAccepted=await handleOpenHandoffTool(env,{mode:'dry_run',expectedGeneration:1,expectedReference:acceptedRef});
+ assert.equal(mcpAccepted.outcome,'dry_run');
+ await assert.rejects(()=>handleOpenHandoffTool(env,{mode:'dry_run',expectedGeneration:1,expectedReference:'x'.repeat(OPEN_HANDOFF_REFERENCE_MAX+1)}),/film_person_invalid/);
 }
 
 {

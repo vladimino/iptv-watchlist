@@ -96,7 +96,7 @@ const asmKeys=()=>[...w.records.keys()].filter(k=>/\/predictions\/assessments\//
 const verKeys=()=>[...w.records.keys()].filter(k=>/\/predictions\/versions\//.test(k));
 const submit=(items,extra={})=>w.api('batch/submit',{runId:m.runId,epoch:m.lease.epoch,items,...extra});
 const item=(id,a)=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction,...(a===undefined?{}:{assessment:a})});
-const asm=()=>{const a=base();a.sources=a.sources.filter(x=>x.kind!=='metadata');a.sources.forEach(x=>{});a.conflicts[0].positions=[{source:0,author:SECRET+' A',stance:'earned'},{source:0,author:SECRET+' B',stance:'weak'}];return a;};
+const asm=()=>{const a=base();a.sources=a.sources.filter(x=>x.kind!=='metadata');a.sources.forEach(x=>{});a.conflicts[0].positions=[{source:0,author:'Author One',stance:'earned'},{source:0,author:'Author Two',stance:'weak'}];return a;};
 const dumpAll=()=>JSON.stringify([...w.records.entries()].filter(([k])=>!/\/predictions\/assessments\//.test(k)))+JSON.stringify(['prediction_pointer','prediction_current','prediction_history','prediction_lineage','prediction_fingerprint'].map(t=>sql(w.file,'SELECT * FROM '+t)));
 
 // 3. A dry run validates the assessment, reports would_write and writes nothing.
@@ -120,9 +120,9 @@ let firstDigest;
  assert.ok(key.endsWith('/'+body.predictionSha256+'.json'));assert.ok(body.predictionKey.endsWith('/predictions/versions/'+body.predictionSha256+'.json'));assert.ok(w.records.has(body.predictionKey));
  assert.deepEqual(Object.keys(body.confirmed).sort(),['assessmentSha256','fingerprintHash','predictionGeneratedAt','recordedAt','runId','tasteProfile','trigger']);
  assert.deepEqual(Object.keys(body.callerReported).sort(),['conflicts','model','research','sources']);assert.deepEqual(Object.keys(body.assessment).sort(),['assessmentVersion','probability4PlusBasis','ratingBasis','risks','tasteSignals','uncertainties']);
- assert.deepEqual(body.callerReported.conflicts[0].positions.map(x=>[x.source,x.author]),[[0,SECRET+' A'],[0,SECRET+' B']],'both authors are kept under callerReported');assert.equal(body.callerReported.model.id,'synthetic-model');assert.equal(body.confirmed.runId,m.runId);
+ assert.deepEqual(body.callerReported.conflicts[0].positions.map(x=>[x.source,x.author]),[[0,'Author One'],[0,'Author Two']],'both authors are kept under callerReported');assert.equal(body.callerReported.model.id,'synthetic-model');assert.equal(body.confirmed.runId,m.runId);
  console.log('sidecar object: '+new TextEncoder().encode(JSON.stringify(body)).length+' B for a caller assessment of '+new TextEncoder().encode(JSON.stringify(asm())).length+' B');
- assert.ok(!dumpAll().includes(SECRET),'no assessment text in D1, the bundle, the view index, Events or any other object');
+ assert.ok(!dumpAll().includes(SECRET),'ratingBasis stays out of D1, the bundle, the view index, Events and other objects');
  assert.ok(!w.logs.join('\n').includes(SECRET),'no assessment text in any log line');
  firstDigest=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+m.runId+"'")[0].d).submitted;
  assert.notEqual(firstDigest[f1].inputDigest,firstDigest[f2].inputDigest);assert.equal(firstDigest[f1].assessment,'written');assert.equal(firstDigest[f2].assessment,'not_sent');

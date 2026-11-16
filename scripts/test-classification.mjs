@@ -1113,6 +1113,9 @@ export const FILES={
  "prediction-dry-run-isolation.mjs": {
   "suite": "core"
  },
+ "prediction-event-details.mjs": {
+  "suite": "core"
+ },
  "prediction-manifest-size.mjs": {
   "suite": "core"
  },
