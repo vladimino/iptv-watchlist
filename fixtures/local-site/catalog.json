@@ -3,6 +3,7 @@
     {
       "id": "movie-1",
       "tmdbId": "900001",
+      "tmdbLink": {"status": "resolved", "link": {"type": "movie", "id": "900001"}},
       "title": "Movie1",
       "original": "Movie1",
       "year": 2020,

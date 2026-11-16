@@ -28,7 +28,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  await rate(Facts,env,'half',0.5,at(T0-H));
  await Facts.recordFilmFacts(env,'blank',{watched:true,rating:null},{observedAt:at(T0-H),source:'owner'});
  await rate(Facts,env,'elsewhere',3,at(T0-H));
- const run={runId:'run-1',stage:'epg',events:[watchlistEvent([{id:'rated',title:'Rated',year:2019},{id:'half',title:'Half',year:2018},{id:'blank',title:'Blank',year:2017},{id:'unknown',title:'Unknown',year:2016}])],watchlist:[],pending:[]};
+ const run={runId:'run-1',stage:'epg',watchlistEventFixed:true,events:[watchlistEvent([{id:'rated',title:'Rated',year:2019},{id:'half',title:'Half',year:2018},{id:'blank',title:'Blank',year:2017},{id:'unknown',title:'Unknown',year:2016}])],watchlist:[],pending:[]};
  await ctx.persistEvents(env,run,report);
  const event=stored(bucket);
  assert.equal(ratingOf(event,'rated'),4.5,'a stored confirmed rating is shown at the first display');
@@ -74,7 +74,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  assert.equal(bucket.value(QUEUE).films.rated.rating,4);assert.equal(bucket.value(QUEUE).films.later.rating,3.5);
  assert.equal(net.fetches.filter(url=>url.includes('letterboxd.com')).length,0,'the settlement requested nothing either');
  // 4. A replay of the commit writes the same event: nothing is duplicated, no rating is lost.
- const replay={runId:'run-1',stage:'epg',events:[structuredClone(event)],watchlist:[],pending:[]};
+ const replay={runId:'run-1',stage:'epg',watchlistEventFixed:true,events:[structuredClone(event)],watchlist:[],pending:[]};
  await ctx.persistEvents(env,replay,report);
  const again=stored(bucket);
  assert.deepEqual(eventKeys(bucket),[KEY]);assert.equal(ratingOf(again,'later'),3.5);assert.equal(ratingOf(again,'rated'),4);assert.equal(again.at,EVENT_AT);
@@ -85,7 +85,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  const {bucket,env,ctx,Facts}=setup();
  await ctx.writeEvent(env,watchlistEvent([{id:'kept',title:'Kept',year:2000,rating:4.5,ratingObservedAt:at(T0+30000)}]));
  await rate(Facts,env,'kept',2,at(T0-DAY));
- const run={runId:'run-1',stage:'epg',events:[watchlistEvent([{id:'kept',title:'Kept',year:2000}])],watchlist:[],pending:[]};
+ const run={runId:'run-1',stage:'epg',watchlistEventFixed:true,events:[watchlistEvent([{id:'kept',title:'Kept',year:2000}])],watchlist:[],pending:[]};
  await ctx.persistEvents(env,run,report);
  assert.equal(ratingOf(stored(bucket),'kept'),4.5,'a stored confirmed rating wins');
 }
@@ -96,7 +96,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  await rate(Facts,env,'rated',4.5,at(T0-H));
  const failing=key=>key.startsWith('letterboxd/facts/');
  bucket.hooks.beforeGet=async key=>{if(failing(key))throw new Error('facts unavailable');};
- const run={runId:'run-1',stage:'epg',events:[watchlistEvent([{id:'rated',title:'Rated',year:2019}])],watchlist:[],pending:[]};
+ const run={runId:'run-1',stage:'epg',watchlistEventFixed:true,events:[watchlistEvent([{id:'rated',title:'Rated',year:2019}])],watchlist:[],pending:[]};
  await ctx.persistEvents(env,run,report);
  bucket.hooks.beforeGet=null;
  assert.equal(ratingOf(stored(bucket),'rated'),undefined,'the event is written unrated, honestly');
@@ -113,7 +113,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  const {bucket,env,ctx,Facts}=setup();
  const ids=Array.from({length:30},(_,i)=>'f'+String(i).padStart(2,'0'));
  for(const id of ids)await rate(Facts,env,id,4,at(T0-H));
- const run={runId:'run-1',stage:'epg',events:[watchlistEvent(ids.map(id=>({id,title:id,year:2000})),{total:0})],watchlist:[],pending:[]};
+ const run={runId:'run-1',stage:'epg',watchlistEventFixed:true,events:[watchlistEvent(ids.map(id=>({id,title:id,year:2000})),{total:0})],watchlist:[],pending:[]};
  const reads=[];bucket.hooks.beforeGet=async key=>{reads.push(key);};
  await ctx.persistEvents(env,run,report);
  bucket.hooks.beforeGet=null;
@@ -128,7 +128,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  const {bucket,env,ctx,Facts}=setup();
  await rate(Facts,env,'ok',3,at(T0-H));
  const broken=eventKeyOf(EVENT_AT,'run-1-broken'),odd=eventKeyOf(EVENT_AT,'run-1-other');
- const run={runId:'run-1',stage:'epg',events:[
+ const run={runId:'run-1',stage:'epg',watchlistEventFixed:true,events:[
   watchlistEvent([{title:'No id'},{id:'',title:'Empty'},{id:'ok',title:'Ok',year:2001}]),
   {id:'run-1-broken',type:'watchlist',at:EVENT_AT,total:0,added:[],removed:[null,{id:'ok',title:'Ok',year:2001}]},
   {id:'run-1-other',type:'watchlist',at:EVENT_AT,total:0,added:[],removed:'nope'},
@@ -163,7 +163,7 @@ const rate=(Facts,env,id,rating,observedAt)=>Facts.recordFilmFacts(env,id,{watch
  const ingestedAt=T0+69000,scanAt=at(T0+5*60000+56000),key=eventKeyOf(scanAt,'run-fixture-watchlist');
  await Facts.recordFilmFacts(env,'1Vuo',{watched:true,rating:3.5},{observedAt:'2026-11-09T00:00:00.000Z',source:'letterboxd_diary',sourceRef:'diary:viewing:fixture'});
  assert.ok(ingestedAt<Date.parse(scanAt),'the fact is stored before the event time');
- const run={runId:'run-fixture',stage:'seal',events:[{id:'run-fixture-watchlist',type:'watchlist',at:scanAt,total:394,baseline:false,added:[],removed:[{id:'1Vuo',title:'Fixture',year:1991}]}],watchlist:[],pending:[]};
+ const run={runId:'run-fixture',stage:'seal',watchlistEventFixed:true,events:[{id:'run-fixture-watchlist',type:'watchlist',at:scanAt,total:394,baseline:false,added:[],removed:[{id:'1Vuo',title:'Fixture',year:1991}]}],watchlist:[],pending:[]};
  await ctx.persistEvents(env,run,{...report,runId:'run-fixture',updatedAt:scanAt});
  const event=bucket.value(key);
  assert.equal(ratingOf(event,'1Vuo'),3.5,'the removed film has its rating in the first stored event');

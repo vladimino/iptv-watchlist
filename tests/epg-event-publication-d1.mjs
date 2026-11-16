@@ -90,7 +90,8 @@ assert.equal(events().length,0,'an attempt that never published writes no event'
 const first=run.events.find(event=>event.type==='epg');assert.ok(first,'the first scan left its events on the run');
 const firstWatch=run.events.find(event=>event.type==='watchlist');
 assert.deepEqual(firstWatch.removed.map(f=>f.id),['gone']);
-const refKey=JSON.parse(JSON.stringify(run.removalRefs));
+assert.equal(run.removalRefs,undefined,'the reference key is not fixed before the run completes');
+const pendingFilms=JSON.parse(JSON.stringify(run.watchlistRemovalFilms));
 
 // 2. The retry rescans (later time, more shows), stages for real, seals in bounded steps and publishes.
 context.stageSealedGeneration=realStage;
@@ -111,11 +112,12 @@ assert.equal(epg[0].broadcasts,report.films.reduce((count,f)=>count+f.shows.leng
 // 3. The removal event: one, same delta, and the hand-over reference names the key that was written.
 const watch=events().filter(event=>event.type==='watchlist');
 assert.equal(watch.length,1);assert.deepEqual(watch[0].removed.map(f=>f.id),['gone']);assert.equal(watch[0].added.length,0);
+assert.equal(watch[0].at,run.completedAt,'AIR-513: completion time');
 const key='events/items/'+String(9999999999999-Date.parse(watch[0].at)).padStart(13,'0')+'-'+watch[0].id+'.json';
 assert.equal(watch[0].key,key);
-const refs=JSON.parse(JSON.stringify(run.removalRefs??refKey));const list=Array.isArray(refs)?refs:[refs];
-assert.ok(list.every(item=>item.ref.eventKey===key),'every removal reference names the written event');
-assert.deepEqual(JSON.parse(JSON.stringify(refKey)),JSON.parse(JSON.stringify(run.removalRefs??refKey)),'the references did not change across the retry');
+const refs=JSON.parse(JSON.stringify(run.removalRefs));const list=Array.isArray(refs)?refs:[refs];
+assert.ok(list.every(item=>item.ref.eventKey===key&&item.ref.at===watch[0].at),'every removal reference names the written event');
+assert.deepEqual(list[0].films.map(film=>film.id),pendingFilms.map(film=>film.id));
 
 // 4. Repeats add nothing: another finishSync of the same report and a reread of the journal.
 await call('finishSync')(stepEnv(),run,report);

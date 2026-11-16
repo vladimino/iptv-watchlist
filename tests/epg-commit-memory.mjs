@@ -290,11 +290,14 @@ for(const [name,store] of [['chunked',memoryBucket({stream:true,chunk:5})],['jso
  await assert.rejects(call('epgSync')({...env,BUCKET:fail},run),/publish stopped/);
  assert.equal(run.events.length,2);
  assert.equal(run.events[0].removed.length,1);
- const refs=JSON.parse(JSON.stringify(run.removalRefs));
+ const pending=JSON.parse(JSON.stringify(run.watchlistRemovalFilms));
+ assert.equal(run.removalRefs,undefined,'the reference waits for completion');
  fail.put=realPut;
  await call('epgSync')({...env,BUCKET:fail},run);
  assert.equal(run.events.length,2);
- assert.equal(JSON.stringify(run.removalRefs),JSON.stringify(refs));
+ assert.equal(run.events.find(event=>event.type==='watchlist').at,run.completedAt);
+ assert.equal(run.removalRefs.ref.eventKey,'events/items/'+String(9999999999999-Date.parse(run.completedAt)).padStart(13,'0')+'-'+RUN+'-watchlist.json');
+ assert.deepEqual(run.removalRefs.films.map(film=>film.id),pending.map(film=>film.id));
  assert.equal(run.stage,'complete');
 }
 

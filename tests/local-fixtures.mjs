@@ -31,6 +31,8 @@ assert.deepEqual(byKey.get('epg/published-generation.json'),{phase:'published',p
 assert.deepEqual(byKey.get('epg/generations/local-fixture/programme.json'),programme,'the generation copy is the programme');
 assert.deepEqual(byKey.get('epg/generations/local-fixture/discovered-films.json'),{});
 assert.equal(programme.films[0].tmdbId,'900001');
+assert.equal(byKey.get('events/items/'+String(9999999999999-(now-60000)).padStart(13,'0')+'-local-fixture-watchlist.json').type,'watchlist');
+assert.equal(byKey.get('events/items/'+String(9999999999999-(now-30000)).padStart(13,'0')+'-local-fixture-started.json').type,'started');
 assert.equal(programme.films[1].tmdbId,undefined);
 assert.equal(byKey.get('titles.json')['movie-2'].status,'provisional');
 assert.equal(byKey.get('people.json')['actor/actor-2'].name,'Актёр 2');
