@@ -4,7 +4,7 @@
 **Original decision date:** 2026-11-04 (owner disposition `retire after Discovery cutover`); code retirement 2026-11-16  
 **Recorded at:** 2026-11-16  
 **Approval source:** explicit Product Owner disposition on [AIR-232](https://trello.com/c/L0cbxhu5#comment-6aeb2a90774af46a22cc7eb9) (4 Nov 2026) and the implementation kickoff on [the same card](https://trello.com/c/L0cbxhu5#comment-6afb532eb00ab4d090a728d2) (16 Nov 2026); this record authorizes no Cloudflare binding edit  
-**Related work:** [AIR-232](https://trello.com/c/L0cbxhu5); prerequisites [AIR-222](https://trello.com/c/9Y4G9DG6), [AIR-320](https://trello.com/c/4cA5GlJn); archive protocol [ADR 0034](0034-bounded-discovery-ledger.md); drain cap [ADR 0112](0112-bounded-ledger-departure-budget.md); diagnostic canary [ADR 0121](0121-epg-diagnostic-rehearsal-design.md)  
+**Related work:** [AIR-232](https://trello.com/c/L0cbxhu5); prerequisites [AIR-222](https://trello.com/c/9Y4G9DG6), [AIR-320](https://trello.com/c/4cA5GlJn); archive protocol [ADR 0034](0034-bounded-discovery-ledger.md); drain cap [ADR 0112](0112-bounded-ledger-departure-budget.md); diagnostic canary [ADR 0121](0121-epg-diagnostic-rehearsal-design.md). Number **0155** is reserved for concurrent [PR #695](https://github.com/vladimino/iptv-watchlist/pull/695) (AIR-308 enrichment projector).  
 **Supersedes:** [ADR 0034](0034-bounded-discovery-ledger.md) in part: the production Worker variable that selected `full` / `bounded` / `frozen`, the default that an unset binding meant `full`, and rollback R1 as a flag change to `frozen`. The archive objects, fences, payload parity, drain cap, re-entry and write-once rules stay  
 **Superseded by:** None
 
