@@ -34,7 +34,12 @@ const item=(w,id)=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction
  const done=await w.api('complete',{runId:started.data.runId,reason:'manifest_spent'});
  assert.equal(done.status,200,JSON.stringify(done.data).slice(0,240));
  assert.equal(done.data.stopReason,'manifest_spent');
- assert.equal(queueDoc(w).retries[retryId].attempts,3,'complete keeps a retry the manifest did not spend');
+ const after=queueDoc(w);
+ for(const id of picked)assert.equal(after.pending.includes(id)||after.hotPending.includes(id)||after.coldPending.includes(id),false,id+' leaves the stored queue during the seal');
+ assert.equal(after.retries[retryId].attempts,3,'complete keeps a retry the manifest did not spend');
+ const follow=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:5});
+ assert.equal(follow.status,200,JSON.stringify(follow.data).slice(0,240));
+ assert.equal(follow.data.films.length>0&&follow.data.films.every(f=>!picked.includes(f.filmId)),true,'the next batch moves past the films already scored');
  assert.equal(JSON.stringify([...w.records.keys()].sort())===keys||w.records.get('sync.json').stage==='seal',true);
 }
 
@@ -96,4 +101,18 @@ const item=(w,id)=>({filmId:id,fingerprint:w.fingerprint,prediction:w.prediction
  const follow=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'manual',manifestSize:5});
  assert.equal(follow.status,200,JSON.stringify(follow.data).slice(0,240));
  assert.equal(follow.data.films.some(f=>f.filmId===id),false,'a new airtime does not make a current prediction stale');
+}
+
+{
+ const w=await ready(6);
+ const started=await w.api('batch/start',{scope:'watchlist_all',mode:'queued',trigger:'scheduled',manifestSize:5});
+ assert.equal(started.status,200,JSON.stringify(started.data).slice(0,240));
+ const picked=started.data.films.map(f=>f.filmId);
+ await w.ctx.mutatePredictionQueue(w.env,q=>({...q,programmeRunId:'p2',priorityBasis:'completed',trigger:'programme_updated',pending:picked,hotPending:picked,coldPending:[]}),'programme_updated');
+ const submitted=await w.api('batch/submit',{runId:started.data.runId,epoch:started.data.lease.epoch,items:picked.map(id=>item(w,id))});
+ assert.equal(submitted.status,200,JSON.stringify(submitted.data).slice(0,240));
+ const fenced=queueDoc(w);
+ assert.equal(fenced.programmeRunId,'p2');
+ assert.equal(fenced.trigger,'programme_updated');
+ for(const id of picked)assert.equal(fenced.pending.includes(id),true,id+' stays on the newer completed queue');
 }
