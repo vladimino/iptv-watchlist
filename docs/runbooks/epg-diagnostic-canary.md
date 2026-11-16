@@ -1,6 +1,6 @@
 # EPG diagnostic canary: operating, retention, cleanup and rollback
 
-Contract: [orchestration reliability](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0124). Decisions: [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md). This page authorizes nothing: provisioning, applying the diagnostic migrations, copying a dataset, activating the diagnostic markers and every launch, stop and cleanup each need an operation-specific owner GO. A passing canary is not AIR-444 acceptance and is not permission to set `DISCOVERY_LEDGER_MODE=bounded`.
+Contract: [orchestration reliability](../reference/orchestration-reliability.md#epg-diagnostic-canary-the-run-and-its-receipt-air-455-adr-0124). Decisions: [ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md). This page authorizes nothing: provisioning, applying the diagnostic migrations, copying a dataset, activating the diagnostic markers and every launch, stop and cleanup each need an operation-specific owner GO. A passing canary is not AIR-444 acceptance and does not change production archive policy.
 
 ## State machine of a run
 
@@ -57,4 +57,4 @@ Receipts are kept (they are the record of what was run); the report is inside th
 
 ## Rollback
 
-A code revert removes the routes and the Workflow class; it does not delete provisioned diagnostic resources, receipts or a running instance. Order: (1) `stop` an active canary; (2) revert; (3) clean the diagnostic domain and, if the owner decides, delete the diagnostic bucket and database (an owner operation). The production EPG schedule, the Cloudflare mode and `DISCOVERY_LEDGER_MODE` are never touched by this feature.
+A code revert removes the routes and the Workflow class; it does not delete provisioned diagnostic resources, receipts or a running instance. Order: (1) `stop` an active canary; (2) revert; (3) clean the diagnostic domain and, if the owner decides, delete the diagnostic bucket and database (an owner operation). The production EPG schedule, the Cloudflare executor mode and leftover `DISCOVERY_LEDGER_MODE` binding are never touched by this feature.

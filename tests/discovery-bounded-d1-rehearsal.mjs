@@ -17,7 +17,7 @@ if(!process.env.BOUNDED_PERF){
  const state=world();
  await bootstrap(state,0);
  assertParity(state,'day 0 (installed)');
- const plan=[[1,undefined,'full'],[2,'bounded','bounded'],[3,undefined,'frozen'],[4,undefined,'frozen'],[5,'bounded','bounded'],[6,'bounded','bounded'],[7,undefined,'frozen'],[8,'frozen','frozen'],[9,'bounded','bounded'],[10,'bounded','bounded']];
+ const plan=[[1,'full','full'],[2,'bounded','bounded'],[3,'frozen','frozen'],[4,'frozen','frozen'],[5,'bounded','bounded'],[6,'bounded','bounded'],[7,'frozen','frozen'],[8,'frozen','frozen'],[9,'bounded','bounded'],[10,'bounded','bounded']];
  const history=[];let archiveRowsBefore=0;
  for(const [day,mode,effective] of plan){
   const previous=r2Union(state),previousKeys=new Set(previous.doc.items.map(item=>item.key));
@@ -112,7 +112,7 @@ if(!process.env.BOUNDED_PERF){
  {
   const state2=world();
   await bootstrap(state2,0);
-  await commit(state2,1,undefined);await commit(state2,2,'bounded');await commit(state2,3,undefined);
+  await commit(state2,1,'full');await commit(state2,2,'bounded');await commit(state2,3,'frozen');
   const snapshot=()=>JSON.stringify({pointer:state2.bkt.json(POINTER),d1:d1Counts(state2.file),transfer:sql(state2.file,'SELECT state, programme_run_id FROM discovery_transfer')[0],authority:sql(state2.file,'SELECT programme_run_id, published_programme_run_id FROM discovery_authority')[0]});
   const stable=snapshot();
   // (a) The manifest the pointer names is missing: the commit stops before any write.
@@ -160,7 +160,7 @@ if(!process.env.BOUNDED_PERF){
   assertParity(state2,'day 5 (bounded, seal resumed)');
   // (f) Rollback R1: the flag goes back to unset. Nothing is rebuilt or deleted, departures stop, re-entry still reads the archive.
   const pointer=state2.bkt.json(POINTER).manifestId,archiveRows=d1Counts(state2.file).archive||0;
-  await commit(state2,6,undefined);
+  await commit(state2,6,'frozen');
   const rolled=assertParity(state2,'day 6 (rollback to frozen)');
   assert.equal(rolled.doc.ledgerMode,'frozen');
   assert.equal(state2.bkt.json(POINTER).manifestId,pointer,'a frozen commit writes no archive');
@@ -187,7 +187,7 @@ if(!process.env.BOUNDED_PERF){
  const latest=Array.from({length:seen},(_,i)=>row(i,2));
  if(process.env.BOUNDED_CAP)context.ledgerDrainCap=()=>Number(process.env.BOUNDED_CAP);
  const cap=call('ledgerDrainCap')();
- const frozen=await commit(state,2,undefined,{latest});
+ const frozen=await commit(state,2,'frozen',{latest});
  const frozenDoc=state.bkt.objects.get('epg/generations/'+runId(2)+'/discovery-latest.json').bytes.length;
  const round=value=>Math.round(value*10)/10;
  const commits=[];

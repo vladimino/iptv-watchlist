@@ -115,7 +115,7 @@ function worker(state){
  };
  return context;
 }
-const envOf=(state)=>({DB:d1Standin(state.file,{maxBinds:100}),BUCKET:state.bucket,discoveryLease:null,DISCOVERY_LEDGER_MODE:'bounded'});
+const envOf=(state)=>({DB:d1Standin(state.file,{maxBinds:100}),BUCKET:state.bucket,discoveryLease:null});
 
 // ---- build -------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 async function build({dir,active,archived,itemBytes}){

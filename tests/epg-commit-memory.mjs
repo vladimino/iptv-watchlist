@@ -10,6 +10,7 @@ import {webcrypto} from 'node:crypto';
 import {scoped} from '../scripts/bundle-scope.mjs';
 import {loadWorker} from '../scripts/discovery-ledger-offline.mjs';
 import {d1Standin} from './d1-standin.mjs';
+import {withLedgerMode} from './ledger-mode-fixture.mjs';
 
 const context=loadWorker();
 const call=code=>vm.runInContext(code,context);
@@ -173,7 +174,7 @@ function arm(store,previousItems){
 }
 const programmeBody=()=>({runId:RUN,updatedAt:'2026-11-03T16:00:00.000Z',watchlistCount:1,films:[{id:'film1',title:'Схватка',year:1995,shows:[{channelId:'c1',channel:'Кино',start:BASE,end:BASE+60000,epgTitle:'Схватка'}]}],people:{directors:[],actors:[]},stats:{}});
 async function publish(store,latest,db){
- const env={BUCKET:store,DISCOVERY_LEDGER_MODE:'frozen',LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.invalid/guide.xml',...(db?{DB:db}:{})};
+ const env=withLedgerMode({BUCKET:store,LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.invalid/guide.xml',...(db?{DB:db}:{})},'frozen');
  const programme=programmeBody();
  await call('publishGenerationWithLedger')(env,RUN,latest,{programmeRunId:RUN,updatedAt:programme.updatedAt,rawCandidates:latest.length,filteredNonMovies:0},{'programme.json':programme,'discovered-films.json':{}},{updatedAt:programme.updatedAt,films:[{id:'film1',title:'Схватка'}]});
 }
@@ -280,7 +281,7 @@ for(const [name,store] of [['chunked',memoryBucket({stream:true,chunk:5})],['jso
  store.seed('titles.json',{});store.seed('people.json',{});
  const film={id:'film1',title:'Heat',original:'Heat',year:1995,url:'https://letterboxd.com/film/heat-1995/',tmdbId:'165',runtime:170,aliases:['Heat']};
  const run={runId:RUN,stage:'epg',startedAt:'2026-11-03T15:59:24.928Z',pages:1,pending:[],watchlist:[film]};
- const env={BUCKET:store,DISCOVERY_LEDGER_MODE:'frozen',LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.test/guide.xml'};
+ const env=withLedgerMode({BUCKET:store,LETTERBOXD_USERNAME:'fixture',EPG_XML_URL:'https://epg.test/guide.xml'},'frozen');
  store.seed('programme.json',{runId:OLD,updatedAt:'2026-11-02T00:00:00.000Z',films:[],stats:{epgEnd:start}});
  const fail=memoryBucket({stream:false});
  for(const [key,text] of store.objects)fail.seed(key,text);
