@@ -12,7 +12,7 @@ flowchart TD
     scorer["Scorer: title, year,<br/>uniqueness, runtime"]
     score{"Accepted score and margin?"}
     detail["Fetch TMDB movie detail:<br/>id, titles, year, runtime"]
-    gate{"Independent identity gate:<br/>detail, competitors, generation,<br/>no Documentary, no concert recording"}
+    gate{"Identity gate<br/>no Documentary<br/>no concert film"}
     writer["Verified decision and<br/>film/catalogue upsert"]
     unresolved["Persist uncertainty / retryAt;<br/>do not create Film"]
     catalogue[("Film catalogue in R2:<br/>live copy and published generation copy")]
