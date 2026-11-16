@@ -1401,6 +1401,9 @@ export const FILES={
  },
  "watchlist-event-ratings.mjs": {
   "suite": "core"
+ },
+ "xmltv-categories-observation.mjs": {
+  "suite": "core"
  }
 };
 export const SUITES=['core','non-functional','split','support','fixture'];

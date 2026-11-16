@@ -26,7 +26,7 @@ EPG discovery drops obvious series episodes and TV shows before any TMDB Movies 
 
 Words such as `Live`, `концерт`, `документальный`, `интервью` and `шоу` never screen a title: concert and documentary films stay candidates. A concert telecast is refused later by the scored identity gate (`concert_recording`) when XMLTV category and TMDB Music id agree, not here. The screen never queries TMDB TV.
 
-XMLTV `<category>` is copied onto the discovery candidate (`categories`, at most eight values). It does not screen at scan: a `Концерт` category does not drop the title. The identity gate uses it as independent broadcast evidence together with TMDB Music id `10402`.
+XMLTV `<category>` is copied onto the discovery candidate (`categories`, at most eight distinct non-empty values). An empty or absent tag becomes `[]`. It does not screen at scan: a `Концерт` category does not drop the title. The identity gate uses a non-empty array as independent broadcast evidence together with TMDB Music id `10402`. A stored observation that omits `categories` is treated as `[]` until the next EPG scan writes the field.
 
 ## Reversibility
 
