@@ -1865,9 +1865,9 @@ function predictionCapabilityHealth({run,live,now,recentRuns,queue}){
  const workLeft=Number.isInteger(slices.eligibleNow)?slices.eligibleNow>0:false;
  const isHard=fact=>PREDICTION_HARD_STOP.has(fact.reason);
  const isComplete=fact=>fact.status==='complete'||fact.status==='completed';
- const isDrained=fact=>isComplete(fact)&&PREDICTION_DRAINED.has(fact.reason);
+ const isDrained=fact=>isComplete(fact)&&PREDICTION_DRAINED.has(fact.reason)&&(fact.failed||0)===0;
  const isProgress=fact=>(fact.added||0)>0||(fact.updated||0)>0||isDrained(fact);
- const isFailedOnly=fact=>isComplete(fact)&&!isProgress(fact)&&(fact.failed||0)>0;
+ const isFailedOnly=fact=>isComplete(fact)&&(fact.added||0)===0&&(fact.updated||0)===0&&(fact.failed||0)>0;
  const isInterrupt=fact=>{
   if(!fact||isHard(fact)||isProgress(fact)||isFailedOnly(fact))return false;
   if(['partial','blocked','interrupted'].includes(fact.status))return true;

@@ -122,13 +122,23 @@ assert.equal(recovered.integrations.aggregate,'healthy');
 
 clearRuns();
 eligibleQueue();
-putRun({runId:'run-fail1',status:'complete',reason:'parse_error',startedAt:'2026-11-16T12:00:00Z',endedAt:'2026-11-16T12:10:00Z',added:0,failed:3});
-putRun({runId:'run-fail2',status:'complete',reason:'parse_error',startedAt:'2026-11-16T12:20:00Z',endedAt:'2026-11-16T12:30:00Z',added:0,failed:2});
+putRun({runId:'run-fail1',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:00:00Z',endedAt:'2026-11-16T12:10:00Z',added:0,failed:3});
+putRun({runId:'run-fail2',status:'complete',reason:'manifest_spent',startedAt:'2026-11-16T12:20:00Z',endedAt:'2026-11-16T12:30:00Z',added:0,failed:2});
 putRun({runId:'run-fail-kill',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
 const failedOnly=await footer();
-assert.notEqual(sourceOf(failedOnly,'predictions').state,'healthy','failed-only completes are not recovery');
+assert.notEqual(sourceOf(failedOnly,'predictions').state,'healthy','failed-only completes with writer stopReasons are not recovery');
 assert.notEqual(sourceOf(failedOnly,'predictions').code,'ok');
 assert.equal(sourceOf(failedOnly,'predictions').code,'prediction_no_recent_progress');
+
+clearRuns();
+eligibleQueue();
+putRun({runId:'run-before-quota',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T11:10:00Z',endedAt:'2026-11-16T11:18:00Z',added:4});
+putRun({runId:'run-quota-mid',status:'partial',reason:'quota',startedAt:'2026-11-16T12:00:00Z',endedAt:'2026-11-16T12:01:00Z',added:0});
+putRun({runId:'run-failed-complete',status:'complete',reason:'eligible_queue_empty',startedAt:'2026-11-16T12:20:00Z',endedAt:'2026-11-16T12:30:00Z',added:0,failed:4});
+putRun({runId:'run-after-failed-complete',status:'partial',reason:'external_termination',startedAt:'2026-11-16T13:04:00Z',endedAt:'2026-11-16T13:04:00Z',added:0,latest:true});
+const quotaFailedComplete=await footer();
+assert.equal(sourceOf(quotaFailedComplete,'predictions').code,'prediction_blocked','a failed-only eligible_queue_empty complete does not clear quota');
+assert.equal(quotaFailedComplete.lastRun.reason,'external_termination');
 
 clearRuns();
 eligibleQueue();
