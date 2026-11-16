@@ -1,8 +1,8 @@
 # ADR 0154: EPG orders Prediction work and does not authorize it
 
-**Status:** Proposed  
+**Status:** Accepted  
 **Date:** 2026-11-16  
-**Approval source:** The Product Owner principle on [AIR-511](https://trello.com/c/dPPtSZdp), 16 November 2026 (Europe/Madrid), states the product rule: EPG controls prediction priority, not the right to score a film. That principle is not acceptance of this ADR. This revision stays Proposed until the owner accepts this text. No merge before that acceptance.  
+**Approval source:** The Product Owner explicitly accepted the full ADR 0154 text reviewed on PR #694, HEAD `ddb2aae3`, on 16 November 2026 (Europe/Madrid); see the [recorded approval on AIR-511](https://trello.com/c/dPPtSZdp#comment-6afb4c9662ed96bfc94043ec) and [independent technical review](https://github.com/vladimino/iptv-watchlist/pull/694#pullrequestreview-5925283874). This acceptance does not authorize any manual production EPG, Discovery, Prediction, storage or Scheduled Task operation.  
 **Related work:** [AIR-511](https://trello.com/c/dPPtSZdp), [ADR 0113](0113-prediction-runner-advances-persisted-queue.md), [ADR 0142](0142-epg-owned-generation-addressed-discovery-slots.md)  
 **Supersedes:** The clause of [ADR 0113](0113-prediction-runner-advances-persisted-queue.md) decision 1 that treats a different programme run as an advance-gate failure (`programme_changed`)  
 **Superseded by:** None
