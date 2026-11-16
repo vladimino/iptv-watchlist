@@ -9,8 +9,8 @@ import {MemoryBucket} from './memory-bucket.mjs';
 import {d1Standin} from './d1-standin.mjs';
 import {sqliteSync} from './sqlite-session.mjs';
 
-// AIR-496: a TMDB Movies concert recording is not a Film admission. Title screening still
-// leaves Live/Concert titles as candidates; the detail gate withholds verification.
+// A TMDB documentary and a recording of a real concert are not Film admissions. Title screening
+// still leaves Live/Concert titles as candidates; the detail gate withholds verification.
 function harness(response){
  const records=new Map(),etags=new Map();let revision=0,calls=0;
  const env={TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0,BUCKET:{async get(key){return records.has(key)?{etag:etags.get(key),json:async()=>structuredClone(records.get(key))}:null;},async put(key,value,options={}){const condition=options.onlyIf;if(condition?.etagDoesNotMatch==='*'&&records.has(key)||condition?.etagMatches&&condition.etagMatches!==etags.get(key))return null;records.set(key,JSON.parse(value));etags.set(key,String(++revision));return {etag:etags.get(key)};}}};
@@ -26,9 +26,9 @@ const candidate=(title,year,duration,extra={})=>{
  const parts=vm.runInContext('epgTitleParts('+JSON.stringify(title)+')',partsLive);
  return {key:parts.normalizedTitle+'|'+(year??''),title:parts.title,normalizedTitle:parts.normalizedTitle,year:year??parts.year,duration,durations:[duration],seenInLatestSnapshot:true,shows:[{...show,end:now+duration*60000}],lastAiring:now,airings:1,...extra};
 };
-function movieDetail(id,title,year,runtime,genres){
+function movieDetail(id,title,year,runtime,genres,overview='A synopsis'){
  const cards=genres.map(genre=>typeof genre==='object'?genre:{name:genre});
- return new Response(JSON.stringify({id:Number(id),title,original_title:title,release_date:year+'-01-01',runtime,overview:'A synopsis',genres:cards,poster_path:'/poster.jpg',credits:{crew:[{id:1,name:'Director',job:'Director'}],cast:[{id:2,name:'Artist'}]},translations:{translations:[]},alternative_titles:{titles:[]}}));
+ return new Response(JSON.stringify({id:Number(id),title,original_title:title,release_date:year+'-01-01',runtime,overview,genres:cards,poster_path:'/poster.jpg',credits:{crew:[{id:1,name:'Director',job:'Director'}],cast:[{id:2,name:'Artist'}]},translations:{translations:[]},alternative_titles:{titles:[]}}));
 }
 function searchHit(id,title,year){
  return new Response(JSON.stringify({total_pages:1,results:[{id:Number(id),title,original_title:title,release_date:year+'-01-01'}]}));
@@ -36,7 +36,7 @@ function searchHit(id,title,year){
 async function resolve(item,movies){
  const live=harness(url=>{
   for(const movie of movies){
-   if(url.includes('/movie/'+movie.id+'?'))return movieDetail(movie.id,movie.title,movie.year,movie.runtime,movie.genres);
+   if(url.includes('/movie/'+movie.id+'?'))return movieDetail(movie.id,movie.title,movie.year,movie.runtime,movie.genres,movie.overview);
   }
   if(url.includes('/search/movie?')&&movies[0])return searchHit(movies[0].id,movies[0].title,movies[0].year);
   return new Response(JSON.stringify({total_pages:1,results:[]}));
@@ -90,49 +90,100 @@ assert.equal(rieu.records.get('epg/discovered-films.json').tmdb_238858,undefined
 const rieuQueue=rieu.records.get('enrichment/prediction-queue.json');
 assert.ok(!rieuQueue||!(rieuQueue.hotPending||[]).includes('tmdb_238858'));
 
-const sense=await resolve(candidate('Stop Making Sense',1984,88,{categories:['Концерт']}),[{id:841,title:'Stop Making Sense',year:1984,runtime:88,genres:[{id:99,name:'Documentary'},{id:10402,name:'Music'}]}]);
-assert.equal(sense.records.get('epg/discovery-resolution.json')['stop making sense|1984'].status,'verified');
-assert.equal(sense.records.get('epg/discovered-films.json').tmdb_841.canonicalIdentity,'tmdb:841');
-assert.ok(sense.records.get('enrichment/prediction-queue.json').hotPending.includes('tmdb_841'));
-
+function withheld(records,key,id,reason){
+ const decision=records.get('epg/discovery-resolution.json')[key];
+ assert.equal(decision.status,reason==='concert_recording_ambiguous'?'needs_verification':'no_confident_match',key);
+ assert.equal(decision.reason,reason,key);
+ assert.equal(records.get('epg/discovered-films.json')['tmdb_'+id],undefined,key);
+ assert.equal(records.get('epg/discovery-score-preview.json').items[key].reason,reason,key);
+ const queue=records.get('enrichment/prediction-queue.json');
+ assert.ok(!queue||!(queue.hotPending||[]).includes('tmdb_'+id),key);
+ assert.ok(!queue||!(queue.pending||[]).includes('tmdb_'+id),key);
+ assert.equal(records.get('programme.json').runId,'run-1',key);
+ assert.deepEqual(records.get('programme.json').films,[],key);
+ assert.equal(records.has('epg/published-generation.json'),false,key);
+}
+function admitted(records,key,id){
+ assert.equal(records.get('epg/discovery-resolution.json')[key].status,'verified',key);
+ assert.equal(records.get('epg/discovered-films.json')['tmdb_'+id].canonicalIdentity,'tmdb:'+id,key);
+ assert.ok(records.get('enrichment/prediction-queue.json').hotPending.includes('tmdb_'+id),key);
+ assert.equal(records.get('programme.json').runId,'run-1',key);
+ assert.equal(records.has('epg/published-generation.json'),false,key);
+}
+for(const categories of [['Концерт'],['Фильм'],[]]){
+ const sense=await resolve(candidate('Stop Making Sense',1984,88,{categories}),[{id:841,title:'Stop Making Sense',year:1984,runtime:88,genres:[{id:99,name:'Documentary'},{id:10402,name:'Music'}]}]);
+ withheld(sense.records,'stop making sense|1984',841,'documentary_excluded');
+}
+const solo=await resolve(candidate('Free Solo',2018,100,{categories:['Фильм']}),[{id:51497,title:'Free Solo',year:2018,runtime:100,genres:[{id:99,name:'Documentary'}]}]);
+withheld(solo.records,'free solo|2018',51497,'documentary_excluded');
+const soloBare=await resolve(candidate('Free Solo',2018,100),[{id:51497,title:'Free Solo',year:2018,runtime:100,genres:[{id:99,name:'Documentary'}]}]);
+withheld(soloBare.records,'free solo|2018',51497,'documentary_excluded');
+const crimeDoc=await resolve(candidate('The Thin Blue Line',1988,103,{categories:['Фильм']}),[{id:11606,title:'The Thin Blue Line',year:1988,runtime:103,genres:[{id:99,name:'Documentary'},{id:80,name:'Crime'}]}]);
+withheld(crimeDoc.records,'the thin blue line|1988',11606,'documentary_excluded');
+const historyDoc=await resolve(candidate('They Shall Not Grow Old',2018,99),[{id:514754,title:'They Shall Not Grow Old',year:2018,runtime:99,genres:[{id:99,name:'Documentary'},{id:36,name:'History'}]}]);
+withheld(historyDoc.records,'they shall not grow old|2018',514754,'documentary_excluded');
+for(const categories of [[],['Фильм']]){
+ const pompeii=await resolve(candidate('Pink Floyd Live At Pompeii',1972,92,{categories}),[{id:18648,title:'Pink Floyd Live At Pompeii',year:1972,runtime:92,genres:[{id:10402,name:'Music'}]}]);
+ withheld(pompeii.records,'pink floyd live at pompeii|1972',18648,'concert_recording');
+}
 const heat=await resolve(candidate('Heat',1995,170),[{id:949,title:'Heat',year:1995,runtime:170,genres:[{id:18,name:'Drama'},{id:80,name:'Crime'}]}]);
-assert.equal(heat.records.get('epg/discovery-resolution.json')['heat|1995'].status,'verified');
-assert.equal(heat.records.get('epg/discovered-films.json').tmdb_949.tmdbId,'949');
-assert.ok(heat.records.get('enrichment/prediction-queue.json').hotPending.includes('tmdb_949'));
-
-const tvMovie=await resolve(candidate('Made For Television',1999,96),[{id:7001,title:'Made For Television',year:1999,runtime:96,genres:[{id:10770,name:'TV Movie'}]}]);
-assert.equal(tvMovie.records.get('epg/discovery-resolution.json')['made for television|1999'].status,'verified');
-const musicOnly=await resolve(candidate('Pink Floyd Live At Pompeii',1972,92),[{id:18648,title:'Pink Floyd Live At Pompeii',year:1972,runtime:92,genres:[{id:10402,name:'Music'}]}]);
-assert.equal(musicOnly.records.get('epg/discovery-resolution.json')['pink floyd live at pompeii|1972'].status,'verified');
+admitted(heat.records,'heat|1995','949');
+const bohemian=await resolve(candidate('Bohemian Rhapsody',2018,134,{categories:['Фильм']}),[{id:424694,title:'Bohemian Rhapsody',year:2018,runtime:134,genres:[{id:18,name:'Drama'},{id:10402,name:'Music'}],overview:'The story of Freddie Mercury and Queen, including their Live Aid concert.'}]);
+admitted(bohemian.records,'bohemian rhapsody|2018','424694');
+const liveTitle=await resolve(candidate('Live by Night',2016,129),[{id:259693,title:'Live by Night',year:2016,runtime:129,genres:[{id:80,name:'Crime'},{id:18,name:'Drama'}]}]);
+admitted(liveTitle.records,'live by night|2016','259693');
+const fictionMusic=await resolve(candidate('Rhythm of the Road',2011,100),[{id:88001,title:'Rhythm of the Road',year:2011,runtime:100,genres:[{id:10402,name:'Music'}],overview:'A fictional band spends a summer writing songs.'}]);
+admitted(fictionMusic.records,'rhythm of the road|2011','88001');
+const ambiguous=await resolve(candidate('The Concert',2009,119,{categories:['Фильм']}),[{id:19406,title:'The Concert',year:2009,runtime:119,genres:[{id:10402,name:'Music'}],overview:'A synopsis.'}]);
+withheld(ambiguous.records,'the concert|2009',19406,'concert_recording_ambiguous');
+const tvMovie=await resolve(candidate('Made For Television',1999,96,{categories:['Концерт']}),[{id:7001,title:'Made For Television',year:1999,runtime:96,genres:[{id:10770,name:'TV Movie'}]}]);
+admitted(tvMovie.records,'made for television|1999','7001');
 
 {
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-air-496-'));
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'iptv-air-501-'));
  const file=path.join(root,'d1.sqlite');
  const chain=['0001_schema_v1','0002_generation_stage','0003_candidate_show_identity','0004_projection_state','0005_film_sync_state','0006_metadata_cache','0007_prediction_authority','0008_published_epg_authority','0009_owner_review_authority','0010_ratings_authority','0011_discovery_authority'];
  const applied=sqliteSync(['-bail',file],{input:'PRAGMA foreign_keys=ON;\n'+chain.map(name=>fs.readFileSync('migrations/'+name+'.sql','utf8')).join('\n'),encoding:'utf8'});
  if(applied.status!==0)throw new Error(applied.stderr||'migration failed');
  sqliteSync(['-bail',file],{input:"UPDATE discovery_authority SET mode='d1', cutover='open' WHERE id=1;",encoding:'utf8'});
- const RUN='run-496';
+ const RUN='run-501';
  const db=d1Standin(file);
  const env={DB:db,BUCKET:new MemoryBucket(),discoveryLease:null,TMDB_API_READ_ACCESS_TOKEN:'test',TMDB_REQUEST_INTERVAL_MS:0};
  const lease=(await Authority.acquireLease(env,{programmeRunId:RUN})).lease;
  env.discoveryLease=lease;
- const item=candidate('Robbie Williams: Live at the Apple Music Festival',2016,82,{categories:['Концерт']});
- await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease,items:(async function*(){yield item;})()});
+ const catalog=[
+  {id:1326142,title:'Robbie Williams: Live at the Apple Music Festival',year:2016,runtime:82,genres:[{id:10402,name:'Музыка'}],categories:['Концерт']},
+  {id:51497,title:'Free Solo',year:2018,runtime:100,genres:[{id:99,name:'Documentary'}],categories:['Фильм']},
+  {id:18648,title:'Pink Floyd Live At Pompeii',year:1972,runtime:92,genres:[{id:10402,name:'Music'}],categories:[]},
+  {id:424694,title:'Bohemian Rhapsody',year:2018,runtime:134,genres:[{id:18,name:'Drama'},{id:10402,name:'Music'}],categories:['Фильм'],overview:'The story of Freddie Mercury and Queen, including their Live Aid concert.'}
+ ];
+ const items=catalog.map(movie=>candidate(movie.title,movie.year,movie.runtime,{categories:movie.categories}));
+ await Authority.ingestLedger(env,{programmeRunId:RUN,handoff:true,lease,items:(async function*(){for(const item of items)yield item;})()});
  const context=vm.createContext({console,Date,Promise,URL,URLSearchParams,AbortSignal,TextEncoder,TextDecoder,crypto:webcrypto,setTimeout,clearTimeout,
-  fetch(url){const text=String(url);if(text.includes('/movie/1326142'))return Promise.resolve(movieDetail(1326142,'Robbie Williams: Live at the Apple Music Festival',2016,82,[{id:10402,name:'Музыка'}]));if(text.includes('/search/movie?'))return Promise.resolve(searchHit(1326142,'Robbie Williams: Live at the Apple Music Festival',2016));return Promise.resolve(new Response(JSON.stringify({results:[]}),{status:200}));},
+  fetch(url){const text=decodeURIComponent(String(url)).replace(/\+/g,' ');const movie=catalog.find(item=>text.includes('/movie/'+item.id)||text.includes(item.title));if(!movie)return Promise.resolve(new Response(JSON.stringify({results:[]}),{status:200}));if(text.includes('/movie/'+movie.id))return Promise.resolve(movieDetail(movie.id,movie.title,movie.year,movie.runtime,movie.genres,movie.overview));return Promise.resolve(searchHit(movie.id,movie.title,movie.year));},
   DiscoveryAuthority:Authority,pinEpg:async value=>value,refreshPredictionQueue:async()=>null,
   loadJSON:async(target,key)=>{if(key==='programme.json')return {runId:RUN,films:[]};if(key==='epg/published-generation.json')return {phase:'published',programmeRunId:RUN};const routed=await Authority.routeRead(target,key);return routed.handled?routed.value:null;},
   saveJSON:async(target,key,value)=>{const routed=await Authority.routeWrite(target,key,value);if(!routed.handled)throw new Error('not stored');}});
  for(const fileName of ['src/domain/film-person.js','src/domain/scored-resolution.js','src/domain/resolution-acceptance.js','src/sources.js','src/discovery.js'])vm.runInContext(fs.readFileSync(fileName,'utf8'),context);
  const result=await context.resolveDiscoveryChunk(env,{films:[]},4,lease);
  assert.equal(result.paged,true);
+ assert.equal(result.error,null);
  const stored=(await Authority.routeRead(env,'epg/discovery-resolution.json')).value;
- assert.equal(stored[item.key].status,'no_confident_match');
- assert.equal(stored[item.key].reason,'concert_recording');
  const admissions=(await Authority.routeRead(env,'epg/discovered-films.json')).value||{};
+ assert.equal(stored[items[0].key].reason,'concert_recording');
+ assert.equal(stored[items[1].key].reason,'documentary_excluded');
+ assert.equal(stored[items[2].key].reason,'concert_recording');
+ assert.equal(stored[items[3].key].status,'verified');
  assert.equal(admissions.tmdb_1326142,undefined);
+ assert.equal(admissions.tmdb_51497,undefined);
+ assert.equal(admissions.tmdb_18648,undefined);
+ assert.equal(admissions.tmdb_424694.canonicalIdentity,'tmdb:424694');
+ const authority=db.sql("SELECT mode, cutover, programme_run_id FROM published_epg_authority WHERE id=1")[0];
+ assert.equal(authority.mode,'r2');
+ assert.equal(authority.programme_run_id,null);
+ assert.equal(db.sql('SELECT COUNT(*) AS n FROM prediction_queue')[0].n,0);
+ assert.equal(db.sql("SELECT COUNT(*) AS n FROM published_epg_show")[0].n,0);
  await Authority.releaseLease(env,lease);
 }
 
-console.log('Concert broadcast admission: two TMDB concert recordings withheld, concert film and feature admitted, EPG Live/Concert titles unscreened');
+console.log('Documentary and concert-recording admission: excluded identities withheld on R2 and D1, fiction admitted, EPG generation unchanged');
