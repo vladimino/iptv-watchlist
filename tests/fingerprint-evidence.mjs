@@ -240,7 +240,7 @@ assert.equal(call('fingerprintCurrent')(storedPointer),true);
 const proposal=fs.readFileSync('docs/reference/scheduled-tasks.md','utf8');
 assert.match(proposal,/### Fingerprint evidence instruction in the live hourly task \(AIR-335, 2026-11-03\)/);
 assert.doesNotMatch(proposal,/### Proposed fingerprint evidence instruction \(not applied\)/);
-assert.match(proposal,/Dated registry readback, not today's producer/);
+assert.match(proposal,/Live state, not merely a proposal/);
 assert.match(proposal,/Mutable prediction state/);
 assert.match(proposal,/On `prediction_only`, reuse the existing Worker fingerprint/);
 assert.match(proposal,/Do not invent a URL/);
