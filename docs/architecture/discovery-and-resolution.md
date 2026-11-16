@@ -4,7 +4,7 @@ The discovery ledger tracks **observations**, not canonical Film records. Accept
 
 ```mermaid
 flowchart TD
-    epg["Published EPG observation:<br/>title, year, duration, evidence key"]
+    epg["Published EPG observation:<br/>title, year, duration, XMLTV categories, evidence key"]
     ledger[("Candidate ledger and decisions:<br/>R2 while the discovery marker is absent or r2;<br/>D1 only when that marker is d1 and cutover open")]
     eligible{"Current, eligible, non-terminal,<br/>retry allowed?"}
     defer["CAS per-key retryAt fence<br/>before TMDB; not checked"]
