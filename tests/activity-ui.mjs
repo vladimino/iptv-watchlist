@@ -157,6 +157,9 @@ assert.match(vm.runInContext('eventHTML(startedEvent)',context),/Начал см
 context.apiWatchlist={id:'from-api',type:'watchlist',at:'2026-10-23T10:00:00Z',total:1,added:[{id:'heat',title:'Heat',year:1995,tmdb:'165'}],removed:[{id:'gone',title:'Gone',year:1999,tmdb:'4242',rating:4}]};
 const apiHTML=vm.runInContext('eventHTML(apiWatchlist)',context);
 assert.match(apiHTML,/href="\/film\/tmdb_165"/);assert.match(apiHTML,/href="\/film\/tmdb_4242"/);
+context.untrustedTmdb={id:'tv-id',type:'watchlist',at:'2026-10-23T10:00:00Z',total:1,added:[{id:'show',title:'Show',year:1999,tmdbId:'99'}],removed:[]};
+assert.doesNotMatch(vm.runInContext('eventHTML(untrustedTmdb)',context),/href="\/film\/tmdb_99"/);
+assert.match(vm.runInContext('eventHTML(untrustedTmdb)',context),/href="\/film\/show"/);
 assert.match(apiHTML,/Gone \(1999\)<\/a> · 4\.0 ★/);
 assert.match(vm.runInContext('eventHTML(unstartedEvent)',context),/Снял отметку/);
 assert.doesNotMatch(vm.runInContext('eventHTML(unstartedEvent)',context),/href=/);

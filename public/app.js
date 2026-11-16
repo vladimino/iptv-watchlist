@@ -2416,7 +2416,7 @@ function batchV2TerminalHTML(event,delta,outcome,reason,hot,cold){
  const explain=ok||withErrors?'':(reason?`<p class="event-note">${reason}</p>`:'');
  return `<p>${title}</p><p class="event-note">Обработано: ${count(details.processed)}.</p>${remaining}${explain}${predictionDetailsHTML(details)}`;
 }
-// AIR-513. A watchlist or viewing-mark film links to its local page. A verified `tmdb` uses `/film/tmdb_<n>` (the ratings helper).
+// AIR-513. A watchlist or viewing-mark film links to its local page. A stored trusted `tmdb` uses `/film/tmdb_<n>`.
 // Otherwise the stored id is used only when it is a film-route id and is not an unverified `tmdb_` prefix. No title or year is turned into an id.
 function eventFilmHTML(f){
  const title=typeof f?.title==='string'?f.title:'';

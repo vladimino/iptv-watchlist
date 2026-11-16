@@ -680,7 +680,15 @@ const saveJSON=async(env,key,value)=>{
 };
 function confirmedHalfStar(value){const rating=Number(value);return Number.isFinite(rating)&&rating>=.5&&rating<=5&&rating*2%1===0?rating:null;}
 function removalRating(film){const rating=confirmedHalfStar(film?.rating);if(rating==null)return null;const observed=typeof film.ratingObservedAt==='string'&&Number.isFinite(Date.parse(film.ratingObservedAt))?film.ratingObservedAt:null;return observed?{rating,ratingObservedAt:observed}:{rating};}
-function eventTmdb(film){const raw=film?.tmdb??film?.tmdbId;return raw!=null&&/^[1-9]\d{0,11}$/.test(String(raw))?String(raw):null;}
+function trustedMovieTmdbId(film){
+ const id=film?.tmdbId==null?'':String(film.tmdbId),link=film?.tmdbLink;
+ if(!/^[1-9]\d{0,11}$/.test(id)||link?.status!=='resolved'||link.link?.type!=='movie'||String(link.link.id)!==id)return null;
+ return id;
+}
+function eventTmdb(film){
+ if(film?.tmdbId!=null||film?.tmdbLink)return trustedMovieTmdbId(film);
+ return film?.tmdb!=null&&/^[1-9]\d{0,11}$/.test(String(film.tmdb))?String(film.tmdb):null;
+}
 const eventFilm=(film,titles=new Map())=>{const tmdb=eventTmdb(film);return {id:String(film.id),title:(film.titleAuthority==='owner'&&(film.titleRu||film.title))||reviewedTitle(film)?.title||titles.get(String(film.id))||film.title||film.original,year:film.year,...(tmdb?{tmdb}:{})};};
 function eventRemovedFilm(film,titles=new Map()){const rating=removalRating(film);return {...eventFilm(film,titles),...(rating||{})};}
 // AIR-393: titles of the films a Ratings run changed, from what is already stored (the metadata cache and the title dictionary): no
@@ -991,6 +999,7 @@ async function watchlistEventStored(env,run){
  return !!(await loadJSON(env,removalEventKey(event)));
 }
 async function watchlistEventOwed(env,run){
+ if(run?.watchlistEventPending)return true;
  if(Array.isArray(run?.watchlistRemovalFilms)&&run.watchlistRemovalFilms.length)return true;
  if(!run?.watchlistEventFixed)return false;
  return !(await watchlistEventStored(env,run));
@@ -1002,13 +1011,19 @@ async function flushWatchlistEvent(env,run){
  try{
   const event=run.events[index],key=removalEventKey(event),existing=await loadJSON(env,key);
   const started=Date.now(),probe=await storedRemovalRatings(env,event),ms=Date.now()-started;
-  if(existing&&probe.event===event)return true;
+  if(existing&&probe.event===event){delete run.watchlistEventPending;return true;}
   await writeEvent(env,probe.event);
   if(probe.event!==event)run.events[index]=probe.event;
   if(probe.probed)run.removalPublication={probed:probe.probed,rated:probe.rated,ms,...(probe.failed?{failed:true}:{})};
+  delete run.watchlistEventPending;
   try{await saveJSON(env,'sync.json',run);}catch{}
   return true;
- }catch(e){console.error(JSON.stringify({event:'watchlist_event_pending',runId:String(run.runId||'').slice(0,64)}));return false;}
+ }catch(e){
+  run.watchlistEventPending=true;
+  try{await saveJSON(env,'sync.json',run);}catch{}
+  console.error(JSON.stringify({event:'watchlist_event_pending',runId:String(run.runId||'').slice(0,64)}));
+  return false;
+ }
 }
 async function flushEpgEvent(env,run){
  if(!run.epgEventPending)return;

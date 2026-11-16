@@ -44,6 +44,7 @@ const continuation=()=>records.get('epg/resolver-continuation.json');
 const epgFetches=()=>fetches.filter(href=>href==='https://epg.test/guide.xml').length;
 const OLD='23570366-0000-4000-8000-000000000000',NEWER='c0ffee00-0000-4000-8000-000000000000';
 const STALE={stage:'paused',reason:'chunk_budget',at:new Date(Date.now()-86400000).toISOString(),hopId:'33333333-4444-4555-8666-777777777777',remainingChunks:0,nextCatchUpAt:new Date(Date.now()+3600000).toISOString(),retryAt:null,programmeRunId:OLD};
+const movieLink=id=>({status:'resolved',link:{type:'movie',id:String(id)}});
 
 // A store with the previous generation's spent series (the 27 Oct shape) and a sync run in the `epg` stage.
 async function readyToCommit(stale=STALE){
@@ -156,7 +157,7 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
 {
  const key=event=>'events/items/'+String(9999999999999-Date.parse(event.at)).padStart(13,'0')+'-'+event.id+'.json';
  const runB=await readyToCommit();
- set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[{id:'film1',title:'Heat',original:'Heat',year:1995},{id:'gone',title:'Gone',original:'Gone',year:1999,tmdbId:'4242',letterboxdUrl:'https://letterboxd.com/film/gone/'}]});
+ set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[{id:'film1',title:'Heat',original:'Heat',year:1995},{id:'gone',title:'Gone',original:'Gone',year:1999,tmdbId:'4242',tmdbLink:movieLink('4242'),letterboxdUrl:'https://letterboxd.com/film/gone/'}]});
  showCount=1;failPublish=k=>/^epg\/generations\/[^/]+\/programme\.json$/.test(k);
  const firstTry=await post('/api/sync/epg',{runId:runB});assert.ok(firstTry.status>=500);failPublish=null;
  const early=records.get('sync.json').events.find(event=>event.type==='watchlist');
@@ -182,7 +183,7 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
 // 4c. A failed watchlist-event PUT after publication: the complete run keeps the hand-over, writes no event, and a delayed start resumes it.
 {
  const runC=await readyToCommit();
- set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[{id:'film1',title:'Heat',original:'Heat',year:1995},{id:'gone',title:'Gone',original:'Gone',year:1999,tmdbId:'4242',url:'https://letterboxd.com/film/gone/'}]});
+ set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[{id:'film1',title:'Heat',original:'Heat',year:1995},{id:'gone',title:'Gone',original:'Gone',year:1999,tmdbId:'4242',tmdbLink:movieLink('4242'),url:'https://letterboxd.com/film/gone/'}]});
  showCount=1;failPublish=null;
  let watchPuts=0;
  failPublish=key=>{if(String(key).endsWith('-watchlist.json')&&watchPuts<1){watchPuts++;return true;}return false;};
@@ -199,6 +200,34 @@ assert.equal(epgEvents().filter(event=>event.id===runId+'-epg').length,1,'a furt
  assert.equal(start.data.runId,runC,'a delayed start resumes the published run instead of replacing it');
  await post('/api/sync/epg',{runId:runC});await settle();
  assert.equal(watchlistEvents().filter(event=>event.id===runC+'-watchlist').length,1);
+}
+
+// 4d. AIR-513: only a resolved TMDB movie identity is stored; TV, unresolved and mismatched numbers stay off the event and the API.
+{
+ const runD=await readyToCommit();
+ set('watchlist.json',{updatedAt:'2026-01-01T00:00:00.000Z',films:[
+  {id:'film1',title:'Heat',original:'Heat',year:1995},
+  {id:'tv',title:'Show',original:'Show',year:1999,tmdbId:'99',tmdbLink:{status:'resolved',link:{type:'tv',id:'99'}}},
+  {id:'open',title:'Open',original:'Open',year:1998,tmdbId:'11',tmdbLink:{status:'unresolved'}},
+  {id:'mismatch',title:'Mismatch',original:'Mismatch',year:1997,tmdbId:'22',tmdbLink:movieLink('33')},
+  {id:'bare',title:'Bare',original:'Bare',year:1996,tmdbId:'44'},
+  {id:'gone',title:'Gone',original:'Gone',year:1995,tmdbId:'4242',tmdbLink:movieLink('4242')},
+ ]});
+ showCount=1;failPublish=null;
+ const done=await post('/api/sync/epg',{runId:runD});assert.equal(done.status,200,JSON.stringify(done.data));
+ const watch=watchlistEvents().find(event=>event.id===runD+'-watchlist');
+ const byId=Object.fromEntries(watch.removed.map(film=>[film.id,film]));
+ assert.equal(byId.gone.tmdb,'4242');
+ assert.equal(byId.tv.tmdb,undefined);
+ assert.equal(byId.open.tmdb,undefined);
+ assert.equal(byId.mismatch.tmdb,undefined);
+ assert.equal(byId.bare.tmdb,undefined);
+ const page=await read('/api/events');
+ const listed=page.events.find(event=>event.id===runD+'-watchlist')?.removed||[];
+ const api=Object.fromEntries(listed.map(film=>[film.id,film]));
+ assert.equal(api.gone.tmdb,'4242');
+ assert.equal(api.tv.tmdb,undefined);
+ assert.equal(api.bare.tmdb,undefined);
 }
 
 // 5. Older events stay readable and ordered: the previous run's events are untouched.

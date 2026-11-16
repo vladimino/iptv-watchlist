@@ -71,7 +71,12 @@ function load({sync,pipeline,authority={ready:true},workflow=null,db,src=null}){
  const state={sync:sync??null,calls:[],authority:{...authority}};
  const context=vm.createContext({console,Date,Math,JSON,Promise,Intl,URL,crypto:webcrypto});
  vm.runInContext(scoped('src/domain/orchestration-policy.js','OrchestrationPolicy'),context);
- context.loadJSON=async(env,key)=>key==='sync.json'?(state.sync?JSON.parse(JSON.stringify(state.sync)):null):null;
+ context.loadJSON=async(env,key)=>{
+  if(key==='sync.json')return state.sync?JSON.parse(JSON.stringify(state.sync)):null;
+  if(key==='programme.json')return state.programme?JSON.parse(JSON.stringify(state.programme)):null;
+  if(state.objects&&Object.prototype.hasOwnProperty.call(state.objects,key))return JSON.parse(JSON.stringify(state.objects[key]));
+  return null;
+ };
  context.PublishedEpg={readAuthority:async()=>{if(state.authority.throws)throw new Error('unavailable');return state.authority;},repairMirrors:async()=>({mirrored:true,aligned:true,wrote:false})};
  context.postSync=async(env,execution,pathname,body,caller)=>{
   state.calls.push({pathname,body,caller,fence:env?.epgFence??null,trace:env?.epgTrace??null});
@@ -267,6 +272,12 @@ function pipeline({metadataSteps=2,busyOnce=false,fail=null,windowBusy=null}={})
    return {body:{runId:state.sync.runId,stage:state.sync.stage,remaining:state.sync.remaining}};
   }
   if(body.runId!==state.sync.runId)return {status:409,body:{error:'Run id mismatch'}};
+  if(pathname==='/api/sync/epg'&&state.sync.stage==='complete'){
+   const next={...state.sync,updatedAt:at(state.now())};
+   delete next.epgEventPending;delete next.watchlistEventPending;
+   state.sync=next;
+   return {body:{runId:next.runId,stage:'complete'}};
+  }
   if(pathname==='/api/sync/metadata'){
    metadataLeft--;state.sync={...state.sync,cursor:state.sync.cursor+10,remaining:metadataLeft*10,updatedAt:at(state.now()),stage:metadataLeft>0?'metadata':'epg'};
    return {body:{runId:state.sync.runId,stage:state.sync.stage,remaining:state.sync.remaining}};
@@ -493,6 +504,52 @@ for(const stage of ['epg','seal']){
  assert.doesNotMatch(lines.join('\n'),/SECRET/,'no raw error text is logged');
  if(acts[1].edge==='error')assert.ok(!acts.some(e=>e.edge==='exit'&&e.actStep==='act-0'),'a rejected action has no exit');
  assert.ok(seen&&seen.kind,'the Workflow still receives a result');
+}
+
+// 7d. AIR-513: a published `stage: epg` run older than 15 minutes is stepped, not replaced by start.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const h=cloudflare({pipeline:pipeline({metadataSteps:0})});
+ const r=runner(h,{startAt:due});
+ await h.epg.ensure(h.env,{now:due});
+ h.state.sync={runId:'pub',stage:'epg',startedAt:at(due),updatedAt:at(due-20*MIN),remaining:0};
+ h.state.programme={runId:'pub'};
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
+ assert.equal(outcome.reason,'complete');
+ assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,0,'a published stale EPG run is not restarted');
+ assert.ok(h.state.calls.some(c=>c.pathname==='/api/sync/epg'&&c.body.runId==='pub'));
+ assert.equal((await control(h)).publishedRunId,'pub');
+}
+
+// 7e. AIR-513: a same-day complete run that still owes an event is stepped through /api/sync/epg, then finished.
+{
+ const due=Date.parse('2026-11-07T16:00:00Z');
+ const h=cloudflare({pipeline:pipeline({metadataSteps:0})});
+ const r=runner(h,{startAt:due});
+ await h.epg.ensure(h.env,{now:due});
+ h.state.sync={runId:'owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due),updatedAt:at(due-20*MIN),epgEventPending:{id:'owed-epg',type:'epg',at:at(due)},watchlistEventPending:true};
+ const outcome=await follow(h.epg,h.env,r,'2026-11-07');
+ assert.equal(outcome.reason,'complete');
+ assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,0);
+ assert.ok(h.state.calls.some(c=>c.pathname==='/api/sync/epg'&&c.body.runId==='owed'));
+ assert.equal(h.state.sync.epgEventPending,undefined);
+ assert.equal((await control(h)).publishedRunId,'owed');
+}
+
+// 7f. AIR-513: a complete run that still owes an event on a later Madrid day is flushed first; then today's run starts.
+{
+ const due=Date.parse('2026-11-08T16:00:00Z');
+ const h=cloudflare({pipeline:pipeline({metadataSteps:0})});
+ const r=runner(h,{startAt:due});
+ await h.epg.ensure(h.env,{now:due});
+ h.state.sync={runId:'old-owed',stage:'complete',runKey:'2026-11-07',startedAt:at(due-20*H),updatedAt:at(due-20*H),epgEventPending:{id:'old-epg',type:'epg',at:at(due-20*H)}};
+ const outcome=await follow(h.epg,h.env,r,'2026-11-08');
+ assert.equal(outcome.reason,'complete');
+ const paths=h.state.calls.map(c=>c.pathname);
+ assert.equal(paths.filter(p=>p==='/api/sync/start').length,1,'today starts only after the owed event is flushed');
+ assert.equal(paths[0],'/api/sync/epg');
+ assert.equal(h.state.calls[0].body.runId,'old-owed');
+ assert.equal((await control(h)).publishedRunId,'run-1');
 }
 
 // 8. Read-after-unknown: a run of this date that already completed (someone else drove it, or the control write was lost) is the
