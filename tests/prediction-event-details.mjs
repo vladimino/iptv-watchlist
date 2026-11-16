@@ -123,4 +123,57 @@ const webAssessment=()=>({assessmentVersion:1,ratingBasis:'Premise, execution an
  assert.equal(done.data.details.failure[0].exhausted,true);
 }
 
+{
+ const w=await flowWorld({films:6});
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ w.ctx.runnerStarted=async()=>{const error=new Error('prediction_domain_cas');error.code='prediction_domain_cas';error.stage='runner_started';throw error;};
+ const failed=await batch(w,{manifestSize:3,trigger:'scheduled'});
+ assert.equal(failed.status,502,JSON.stringify(failed.data).slice(0,400));
+ assert.equal(failed.data.error,'storage_error');
+ assert.equal(failed.data.presentation,'batch_v2_terminal');
+ assert.equal(failed.data.protocol,'batch_v2');
+ assert.equal(failed.data.stage,'partial');
+ assert.equal(failed.data.title,'Пакет прогнозов прерван');
+ assert.equal(failed.data.details.processed,0);
+ assert.deepEqual(failed.data.details.success,[]);
+ assert.deepEqual(failed.data.details.failure,[]);
+ const runId=failed.data.runId;assert.match(runId,/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+ assert.equal(failed.data.id,'enrichment-'+runId);
+ assert.doesNotMatch(runId,/^blocked-/);
+ const packed=JSON.stringify(failed.data);
+ assert.doesNotMatch(packed,/prediction_domain_cas|runner_started/);
+ const terminals=[...w.records.values()].filter(v=>v&&typeof v==='object'&&v.presentation==='batch_v2_terminal');
+ assert.equal(terminals.length,1,'one terminal Event');
+ assert.equal(terminals[0].id,'enrichment-'+runId);
+ const starts=[...w.records.keys()].filter(k=>k.includes('start-events/'));
+ assert.equal(starts.length,0,'no start Event on a blocked batch persist');
+ const again=await w.ctx.recordRunStop(w.env,runId,'storage_error',{start:true,trigger:'scheduled',protocol:'batch_v2'});
+ assert.equal(again.id,'enrichment-'+runId);
+ assert.equal([...w.records.values()].filter(v=>v&&v.presentation==='batch_v2_terminal').length,1,'replay keeps one Event');
+}
+
+{
+ const w=await flowWorld({films:4});
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const live=await batch(w,{manifestSize:1});assert.equal(live.status,200);
+ const overlap=await batch(w,{manifestSize:1});
+ assert.equal(overlap.status,200);
+ assert.equal(overlap.data.status,'already_running');
+ assert.equal(overlap.data.presentation,undefined);
+ const terminals=[...w.records.values()].filter(v=>v&&v.presentation==='batch_v2_terminal');
+ assert.equal(terminals.length,0,'already_running writes no Event');
+}
+
+{
+ const w=await flowWorld({films:4});
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const start=await batch(w,{manifestSize:1});assert.equal(start.status,200);
+ const stop=await w.api('complete',{runId:start.data.runId,reason:'api_error'});
+ assert.equal(stop.status,200);
+ assert.equal(stop.data.presentation,'batch_v2_terminal');
+ assert.equal(stop.data.title,'Пакет прогнозов прерван');
+ assert.equal(stop.data.details.processed,0);
+ assert.deepEqual(stop.data.details.failure,[]);
+}
+
 console.log('prediction event details: named films, sources, failures and interruption snapshot passed');
