@@ -4,7 +4,7 @@
 // the same derivation as the offline import, and compares each Film and Person with the change key D1 holds for it. Only a changed
 // one is written, in one D1 batch that also stores its new key, so a key never claims a write that did not commit. A Film that no R2
 // source lists, and that no watchlist fact admits, loses its watchlist membership and is marked absent. A Film a watchlist fact admits stays in the view; only its membership is removed.
-// AIR-308 (ADR 0154): the Worker cron does not call this function. D1_ENRICHMENT_WRITE is ignored. A call returns retired
+// AIR-308 (ADR 0155): the Worker cron does not call this function. D1_ENRICHMENT_WRITE is ignored. A call returns retired
 // before any lease, window, R2 read or D1 write unless the offline test harness global is set, which production never sets.
 // Every historical batch still starts with the lease fence, so a harness run that lost its lease writes nothing.
 const D1_ENRICHMENT_PROJECTION='enrichment';

@@ -1,4 +1,4 @@
-# ADR 0154: Retire the hourly enrichment projector and ignore D1_ENRICHMENT_WRITE
+# ADR 0155: Retire the hourly enrichment projector and ignore D1_ENRICHMENT_WRITE
 
 **Status:** Accepted
 **Original decision date:** 2026-11-16

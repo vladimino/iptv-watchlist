@@ -1117,6 +1117,10 @@ export const FILES={
  "prediction-dry-run-isolation.mjs": {
   "suite": "core"
  },
+ "prediction-epg-independence.mjs": {
+  "suite": "core",
+  "note": "EPG seal does not block batch selection, submit or manifest_spent. Airtime does not change fingerprint freshness."
+ },
  "prediction-event-details.mjs": {
   "suite": "core"
  },

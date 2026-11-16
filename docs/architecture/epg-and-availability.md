@@ -25,6 +25,8 @@ flowchart TD
     stale -->|no| reject
 ```
 
+Prediction scoring does not read this publication as permission to run. Hot and cold order use a completed snapshot of these shows, or last-known completed priority for 36 hours, and an unsealed generation does not block the prediction queue ([ADR 0154](../adr/0154-prediction-eligibility-independent-of-epg.md)).
+
 ## Film availability lifecycle
 
 On the published shows a film is, at every instant, in one of three states ([ADR 0114](../adr/0114-film-availability-lifecycle.md), [reference](../reference/domain/film-availability.md)). The state is a **snapshot recomputed from the shows** at each instant and is never stored, so any of the three can be the first one seen; the diagram lists the transitions time or a new generation can cause. A repeat or a show on air never changes `available` while a ready recording exists. A ready archive outranks live and future; a show on air is not an archive until it ends; `soon` turns `available` at the show's effective end (the EPG end, else start plus the film runtime; a schedule-based calculation, not a provider probe).

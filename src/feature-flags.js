@@ -14,7 +14,7 @@ const FEATURE_FLAGS=[
  {name:'REMOVAL_RATING_LOOKUP',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
  // Retired: Diary page 1 on a migrated ratings run does not read this binding (ADR 0075).
  {name:'LETTERBOXD_DIARY_HISTORY',modes:[],default:null,tokens:['off','on'],retired:true,effective:()=>null},
- // Retired (AIR-308, ADR 0154): the hourly cron does not call the projector. The binding is ignored.
+ // Retired (AIR-308, ADR 0155): the hourly cron does not call the projector. The binding is ignored.
  {name:'D1_ENRICHMENT_WRITE',modes:[],default:null,tokens:['off','dry','on'],retired:true,effective:()=>null,note:'AIR-308: retired. A set value, including on, does not start the R2 to D1 Film/Person projector. Removing the Cloudflare binding needs a separate owner approval'},
  {name:'D1_ENRICHMENT_WINDOW',modes:['off','on'],default:'off',tokens:['off','on'],effective:env=>d1EnrichmentWindowMode(env),note:'AIR-383 (ADR 0103), orphan after AIR-308: only the retired projector read this flag, and the cron no longer calls it. A set value does not request projector_window. Discovery still refuses admission while a held row exists. The Cloudflare binding is unchanged by the retirement'},
  {name:'D1_ENRICHMENT_BULK',modes:['off','on'],default:'off',tokens:['off','on'],effective:env=>d1EnrichmentBulkMode(env),note:'ADR 0106, orphan after AIR-308: only the retired projector read this flag, and the cron no longer calls it. A set value selects no production write path. The Cloudflare binding is unchanged by the retirement'},
