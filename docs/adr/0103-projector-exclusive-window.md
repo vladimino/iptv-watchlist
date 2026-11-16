@@ -8,6 +8,8 @@
 **Supersedes:** None. It adds a coordination step in front of the generation fence of [ADR 0056](0056-d1-enrichment-write-through.md) and changes none of that ADR's fences.  
 **Superseded by:** None
 
+**Lifecycle note (2026-11-16):** [AIR-512](https://trello.com/c/w0m6VfaL) retires the production `D1_ENRICHMENT_WINDOW` selector after the projector itself was retired by [ADR 0155](0155-retire-enrichment-projector-cron.md). This record remains the historical window protocol. The `projector_window` table and Discovery's held-window admission fence remain in force independently of that selector.
+
 ## Context
 
 The projector pins the global Discovery generation before it reads and compares it again before it writes; the 21 s diff phase lies between the two points, and Discovery bumps the generation about 17 times a minute with no quiet minute in a 150-minute sample. A retry cannot pass that fence, and a design that relaxes it was rejected by the owner as disproportionately complex. The remaining way to keep the fence exactly as it is is a window in which Discovery does not write.

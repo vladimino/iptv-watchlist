@@ -141,6 +141,14 @@ const padded=entry((await flags({D1_ENRICHMENT_WRITE:' on '})).report,'D1_ENRICH
 assert.deepEqual([padded.raw,padded.valid,padded.issue,padded.effective,padded.retired],[' on ',false,'retired',null,true]);
 const kept=entry((await flags({D1_ENRICHMENT_WRITE:'on'})).report,'D1_ENRICHMENT_WRITE');
 assert.deepEqual([kept.raw,kept.valid,kept.issue,kept.effective],['on',false,'retired',null],'a leftover on does not select a mode');
+for(const name of ['D1_ENRICHMENT_WINDOW','D1_ENRICHMENT_BULK']){
+ const absent=entry(empty.report,name);
+ assert.deepEqual([absent.state,absent.valid,absent.issue,absent.effective,absent.default,absent.modes,absent.retired],['absent',true,null,null,null,[],true],name+' is inert when absent');
+ const set=entry((await flags({[name]:'on'})).report,name);
+ assert.deepEqual([set.state,set.raw,set.valid,set.issue,set.effective,set.default,set.modes,set.retired],['set','on',false,'retired',null,null,[],true],name+' is visibly set but cannot select a production path');
+ const malformed=entry((await flags({[name]:'enabled'})).report,name);
+ assert.deepEqual([malformed.state,malformed.raw,malformed.redacted,malformed.valid,malformed.issue,malformed.effective,malformed.retired],['set',null,true,false,'retired',null,true],name+' redacts an unknown value and stays inert');
+}
 
 // AIR-366: MONITOR is a permanent on/off gate. The retired dry token is not a mode: it is reported invalid and the effective mode is off.
 {
@@ -207,4 +215,4 @@ const bare=await tool({MCP_ACCESS_TEAM_DOMAIN:TEAM,MCP_ACCESS_AUD:AUD,LETTERBOXD
 assert.equal(entry(bare.body.result.structuredContent,'LETTERBOXD_FACTS').state,'set','answers without a bucket binding');
 assert.doesNotMatch(fs.readFileSync('src/feature-flags.js','utf8'),/Object\.(keys|entries|getOwnPropertyNames)\(env|for\s*\(\s*const\s+\w+\s+in\s+env/,'the readout never enumerates env');
 
-console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and the retired switch, unmet requirements, effective modes equal to every consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');
+console.log('Feature flags (ADR 0039): feature_flags lists the registered flags absent and set, literal values only for known tokens, shape-only reports for secrets, near misses, objects and over-long values, retired tokens and selectors including the inert enrichment window and bulk selectors, unmet requirements, effective modes equal to every active consumer, registry parity with the reference and the checker, no storage, no env enumeration, arguments refused and the Access JWT required passed');
