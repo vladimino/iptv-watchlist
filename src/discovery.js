@@ -25,8 +25,10 @@ const PAGED_CHEAP_GROUP=4;
 // The last stretch before the budget ends belongs to the final lease renewal, the status write and the checkpoint.
 const PAGED_CHECKPOINT_RESERVE_MS=5000;
 // Write batches after the last stored candidate: the preview (renewal and write), the final renewal, the status and the checkpoint.
+// The pre-TMDB fairness fence is *work*, not one of these: counting it here multiplied a slow cheap/replay batch
+// across every remaining write and starved candidate TMDB (AIR-492, 16 Nov 2026 production).
 const PAGED_FINAL_WRITES=6;
-// One extra reserved D1 batch so a per-key fairness fence can be stored *before* TMDB, leaving the final writes intact.
+// Kept as documentation of the one pre-TMDB fence write; persistLimit does not multiply it.
 const PAGED_DEFER_WRITES=1;
 // What a D1 write batch is assumed to cost until the chunk has measured one.
 const PAGED_DEFAULT_WRITE_MS=500;
@@ -681,10 +683,13 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  const candidateDeadline=t0+PAGED_CHUNK_BUDGET_MS-PAGED_COMMIT_RESERVE_MS,walkDeadline=candidateDeadline-PAGED_MIN_REQUEST_MS;
  let writeCostMs=0;
  const timedWrite=async write=>{const began=Date.now();try{return await write();}finally{writeCostMs=Math.max(writeCostMs,Date.now()-began);}};
- const writeEstimate=count=>(writeCostMs||PAGED_DEFAULT_WRITE_MS)*count;
- // The final writes (preview, renewal, status, checkpoint) cost as much as D1 makes a write cost, so the reserve for them
- // grows with the slowest write seen: on a slow D1 the chunk stops storing earlier and still checkpoints inside the budget.
- const persistLimit=()=>t0+PAGED_CHUNK_BUDGET_MS-Math.max(PAGED_CHECKPOINT_RESERVE_MS,(PAGED_FINAL_WRITES+PAGED_DEFER_WRITES)*(writeCostMs||PAGED_DEFAULT_WRITE_MS));
+ // A cheap group can be several D1 batches in one timedWrite; using that whole duration for every remaining
+ // checkpoint write (and for TMDB start) is what starved candidates on 16 Nov 2026. Estimates cap at 3 s/write.
+ const cappedWriteMs=()=>Math.min(writeCostMs||PAGED_DEFAULT_WRITE_MS,3000);
+ const writeEstimate=count=>cappedWriteMs()*count;
+ // In-flight unit plus status and checkpoint, capped so a multi-batch cheap group cannot reserve 36 s.
+ const persistLimit=()=>t0+PAGED_CHUNK_BUDGET_MS-Math.max(PAGED_COMMIT_RESERVE_MS,Math.min(15000,3*(writeCostMs||PAGED_DEFAULT_WRITE_MS)));
+ const candidateHeadroom=()=>PAGED_MIN_REQUEST_MS+writeEstimate(2);
  // AIR-374 P3c: the time the canonical Film admission may use inside this chunk: the persist limit minus the cost of three writes (one admission unit is several round trips), so a unit never starts when it could not finish before the checkpoint reserve.
  const canonicalLimit=()=>persistLimit()-writeEstimate(3);
  const lost=(e,failedAt)=>{if(e?.name==='LeaseLostError')e.timings??={...timings,sinceStartMs:Date.now()-t0,failedAt};return e;};
@@ -742,6 +747,14 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  pending.sort((a,b)=>(candidateIsHot(b,nowSelect)?1:0)-(candidateIsHot(a,nowSelect)?1:0)||Number(!!b.year)-Number(!!a.year)||(Number(b.lastAiring)||0)-(Number(a.lastAiring)||0)||String(a.key).localeCompare(String(b.key)));
  const queued=new Set(pending.map(candidate=>candidate.key));
  if(pending.length>limit)pending.length=limit;
+ // Cheap/replay must leave room for one TMDB start while unresolved candidates remain (AIR-492 cheap-starvation).
+ // `writes` is this unit plus any still-pending cheap_pass status write before TMDB.
+ const cheapWorkFits=(writes=1)=>{
+  const nextMs=writeCostMs||PAGED_DEFAULT_WRITE_MS;
+  if(Date.now()+nextMs>Math.min(candidateDeadline,persistLimit()))return false;
+  if(!pending.length)return true;
+  return Date.now()+nextMs*writes+candidateHeadroom()<=persistLimit();
+ };
  let checked=0,added=0,tmdbCalls=0,screenedOut=0,knownAliases=0,touchedWritten=0,cheapRemaining=0,deferred=0;
  const starved=[];
  const deferredKeys=new Set();
@@ -769,7 +782,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   const filmBatch=changedFilms.slice(0,PAGED_CHEAP_FILMS);
   let decisionsAttempted=0,filmsAttempted=0;
   for(let index=0;index<planned.length;index+=PAGED_CHEAP_GROUP){
-   if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
+   if(!cheapWorkFits(2))break;
    const group=planned.slice(index,index+PAGED_CHEAP_GROUP);
    await heartbeat();
    const wrote=await inPhase('cheap_decision',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,Object.fromEntries(group.map(([key,item])=>[key,{previous:item.previous,next:item.next}])),{lease}))));
@@ -781,7 +794,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   }
   const perBatch=Math.max(1,Math.floor((DiscoveryAuthority.STATEMENT_CAP-2)/2));
   for(let index=0;index<filmBatch.length;index+=perBatch){
-   if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit()))break;
+   if(!cheapWorkFits(2))break;
    const group=filmBatch.slice(index,index+perBatch);
    await heartbeat();
    const wrote=await inPhase('cheap_admission',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,Object.fromEntries(group.map(key=>[key,films[key]])),{lease,canonicalDeadline:canonicalLimit()}))));
@@ -791,7 +804,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   }
   cheapRemaining=(cheap.decisionTotal-decisionsAttempted)+(changedFilms.length-filmsAttempted);
   // The status the interrupted-recovery gate reads as this hop's proof that its cheap pass ran.
-  if(Date.now()+writeEstimate(1)<=persistLimit()){
+  if(Date.now()+(writeCostMs||PAGED_DEFAULT_WRITE_MS)+(pending.length?candidateHeadroom():0)<=persistLimit()){
    await heartbeat();
    try{await fence();}catch(e){throw lost(e,'cheap_pass');}
    await timedWrite(()=>saveJSON(env,'epg/discovery-status.json',{schemaVersion:2,stage:'partial',startedAt,at:new Date().toISOString(),programmeRunId:source.programmeRunId||null,hopId,checked:screenedOut+knownAliases,screenedOut,reused:knownAliases,touched:touchedWritten,tmdbCalls:0,added:0,remaining:null,hotRemaining:null,error:null,retryAt:null,checkpoint:'cheap_pass'}));
@@ -804,7 +817,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   for(const row of [...selected.items,...selected.touches]){const key=row.candidate.key;if(seen.has(key))continue;seen.add(key);if(decisions[key]?.status==='verified'&&row.candidate.shows?.length)replay.push(row.candidate);}
   replay.sort((a,b)=>(candidateIsHot(b,nowSelect)?1:0)-(candidateIsHot(a,nowSelect)?1:0)||String(a.key).localeCompare(String(b.key)));
   for(const candidate of replay){
-   if(Date.now()+writeEstimate(1)>Math.min(candidateDeadline,persistLimit())){assignment.replayRemaining++;continue;}
+   if(!cheapWorkFits(1)){assignment.replayRemaining++;continue;}
    if(await assignSlots(candidate.key,'replay_assignment'))assignment.replayed++;
   }
  }
@@ -838,7 +851,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
   return 'saved';
  };
  const persistBudgetDefer=async(candidate,previous)=>{
-  if(Date.now()+writeEstimate(1)>persistLimit())return false;
+  if(Date.now()+writeEstimate(PAGED_DEFER_WRITES)>persistLimit())return false;
   const next=budgetDeferDecision(previous,candidate,Date.now());
   await heartbeat();
   const wrote=await inPhase('candidate_decision',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.writeDecisionDelta(env,{[candidate.key]:{previous:previous??null,next}},{lease}))));
@@ -1254,6 +1267,7 @@ function diagnosticErrorCode(error){
  const typed=typeof error?.code==='string'&&TYPED_DISCOVERY_CODES.has(error.code)?error.code:(typeof error?.message==='string'&&TYPED_DISCOVERY_CODES.has(error.message)?error.message:null);
  if(typed)return typed;
  const name=String(error?.name||''),message=String(error?.message||'');
+ if(message==='wall_budget')return 'wall_budget';
  if(name==='AbortError'||name==='TimeoutError'||/timed? ?out/i.test(message))return 'timeout';
  if(/generation changed/i.test(message))return 'publish_conflict';
  if(/resolver is writing|lease lost/i.test(message))return 'resolver_busy';

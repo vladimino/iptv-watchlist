@@ -24,6 +24,8 @@ Raising `PAGED_CHUNK_BUDGET_MS` or shortening the five-minute backoff is out of 
 4. A hop that starts **no** TMDB candidate (selection overran, or writes so slow that nothing fits) still stores `error: wall_budget` and a five-minute series `retryAt`. TMDB HTTP 429 still sets a series `retryAt` from `Retry-After`.
 5. Eligible-now `remaining` subtracts settled and keys that still carry this hop's fairness fence. `waitingRetry` is the SQL count of current-window unresolved rows ineligible only because of a future `retry_at` with `deferReason: wall_budget`. `deferred` is fences still standing at hop end (overwritten identities are not deferred). Series `error: wall_budget` is only when **no** TMDB call started and no fence landed. The 40 s checkpoint reserve is unchanged; the pre-fence uses the reserved defer write **before** TMDB. A CAS skip is not handled. No new table, index, flag, cron, Task or Workflow.
 
+The 16 November 2026 natural-run failure (cheap/replay `writeMaxMs` starving TMDB with `tmdbCalls=0`) is a **budget-arithmetic** correction under this same decision: checkpoint reserve counts the final writes, not the pre-TMDB fence times the slowest cheap/replay batch, and cheap/replay yield one TMDB start while eligible candidates remain. It does not change fairness/order, `retry_at`, or the 40 s / 16-call caps.
+
 What is **not** decided: changing the 40 s wall or the 16-request cap; hot-first order across the whole ledger; treating `unknown` in historical Workflow records as proven `wall_budget`.
 
 ## Alternatives considered
@@ -45,7 +47,7 @@ Code rollback restores series backoff on zero `checked`. It does not delete `ret
 
 - **Original decision:** [AIR-492](https://trello.com/c/09ys5uPy)
 - **Implementation:** this PR
-- **Dated verification:** [AIR-492 evidence](../evidence/discovery/air-492-budget-starvation-2026-11-15.md)
+- **Dated verification:** [AIR-492 evidence](../evidence/discovery/air-492-budget-starvation-2026-11-15.md); [cheap/replay follow-up](../evidence/discovery/air-492-cheap-replay-starvation-2026-11-16.md)
 - **Uncertainty:** historical Workflow `error=unknown` is not a stored `wall_budget` code; offline tests prove the current main mechanism, not the 13 November exception text
 
 ## Follow-ups
