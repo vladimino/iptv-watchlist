@@ -269,7 +269,7 @@ assert.equal(sourceOf(started,'epg').state,'healthy');
 assert.equal(sourceOf(started,'predictions').state,'healthy');
 assert.equal(writes.length,writesBeforeStart+1,'a failed watchlist start records one sanitized ingest and the footer stays read-only');
 
-// Exhausted chunk_budget after the schedule grace, with ready work and no newer batch, is attention.
+// Exhausted chunk_budget after the discovery-gate grace, with ready work and no newer batch, is attention.
 // It does not claim a usage quota, and it does not repaint ratings, EPG or the last prediction run.
 const footerNow=async()=>await (await context.worker.fetch(new Request('https://site.example/api/enrichment/footer/status'),env)).json();
 const writesBeforeStall=writes.length;
@@ -283,15 +283,15 @@ records.set('enrichment/latest-run.json',{runId:'run-1',status:'complete',trigge
 const budgetPause=(patch={})=>({stage:'paused',reason:'chunk_budget',at:'2026-10-24T23:40:00.000Z',programmeRunId:'programme-dst',remainingChunks:0,nextCatchUpAt:gate,retryAt:null,...patch});
 records.set('epg/resolver-continuation.json',budgetPause());
 records.delete('epg/resolver-lease.json');
-now=Date.parse('2026-10-25T01:30:00.000Z');
+now=Date.parse('2026-10-25T02:30:00.000Z');
 let grace=await footerNow();
-assert.equal(sourceOf(grace,'resolver').state,'waiting','the second nominal trigger is inside the execution slack');
+assert.equal(sourceOf(grace,'resolver').state,'waiting','two hours plus slack after the discovery gate is still waiting');
 assert.equal(sourceOf(grace,'resolver').code,'resolver_waiting');
 assert.equal(grace.integrations.aggregate,'healthy');
-now=Date.parse('2026-10-25T02:05:00.000Z');
+now=Date.parse('2026-10-25T02:45:00.000Z');
 let exactGrace=await footerNow();
 assert.equal(sourceOf(exactGrace,'resolver').state,'waiting','exactly at the grace end stays waiting');
-now=Date.parse('2026-10-25T02:06:00.000Z');
+now=Date.parse('2026-10-25T02:46:00.000Z');
 let stalled=await footerNow();
 const stalledResolver=sourceOf(stalled,'resolver');
 assert.equal(stalledResolver.state,'degraded');

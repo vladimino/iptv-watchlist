@@ -877,46 +877,23 @@ function policyExcludedEnrichmentFilm(film){
 }
 function allEnrichmentFilms(report,catalog){const watchlist=eligibleEnrichmentFilms(report),seen=new Set(),films=[];for(const film of [...watchlist,...Object.values(catalog||{}).sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'))]){if(policyExcludedEnrichmentFilm(film))continue;const identity=film.tmdbId?'tmdb:'+String(film.tmdbId):'legacy:'+String(film.id);if(seen.has(identity))continue;seen.add(identity);films.push(film);}return films.sort((a,b)=>String(a.id).localeCompare(String(b.id),'en'));}
 function modelMetadata(film){return {id:String(film.id),letterboxdUri:film.url?.startsWith('https://letterboxd.com/')?film.url:null,tmdbUri:film.tmdbId?'https://www.themoviedb.org/movie/'+film.tmdbId:null,title:film.title,original:film.original,year:film.year,genres:film.genres,synopsis:film.synopsis,directors:film.directors,actors:film.actors,runtime:film.runtime||null};}
-// Two different times, never interchangeable (see docs/reference/scheduled-tasks.md):
-// - nextCatchUpAt() is the Worker's own earliest-retry gate for discovery `wait`: the next whole UTC hour. It throttles
-//   a new chunk series to one per clock hour and does not depend on any external schedule, so the discovery wait and
-//   fencing rules behave the same whether or not the schedule below is known. It is not a scheduled run.
-// - hourlyTaskRunAt() is the nominal trigger of the external hourly ChatGPT Scheduled Task. The live recurrence lives in
-//   the task registry, which the Worker cannot read; HOURLY_TASK_SCHEDULE is the single statement of the expected one.
-//   It is an estimate (the scheduler can run late), never a gate, and it is null when the schedule is not usable.
+// nextCatchUpAt() is the Worker's own earliest-retry gate for discovery `wait`: the next whole UTC hour. It throttles
+// a new chunk series to one per clock hour. It is not a ChatGPT Scheduled Task time: the Worker does not store or
+// derive the external Predictions registry recurrence (see docs/reference/scheduled-tasks.md).
 const nextCatchUpAt=()=>new Date(Math.floor(Date.now()/3600000+1)*3600000).toISOString();
-const HOURLY_TASK_SCHEDULE=Object.freeze({timeZone:'Europe/Madrid',minute:20});
-// The first instant at or after `from` whose wall-clock minute in the schedule's time zone is the scheduled minute.
-// The minute is read through Intl per candidate, so DST changes and zones with non-hour offsets are handled; on a
-// DST change in a whole-hour zone the hourly instants stay one UTC hour apart.
-function hourlyTaskRunAt(from=Date.now(),schedule=HOURLY_TASK_SCHEDULE){
- if(!Number.isFinite(from)||!schedule||typeof schedule.timeZone!=='string'||!Number.isInteger(schedule.minute)||schedule.minute<0||schedule.minute>59)return null;
- let format;try{format=new Intl.DateTimeFormat('en-GB',{timeZone:schedule.timeZone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'});}catch{return null;}
- const minuteAt=ms=>Number(format.formatToParts(ms).find(part=>part.type==='minute')?.value);
- for(let hour=Math.floor(from/3600000)*3600000;hour<=from+3*3600000;hour+=3600000){
-  const local=minuteAt(hour);if(!Number.isInteger(local))return null;
-  const candidate=hour+((schedule.minute-local+60)%60)*60000;
-  if(candidate>=from&&minuteAt(candidate)===schedule.minute)return new Date(candidate).toISOString();
- }
- return null;
-}
-// Prediction responses: `nextCatchUpAt` is the compatibility name of the same nominal hourly run, not a gate.
-const scheduledRunFields=()=>{const at=hourlyTaskRunAt();return {nextCatchUpAt:at,nextScheduledRunAt:at};};
+// Prediction wire fields keep the names for compatibility. Both are null: the Worker does not know the next
+// external Task invocation. Discovery `wait` uses its own nextCatchUpAt as the gate; these names are not that gate.
+const scheduledRunFields=()=>({nextCatchUpAt:null,nextScheduledRunAt:null});
 // A paused exhausted chunk_budget is not "running" merely because its checkpoint is younger than 48 hours.
-// It stays waiting until two nominal hourly triggers after nextCatchUpAt, plus this slack, have passed.
-// One missed trigger is ordinary lateness. A live resolver lease is running on its own and is not part of
-// the slack. Exactly at the end the state stays waiting. This clock does not read the task registry or any usage account.
+// After the discovery gate it stays waiting for two hours plus this slack. That duration is the Worker's own
+// stall detector for the Cloudflare Discovery Workflow; it is not two ChatGPT Task slots. A live resolver lease
+// is running on its own and is not part of the slack. Exactly at the end the state stays waiting. This clock
+// does not read the task registry or any usage account, and millisecond addition is independent of DST.
 const RESOLVER_PROGRESS_EPOCHS=2;
 const RESOLVER_PROGRESS_SLACK_MS=45*60*1000;
-function resolverProgressGraceEnd(gateMs,schedule=HOURLY_TASK_SCHEDULE){
+function resolverProgressGraceEnd(gateMs){
  if(!Number.isFinite(gateMs))return null;
- let at=gateMs,nominal=null;
- for(let epoch=0;epoch<RESOLVER_PROGRESS_EPOCHS;epoch++){
-  nominal=hourlyTaskRunAt(at,schedule);
-  if(!nominal)return null;
-  at=Date.parse(nominal)+1;
- }
- const end=Date.parse(nominal)+RESOLVER_PROGRESS_SLACK_MS;
+ const end=gateMs+RESOLVER_PROGRESS_EPOCHS*3600000+RESOLVER_PROGRESS_SLACK_MS;
  return Number.isFinite(end)?end:null;
 }
 // The profile rule (ADR-0031) is always selective: the shared evaluator keeps a prediction that no published, owner-approved
@@ -1897,10 +1874,10 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
  if(continuation?.stage==='complete'){const at=integrationTime(continuation.at);if(at)resolverConfirmed.push({at,current:resolverMatches(continuation.programmeRunId,reportRunId)});}
  const byTime=(a,b)=>Date.parse(a)-Date.parse(b),priorResolverSuccess=resolverConfirmed.map(item=>item.at).sort(byTime).at(-1)||null,currentResolverSuccess=resolverConfirmed.filter(item=>item.current).map(item=>item.at).sort(byTime).at(-1)||null;
  const resolverProgress=()=>{const elapsed=age(continuation?.at);return integrationEntry('resolver','source',elapsed>INTEGRATION_STALE_MS?'stale':'running',elapsed>INTEGRATION_STALE_MS?'stale':'running',priorResolverSuccess,null);};
- // Exhausted chunk_budget is a schedule gate, not a live writer. Waiting is not attention. The stall code
+ // Exhausted chunk_budget is a discovery wait gate, not a live writer. Waiting is not attention. The stall code
  // means a same-generation batch was stored and none newer than the gate was. A missing status, an unusable
  // checkpoint or batch time, or a batch from another generation is unknown evidence, not that code, and the
- // code never asserts an external usage quota.
+ // code never asserts an external usage quota or a ChatGPT Task miss.
  const chunkBudgetRecognition=()=>{
   const skew=5*60*1000,skewed=value=>Number.isFinite(value)&&value>now+skew;
   const checkpoint=integrationTime(continuation?.at),checkpointMs=checkpoint?Date.parse(checkpoint):NaN,gate=integrationTime(continuation?.nextCatchUpAt),gateMs=gate?Date.parse(gate):NaN;
@@ -2035,7 +2012,7 @@ async function footerStatus(env){
  const live=run?.status==='running'&&lease?.runId===run.runId&&lease.expiresAt>Date.now(),summary=run?runSummary(run):null;
  const runStatus=!run?'idle':live?'running':run.status==='running'?'blocked':run.status==='partial'?'blocked':run.status==='complete'?'completed':run.status||'idle';
  const rawReason=run?.stopReason||run?.reason,reason=['queue_empty','eligible_queue_empty','retry_backoff'].includes(rawReason)?rawReason:safePredictionReason(rawReason);
- return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:hourlyTaskRunAt()},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease}),...(degraded.length?{degraded:[...degraded]}:{})};
+ return {schemaVersion:1,generatedAt:new Date().toISOString(),profile:profile?{version:profile.version,updatedAt:profile.updatedAt}:null,collection,recommendations:{newUnseen},coverage:coverageReadable?{...coverage,localPercent:coveragePercent(coverage.currentPredictionsTotal,coverage.confirmedFilmsTotal),windowPercent:coveragePercent(coverage.windowCurrentPredictions,coverage.windowFilmsTotal),windowPendingTotal:coverage.windowFilmsTotal-coverage.windowCurrentPredictions}:{...coverage,localPercent:null,windowPercent:null,windowPendingTotal:null},predictions:{pendingHot:queue?.hotRemaining??difference(coverage.windowFilmsTotal,coverage.windowCurrentPredictions),pendingCold:queue?.coldRemaining??coverage.pendingOffWindowTotal,outstanding:slices.outstanding,eligibleNow:slices.eligibleNow,deferredByRetry:slices.deferredByRetry,retryExhausted:slices.retryExhausted,nextRetryAt:slices.nextRetryAt,pendingOffWindow:coverage.pendingOffWindowTotal,currentBatch:live?{size:run.batchSize??run.selectedIds?.length??null}:null,nextBatchSize:queue?.adaptiveBatch?.batchSize??0,nextScheduledRun:null},epgTmdb:{recognizedFilms:recognized?recognized.size:null,pendingRecognition,historicalUnresolved,ledgerTotal:counts?counts.ledgerTotal:null,confirmedMovies:coverage.confirmedFilmsTotal,cacheOffWindow:coverage.cacheOffWindowTotal,epgStart:report?.stats?.epgStart??null,epgEnd:report?.stats?.epgEnd??null,channels:report?.stats?.channels??null,checkedTransmissions:report?.stats?.scanned??null},watchlist:{films:report?(report.watchlistCount??report.films?.length??0):null,updatedAt:report?.watchlistUpdatedAt||report?.updatedAt||null,titleMissing:report?.stats?.titleMissing??0,titleProvisional:report?.stats?.titleProvisional??0,metadataMissing:report?.stats?.metadataMissing??0},lastRun:run?{status:runStatus,reason,startedAt:run.createdAt||null,finishedAt:run.completedAt||null,added:summary?.added||0,failed:summary?.failed||0}:null,integrations:integrationHealth({sync,ratings,enabled:false,report,continuation,discoveryStatus,run,live,now:Date.now(),watchlistIngest,ratingsRun,ratingsBlocked,discoveryReady:counts?counts.readyNow:null,resolverLease}),...(degraded.length?{degraded:[...degraded]}:{})};
 }
 function queueLaneIds(queue){
  const hot=(queue.hotPending||[]).filter(id=>!retryBudgetExhausted(queue.retries?.[id]));

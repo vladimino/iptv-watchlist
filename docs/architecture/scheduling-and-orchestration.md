@@ -371,7 +371,7 @@ The hourly cron still runs the D1 enrichment projector for canonical Film/Person
 
 ## Timing and authority
 
-The timetable and enabled status belong to the external automation registry. The Worker states only the expected hourly trigger (`:20` Europe/Madrid) for display and keeps it apart from its own discovery wait gate; see [Scheduled Task timing](../reference/scheduled-tasks.md#timing-nominal-trigger-versus-server-gate). Historical records of successful scheduling are not a live status check; production task changes or manual invocations require separate owner approval. A GitHub deployment does not trigger any of these workflows.
+The timetable and enabled status belong to the external automation registry. The Worker does not store that recurrence and does not display a next Task time; it keeps its own discovery wait gate apart from registry clocks; see [Scheduled Task timing](../reference/scheduled-tasks.md#timing-nominal-trigger-versus-server-gate). Historical records of successful scheduling are not a live status check; production task changes or manual invocations require separate owner approval. A GitHub deployment does not trigger any of these workflows.
 
 ## Ratings executor implementation (AIR-347)
 
