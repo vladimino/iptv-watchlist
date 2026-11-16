@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {applyFilmFacts} from '../src/canonical-producer-adapters.js';
+import {filmFactsOf} from '../src/canonical-producer-workflow.js';
 import {EMPTY_CLASSES as PRODUCER_EMPTY_CLASSES,PRODUCER_WIRING as PRODUCER_WIRING_SOURCE,handoffReadiness} from '../src/canonical-producers.js';
 import {grantProjectorWindow,requestProjectorWindow} from '../src/discovery-authority.js';
 import {projectorExpectation} from '../src/film-person-authority.js';
@@ -54,9 +55,18 @@ assert.ok(!audit.producers.find(item=>item.name==='metadata_sync').wired);
 assert.ok(!audit.producers.find(item=>item.name==='rated_admission_retention').wired);
 const workflowSrc=fs.readFileSync('src/canonical-producer-workflow.js','utf8');
 assert.match(workflowSrc,/export function filmFactsOf\(film,watchlisted\)/);
-assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.metadata/);
-assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.dimensions/);
+assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.metadata=/);
+assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/sealedDimension/);
 assert.match(workflowSrc.slice(workflowSrc.indexOf('export function filmFactsOf'),workflowSrc.indexOf('function idsOf')),/facts\.sync=/);
+{
+ const clockOnly=filmFactsOf({id:'x',canonicalIdentity:'tmdb:1',original:'O',updatedAt:'2026-01-02T00:00:00.000Z'},true);
+ assert.equal(clockOnly.metadata,undefined);
+ assert.equal(clockOnly.dimensions,undefined);
+ assert.equal(clockOnly.sync,undefined);
+ const noProvenance=filmFactsOf({id:'x',canonicalIdentity:'tmdb:1',original:'O',metadataAt:'2026-01-01T00:00:00.000Z',dimensions:{identity:{dimension:'identity',status:'provisional',source:'tmdb',sourceVersion:null,provenance:null,value:'tmdb:1',updatedAt:'2026-01-01T00:00:00.000Z',attempts:0,nextAction:'none'}}},true);
+ assert.ok(noProvenance.metadata);
+ assert.equal(noProvenance.dimensions,undefined);
+}
 assert.equal(proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:false},described:{name:OPERATOR_D1_TARGET.databaseName,uuid:OPERATOR_D1_TARGET.databaseId}}).ok,true);
 assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,endpointOverride:true},described:{name:OPERATOR_D1_TARGET.databaseName,uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
 assert.ok(!proveOperatorTarget({target:{...OPERATOR_D1_TARGET,databaseId:'00000000-0000-0000-0000-000000000000',endpointOverride:false},described:{name:'iptv',uuid:OPERATOR_D1_TARGET.databaseId}}).ok);
@@ -69,6 +79,12 @@ const bundled=fs.readFileSync('build.mjs','utf8');
 assert.match(bundled,/film-person-open-handoff/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/film-person-open-handoff/);
 assert.doesNotMatch(fs.readFileSync('src/worker.js','utf8'),/canonical-producers/);
+{
+ const worker=fs.readFileSync('src/worker.js','utf8');
+ assert.match(worker,/async function saveCanonicalMirror\(env,key,value\)\{\n if\(await frozenCanonicalMirrorsLocked\(env\)\)return false;\n await saveJSON\(env,key,value\);\n return true;\n\}/);
+ assert.equal([...worker.matchAll(/saveCanonicalMirror\(env,'(titles|people)\.json'/g)].length,4);
+ assert.doesNotMatch(worker.replace(/async function saveCanonicalMirror[\s\S]*?return true;\n\}/,''),/saveJSON\(env,'(titles|people)\.json'/);
+}
 
 {
  const file=openDb();

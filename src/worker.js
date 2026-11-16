@@ -69,13 +69,20 @@ async function publishedOwnerReviews(env){
 const TITLE_READ_REFUSALS=['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'];
 const titleReadGate=env=>typeof CanonicalCatalogReader==='undefined'?null:CanonicalCatalogReader.catalogReaderGate(env);
 // Frozen titles.json / people.json stay R2 only while the Film/Person marker is not open. At open (and held / unreadable) the
-// Producer Workflow is the writer; these sync steps must not refresh the frozen mirrors.
+// Producer Workflow is the writer; these sync steps must not refresh the frozen mirrors. The lock is re-read at the write, after any
+// localization await, so a prepared→open flip mid-step cannot land a canonical R2 put.
 async function frozenCanonicalMirrorsLocked(env){
  if(typeof CanonicalCatalogReader==='undefined')return false;
+ if(typeof CanonicalCatalogReader.canonicalMirrorsWritable==='function')return !(await CanonicalCatalogReader.canonicalMirrorsWritable(env));
  try{
   const gate=await CanonicalCatalogReader.catalogReaderGate(env);
   return gate.mode==='d1';
  }catch{return true;}
+}
+async function saveCanonicalMirror(env,key,value){
+ if(await frozenCanonicalMirrorsLocked(env))return false;
+ await saveJSON(env,key,value);
+ return true;
 }
 async function localizedTitleStore(env,pinned,gate,films){
  if(!gate)return (await loadJSON(pinned,'titles.json'))||{};
@@ -740,11 +747,11 @@ async function metadataSync(env,run){
  const freeze=await frozenCanonicalMirrorsLocked(env);
  const titles=freeze?{}:await loadJSON(env,'titles.json')||{};const titleBatch=run.watchlist.filter(f=>ids.includes(f.id));const localizationMode=metadataLocalizationMode(env);
  try{recordLifecycle(run,'metadata',localizationMode,await localizeFilmTitles(titleBatch,titles,localizationMode));}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
- if(!freeze)await saveJSON(env,'titles.json',titles);
+ await saveCanonicalMirror(env,'titles.json',titles);
  const people=freeze?{}:await loadJSON(env,'people.json')||{};const batch=run.watchlist.filter(f=>creditsChanged.has(f.id)&&f.peopleVersion===1);
  try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  for(const f of batch)cache[f.id]=f;
- if(!freeze)await saveJSON(env,'people.json',people);
+ await saveCanonicalMirror(env,'people.json',people);
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
 // AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so
@@ -1772,9 +1779,9 @@ async function epgSync(env,run){
  await epgWindowPrecheck(env);
  const freeze=await frozenCanonicalMirrorsLocked(env);
  const titles=freeze?{}:await loadJSON(env,'titles.json')||{};
- try{await localizeFilmTitles(run.watchlist,titles,'on');if(!freeze)await saveJSON(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
+ try{await localizeFilmTitles(run.watchlist,titles,'on');await saveCanonicalMirror(env,'titles.json',titles);}catch(e){run.titleLocalizationErrors=(run.titleLocalizationErrors||0)+1;}
  const people=freeze?{}:await loadJSON(env,'people.json')||{};
- try{await localizeByLetterboxd(run.watchlist,people);if(!freeze)await saveJSON(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
+ try{await localizeByLetterboxd(run.watchlist,people);await saveCanonicalMirror(env,'people.json',people);}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  applyEpgLocalization(run.watchlist,people);
  // AIR-263: the source fetch and the scan are one traced phase; an error logs `error` and rethrows unchanged.
  const sources=sourceConfig(env);

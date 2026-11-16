@@ -49,17 +49,26 @@ function canonicalPersonId(raw){
  return s.startsWith('person:')?s:'person:'+s;
 }
 function clockOf(value){return typeof value==='string'&&value.length?value:null;}
+function plain(value){return !!value&&typeof value==='object'&&!Array.isArray(value);}
+function sealedDimension(raw,name){
+ if(!plain(raw)||raw.dimension!==name||typeof raw.status!=='string'||!clockOf(raw.updatedAt)||!plain(raw.provenance))return null;
+ return {
+  dimension:name,status:raw.status,source:typeof raw.source==='string'?raw.source:null,sourceVersion:raw.sourceVersion??null,
+  provenance:raw.provenance,value:raw.value??null,updatedAt:clockOf(raw.updatedAt),attempts:Number.isInteger(raw.attempts)?raw.attempts:0,
+  nextAction:typeof raw.nextAction==='string'?raw.nextAction:'none',...(typeof raw.authority==='string'?{authority:raw.authority}:{}),
+ };
+}
 export function filmFactsOf(film,watchlisted){
  const facts={watchlist:watchlisted,film:{contractVersion:1,canonicalIdentity:film?.canonicalIdentity||null,originalTitle:film?.original||film?.title||null}};
- const updatedAt=clockOf(film?.metadataAt)||clockOf(film?.updatedAt)||clockOf(film?.synopsisFetchedAt);
- if(updatedAt){
-  facts.metadata={schemaVersion:1,year:film.year??null,runtime:film.runtime??null,synopsis:film.synopsis??null,poster:film.poster??null,url:film.url??null,genres:Array.isArray(film.genres)?film.genres:[],peopleVersion:film.peopleVersion??null,payload:{},r2Key:null,contentSha256:null,updatedAt};
-  facts.dimensions={
-   identity:{dimension:'identity',status:'provisional',source:'tmdb',sourceVersion:null,provenance:null,value:film.canonicalIdentity||null,updatedAt,attempts:0,nextAction:'none'},
-   metadata:{dimension:'metadata',status:'provisional',source:'letterboxd',sourceVersion:null,provenance:null,value:null,updatedAt,attempts:0,nextAction:'none'},
-  };
- }
- const sync={metadataAt:clockOf(film?.metadataAt),synopsisFetchedAt:clockOf(film?.synopsisFetchedAt),peopleNamesVersion:Number.isInteger(film?.peopleNamesVersion)?film.peopleNamesVersion:null,peopleLocalizedAt:clockOf(film?.peopleLocalizedAt)};
+ const metadataAt=clockOf(film?.metadataAt);
+ if(metadataAt)facts.metadata={schemaVersion:1,year:film.year??null,runtime:film.runtime??null,synopsis:film.synopsis??null,poster:film.poster??null,url:film.url??null,genres:Array.isArray(film.genres)?film.genres:[],peopleVersion:film.peopleVersion??null,payload:{},r2Key:null,contentSha256:null,updatedAt:metadataAt};
+ const dimensions={};
+ const identity=sealedDimension(film?.dimensions?.identity,'identity');
+ const metadataDim=sealedDimension(film?.dimensions?.metadata,'metadata');
+ if(identity)dimensions.identity=identity;
+ if(metadataDim)dimensions.metadata=metadataDim;
+ if(identity||metadataDim)facts.dimensions=dimensions;
+ const sync={metadataAt,synopsisFetchedAt:clockOf(film?.synopsisFetchedAt),peopleNamesVersion:Number.isInteger(film?.peopleNamesVersion)?film.peopleNamesVersion:null,peopleLocalizedAt:clockOf(film?.peopleLocalizedAt)};
  if(sync.metadataAt||sync.synopsisFetchedAt||sync.peopleNamesVersion!=null||sync.peopleLocalizedAt)facts.sync=sync;
  return facts;
 }

@@ -23,7 +23,15 @@ export const OPERATOR_D1_TARGET=Object.freeze({
  databaseId:'3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb',
  endpoint:'https://api.cloudflare.com/client/v4',
 });
-export function workflowFactsProbe(sample=filmFactsOf({id:'probe',tmdbId:1,canonicalIdentity:'tmdb:1',original:'O',title:'T',metadataAt:'2026-01-01T00:00:00.000Z',synopsisFetchedAt:'2026-01-01T00:00:00.000Z',peopleNamesVersion:2,peopleLocalizedAt:'2026-01-01T00:00:00.000Z',year:1999,runtime:90,synopsis:'s',poster:'p',url:'u',genres:[]},true)){
+const WORKFLOW_FACTS_SAMPLE={
+ id:'probe',tmdbId:1,canonicalIdentity:'tmdb:1',original:'O',title:'T',metadataAt:'2026-01-01T00:00:00.000Z',synopsisFetchedAt:'2026-01-01T00:00:00.000Z',
+ peopleNamesVersion:2,peopleLocalizedAt:'2026-01-01T00:00:00.000Z',year:1999,runtime:90,synopsis:'s',poster:'p',url:'u',genres:[],
+ dimensions:{
+  identity:{dimension:'identity',status:'resolved',source:'tmdb',sourceVersion:'tmdb:1',provenance:{authority:'automatic'},value:'tmdb:1',updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none'},
+  metadata:{dimension:'metadata',status:'resolved',source:'letterboxd',sourceVersion:'lb:1',provenance:{authority:'automatic'},value:null,updatedAt:'2026-01-01T00:00:00.000Z',attempts:1,nextAction:'none'},
+ },
+};
+export function workflowFactsProbe(sample=filmFactsOf(WORKFLOW_FACTS_SAMPLE,true)){
  const present=[];
  if(sample&&sample.watchlist!=null)present.push('watchlist');
  if(sample?.film?.canonicalIdentity!=null)present.push('canonicalIdentity');
@@ -82,7 +90,7 @@ export function activationAudit(){
  const consumers=CANONICAL_READER_REGISTRY.map(classifyConsumer);
  const atomic=kind=>{for(const spec of PRODUCER_OPERATIONS.values())if(spec.operation===kind&&spec.atomic===true)return true;return false;};
  const producers=PRODUCER_WIRING.map(item=>({name:item.name,site:item.site,requires:item.requires,wired:item.requires.every(kind=>atomic(kind))}));
- const facts=workflowFactsProbe(filmFactsOf({id:'probe',tmdbId:1,canonicalIdentity:'tmdb:1',original:'O',title:'T',metadataAt:'2026-01-01T00:00:00.000Z',synopsisFetchedAt:'2026-01-01T00:00:00.000Z',peopleNamesVersion:2,peopleLocalizedAt:'2026-01-01T00:00:00.000Z',year:1999,runtime:90,synopsis:'s',poster:'p',url:'u',genres:[]},true));
+ const facts=workflowFactsProbe(filmFactsOf(WORKFLOW_FACTS_SAMPLE,true));
  const residuals=[
   ...consumers.filter(item=>item.class==='freeze'&&item.moved!==true).map(item=>'freeze_unmoved:'+item.name),
   ...producers.filter(item=>!item.wired).map(item=>'producer_not_wired:'+item.name),

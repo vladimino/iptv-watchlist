@@ -18,6 +18,12 @@ export async function catalogReaderGate(env){
  return {mode:source==='d1'?'d1':'existing',generation:gate.generation,state:gate.state};
 }
 
+// Frozen titles.json / people.json may be written only while the marker is not d1/open (or held / unreadable). Re-read at the write, not before an await.
+export async function canonicalMirrorsWritable(env){
+ try{return (await catalogReaderGate(env)).mode!=='d1';}
+ catch{return false;}
+}
+
 // Read only, no gate: the stored admission and retention rows for ids (chunked by 80, two reads per chunk).
 export async function loadAdmissionRows(env,ids){
  const db=database(env);

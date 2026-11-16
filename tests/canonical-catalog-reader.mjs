@@ -55,6 +55,21 @@ if(ONLY!=='route')for(const state of STATES){
  else await assert.rejects(()=>reader.catalogReaderGate(env),code(refusal(state)),state);
 }
 if(ONLY!=='route')assert.equal((await canonicalReaderMode({DB:d1Standin(database('open'))})).mode,'d1','the bulk read model shares the one gate');
+if(ONLY!=='route'){
+ for(const state of ['legacy','r2','prepared'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),true,state);
+ assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database('open'),'open')}),false,'open');
+ for(const state of ['held','unknown-row','unknown-table','unknown-read'])assert.equal(await reader.canonicalMirrorsWritable({DB:standin(database(state),state)}),false,state);
+ const file=database('prepared'),env={DB:d1Standin(file)};
+ const stored={titles:1,people:1};
+ const write=async(key)=>{if(!(await reader.canonicalMirrorsWritable(env)))return false;stored[key]=(stored[key]||0)+1;return true;};
+ assert.equal(await write('titles'),true,'prepared still writes');
+ sqlite(file,"UPDATE film_person_authority SET mode='d1',generation=2 WHERE id=1");
+ assert.equal(await write('titles'),false,'flip between localize and write skips titles.json');
+ assert.equal(await write('people'),false,'flip between localize and write skips people.json');
+ assert.deepEqual(stored,{titles:2,people:1});
+ sqlite(file,"UPDATE film_person_authority SET cutover='held',generation=3 WHERE id=1");
+ assert.equal(await write('titles'),false,'held skips');
+}
 
 // 2. The D1 fallback reader: only at open; every other state refuses before a catalog statement. There is no R2 handle in this environment at all.
 if(ONLY!=='route'){

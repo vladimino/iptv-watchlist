@@ -59,7 +59,7 @@ const chunk=closure(CHUNK),publication=closure(PUBLICATION);
 const consts=new Map();
 for(const [,text] of texts)for(const m of text.matchAll(/(?:^|\n)\s*(?:export\s+)?const\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*('[^'\n]*'|`[^`\n]*`)/g))if(!consts.has(m[1]))consts.set(m[1],m[2]);
 const NOT_DISCOVERY=['metadata.json','titles.json','people.json','watchlist.json','letterboxd/diary/history.json','view-index.json','letterboxd/admissions/verified-films.json','owner-reviews.json'];
-const PRIMITIVE=/((?:env\.)?\bBUCKET\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bbucket\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bsaveJSON|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputStable|\bputKnownLength)\(/g;
+const PRIMITIVE=/((?:env\.)?\bBUCKET\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bbucket\.(?:put|delete|createMultipartUpload|resumeMultipartUpload)|\bsaveJSON|\bsaveCanonicalMirror|\bmergeStoredJSON|\.saveMutable|\.routeWrite|\bputStable|\bputKnownLength)\(/g;
 const perFile=new Map(),inputSites=new Map();let siteCount=0;
 function argsOf(text,from){let depth=0,i=from,start=from;const args=[];for(;i<text.length;i++){const c=text[i];if('([{'.includes(c))depth++;else if(')]}'.includes(c)){if(depth===0)break;depth--;}else if(c===','&&depth===0){args.push(text.slice(start,i));start=i+1;if(args.length>=2)break;}}args.push(text.slice(start,i));return args;}
 for(const [file,text] of texts){
@@ -117,7 +117,7 @@ const FILE_SITES={
  // ADR 0118: writeDiscoveryEvent now has a second put, the compare-and-swap replacement of a report_failed notice by the report of the same hour (events/items/..., not a projector input).
  // ADR 0145: +1 r2 put of `epg/seal/<runId>/publication.json` in `stageSealedGeneration` and +1 dynamic delete of that key in `sealQueueStep`
  // (the leftover `payload.json` delete stays). Neither object is a projector input; both sit on the publication path that already takes the lease.
- 'src/worker.js':{r2:17,wrapper:47,dynamic:19},
+ 'src/worker.js':{r2:17,wrapper:49,dynamic:19}, // AIR-499: four saveCanonicalMirror puts plus the helper's saveJSON(env,key); literal saveJSON(titles|people) sites removed
 };
 const actualSites=Object.fromEntries([...perFile].sort().map(([f,v])=>[f,v]));
 assert.deepEqual(actualSites,FILE_SITES,'the R2 write sites per file changed: look at the new site, classify it against the projector inputs, then update this table');
@@ -128,8 +128,8 @@ const INPUT_WRITERS={
  "src/metadata-cache.js|bucket.put|MIRROR_KEY":{count:1,owner:'metadata cache R2 mirror, its own domain'},
  "src/owner-review-d1.js|bucket.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
  "src/owner-review-d1.js|env.BUCKET.put|OWNER_REVIEWS_KEY":{count:1,owner:'owner-review D1 mirror, its own domain'},
- "src/worker.js|saveJSON|'people.json'":{count:2,owner:'metadata sync steps (Persons)'},
- "src/worker.js|saveJSON|'titles.json'":{count:2,owner:'metadata sync steps (titles)'},
+ "src/worker.js|saveCanonicalMirror|'people.json'":{count:2,owner:'metadata and EPG sync Persons, re-gated at put'},
+ "src/worker.js|saveCanonicalMirror|'titles.json'":{count:2,owner:'metadata and EPG sync titles, re-gated at put'},
  "src/worker.js|saveJSON|'watchlist.json'":{count:3,owner:'EPG publication and watchlist persistence, under the publication lease'},
 };
 assert.deepEqual(Object.fromEntries([...inputSites].sort()),Object.fromEntries(Object.entries(INPUT_WRITERS).sort().map(([k,v])=>[k,v.count])),'the sites that write a non-Discovery projector input changed: classify the new one');
