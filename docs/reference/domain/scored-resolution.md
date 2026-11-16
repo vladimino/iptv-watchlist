@@ -47,7 +47,7 @@ Historically a `shadow` mode let the legacy resolver write while the scored gate
 
 [AIR-49](https://trello.com/c/YNaLFwtW) owns a separate store for the score, the fetched card, and the decision. The unapplied tables are in [docs/d1-schema.md](../data/d1-schema.md). This path keeps a compact provenance on the current decision row and does not apply that schema. The owner-labeled review in `docs/air-43-verification-audit.md` is not built. [AIR-53](https://trello.com/c/gkuy1awG) is unchanged.
 
-`scanEPG` asks `showMatchBasis` only after [ADR 0150](../../adr/0150-epg-known-film-title-collision.md) has already left a single identity. A collision or a runtime contradiction is not attached, so the cautious mark is not the veto for those slots. The score itself is unchanged.
+`scanEPG` asks `showMatchBasis` only after the proposed rule in [ADR 0150](../../adr/0150-epg-known-film-title-collision.md) has already left a single identity. A collision or a runtime contradiction is not attached, so the cautious mark is not the veto for those slots. The score itself is unchanged.
 
 The programme marks `≈` only when the attached showing is `title_duration`. Every attached showing is scored first. The mark stays off only when that score is `accepted`: a year then uses `title_year`, and a missing year on a long unique title uses `title_unique`. A year by itself does not hide a runtime contradiction, a near-year collision, or any other result that is not accepted. Those stay `title_duration` and name the reason. An older snapshot that stored `title_duration` without a reason still shows the cautious mark until the next successful EPG scan replaces its showings.
 

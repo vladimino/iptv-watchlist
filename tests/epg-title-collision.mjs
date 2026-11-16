@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 import {Readable} from 'node:stream';
+import {slotEligibility,slotScanConfirmation} from '../src/domain/slot-evidence.js';
 
 const H=3600000,now=Date.parse('2026-11-16T12:00:00Z');
 const context=vm.createContext({TextDecoder,Date,Map,Set,Number,String,JSON,Math,RegExp,Error,Promise,AbortSignal,fetch,console});
@@ -89,5 +90,23 @@ assert.equal(observation(repeated).confirmedTmdbId,null);
 assert.equal(repeated.stats.identityCollision,2);
 const owners=new Set(repeated.discovery.flatMap(item=>item.shows.map(show=>show.channelId+':'+show.start)));
 assert.equal(owners.size,2);
+
+// A slot that uniquely confirms the catalog film must not lend that id to a later or earlier collision on the same title.
+const watch=film('lb-short','100','Кровь за кровь',2005,100);
+const catalog=film('tmdb_long','200','Кровь за кровь',2023,155,{catalogOnly:true});
+const decision={status:'verified',tmdbId:'200',identitySource:'known_epg_alias',anchor:[]};
+for(const first of [true,false]){
+ const programmes=first?[programme('Кровь за кровь',2,155),programme('Кровь за кровь',5,105,'two')]:[programme('Кровь за кровь',5,105,'two'),programme('Кровь за кровь',2,155)];
+ const mixed=await scan(programmes,[watch,catalog]);
+ const item=observation(mixed);
+ assert.equal(item.confirmedTmdbId,null);
+ assert.equal(item.confirmedSlots.length,1);
+ assert.equal(item.confirmedSlots[0].tmdbId,'200');
+ assert.equal(item.confirmedSlots[0].start,now+2*H);
+ const confirmed=item.shows.find(show=>show.start===now+2*H);
+ const collided=item.shows.find(show=>show.start===now+5*H);
+ assert.equal(slotEligibility(decision,confirmed,slotScanConfirmation(item,confirmed)).rule,'scan_confirmed');
+ assert.equal(slotEligibility(decision,collided,slotScanConfirmation(item,collided)).eligible,false);
+}
 
 console.log('EPG title collision: unresolved identities stay observations');

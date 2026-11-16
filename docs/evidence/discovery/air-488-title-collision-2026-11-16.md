@@ -24,6 +24,10 @@
 
 `stats.identityCollision` is a count of hot-window slots. It does not store titles.
 
+A yearless 155-minute slot that uniquely confirms the catalog film (155) and a yearless 105-minute slot that collides with a 100-minute watchlist film share one observation. In either feed order `confirmedTmdbId` is null. `confirmedSlots` names only the 155-minute slot. `slotScanConfirmation` plus `slotEligibility` then grants `scan_confirmed` to that slot alone.
+
+The contradiction band in ADR 0150 is **Proposed**. These fixtures show what the current code does. They are not owner acceptance of `max(45 minutes, 40%)`.
+
 ## Not measured
 
 Production recall, the size of `identityCollision` on a live feed, and whether the owner's reported showing was this collision. Those need the next natural EPG publication and a read-only comparison. This change does not start that publication.

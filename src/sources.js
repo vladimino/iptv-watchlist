@@ -328,6 +328,12 @@ function knownSlotDecision(candidates,titleYear,duration){
  if(near.length>=1&&open.length>1)return {films:[],reason:'identity_collision'};
  return {films:[],reason:'insufficient_year_or_duration'};
 }
+// A catalog confirmation belongs to the slot that earned it. The observation carries that id only when every retained slot confirms the same one.
+function applySlotConfirmation(candidate,metas){
+ const ids=(metas||[]).map(meta=>meta?.confirmedTmdbId||null);
+ candidate.confirmedTmdbId=ids.length&&ids.every(id=>id&&id===ids[0])?ids[0]:null;
+ candidate.confirmedSlots=candidate.shows.flatMap((show,index)=>ids[index]?[{channelId:show.channelId,start:show.start,tmdbId:ids[index]}]:[]);
+}
 async function scanEPG(stream,watchlist,now){
  const index=new Map();for(const film of watchlist){for(const title of new Set((film.aliases||[film.original]).map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
  const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
@@ -359,9 +365,10 @@ async function scanEPG(stream,watchlist,now){
    const [first]=candidate.shows,metas=candidate.shows.map(show=>showMeta.get(show));
    candidate.airings=candidate.shows.length;candidate.firstAiring=first.start;candidate.lastAiring=Math.max(...candidate.shows.map(show=>show.start));
    candidate.duration=Math.round((first.end-first.start)/60000);candidate.title=metas[0].title;candidate.rawTitles=[...new Set(candidate.shows.map(show=>show.epgTitle))].slice(0,8);
-   candidate.description=metas.find(meta=>meta.description)?.description||null;candidate.confirmedTmdbId=metas[0].confirmedTmdbId;
+   candidate.description=metas.find(meta=>meta.description)?.description||null;applySlotConfirmation(candidate,metas);
    candidate.categories=[...new Set(metas.flatMap(meta=>meta.categories||[]))].slice(0,8);}
   }
+ for(const candidate of discovery.values())applySlotConfirmation(candidate,candidate.shows.map(show=>showMeta.get(show)));
  return {films:[...matched.values()],coverage:[...coverage.values()],discovery:[...discovery.values()],stats:{scanned,retained:kept,epgStart:min,epgEnd:max,bytes,uncertain:uncertain.size,identityCollision,duplicate_slot:conflictedSlots.size,discoveryCandidates:discovery.size,rawCandidates:rawDiscovery.size,filteredNonMovies:filteredNonMovies.size},uncertain:[...uncertain.values(),...conflictedSlots.values()].slice(0,100)};
 }
 
