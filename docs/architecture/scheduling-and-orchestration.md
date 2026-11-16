@@ -168,7 +168,7 @@ sequenceDiagram
         end
     end
     opt Flag on and Film/Person marker open
-        Note over Worker,D1: Compare-only for canonical Film/Person; fenced adapters own writes. Natural producer pass unproven.
+        Note over Worker,D1: compare-only Film/Person at open - fenced adapters own writes
     end
     opt Workflow binding and D1 admission pass
         Cron->>Worker: reconcileDiscoveryWorkflow
