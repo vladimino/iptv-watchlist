@@ -2,8 +2,10 @@
 // AIR-499. Operator CLI for the Film/Person prepared → open handoff. Default is dry-run (readiness only).
 // `--apply --confirm-go` is required together for any write. A merge of this file is not a production GO.
 // The flip is a single UPDATE (binding.run), not a REST {batch} pair that depends on changes().
-import {activateOpen,parseOpenHandoffArgs,proveOperatorTarget,OPERATOR_D1_TARGET} from '../src/film-person-open-handoff.js';
+import {activateOpen,parseOpenHandoffArgs,proveOperatorTarget,OPERATOR_D1_TARGET,transactionalStatements} from '../src/film-person-open-handoff.js';
 import {createD1Adapter,readTarget,renderSql} from './d1-backfill.mjs';
+
+export {transactionalStatements};
 
 export function bindingOfAdapter(adapter){
  const bound=(sql,params)=>({
@@ -15,7 +17,7 @@ export function bindingOfAdapter(adapter){
  return {
   prepare(sql){return {bind:(...params)=>bound(sql,params),...bound(sql,[])};},
   async batch(statements){
-   await adapter.executeRendered(statements.map(item=>item.text));
+   await adapter.executeSql(transactionalStatements(statements.map(item=>item.text)));
    return statements.map(()=>({success:true}));
   },
  };
@@ -29,6 +31,10 @@ export async function main(argv=process.argv.slice(2),env=process.env,io=console
  }
  if(args.apply&&args.confirmGo!==true){
   io.error('refused: --apply requires --confirm-go');
+  return 2;
+ }
+ if(args.apply&&(!Number.isInteger(args.expectedGeneration)||!args.expectedReference)){
+  io.error('refused: --apply requires --expected-generation and --expected-reference');
   return 2;
  }
  const target=readTarget(env);

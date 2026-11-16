@@ -16,9 +16,11 @@ import {
  activationReadiness,
  exclusiveOwned,
  flipOpen,
+ runExclusiveHandoff,
  parseOpenHandoffArgs,
  proveOperatorTarget,
  takeProjectorLease,
+ transactionalStatements,
 } from '../src/film-person-open-handoff.js';
 import {d1Standin} from './d1-standin.mjs';
 import {copyOf,envOf,fresh,rows,sqlite} from './canonical-differential-helper.mjs';
@@ -58,21 +60,29 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
  const file=openDb();
  const env=envOf(file);
  const ready=await activationReadiness(env,{now:T,expectedGeneration:1,expectedReference:REF,classes:CLASSES});
- assert.equal(ready.ready,true,ready.blockers.join(','));
+ assert.equal(ready.ready,false,ready.blockers.join(','));
+ assert.ok(ready.blockers.some(item=>item.startsWith('freeze_unmoved:')));
+ assert.ok(ready.blockers.some(item=>item.startsWith('producer_not_wired:')));
+ assert.ok(ready.blockers.some(item=>item==='workflow_facts_absent:film_metadata'));
+ assert.match(ready.nextMinimalFix,/Move the 11 freeze consumers/);
  const handoff=await handoffReadiness(env,{now:T});
  assert.equal(handoff.ready,false);
- assert.ok(handoff.blockers.some(item=>item.startsWith('producer_not_wired:')));
- assert.ok(handoff.blockers.some(item=>item.startsWith('reader_not_moved:')));
  const dry=await activateOpen(env,{apply:false,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES});
  assert.equal(dry.outcome,'dry_run');
+ assert.equal(dry.readiness.ready,false);
  assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'prepared');
  const refused=await activateOpen(env,{apply:true,confirmGo:false,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES});
  assert.equal(refused.reason,'confirm_go_required');
+ const operands=await activateOpen(env,{apply:true,confirmGo:true,now:T,classes:CLASSES});
+ assert.equal(operands.reason,'go_operands_required');
 }
 
 {
  const file=openDb();
- const out=await activateOpen(envOf(file),{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'op-1'});
+ const blocked=await activateOpen(envOf(file),{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'op-1'});
+ assert.equal(blocked.outcome,'stop');
+ assert.equal(blocked.reason,'preflight');
+ const out=await runExclusiveHandoff(envOf(file),{expectedGeneration:1,expectedReference:REF,owner:'op-1'});
  assert.equal(out.outcome,'activated',JSON.stringify(out));
  assert.equal(out.generation,2);
  assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'d1');
@@ -140,11 +150,11 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 {
  const file=openDb();
  const env=envOf(file);
- const armed=await activateOpen(env,{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'op-9'});
+ const armed=await runExclusiveHandoff(env,{expectedGeneration:1,expectedReference:REF,owner:'op-9'});
  assert.equal(armed.outcome,'activated');
  const again=await activateOpen(env,{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'op-9b'});
  assert.equal(again.outcome,'stop');
- assert.ok(again.readiness.blockers.some(item=>item.startsWith('marker_not_prepared')));
+ assert.equal(again.reason,'preflight');
 }
 
 {
@@ -234,8 +244,37 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 }
 
 {
+ const file=openDb();
+ const wall=Date.now();
+ let wrote=false;
+ const db=d1Standin(file,{onQuery:async text=>{
+  if(/UPDATE film_person_authority SET mode='d1'/.test(text))wrote=true;
+  else if(wrote&&/SELECT version FROM schema_contract/.test(text))throw new Error('read_lost');
+ }});
+ const env={DB:db};
+ await takeProjectorLease(env,{owner:'op-15',now:wall});
+ assert.equal((await requestProjectorWindow(env,{owner:'op-15',now:wall})).outcome,'requested');
+ assert.equal((await grantProjectorWindow(env,{owner:'op-15',now:wall})).outcome,'granted');
+ const flipped=await flipOpen(env,{expectedGeneration:1,expectedReference:REF,owner:'op-15'});
+ assert.equal(flipped.outcome,'unknown');
+ assert.equal(flipped.retry,false);
+ assert.equal(flipped.wrote,true);
+ assert.equal(q(file,'SELECT mode FROM film_person_authority WHERE id=1').mode,'d1');
+ assert.equal(q(file,'SELECT owner FROM projector_window WHERE id=1').owner,'op-15');
+}
+
+{
+ const wrapped=transactionalStatements(["UPDATE projector_window SET state='held' WHERE id=1","UPDATE discovery_cas SET ok=changes() WHERE id=1"]);
+ assert.equal(wrapped[0],'BEGIN IMMEDIATE;');
+ assert.equal(wrapped.at(-1),'COMMIT;');
+ assert.equal(wrapped.length,4);
+}
+
+{
  const src=fs.readFileSync('src/film-person-open-handoff.js','utf8')+' '+fs.readFileSync('scripts/film-person-open-handoff.mjs','utf8');
  assert.match(src,/strftime\('%s','now'\)/);
  assert.match(src,/proveOperatorTarget/);
  assert.match(src,/PRODUCER_WIRING/);
+ assert.match(src,/BEGIN IMMEDIATE/);
+ assert.match(src,/go_operands_required/);
 }

@@ -20,6 +20,7 @@ export const OPERATOR_D1_TARGET=Object.freeze({
 // What the Producer Workflow actually plans per Film (src/canonical-producer-workflow.js filmFactsOf). Not metadata, dimensions or sync clocks.
 export const WORKFLOW_FILM_FACTS=Object.freeze(['watchlist','canonicalIdentity','originalTitle']);
 export const WORKFLOW_FILM_FACTS_ABSENT=Object.freeze(['film_metadata','film_dimension','film_sync_state']);
+export const NEXT_MINIMAL_FIX='Move the 11 freeze consumers to D1 (ADR 0117 decision 4), register atomic operations for every remaining PRODUCER_WIRING kind, and extend Producer Workflow filmFactsOf with film_metadata, film_dimension and film_sync_state (or record an owner-accepted exception). Until then activationReadiness.ready is false and --apply STOPs.';
 
 const DB_NOW_MS="(CAST(strftime('%s','now') AS INTEGER)*1000)";
 const DB_NOW_ISO="strftime('%Y-%m-%dT%H:%M:%fZ','now')";
@@ -167,7 +168,8 @@ export async function activationReadiness(env,{now=new Date().toISOString(),expe
   if(item.kind==='frozen_r2_writer'&&item.dualD1!==false)blockers.push('frozen_mirror_misclassified:'+item.name);
   if(item.kind==='adr0117_exception'&&item.moved===true)blockers.push('exception_marked_moved:'+item.name);
  }
- return {ready:blockers.length===0,blockers,audit,generation:gate?.generation??null,version};
+ for(const item of audit.residuals)if(!blockers.includes(item))blockers.push(item);
+ return {ready:blockers.length===0,blockers,audit,nextMinimalFix:NEXT_MINIMAL_FIX,generation:gate?.generation??null,version};
 }
 
 export async function flipOpen(env,{expectedGeneration,expectedReference,owner}={}){
@@ -190,7 +192,9 @@ export async function flipOpen(env,{expectedGeneration,expectedReference,owner}=
   if(after?.state==='prepared'&&after.generation===expectedGeneration)return {outcome:'stop',reason:'flip_not_applied',retry:false,error};
   return {outcome:'unknown',retry:false,after,error};
  }
- const after=await readAuthority(env);
+ let after=null;
+ try{after=await readAuthority(env);}
+ catch(error){return {outcome:'unknown',retry:false,error,wrote:true};}
  if(after.state==='open'&&after.generation===expectedGeneration+1&&before.state==='prepared')return {outcome:'flipped',generation:after.generation,state:after.state};
  if(after.state==='prepared'&&after.generation===expectedGeneration)return {outcome:'stop',reason:'flip_precondition',retry:false,generation:after.generation};
  return {outcome:'unknown',retry:false,generation:after.generation,state:after.state};
@@ -224,13 +228,8 @@ export function proveOperatorTarget({target,described}={}){
  return {ok:reasons.length===0,reasons};
 }
 
-export async function activateOpen(env,{apply=false,confirmGo=false,expectedGeneration,expectedReference,now=new Date().toISOString(),owner=null,classes=EMPTY_CLASSES}={}){
- if(apply&&confirmGo!==true)return stop('confirm_go_required');
- const clock=now;
- const readiness=await activationReadiness(env,{now:clock,expectedGeneration,expectedReference,classes});
- if(!apply)return {outcome:'dry_run',apply:false,readiness};
- if(!readiness.ready)return stop('preflight',{readiness});
- const id=owner||OPEN_HANDOFF_OWNER_PREFIX+':'+iso(clock);
+export async function runExclusiveHandoff(env,{expectedGeneration,expectedReference,owner,readiness=null}={}){
+ const id=owner||OPEN_HANDOFF_OWNER_PREFIX+':'+new Date().toISOString();
  const wall=Date.now();
  let keep=false;
  try{
@@ -246,19 +245,19 @@ export async function activateOpen(env,{apply=false,confirmGo=false,expectedGene
    await releaseOwn(env,{owner:id,now:wall});
    return stop('window_'+granted.outcome,{granted,readiness});
   }
-  const flipped=await flipOpen(env,{expectedGeneration,expectedReference,owner:id});
-  if(flipped.outcome!=='flipped'){
-   keep=flipped.outcome==='unknown_committed'||flipped.outcome==='unknown';
-   if(!keep)await releaseOwn(env,{owner:id,now:wall});
-   return stop(flipped.reason||flipped.outcome,{flipped,retry:false,keepLease:keep,readiness});
-  }
   keep=true;
+  let flipped;
+  try{flipped=await flipOpen(env,{expectedGeneration,expectedReference,owner:id});}
+  catch(error){return stop('flip_unknown',{error,retry:false,keepLease:true,readiness});}
+  if(flipped.outcome!=='flipped'){
+   const retain=flipped.outcome==='unknown_committed'||flipped.outcome==='unknown'||flipped.wrote===true;
+   if(!retain){keep=false;await releaseOwn(env,{owner:id,now:wall});}
+   return stop(flipped.reason||flipped.outcome,{flipped,retry:false,keepLease:retain,readiness});
+  }
   if(!(await exclusiveOwned(env,{owner:id})))return stop('exclusive_expired',{flipped,keepLease:true,readiness});
   let sealed;
   try{sealed=await recordBaseline(env,{now:()=>new Date().toISOString()});}
-  catch(error){
-   return stop('seal_failed',{error,keepLease:true,flipped,readiness});
-  }
+  catch(error){return stop('seal_failed',{error,keepLease:true,flipped,readiness});}
   if(!(await exclusiveOwned(env,{owner:id})))return stop('exclusive_expired_after_seal',{flipped,sealed,keepLease:true,readiness});
   const proof=await proveOpen(env,{expectedGeneration});
   if(!proof.ok)return stop('readback_failed',{proof,sealed,keepLease:true,readiness});
@@ -269,6 +268,20 @@ export async function activateOpen(env,{apply=false,confirmGo=false,expectedGene
   if(!keep)await releaseOwn(env,{owner:id,now:Date.now()}).catch(()=>{});
   return stop('activate_failed',{error,keepLease:keep,readiness});
  }
+}
+
+export async function activateOpen(env,{apply=false,confirmGo=false,expectedGeneration,expectedReference,now=new Date().toISOString(),owner=null,classes=EMPTY_CLASSES}={}){
+ if(apply&&confirmGo!==true)return stop('confirm_go_required');
+ if(apply&&(!Number.isInteger(expectedGeneration)||!expectedReference))return stop('go_operands_required');
+ const clock=now;
+ const readiness=await activationReadiness(env,{now:clock,expectedGeneration,expectedReference,classes});
+ if(!apply)return {outcome:'dry_run',apply:false,readiness};
+ if(!readiness.ready)return stop('preflight',{readiness});
+ return runExclusiveHandoff(env,{expectedGeneration,expectedReference,owner:owner||OPEN_HANDOFF_OWNER_PREFIX+':'+iso(clock),readiness});
+}
+
+export function transactionalStatements(texts){
+ return ['BEGIN IMMEDIATE;',...texts.map(text=>String(text).trim().replace(/;+$/,'')+';'),'COMMIT;'];
 }
 
 export function parseOpenHandoffArgs(argv){
