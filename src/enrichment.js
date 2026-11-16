@@ -1071,6 +1071,9 @@ async function recordRunStop(env,id,reason,fallback={}){
  if(!record){let queue=null;try{queue=await loadJSON(env,predictionQueueKey);}catch{}const summary=runSummary(run),at=run.event?.at||run.completedAt||new Date().toISOString();
  const snapshot=await predictionEventSnapshot(env,queue,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run);
  let sources=null;try{sources=await loadJSON(env,ENRICHMENT_KEY+'sources/'+id+'.json');}catch{}
+ applyRetrySnapshot(run,queue);
+ const states=isBatchV2Run(run)?await Promise.all((run.selectedIds||[]).map(fid=>readFilmState(env,fid))):[];
+ await recoverBatchEventFilms(env,run,sources||{},states);
  const event=withBatchV2EventDetails({remaining:queue?(queue.priorityCount||0)+(queue.coldRemaining||0):null,id:run.event?.id||'enrichment-'+id,type:'enrichment',runId:id,at,queueSchemaVersion:6,stage:'partial',title:v2.presentation?'Пакет прогнозов прерван':'Прогнозы приостановлены',reason:systemicReason(reason),stopReason:systemicReason(reason),trigger:run.trigger,added:summary.added,updated:summary.updated,failed:summary.failed,checked:summary.checked,processed:summary.processed,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,batchCount:summary.batchCount,batchesProcessed:predictionBatchesProcessed(run),hotRemaining:queue?.priorityCount??fallback.hotRemaining??run.hotRemaining??null,coldRemaining:queue?.coldRemaining??fallback.coldRemaining??run.coldRemaining??null,delta,snapshot,...v2},run,sources);
  record={event};const saved=await env.BUCKET.put(key,JSON.stringify(record),{onlyIf:{etagDoesNotMatch:'*'}});if(saved===null)record=await loadJSON(env,key);
  }
@@ -2116,26 +2119,63 @@ function eventFilmIdentity(meta,filmId){
 }
 function halfStarRating(value){return typeof value==='number'&&Number.isFinite(value)&&value>=.5&&value<=5&&value*2%1===0?value:null;}
 function compactEventSource(assessment){
- const sources=Array.isArray(assessment?.sources)?assessment.sources.filter(s=>s&&typeof s==='object'):[],kinds=[],seen=new Set(),accesses=[];
+ const listed=Array.isArray(assessment?.sources)?assessment.sources:(Array.isArray(assessment?.callerReported?.sources)?assessment.callerReported.sources:[]);
+ const sources=listed.filter(s=>s&&typeof s==='object'),kinds=[],seen=new Set(),accesses=[],authors=[],authorSeen=new Set();
  for(const s of sources){
   if(!['metadata','model_knowledge','web_research'].includes(s.kind))continue;
   if(!seen.has(s.kind)){seen.add(s.kind);kinds.push(s.kind);}
   if(s.kind==='web_research'&&['full_text','partial_text','search_snippet'].includes(s.access)&&!accesses.includes(s.access))accesses.push(s.access);
  }
- const out={};if(kinds.length)out.kinds=kinds;if(accesses.length)out.accesses=accesses;return out;
+ const conflicts=Array.isArray(assessment?.conflicts)?assessment.conflicts:(Array.isArray(assessment?.callerReported?.conflicts)?assessment.callerReported.conflicts:[]);
+ for(const c of conflicts){
+  for(const pos of Array.isArray(c?.positions)?c.positions:[]){
+   const src=Number.isInteger(pos?.source)?sources[pos.source]:null;
+   if(!src||src.kind!=='web_research'||!['full_text','partial_text'].includes(src.access))continue;
+   const name=typeof pos.author==='string'?pos.author.trim().slice(0,80):'';
+   if(!name)continue;
+   const key=name.toLowerCase();if(authorSeen.has(key))continue;authorSeen.add(key);authors.push(name);
+   if(authors.length>=3)break;
+  }
+  if(authors.length>=3)break;
+ }
+ const out={};if(kinds.length)out.kinds=kinds;if(accesses.length)out.accesses=accesses;if(authors.length)out.authors=authors;return out;
 }
 function rememberBatchEventFilm(run,id,source,extra){
  if(!isBatchV2Run(run))return;
  run.eventFilms||={success:{},failure:{}};
  const identity=eventFilmIdentity(source?.[id],id);
  if(extra.group==='success'){
-  if(run.eventFilms.success[id])return;
+  const existing=run.eventFilms.success[id],hasBody=existing&&(existing.rating!=null||(existing.source&&(existing.source.kinds||existing.source.authors)));
+  if(hasBody)return;
   const rating=halfStarRating(extra.rating),row={...identity,status:extra.status,source:extra.source&&typeof extra.source==='object'?extra.source:{}};
   if(rating!==null)row.rating=rating;run.eventFilms.success[id]=row;
  }else if(extra.group==='failure'){
   const row={...identity,kind:typeof extra.kind==='string'?extra.kind:null};
   if(Number.isInteger(extra.attempts)&&extra.attempts>=1)row.attempts=extra.attempts;
   run.eventFilms.failure[id]=row;
+ }
+}
+function applyRetrySnapshot(run,queue){
+ if(!isBatchV2Run(run))return;
+ for(const [id,failure] of Object.entries(run.failures||{})){
+  const queued=queue?.retries?.[id];if(!queued)continue;
+  const attempts=Math.max(Number.isInteger(failure.attempts)?failure.attempts:0,Number.isInteger(queued.attempts)?queued.attempts:0);
+  if(attempts>=1)failure.attempts=attempts;
+  if(Number.isFinite(queued.retryAt))failure.retryAt=Math.max(failure.retryAt||0,queued.retryAt);
+ }
+}
+async function recoverBatchEventFilms(env,run,source,states){
+ if(!isBatchV2Run(run))return;
+ for(let i=0;i<(run.selectedIds||[]).length;i++){
+  const id=run.selectedIds[i],status=run.results?.[id];
+  if(status!=='created'&&status!=='recalculated')continue;
+  const existing=run.eventFilms?.success?.[id];
+  if(existing&&existing.rating!=null&&existing.source&&(existing.source.kinds||existing.source.authors))continue;
+  const p=states[i]?.predictions?.current;if(!p||p.runId!==run.runId)continue;
+  let assessment=null;
+  if(typeof p.contentSha256==='string')try{assessment=await loadJSON(env,predictionAssessmentKey(id,p.contentSha256));}catch{assessment=null;}
+  if(assessment?.confirmed?.runId&&assessment.confirmed.runId!==run.runId)assessment=null;
+  rememberBatchEventFilm(run,id,source,{group:'success',status,rating:p.predictedRating,source:compactEventSource(assessment)});
  }
 }
 function batchProcessedCount(run){
@@ -2736,6 +2776,7 @@ async function batchSubmitLocked(env,body,run,requestId,token){
    if(!lost())await saveRun();
    // The retry record of a failed film goes to the queue at once, under the same guard.
    if(!lost()&&outcome.failure)await batchGuardedCommit(env,ctx,()=>batchRecordRetry(ctx.guarded,run,outcome.failure,outcome.result));
+   if(!lost()&&outcome.failure)await saveRun();
    if(!lost()&&run.systemicStopReason)stop||=run.systemicStopReason;
   }catch(error){
    // A retry write that kept losing its swap while the gate is still ours leaves the run's own `retryHeal: pending` mark, which the stop or the next start writes; it is not a stop.
@@ -2992,6 +3033,8 @@ async function enrichmentComplete(env,body,requestId){
   // ADR 0136: a short batch that spent its selected manifest records stopReason manifest_spent (not time_budget, not a false queue_empty) while still reporting the real global outstanding counters.
   if(queue&&!run.reason&&!pending)run.stopReason=body.reason==='manifest_spent'?'manifest_spent':(queue.priorityCount+queue.coldRemaining?'eligible_queue_empty':'queue_empty');
  }
+ applyRetrySnapshot(run,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null);
+ await recoverBatchEventFilms(env,run,source,states);
  const snapshot=await predictionEventSnapshot(env,run.mode==='queued'?await loadJSON(env,predictionQueueKey):null,run.batchSize),delta=predictionEventDelta(run,summary,snapshot),v2=batchV2EventFields(run),failedCount=run.counts.failed||0,title=v2.presentation?(run.status==='complete'?(failedCount?'Пакет прогнозов обработан с ошибками':'Пакет прогнозов обработан'):'Пакет прогнозов прерван'):undefined,event=withBatchV2EventDetails({id:'enrichment-'+run.runId,type:'enrichment',at:run.completedAt,...run.counts,checked:summary.checked,added:created,updated:recalculated,batchSize:run.batchSize,...(run.manifestSize!==undefined?{manifestSize:run.manifestSize}:{}),selectedCount:run.selectedIds.length,hotProcessed:summary.hotProcessed,coldProcessed:summary.coldProcessed,remaining,hotRemaining,coldRemaining,queueSchemaVersion:6,batchCount:run.batchCount,batchesProcessed:predictionBatchesProcessed(run),delta,snapshot,lastHeartbeatAt:run.lastHeartbeatAt,stopReason:run.stopReason,trigger:run.trigger,stage:run.status,reason:run.reason,protocol:run.protocol||null,...(title?{title}:{}),...v2,...scheduledRunFields()},run,source);run.event=event;await savePredictionRun(env,run);if(isBatchV2Run(run))await parkAndFlushRunEvent(env,event,run.runId);else await writeEvent(env,event);await runnerLease(env,run.runId,'release');await settleExpiredDiagnostics(env);return json({runId:run.runId,status:run.status,counts:run.counts,...event});
 }
 async function enrichmentStatus(env){const recent=(await diagnosticHistory(env,20)).runs;const [profile,run,report,queue,discoveryRead,lease,eventOutbox]=await Promise.all([loadJSON(env,profileKey),loadJSON(env,ENRICHMENT_KEY+'latest-run.json'),loadJSON(env,'programme.json'),queueStatus(env),loadJSON(env,'epg/discovery-status.json').then(value=>({value}),()=>({value:null,unavailable:true})),loadJSON(env,RUNNER_LEASE_KEY),eventOutboxStatus(env)]);const summary=run?runSummary(run):null,state=run?.status==='running'?(lease?.runId===run.runId&&lease.expiresAt>Date.now()?'running':'blocked'):run?.status==='partial'?'blocked':run?.status==='complete'?'completed':'idle',live={state,runId:run?.runId||null,startedAt:run?.createdAt||null,lastHeartbeatAt:state==='running'&&lease&&lease.runId===run?.runId?lease.heartbeatAt:run?.lastHeartbeatAt||null,added:summary?.added||0,failed:summary?.failed||0,hotRemaining:queue?.hotRemaining??null,coldRemaining:queue?.coldRemaining??null,currentBatchSize:state==='running'?run.batchSize??null:null};return {...live,diagnostics:compactDiagnostics(recent.find(row=>row.runId===run?.runId)||recent[0]||null),live,currentRun:state==='running'?live:null,recentRuns:recent.filter(r=>r.state!=='running').slice(0,10),profileVersion:profile?.version||null,fingerprintSchemaVersion:FINGERPRINT_SCHEMA_VERSION,fingerprintPromptVersion:FINGERPRINT_PROMPT_VERSION,predictionPromptVersion:PREDICTION_PROMPT_VERSION,compatibility:{profileMode:PREDICTION_PROFILE_MODE,fingerprintMode:PREDICTION_FINGERPRINT_MODE},lastRun:run?{...runSummary(run),counts:run.counts||null,failures:run.failures,reason:run.reason||null,completedAt:run.completedAt||null}:null,selectedCount:queue?(queue.hotCount||0)+(queue.coldCount||0):report?eligibleEnrichmentFilms(report).length:0,pendingCount:queue?.pendingCount??null,discovery:discoveryRead.value||null,...(discoveryRead.unavailable?{discoveryStatus:'unavailable'}:{}),queue,eventOutbox};}

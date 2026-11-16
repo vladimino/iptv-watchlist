@@ -49,8 +49,8 @@ const webAssessment=()=>({assessmentVersion:1,ratingBasis:'Premise, execution an
  assert.equal(details.success[0].rating,3.5);
  assert.deepEqual(details.success[0].source.kinds,['metadata','web_research']);
  assert.deepEqual(details.success[0].source.accesses,['full_text']);
- assert.equal(details.success[0].source.authors,undefined);
- assert.doesNotMatch(JSON.stringify(details),/https:\/\/example.com\/review|A crew plans|Jane Reviewer/);
+ assert.deepEqual(details.success[0].source.authors,['Jane Reviewer','Other Voice']);
+ assert.doesNotMatch(JSON.stringify(details),/https:\/\/example.com\/review|A crew plans|Premise, execution/);
  assert.equal(details.failure[0].kind,'parse_error');assert.equal(details.failure[0].claimed,'json_unparseable');
  assert.equal(details.failure[0].attempts,1);assert.equal(details.failure[0].exhausted,undefined);
 }
@@ -70,6 +70,57 @@ const webAssessment=()=>({assessmentVersion:1,ratingBasis:'Premise, execution an
  const stop=await w.api('complete',{runId:start.data.runId,reason:'quota'});
  assert.equal(stop.data.details.success.length,1);assert.equal(stop.data.details.failure.length,0);assert.equal(stop.data.details.processed,1);
  assert.equal(stop.data.stage,'partial');
+}
+
+{
+ const w=await flowWorld({films:4});assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const start=await batch(w,{manifestSize:1});
+ const pick=start.data.films[0].filmId;
+ const snippet={assessmentVersion:1,ratingBasis:'Premise, execution and payoff of this film.',probability4PlusBasis:'Fit is moderate given mixed payoff.',
+  tasteSignals:[],risks:[],uncertainties:[],research:{status:'attempted_found'},
+  sources:[{kind:'web_research',ref:'https://example.com/snippet',usedFor:'reception',access:'search_snippet'}],
+  conflicts:[{topic:'Ending',positions:[{source:0,author:'Snippet Voice',stance:'earned'},{source:0,author:'Other Snip',stance:'weak'}],handling:'kept_unresolved'}],
+  model:{status:'unavailable'}};
+ const sub=await w.api('batch/submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId:pick,fingerprint:w.fingerprint,prediction:w.prediction,assessment:snippet}]});
+ assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));
+ const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.deepEqual(done.data.details.success[0].source.accesses,['search_snippet']);
+ assert.equal(done.data.details.success[0].source.authors,undefined);
+}
+
+{
+ const w=await flowWorld({films:4});
+ sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','A crew plans a robbery and a detective closes in.','$.genres',json('[\"Crime\"]'),'$.runtime',120,'$.directors',json('[\"A Director\"]'))");
+ assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const start=await batch(w,{manifestSize:1});
+ const pick=start.data.films[0].filmId;
+ const sub=await w.api('batch/submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId:pick,fingerprint:w.fingerprint,prediction:w.prediction,assessment:webAssessment()}]});
+ assert.equal(sub.status,200,JSON.stringify(sub.data).slice(0,300));
+ assert.equal(sub.data.results[0].status,'created');
+ sql(w.file,"UPDATE prediction_run SET document_json=json_remove(document_json,'$.eventFilms') WHERE run_id='"+start.data.runId+"'");
+ const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(done.status,200);
+ assert.equal(done.data.details.success[0].rating,3.5);
+ assert.deepEqual(done.data.details.success[0].source.kinds,['metadata','web_research']);
+ assert.deepEqual(done.data.details.success[0].source.authors,['Jane Reviewer','Other Voice']);
+}
+
+{
+ const w=await flowWorld({films:4});assert.equal((await w.api('queue/reconcile',{})).status,200);
+ const start=await batch(w,{manifestSize:1});
+ const pick=start.data.films[0].filmId;
+ const sub=await w.api('batch/submit',{runId:start.data.runId,epoch:start.data.lease.epoch,items:[{filmId:pick,failure:{kind:'parse_error',reason:'insufficient_evidence'}}]});
+ assert.equal(sub.status,200);
+ const stored=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+start.data.runId+"'")[0].d);
+ assert.equal(stored.failures[pick].attempts,1,'reconciled attempts are checkpointed on the run after submit');
+ await w.ctx.mutatePredictionQueue(w.env,current=>{
+  if(current.retries?.[pick])current.retries[pick].attempts=10;
+  return current;
+ },'due_retry');
+ const done=await w.api('complete',{runId:start.data.runId,reason:'manifest_spent'});
+ assert.equal(done.status,200);
+ assert.equal(done.data.details.failure[0].attempts,10);
+ assert.equal(done.data.details.failure[0].exhausted,true);
 }
 
 console.log('prediction event details: named films, sources, failures and interruption snapshot passed');
