@@ -273,15 +273,12 @@ export async function runExclusiveHandoff(env,{expectedGeneration,expectedRefere
 export async function activateOpen(env,{apply=false,confirmGo=false,expectedGeneration,expectedReference,now=new Date().toISOString(),owner=null,classes=EMPTY_CLASSES}={}){
  if(apply&&confirmGo!==true)return stop('confirm_go_required');
  if(apply&&(!Number.isInteger(expectedGeneration)||!expectedReference))return stop('go_operands_required');
+ if(apply&&env?.d1Transport==='rest')return stop('transport_not_worker_batch');
  const clock=now;
  const readiness=await activationReadiness(env,{now:clock,expectedGeneration,expectedReference,classes});
  if(!apply)return {outcome:'dry_run',apply:false,readiness};
  if(!readiness.ready)return stop('preflight',{readiness});
  return runExclusiveHandoff(env,{expectedGeneration,expectedReference,owner:owner||OPEN_HANDOFF_OWNER_PREFIX+':'+iso(clock),readiness});
-}
-
-export function transactionalStatements(texts){
- return ['BEGIN IMMEDIATE;',...texts.map(text=>String(text).trim().replace(/;+$/,'')+';'),'COMMIT;'];
 }
 
 export function parseOpenHandoffArgs(argv){

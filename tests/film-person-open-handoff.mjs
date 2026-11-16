@@ -20,7 +20,6 @@ import {
  parseOpenHandoffArgs,
  proveOperatorTarget,
  takeProjectorLease,
- transactionalStatements,
 } from '../src/film-person-open-handoff.js';
 import {d1Standin} from './d1-standin.mjs';
 import {copyOf,envOf,fresh,rows,sqlite} from './canonical-differential-helper.mjs';
@@ -75,6 +74,9 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
  assert.equal(refused.reason,'confirm_go_required');
  const operands=await activateOpen(env,{apply:true,confirmGo:true,now:T,classes:CLASSES});
  assert.equal(operands.reason,'go_operands_required');
+ const rest=await activateOpen({...env,d1Transport:'rest'},{apply:true,confirmGo:true,expectedGeneration:1,expectedReference:REF,now:T,classes:CLASSES,owner:'rest'});
+ assert.equal(rest.reason,'transport_not_worker_batch');
+ assert.equal(q(file,'SELECT generation FROM film_person_authority WHERE id=1').generation,1);
 }
 
 {
@@ -264,17 +266,12 @@ assert.doesNotMatch(bundled,/film-person-open-handoff/);
 }
 
 {
- const wrapped=transactionalStatements(["UPDATE projector_window SET state='held' WHERE id=1","UPDATE discovery_cas SET ok=changes() WHERE id=1"]);
- assert.equal(wrapped[0],'BEGIN IMMEDIATE;');
- assert.equal(wrapped.at(-1),'COMMIT;');
- assert.equal(wrapped.length,4);
-}
-
-{
  const src=fs.readFileSync('src/film-person-open-handoff.js','utf8')+' '+fs.readFileSync('scripts/film-person-open-handoff.mjs','utf8');
  assert.match(src,/strftime\('%s','now'\)/);
  assert.match(src,/proveOperatorTarget/);
  assert.match(src,/PRODUCER_WIRING/);
- assert.match(src,/BEGIN IMMEDIATE/);
  assert.match(src,/go_operands_required/);
+ assert.match(src,/transport_not_worker_batch/);
+ assert.doesNotMatch(src,/BEGIN IMMEDIATE/);
+ assert.doesNotMatch(src,/executeSql|executeRendered/);
 }

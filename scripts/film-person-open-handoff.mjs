@@ -1,11 +1,9 @@
 #!/usr/bin/env node
-// AIR-499. Operator CLI for the Film/Person prepared → open handoff. Default is dry-run (readiness only).
-// `--apply --confirm-go` is required together for any write. A merge of this file is not a production GO.
-// The flip is a single UPDATE (binding.run), not a REST {batch} pair that depends on changes().
-import {activateOpen,parseOpenHandoffArgs,proveOperatorTarget,OPERATOR_D1_TARGET,transactionalStatements} from '../src/film-person-open-handoff.js';
+// AIR-499. Operator CLI. Default is dry-run (REST SELECTs only). `--apply` is refused on this REST
+// transport: grant and recordBaseline need Worker D1Database.batch() rollback, which /query does not
+// document, and explicit BEGIN/COMMIT is unsupported on D1.
+import {activateOpen,parseOpenHandoffArgs,proveOperatorTarget,OPERATOR_D1_TARGET} from '../src/film-person-open-handoff.js';
 import {createD1Adapter,readTarget,renderSql} from './d1-backfill.mjs';
-
-export {transactionalStatements};
 
 export function bindingOfAdapter(adapter){
  const bound=(sql,params)=>({
@@ -16,9 +14,10 @@ export function bindingOfAdapter(adapter){
  });
  return {
   prepare(sql){return {bind:(...params)=>bound(sql,params),...bound(sql,[])};},
-  async batch(statements){
-   await adapter.executeSql(transactionalStatements(statements.map(item=>item.text)));
-   return statements.map(()=>({success:true}));
+  async batch(){
+   const error=new Error('transport_not_worker_batch');
+   error.code='transport_not_worker_batch';
+   throw error;
   },
  };
 }
@@ -26,7 +25,7 @@ export function bindingOfAdapter(adapter){
 export async function main(argv=process.argv.slice(2),env=process.env,io=console){
  const args=parseOpenHandoffArgs(argv);
  if(args.help){
-  io.log('Usage: node scripts/film-person-open-handoff.mjs [--expected-generation=N] [--expected-reference=HEX] [--apply --confirm-go]');
+  io.log('Usage: node scripts/film-person-open-handoff.mjs [--expected-generation=N] [--expected-reference=HEX]  (dry-run). --apply is refused on the REST D1 adapter.');
   return 0;
  }
  if(args.apply&&args.confirmGo!==true){
@@ -40,7 +39,7 @@ export async function main(argv=process.argv.slice(2),env=process.env,io=console
  const target=readTarget(env);
  if(args.apply){
   if(target.endpointOverride||target.endpoint!==OPERATOR_D1_TARGET.endpoint||target.databaseId!==OPERATOR_D1_TARGET.databaseId||target.databaseName!==OPERATOR_D1_TARGET.databaseName){
-   io.error(JSON.stringify({outcome:'stop',reason:'target_mismatch',target:{endpoint:target.endpoint,databaseId:target.databaseId,databaseName:target.databaseName,endpointOverride:target.endpointOverride}}));
+   io.error(JSON.stringify({outcome:'stop',reason:'target_mismatch'}));
    return 2;
   }
  }
@@ -53,7 +52,7 @@ export async function main(argv=process.argv.slice(2),env=process.env,io=console
    return 2;
   }
  }
- const result=await activateOpen({DB:bindingOfAdapter(adapter)},{
+ const result=await activateOpen({DB:bindingOfAdapter(adapter),d1Transport:'rest'},{
   apply:args.apply,
   confirmGo:args.confirmGo,
   expectedGeneration:args.expectedGeneration,
@@ -63,5 +62,5 @@ export async function main(argv=process.argv.slice(2),env=process.env,io=console
  return result.outcome==='activated'||result.outcome==='dry_run'?0:3;
 }
 
-const entry=process.argv[1]&&/film-person-open-handoff\.mjs$/.test(process.argv[1].replaceAll('\\','/'));
+const entry=process.argv[1]&&/scripts\/film-person-open-handoff\.mjs$/.test(process.argv[1].replaceAll('\\','/'));
 if(entry)main().then(code=>process.exit(code),error=>{console.error(error);process.exit(1);});
