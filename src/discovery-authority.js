@@ -32,7 +32,11 @@ export const INDEX_CAP=3000;
 const READ_CAP=20000;
 export const LEDGER_PAGE=500;
 export const BIND_CAP=100;
-export const POLICY_EXCLUDE_CAP=16;
+export const POLICY_EXCLUDE_OVERHEAD=4;
+export const POLICY_EXCLUDE_STATEMENTS_PER=3;
+export const POLICY_EXCLUDE_CAP=Math.floor((STATEMENT_CAP-POLICY_EXCLUDE_OVERHEAD)/POLICY_EXCLUDE_STATEMENTS_PER);
+function policyExcludeStatementCount(n){return POLICY_EXCLUDE_OVERHEAD+POLICY_EXCLUDE_STATEMENTS_PER*n;}
+const POLICY_DECISIONS_SQL="SELECT observation_key, status, tmdb_id, film_id, decision_hash, payload_json FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=? ORDER BY observation_key";
 const POLICY_FILM_ID=/^tmdb_[1-9]\d{0,11}$/;
 function catalogPolicyKind(film,observation){
  if(typeof admissionPolicy==='function')return admissionPolicy(film,observation);
@@ -49,8 +53,10 @@ function catalogPolicyKind(film,observation){
 }
 function rejectedPolicyDecision(previous,tmdbId){
  const prior=previous&&typeof previous==='object'?previous:{};
- const rejected=[...(Array.isArray(prior.rejectedTmdbIds)?prior.rejectedTmdbIds:[]).map(String),String(tmdbId)].filter((id,index,list)=>list.indexOf(id)===index).slice(0,8);
- const clears=prior.tmdbId==null?false:String(prior.tmdbId)===String(tmdbId);
+ const id=String(tmdbId);
+ const priorIds=[...new Set((Array.isArray(prior.rejectedTmdbIds)?prior.rejectedTmdbIds:[]).map(String).filter(value=>value&&value!==id))];
+ const rejected=[id,...priorIds].slice(0,8);
+ const clears=prior.tmdbId==null?false:String(prior.tmdbId)===id;
  return {
   ...prior,
   status:prior.status==='verified'||typeof prior.status!=='string'||!prior.status?'needs_verification':prior.status,
@@ -1878,24 +1884,46 @@ export async function ownerDecision(env,spec){
  const after=await readIntent(env,spec.idempotencyKey);
  return {outcome:'written',receipt:after.intent?.receipt||spec.receipt||null};
 }
-export async function readPolicyExcludePreview(env,filmId){
+async function policyExcludePlan(env,filmId){
  const gate=await readAuthority(env);
  if(!gate.ready)return {handled:false};
- if(gate.held)return {handled:true,available:false,reason:'held'};
+ if(gate.held)return {handled:true,available:false,reason:'held',gate};
  const id=typeof filmId==='string'?filmId:'';
- if(!POLICY_FILM_ID.test(id))return {handled:true,available:false,reason:'invalid'};
+ if(!POLICY_FILM_ID.test(id))return {handled:true,available:false,reason:'invalid',gate};
  const tmdbId=id.slice(5);
  const row=await one(database(env),'SELECT film_id, tmdb_id, media_kind, state, payload_json FROM discovery_admission WHERE film_id=?',[id]);
- if(!row)return {handled:true,available:false,reason:'missing',filmId:id};
- let film=null;try{film=row.payload_json?JSON.parse(row.payload_json):null;}catch{return {handled:true,available:false,reason:'malformed',filmId:id};}
+ if(!row)return {handled:true,available:false,reason:'missing',filmId:id,gate};
+ if(row.media_kind!=='movie'||String(row.tmdb_id)!==tmdbId)return {handled:true,available:false,reason:'not_movie_admission',filmId:id,gate};
+ let film=null;try{film=row.payload_json?JSON.parse(row.payload_json):null;}catch{return {handled:true,available:false,reason:'malformed',filmId:id,gate};}
  const policy=film?catalogPolicyKind(film,null):null;
- const decisions=await many(database(env),"SELECT observation_key, status, tmdb_id, film_id, decision_hash FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=?",[tmdbId]);
+ const decisions=await many(database(env),POLICY_DECISIONS_SQL,[tmdbId]);
+ const linked=[];
+ for(const decision of decisions){
+  const other=decision.film_id&&decision.film_id!==id?decision.film_id:null;
+  if(!other)continue;
+  const admission=await one(database(env),"SELECT film_id, tmdb_id, state FROM discovery_admission WHERE film_id=?",[other]);
+  if(admission&&admission.state==='current'&&String(admission.tmdb_id)!==tmdbId)linked.push(other);
+ }
+ const statements=policyExcludeStatementCount(decisions.length);
+ let reason='eligible';
+ if(row.state!=='current')reason='already_applied';
+ else if(policy!=='documentary'&&policy!=='concert')reason='not_policy_excluded';
+ else if(linked.length)reason='linked_admission';
+ else if(statements>STATEMENT_CAP||decisions.length>POLICY_EXCLUDE_CAP)reason='bounded';
  return {
-  handled:true,available:row.state==='current'&&(policy==='documentary'||policy==='concert'),
-  reason:row.state!=='current'?'already_applied':(policy==='documentary'||policy==='concert')?'eligible':'not_policy_excluded',
-  filmId:id,tmdbId,state:row.state,policy,generation:gate.generation,programmeRunId:gate.programmeRunId,
-  title:typeof film?.title==='string'?film.title:null,year:film?.year??null,genres:Array.isArray(film?.genres)?film.genres:[],
-  observations:decisions.map(row=>({key:row.observation_key,status:row.status,filmId:row.film_id,decisionHash:row.decision_hash})),
+  handled:true,available:reason==='eligible',reason,gate,film,row,policy,tmdbId,filmId:id,
+  decisions,linked,statements,cap:POLICY_EXCLUDE_CAP,
+  observations:decisions.map(decision=>({key:decision.observation_key,status:decision.status,filmId:decision.film_id,decisionHash:decision.decision_hash})),
+ };
+}
+export async function readPolicyExcludePreview(env,filmId){
+ const plan=await policyExcludePlan(env,filmId);
+ if(!plan.handled)return {handled:false};
+ return {
+  handled:true,available:plan.available,reason:plan.reason,filmId:plan.filmId,tmdbId:plan.tmdbId,state:plan.row?.state??null,
+  policy:plan.policy??null,generation:plan.gate?.generation??null,programmeRunId:plan.gate?.programmeRunId??null,
+  title:typeof plan.film?.title==='string'?plan.film.title:null,year:plan.film?.year??null,genres:Array.isArray(plan.film?.genres)?plan.film.genres:[],
+  observations:plan.observations||[],linkedAdmissions:plan.linked||[],statementCount:plan.statements??null,cap:plan.cap??POLICY_EXCLUDE_CAP,
  };
 }
 export async function ownerPolicyExclude(env,spec={}){
@@ -1903,19 +1931,15 @@ export async function ownerPolicyExclude(env,spec={}){
  assertOpen(gate);
  const lease=spec.lease||leaseOf(env);
  if(!lease)return {outcome:'lease'};
- const filmId=typeof spec.filmId==='string'?spec.filmId:'';
- if(!POLICY_FILM_ID.test(filmId))return {outcome:'invalid'};
- const tmdbId=filmId.slice(5);
- const row=await one(database(env),'SELECT film_id, tmdb_id, media_kind, state, payload_json FROM discovery_admission WHERE film_id=?',[filmId]);
- if(!row)return {outcome:'missing'};
- if(row.media_kind!=='movie'||String(row.tmdb_id)!==tmdbId)return {outcome:'not_eligible',reason:'not_movie_admission'};
- if(row.state!=='current')return {outcome:'already_applied',filmId,policy:spec.policy||null};
- let film;try{film=JSON.parse(row.payload_json);}catch{return {outcome:'malformed'};}
- const policy=catalogPolicyKind(film,spec.observation||null);
- if(policy!=='documentary'&&policy!=='concert')return {outcome:'not_eligible',reason:'not_policy_excluded'};
- if(spec.policy&&spec.policy!==policy)return {outcome:'conflict'};
- const decisions=await many(database(env),"SELECT observation_key, decision_hash, payload_json FROM discovery_decision WHERE media_kind='movie' AND tmdb_id=? AND (film_id=? OR film_id IS NULL)",[tmdbId,filmId]);
- if(decisions.length>POLICY_EXCLUDE_CAP)return {outcome:'bounded'};
+ const plan=await policyExcludePlan(env,spec.filmId);
+ if(!plan.handled)return {outcome:'missing'};
+ if(plan.reason==='missing')return {outcome:'missing'};
+ if(plan.reason==='invalid')return {outcome:'invalid'};
+ if(plan.reason==='malformed')return {outcome:'malformed'};
+ if(plan.reason==='already_applied')return {outcome:'already_applied',filmId:plan.filmId,policy:plan.policy||null};
+ if(!plan.available)return {outcome:plan.reason==='bounded'?'bounded':'not_eligible',reason:plan.reason};
+ if(spec.policy&&spec.policy!==plan.policy)return {outcome:'conflict'};
+ const filmId=plan.filmId,tmdbId=plan.tmdbId,decisions=plan.decisions;
  const prepared=[];
  for(const decision of decisions){
   let previous;try{previous=JSON.parse(decision.payload_json);}catch{return {outcome:'malformed'};}
@@ -1936,7 +1960,7 @@ export async function ownerPolicyExclude(env,spec={}){
  catch{return {outcome:'unknown'};}
  const after=await one(database(env),'SELECT state FROM discovery_admission WHERE film_id=?',[filmId]);
  if(after?.state!=='superseded')return {outcome:'unknown'};
- return {outcome:'written',filmId,policy,observations:prepared.map(item=>item.key),receipt:spec.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy,observations:prepared.map(item=>item.key)}};
+ return {outcome:'written',filmId,policy:plan.policy,observations:prepared.map(item=>item.key),receipt:spec.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy:plan.policy,observations:prepared.map(item=>item.key)}};
 }
 async function commitOwnerWrite(env,spec,previous){
  const gate=await readAuthority(env);

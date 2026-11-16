@@ -157,12 +157,12 @@ Not covered: more than one observation ([AIR-131](https://trello.com/c/0WtLPRnH)
 
 ## Policy exclusion: `catalog_policy_exclude@1`
 
-The third discovery capability ([ADR 0152](../../adr/0152-catalog-policy-exclusion.md)). It excludes **one** current movie admission `tmdb_<id>` whose stored payload is a Documentary or a concert recording under [ADR 0150](../../adr/0150-documentary-and-concert-film-exclusion.md). In one resolver-leased D1 batch it rejects every current movie decision with that TMDB id (at most 16), deletes current-generation `published_epg_show` rows with `basis='discovery'` for those observation keys, and sets the admission `state` to `superseded`. It does not delete ratings, fingerprints, immutable predictions, Letterboxd facts, Film/Person R2 objects, or non-discovery EPG shows. It calls no TMDB and starts no chunk. A later prediction-queue rebuild omits the film because the catalog snapshot no longer lists a current admission and because `allEnrichmentFilms` skips ADR 0150 exclusions even when the film is still on the personal watchlist. Routes are in the [admin API](admin.md#policy-exclusion-get-apiadmindiscovery-recoverypolicy-exclude).
+The third discovery capability ([ADR 0152](../../adr/0152-catalog-policy-exclusion.md), Proposed). It excludes **one** current movie admission `tmdb_<id>` whose stored payload is a Documentary or a concert recording under [ADR 0150](../../adr/0150-documentary-and-concert-film-exclusion.md). In one resolver-leased D1 batch it rejects every current movie decision with that TMDB id (at most 12, `floor((STATEMENT_CAP-4)/3)`), deletes current-generation `published_epg_show` rows with `basis='discovery'` for those observation keys, and sets the admission `state` to `superseded`. Preview and writer share that observation set; a current admission on a different film_id among those decisions is `linked_admission`. It then settles the film out of the prediction queue (`settleQueueFilms` via `mutatePredictionQueue`) and rebuilds (`refreshPredictionQueue`). It does not delete ratings, fingerprints, immutable predictions, Letterboxd facts, Film/Person R2 objects, or non-discovery EPG shows. It calls no TMDB and starts no chunk. `allEnrichmentFilms` skips ADR 0150 exclusions even when the film is still on the personal watchlist. Routes are in the [admin API](admin.md#policy-exclusion-get-apiadmindiscovery-recoverypolicy-exclude).
 
 The declaration is:
 
 - subject kind `film`, `healthActionCode: catalog_policy_exclude`;
-- budget: 16 records, 3 writes per record, 0 external calls;
+- budget: 12 records, 3 writes per record, 0 external calls;
 - retry: 1 attempt, no backoff;
 - compensation `manual`: restoring the admission is a separate owner-approved write;
 - `confirmTtlMs`: 10 minutes.
@@ -170,13 +170,13 @@ The declaration is:
 | Principle | In `catalog_policy_exclude` |
 | --- | --- |
 | Eligibility | Ready D1 Discovery authority with `cutover` `open`. Current movie admission whose payload classifies as `documentary` or `concert`. A drama, an ambiguous Music-only Live token, a TV Movie without independent recording phrases, a missing admission and a non-movie id are not eligible |
-| Record version | The admission `film_id` plus the policy kind. A superseded row is `already_applied` and writes nothing |
+| Record version | The admission `film_id` plus the policy kind. A superseded row is `already_applied` for Discovery and still retries the queue |
 | Preview | `GET /api/admin/discovery-recovery/policy-exclude?filmId=tmdb_<id>` |
 | Issuance | The execute POST carries `{filmId, idempotencyKey}` and the Access action header. A stored R2 receipt for that key replays |
 | Executor lease | The resolver lease |
 | Commit with CAS | One fenced D1 batch (`ownerPolicyExclude`): decision history and reject payloads, assigned-row deletes, admission `superseded` |
 | Receipt | R2 `admin/actions/catalog_policy_exclude/v1/<idempotencyKey>.json`. A superseded admission on a later POST of the same film is `already_applied` |
-| What changed | Catalog current snapshot, related decisions, discovery-basis shows of those keys. Queue membership changes on the next ordinary rebuild |
+| What changed | Catalog current snapshot, related decisions, discovery-basis shows of those keys, and the prediction-queue membership of that film |
 
 Not covered: bulk exclusion of the AIR-500 inventory, a schema change to `discovery_intent`, deleting personal history, moving the published EPG generation, and any production write. Shipping the capability does not authorize a live exclude.
 

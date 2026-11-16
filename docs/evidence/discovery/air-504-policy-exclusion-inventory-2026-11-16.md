@@ -1,7 +1,7 @@
 # AIR-504: ADR 0150 reclassification of the AIR-500 admission inventory
 
 **Captured:** reclassified 2026-11-16 from the AIR-500 D1 read (2026-11-15 23:32–23:44 UTC / 16 November 2026 00:32–00:44 Europe/Madrid). No new production SELECT, no Worker GET, no MCP write, no TMDB call.
-**Used by:** [AIR-504](https://trello.com/c/jUaNE1Rs). Inventory only. This report does not authorize `catalog_policy_exclude` against production.
+**Used by:** [AIR-504](https://trello.com/c/jUaNE1Rs). Inventory only. This report is a reclassification of the older AIR-500 D1 capture, not a fresh production write set and not an owner GO. It does not authorize `catalog_policy_exclude` against production.
 **Code read:** ADR 0150 on `main` after AIR-501; source audit [AIR-500](air-500-false-film-identity-audit-2026-11-16.md).
 **Verdict:** identity_correct is not sufficient. Documentary-only and Music+Documentary current admissions, and Music-only titles with an explicit performance phrase, are in-scope for the new writer after an owner GO per film. Ambiguous Live tokens are not.
 
@@ -25,7 +25,7 @@ XMLTV `categories` were empty on every active observation in AIR-500, so a conce
 
 ## Hot queue examples (AIR-500 named rows)
 
-None of these four had a `ratings_view` row or a fingerprint/prediction pointer in that capture. Watchlist flag was absent. They are the first candidates for an owner GO after this code deploys; this report does not execute them.
+None of these four had a `ratings_view` row or a fingerprint/prediction pointer in that capture. Watchlist flag was absent. They are named examples only. A later GO must preview each live admission, observation count (cap 12) and queue place; this report is not that write set and does not execute them.
 
 | film_id | AIR-500 verdict | ADR 0150 | Why |
 | --- | --- | --- | --- |

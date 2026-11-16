@@ -36,7 +36,7 @@ const DI_CAPABILITY=AdminActions.defineCapability({
 const PE_CAPABILITY=AdminActions.defineCapability({
  id:'catalog_policy_exclude',version:1,title:'Exclude one Documentary or concert-recording Film from Discovery admission',
  subjectKinds:['film'],healthActionCode:'catalog_policy_exclude',
- budget:{maxRecords:16,maxWritesPerRecord:3,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
+ budget:{maxRecords:12,maxWritesPerRecord:3,externalCallsPerRecord:0},retry:{maxAttempts:1,backoffMs:0},
  compensation:{kind:'manual',guidance:'No automatic undo. The action record names the superseded admission and rejected observation keys. Restoring them is a separate owner-approved write. Ratings, fingerprints and immutable predictions are not deleted.'},
  confirmTtlMs:10*60000,
 });
@@ -827,6 +827,41 @@ function pePrincipal(request,url){
  return {owner:typeof assertion==='string'&&assertion.length>0&&assertion.length<=8192&&request.headers.get('Origin')===url.origin&&request.headers.get('X-IPTV-Admin-Action')==='catalog_policy_exclude'&&(request.method==='GET'||type==='application/json')};
 }
 function peActionKey(idempotencyKey){return PE_ACTION_PREFIX+idempotencyKey+'.json';}
+function peQueuePresent(queue,filmId){
+ const id=String(filmId);
+ return !!(queue&&((queue.pending||[]).includes(id)||(queue.hotPending||[]).includes(id)||(queue.coldPending||[]).includes(id)||queue.priority?.[id]||queue.work?.[id]||queue.retries?.[id]));
+}
+async function peReconcileQueue(env,filmId){
+ const id=String(filmId);
+ let head=null;
+ try{head=await readQueueHead(env);}catch{return {outcome:'unknown'};}
+ if(!head?.current)return {outcome:'absent'};
+ let settled=null;
+ try{
+  settled=await mutatePredictionQueue(env,current=>{
+   const next=settleQueueFilms(current,[id]);
+   if(next)next.trigger='catalog_policy_exclude';
+   return next;
+  },'catalog_policy_exclude');
+ }catch(error){
+  return {outcome:error?.name==='PredictionQueueConflictError'?'conflict':'unknown'};
+ }
+ try{
+  const report=await loadJSON(env,'programme.json');
+  if(report)await refreshPredictionQueue(env,report,'catalog_policy_exclude');
+ }catch{}
+ try{head=await readQueueHead(env);}catch{return {outcome:settled&&!peQueuePresent(settled,id)?'removed':'unknown'};}
+ const queue=head?.current||settled;
+ if(!queue)return {outcome:'unknown'};
+ return {outcome:peQueuePresent(queue,id)?'present':'removed'};
+}
+async function peFinishExclude(env,filmId,payload){
+ const queue=await peReconcileQueue(env,filmId);
+ if(queue.outcome==='present'||queue.outcome==='conflict'||queue.outcome==='unknown'){
+  return drRefused('queue_unreconciled',409,{durable:true,filmId,queue:queue.outcome,outcome:payload.outcome});
+ }
+ return json({...payload,queue:queue.outcome});
+}
 async function pePreview(request,env,url){
  const filmId=url.searchParams.get('filmId');
  if(!filmId||!PE_FILM_ID.test(filmId))return adminError('invalid_request',400);
@@ -848,13 +883,13 @@ async function peExecute(request,env,url){
  if(gate.held||!gate.ready)return drRefused('unknown_authority',409);
  const preview=await DiscoveryAuthority.readPolicyExcludePreview(env,filmId);
  if(preview.reason==='already_applied'){
-  return json({replayed:true,durable:true,state:'applied',outcome:'already_applied',filmId,policy:preview.policy,observations:(preview.observations||[]).map(row=>row.key)});
+  return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',outcome:'already_applied',filmId,policy:preview.policy,observations:(preview.observations||[]).map(row=>row.key)});
  }
  if(!preview.available)return drRefused('not_eligible',409,{reason:preview.reason});
  const stored=await env.BUCKET.get(peActionKey(idempotencyKey));
  if(stored){
   const record=await stored.json();
-  if(record?.receipt)return json({replayed:true,durable:true,state:'applied',...record.receipt});
+  if(record?.receipt)return peFinishExclude(env,filmId,{replayed:true,durable:true,state:'applied',...record.receipt});
  }
  const lease=await acquireDiscoveryLease(env);
  if(!lease)return drRefused('lease_held',409);
@@ -863,7 +898,7 @@ async function peExecute(request,env,url){
   if(result.outcome==='written'||result.outcome==='already_applied'){
    const receipt=result.receipt||{state:'applied',capability:'catalog_policy_exclude',filmId,policy:result.policy,outcome:result.outcome};
    try{await env.BUCKET.put(peActionKey(idempotencyKey),JSON.stringify({schemaVersion:1,kind:'catalog_policy_exclude_action',idempotencyKey,state:'applied',filmId,receipt,finishedAt:new Date().toISOString()}));}catch{}
-   return json({replayed:result.outcome==='already_applied',durable:true,state:'applied',outcome:result.outcome,filmId,policy:result.policy,observations:result.observations||[],receipt});
+   return await peFinishExclude(env,filmId,{replayed:result.outcome==='already_applied',durable:true,state:'applied',outcome:result.outcome,filmId,policy:result.policy,observations:result.observations||[],receipt});
   }
   if(result.outcome==='unknown')return drRefused('in_progress',409,{state:'unknown'});
   if(result.outcome==='lease')return drRefused('lease_held',409);

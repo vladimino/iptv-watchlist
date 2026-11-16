@@ -1,6 +1,6 @@
 # ADR 0152: One owner-fenced policy exclusion retires an already admitted Documentary or concert recording
 
-**Status:** **Accepted** (2026-11-16; product policy on [AIR-504](https://trello.com/c/jUaNE1Rs). This records the writer contract, not permission to run it in production)  
+**Status:** **Proposed** (2026-11-16; writer architecture for [AIR-504](https://trello.com/c/jUaNE1Rs). Stays Proposed until the owner accepts this contract. This records no permission to run it in production)  
 **Original decision date:** 2026-11-16  
 **Recorded at:** 2026-11-16  
 **Approval source:** [AIR-504](https://trello.com/c/jUaNE1Rs)  
@@ -17,10 +17,10 @@ AIR-504 needs one coordinated correction per Film that applies to every related 
 ## Decision
 
 1. **Capability.** `catalog_policy_exclude@1` is an owner-only Access write on one current movie admission `tmdb_<id>`. The Worker classifies the stored payload with the same ADR 0150 `admissionPolicy` as the detail gate. Eligible kinds are `documentary` and `concert`. An ambiguous Music-only Live token, a TV Movie without independent recording phrases, a feature-genre film and a missing admission are not eligible.
-2. **One batch.** Under the resolver lease and the open Discovery fence, `ownerPolicyExclude` rejects every current movie decision with that TMDB id (cap 16), deletes current-generation `published_epg_show` rows with `basis='discovery'` for those observation keys, and sets the admission `state` to `superseded`. History rows keep the before-image. Non-discovery shows stay.
-3. **Queue.** The catalog snapshot is current admissions only, so a rebuild no longer lists the film. `allEnrichmentFilms` also skips ADR 0150 exclusions so a Letterboxd watchlist row cannot re-queue a documentary or concert recording. Ratings and fingerprint objects are not deleted.
+2. **One batch.** Under the resolver lease and the open Discovery fence, `ownerPolicyExclude` rejects every current movie decision with that TMDB id. Preview and writer use the same `tmdb_id` movie query. If any of those decisions names another `film_id` whose admission is still current on a different TMDB id, the write is `linked_admission` and changes nothing. The observation cap is `floor((STATEMENT_CAP-4)/3)` (12 at `STATEMENT_CAP` 40): each verified reject costs three statements plus four fence/admission statements, all-or-nothing. The batch deletes current-generation `published_epg_show` rows with `basis='discovery'` for those observation keys, and sets the admission `state` to `superseded`. History rows keep the before-image. Non-discovery shows stay. `rejectedTmdbIds` keeps the excluded id first and drops older ids if the list would exceed eight.
+3. **Queue.** After the D1 batch, the same POST calls `settleQueueFilms` through `mutatePredictionQueue` (not gated on programme generation) and then `refreshPredictionQueue`. A cold id outside a batch window is still removed. `already_applied` retries that queue reconcile. Durable success is reported only when the film is absent from pending, hot, cold, priority, work and retries, or when no queue object exists. A present, conflicted or unread queue is `queue_unreconciled` (409) even if Discovery already wrote. `allEnrichmentFilms` also skips ADR 0150 exclusions so a Letterboxd watchlist row cannot re-queue a documentary or concert recording. Ratings and fingerprint objects are not deleted.
 4. **Not a Film delete.** Film/Person R2 objects, Letterboxd facts and `film_retention` are unchanged. If a later owner wants a canonical Film retirement, that is a separate Film/Person write after AIR-499.
-5. **Idempotence.** A superseded admission is `already_applied` and writes nothing.
+5. **Idempotence.** A superseded admission is `already_applied` for Discovery and still retries the queue reconcile.
 6. **No production write.** Shipping the route does not authorize a live exclude. Each film still needs an owner GO.
 
 Not decided: bulk application of the AIR-500 inventory, a new `discovery_intent` kind, and reversing a policy exclusion.

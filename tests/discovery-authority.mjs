@@ -267,6 +267,45 @@ const excludedConcert=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_71',l
 assert.equal(excludedConcert.outcome,'written');
 assert.equal(excludedConcert.policy,'concert');
 assert.equal(one(live.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_71'").state,'superseded');
+assert.equal(Authority.POLICY_EXCLUDE_CAP,12);
+assert.equal(Authority.POLICY_EXCLUDE_CAP,Math.floor((Authority.STATEMENT_CAP-4)/3));
+const rejectFilm={id:'tmdb_73',tmdbId:'73',canonicalIdentity:'tmdb:73',title:'Rejected List',year:2020,runtime:90,genres:['документальный']};
+const linkedDoc={id:'tmdb_74',tmdbId:'74',canonicalIdentity:'tmdb:74',title:'Linked Doc',year:2020,runtime:90,genres:['документальный']};
+const linkedOther={id:'tmdb_75',tmdbId:'75',canonicalIdentity:'tmdb:75',title:'Other Film',year:2001,genres:['драма']};
+const capOver={id:'tmdb_80',tmdbId:'80',canonicalIdentity:'tmdb:80',title:'Over Cap',year:2020,runtime:90,genres:['документальный']};
+const capOk={id:'tmdb_81',tmdbId:'81',canonicalIdentity:'tmdb:81',title:'At Cap',year:2020,runtime:90,genres:['документальный']};
+await Authority.replaceCatalog(env,{tmdb_70:docFilm,tmdb_71:concertFilm,tmdb_72:drama,tmdb_73:rejectFilm,tmdb_74:linkedDoc,tmdb_75:linkedOther,tmdb_80:capOver,tmdb_81:capOk});
+async function putDecision(key,decision,filmId){
+ const hash=await Authority.decisionHash(decision);
+ const filmSql=filmId==null?'NULL':"'"+filmId+"'";
+ live.db.sql("INSERT INTO discovery_decision (observation_key, programme_run_id, generation, status, attempts, evidence_key, terminal_reason, retry_at, tmdb_id, media_kind, film_id, decision_hash, payload_json) VALUES ('"+key+"', 'run-b', 1, '"+(decision.status||'verified')+"', 1, NULL, NULL, NULL, '"+decision.tmdbId+"', 'movie', "+filmSql+", '"+hash+"', '"+JSON.stringify(decision).replace(/'/g,"''")+"')");
+}
+await putDecision('reject-obs',{status:'verified',tmdbId:'73',filmId:'tmdb_73',canonicalIdentity:'tmdb:73',identitySource:'tmdb_detail',attempts:1,evidenceKey:evidence,rejectedTmdbIds:['1','2','3','4','5','6','7','8']},'tmdb_73');
+const rejectedList=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_73',lease:again.lease});
+assert.equal(rejectedList.outcome,'written');
+const rejectedPayload=JSON.parse(one(live.db,"SELECT payload_json FROM discovery_decision WHERE observation_key='reject-obs'").payload_json);
+assert.equal(rejectedPayload.rejectedTmdbIds[0],'73');
+assert.equal(rejectedPayload.rejectedTmdbIds.length,8);
+assert.equal(rejectedPayload.rejectedTmdbIds.includes('8'),false);
+await putDecision('linked-obs',{status:'verified',tmdbId:'74',filmId:'tmdb_75',canonicalIdentity:'tmdb:75',identitySource:'tmdb_detail',attempts:1,evidenceKey:evidence},'tmdb_75');
+const linkedPreview=await Authority.readPolicyExcludePreview(env,'tmdb_74');
+assert.equal(linkedPreview.available,false);
+assert.equal(linkedPreview.reason,'linked_admission');
+const linkedWrite=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_74',lease:again.lease});
+assert.equal(linkedWrite.outcome,'not_eligible');
+assert.equal(linkedWrite.reason,'linked_admission');
+assert.equal(one(live.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_74'").state,'current');
+for(let i=0;i<13;i++)await putDecision('over-obs-'+i,{status:'verified',tmdbId:'80',filmId:'tmdb_80',canonicalIdentity:'tmdb:80',identitySource:'tmdb_detail',attempts:1,evidenceKey:evidence},'tmdb_80');
+const overPreview=await Authority.readPolicyExcludePreview(env,'tmdb_80');
+assert.equal(overPreview.available,false);
+assert.equal(overPreview.reason,'bounded');
+assert.equal(overPreview.cap,12);
+const overWrite=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_80',lease:again.lease});
+assert.equal(overWrite.outcome,'bounded');
+assert.equal(one(live.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_80'").state,'current');
+for(let i=0;i<12;i++)await putDecision('ok-obs-'+i,{status:'verified',tmdbId:'81',filmId:'tmdb_81',canonicalIdentity:'tmdb:81',identitySource:'tmdb_detail',attempts:1,evidenceKey:evidence},'tmdb_81');
+const okWrite=await Authority.ownerPolicyExclude(env,{filmId:'tmdb_81',lease:again.lease});
+assert.equal(okWrite.outcome,'written');
 const collided=await Authority.ownerDecision(env,{idempotencyKey:'missing-key-000001',key:'obs-1',expectedHash:expected,next:assigned,lease:again.lease});
 assert.equal(collided.outcome,'missing');
 
@@ -575,12 +614,25 @@ assert.equal(policyPreview.body.available,true);
 assert.equal(policyPreview.body.policy,'documentary');
 const policyDenied=await call('/api/admin/discovery-recovery/policy-exclude',{method:'POST',headers:ownerHeaders('discovery_identity_correct'),body:JSON.stringify({filmId:'tmdb_70',idempotencyKey:'policy-exclude-00001'})});
 assert.equal(policyDenied.status,403);
+const coldFill=Array.from({length:20},(_,i)=>'tmdb_fill_'+i);
+await httpBucket.put('enrichment/prediction-queue.json',JSON.stringify({
+ schemaVersion:3,profileVersion:1,profileHash:'p1',programmeRunId:RUN,refreshedAt:new Date().toISOString(),lastCheckAt:new Date().toISOString(),
+ lastBatch:{finishedAt:new Date().toISOString(),stage:'complete',reason:null},hotPending:[],coldPending:[...coldFill,'tmdb_70'],pending:['tmdb_70'],
+ priority:{tmdb_70:{rank:2,hot:false}},priorityCount:0,coldRemaining:21,urgentCount:0,retries:{},work:{},
+}));
+await httpBucket.put('programme.json',JSON.stringify({runId:RUN,updatedAt:new Date().toISOString(),watchlistCount:0,films:[],stats:{}}));
 const policyExecuted=await call('/api/admin/discovery-recovery/policy-exclude',{method:'POST',headers:ownerHeaders('catalog_policy_exclude'),body:JSON.stringify({filmId:'tmdb_70',idempotencyKey:'policy-exclude-00001'})});
 assert.equal(policyExecuted.status,200,JSON.stringify(policyExecuted.body));
 assert.equal(policyExecuted.body.outcome,'written');
+assert.equal(policyExecuted.body.queue,'removed');
 assert.equal(one(httpDb.db,"SELECT state FROM discovery_admission WHERE film_id='tmdb_70'").state,'superseded');
+const queued=await (await httpBucket.get('enrichment/prediction-queue.json')).json();
+assert.equal((queued.coldPending||[]).includes('tmdb_70'),false);
+assert.equal((queued.pending||[]).includes('tmdb_70'),false);
+assert.equal(queued.priority.tmdb_70,undefined);
 const policyReplay=await call('/api/admin/discovery-recovery/policy-exclude',{method:'POST',headers:ownerHeaders('catalog_policy_exclude'),body:JSON.stringify({filmId:'tmdb_70',idempotencyKey:'policy-exclude-00001'})});
 assert.equal(policyReplay.body.replayed,true,JSON.stringify(policyReplay.body));
+assert.equal(policyReplay.body.queue,'removed');
 
 const hour=3600000,catalogNow=Date.now();
 const catalogShow=start=>({channelId:'c1',channel:'One',start,end:start+2*hour});
