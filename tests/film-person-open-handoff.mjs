@@ -51,7 +51,7 @@ assert.ok(!audit.residuals.some(item=>item.startsWith('workflow_facts_absent:'))
 assert.ok(audit.residuals.some(item=>item.startsWith('producer_not_wired:')));
 assert.ok(audit.producers.find(item=>item.name==='discovery_admission').wired);
 assert.ok(audit.producers.find(item=>item.name==='epg_commit').wired);
-assert.ok(!audit.producers.find(item=>item.name==='metadata_sync').wired);
+assert.ok(audit.producers.find(item=>item.name==='metadata_sync').wired);
 assert.ok(!audit.producers.find(item=>item.name==='rated_admission_retention').wired);
 const workflowSrc=fs.readFileSync('src/canonical-producer-workflow.js','utf8');
 assert.match(workflowSrc,/export function filmFactsOf\(film,watchlisted\)/);

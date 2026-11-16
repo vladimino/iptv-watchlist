@@ -816,6 +816,19 @@ async function metadataSync(env,run){
  try{if(batch.length)recordLifecycle(run,'metadata',localizationMode,await localizePeople(batch,people,localizationMode));for(const f of batch){f.peopleLocalizedAt=new Date().toISOString();f.peopleNamesVersion=2;}}catch(e){run.localizationErrors=(run.localizationErrors||0)+1;}
  for(const f of batch)cache[f.id]=f;
  await saveCanonicalMirror(env,'people.json',people);
+ if(typeof CanonicalMetadataSync!=='undefined'){
+  try{
+   await CanonicalMetadataSync.applyMetadataSync(env,{
+    event:'metadata:'+String(run.runId||''),
+    films:run.watchlist.filter(film=>ids.includes(film.id)),
+    titles,people,failedIds:(run.failures||[]).map(item=>item.id),
+   });
+  }catch(error){
+   const code=error&&error.code;
+   if(code==='film_person_held'||code==='film_person_unavailable'||code==='film_person_not_open'||code==='film_person_generation_moved')throw error;
+   run.canonicalMetadataErrors=(run.canonicalMetadataErrors||0)+1;
+  }
+ }
  run.cursor+=ids.length;run.remaining=run.pending.length-run.cursor;run.stage=run.remaining?'metadata':'epg';run.updatedAt=new Date().toISOString();await MetadataCache.saveMetadataWorkingSet(env,cache,working);await saveJSON(env,'sync.json',run);return {runId:run.runId,stage:run.stage,remaining:run.remaining,failedMetadata:run.failures.length,localizationErrors:run.localizationErrors||0,russianNames:Object.keys(people).length};
 }
 // AIR-353: the first half of the commit tail (the watchlist, the scan observation and the events) is its own function, so

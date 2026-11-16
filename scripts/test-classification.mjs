@@ -189,6 +189,9 @@ export const FILES={
  "canonical-handoff-readiness.mjs": {
   "suite": "core"
  },
+ "canonical-metadata-sync-producer.mjs": {
+  "suite": "core"
+ },
  "canonical-person-mutation-producer-mutation.mjs": {
   "suite": "non-functional",
   "note": "Every assertion is that a one-rule mutant is killed by the matching functional test, or that a neutral edit is not. That measures how effective the tests are. It is not a check of production behaviour."

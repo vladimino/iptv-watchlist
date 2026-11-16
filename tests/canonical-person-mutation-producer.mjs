@@ -473,10 +473,10 @@ for(const stage of ['legacy','r2','prepared']){
  assert.ok(/mutatePerson\(/.test(body)&&/receiptMark/.test(body)&&/presence/.test(body));
  assert.deepEqual([...body.matchAll(/from '(\.\/[^']+)'/g)].map(match=>match[1]).sort(),['./canonical-mutations.js','./canonical-person-adapters.js','./canonical-producer-adapters.js','./canonical-receipts.js','./canonical-writer-route.js','./film-person-authority.js']);
  await assert.rejects(()=>mutatePerson(envOf(database('open')),{id:PID(1),expectedRevision:0,at:T,presence:'maybe',person:{roleId:'director/1',contractVersion:1}}),code('film_person_invalid'));
- assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_mutation','person_mutation','person_state']);
+ assert.deepEqual([...PRODUCER_OPERATIONS.keys()].sort(),['film_credits','film_facts','film_metadata','film_mutation','film_sync_state','localization_conflict','localization_source','person_mutation','person_state']);
  const epgWiring=PRODUCER_WIRING.find(item=>item.name==='epg_commit');
  assert.ok(epgWiring.requires.includes('person_mutation')&&epgWiring.requires.every(kind=>PRODUCER_OPERATIONS.has(kind)));
  const readiness=await handoffReadiness(envOf(database('prepared')),{now:T});
- assert.ok(!readiness.blockers.includes('producer_not_wired:epg_commit')&&readiness.blockers.includes('producer_not_wired:metadata_sync')&&readiness.ready===false);
+ assert.ok(!readiness.blockers.includes('producer_not_wired:epg_commit')&&!readiness.blockers.includes('producer_not_wired:metadata_sync')&&readiness.blockers.includes('producer_not_wired:rated_admission_retention')&&readiness.ready===false);
 }
 console.log('canonical-person-mutation-producer: ok');

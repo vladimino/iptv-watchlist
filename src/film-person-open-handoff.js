@@ -8,6 +8,7 @@ import {grantProjectorWindow,releaseProjectorWindow,requestProjectorWindow,WINDO
 import {writerRoute} from './canonical-writer-route.js';
 import {CANONICAL_READER_REGISTRY} from './canonical-catalog-reader.js';
 import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
+import {metadataSyncOperations} from './canonical-metadata-sync-producer.js';
 import {filmFactsOperation} from './canonical-producer-adapters.js';
 import {personMutationOperation} from './canonical-person-mutation-producer.js';
 import {FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,unitOperation} from './canonical-person-adapters.js';
@@ -44,7 +45,7 @@ export function workflowFactsProbe(sample=filmFactsOf(WORKFLOW_FACTS_SAMPLE,true
 }
 export const WORKFLOW_FILM_FACTS=workflowFactsProbe().present;
 export const WORKFLOW_FILM_FACTS_ABSENT=workflowFactsProbe().absent;
-export const NEXT_MINIMAL_FIX='Register atomic operations for every remaining PRODUCER_WIRING kind (metadata_sync, rated_admission_retention). Until then activationReadiness.ready is false and apply STOPs.';
+export const NEXT_MINIMAL_FIX='Register atomic operations for the remaining PRODUCER_WIRING kind rated_admission_retention. Until then activationReadiness.ready is false and apply STOPs.';
 export const PRODUCER_WIRING=Object.freeze([
  Object.freeze({name:'epg_commit',site:'Producer Workflow chain from EpgOrchestration.ensure (canonical-producer-workflow.js)',requires:Object.freeze(['film_facts','person_mutation','person_state','film_credits'])}),
  Object.freeze({name:'metadata_sync',site:'metadataSync (worker.js)',requires:Object.freeze(['film_metadata','film_sync_state','localization_source','localization_conflict'])}),
@@ -62,6 +63,7 @@ const PRODUCER_OPERATIONS=operationRegistry([
  personMutationOperation({replan:async()=>null}),
  unitOperation(PERSON_STATE_OPERATION,{replan:async()=>null}),
  unitOperation(FILM_CREDITS_OPERATION,{replan:async()=>null}),
+ ...metadataSyncOperations({replan:async()=>null}),
 ]);
 
 const DB_NOW_MS="(CAST(strftime('%s','now') AS INTEGER)*1000)";

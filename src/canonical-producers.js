@@ -17,6 +17,7 @@
 import {PROJECTOR_MARKER_CONDITION,assertWritable,database,failed,many,one,readAuthority} from './film-person-authority.js';
 import {writerRoute} from './canonical-writer-route.js';
 import {discoveryAdmissionOperation} from './canonical-discovery-admission-producer.js';
+import {metadataSyncOperations} from './canonical-metadata-sync-producer.js';
 import {filmFactsOperation} from './canonical-producer-adapters.js';
 import {personMutationOperation} from './canonical-person-mutation-producer.js';
 import {FILM_CREDITS_OPERATION,PERSON_STATE_OPERATION,unitOperation} from './canonical-person-adapters.js';
@@ -67,6 +68,7 @@ export const PRODUCER_OPERATIONS=operationRegistry([
  personMutationOperation({replan:async()=>null}),
  unitOperation(PERSON_STATE_OPERATION,{replan:async()=>null}),
  unitOperation(FILM_CREDITS_OPERATION,{replan:async()=>null}),
+ ...metadataSyncOperations({replan:async()=>null}),
 ]);
 // P4: the readers are NOT listed here. handoffReadiness derives them from CANONICAL_READER_REGISTRY of src/canonical-catalog-reader.js (the one registry, owner decision 4): every entry of
 // class 'freeze' with moved:false is `reader_not_moved:<name>`; an entry of class 'exception' never blocks and must not be marked moved.
