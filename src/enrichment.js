@@ -1457,8 +1457,7 @@ function retryablePerFilmFailure(failure){
 }
 function retryBudgetExhausted(record){return Number.isInteger(record?.attempts)&&record.attempts>=PREDICTION_RETRY_ATTEMPT_BUDGET;}
 function countsTowardFormatStorm(validation){
- if(!validation||typeof validation!=='object')return true;
- if(validation.stage==='caller_reported'&&validation.claimed?.reason==='insufficient_evidence')return false;
+ if(validation?.stage==='caller_reported'&&validation.claimed?.reason)return false;
  return true;
 }
 function recountQueueLanes(queue){
@@ -1476,14 +1475,15 @@ function holdRetryExhaustedFilm(queue,id){
  return true;
 }
 function boundRetryRecords(retries,currentIds){
- const keep=[];
+ const held=[],historical=[];
  for(const [id,record] of Object.entries(retries||{})){
-  if(currentIds.has(id)||retryBudgetExhausted(record))keep.push([id,record]);
+  if(retryBudgetExhausted(record)){
+   if(currentIds.has(id))held.push([id,record]);
+   else historical.push([id,record]);
+  }else if(currentIds.has(id))held.push([id,record]);
  }
- if(keep.length<=PREDICTION_RETRY_EXHAUSTED_KEEP+currentIds.size)return Object.fromEntries(keep);
- const current=keep.filter(([id])=>currentIds.has(id)&&!retryBudgetExhausted(retries[id]));
- const exhausted=keep.filter(([,record])=>retryBudgetExhausted(record)).sort((a,b)=>Date.parse(b[1].failedAt||0)-Date.parse(a[1].failedAt||0)).slice(0,PREDICTION_RETRY_EXHAUSTED_KEEP);
- return Object.fromEntries([...exhausted,...current]);
+ historical.sort((a,b)=>Date.parse(b[1].failedAt||0)-Date.parse(a[1].failedAt||0));
+ return Object.fromEntries([...held,...historical.slice(0,PREDICTION_RETRY_EXHAUSTED_KEEP)]);
 }
 // A retry record only grows while its film is outstanding: attempts and retryAt never go back, and the same run's record
 // is written once. Systemic run failures do not increment the per-film budget.

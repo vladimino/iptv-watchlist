@@ -78,12 +78,54 @@ async function failFilm(w,filmId){
 
 {
  const w=await ready(8);const m=await start(w),pick=ids(m).slice(0,5);
+ const r=await submit(w,m,pick.map(filmId=>({filmId,failure:{kind:'parse_error',reason:'json_unparseable'}})));
+ assert.equal(r.status,200);
+ const stored=storedRun(w,m);
+ assert.equal(stored.formatFailureStreak||0,0,'caller json_unparseable does not trip format_error_storm');
+ assert.notEqual(stored.systemicStopReason,'format_error_storm');
+ await stop(w,m);
+}
+
+{
+ const w=await ready(8);const m=await start(w),pick=ids(m).slice(0,5);
+ const mixed=pick.map((filmId,i)=>i<4?{filmId,failure:{kind:'parse_error',reason:'preflight_validation_failed'}}:{filmId,fingerprint:w.fingerprint,prediction:{...w.prediction,predictedRating:99}});
+ const r=await submit(w,m,mixed);
+ assert.equal(r.status,200);
+ const stored=storedRun(w,m);
+ assert.notEqual(stored.systemicStopReason,'format_error_storm','four caller claims plus one worker failure is not a storm');
+ assert.equal(stored.formatFailureStreak,1);
+ await stop(w,m);
+}
+
+{
+ const w=await ready(8);const m=await start(w),pick=ids(m).slice(0,5);
  const bad={...w.prediction,predictedRating:99};
  const r=await submit(w,m,pick.map(filmId=>({filmId,fingerprint:w.fingerprint,prediction:bad})));
  assert.equal(r.status,200);
  const stored=storedRun(w,m);
  assert.equal(stored.systemicStopReason,'format_error_storm','five worker schema failures still stop the run');
  await w.api('complete',{runId:m.runId,reason:'format_error_storm'});
+}
+
+{
+ const w=await ready(2);
+ const rec=(n)=>({kind:'parse_error',scope:'item',retryable:true,attempts:10,failedAt:new Date(Date.parse('2026-11-16T00:00:00.000Z')+n*1000).toISOString(),retryAt:0,lastRunId:'prior'});
+ const seeded=await w.ctx.mutatePredictionQueue(w.env,current=>{
+  current.retries||={};
+  current.retries.tmdb_1=rec(0);
+  for(let i=0;i<501;i++)current.retries['hist_'+i]=rec(i+1);
+  return current;
+ },'seed_history_cap');
+ assert.ok(seeded);
+ const rebuilt=await w.api('queue/reconcile',{});
+ assert.equal(rebuilt.status,200);
+ const held=queue(w);
+ assert.equal(held.retries.tmdb_1.attempts,10,'rebuild does not drop an exhausted catalog identity under the history cap');
+ assert.ok(!held.hotPending.includes('tmdb_1'));
+ assert.equal(held.retries.hist_0,undefined);
+ const m=await start(w);
+ assert.ok(!ids(m).includes('tmdb_1'),'the held identity is not selected for an 11th attempt');
+ await stop(w,m);
 }
 
 {
@@ -116,6 +158,16 @@ async function failFilm(w,filmId){
  assert.deepEqual(readyIds,[],'exhausted hot films do not occupy the hot lane once every remaining hot film is held');
  const cold=w.ctx.queueReadyIds({hotPending:['a'],coldPending:['c'],priorityCount:1,retries:{a:{attempts:10,retryAt:0}}});
  assert.deepEqual(cold,['c'],'cold proceeds when every hot film is retry-exhausted');
+ const rec=(n,id)=>({kind:'parse_error',scope:'item',retryable:true,attempts:10,failedAt:new Date(Date.parse('2026-11-16T00:00:00.000Z')+n*1000).toISOString(),retryAt:0,lastRunId:'prior'});
+ const retries={};
+ for(let i=0;i<501;i++)retries['hist_'+i]=rec(i);
+ retries.important=rec(0);
+ const keepActive=w.ctx.boundRetryRecords(retries,new Set(['important']));
+ assert.equal(keepActive.important.attempts,10,'an exhausted catalog identity survives >500 newer historical records');
+ assert.equal(Object.keys(keepActive).filter(id=>id.startsWith('hist_')).length,500);
+ assert.equal(keepActive.hist_0,undefined,'the oldest historical exhausted record is the one dropped');
+ const keepBoth=w.ctx.boundRetryRecords(retries,new Set(['important','hist_0']));
+ assert.ok(keepBoth.hist_0&&keepBoth.important,'catalog exhausted holds are never trimmed for history');
 }
 
 console.log('prediction retry exhausted: 9 stays deferred, 10 holds, rebuild and replay keep the budget, insufficient_evidence does not false-storm');
