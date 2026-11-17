@@ -47,6 +47,17 @@ assert.ok(prompt.includes("prediction_batch_manifest({runId,part:'envelope'})")&
 assert.ok(prompt.includes("неизвестен runId")||prompt.includes("отсутствии достоверного runId"),'fallback fails closed if run identity is lost');
 assert.ok(!/runId:['"]dry-run['"]|dryRun:true|\{\{FROZEN_MANIFEST\}\}/.test(prompt),'production never invokes dry-run transport or synthetic S5-C runId');
 assert.ok(/prediction_batch_submit\(\{runId,epoch,items\}\)/.test(prompt),'production submit uses the owned live runId and epoch');
+// AIR-510: observed external-termination only. A recovered manifest must proceed; an unrecoverable manifest read error is api_error.
+const reconstructionInstruction=prompt.split('\n').find(line=>line.startsWith('2а. Восстановление'));
+const stopInstruction=prompt.split('\n').find(line=>line.startsWith('10. Остановки'));
+assert.ok(reconstructionInstruction?.includes('После полного успешного восстановления ОБЯЗАТЕЛЬНО продолжай с шага 3'),'valid reconstruction cannot voluntarily stop');
+assert.ok(reconstructionInstruction?.includes("reason:'api_error'"),'owned failed readback reports an observed API failure');
+assert.ok(!reconstructionInstruction.includes("reason:'external_termination'"),'failed readback is not classified as external termination');
+assert.ok(stopInstruction?.includes('external_termination разрешён ТОЛЬКО при явном'),'external termination requires observed signal');
+assert.ok(stopInstruction?.includes('НЕЛЬЗЯ выбирать external_termination'),'voluntary early exit is forbidden');
+assert.ok(stopInstruction?.includes('ОБЯЗАТЕЛЬНО продолжай research→generation→preflight→hold→submit'),'research must continue with live owned manifest');
+assert.ok(stopInstruction?.includes('обычное истечение lease обеспечит recovery'),'true platform hard kill relies on lease expiry');
+assert.ok(prompt.includes('manifestSize=5')&&prompt.includes('generationSize=1')&&prompt.includes('submitBatchSize=5'),'batch params remain unchanged');
 // AIR-510 / ADR 0157: stage is durable and transferable, but hold is not itself commit.
 const holdInstruction=prompt.split('\n').find(line=>line.startsWith('7а. DURABLE HOLD (ADR 0157, AIR-510).'));
 assert.ok(holdInstruction,'the installed durable hold section is kept byte for byte');
