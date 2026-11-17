@@ -19,7 +19,7 @@ const fixture = fs.readFileSync('src/admin/actions-fixture.js', 'utf8');
 assert.doesNotMatch(contract, /\bfetch\b|BUCKET|cloudflare:|node:|\bimport\b|\brequire\(|Date\.now|new Date\(\)|Math\.random|\.prepare\(/);
 assert.doesNotMatch(fixture, /\bfetch\b|BUCKET|env\.|cloudflare:|node:|\.prepare\(|localStorage|Authorization|Bearer|CF-Access/);
 const build = fs.readFileSync('build.mjs', 'utf8');
-const workerBundle = build.slice(build.indexOf("fs.writeFileSync('dist/server/index.js'"));
+const workerBundle = build.slice(build.indexOf("writeAtomic('dist/server/index.js'"));
 assert.equal(workerBundle.includes("scoped('src/domain/admin-actions.js','AdminActions')"), true, 'the Worker script carries the contract, scoped');
 assert.deepEqual([...fs.readFileSync('src/admin/discovery-recovery.js', 'utf8').matchAll(/AdminActions\.defineCapability\(\{\s*id:'([a-z_]+)'/g)].map(match => match[1]), ['discovery_reconsider', 'discovery_identity_correct', 'catalog_policy_exclude'], 'the discovery adapter registers reconsideration, identity correction and policy exclusion');
 assert.doesNotMatch(fs.readFileSync('src/worker.js', 'utf8'), /defineCapability|createRegistry/, 'the Worker entry point registers no capability of its own');
