@@ -126,7 +126,7 @@ for(const [label,text] of [['scheduled',prompt],['dry run',dry]]){
  assert.ok(/failure:\{kind:'parse_error',reason,preflight\}/.test(step7)&&/preflight_validation_failed/.test(step7)&&/insufficient_evidence/.test(step7)&&/json_unparseable/.test(step7)&&/request_too_large/.test(step7)&&/максимум из 20 issues/.test(step7)&&/это твоё заявление, а не серверная телеметрия/i.test(step7),'the failure item carries the closed reason and the copied preflight issues, as a claim');
  assert.ok(!/повтори один раз как \{filmId,failure:\{kind:'parse_error'\}\}/.test(step7),'no kind-only fallback');
  assert.ok(/Не отправляй \{filmId,failure:\{kind:'parse_error'\}\} без reason/.test(step7)&&/Worker ответит 400/.test(step7),'a missing reason is a 400, not a retry as kind-only');
- assert.ok(/reason:'request_too_large'/.test(step7),'an oversized single film is reported with request_too_large');
+ assert.ok(/request_too_large \(фильм не помещается в запрос один\)/.test(step7),'an oversized single film is reported with request_too_large');
  assert.ok(!/остаются issues, отправь как/.test(prompt),'no unconditional legacy instruction remains');assert.ok(!/отправь существующий failure/.test(prompt),'3б no longer sends a legacy failure');
  assert.ok(/ОБЯЗАТЕЛЕН, даже когда первый дал казавшуюся содержательной статью/.test(step3b(prompt)[0])&&/третий поиск не разрешён/.test(step3b(prompt)[0]),'3б: second search mandatory within the two-search budget');
  assert.ok(/reason:'preflight_validation_failed'/.test(dry)&&/reason:'insufficient_evidence'/.test(dry),'the dry-run failure item carries a closed reason');
