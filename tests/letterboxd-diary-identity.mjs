@@ -19,7 +19,8 @@ const bucket = {
 const net = {calls: [], handler: async () => {throw new Error('unexpected request');}};
 const headersOf = map => ({get: key => map[String(key).toLowerCase()] ?? null});
 const http = (status, body, headers = {}) => ({status, ok: status < 300, headers: headersOf(headers), async text() {return body;}});
-const canonical = {gate: {mode: 'd1', state: 'open', generation: 2}, bridge: {}, applied: [], failWith: null};
+const canonical = {gate: {mode: 'd1', state: 'open', generation: 2}, bridge: {}, applied: [], failWith: null, result: null};
+const applied = {state: 'complete', applied: 1, failed: 0, unknown: 0, preflightFailed: 0, deferred: 0, refused: 0, units: [{kind: 'film_admission', state: 'applied'}]};
 const ctx = vm.createContext({Response, Headers, URL, Date, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, AbortSignal, crypto: webcrypto, console: {...console, log: () => {}},
   fetch: async (url, init) => {net.calls.push(String(url)); return net.handler(String(url), init);}});
 ctx.CanonicalCatalogReader = {
@@ -28,7 +29,7 @@ ctx.CanonicalCatalogReader = {
   catalogTitlesFromD1: async () => ({}),
 };
 ctx.CanonicalRatedAdmission = {
-  applyRatedAdmissionRetention: async (env, input) => {if (canonical.failWith) throw Object.assign(new Error(canonical.failWith), {code: canonical.failWith}); canonical.applied.push(input); return {state: 'complete', failed: 0, unknown: 0, preflightFailed: 0, deferred: 0, refused: 0};},
+  applyRatedAdmissionRetention: async (env, input) => {if (canonical.failWith) throw Object.assign(new Error(canonical.failWith), {code: canonical.failWith}); canonical.applied.push(input); return canonical.result || applied;},
   assertRatedAdmissionAccepted: out => out,
 };
 const run = file => vm.runInContext(fs.readFileSync(file, 'utf8').replace(/^export default/m, 'globalThis.x='), ctx);
@@ -46,17 +47,17 @@ const filmPage = ({lid, slug, title, year, tmdbIds = ['900001'], type = 'movie',
 };
 const detail = (tmdb, title, year) => JSON.stringify({id: Number(tmdb), title, original_title: title, release_date: year + '-05-01'});
 // site: lid -> {slug, page html, status}; tmdb: id -> http response
-const site = new Map(), tmdbDocs = new Map();
+const site = new Map(), tmdbDocs = new Map(), slow = {on: null, left: 120000};
 net.handler = async url => {
   const boxd = /^https:\/\/boxd\.it\/([A-Za-z0-9]+)$/.exec(url);
-  if (boxd) {const item = site.get(boxd[1]); if (!item) return http(404, ''); if (item.status) return http(item.status, '', item.headers || {}); return http(301, '', {location: 'https://letterboxd.com/film/' + item.landing + '/'});}
+  if (boxd) {if (slow.on === 'redirect') slow.left = 10000; const item = site.get(boxd[1]); if (!item) return http(404, ''); if (item.status) return http(item.status, '', item.headers || {}); return http(301, '', {location: 'https://letterboxd.com/film/' + item.landing + '/'});}
   const film = /^https:\/\/letterboxd\.com\/film\/([a-z0-9-]+)\/$/.exec(url);
   if (film) {const item = [...site.values()].find(entry => entry.landing === film[1]); return item ? http(200, item.html) : http(404, '');}
   const tm = /api\.themoviedb\.org\/3\/movie\/(\d+)/.exec(url);
-  if (tm) {const doc = tmdbDocs.get(tm[1]); return doc ? (typeof doc === 'function' ? doc() : http(200, doc)) : http(404, '');}
+  if (tm) {if (slow.on === 'detail') slow.left = 14000; const doc = tmdbDocs.get(tm[1]); return doc ? (typeof doc === 'function' ? doc() : http(200, doc)) : http(404, '');}
   throw new Error('unexpected ' + url);
 };
-const reset = () => {records.clear(); etags.clear(); site.clear(); tmdbDocs.clear(); net.calls.length = 0; canonical.bridge = {}; canonical.applied.length = 0; canonical.failWith = null; canonical.gate = {mode: 'd1', state: 'open', generation: 2};};
+const reset = () => {records.clear(); etags.clear(); site.clear(); tmdbDocs.clear(); net.calls.length = 0; canonical.bridge = {}; canonical.applied.length = 0; canonical.failWith = null; canonical.result = null; slow.on = null; canonical.gate = {mode: 'd1', state: 'open', generation: 2};};
 const seed = async (lid, rating, date = '2026-11-15') => Facts.applyDiaryEvidence(env, [{lid, watchedDate: date, rating, ratingState: 'rated', sourceRef: 'diary:viewing:1'}]);
 const add = (lid, slug, tmdb, title, year, extra = {}) => {site.set(lid, {landing: slug, html: filmPage({lid, slug, title, year, tmdbIds: [tmdb], ...extra})}); tmdbDocs.set(tmdb, detail(tmdb, title, year));};
 const NOW = Date.parse('2026-11-17T16:01:00.000Z');
@@ -110,7 +111,7 @@ for (const [reason, arrange, slug] of refusals) {
   reset(); await seed('Gam1', 2.5); arrange('Gam1');
   out = await Identity.resolve(env, items(['Gam1', slug]), opts());
   const expected = reason === 'challenge' ? 'challenge' : reason;
-  assert.equal(pending().Gam1?.reason, expected, reason); assert.equal(canonical.applied.length, 0, reason + ' admits nothing');
+  assert.equal(pending().Gam1?.reason, expected, reason); if (reason === 'slug_missing') assert.equal(net.calls.length, 0, 'no request without the same-row slug'); assert.equal(canonical.applied.length, 0, reason + ' admits nothing');
   assert.equal(recordOf('Gam1').links.tmdb, null, reason); assert.equal(recordOf('Gam1').rating.value, 2.5, reason);
   assert.equal(records.has('letterboxd/admissions/verified-films.json'), false, reason + ' writes no receipt');
 }
@@ -144,7 +145,7 @@ assert.equal(net.calls.length, 0); assert.equal(out.counts.skipped, 1); assert.d
 // 8. budget: a short lease defers, a transport stop ends the step's requests, the step cap is three.
 reset(); for (const lid of ['Bud1', 'Bud2', 'Bud3', 'Bud4', 'Bud5']) {await seed(lid, 3); site.set(lid, {status: 404});}
 out = await Identity.resolve(env, items(...['Bud1', 'Bud2', 'Bud3', 'Bud4', 'Bud5'].map(lid => [lid, 'x'])), opts({remaining: () => 1000}));
-assert.equal(net.calls.length, 0); assert.equal(out.counts.deferred, 5);
+assert.equal(net.calls.length, 0); assert.equal(out.counts.deferred, 5); assert.equal(Object.keys(pending()).length, 5, 'deferred ids are kept, not dropped');
 out = await Identity.resolve(env, items(...['Bud1', 'Bud2', 'Bud3', 'Bud4', 'Bud5'].map(lid => [lid, 'x'])), opts());
 assert.equal(out.counts.deferred, 2); assert.equal(net.calls.filter(url => url.startsWith('https://boxd.it/')).length, 3);
 reset(); for (const lid of ['Stp1', 'Stp2']) {await seed(lid, 3); site.set(lid, {status: 429});}
@@ -155,6 +156,42 @@ for (let i = 0; i < Identity.MAX_ATTEMPTS + 3; i++) {await Identity.resolve(env,
 assert.equal(pending().Cap1.attempts, Identity.MAX_ATTEMPTS); assert.equal(net.calls.length, Identity.MAX_ATTEMPTS);
 // an id with no fact record is not bridged (nothing to attach to).
 reset(); out = await Identity.resolve(env, items(['Nof1', 'x']), opts()); assert.equal(out.counts.skipped, 1); assert.equal(net.calls.length, 0);
+
+
+// 10. review of PR #720, P1: the writer answering `skipped` (routing moved after the gate) or any answer without an applied unit is NOT an admission.
+for (const [name, result] of [['skipped', {state: 'skipped', reason: 'projector_is_writer', receipt: false}], ['no unit', {state: 'complete', applied: 0, failed: 0, unknown: 0, preflightFailed: 0, deferred: 0, refused: 0, units: []}], ['failed count', {...applied, failed: 1}], ['refused', {...applied, refused: 1}], ['incomplete', {...applied, state: 'incomplete'}], ['unknown unit state', {...applied, units: [{kind: 'film_admission', state: 'unknown'}]}], ['retention unit only', {...applied, units: [{kind: 'film_retention', state: 'applied'}]}], ['null', null]]) {
+  reset(); await seed('Skp1', 3); add('Skp1', 'fixture-skp-2017', '900060', 'Fixture Skp', 2017); canonical.result = result === null ? {state: undefined} : result;
+  out = await Identity.resolve(env, items(['Skp1', 'fixture-skp-2017']), opts());
+  assert.equal(recordOf('Skp1').links.tmdb, null, name + ': no alias without a confirmed admission'); assert.equal(out.labels.size, 0, name); assert.ok(pending().Skp1, name);
+  assert.equal(records.get('enrichment/view-index.json')?.tmdb_900060, undefined, name + ': no TMDB projection');
+}
+reset(); await seed('Skp2', 3); add('Skp2', 'fixture-skp-2016', '900061', 'Fixture Skp2', 2016); canonical.result = {state: 'skipped', reason: 'projector_is_writer'};
+await Identity.resolve(env, items(['Skp2', 'fixture-skp-2016']), opts()); assert.equal(pending().Skp2.reason, 'admission_skipped');
+for (const state of ['applied', 'already', 'noop']) {reset(); await seed('Okk1', 3); add('Okk1', 'fixture-okk-2015', '900062', 'Fixture Okk', 2015); canonical.result = {...applied, units: [{kind: 'film_admission', state}]}; out = await Identity.resolve(env, items(['Okk1', 'fixture-okk-2015']), opts()); assert.equal(out.counts.verified, 1, state);}
+
+// 11. review of PR #720, P1: an id that left Diary page 1 is still retried (the same-row slug is kept); an id deferred by the step cap is kept and served later.
+reset(); await seed('Aj8u', 4); site.set('Aj8u', {status: 403});
+await Identity.resolve(env, items(['Aj8u', 'fixture-beta-2024']), opts());
+assert.equal(pending().Aj8u.slug, 'fixture-beta-2024'); add('Aj8u', 'fixture-beta-2024', '900002', 'Fixture Beta', 2024);
+calls = net.calls.length; out = await Identity.resolve(env, [], opts({clock: () => NOW + 60000})); assert.equal(net.calls.length, calls, 'not due yet: no request'); assert.equal(out.counts.verified, 0);
+out = await Identity.resolve(env, items(['Other', 'o']), opts({clock: () => NOW + 3 * 3600000}));
+assert.equal(out.counts.verified, 1, 'the entry that left page 1 is retried by a later ordinary step'); assert.equal(recordOf('Aj8u').links.tmdb, '900002'); assert.equal(pending().Aj8u, undefined);
+reset(); const five = ['Dfr1', 'Dfr2', 'Dfr3', 'Dfr4', 'Dfr5'];
+for (const lid of five) {await seed(lid, 3); add(lid, 'fixture-' + lid.toLowerCase(), String(900100 + Number(lid.slice(3))), 'Fixture ' + lid, 2010);}
+out = await Identity.resolve(env, items(...five.map(lid => [lid, 'fixture-' + lid.toLowerCase()])), opts());
+assert.equal(out.counts.verified, 3); assert.equal(out.counts.deferred, 2); assert.deepEqual(Object.keys(pending()).sort(), ['Dfr4', 'Dfr5']); assert.equal(pending().Dfr4.reason, 'deferred'); assert.equal(pending().Dfr4.attempts, 0);
+out = await Identity.resolve(env, [], opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.verified, 2, 'the deferred fourth and fifth are processed without being on the page again'); assert.deepEqual(pending(), {}); for (const lid of five) assert.ok(recordOf(lid).links.tmdb, lid);
+
+// 12. review of PR #720, P2: one shared budget. A slow redirect leaves no time for the page or TMDB; a slow detail leaves no time for the writes. Nothing is written in either case.
+reset(); await seed('Slw1', 3); add('Slw1', 'fixture-slw-2014', '900070', 'Fixture Slw', 2014); slow.on = 'redirect'; slow.left = 120000;
+out = await Identity.resolve(env, items(['Slw1', 'fixture-slw-2014']), opts({remaining: () => slow.left}));
+assert.equal(pending().Slw1.reason, 'timeout'); assert.equal(canonical.applied.length, 0); assert.equal(net.calls.length, 1, 'the page and TMDB are not requested past the budget');
+reset(); await seed('Slw2', 3); add('Slw2', 'fixture-slw-2013', '900071', 'Fixture Slw2', 2013); slow.on = 'detail'; slow.left = 120000;
+out = await Identity.resolve(env, items(['Slw2', 'fixture-slw-2013']), opts({remaining: () => slow.left}));
+assert.equal(pending().Slw2.reason, 'budget'); assert.equal(canonical.applied.length, 0); assert.equal(recordOf('Slw2').links.tmdb, null); assert.equal(records.has('letterboxd/admissions/verified-films.json'), false, 'no receipt without the write reserve');
+reset(); await seed('Slw3', 3); add('Slw3', 'fixture-slw-2012', '900072', 'Fixture Slw3', 2012);
+out = await Identity.resolve(env, items(['Slw3', 'fixture-slw-2012']), opts({remaining: () => Identity.STEP_BUDGET_MS - 1})); assert.equal(net.calls.length, 0); assert.equal(pending().Slw3.reason, 'deferred');
 
 // 9. the pending retry spacing is monotone and bounded; transport backs off less than a review.
 assert.ok(Identity.delayMs('forbidden', 1) < Identity.delayMs('slug_mismatch', 1)); assert.ok(Identity.delayMs('forbidden', 9) <= 48 * 3600000);

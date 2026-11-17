@@ -122,3 +122,11 @@ Use when an EPG Workflow invocation ends `exceededMemory` or a step disappears, 
 3. Take the `epg_phase` and `epg_memory_boundary` lines with that `attemptTraceId` in time order. The last one is the last confirmed point; the paired boundary or phase whose `enter` has no matching `exit` or `error` is where the attempt was when logging stopped. Milestones (`*_begin`, `seal_ledger_batches`, `seal_stage_archive_segments`) are one-sided by design and never an unmatched enter or exit: use only the pairs listed in the [pairing rule](../reference/orchestration-reliability.md#epg-correlation-and-memory-boundary-markers-air-462). An `epg_act` `error` means the action rejected (the Workflow then slept `act_failed`); it carries no error text.
 4. Interpret with care. The trace id is local, not Cloudflare's. The last line is not the instruction that killed the attempt: a line written just before death can be lost, and a long synchronous `JSON.parse` or `JSON.stringify` shows as a gap after an `enter`. Byte counts are allocation proxies, not heap figures. Logs are kept about 7 days and may be truncated: if an `act-N` has the platform attempt but no `epg_act` line, say so and stop; do not infer a position.
 5. Record several natural daily runs as dated evidence with observed, inferred and unknown, exact UTC and Madrid times and the deployed SHA. One run without `exceededMemory` does not close AIR-420 or show a memory fix.
+
+## EPG seal hand-off stuck in `starting` (AIR-520)
+
+Symptom in `epg_status`: `stage=seal`, `phase=starting`, `handoff.successorPending=true`, `owner.liveness=absent`, `published=null`. Since AIR-520 the replayed old instance creates the claimed successor by itself, and the hourly `ensure` remains the fallback; a read-only check is enough:
+
+1. Read `epg_status` twice, at least one cron period apart. `failure.code=create_uncertain` with a `cooldownUntil` means a recorded, bounded retry; no failure and no progress across two ticks is a new defect to report.
+2. Compare with the Workflow GET of `epg_<day>_<series>` (read only). Do not create, terminate or retry an instance and do not run EPG steps by hand without a separate operation-specific GO.
+3. Evidence and mechanism: [AIR-520](../evidence/orchestration/air-520-orphan-handoff-claim-rca-2026-11-17.md).

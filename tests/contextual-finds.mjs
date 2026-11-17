@@ -305,7 +305,7 @@ async function expectPersonLine(label,response,pattern){
  assert.match(nodes['#finds-cards'].innerHTML,pattern,label);
  assert.doesNotMatch(nodes['#finds-cards'].innerHTML,ABSENCE,label);
  assert.equal(nodes['#empty'].hidden,true,'the shared empty state stays hidden while Finds explains the person');
- assert.equal((nodes['#finds-cards'].innerHTML.match(/class="finds-card"/g)||[]).length,0,label);
+ assert.equal((nodes['#finds-cards'].innerHTML.match(/class="finds-card has-both-scores"/g)||[]).length,0,label);
 }
 const verified=personBody('actor/hardy','actor',['film:tmdb:1']);
 await expectPersonLine('name only',http(200,personBody('actor/hardy','actor',['film:tmdb:1'],{state:'ambiguous',cross:'none',links:[{basis:'same_name',roles:['actor'],personIds:[],films:[],names:['Том']}]})),REFUSED);

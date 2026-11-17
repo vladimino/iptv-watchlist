@@ -546,15 +546,6 @@ export const FILES={
  "epg-diagnostic-bindings-ready.mjs": {
   "suite": "core"
  },
- "epg-diagnostic-context.mjs": {
-  "suite": "core"
- },
- "epg-diagnostic-provision.mjs": {
-  "suite": "core"
- },
- "epg-diagnostic-run.mjs": {
-  "suite": "core"
- },
  "epg-event-publication-d1.mjs": {
   "suite": "core"
  },
@@ -618,9 +609,6 @@ export const FILES={
   "note": "Known-length publish at tens of megabytes stays in core. The assertions are sizes, counts and the type error. seedMs and publishMs are only logged."
  },
  "epg-ratings-attempt.mjs": {
-  "suite": "core"
- },
- "epg-replay-dataset.mjs": {
   "suite": "core"
  },
  "epg-repository.mjs": {
@@ -1014,6 +1002,9 @@ export const FILES={
   "suite": "core"
  },
  "metadata-cache.mjs": {
+  "suite": "core"
+ },
+ "migration-export-route-absent.mjs": {
   "suite": "core"
  },
  "migration-export.mjs": {

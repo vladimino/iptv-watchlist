@@ -11,7 +11,7 @@ const canonical={applied:[],gate:{mode:'d1',state:'open',generation:2},bridge:{}
 const stubs={
  CanonicalCatalogReader:{catalogReaderGate:async()=>canonical.gate,catalogFilmIdentityBridge:async(env,lid)=>canonical.bridge[lid]||{state:'absent'},catalogTitlesFromD1:async()=>({}),catalogMetadataFromD1:async()=>({}),catalogReaderStill:async()=>{},
   readAdmissions:async(env,ids)=>new Map(ids.map(id=>{const entry=bucketOf.value('letterboxd/admissions/verified-films.json')?.films?.['tmdb_'+id.slice(10)];return [id,{ratedAdmission:entry?{title:entry.title,year:entry.year}:null}];}))},
- CanonicalRatedAdmission:{applyRatedAdmissionRetention:async(env,input)=>{canonical.applied.push(input);return {state:'complete',failed:0,unknown:0,preflightFailed:0,deferred:0,refused:0};},assertRatedAdmissionAccepted:out=>out},
+ CanonicalRatedAdmission:{applyRatedAdmissionRetention:async(env,input)=>{canonical.applied.push(input);return {state:'complete',applied:1,failed:0,unknown:0,preflightFailed:0,deferred:0,refused:0,units:[{kind:'film_admission',state:'applied'}]};},assertRatedAdmissionAccepted:out=>out},
 };
 let bucketOf=null;
 const filmPage=({lid,slug,title,year,tmdb})=>`<html><head><link rel="canonical" href="https://letterboxd.com/film/${slug}/"><link rel="shortlink" href="https://boxd.it/${lid}"><meta property="og:title" content="${title} (${year})"><script type="application/ld+json">${JSON.stringify({name:title,releasedEvent:[{startDate:String(year)}]})}</script></head><body class="film" data-tmdb-type="movie" data-tmdb-id="${tmdb}"></body></html>`;

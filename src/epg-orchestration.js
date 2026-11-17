@@ -382,6 +382,8 @@ function frozenDay(run){
   const adm=await admit(env,{runKey,series,epoch,id});
   if(!adm.ok){
    if(adm.transient)return {kind:'sleep',until:now+policy().COOLDOWNS_MS[0],reason:adm.reason};
+   // AIR-520: a replayed `act-N` of the old series finds the claim it committed itself (the platform lost the step result after the D1 CAS).
+   if(adm.reason==='not_owner'){const orphan=await recoverOrphanClaim(env,{runKey,series,epoch,now,random:ctx.random});if(orphan)return orphan;}
    return {kind:'stop',reason:adm.reason};
   }
   const control=adm.control;
@@ -459,7 +461,12 @@ function frozenDay(run){
     return {stopped:true,reason:result.reason,instanceId:id};
    }
    if(result.kind==='handoff'){
-    const created=await step.do(name('handoff'),()=>createSuccessor(env,result));
+    const created=await step.do(name('handoff'),async()=>{
+     const made=await createSuccessor(env,result);
+     // AIR-520: an unproven create is recorded (budget, cooldown, visible failure), never left looking like progress.
+     if(made.uncertain)await noteCreateUncertain(env,{...result,status:made.status,now:ctx.now(),random:ctx.random}).catch(()=>false);
+     return made;
+    });
     return {stopped:true,reason:'seal_handoff',instanceId:id,successor:created?.id??null};
    }
    if(result.kind==='sleep')await step.sleepUntil(name('sleep'),new Date(Math.max(result.until,ctx.now()+SLEEP_FLOOR_MS)));
@@ -483,8 +490,44 @@ function frozenDay(run){
    if(createError(error)==='exists')return {attached:true,id};
    const status=await instanceStatus(env.EPG_WORKFLOW,id);
    if(ALIVE.includes(status)||status==='complete')return {attached:true,id};
-   return {uncertain:true,id};
+   return {uncertain:true,id,status};
   }
+ }
+ // AIR-520: the claim CAS of a hand-off committed (`series+1`, `phase=starting`, `handoff.fromSeries=series`) but the result of `act-N` never
+ // became durable, so the retry of the old series reads `not_owner` and would stop without a successor (17 Nov 2026). The old instance may
+ // create exactly the successor its own committed claim names, and only when every predicate below holds against a fresh read; any other
+ // reading changes nothing and keeps the former `not_owner` stop. It runs once per replay (no loop) and writes nothing unless the create is unproven.
+ async function recoverOrphanClaim(env,{runKey,series,epoch,now,random}){
+  let stored;
+  try{stored=await readControl(env);}catch{return null;}
+  if(stored.malformed)return null;
+  const c=stored.record,h=c.handoff,next=series+1;
+  if(!h||c.runKey!==runKey||c.series!==next||h.fromSeries!==series||h.toSeries!==next||c.instanceId!==instanceId(runKey,next))return null;
+  if(c.phase!=='starting'||c.doneAt||c.quarantine)return null;
+  const cooling=Date.parse(c.cooldownUntil||'');
+  if(Number.isFinite(cooling)&&cooling>now)return null;
+  const claim=await sealClaimPending(env,c);
+  if(!claim.pending)return null;
+  const status=await instanceStatus(env.EPG_WORKFLOW,c.instanceId);
+  if(status==='unknown'){await noteCreateUncertain(env,{runKey,series:next,epoch,now,random,status}).catch(()=>false);return null;}
+  if(status!=='absent')return null;
+  // Same id, same params as the claim; an existing id attaches. The `handoff` step of the caller performs the idempotent create.
+  return {kind:'handoff',runKey,series:next,epoch,recovered:true};
+ }
+ // A claimed successor whose create or status stays unproven: counted under the budget with a cooldown, phase kept `starting`, so the
+ // read model and the hourly `ensure` see a failure and not a silent wait. `stopReason` follows what `ensureWorkflow` guards: `status_unknown`
+ // (unreadable status, honoured before the status read) or `create_uncertain` (absent child, honoured by the absent guard), so a repeated ensure inside
+ // the cooldown spends no further budget. A moved control record writes nothing.
+ async function noteCreateUncertain(env,{runKey,series,epoch,now,random,status}){
+  const mode=await readMode(env);
+  if(!mode.schema||mode.malformed||mode.record.mode!=='cloudflare'||mode.record.epoch!==epoch)return false;
+  const stored=await readControl(env);
+  if(stored.malformed)return false;
+  const c=stored.record;
+  if(c.runKey!==runKey||c.series!==series||c.phase!=='starting'||c.doneAt||c.quarantine||!c.handoff)return false;
+  const applied=policy().applyFailure(c.budget,{code:'create_uncertain'},{now,phase:c.checkpoint?.phase??null,checkpoint:c.checkpoint?.key??null,random});
+  const record={...c,budget:applied.budget,cooldownUntil:applied.cooldownUntil,failure:{class:policy().failureClass('create_uncertain'),code:'create_uncertain'},quarantine:applied.quarantine?{...applied.quarantine,at:iso(now)}:null,stopReason:status==='unknown'?'status_unknown':'create_uncertain',updatedAt:iso(now)};
+  return casDoc(env,'control',stored.stored?stored.revision:null,record,mode.revision);
  }
  // AIR-462: one line when an `act-N` callback starts, one when it returns or throws. A callback killed by the platform leaves the enter line alone.
  // Every execution of the callback, a retry included, mints its own `attemptTraceId`; the id is a local correlator, not Cloudflare's attempt id.
@@ -498,7 +541,7 @@ function frozenDay(run){
    const result=await act(env,{...ctx,trace}).catch(()=>{rejected=true;return {kind:'sleep',until:ctx.now()+60000,reason:'act_failed'};});
    // A rejected action logs `error` and no `exit`; the recovery result below is unchanged.
    if(rejected)log('error',{elapsedMs:Date.now()-began});
-   else log('exit',{elapsedMs:Date.now()-began,kind:['continue','sleep','stop'].includes(result?.kind)?result.kind:null});
+   else log('exit',{elapsedMs:Date.now()-began,kind:['continue','sleep','stop','handoff'].includes(result?.kind)?result.kind:null});
    return result;
   }catch(error){log('error',{elapsedMs:Date.now()-began});throw error;}
  }
@@ -661,7 +704,7 @@ function frozenDay(run){
    owner:{kind:'workflow',instanceId:c.instanceId,liveness},lastDurableProgressAt:c.lastDurableProgressAt,dueAt:iso(dueAt),nextWakeAt:c.nextWakeAt||(now>=dueAt?null:iso(dueAt)),
    syncRun:run?{runId:run.runId,stage:run.stage,remaining:run.remaining??null,sealPhase:run.seal?.phase??null,updatedAt:run.updatedAt??null}:null,seal,publication,
    failure:{class:c.failure?.class??null,code:c.failure?.code??null,fingerprint:c.budget?.fingerprint??null,consecutive:c.budget?.consecutive??0,total:c.budget?.total??0,caps:policy().BUDGET_CAPS},
-   cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null}}:{}),health,sideEffects:'none'};
+   cooldownUntil:c.cooldownUntil,quarantine:c.quarantine,lastStep:c.lastStep,...(c.handoff?{handoff:{fromSeries:c.handoff.fromSeries??null,toSeries:c.handoff.toSeries??null,at:c.handoff.at??null,successorPending:c.phase==='starting'&&!c.doneAt&&liveness==='absent'}}:{}),health,sideEffects:'none'};
  }
  return {TABLE,LEASE_MS,BOUNDARY_MARGIN_MS,readLease,acquireStep,endStep,assertStep,beginExternalStep,instanceId,readMode,readControl,switchMode,clearQuarantine,handle,validate,externalGate,admit,act,run,ensure,reconcileMirrors,readModel,drainState,classifyThrown,checkpointKey,progressCount,sealClaimPending,createSuccessor};
 })();

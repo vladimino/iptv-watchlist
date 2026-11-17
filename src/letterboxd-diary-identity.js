@@ -8,7 +8,7 @@
 // Anything else stays `pending` in one bounded document with a reason and a retry time; only ordinary Ratings runs retry it. It never throws into the
 // run: the rating fact and the Event do not wait for it. Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdDiaryIdentity=(()=>{
- const STEP_LIMIT=3,MAX_ATTEMPTS=6,STEP_BUDGET_MS=75000;
+ const STEP_LIMIT=3,MAX_ATTEMPTS=6,STEP_BUDGET_MS=40000,WRITE_RESERVE_MS=15000;
  const HOUR=3600000;
  const LID=/^[A-Za-z0-9_-]{1,80}$/,SLUG=/^[a-z0-9-]{1,200}$/,TMDB=/^[1-9]\d{0,11}$/;
  const TRANSPORT=new Set(['forbidden','rate_limited','challenge','timeout','fetch_failed','oversized','tmdb_unavailable']);
@@ -50,36 +50,65 @@ const LetterboxdDiaryIdentity=(()=>{
 
  const label=verdict=>({title:verdict.title,year:verdict.year,tmdb:verdict.tmdb});
 
- // One id whose source is to be checked now. Returns {state:'linked'|'pending',...}; a transport stop also returns `stop` so the step stops requesting.
- async function checkOne(env,{lid,slug},{clock,fetchImpl}){
+ // The end-to-end budget of a step (review of PR #720): every network request is cut at the time left in the lease minus the reserve the canonical
+ // writes need, and no write starts without that reserve. A cut request is a `timeout` pending, never a partial write.
+ function budgeted(fetchImpl,remaining){
+  return async(url,init={})=>{
+   const left=remaining()-WRITE_RESERVE_MS;
+   if(!(left>1000))throw Object.assign(new Error('step budget exhausted'),{name:'TimeoutError'});
+   const signals=[AbortSignal.timeout(left)];if(init&&init.signal)signals.push(init.signal);
+   return fetchImpl(url,{...init,signal:typeof AbortSignal.any==='function'?AbortSignal.any(signals):signals[0]});
+  };
+ }
+ // Positive evidence of one fenced admission unit. A skipped route, a no-unit answer or any failed/unknown/refused/deferred count is not an admission.
+ function admissionConfirmed(out){
+  if(!out||out.state!=='complete')return false;
+  if(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0)||Number(out.deferred||0))return false;
+  return (Array.isArray(out.units)?out.units:[]).some(unit=>unit&&unit.kind==='film_admission'&&['applied','already','noop'].includes(unit.state));
+ }
+
+ // One id whose source is to be checked now. Returns {state:'verified'|'pending',...}; a transport stop also returns `stop` so the step stops requesting.
+ async function checkOne(env,{lid,slug},{clock,fetchImpl,remaining}){
   if(typeof LetterboxdRatedCandidates==='undefined'||typeof LetterboxdIdentity==='undefined'||typeof LetterboxdRatedAdmission==='undefined')return {state:'pending',reason:'unavailable'};
-  const page=await LetterboxdRatedCandidates.follow(fetchImpl,lid);
+  const net=budgeted(fetchImpl,remaining);
+  const page=await LetterboxdRatedCandidates.follow(net,lid);
   if(page.stop)return {state:'pending',reason:page.stop,stop:true};
   if(page.review)return {state:'pending',reason:page.review};
   // The film page must be the page of the Diary row's slug, with one movie id, before TMDB is asked at all.
   const seen=verifyPage({lid,slug,page},letterboxdPageTools());
   if(seen.state!=='page_ok')return {state:'pending',reason:seen.reason};
-  const tmdb=seen.tmdb,found=await LetterboxdRatedCandidates.movieDetail(env,tmdb,fetchImpl);
+  const tmdb=seen.tmdb,found=await LetterboxdRatedCandidates.movieDetail(env,tmdb,net);
   if(found.stop)return {state:'pending',reason:found.stop,stop:true};
   if(found.review)return {state:'pending',reason:found.review};
   const verdict=verify({lid,slug,page,detail:found.detail},letterboxdPageTools());
   if(verdict.state!=='verified')return {state:'pending',reason:verdict.reason};
+  if(remaining()<WRITE_RESERVE_MS)return {state:'pending',reason:'budget',stop:true};
   const verifiedAt=iso(clock()),evidenceSha256=await sha256({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,source:'letterboxd_diary_page'});
   const admitted=await LetterboxdFacts.admitDiaryFilm(env,{lid,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath,verifiedAt,evidenceSha256});
   if(admitted==='conflict'||admitted==='other_code')return {state:'pending',reason:'admission_conflict'};
   return {state:'verified',verdict,evidenceSha256,admitted};
  }
 
- // items: [{lid,slug}] of one Diary page, in page order, only ids whose facts are already durable. Returns {labels:Map lid->{title,year,tmdb},counts,pending}.
+ // items: [{lid,slug}] of one Diary page in page order (facts already durable). Pending entries that left the page (they keep the same-row slug) and ids
+ // deferred by an earlier step are serviced here too, after the page's own ids, inside the same three-check budget. Returns {labels,counts}.
  async function resolve(env,items,{clock=()=>Date.now(),remaining=()=>Infinity,fetchImpl=fetch}={}){
   const counts={considered:0,bridged:0,verified:0,pending:0,deferred:0,skipped:0},labels=new Map();
-  const wanted=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,item])).values()];
+  const page=[...new Map((items||[]).filter(item=>item&&LID.test(String(item.lid||''))).map(item=>[item.lid,{lid:item.lid,slug:typeof item.slug==='string'&&SLUG.test(item.slug)?item.slug:null,onPage:true}])).values()];
+  let stored;
+  try{stored=await LetterboxdFacts.readDiaryIdentity(env);}catch{return {labels,counts:{...counts,skipped:page.length}};}
+  const now=clock(),onPage=new Set(page.map(item=>item.lid));
+  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now)
+   .sort(([,x],[,y])=>String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
+  const wanted=[...page,...due];
   if(!wanted.length)return {labels,counts};
-  let links,stored;
-  try{links=await LetterboxdFacts.diaryLinks(env,wanted.map(item=>item.lid));stored=await LetterboxdFacts.readDiaryIdentity(env);}catch{return {labels,counts:{...counts,skipped:wanted.length}};}
-  const now=clock(),set={},clear=[];let fetched=0,stopped=false,gate=null;
+  let links;
+  try{links=await LetterboxdFacts.diaryLinks(env,wanted.map(item=>item.lid));}catch{return {labels,counts:{...counts,skipped:wanted.length}};}
+  const set={},clear=[];let fetched=0,stopped=false,gate=null;
   try{gate=await CanonicalCatalogReader.catalogReaderGate(env);}catch{gate=null;}
   const open=!!gate&&gate.mode==='d1'&&gate.state==='open';
+  const entry=(item,reason,attempts,at)=>({reason:String(reason).slice(0,64),slug:item.slug||null,attempts,lastAttemptAt:iso(now),nextAttemptAt:iso(at)});
+  // An id this step could not reach is kept for the next ordinary step (due now, attempts unchanged), never dropped.
+  const defer=(item,prior)=>{counts.deferred++;if(item.onPage&&!prior)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};};
   for(const item of wanted){
    const lid=item.lid,own=links.get(lid)||{};
    if(own.tmdb){clear.push(lid);continue;}
@@ -94,38 +123,41 @@ const LetterboxdDiaryIdentity=(()=>{
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb});
      if(linked.state==='linked'){counts.bridged++;clear.push(lid);const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
-     set[lid]={reason:'link_conflict',attempts:attempts+1,lastAttemptAt:iso(now),nextAttemptAt:iso(now+delayMs('link_conflict',attempts+1))};counts.pending++;continue;
+     set[lid]=entry(item,'link_conflict',attempts+1,now+delayMs('link_conflict',attempts+1));counts.pending++;continue;
     }catch{counts.skipped++;continue;}
    }
-   if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){set[lid]={reason:'bridge_'+bridge.state,attempts:attempts+1,lastAttemptAt:iso(now),nextAttemptAt:iso(now+delayMs('review',attempts+1))};counts.pending++;continue;}
+   if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){set[lid]=entry(item,'bridge_'+bridge.state,attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}
    // 2. A bounded source check, only for an id that is due and only while the lease leaves room.
    if(prior&&(attempts>=MAX_ATTEMPTS||Date.parse(prior.nextAttemptAt)>now)){counts.deferred++;continue;}
-   if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS){counts.deferred++;continue;}
+   if(!item.slug){set[lid]=entry(item,'slug_missing',attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}
+   if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS){defer(item,null);continue;}
    fetched++;
    let outcome;
-   try{outcome=await checkOne(env,item,{clock,fetchImpl});}catch(error){outcome={state:'pending',reason:'check_failed'};}
+   try{outcome=await checkOne(env,item,{clock,fetchImpl,remaining});}catch(error){outcome={state:'pending',reason:'check_failed'};}
    if(outcome.stop)stopped=true;
    if(outcome.state==='verified'){
-    let admission=null;
+    let confirmed=false;
     try{
+     if(remaining()<WRITE_RESERVE_MS)throw Object.assign(new Error('budget'),{code:'budget'});
      const receiptKey='tmdb_'+outcome.verdict.tmdb,{value:receipts}=await LetterboxdFacts.readAdmissionReceipts(env);
      const receipt=receipts?.films?.[receiptKey];
      if(!receipt)throw new Error('receipt_missing');
-     admission=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{event:'diary:'+lid,admissions:[{receiptKey,receipt}]});
-     CanonicalRatedAdmission.assertRatedAdmissionAccepted(admission);
-    }catch(error){admission=null;outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}
-    if(admission){
+     const admission=await CanonicalRatedAdmission.applyRatedAdmissionRetention(env,{event:'diary:'+lid,admissions:[{receiptKey,receipt}]});
+     confirmed=admissionConfirmed(admission);
+     if(!confirmed)outcome={state:'pending',reason:admission?.state==='skipped'?'admission_skipped':'admission_not_confirmed'};
+    }catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}
+    if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
      if(linked.state==='linked'){counts.verified++;clear.push(lid);labels.set(lid,label(outcome.verdict));continue;}
      outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed'};
     }
    }
    counts.pending++;
-   set[lid]={reason:String(outcome.reason).slice(0,64),attempts:attempts+1,lastAttemptAt:iso(now),nextAttemptAt:iso(now+delayMs(outcome.reason,attempts+1))};
+   set[lid]=entry(item,outcome.reason,attempts+1,now+delayMs(outcome.reason,attempts+1));
   }
   try{await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clear.filter(lid=>stored.films[lid])});}catch{}
   return {labels,counts};
  }
 
- return {STEP_LIMIT,MAX_ATTEMPTS,verifyPage,verify,resolve,delayMs};
+ return {STEP_LIMIT,MAX_ATTEMPTS,STEP_BUDGET_MS,WRITE_RESERVE_MS,admissionConfirmed,verifyPage,verify,resolve,delayMs};
 })();

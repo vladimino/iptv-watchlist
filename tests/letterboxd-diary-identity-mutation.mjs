@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 const SOURCE = fs.readFileSync('src/letterboxd-diary-identity.js', 'utf8');
 const MUTANTS = [
   ['slug is not compared', "if(evidence.path!=='/film/'+slug+'/')return {state:'unresolved',reason:'slug_mismatch'};", ''],
-  ['a missing slug passes', "if(typeof slug!=='string'||!SLUG.test(slug))return {state:'unresolved',reason:'slug_missing'};", ''],
+  ['a missing slug is requested', "if(!item.slug){set[lid]=entry(item,'slug_missing',attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}", ''],
   ['shortlink mismatch passes', "if(evidence.shortlinkPresent&&evidence.shortCode!==lid)return {state:'unresolved',reason:'shortlink_mismatch'};", ''],
   ['canonical mismatch passes', "if(evidence.canonicalPath&&evidence.canonicalPath!==evidence.path)return {state:'unresolved',reason:'canonical_mismatch'};", ''],
   ['two TMDB ids pass', "if(evidence.tmdbIds.length>1)return {state:'unresolved',reason:'tmdb_multiple'};", ''],
@@ -23,7 +23,15 @@ const MUTANTS = [
   ['the marker gate is ignored', "if(!open){counts.skipped++;continue;}", ''],
   ['a conflicting bridge is overridden', "if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){", "if(false){"],
   ['an existing receipt for another code is accepted', "if(admitted==='conflict'||admitted==='other_code')", "if(false)"],
-  ['an admission failure is not a pending', "outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};", "throw error;"],
+  ['an admission failure is not a pending', "}catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}", "}catch(error){throw error;}"],
+  ['a skipped writer counts as an admission', "if(!out||out.state!=='complete')return false;", "if(!out)return false;"],
+  ['a failed count is ignored', "if(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0)||Number(out.deferred||0))return false;", ''],
+  ['any unit counts as an admission', "unit.kind==='film_admission'&&['applied','already','noop'].includes(unit.state)", 'true'],
+  ['the network budget is not enforced', "if(!(left>1000))throw Object.assign(new Error('step budget exhausted'),{name:'TimeoutError'});", ''],
+  ['the write reserve is not checked after the checks', "if(remaining()<WRITE_RESERVE_MS)return {state:'pending',reason:'budget',stop:true};", ''],
+  ['an id that left the page is never retried', "!onPage.has(lid)&&entry&&", 'false&&entry&&'],
+  ['a deferred id is dropped', "if(item.onPage&&!prior)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};", ''],
+  ['the slug is not kept for the retry', "slug:item.slug||null,attempts,lastAttemptAt:iso(now)", "slug:null,attempts,lastAttemptAt:iso(now)"],
 ];
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'air489-'));
 let killed = 0;

@@ -1635,20 +1635,43 @@ function similarBadge(kind){if(kind==='new')return '<span class="film-similar-ba
 // when its identity is verified. Anything else stays plain text. Never a jump to TMDB.
 function similarTitle(film){const title=film.title||film.original||'Фильм',loaded=(films||[]).find(item=>String(item.id)===String(film.id)),verified=similarVerifiedIdentity(film),target=loaded?filmPermalinkId(loaded):verified?'tmdb_'+film.tmdbId:null;if(target)return `<button type="button" class="film-similar-open" data-similar-open="${escapeHTML(target)}">${escapeHTML(title)}</button>`;return escapeHTML(title);}
 function similarPoster(film){const name=film.original||film.title||'';if(typeof film.poster==='string'&&film.poster)return `<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(name)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`;return `<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;}
+// One compact pair of badges for Finds and Similar: "МОЯ ОЦЕНКА" (actualRating) then "ПРОГНОЗ" (stored prediction). They are independent facts;
+// a missing one is shown as a neutral "—", never as 0.0 and never replaced by the other.
+// The own rating of a card. Only a half-star value 0.5..5.0 counts (0, null, text or out-of-range legacy values are "no rating"). The view entry is found under the card's own id and, when the
+// loaded data verifies it (`similarLidBridge`: programme rows and verified catalog rows agree on one TMDB id for a Letterboxd id), under the other spelling of the same Film. A conflicted or
+// ambiguous mapping bridges nothing, two spellings that disagree on the value show nothing, and a title, year or slug is never matched. No request is made.
+function ratingValue(item){const raw=item?.actualRating;if(raw===null||raw===undefined||raw===''||typeof raw==='boolean')return null;const value=Number(raw);return Number.isFinite(value)&&value>=0.5&&value<=5&&Number.isInteger(value*2)?value:null;}
+let ratingBridgeCache={films:null,finds:null,fresh:null,bridge:null,lidsByTmdb:null};
+function ratingBridge(){
+ const finds=findsSource?.films||null,fresh=findsFresh();
+ if(ratingBridgeCache.films===films&&ratingBridgeCache.finds===finds&&ratingBridgeCache.fresh===fresh&&ratingBridgeCache.bridge)return ratingBridgeCache;
+ const bridge=similarLidBridge(),lidsByTmdb=new Map();
+ for(const [lid,tmdb] of bridge.byLid){if(!lidsByTmdb.has(tmdb))lidsByTmdb.set(tmdb,[]);lidsByTmdb.get(tmdb).push(lid);}
+ ratingBridgeCache={films,finds,fresh,bridge,lidsByTmdb};return ratingBridgeCache;
+}
+function ownRatingOf(film){
+ if(film?.id==null)return null;
+ const id=String(film.id),others=[],{bridge,lidsByTmdb}=ratingBridge(),own=/^tmdb_([1-9]\d*)$/.exec(id);
+ if(own){const lids=lidsByTmdb.get(own[1])||[];if(lids.length===1&&!bridge.conflicted.has(lids[0]))others.push(lids[0]);else if(lids.length>1)return ratingValue(similarViewItem(id));}
+ else if(!bridge.conflicted.has(id)&&bridge.byLid.has(id))others.push('tmdb_'+bridge.byLid.get(id));
+ const values=[id,...others].map(key=>ratingValue(similarViewItem(key))).filter(value=>value!==null);
+ return values.length&&values.every(value=>value===values[0])?values[0]:null;
+}
+function scoreBadgesHTML(actual,rating,chance){
+ const own=actual===null?'<div class="score-badge score-actual score-none" aria-label="Моя оценка: нет"><span>МОЯ ОЦЕНКА</span><strong>—</strong></div>':`<div class="score-badge score-actual" aria-label="Моя оценка ${actual.toFixed(1)} из 5"><span>МОЯ ОЦЕНКА</span><strong>${actual.toFixed(1)}</strong></div>`;
+ const forecast=Number.isFinite(rating)?`<div class="score-badge score-predicted" aria-label="Прогноз ${rating.toFixed(1)} из 5${chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${rating.toFixed(1)}</strong>${chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'<div class="score-badge score-predicted score-none" aria-label="Прогноз: нет"><span>ПРОГНОЗ</span><strong>—</strong></div>';
+ return `<div class="film-score-badges">${own}${forecast}</div>`;
+}
 function similarScoreBadges(row){
- const item=similarViewItem(row.film.id),raw=item?.actualRating,actual=raw!==null&&raw!==undefined&&Number.isFinite(Number(raw))?Number(raw):null,prediction=row.prediction;
- if(actual===null&&!prediction)return '';
- const actualBadge=actual===null?'':`<div class="score-badge score-actual" aria-label="Моя оценка ${actual.toFixed(1)} из 5"><span>МОЯ ОЦЕНКА</span><strong>${actual.toFixed(1)}</strong></div>`;
- const chance=prediction&&Number.isFinite(prediction.probability)?Math.round(prediction.probability*100):null;
- const predictedBadge=prediction?`<div class="score-badge score-predicted" aria-label="Прогноз ${prediction.rating.toFixed(1)} из 5${chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${prediction.rating.toFixed(1)}</strong>${chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'';
- return `<div class="film-score-badges">${actualBadge}${predictedBadge}</div>`;
+ const prediction=row.prediction,chance=prediction&&Number.isFinite(prediction.probability)?Math.round(prediction.probability*100):null;
+ return scoreBadgesHTML(ownRatingOf(row.film),prediction?prediction.rating:null,chance);
 }
 function similarCard(row,now){
  const film=row.film,catalog=row.source==='catalog',scores=similarScoreBadges(row),airing=findsAiring(film,now,null);
  const year=film.year?String(film.year):'Год не указан',runtime=Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:'';
  const original=film.original&&film.original!==film.title?`<p class="original">${escapeHTML(film.original)}</p>`:'';
  const genres=(film.genres||[]).filter(Boolean);
- const both=scores.includes('score-actual')&&scores.includes('score-predicted');
+ const both=true;
  return `<article class="film-similar-card ${catalog?'is-catalog':'is-watchlist'}${scores?both?' has-both-scores':' has-score':''}" data-similar-source="${row.source}" data-similar-id="${escapeHTML(String(film.id))}">${scores}<div class="film-head"><div class="film-similar-poster">${catalog&&catalogIsDiscoveryNew(film)?similarBadge('new'):''}${soonBadge(film,{now,shows:findsWindowShows(film,now,null)})}${similarPoster(film)}</div><div class="film-info"><h3>${similarTitle(film)}${letterboxdLink(film,{catalog})}</h3>${original}<span class="film-year">${escapeHTML(year)}${runtime}</span>${genres.length?`<div class="film-tags">${genres.map(escapeHTML).join(' · ')}</div>`:''}${catalog?'':similarBadge(row.badge)}</div></div><p class="film-similar-airing">${escapeHTML(airing.text)}</p><p class="film-similar-reason">${escapeHTML(row.label)}</p></article>`;
 }
 // The last markup written into #film-similar-cards. An identical refresh keeps that DOM, so a focused title stays focused.
@@ -1667,7 +1690,7 @@ function findsCard(film,now=nowMs(),scope=findsScope(),context=null){
  const p=film.prediction,airing=findsAiring(film,now,scope),labels=findsLabels(film),match=findsMatchText(film,context),chance=chance4Plus(p),original=film.original&&film.original!==film.title?film.original:'';
  const poster=film.poster?`<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(film.original||film.title||'')}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`:`<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;
  const label=escapeHTML(film.title||film.original||''),verifiedId=similarVerifiedIdentity(film)?'tmdb_'+film.tmdbId:null,title=verifiedId?`<a class="film-open" href="${filmHref(verifiedId)}" data-film-id="${escapeHTML(verifiedId)}">${label}</a>`:label;
- return `<article class="finds-card" data-finds-film="${escapeHTML(film.id)}"><div class="film-score-badges"><div class="score-badge score-predicted" aria-label="Прогноз ${p.predictedRating.toFixed(1)} из 5, шанс оценки 4 и выше ${chance}%"><span>ПРОГНОЗ</span><strong>${p.predictedRating.toFixed(1)}</strong><small>${chance}% на 4.0+</small></div></div><div class="film-head"><div class="finds-poster">${catalogIsDiscoveryNew(film)?'<span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>':''}${airing.availability?.state==='soon'?soonBadge(film,{now,shows:findsWindowShows(film,now,scope)}):''}${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
+ return `<article class="finds-card has-both-scores" data-finds-film="${escapeHTML(film.id)}">${scoreBadgesHTML(ownRatingOf(film),p.predictedRating,chance)}<div class="film-head"><div class="finds-poster">${catalogIsDiscoveryNew(film)?'<span class="finds-badge" title="Находка вне твоего watchlist" aria-label="Находка вне watchlist">NEW</span>':''}${airing.availability?.state==='soon'?soonBadge(film,{now,shows:findsWindowShows(film,now,scope)}):''}${poster}</div><div class="film-info"><h3>${title}${letterboxdLink(film,{catalog:true})}</h3>${original?`<p class="original">${escapeHTML(original)}</p>`:''}<span class="film-year">${escapeHTML(String(film.year||'Год не указан'))}${Number(film.runtime)>0?` · ${Math.round(Number(film.runtime))} мин`:''}</span><div class="film-tags">${(film.genres||[]).map(escapeHTML).join(' · ')}</div></div></div>${labels.length?`<div class="film-moods finds-labels">${labels.map(label=>`<span>${escapeHTML(label)}</span>`).join('')}</div>`:''}${match?`<p class="finds-match">Совпадает с фильтрами: ${escapeHTML(match)}</p>`:''}<p class="finds-airing" data-airing="${airing.kind}">${escapeHTML(airing.text)}</p>${findsMarkAction(film)}</article>`;
 }
 function findsMarkAction(film){
  if(!findsSource.watchedMarkEnabled||!film.tmdbId)return '';

@@ -1260,4 +1260,164 @@ for(const stage of ['epg','seal']){
   assert.equal(h.state.calls.filter(c=>c.pathname==='/api/sync/start').length,1);
  }
 }
+// AIR-520: the 17 Nov 2026 incident. The hand-off CAS (`series+1`, `phase=starting`) committed, then the platform lost the result of `act-N`
+// (`WorkflowInternalError`) before the `handoff` step; the retry of the old series read `not_owner` and stopped, and no successor existed.
+{
+ const day='2026-11-07',due0=Date.parse('2026-11-07T16:00:00Z'),nextDue=Date.parse('2026-11-08T16:00:00Z');
+ const succ='epg_20261107_1',params={runKey:day,series:1,epoch:1};
+ const startsOf=h=>h.state.calls.filter(c=>c.pathname==='/api/sync/start').length;
+ // The failpoint: after a hand-off `act-N` has committed its claim, the platform drops its result and runs the callback again.
+ function lossy(r,{replays=1}={}){
+  const realDo=r.step.do;let lost=0;
+  r.step.do=async(name,fn)=>{
+   if(!name.startsWith('act'))return realDo.call(r.step,name,fn);
+   const first=await fn();
+   if(first?.kind==='handoff'&&lost<replays){lost++;return realDo.call(r.step,name,fn);}
+   return first;
+  };
+  return ()=>lost;
+ }
+ async function orphan({replays=1}={}){
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  const lost=lossy(r,{replays});
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  return {h,r,out,lost};
+ }
+ {// the retried old act-N heals the orphan claim at once: exactly the claimed child, then one seal and one publication
+  const {h,r,out,lost}=await orphan();
+  assert.equal(lost(),1);
+  eq(out,{stopped:true,reason:'seal_handoff',instanceId:'epg_20261107_0',successor:succ});
+  assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);eq(h.wf.creates.find(c=>c.id===succ).params,params);
+  const rec=await control(h);assert.equal(rec.series,1);assert.equal(rec.handoff.sealRunId,'run-1');assert.equal(rec.failure,null);
+  const done=await h.epg.run(h.env,{runKey:day,series:1,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(done.reason,'complete');assert.equal(h.state.sync.stage,'complete');
+  assert.equal(startsOf(h),1,'no second run and no second publication');
+  assert.equal((await control(h)).publishedRunId,'run-1');
+ }
+ {// the same replay after midnight: the claimed day keeps priority and the child is still the claimed id
+  const {h,r}=await (async()=>{const h=cloudflare({pipeline:pipeline({metadataSteps:1})});const r=runner(h,{startAt:due0});await h.epg.ensure(h.env,{now:due0});return {h,r};})();
+  const realDo=r.step.do;
+  r.step.do=async(name,fn)=>{if(!name.startsWith('act'))return realDo.call(r.step,name,fn);const first=await fn();if(first?.kind==='handoff'){r.advance(nextDue-r.clock());return realDo.call(r.step,name,fn);}return first;};
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.successor,succ);assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);
+  assert.equal((await control(h)).runKey,day);
+ }
+ {// create succeeded but its reply was lost: the status is read back, nothing is created twice
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  lossy(r);
+  const create=h.wf.create.bind(h.wf);
+  h.wf.create=async args=>{await create(args);if(args.id===succ)throw new Error('response lost');};
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.successor,succ);assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);
+  eq(start(await h.epg.ensure(h.env,{now:nextDue})),{started:false,reason:'in_progress',instanceId:succ});
+ }
+ {// duplicate retry plus the hourly cron: still exactly one create of the claimed id
+  const {h,r}=await orphan({replays:2});
+  await h.epg.ensure(h.env,{now:r.clock()+H});await h.epg.ensure(h.env,{now:nextDue});
+  assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);
+  assert.equal(h.wf.creates.some(c=>c.params.series>1),false,'no second series');
+ }
+ {// a child that is alive is never touched (parallel real successor): the old instance keeps the former not_owner stop
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const before=h.wf.creates.length;
+  const stale=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  eq(stale,{stopped:true,reason:'not_owner',instanceId:'epg_20261107_0'});assert.equal(h.wf.creates.length,before);
+ }
+ for(const status of ['terminated','errored','complete']){// a terminal child is never re-created by the old instance; the cron handles it
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  h.wf.instances.set(succ,status);
+  const stale=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(stale.reason,'not_owner');assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);
+ }
+ {// status unreadable (404 vs platform error): fail closed, a visible create_uncertain with a cooldown, no spin, then the cron recovers
+  const {h,r}=await (async()=>{const h=cloudflare({pipeline:pipeline({metadataSteps:1})});const r=runner(h,{startAt:due0});await h.epg.ensure(h.env,{now:due0});return {h,r};})();
+  const realDo=r.step.do;let lost=false;
+  r.step.do=async(name,fn)=>{if(!name.startsWith('act'))return realDo.call(r.step,name,fn);const first=await fn();if(first?.kind==='handoff'&&!lost){lost=true;h.wf.get=async()=>{throw new Error('platform unavailable');};return realDo.call(r.step,name,fn);}return first;};
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.reason,'not_owner');assert.equal(h.wf.creates.filter(c=>c.id===succ).length,0,'nothing is created while the status is unknown');
+  const rec=await control(h);assert.equal(rec.failure.code,'create_uncertain');assert.ok(rec.cooldownUntil,'a cooldown bounds the retry');assert.equal(rec.phase,'starting');
+  const model=plain(await h.epg.readModel(h.env,r.clock()));assert.equal(model.failure.code,'create_uncertain');assert.equal(model.handoff.successorPending,false,'an unreadable status does not prove an absent child');assert.equal(model.owner.liveness,'unknown');
+  assert.equal(rec.stopReason,'status_unknown','aligned with the ensure cooldown guard');
+  const spent=(await control(h)).budget,until=Date.parse(rec.cooldownUntil);
+  for(const offset of [60000,10*60000]){// repeated ensures inside an active cooldown change no budget and write nothing
+   const again=await h.epg.ensure(h.env,{now:until-offset,random:()=>0.5});
+   assert.equal(again.reason,'cooldown');
+   const after=await control(h);eq(after.budget,spent);assert.equal(after.cooldownUntil,rec.cooldownUntil);assert.equal(after.quarantine,null);
+  }
+  delete h.wf.get;h.wf.get=async id=>{if(!h.wf.instances.has(id))throw new Error('instance not found');return {status:async()=>({status:h.wf.instances.get(id)})};};
+  const healed=await h.epg.ensure(h.env,{now:nextDue,random:()=>0.5});
+  assert.equal(healed.started,true);assert.equal(healed.instanceId,succ);assert.equal(h.wf.creates.filter(c=>c.id===succ).length,1);
+ }
+ {// fail-closed predicates: epoch moved, authority held, done, quarantined and a foreign day write or create nothing
+  const base=async mutate=>{const h=cloudflare({pipeline:pipeline({metadataSteps:1})});const r=runner(h,{startAt:due0});await h.epg.ensure(h.env,{now:due0});
+   await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});h.wf.instances.delete(succ);await mutate(h);
+   const before=h.wf.creates.length;const stale=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+   return {h,stale,created:h.wf.creates.length-before};};
+  const patch=async(h,fields)=>{const rec=await control(h);await h.db.prepare('UPDATE epg_orchestration_document SET body=?, revision=revision+1 WHERE key=?').bind(JSON.stringify({...rec,...fields}),'control').run();};
+  const cases={
+   'sync.json no longer at stage seal':async h=>{h.state.sync={...h.state.sync,stage:'complete'};},
+   'run already done':h=>patch(h,{doneAt:'2026-11-07T17:00:00Z',phase:'done'}),
+   'run quarantined':h=>patch(h,{quarantine:{reason:'repeated_failure',scope:'run'}}),
+   'cooldown running':h=>patch(h,{cooldownUntil:'2099-01-01T00:00:00Z'}),
+   'phase no longer starting':h=>patch(h,{phase:'running'}),
+   'claim names another run':h=>patch(h,{handoff:{sealRunId:'other-run',fromSeries:0,toSeries:1,at:'2026-11-07T16:05:00Z'}}),
+   'claim from another series':h=>patch(h,{handoff:{sealRunId:'run-1',fromSeries:3,toSeries:4,at:'2026-11-07T16:05:00Z'}}),
+   'instance id does not match the claim':h=>patch(h,{instanceId:'epg_20261107_7'}),
+   'mode epoch moved':async h=>{await h.db.prepare('UPDATE epg_orchestration_document SET body=?, revision=revision+1 WHERE key=?').bind(JSON.stringify({schemaVersion:1,mode:'cloudflare',from:'external',target:null,epoch:2,drain:'verified'}),'mode').run();},
+  };
+  for(const [label,mutate] of Object.entries(cases)){
+   const res=await base(mutate);
+   assert.equal(res.created,0,label+': nothing created');assert.notEqual(res.stale.successor,succ,label);
+   assert.ok(['not_owner','epoch_mismatch'].includes(res.stale.reason),label+': '+res.stale.reason);
+  }
+ }
+ {// the observable difference between a pending hand-off and a running child
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(plain(await h.epg.readModel(h.env,r.clock())).handoff.successorPending,false,'a live child is not pending');
+  h.wf.instances.delete(succ);
+  const m=plain(await h.epg.readModel(h.env,r.clock()));assert.equal(m.handoff.successorPending,true);assert.equal(m.owner.liveness,'absent');
+ }
+ {// successorPending only for a verified absence; alive, unknown and finished stay distinct
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  const pending=async()=>{const m=plain(await h.epg.readModel(h.env,r.clock()));return [m.handoff.successorPending,m.owner.liveness];};
+  eq(await pending(),[false,'alive']);
+  h.wf.instances.set(succ,'complete');eq(await pending(),[false,'finished']);
+  const get=h.wf.get.bind(h.wf);h.wf.get=async()=>{throw new Error('platform unavailable');};eq(await pending(),[false,'unknown']);
+  h.wf.get=get;h.wf.instances.delete(succ);eq(await pending(),[true,'absent']);
+ }
+ {// create unproven with the child absent: create_uncertain with a cooldown, and repeated ensures inside it spend nothing
+  const h=cloudflare({pipeline:pipeline({metadataSteps:1})});
+  const r=runner(h,{startAt:due0});
+  await h.epg.ensure(h.env,{now:due0});
+  h.wf.create=async({id,params})=>{h.wf.creates.push({id,params});if(id===succ)throw new Error('create failed');h.wf.instances.set(id,'running');};
+  const out=await h.epg.run(h.env,{runKey:day,series:0,epoch:1},r.step,{now:r.clock,clock:r.clock,random:()=>0.5});
+  assert.equal(out.reason,'seal_handoff');
+  const rec=await control(h);assert.equal(rec.failure.code,'create_uncertain');assert.equal(rec.stopReason,'create_uncertain');
+  const spent=rec.budget,until=Date.parse(rec.cooldownUntil);
+  for(const offset of [60000,10*60000]){
+   assert.equal((await h.epg.ensure(h.env,{now:until-offset,random:()=>0.5})).reason,'cooldown');
+   const after=await control(h);eq(after.budget,spent);assert.equal(after.quarantine,null);
+  }
+ }
+ {// recovery cost: the replay adds one control read, one status read and one create (no extra publication calls)
+  const {h}=await orphan();
+  assert.equal(h.wf.creates.length,2,'series 0 by ensure, series 1 by the recovery');
+ }
+}
 console.log('epg-orchestration: ok');
