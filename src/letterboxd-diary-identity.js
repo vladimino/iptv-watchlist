@@ -108,23 +108,23 @@ const LetterboxdDiaryIdentity=(()=>{
   const open=!!gate&&gate.mode==='d1'&&gate.state==='open';
   const entry=(item,reason,attempts,at)=>({reason:String(reason).slice(0,64),slug:item.slug||null,attempts,lastAttemptAt:iso(now),nextAttemptAt:iso(at)});
   // An id this step could not reach is kept for the next ordinary step (due now, attempts unchanged), never dropped.
-  const defer=(item,prior)=>{counts.deferred++;if(item.onPage&&!prior)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};};
+  const defer=(item,prior)=>{counts.deferred++;if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};};
   for(const item of wanted){
    const lid=item.lid,own=links.get(lid)||{};
    if(own.tmdb){clear.push(lid);continue;}
    if(!own.factKey){counts.skipped++;continue;}
    counts.considered++;
    const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
-   if(!open){counts.skipped++;continue;}
+   if(!open){defer(item,prior);continue;}
    // 1. An existing trusted D1 bridge is consumed, never re-proved or re-registered.
    let bridge=null;
-   try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){counts.skipped++;continue;}bridge=null;}
+   try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){defer(item,prior);continue;}bridge=null;}
    if(bridge?.state==='ok'&&bridge.tmdb){
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb});
      if(linked.state==='linked'){counts.bridged++;clear.push(lid);const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
      set[lid]=entry(item,'link_conflict',attempts+1,now+delayMs('link_conflict',attempts+1));counts.pending++;continue;
-    }catch{counts.skipped++;continue;}
+    }catch{defer(item,prior);continue;}
    }
    if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){set[lid]=entry(item,'bridge_'+bridge.state,attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}
    // 2. A bounded source check, only for an id that is due and only while the lease leaves room.

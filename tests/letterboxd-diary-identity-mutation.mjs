@@ -20,7 +20,6 @@ const MUTANTS = [
   ['lease budget is ignored', "||remaining()<STEP_BUDGET_MS", ''],
   ['a transport stop does not stop the step', "if(outcome.stop)stopped=true;", ''],
   ['an id without a record is bridged', "if(!own.factKey){counts.skipped++;continue;}", ''],
-  ['the marker gate is ignored', "if(!open){counts.skipped++;continue;}", ''],
   ['a conflicting bridge is overridden', "if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){", "if(false){"],
   ['an existing receipt for another code is accepted', "if(admitted==='conflict'||admitted==='other_code')", "if(false)"],
   ['an admission failure is not a pending', "}catch(error){outcome={state:'pending',reason:error?.code==='admission_identity_held'||error?.reason?'admission_held':error?.code||'admission_failed'};}", "}catch(error){throw error;}"],
@@ -30,7 +29,10 @@ const MUTANTS = [
   ['the network budget is not enforced', "if(!(left>1000))throw Object.assign(new Error('step budget exhausted'),{name:'TimeoutError'});", ''],
   ['the write reserve is not checked after the checks', "if(remaining()<WRITE_RESERVE_MS)return {state:'pending',reason:'budget',stop:true};", ''],
   ['an id that left the page is never retried', "!onPage.has(lid)&&entry&&", 'false&&entry&&'],
-  ['a deferred id is dropped', "if(item.onPage&&!prior)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};", ''],
+  ['a not-open authority drops the id', "if(!open){defer(item,prior);continue;}", "if(!open){counts.skipped++;continue;}"],
+  ['a held bridge read drops the id', "includes(error?.code)){defer(item,prior);continue;}bridge=null;}", "includes(error?.code)){counts.skipped++;continue;}bridge=null;}"],
+  ['a link throw on a consumed bridge drops the id', "    }catch{defer(item,prior);continue;}\n   }\n   if(bridge&&", "    }catch{counts.skipped++;continue;}\n   }\n   if(bridge&&"],
+  ['a deferred id is dropped', "if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};", ''],
   ['the slug is not kept for the retry', "slug:item.slug||null,attempts,lastAttemptAt:iso(now)", "slug:null,attempts,lastAttemptAt:iso(now)"],
 ];
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'air489-'));

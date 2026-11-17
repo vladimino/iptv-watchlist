@@ -19,13 +19,13 @@ const bucket = {
 const net = {calls: [], handler: async () => {throw new Error('unexpected request');}};
 const headersOf = map => ({get: key => map[String(key).toLowerCase()] ?? null});
 const http = (status, body, headers = {}) => ({status, ok: status < 300, headers: headersOf(headers), async text() {return body;}});
-const canonical = {gate: {mode: 'd1', state: 'open', generation: 2}, bridge: {}, applied: [], failWith: null, result: null};
+const canonical = {gate: {mode: 'd1', state: 'open', generation: 2}, bridge: {}, applied: [], failWith: null, result: null, bridgeThrows: null};
 const applied = {state: 'complete', applied: 1, failed: 0, unknown: 0, preflightFailed: 0, deferred: 0, refused: 0, units: [{kind: 'film_admission', state: 'applied'}]};
 const ctx = vm.createContext({Response, Headers, URL, Date, Map, Set, JSON, TextEncoder, TextDecoder, Uint8Array, AbortSignal, crypto: webcrypto, console: {...console, log: () => {}},
   fetch: async (url, init) => {net.calls.push(String(url)); return net.handler(String(url), init);}});
 ctx.CanonicalCatalogReader = {
   catalogReaderGate: async () => canonical.gate,
-  catalogFilmIdentityBridge: async (env, lid) => canonical.bridge[lid] || {state: 'absent'},
+  catalogFilmIdentityBridge: async (env, lid) => {if (canonical.bridgeThrows) throw Object.assign(new Error(canonical.bridgeThrows), {code: canonical.bridgeThrows}); return canonical.bridge[lid] || {state: 'absent'};},
   catalogTitlesFromD1: async () => ({}),
 };
 ctx.CanonicalRatedAdmission = {
@@ -57,7 +57,7 @@ net.handler = async url => {
   if (tm) {if (slow.on === 'detail') slow.left = 14000; const doc = tmdbDocs.get(tm[1]); return doc ? (typeof doc === 'function' ? doc() : http(200, doc)) : http(404, '');}
   throw new Error('unexpected ' + url);
 };
-const reset = () => {records.clear(); etags.clear(); site.clear(); tmdbDocs.clear(); net.calls.length = 0; canonical.bridge = {}; canonical.applied.length = 0; canonical.failWith = null; canonical.result = null; slow.on = null; canonical.gate = {mode: 'd1', state: 'open', generation: 2};};
+const reset = () => {records.clear(); etags.clear(); site.clear(); tmdbDocs.clear(); net.calls.length = 0; canonical.bridge = {}; canonical.applied.length = 0; canonical.failWith = null; canonical.result = null; canonical.bridgeThrows = null; slow.on = null; canonical.gate = {mode: 'd1', state: 'open', generation: 2};};
 const seed = async (lid, rating, date = '2026-11-15') => Facts.applyDiaryEvidence(env, [{lid, watchedDate: date, rating, ratingState: 'rated', sourceRef: 'diary:viewing:1'}]);
 const add = (lid, slug, tmdb, title, year, extra = {}) => {site.set(lid, {landing: slug, html: filmPage({lid, slug, title, year, tmdbIds: [tmdb], ...extra})}); tmdbDocs.set(tmdb, detail(tmdb, title, year));};
 const NOW = Date.parse('2026-11-17T16:01:00.000Z');
@@ -140,7 +140,7 @@ assert.equal(pending().Rc01.reason, 'admission_conflict'); assert.equal(canonica
 reset(); await seed('Hld1', 3); add('Hld1', 'fixture-hld-2018', '900050', 'Fixture Hld', 2018); canonical.failWith = 'film_person_held';
 out = await Identity.resolve(env, items(['Hld1', 'fixture-hld-2018']), opts()); assert.equal(out.counts.pending, 1); assert.equal(recordOf('Hld1').links.tmdb, null);
 reset(); await seed('Nop1', 3); canonical.gate = {mode: 'existing', state: 'prepared', generation: 2}; out = await Identity.resolve(env, items(['Nop1', 'x']), opts());
-assert.equal(net.calls.length, 0); assert.equal(out.counts.skipped, 1); assert.deepEqual(pending(), {});
+assert.equal(net.calls.length, 0); assert.equal(out.counts.deferred, 1); assert.equal(pending().Nop1.reason, 'deferred', 'a not-open authority defers, it does not drop');
 
 // 8. budget: a short lease defers, a transport stop ends the step's requests, the step cap is three.
 reset(); for (const lid of ['Bud1', 'Bud2', 'Bud3', 'Bud4', 'Bud5']) {await seed(lid, 3); site.set(lid, {status: 404});}
@@ -192,6 +192,28 @@ out = await Identity.resolve(env, items(['Slw2', 'fixture-slw-2013']), opts({rem
 assert.equal(pending().Slw2.reason, 'budget'); assert.equal(canonical.applied.length, 0); assert.equal(recordOf('Slw2').links.tmdb, null); assert.equal(records.has('letterboxd/admissions/verified-films.json'), false, 'no receipt without the write reserve');
 reset(); await seed('Slw3', 3); add('Slw3', 'fixture-slw-2012', '900072', 'Fixture Slw3', 2012);
 out = await Identity.resolve(env, items(['Slw3', 'fixture-slw-2012']), opts({remaining: () => Identity.STEP_BUDGET_MS - 1})); assert.equal(net.calls.length, 0); assert.equal(pending().Slw3.reason, 'deferred');
+
+// 13. review of PR #720 (second), P1: a temporary Film authority interruption (gate not open, bridge read held/unavailable/moved) keeps the id as a bounded `deferred`
+// pending (same-row slug, attempts unchanged, no outbound check), and a LATER step with an empty or different page and an open gate processes it.
+const interruptions = [['gate held', () => {canonical.gate = {mode: 'existing', state: 'held', generation: 2};}], ['gate not open', () => {canonical.gate = {mode: 'existing', state: 'prepared', generation: 2};}],
+  ['gate unreadable', () => {canonical.gate = null;}], ...['film_person_held', 'film_person_unavailable', 'film_person_generation_moved', 'canonical_read_unavailable', 'canonical_read_not_authoritative'].map(code => ['bridge ' + code, () => {canonical.bridgeThrows = code;}])];
+for (const [name, interrupt] of interruptions) {
+  reset(); await seed('Tmp1', 3); add('Tmp1', 'fixture-tmp-2011', '900080', 'Fixture Tmp', 2011); interrupt();
+  out = await Identity.resolve(env, items(['Tmp1', 'fixture-tmp-2011']), opts());
+  assert.equal(net.calls.length, 0, name + ': no outbound check while the authority is unavailable'); assert.equal(canonical.applied.length, 0, name);
+  assert.deepEqual({...pending().Tmp1}, {reason: 'deferred', slug: 'fixture-tmp-2011', attempts: 0, lastAttemptAt: null, nextAttemptAt: new Date(NOW).toISOString()}, name);
+  // a second interrupted step keeps the entry as it is (no attempt consumed)
+  await Identity.resolve(env, [], opts({clock: () => NOW + 1000})); assert.equal(pending().Tmp1.attempts, 0, name); assert.equal(net.calls.length, 0, name);
+  canonical.gate = {mode: 'd1', state: 'open', generation: 2}; canonical.bridgeThrows = null;
+  out = await Identity.resolve(env, items(['Other9', 'other-9']), opts({clock: () => NOW + 2000}));
+  assert.equal(out.counts.verified, 1, name + ': the id is processed although it is no longer on the page'); assert.equal(recordOf('Tmp1').links.tmdb, '900080', name); assert.equal(pending().Tmp1, undefined, name);
+}
+// a conflict or retired bridge still fails closed and backs off (not a deferral).
+reset(); await seed('Tmp2', 3); canonical.bridge.Tmp2 = {state: 'conflict'}; await Identity.resolve(env, items(['Tmp2', 'x']), opts());
+assert.equal(pending().Tmp2.reason, 'bridge_conflict'); assert.equal(pending().Tmp2.attempts, 1); assert.ok(Date.parse(pending().Tmp2.nextAttemptAt) > NOW);
+// a throw while linking a consumed bridge keeps the id as a deferral too (nothing is linked, nothing is dropped).
+reset(); await seed('Tmp3', 3); canonical.bridge.Tmp3 = {state: 'ok', filmId: 'film:tmdb:x', tmdb: 'not-a-number', lid: 'Tmp3'};
+out = await Identity.resolve(env, items(['Tmp3', 'fixture-tmp3-2010']), opts()); assert.equal(pending().Tmp3.reason, 'deferred'); assert.equal(recordOf('Tmp3').links.tmdb, null);
 
 // 9. the pending retry spacing is monotone and bounded; transport backs off less than a review.
 assert.ok(Identity.delayMs('forbidden', 1) < Identity.delayMs('slug_mismatch', 1)); assert.ok(Identity.delayMs('forbidden', 9) <= 48 * 3600000);
