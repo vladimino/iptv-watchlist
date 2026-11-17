@@ -561,7 +561,7 @@ async function started(w){await activate(w);const result=plain(await w.RO.ensure
   const status=plain(await w.R.status(w.env));assert.notEqual(status.orchestration?.mode,'external',label);assert.equal(status.orchestration.health,'unknown');
   assert.notEqual(plain(await w.RO.ensure(w.env,{now:w.clock.now})).started,true);assert.equal(w.workflow.creates.length,0);
  }
- // 16c. The retired migrate action has no entry path (ADR 0160). The dispatchers route start and step through `handle` only, and
+ // 16c. The retired migrate action has no entry path (ADR 0161). The dispatchers route start and step through `handle` only, and
  // `handle` answers 400 for any other action, fenced or not, without a write.
  {
   const w=setup();

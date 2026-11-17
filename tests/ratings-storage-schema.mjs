@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import {ratingsAuthorityModule,makeBucket,makeClock,makeNetwork,loadContext,baseEnv,QUEUE,CURSOR,SEPARATE,H,film,plain,g,migrated} from './ratings-harness.mjs';
 
-// ADR 0160: the ratings pipeline works only on version 2 storage, and the Worker has no code that converts it. Start, step and the
+// ADR 0161: the ratings pipeline works only on version 2 storage, and the Worker has no code that converts it. Start, step and the
 // status read the removal queue and the Diary cursor and refuse anything else without a write, a request, a conversion or a read
 // through another store.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');
@@ -111,4 +111,4 @@ for(const kind of ['held','unavailable']){
  assert.equal(bucket.writes().length,writes,kind+': nothing is written');assert.equal(net.fetches.length,0,kind+': no request');
 }
 
-console.log('Ratings storage schema (ADR 0160): only a version 2 queue with a merge-form cursor is supported; any other pair is refused by start, step and the status with no write, request or conversion; a version 1 object found after version 2 is refused the same way; no conversion entry point exists in the Worker');
+console.log('Ratings storage schema (ADR 0161): only a version 2 queue with a merge-form cursor is supported; any other pair is refused by start, step and the status with no write, request or conversion; a version 1 object found after version 2 is refused the same way; no conversion entry point exists in the Worker');

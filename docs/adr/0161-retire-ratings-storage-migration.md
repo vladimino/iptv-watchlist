@@ -1,4 +1,4 @@
-# ADR 0160: Retire the ratings storage migration tool and gate the pipeline on the stored schema
+# ADR 0161: Retire the ratings storage migration tool and gate the pipeline on the stored schema
 
 **Status:** Proposed  
 **Original decision date:** 2026-11-17  

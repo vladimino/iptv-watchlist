@@ -170,7 +170,7 @@ const LetterboxdDiary=(()=>{
  const outcomeOf=status=>status===403?'blocked':status===429?'rate_limited':'failed';
 
  // The Diary cursor (`state.json`). Version 1 (no `writer`) is written as before, last writer wins. The merge form
- // (ADR 0060 decision 6, `schemaVersion: 2` with `writer`) is the only form the ratings pipeline accepts (ADR 0160):
+ // (ADR 0060 decision 6, `schemaVersion: 2` with `writer`) is the only form the ratings pipeline accepts (ADR 0161):
  // its progress part is a join (newest = later, oldest = earlier, reachedEnd = either, resumePage = the larger, null
  // once reachedEnd; an absent page counts as page 2) and its diagnostic part (lastOutcome, stopReason, counts, writer)
  // is one record, last writer wins by (lastAttemptAt, writer.runId, writer.step, content). Serialization is canonical,

@@ -1902,7 +1902,7 @@ async function sealStep(env,run,entryAt=Date.now()){
   throw new Error('seal_phase_unknown');
  }finally{await releaseDiscoveryLease(env,lease);}
 }
-// ADR 0074, ADR 0160: the ratings pipeline is permanently separate. It works only on version 2 storage, the removal queue at
+// ADR 0074, ADR 0161: the ratings pipeline is permanently separate. It works only on version 2 storage, the removal queue at
 // schema version 2 and the Diary cursor in its merge form. The EPG commit then hands the films its watchlist diff removed to the
 // queue as references to the removal event, durably and before it publishes, and does no ratings work: no Diary read, no fact
 // write, no lookup. The RATINGS_PIPELINE binding is ignored. On any other stored state the commit still publishes and fails
@@ -1983,7 +1983,7 @@ async function closeInterruptedRatings(env,run,now=Date.now()){
  run.ratingError=`Ratings step interrupted during ${phase}; no outcome recorded`;run.ratingError=run.ratingError.slice(0,300);delete run.ratingPending;
  await saveJSON(env,'sync.json',run);return run.ratingAttempt;
 }
-// ADR 0074, ADR 0160: the EPG commit never reads Diary and never looks up films. Supported storage enqueues removal references.
+// ADR 0074, ADR 0161: the EPG commit never reads Diary and never looks up films. Supported storage enqueues removal references.
 // Any other stored state publishes the programme, keeps the removal references on the sync run and does not enqueue.
 async function completeWithRatings(env,run,report){
  const gate=await ratingsGate(env);

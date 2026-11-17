@@ -8,7 +8,7 @@ const {clock,FakeDate,crypto}=makeClock(T0),net=makeNetwork(),bucket=makeBucket(
 const ctx=loadContext({net,clock,FakeDate,crypto});
 const D=g(ctx,'LetterboxdDiary'),env=baseEnv(bucket);
 const bytes=value=>JSON.stringify(value);
-// The Worker has no code that converts a version 1 cursor (ADR 0160). The writers below must still follow the version they find at their
+// The Worker has no code that converts a version 1 cursor (ADR 0161). The writers below must still follow the version they find at their
 // own compare-and-swap, so the tests build the merge form themselves, as any other writer of that form would.
 const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
 const toMergeForm=(state,writer)=>canonical({...D.emptyState(),...(state||{}),schemaVersion:2,writer});

@@ -108,7 +108,7 @@ export const plain=value=>JSON.parse(JSON.stringify(value));
 export const g=(context,name)=>vm.runInContext(name,context);
 export const eventKeyOf=(at,id)=>'events/items/'+String(9999999999999-Date.parse(at)).padStart(13,'0')+'-'+id+'.json';
 export const film=slug=>({id:slug,url:`https://letterboxd.com/film/${slug}/`});
-// Supported storage (ADR 0160): a version 2 removal queue and a merge-form Diary cursor.
+// Supported storage (ADR 0161): a version 2 removal queue and a merge-form Diary cursor.
 export function migrated(bucket,{films={},cursor={}}={},at='2026-10-31T00:00:00.000Z'){
  bucket.set(QUEUE,{schemaVersion:2,films,droppedRefs:0,migratedAt:at});
  bucket.set(CURSOR,{schemaVersion:2,coverage:{newestWatchedDate:null,oldestWatchedDate:null,reachedEnd:false},resumePage:null,writer:{runId:'ratings-storage-migrate',step:'migrate'},...cursor});
@@ -116,7 +116,7 @@ export function migrated(bucket,{films={},cursor={}}={},at='2026-10-31T00:00:00.
 // A seeded pseudo-random generator for the property tests.
 export function seeded(seed){let state=seed>>>0;return ()=>{state=(state*1664525+1013904223)>>>0;return state/4294967296;};}
 
-// The Ratings D1 module with only its authority read replaced (ADR 0160 tests): `held` reports a d1 marker whose cutover is held,
+// The Ratings D1 module with only its authority read replaced (ADR 0161 tests): `held` reports a d1 marker whose cutover is held,
 // `unavailable` throws as an unreadable marker does. Every other function is the real one, with no database behind it.
 export function ratingsAuthorityModule(RatingsD1,kind){
  const readRatingsAuthority=async()=>{

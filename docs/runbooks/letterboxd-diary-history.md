@@ -59,7 +59,7 @@ Since [ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md) the EPG commit d
 
 ## Separate ratings pipeline
 
-[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md); contract: [separate ratings pipeline](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline); tools: [MCP reference](../reference/api/mcp.md#ratings-tools). The Worker does not read `RATINGS_PIPELINE`. On supported storage the EPG commit only enqueues removal references; the active writer is selected by the Ratings orchestration mode. Production is `cloudflare` / epoch 1, with the legacy Ratings Task disabled. The Cloudflare Workflow runs the separate pipeline. On any other stored state (a queue or Diary cursor that is not version 2, [ADR 0160](../adr/0160-retire-ratings-storage-migration.md)) the commit publishes and fails closed: no Diary, no lookup, no enqueue, and start and step answer `storage_unsupported`. Setting the binding to `inline` or deleting it does not put Diary back inside the commit.
+[ADR 0060](../adr/0060-independent-letterboxd-ratings-pipeline.md), [ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md); contract: [separate ratings pipeline](../reference/integrations/letterboxd-ratings.md#separate-ratings-pipeline); tools: [MCP reference](../reference/api/mcp.md#ratings-tools). The Worker does not read `RATINGS_PIPELINE`. On supported storage the EPG commit only enqueues removal references; the active writer is selected by the Ratings orchestration mode. Production is `cloudflare` / epoch 1, with the legacy Ratings Task disabled. The Cloudflare Workflow runs the separate pipeline. On any other stored state (a queue or Diary cursor that is not version 2, [ADR 0161](../adr/0161-retire-ratings-storage-migration.md)) the commit publishes and fails closed: no Diary, no lookup, no enqueue, and start and step answer `storage_unsupported`. Setting the binding to `inline` or deleting it does not put Diary back inside the commit.
 
 ### Reading the status (read-only)
 
@@ -72,7 +72,7 @@ Since [ADR 0074](../adr/0074-retire-ratings-pipeline-switch.md) the EPG commit d
 
 ### Cutover (owner) — historical AIR-295 sequence
 
-The steps below are the sequence that was followed on 2026-10-31. They are not a current instruction and not a rollback, and they cannot be repeated: the `ratings_storage_migrate` tool they use no longer exists in the Worker ([ADR 0160](../adr/0160-retire-ratings-storage-migration.md)). Do not set `RATINGS_PIPELINE=inline` or remove the binding to restore Diary on the commit. Current behaviour is [above](#separate-ratings-pipeline).
+The steps below are the sequence that was followed on 2026-10-31. They are not a current instruction and not a rollback, and they cannot be repeated: the `ratings_storage_migrate` tool they use no longer exists in the Worker ([ADR 0161](../adr/0161-retire-ratings-storage-migration.md)). Do not set `RATINGS_PIPELINE=inline` or remove the binding to restore Diary on the commit. Current behaviour is [above](#separate-ratings-pipeline).
 
 A sequence of owner actions. Each step was approved separately and checked before the next one.
 

@@ -1,6 +1,6 @@
 # ADR 0121: Owner-only EPG diagnostic canary on an isolated Cloudflare Workflow (design for owner decision)
 
-**Status:** Accepted (architecture only; nothing is implemented, provisioned, deployed or activated by this ADR)  
+**Status:** Accepted, **historical since 2026-11-17: the canary was abandoned and its code deleted ([ADR 0161](0160-delete-epg-diagnostic-canary-code.md)); the design is no longer a contract of any code** (original: architecture only; nothing is implemented, provisioned, deployed or activated by this ADR)  
 **Original decision date:** 2026-11-12 (explicit owner acceptance following independent review of PR #540)  
 **Recorded at:** 2026-11-12  
 **Approval source:** Explicit Product Owner instruction on 2026-11-12 in the AIR-445 project conversation to mark ADR 0121 Accepted and merge PR #540, after independent [review of PR #540 HEAD `200866e`](https://github.com/vladimino/iptv-watchlist/pull/540#pullrequestreview-5871329798). Earlier [design feedback](https://github.com/vladimino/iptv-watchlist/pull/540#issuecomment-6818501618) provides the selected options. Architecture approval only; no provisioning, migration or diagnostic run authorized  

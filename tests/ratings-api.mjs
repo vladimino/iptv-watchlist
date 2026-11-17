@@ -51,7 +51,7 @@ for(const extra of [{},{RATINGS_PIPELINE:'inline'},{RATINGS_PIPELINE:'Separate'}
  assert.equal(bucket.log.length,0,'a malformed request reads and writes nothing');
  assert.equal((await http(START,'POST',{trigger:'manual'},{Origin:'https://evil.example'})).status,403);
  assert.equal((await http(START,'GET')).status,404);assert.equal((await http(STATUS,'POST',{})).status,404);
- // The retired conversion route is gone (ADR 0160): the dispatcher answers its common 404 and reads or writes nothing.
+ // The retired conversion route is gone (ADR 0161): the dispatcher answers its common 404 and reads or writes nothing.
  for(const body of [{mode:'apply'},{mode:'dry_run'},{}])assert.equal((await http(RETIRED,'POST',body)).status,404,RETIRED+JSON.stringify(body));
  assert.equal(bucket.writes().length,0);
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import * as RatingsD1 from '../src/ratings-d1.js';
 import {ratingsAuthorityModule,makeBucket,makeClock,makeNetwork,loadContext,baseEnv,diaryPage,diaryRow,migrated,QUEUE,CURSOR,RUN,SEPARATE,H,eventKeyOf,plain,g} from './ratings-harness.mjs';
 
-// ADR 0074, ADR 0160: the EPG commit never reads Diary. Unsupported storage fails closed for every binding value. On supported
+// ADR 0074, ADR 0161: the EPG commit never reads Diary. Unsupported storage fails closed for every binding value. On supported
 // storage the commit only enqueues removal references, durably, at completion (AIR-513), whatever the retired
 // RATINGS_PIPELINE binding holds, and requests nothing from Letterboxd for ratings.
 const T0=Date.parse('2026-10-31T08:00:00.000Z');

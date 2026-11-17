@@ -6,7 +6,7 @@
 **Approval source:** Owner's explicit 17 November 2026 acceptance of [PR #714](https://github.com/vladimino/iptv-watchlist/pull/714), recorded on [AIR-457](https://trello.com/c/InwLNuYs). The 14 November authorization was for planning and PR preparation only; diagnostic resource deletion and other live settings changes remain unapproved.
 **Related work:** [AIR-456](https://trello.com/c/eb948eA5) (documented NO-GO), [AIR-457](https://trello.com/c/InwLNuYs); [ADR 0121](0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](0124-epg-diagnostic-canary-run-contract.md), [ADR 0139](0139-epg-diagnostic-chunked-replay-dataset.md)
 **Supersedes:** The deployment wiring of ADR 0121 and ADR 0124 (bindings, var, route, Workflow class). Their design, isolation reasoning and contracts stay Accepted as history and as the contract of the inert modules.
-**Superseded by:** None
+**Superseded by:** Decision 2 (keep inert modules) only, by [ADR 0161](0160-delete-epg-diagnostic-canary-code.md); decisions 1, 3 and 4 stand
 
 ## Context
 

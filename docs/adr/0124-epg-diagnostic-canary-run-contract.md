@@ -1,6 +1,6 @@
 # ADR 0124: EPG diagnostic canary run contract (implementation decisions of ADR 0121)
 
-**Status:** Accepted (implementation decisions inside the accepted architecture of ADR 0121; design and code-delivery authorization only: nothing is provisioned, activated or run by this ADR, and it is not a production GO)  
+**Status:** Accepted, **historical since 2026-11-17: the canary was abandoned and its code deleted ([ADR 0161](0160-delete-epg-diagnostic-canary-code.md)); the design is no longer a contract of any code** (original: implementation decisions inside the accepted architecture of ADR 0121; design and code-delivery authorization only: nothing is provisioned, activated or run by this ADR, and it is not a production GO)  
 **Original decision date:** 2026-11-12  
 **Recorded at:** 2026-11-12  
 **Approval source:** the Product Owner on 12 Nov 2026, after the first AIR-455 review: Cloudflare Access at the edge is the authorization boundary for the diagnostic routes, without a second in-Worker JWT validator or a second Access audience; the owner pre-approved marking this ADR Accepted once it records that decision and passes independent review (pull request #552 review of 12 Nov 2026)  

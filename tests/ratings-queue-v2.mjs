@@ -10,7 +10,7 @@ const fn=name=>vm.runInContext(name,ctx);
 const env=baseEnv(bucket);
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
 const at=ms=>new Date(ms).toISOString();
-// The Worker has no code that converts a version 1 queue (ADR 0160). Writers must still follow the version they find at their own
+// The Worker has no code that converts a version 1 queue (ADR 0161). Writers must still follow the version they find at their own
 // compare-and-swap, so the race below is emulated by another writer that stores the version 2 form.
 const toV2=(queue,when)=>({schemaVersion:2,films:Object.fromEntries(Object.entries(queue?.films||{}).map(([id,entry])=>[id,{...entry,claim:null,refs:[],legacy:true}])),droppedRefs:0,migratedAt:when,...(queue?.pausedUntil?{pausedUntil:queue.pausedUntil,pausedBy:queue.pausedBy||null}:{})});
 const ref=(n,ms=T0)=>({eventKey:eventKeyOf(at(ms),'run-'+n+'-watchlist'),sourceRunId:'run-'+n,at:at(ms)});

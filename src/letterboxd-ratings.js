@@ -4,7 +4,7 @@
 // by their monotone merges, so a step that outlived its lease can add real progress and never move anything back.
 // The pipeline is permanently separate (ADR 0074). It works only on version 2 storage: the removal queue at schema version 2 and
 // the Diary cursor in its merge form. Any other stored state is refused by start and step (`storage_unsupported`) and nothing
-// is written, converted or read through R2 (ADR 0160). The RATINGS_PIPELINE binding is ignored.
+// is written, converted or read through R2 (ADR 0161). The RATINGS_PIPELINE binding is ignored.
 // LETTERBOXD_DIARY_HISTORY is retired and unread (ADR 0075). A run always starts in the Diary phase.
 // REMOVAL_RATING_LOOKUP is retired and unread (ADR 0077). A film the Diary did not rate stays eligible for the
 // bounded member-page lookup unless a stored fact already holds a confirmed rating and the current Diary page did
@@ -39,7 +39,7 @@ const LetterboxdRatings=(()=>{
   return env.BUCKET.put(key,JSON.stringify(value),{httpMetadata:{contentType:'application/json'},onlyIf:object?{etagMatches:object.etag}:{etagDoesNotMatch:'*'}});
  };
 
- // The storage schema guard (ADR 0160). The queue must be at schema version 2 and the Diary cursor in its merge form. This is a
+ // The storage schema guard (ADR 0161). The queue must be at schema version 2 and the Diary cursor in its merge form. This is a
  // read of the two objects and writes nothing. A version 1 object, an absent object or any other shape is unsupported: the
  // pipeline neither converts it nor falls back to another store, and no code in the Worker can convert it.
  // The D1 authority is checked first. A held marker (a D1 domain that is not the writer) or an unreadable one is never read as

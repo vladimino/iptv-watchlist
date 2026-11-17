@@ -1,6 +1,6 @@
 # AIR-79 ratings storage migration retirement, 17 November 2026
 
-**Trello:** [AIR-79](https://trello.com/c/485tlGLA), slice D-3. **Code reference:** `main` at `7ddfadf`. **Captured:** 17 November 2026 (UTC). Decision: [ADR 0160](../../adr/0160-retire-ratings-storage-migration.md). Continues the [flag closure audit](air-79-flag-closure-and-legacy-export-route-2026-11-17.md), whose live `ratings_sync_status` readout is the precondition used here.
+**Trello:** [AIR-79](https://trello.com/c/485tlGLA), slice D-3. **Code reference:** `main` at `7ddfadf`. **Captured:** 17 November 2026 (UTC). Decision: [ADR 0161](../../adr/0161-retire-ratings-storage-migration.md). Continues the [flag closure audit](air-79-flag-closure-and-legacy-export-route-2026-11-17.md), whose live `ratings_sync_status` readout is the precondition used here.
 
 ## Scope and method
 

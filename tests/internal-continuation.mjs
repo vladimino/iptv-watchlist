@@ -183,7 +183,7 @@ assert.deepEqual(scanHops,[]);assert.equal(continuation().reason,'scan_committed
 const epgUrl=env.EPG_XML_URL;delete env.EPG_XML_URL;
 response=await call('/api/enrichment/discovery/scan',{});assert.equal(response.status,502);assert.match((await response.json()).error,/EPG_XML_URL is not configured/);
 env.EPG_XML_URL=epgUrl;
-delete env.epgDiagnostic;delete env.DISCOVERY_LEDGER_MODE;
+delete env.offlineLedgerFixture;delete env.DISCOVERY_LEDGER_MODE;
 
 // A committed EPG sync queues discovery. The next step runs one chunk and does not retry ratings.
 seed(5);records.set('sync.json',{runId:'sync-1',stage:'epg',updatedAt:new Date().toISOString()});

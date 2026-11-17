@@ -326,8 +326,9 @@ fs.unlinkSync(me);`;
       const coreCohort = part => coreFiles(part).filter(file => !serialFiles.includes(file) && coreWeight(file) >= HEAVY_MIN_WEIGHT);
       const corePressure = coreParts.map(part => coreCohort(part).reduce((sum, file) => sum + coreWeight(file), 0));
       const coreCredited = corePressure.map((value, index) => index === 0 ? value - CORE_FIRST_SHARD_HEAVY_CREDIT : value);
+      // AIR-521: deleting the canary suites (the 22-unit epg-diagnostic-run was a heavy-cohort file) left 11 heavy files, so the greedy deal is discrete-limited to 124/113/97 (about 15%); 0.08 was reachable only with that file. Scheduling heuristic only: real shard time is gated by CI.
       const coreMeanPressure = corePressure.reduce((a, b) => a + b, 0) / 3;
-      assert.ok(Math.max(...coreCredited) - Math.min(...coreCredited) <= 0.08 * coreMeanPressure, `core heavy-file pressure is spread once shard 1's core credit is counted: ${corePressure.join(' vs ')} (credit ${CORE_FIRST_SHARD_HEAVY_CREDIT})`);
+      assert.ok(Math.max(...coreCredited) - Math.min(...coreCredited) <= 0.16 * coreMeanPressure, `core heavy-file pressure is spread once shard 1's core credit is counted: ${corePressure.join(' vs ')} (credit ${CORE_FIRST_SHARD_HEAVY_CREDIT})`);
       assert.deepEqual(planTests({directory: 'tests', suite: 'core', shard: {index: 2, count: 3}}), coreParts[1], 'the core split does not depend on who asks');
       const nightly = planTests({directory: 'tests', suite: 'non-functional', shard: {index: 1, count: 3}});
       const nightlyOld = planTests({directory: 'tests', suite: 'non-functional', shard: {index: 1, count: 3}, weights: WEIGHTS, heavyCredit: FIRST_SHARD_HEAVY_CREDIT});
