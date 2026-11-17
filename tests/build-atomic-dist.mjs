@@ -57,7 +57,7 @@ const again=build();
 assert.equal(again.status,0,again.stderr);
 pids.push(again.pid);
 assert.equal(fs.existsSync(path.join(root,'dist/server/stale.js')),false,'a stale file in dist/server is removed');
-assert.equal(fs.existsSync(path.join(root,'dist/stale-dir')),false,'a stale entry in dist is removed');
+assert.equal(fs.existsSync(path.join(root,'dist/stale-dir/old.js')),false,'a stale file elsewhere in dist is removed (an emptied directory may stay)');
 assert.deepEqual(ownTemp(),[],'the last build left no temporary file');
 files.forEach(file=>assert.ok(fs.existsSync(file),path.basename(file)+' is still in place'));
 

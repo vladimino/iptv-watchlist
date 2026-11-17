@@ -528,6 +528,9 @@ export const FILES={
  "discovery-workflow-bundle.mjs": {
   "suite": "core"
  },
+ "discovery-workflow-rollover.mjs": {
+  "suite": "core"
+ },
  "discovery-workflow.mjs": {
   "suite": "core"
  },
@@ -1157,6 +1160,9 @@ export const FILES={
   "suite": "core"
  },
  "prediction-queue-hotenteredat.mjs": {
+  "suite": "core"
+ },
+ "prediction-scoring-candidate.mjs": {
   "suite": "core"
  },
  "prediction-r2-roundtrips.mjs": {

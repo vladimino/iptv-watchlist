@@ -22,7 +22,7 @@ function seedHealthySources(){
  records.set('programme.json',{runId:'programme-1',updatedAt:'2026-11-16T11:00:00Z',watchlistUpdatedAt:'2026-11-16T11:00:00Z',watchlistCount:3,films:[film('watch-a',1),film('watch-b',2),film('watch-c',3)],stats:{epgStart:now-72*3600000,epgEnd:now+24*3600000,channels:2,scanned:10,titleMissing:0,titleProvisional:0,metadataMissing:0}});
  records.set('epg/discovered-films.json',{watch_a:film('watch-a',1),watch_b:film('watch-b',2),watch_c:film('watch-c',3)});
  records.set('enrichment/view-index.json',{'watch-a':current('a'),'watch-b':current('b')});
- records.set('sync.json',{stage:'complete',updatedAt:'2026-11-16T11:00:00Z',ratingObservedAt:'2026-11-16T11:00:00Z',completedAt:'2026-11-16T11:00:00Z'});
+ records.set('sync.json',{runId:'programme-1',stage:'complete',updatedAt:'2026-11-16T11:00:00Z',ratingObservedAt:'2026-11-16T11:00:00Z',completedAt:'2026-11-16T11:00:00Z'});
  records.set('epg/discovery-status.json',{stage:'complete',programmeRunId:'programme-1',finishedAt:'2026-11-16T11:00:00Z',error:null});
  records.set('epg/resolver-continuation.json',{stage:'complete',programmeRunId:'programme-1',at:'2026-11-16T11:00:00Z',reason:null});
  records.set('epg/discovery-resolution.json',{});

@@ -292,6 +292,25 @@ async function throwIfPriorityPaused(env,gate,error,context={}){
  throw Object.assign(priorityError(await priorityBusy(env,gate,decision,nowMs())),{cause:error});
 }
 
+// AIR-524 (ADR 0164). The two soft write gates of the controlled Workflow rollover preflight, read only: the projector window and the EPG-priority
+// pause, as the writers would judge them now. Absent tables are verified absence (`present: false`, open). It never writes and never throws a
+// window or priority refusal; an unreadable source answers `unknown`, which the preflight treats as fail-closed.
+export async function readDiscoveryGates(env,now=nowMs()){
+ const gate=await readAuthority(env);
+ const out={programmeRunId:gate.programmeRunId??null,publishedProgrammeRunId:gate.publishedProgrammeRunId??null,window:{present:gate.windowTable===true,state:'idle',active:false,expiresAt:null},priority:{present:gate.priorityTable===true,paused:false,reason:gate.priorityTable?null:'inert',nextCatchUpAt:null}};
+ if(gate.windowTable){
+  try{const window=await readProjectorWindow(env,now);out.window={present:true,state:window.state,active:window.active===true,expiresAt:window.expiresAt??null};}
+  catch{out.window={present:true,state:'unknown',active:null,expiresAt:null};}
+ }
+ if(gate.priorityTable){
+  try{
+   const decision=discoveryAdmission(await readPriorityFacts(env,now,{role:null,programmeRunId:gate.publishedProgrammeRunId??null}));
+   out.priority={present:true,paused:decision.reason==='epg_priority',reason:decision.reason,nextCatchUpAt:decision.nextCatchUpAt??null,unreadable:decision.admit!==true&&decision.reason!=='epg_priority'};
+  }catch{out.priority={present:true,paused:null,reason:'unknown',nextCatchUpAt:null};}
+ }
+ return out;
+}
+
 export async function readAuthority(env){
  const db=database(env);
  if(!db)return closed();
@@ -1862,7 +1881,12 @@ export async function readOperationalSnapshot(env){
   window:rows.window?{state:rows.window.state,owner:rows.window.owner,requestedAt:rows.window.requestedAt==null?null:Number(rows.window.requestedAt),expiresAt:rows.window.expiresAt==null?null:Number(rows.window.expiresAt)}:null,
  }};
 }
-export async function writeWorkflow(env,record,etag){
+// AIR-524 (ADR 0164). `options.expectedProgrammeRunId` is the controlled rollover's generation pin: the same statement that moves the authority
+// generation (and so commits the executor-record compare-and-swap) also requires that the Discovery programme, the Discovery published pin and
+// the published EPG pointer all still name that run. A publication between the operator's preflight and its swap fails the whole batch, writes
+// nothing and answers `stale: true`. Routine record writes pass no option and are byte-for-byte what they were.
+const WORKFLOW_GENERATION_PIN_SQL=" AND programme_run_id=? AND published_programme_run_id=? AND EXISTS (SELECT 1 FROM published_epg_authority WHERE id=1 AND programme_run_id=?)";
+export async function writeWorkflow(env,record,etag,options={}){
  const gate=await readAuthority(env);
  if(gate.held)throw failed('discovery_fence');
  if(!gate.ready)return {handled:false,saved:false};
@@ -1873,13 +1897,26 @@ export async function writeWorkflow(env,record,etag){
  const params=expected==null?[record?.instanceId??null,record?.programmeRunId??null,Number.isInteger(record?.series)?record.series:null,text]:[record?.instanceId??null,record?.programmeRunId??null,Number.isInteger(record?.series)?record.series:null,text,expected];
  // ADR 0135: the writer that holds the live lease (an in-flight chunk) finishes; a lease-free writer is refused while the pause is open.
  const gatePriority=priorityGuard(gate,admissionBounds(nowMs()),record?.programmeRunId??null,leaseOf(env));
+ const pin=typeof options?.expectedProgrammeRunId==='string'&&options.expectedProgrammeRunId?options.expectedProgrammeRunId:null;
+ if(options?.expectedProgrammeRunId!==undefined&&!pin)return {handled:true,saved:false,stale:true};
  try{
   await commit(database(env),[
    [`UPDATE discovery_workflow SET instance_id=?, programme_run_id=?, series=?, payload_json=?, revision=revision+1 WHERE ${where}`,params],
-   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+windowHeldGuard(gate)[0]+gatePriority[0],[gate.generation,...windowHeldGuard(gate)[1],...gatePriority[1]]],
+   ['UPDATE discovery_authority SET generation=generation+1 WHERE id=1 AND mode=\'d1\' AND cutover=\'open\' AND generation=? AND changes()=1'+(pin?WORKFLOW_GENERATION_PIN_SQL:'')+windowHeldGuard(gate)[0]+gatePriority[0],[gate.generation,...(pin?[pin,pin,pin]:[]),...windowHeldGuard(gate)[1],...gatePriority[1]]],
    [FENCE_SQL,[]],
   ]);
- }catch(error){if(error.code==='discovery_fence'){await throwIfWindowHeld(env,gate,error);await throwIfPriorityPaused(env,gate,error,{programmeRunId:record?.programmeRunId??null});return {handled:true,saved:false};}throw error;}
+ }catch(error){
+  if(error.code==='discovery_fence'){
+   await throwIfWindowHeld(env,gate,error);await throwIfPriorityPaused(env,gate,error,{programmeRunId:record?.programmeRunId??null});
+   if(pin){
+    // The answer says why the pinned write failed: a moved generation is `stale`, anything else stays an ordinary lost compare-and-swap.
+    let now=null;try{now=await one(database(env),'SELECT a.programme_run_id AS programmeRunId, a.published_programme_run_id AS publishedProgrammeRunId, e.programme_run_id AS epgProgrammeRunId FROM discovery_authority a, published_epg_authority e WHERE a.id=1 AND e.id=1');}catch{}
+    if(!now||now.programmeRunId!==pin||now.publishedProgrammeRunId!==pin||now.epgProgrammeRunId!==pin)return {handled:true,saved:false,stale:true};
+   }
+   return {handled:true,saved:false};
+  }
+  throw error;
+ }
  return {handled:true,saved:true};
 }
 

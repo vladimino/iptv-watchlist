@@ -353,6 +353,11 @@ function workflowStepRecoverable(error,hint){
 function logWorkflowFailure(step,error,meter,total){
  try{console.error(JSON.stringify({event:'discovery_workflow_step_failed',step:String(step).replace(/[^a-z-]/g,'').slice(0,24),code:workflowFailureCode(error),name:workflowFailureName(error),class:workflowFailureClass(error),causeName:workflowFailureName(error?.cause),causeClass:workflowFailureClass(error?.cause),statements:meter?.statements??null,batches:meter?.batches??null,instanceStatements:Number.isFinite(total)?total:null}));}catch{}
 }
+// AIR-524 (ADR 0164). The Worker version this code runs as, from the version metadata binding; null when the binding is absent. Inside a Workflow
+// instance it is the version that instance runs on, which is what a controlled rollover compares with the deployed version.
+function discoveryWorkerVersion(env){
+ try{const id=env?.CF_VERSION_METADATA?.id;return typeof id==='string'&&/^[0-9A-Za-z-]{1,64}$/.test(id)?id:null;}catch{return null;}
+}
 function discoveryInstanceId(programmeRunId,series){
  const compact=String(programmeRunId||'').replace(/[^0-9A-Za-z]/g,'').slice(0,32)||'none';
  const n=Number.isInteger(series)&&series>=0?series:0;
@@ -533,8 +538,10 @@ async function createWorkflowInstance(env,programmeRunId,series,instanceId,etag,
  const same=previous?.instanceId===instanceId;
  // AIR-410: the period accumulator and the outbox of undelivered reports belong to the executor, not to a generation or an instance: they are
  // carried over whatever replaces the record, so no delta and no pending report is lost on a generation change or a successor.
- const carry={...(previous?.report?{report:previous.report}:{}),...(Array.isArray(previous?.outbox)?{outbox:previous.outbox}:{})};
- const next={schemaVersion:1,...(same?previous:{}),...carry,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null};
+ // AIR-524: the receipt of the last controlled rollover is carried the same way, so a repeat of that operator request is still recognised after a later successor.
+ const carry={...(previous?.report?{report:previous.report}:{}),...(Array.isArray(previous?.outbox)?{outbox:previous.outbox}:{}),...(previous?.rollover&&typeof previous.rollover==='object'?{rollover:previous.rollover}:{})};
+ // AIR-524: `versionId` is written only by the instance itself (its own Worker version); a new instance starts without one. `createdVersionId` is the creator's.
+ const next={schemaVersion:1,...(same?previous:{}),...carry,programmeRunId,series,instanceId,phase:'starting',updatedAt:new Date().toISOString(),waitingUntil:null,reason:null,chunksThisInstance:same?previous.chunksThisInstance||0:0,lastProgress:same?previous.lastProgress||null:null,recovery:recovery||null,...(same?{}:{versionId:null,createdVersionId:discoveryWorkerVersion(env)})};
  const first=await writeWorkflowStateSoft(env,next,etag);
  if(first.windowBusy)return {started:false,reason:'projector_window',windowUntil:first.window.expiresAt??null,programmeRunId,instanceId,series};
  if(first.priorityBusy)return {started:false,reason:'epg_priority',windowUntil:first.window.expiresAt,programmeRunId,instanceId,series};
@@ -727,6 +734,227 @@ async function armStepFailureRecovery(env,ownId,series,pinned,chunks){
  }
  return {armed:false,reason:'write_conflict'};
 }
+// AIR-524 (ADR 0164). Controlled rollover of the Discovery Workflow onto the deployed Worker version. An existing instance keeps running the
+// version it was created on until its own natural rollover (instance_limit, invocation_budget). This owner-only operator, reached only through the
+// MCP tool `discovery_workflow_rollover` (Cloudflare Access JWT on /mcp), hands the executor record to the deterministic successor (series + 1) of
+// the SAME generation, using the record's own compare-and-swap, the only place ownership lives. It is admitted only while the owner is provably
+// asleep: phase `waiting` with a durable sleep that ends later than the wake margin, no live lease, a saved continuation checkpoint, no projector
+// window, no EPG-priority pause, an open authority and the published generation pinned. A sleeping instance holds no lease and runs no step, so
+// after the swap it wakes into its owner gate, finds another instance named and stops; it can no longer write the record, and the lease and the
+// continuation CAS fence the data as for any other writer. Nothing here touches the continuation, the ledger, the published EPG or any R2 object;
+// the period report, the outbox and the continuation (hopId, budget, replayAfter in the status) are carried untouched. No cron, flag, schedule
+// or Scheduled Task calls it. A create that fails or cannot be confirmed leaves the record `uncertain` with the existing recovery due time, so the
+// hourly reconcile recreates the same deterministic id: never a second successor.
+const DISCOVERY_ROLLOVER_WAKE_MARGIN_MS=120000;
+const DISCOVERY_ROLLOVER_REQUEST_ID=/^[A-Za-z0-9_-]{8,64}$/;
+const DISCOVERY_ROLLOVER_ALIVE=new Set(['running','waiting']);
+const DISCOVERY_ROLLOVER_UNKNOWN_ADMISSION=new Set(['d1_unavailable','workflow_unavailable']);
+const rolloverString=(value,max=80)=>typeof value==='string'&&value?value.slice(0,max):null;
+const rolloverRevision=etag=>{const text=String(etag??'').replace(/^d1:(workflow:)?/,'');return /^\d+$/.test(text)?Number(text):null;};
+// Every fact the decision needs, read only. Nothing here writes; an unreadable source is named in `unreadable` and never guessed.
+// The swap itself. Only through the D1 executor record, never the R2 fallback, and always with the generation pin: the statement that commits the
+// compare-and-swap also requires the Discovery programme, the Discovery pin and the published EPG pointer to name `programmeRunId` (ADR 0164).
+async function writeRolloverSwap(env,record,etag,programmeRunId){
+ if(typeof DiscoveryAuthority==='undefined'||typeof DiscoveryAuthority.writeWorkflow!=='function')return {saved:false,reason:'authority_not_ready'};
+ try{
+  const routed=await DiscoveryAuthority.writeWorkflow(env,record,etag,{expectedProgrammeRunId:programmeRunId});
+  if(!routed?.handled)return {saved:false,reason:'authority_not_ready'};
+  if(routed.saved===true)return {saved:true,reason:null};
+  return {saved:false,reason:routed.stale===true?'stale_generation':'write_conflict'};
+ }catch(error){
+  if(error?.code==='discovery_window')return {saved:false,reason:'projector_window',windowUntil:error.window?.expiresAt??null};
+  if(error?.code==='discovery_epg_priority')return {saved:false,reason:'epg_priority',windowUntil:priorityWindow(error).expiresAt};
+  if(error?.code==='discovery_fence')return {saved:false,reason:'authority_held'};
+  throw error;
+ }
+}
+async function discoveryRolloverFacts(env,now=Date.now()){
+ const facts={now,deployedVersionId:discoveryWorkerVersion(env),unreadable:[],state:null,record:null,continuation:null,continuationEtag:null,status:null,lease:null,gates:null,published:null,liveness:null};
+ let admitted;
+ try{admitted=await discoveryWorkflowAdmission(env);}catch{admitted={ok:false,reason:'d1_unavailable'};}
+ facts.admission={ok:admitted.ok===true,reason:admitted.ok?null:(admitted.reason||'unknown')};
+ facts.programmeRunId=admitted.programmeRunId||null;
+ try{
+  const live=typeof PublishedEpg!=='undefined'&&typeof PublishedEpg.currentGeneration==='function'?await PublishedEpg.currentGeneration(env):null;
+  facts.published=live?{programmeRunId:rolloverString(live.programmeRunId),authority:rolloverString(live.authority,16),phase:rolloverString(live.phase,16),generation:Number.isInteger(live.generation)?live.generation:null}:null;
+ }catch{facts.unreadable.push('published');}
+ try{facts.state=await readWorkflowState(env);facts.record=facts.state.record||null;}catch{facts.unreadable.push('workflow');}
+ try{const stored=await readContinuation(env);facts.continuation=stored.record||null;facts.continuationEtag=stored.etag??null;}catch{facts.unreadable.push('continuation');}
+ try{facts.status=await loadJSON(env,'epg/discovery-status.json');}catch{facts.unreadable.push('status');}
+ try{facts.lease=await loadJSON(env,'epg/resolver-lease.json');}catch{facts.unreadable.push('lease');}
+ if(typeof DiscoveryAuthority!=='undefined'&&typeof DiscoveryAuthority.readDiscoveryGates==='function'){
+  try{facts.gates=await DiscoveryAuthority.readDiscoveryGates(env,now);}catch{facts.unreadable.push('gates');}
+ }else facts.unreadable.push('gates');
+ if(facts.record?.instanceId)facts.liveness=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,facts.record.instanceId);
+ return facts;
+}
+// Pure. eligible: every precondition holds and the owner runs another version than the deployed one (or recorded none, which only code before
+// AIR-524 does). already_current: the owner recorded the deployed version. unsafe: a precondition fails (`blockers`). unknown: a fact needed for
+// the decision could not be read (`unknowns`). Only `eligible` admits an apply.
+function discoveryRolloverDecision(facts){
+ const unknowns=[],blockers=[],record=facts?.record||null,now=facts?.now??Date.now();
+ if(!facts?.deployedVersionId)unknowns.push('deployed_version_unknown');
+ for(const name of facts?.unreadable||[])unknowns.push(name+'_unreadable');
+ if(!facts?.admission?.ok){if(DISCOVERY_ROLLOVER_UNKNOWN_ADMISSION.has(facts?.admission?.reason))unknowns.push(facts.admission.reason);else blockers.push(facts?.admission?.reason||'admission_refused');}
+ if(record?.instanceId&&facts?.deployedVersionId&&record.versionId===facts.deployedVersionId&&['waiting','running','starting'].includes(record.phase)&&!unknowns.length)return {decision:'already_current',blockers:[],unknowns:[]};
+ if(!record?.instanceId)blockers.push('no_active_instance');
+ else{
+  if(!Number.isInteger(record.series)||record.series<0||record.instanceId!==discoveryInstanceId(record.programmeRunId,record.series))unknowns.push('owner_unknown');
+  if(facts.programmeRunId&&record.programmeRunId!==facts.programmeRunId)blockers.push('generation_mismatch');
+  if(record.recovery?.quarantined||record.reason==='recovery_exhausted')blockers.push('recovery_exhausted');
+  if(record.phase==='running')blockers.push('instance_active');
+  else if(record.phase==='starting'||record.phase==='uncertain')blockers.push('handoff_pending');
+  else if(record.phase==='stopped')blockers.push('no_active_instance');
+  else if(record.phase!=='waiting')unknowns.push('owner_unknown');
+  else{const wake=Date.parse(record.waitingUntil||'');if(!Number.isFinite(wake)||wake<=now+DISCOVERY_ROLLOVER_WAKE_MARGIN_MS)blockers.push('wake_imminent');}
+  if(facts.liveness==='unknown'||facts.liveness==null)unknowns.push('instance_status_unknown');
+  else if(!DISCOVERY_ROLLOVER_ALIVE.has(facts.liveness))blockers.push('instance_not_alive');
+ }
+ if(Number(facts?.lease?.expiresAt)>now)blockers.push('lease_live');
+ const continuation=facts?.continuation;
+ if(!facts?.unreadable?.includes('continuation')){
+  if(!continuation)blockers.push('no_continuation');
+  else{
+   if(facts.programmeRunId&&continuation.programmeRunId!==facts.programmeRunId)blockers.push('continuation_foreign');
+   if(continuation.stage==='running')blockers.push('checkpoint_unsaved');
+  }
+ }
+ const gates=facts?.gates;
+ if(gates){
+  if(gates.window?.active===null||gates.window?.state==='unknown')unknowns.push('projector_window_unreadable');
+  else if(gates.window?.active===true)blockers.push('projector_window');
+  if(facts.programmeRunId&&(gates.programmeRunId!==undefined||gates.publishedProgrammeRunId!==undefined)&&(gates.programmeRunId!==facts.programmeRunId||gates.publishedProgrammeRunId!==facts.programmeRunId))blockers.push('generation_handoff');
+  if(gates.priority?.paused===null||gates.priority?.unreadable===true)unknowns.push('epg_priority_unreadable');
+  else if(gates.priority?.paused===true)blockers.push('epg_priority');
+ }
+ const unique=list=>[...new Set(list)];
+ if(unknowns.length)return {decision:'unknown',blockers:unique(blockers),unknowns:unique(unknowns)};
+ if(blockers.length)return {decision:'unsafe',blockers:unique(blockers),unknowns:[]};
+ return {decision:'eligible',blockers:[],unknowns:[]};
+}
+// The secret-free picture an operator reads: identifiers, phases, times and counts only. No continuation body, no SQL, no Film id, no lease id.
+function discoveryRolloverView(facts){
+ const record=facts.record,continuation=facts.continuation,status=facts.status,receipt=record?.rollover;
+ return {
+  at:new Date(facts.now).toISOString(),
+  published:facts.published,
+  admission:facts.admission,
+  programmeRunId:facts.programmeRunId,
+  deployedVersionId:facts.deployedVersionId,
+  owner:record?{instanceId:rolloverString(record.instanceId),series:Number.isInteger(record.series)?record.series:null,programmeRunId:rolloverString(record.programmeRunId),phase:rolloverString(record.phase,16),reason:rolloverString(record.reason,48),waitingUntil:rolloverString(record.waitingUntil,40),updatedAt:rolloverString(record.updatedAt,40),versionId:rolloverString(record.versionId,64),createdVersionId:rolloverString(record.createdVersionId,64),liveness:facts.liveness,recovery:record.recovery?{attempts:record.recovery.attempts??null,dueAt:rolloverString(record.recovery.dueAt,40),quarantined:record.recovery.quarantined===true}:null}:null,
+  continuation:continuation?{programmeRunId:rolloverString(continuation.programmeRunId),stage:rolloverString(continuation.stage,16),reason:rolloverString(continuation.reason,48),hopId:rolloverString(continuation.hopId),remainingChunks:Number.isInteger(continuation.remainingChunks)?continuation.remainingChunks:null,nextCatchUpAt:rolloverString(continuation.nextCatchUpAt,40),retryAt:rolloverString(continuation.retryAt,40),revision:rolloverRevision(facts.continuationEtag),replayAfter:status&&status.programmeRunId===continuation.programmeRunId?rolloverString(status.replayAfter,120):null}:null,
+  lease:{live:Number(facts.lease?.expiresAt)>facts.now,expiresAt:Number.isFinite(Number(facts.lease?.expiresAt))?Number(facts.lease.expiresAt):null},
+  gates:facts.gates?{window:{state:facts.gates.window?.state??null,active:facts.gates.window?.active??null,expiresAt:facts.gates.window?.expiresAt??null},priority:{paused:facts.gates.priority?.paused??null,reason:facts.gates.priority?.reason??null,nextCatchUpAt:facts.gates.priority?.nextCatchUpAt??null}}:null,
+  report:record?{chunks:Number.isInteger(record.report?.chunks)?record.report.chunks:0,outbox:Array.isArray(record.outbox)?record.outbox.length:0}:null,
+  lastRollover:receipt&&typeof receipt==='object'?{requestId:rolloverString(receipt.requestId,64),fromInstanceId:rolloverString(receipt.fromInstanceId),fromSeries:receipt.fromSeries??null,toInstanceId:rolloverString(receipt.toInstanceId),toSeries:receipt.toSeries??null,requestedAt:rolloverString(receipt.requestedAt,40),deployedVersionId:rolloverString(receipt.deployedVersionId,64)}:null,
+  wakeMarginMs:DISCOVERY_ROLLOVER_WAKE_MARGIN_MS,
+ };
+}
+// Reads back what the swap and the create produced. `accepted` only when the record names the successor (and only it), the platform reports it
+// alive and the continuation checkpoint of the generation is still there and did not go back. `versionConfirmed` once the successor recorded
+// the deployed version (its first step does that); until then the receipt says `pending` and the preflight is read again.
+async function discoveryRolloverReadback(env,receipt,before){
+ const out={owner:null,liveness:null,checkpoint:null,versionConfirmed:false,accepted:false};
+ try{
+  const state=await readWorkflowState(env),record=state.record;
+  out.owner={instanceId:rolloverString(record?.instanceId),series:Number.isInteger(record?.series)?record.series:null,phase:rolloverString(record?.phase,16),versionId:rolloverString(record?.versionId,64),isSuccessor:record?.instanceId===receipt.toInstanceId&&record?.series===receipt.toSeries};
+  out.versionConfirmed=out.owner.isSuccessor&&!!receipt.deployedVersionId&&record.versionId===receipt.deployedVersionId;
+ }catch{out.owner=null;}
+ out.liveness=await workflowInstanceStatus(env.DISCOVERY_WORKFLOW,receipt.toInstanceId);
+ try{
+  const stored=await readContinuation(env),revision=rolloverRevision(stored.etag),was=before?.revision??null;
+  const preserved=!!stored.record&&stored.record.programmeRunId===receipt.programmeRunId&&(stored.etag===before?.etag||(revision!=null&&was!=null&&revision>=was));
+  out.checkpoint={preserved,revision,before:was,stage:rolloverString(stored.record?.stage,16),hopId:rolloverString(stored.record?.hopId)};
+ }catch{out.checkpoint={preserved:false,revision:null,before:before?.revision??null,unreadable:true};}
+ out.accepted=out.owner?.isSuccessor===true&&['running','waiting','queued'].includes(out.liveness)&&out.checkpoint?.preserved===true;
+ return out;
+}
+function discoveryRolloverReceipt(receipt){
+ return {requestId:receipt.requestId,programmeRunId:receipt.programmeRunId,from:{instanceId:receipt.fromInstanceId,series:receipt.fromSeries,versionId:receipt.fromVersionId??null},to:{instanceId:receipt.toInstanceId,series:receipt.toSeries},deployedVersionId:receipt.deployedVersionId,requestedAt:receipt.requestedAt};
+}
+// Creates the successor the record already names (the swap is done) and settles the record only while it is still `starting` for that id. A
+// duplicate id is the same successor (attach). Any other failure arms the existing start recovery: the hourly reconcile recreates the same id.
+async function startRolloverSuccessor(env,receipt){
+ const binding=env.DISCOVERY_WORKFLOW,id=receipt.toInstanceId,series=receipt.toSeries,programmeRunId=receipt.programmeRunId;
+ // Writes only while the record is still `starting` for this id: a successor that already wrote its own state is not overwritten, and no empty write
+ // moves the record revision (or, in D1, the authority generation that fences the successor's own commit).
+ const onlyStarting=async patch=>{
+  const state=await readWorkflowState(env),record=state.record;
+  if(record?.instanceId!==id||record.phase!=='starting')return false;
+  const written=await writeWorkflowStateSoft(env,{...record,...patch,updatedAt:new Date().toISOString()},state.etag);
+  return written.saved===true;
+ };
+ let created,settled=false;
+ try{await binding.create({id,params:{programmeRunId,series}});created='started';}
+ catch(error){created=workflowCreateError(error)==='exists'?'attached':'uncertain';}
+ try{
+  if(created==='uncertain'){
+   const failure=workflowFailure(null,'start_uncertain',Date.now());
+   settled=await onlyStarting({phase:'uncertain',reason:'start_uncertain',recovery:failure,waitingUntil:failure.dueAt});
+  }else settled=await onlyStarting({phase:'running',reason:created,recovery:null,waitingUntil:null});
+ }catch{}
+ return {created,settled};
+}
+async function discoveryWorkflowRollover(env,args={}){
+ const refuse=(status,reason,extra={})=>({status,body:{ok:false,mode:args.mode,reason,writes:0,...extra}});
+ const facts=await discoveryRolloverFacts(env);
+ const verdict=discoveryRolloverDecision(facts),view=discoveryRolloverView(facts);
+ const expect={programmeRunId:view.programmeRunId,instanceId:view.owner?.instanceId??null,series:view.owner?.series??null};
+ if(args.mode==='dry_run')return {status:200,body:{ok:true,mode:'dry_run',writes:0,...verdict,expect,preflight:view}};
+ if(args.confirmGo!==true)return refuse(409,'confirm_required',{...verdict,preflight:view});
+ const record=facts.record,requestId=args.requestId;
+ const pins={programmeRunId:args.expectedProgrammeRunId,instanceId:args.expectedInstanceId,series:args.expectedSeries};
+ // A repeat of a request that already swapped the record: no second swap, the stored receipt is resumed or read back.
+ const stored=record?.rollover;
+ if(stored&&typeof stored==='object'&&stored.requestId===requestId){
+  if(stored.programmeRunId!==pins.programmeRunId||stored.fromInstanceId!==pins.instanceId||stored.fromSeries!==pins.series)return refuse(409,'request_id_reused',{preflight:view});
+  let start=null;
+  if(record.instanceId===stored.toInstanceId&&record.series===stored.toSeries&&record.phase==='starting'){
+   // The create of a swap that never reached it, only while that generation is still the published one; otherwise the reconcile decides.
+   if(stored.programmeRunId!==facts.programmeRunId||!facts.admission.ok)return refuse(409,'replay_stale',{admission:facts.admission,receipt:discoveryRolloverReceipt(stored)});
+   start=await startRolloverSuccessor(env,stored);
+  }
+  const created=start?.created??null;
+  const readback=await discoveryRolloverReadback(env,stored,stored.checkpoint);
+  const outcome=record.instanceId!==stored.toInstanceId?'superseded':created==='uncertain'||record.phase==='uncertain'?'successor_uncertain':readback.accepted?(readback.versionConfirmed?'handed_over':'handed_over_version_pending'):'readback_unproven';
+  return {status:readback.accepted||outcome==='superseded'?200:202,body:{ok:readback.accepted||outcome==='superseded',mode:'apply',outcome,replay:true,writes:start?.settled?1:0,receipt:discoveryRolloverReceipt(stored),readback}};
+ }
+ const mismatched=Object.keys(pins).filter(key=>pins[key]!==expect[key]);
+ if(mismatched.length)return refuse(409,'pin_mismatch',{mismatched,expect,...verdict,preflight:view});
+ if(verdict.decision!=='eligible')return refuse(409,verdict.decision,{blockers:verdict.blockers,unknowns:verdict.unknowns,preflight:view});
+ // The wake margin is measured from the start of the reads; a preflight that took long enough to eat into it is not a proof of sleep any more.
+ const wake=Date.parse(record.waitingUntil||'');
+ if(!Number.isFinite(wake)||wake<=Date.now()+DISCOVERY_ROLLOVER_WAKE_MARGIN_MS/2)return refuse(409,'unsafe',{blockers:['wake_imminent'],preflight:view});
+ const series=record.series+1,pinned=record.programmeRunId,toInstanceId=discoveryInstanceId(pinned,series),at=new Date().toISOString();
+ const receipt={requestId,programmeRunId:pinned,fromInstanceId:record.instanceId,fromSeries:record.series,fromVersionId:record.versionId||null,toInstanceId,toSeries:series,deployedVersionId:facts.deployedVersionId,requestedAt:at,checkpoint:{etag:facts.continuationEtag??null,revision:rolloverRevision(facts.continuationEtag),hopId:facts.continuation?.hopId??null}};
+ const next={schemaVersion:1,...(record.report?{report:record.report}:{}),...(Array.isArray(record.outbox)?{outbox:record.outbox}:{}),rollover:receipt,programmeRunId:pinned,series,instanceId:toInstanceId,phase:'starting',updatedAt:at,waitingUntil:null,reason:'rollover',chunksThisInstance:0,lastProgress:null,recovery:null,versionId:null,createdVersionId:facts.deployedVersionId};
+ // The swap: one compare-and-swap of the executor record against the exact revision the decision was made on.
+ const written=await writeRolloverSwap(env,next,facts.state.etag,pinned);
+ if(['projector_window','epg_priority','stale_generation','authority_not_ready','authority_held'].includes(written.reason))return refuse(409,written.reason,written.windowUntil!==undefined?{windowUntil:written.windowUntil}:{});
+ if(!written.saved){
+  let after=null;try{after=(await readWorkflowState(env)).record;}catch{}
+  // A swap that reports a refusal but is found stored (an uncertain answer) is this request's swap; anything else changed the record first.
+  if(after?.rollover?.requestId!==requestId||after.instanceId!==toInstanceId)return refuse(409,'write_conflict',{owner:after?{instanceId:rolloverString(after.instanceId),series:after.series??null,phase:rolloverString(after.phase,16)}:null});
+ }
+ const {created,settled}=await startRolloverSuccessor(env,receipt);
+ const readback=await discoveryRolloverReadback(env,receipt,receipt.checkpoint);
+ const outcome=created==='uncertain'?'successor_uncertain':readback.accepted?(readback.versionConfirmed?'handed_over':'handed_over_version_pending'):'readback_unproven';
+ try{console.log(JSON.stringify({event:'discovery_workflow_rollover',outcome,requestId:String(requestId).slice(0,64),from:receipt.fromInstanceId.slice(0,80),to:toInstanceId.slice(0,80),deployedVersionId:String(receipt.deployedVersionId).slice(0,64)}));}catch{}
+ return {status:readback.accepted?200:202,body:{ok:readback.accepted,mode:'apply',outcome,replay:false,writes:settled?2:1,receipt:discoveryRolloverReceipt(receipt),readback}};
+}
+// The MCP entry. Validates the arguments exactly; dry_run never writes.
+async function handleDiscoveryRolloverTool(env,args={}){
+ if(!args||typeof args!=='object'||Array.isArray(args))return {status:400,body:{ok:false,reason:'invalid'}};
+ if(args.mode!=='dry_run'&&args.mode!=='apply')return {status:400,body:{ok:false,reason:'invalid_mode'}};
+ if(args.confirmGo!==undefined&&typeof args.confirmGo!=='boolean')return {status:400,body:{ok:false,reason:'invalid_confirm'}};
+ if(args.mode==='apply'){
+  if(typeof args.requestId!=='string'||!DISCOVERY_ROLLOVER_REQUEST_ID.test(args.requestId))return {status:400,body:{ok:false,reason:'invalid_request_id'}};
+  if(typeof args.expectedProgrammeRunId!=='string'||!args.expectedProgrammeRunId||args.expectedProgrammeRunId.length>80)return {status:400,body:{ok:false,reason:'invalid_expected_programme_run_id'}};
+  if(typeof args.expectedInstanceId!=='string'||!/^discovery_[0-9A-Za-z]{1,32}_\d{1,6}$/.test(args.expectedInstanceId))return {status:400,body:{ok:false,reason:'invalid_expected_instance_id'}};
+  if(!Number.isInteger(args.expectedSeries)||args.expectedSeries<0)return {status:400,body:{ok:false,reason:'invalid_expected_series'}};
+ }
+ return discoveryWorkflowRollover(env,args);
+}
 async function runDiscoveryWorkflow(rawEnv,payload,step){
  // `meter` counts this invocation. A replay after a sleep starts a new invocation and a new meter, so each step also
  // returns what it spent and `tally.total` re-adds those cached outputs: it is the count of the whole instance.
@@ -812,7 +1040,22 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
   }
   return {stopped:true,reason:'recovery_waiting',chunks,instanceId:ownId};
  };
+ // AIR-524 (ADR 0164). The instance records the Worker version it runs on, once, as soon as it owns the record, so a controlled rollover's readback can
+ // prove the successor runs the deployed version without waiting for its first checkpoint. Best effort: a refused or lost write changes nothing, and every
+ // later checkpoint carries the same field. It never takes ownership: it writes only while the record already names this instance and series.
+ const ownVersion=discoveryWorkerVersion(rawEnv)?{versionId:discoveryWorkerVersion(rawEnv)}:{};
  try{
+   if(ownVersion.versionId){
+    // A fixed step name outside the numbered sequence, so every later step keeps the name it had without this step.
+    const versionStep=await step.do('version',accounted('version',async()=>{
+     let state;try{state=await readWorkflowState(env);}catch{return {recorded:false};}
+     const record=state.record;
+     if(record?.instanceId!==ownId||record.series!==series||record.versionId===ownVersion.versionId)return {recorded:false};
+     try{const written=await writeWorkflowStateSoft(env,{...record,versionId:ownVersion.versionId},state.etag);return {recorded:written.saved===true};}
+     catch{return {recorded:false};}
+    }));
+    if(versionStep&&versionStep.__counted===1)tally.total+=Number(versionStep.spent)||0;
+   }
    for(;;){
     const gate=await doStep('owner',()=>workflowOwnerGate(env,ownId,series));
     if(!gate.owned)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
@@ -823,7 +1066,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     if(plan.action==='stop')return finish('stop',plan.reason);
     if(plan.action==='wait'){
      const until=Number.isFinite(plan.until)?plan.until:Date.now()+1000;
-     const settledWait=await doStep('wait',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:plan.reason,waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
+     const settledWait=await doStep('wait',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:plan.reason,waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks,...ownVersion}));
      await step.sleepUntil(stepName('sleep'),new Date(isWindowBusy(settledWait?.reason)?Math.max(until,windowWakeAt(settledWait)):until));
      continue;
     }
@@ -847,7 +1090,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     if(outcome.notOwner)return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
     if(outcome.busy){
      const until=Date.parse(outcome.until||'')||Date.now()+1000;
-     const settledBusy=await doStep('busy',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks}));
+     const settledBusy=await doStep('busy',()=>settleWorkflowIfOwner(env,ownId,{phase:'waiting',reason:'busy',waitingUntil:new Date(until).toISOString(),programmeRunId:pinned,series,chunksThisInstance:chunks,...ownVersion}));
      // ADR 0103: a busy checkpoint refused by a held projector window waits for that window's one expiry (capped like every window wait), not for the
      // hourly gate the busy chunk carries in `until`. A refusal that names no readable deadline keeps the later of `until` and the fallback, as before.
      const windowKnown=isWindowBusy(settledBusy?.reason)&&Number.isFinite(Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil))&&Number(settledBusy?.window?.expiresAt??settledBusy?.windowUntil)>0;
@@ -866,7 +1109,7 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
     // AIR-410: the chunk's key is its instance and its ordinal in that instance, stable across a replay. The patch is a function of the record read
     // inside the compare-and-swap, so a cron closing the period in between cannot be overwritten, and a retried checkpoint adds nothing twice.
     const chunkKey=ownId+':'+chunks;
-    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey,pinned)});
+    const progressPatch=record=>({phase:'running',reason:null,programmeRunId:pinned,series,chunksThisInstance:chunks,lastProgress:outcome.summary||null,invocation:{statements:meter.statements,batches:meter.batches},instance:{statements:tally.total},waitingUntil:null,recovery:null,report:addChunkToDiscoveryReport(record.report,outcome.summary,chunkKey,pinned),...ownVersion});
     const checkpoint=await persist('progress',()=>settleWorkflowIfOwner(env,ownId,progressPatch),settleKind);
     if(checkpoint.kind==='lost')return {stopped:true,reason:'not_owner',chunks,instanceId:ownId};
     if(checkpoint.kind==='deferred')return deferredExit('checkpoint_unsaved',checkpoint.cause);
