@@ -49,7 +49,7 @@ Nothing is written (no lease, run, queue, fingerprint, prediction, version objec
 
 Owner decision 13 November 2026 (AIR-463): spending the selected manifest is a **normal** completion (`reason: manifest_spent`, `status: complete`, truthful Event with selected/created/outstanding counters). Do not use `time_budget` for a spent short run and do not describe it as «Прогнозы приостановлены». Enabling up to four independent hourly v2 Tasks that share one lease/queue remains [AIR-451](https://trello.com/c/NN3N6kRp) and needs a separate operation-specific owner GO; this prompt file alone edits no Scheduled Task registry. Legacy v5 must stay disabled for the whole cutover.
 
-### Current Task A and planned scale-out
+### Historical Task A activation and four-task scale-out context
 
 The canary became Production Task A (`IPTV Predictions v2 Canary`, `6af7a2d8369081918b79bb2892bac0fe`); the live registry readback on 15 November 2026 showed it enabled on an hourly `:00` Europe/Madrid schedule. The prompt below is the exact installed text at that readback (`manifestSize=5`, `generationSize=1`, `submitBatchSize=5`). Additional B/C/D Task activation remains separately owner-authorized under [AIR-451](https://trello.com/c/NN3N6kRp). This snapshot does not edit a Task, and the live registry remains authoritative.
 
