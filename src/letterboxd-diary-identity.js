@@ -8,6 +8,7 @@
 // Anything else stays `pending` in one bounded document with a reason and a retry time; only ordinary Ratings runs retry it. It never throws into the
 // run: the rating fact and the Event do not wait for it. Concatenated into the Worker like the other server modules: one global, no exports.
 const LetterboxdDiaryIdentity=(()=>{
+ const LINK_REASONS=new Set(['linking','link_failed']);
  const STEP_LIMIT=3,MAX_ATTEMPTS=6,STEP_BUDGET_MS=40000,WRITE_RESERVE_MS=15000;
  const HOUR=3600000;
  const LID=/^[A-Za-z0-9_-]{1,80}$/,SLUG=/^[a-z0-9-]{1,200}$/,TMDB=/^[1-9]\d{0,11}$/;
@@ -82,11 +83,12 @@ const LetterboxdDiaryIdentity=(()=>{
   if(found.review)return {state:'pending',reason:found.review};
   const verdict=verify({lid,slug,page,detail:found.detail},letterboxdPageTools());
   if(verdict.state!=='verified')return {state:'pending',reason:verdict.reason};
-  if(remaining()<WRITE_RESERVE_MS)return {state:'pending',reason:'budget',stop:true};
+  return {state:'verified',verdict};
+ }
+ // The receipt entry, written only after the link intent is durable.
+ async function writeReceipt(env,{lid,slug},verdict,clock){
   const verifiedAt=iso(clock()),evidenceSha256=await sha256({lid,slug,path:verdict.filmPath,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,source:'letterboxd_diary_page'});
-  const admitted=await LetterboxdFacts.admitDiaryFilm(env,{lid,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath,verifiedAt,evidenceSha256});
-  if(admitted==='conflict'||admitted==='other_code')return {state:'pending',reason:'admission_conflict'};
-  return {state:'verified',verdict,evidenceSha256,admitted};
+  return LetterboxdFacts.admitDiaryFilm(env,{lid,tmdb:verdict.tmdb,title:verdict.title,year:verdict.year,filmPath:verdict.filmPath,verifiedAt,evidenceSha256});
  }
 
  // items: [{lid,slug}] of one Diary page in page order (facts already durable). Pending entries that left the page (they keep the same-row slug) and ids
@@ -97,8 +99,10 @@ const LetterboxdDiaryIdentity=(()=>{
   let stored;
   try{stored=await LetterboxdFacts.readDiaryIdentity(env);}catch{return {labels,counts:{...counts,skipped:page.length}};}
   const now=clock(),onPage=new Set(page.map(item=>item.lid));
-  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&(Date.parse(entry.nextAttemptAt)<=now||entry.reason==='link_failed'))
-   .sort(([,x],[,y])=>String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
+  // A link intent (`linking`, or a `link_failed` bridge) is a local repair: it is served at once, before source retries, whatever its source-attempt count or slug.
+  const repair=entry=>entry&&LINK_REASONS.has(entry.reason);
+  const due=Object.entries(stored.films).filter(([lid,entry])=>!onPage.has(lid)&&entry&&(repair(entry)||typeof entry.slug==='string'&&SLUG.test(entry.slug)&&(Number(entry.attempts)||0)<MAX_ATTEMPTS&&Date.parse(entry.nextAttemptAt)<=now))
+   .sort(([,x],[,y])=>repair(x)!==repair(y)?(repair(x)?-1:1):String(x.nextAttemptAt)<String(y.nextAttemptAt)?-1:1).slice(0,STEP_LIMIT*2).map(([lid,entry])=>({lid,slug:entry.slug,onPage:false}));
   const wanted=[...page,...due];
   if(!wanted.length)return {labels,counts};
   let links;
@@ -109,6 +113,12 @@ const LetterboxdDiaryIdentity=(()=>{
   const entry=(item,reason,attempts,at)=>({reason:String(reason).slice(0,64),slug:item.slug||null,attempts,lastAttemptAt:iso(now),nextAttemptAt:iso(at)});
   // An id this step could not reach is kept for the next ordinary step (due now, attempts unchanged), never dropped.
   const defer=(item,prior)=>{counts.deferred++;if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};};
+  // Before the first non-atomic effect (receipt, admission, alias, record link, projection) a bounded link intent is made durable, so a kill or a lost final write
+  // after a partial commit leaves an entry that a later ordinary step repairs (review of PR #720). If it cannot be written, nothing is written (fail closed).
+  const intend=async(item,tmdb,attempts)=>{
+   const value={reason:'linking',slug:item.slug||null,tmdb:String(tmdb),attempts,lastAttemptAt:iso(now),nextAttemptAt:iso(now)};
+   try{await LetterboxdFacts.updateDiaryIdentity(env,{set:{[item.lid]:value}});stored.films[item.lid]=value;return true;}catch{counts.persistFailed=1;return false;}
+  };
   for(const item of wanted){
    const lid=item.lid,own=links.get(lid)||{};
    const prior=stored.films[lid]||null,attempts=Number(prior?.attempts)||0;
@@ -120,6 +130,16 @@ const LetterboxdDiaryIdentity=(()=>{
     continue;
    }
    if(!own.factKey){counts.skipped++;continue;}
+   // A bridge whose admission was confirmed but whose alias/record link did not commit (`link_failed` with its verified movie id) is completed locally:
+   // no source request and no admission, whatever the source-attempt count. Only a confirmed admission ever writes this entry.
+   if(prior&&prior.reason==='link_failed'&&TMDB.test(String(prior.tmdb||''))){
+    try{
+     const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:String(prior.tmdb)});
+     if(linked.state==='linked'){counts.repaired++;clear.push(lid);}
+     else{set[lid]={...prior,reason:'link_conflict',nextAttemptAt:iso(now+delayMs('link_conflict',attempts))};counts.pending++;}
+    }catch{counts.skipped++;}
+    continue;
+   }
    counts.considered++;
    // Better same-row evidence keeps the retry alive: a newly seen usable slug is saved on the existing pending entry first (attempts and backoff unchanged), whatever follows.
    if(prior&&item.onPage&&item.slug&&prior.slug!==item.slug)set[lid]={...prior,slug:item.slug};
@@ -128,6 +148,7 @@ const LetterboxdDiaryIdentity=(()=>{
    let bridge=null;
    try{bridge=await CanonicalCatalogReader.catalogFilmIdentityBridge(env,lid);}catch(error){if(['film_person_held','film_person_unavailable','film_person_generation_moved','canonical_read_unavailable','canonical_read_not_authoritative'].includes(error?.code)){defer(item,prior);continue;}bridge=null;}
    if(bridge?.state==='ok'&&bridge.tmdb){
+    if(!(await intend(item,bridge.tmdb,attempts))){counts.deferred++;continue;}
     try{
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:bridge.tmdb});
      if(linked.state==='linked'){counts.bridged++;clear.push(lid);const known=await CanonicalCatalogReader.catalogTitlesFromD1(env,[{id:'tmdb_'+bridge.tmdb,tmdbId:bridge.tmdb}],gate).catch(()=>({}));const title=known['tmdb_'+bridge.tmdb]?.title||null;labels.set(lid,{title,year:null,tmdb:bridge.tmdb});continue;}
@@ -136,7 +157,11 @@ const LetterboxdDiaryIdentity=(()=>{
    }
    if(bridge&&(bridge.state==='conflict'||bridge.state==='retired')){set[lid]=entry(item,'bridge_'+bridge.state,attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}
    // 2. A bounded source check, only for an id that is due and only while the lease leaves room.
-   if(prior&&(attempts>=MAX_ATTEMPTS||Date.parse(prior.nextAttemptAt)>now)){counts.deferred++;continue;}
+   if(prior&&(attempts>=MAX_ATTEMPTS||Date.parse(prior.nextAttemptAt)>now)){
+    // An intent whose alias never committed is an ordinary source retry: at the cap it stops being served as a repair.
+    if(attempts>=MAX_ATTEMPTS&&LINK_REASONS.has(prior.reason))set[lid]={...prior,...(set[lid]||{}),reason:'link_interrupted'};
+    counts.deferred++;continue;
+   }
    if(!item.slug){set[lid]=entry(item,'slug_missing',attempts+1,now+delayMs('review',attempts+1));counts.pending++;continue;}
    if(stopped||fetched>=STEP_LIMIT||remaining()<STEP_BUDGET_MS){defer(item,prior);continue;}
    fetched++;
@@ -147,6 +172,9 @@ const LetterboxdDiaryIdentity=(()=>{
     let confirmed=false;
     try{
      if(remaining()<WRITE_RESERVE_MS)throw Object.assign(new Error('budget'),{code:'budget'});
+     if(!(await intend(item,outcome.verdict.tmdb,attempts+1)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});
+     const admitted=await writeReceipt(env,item,outcome.verdict,clock);
+     if(admitted==='conflict'||admitted==='other_code')throw Object.assign(new Error('admission_conflict'),{code:'admission_conflict'});
      const receiptKey='tmdb_'+outcome.verdict.tmdb,{value:receipts}=await LetterboxdFacts.readAdmissionReceipts(env);
      const receipt=receipts?.films?.[receiptKey];
      if(!receipt)throw new Error('receipt_missing');
@@ -157,11 +185,11 @@ const LetterboxdDiaryIdentity=(()=>{
     if(confirmed){
      const linked=await LetterboxdFacts.bridgeDiaryFilm(env,{lid,tmdb:outcome.verdict.tmdb}).catch(()=>({state:'error'}));
      if(linked.state==='linked'){counts.verified++;clear.push(lid);labels.set(lid,label(outcome.verdict));continue;}
-     outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed'};
+     outcome={state:'pending',reason:linked.state==='conflict'?'link_conflict':'link_failed',...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})};
     }
    }
    counts.pending++;
-   set[lid]=entry(item,outcome.reason,attempts+1,now+delayMs(outcome.reason,attempts+1));
+   set[lid]={...entry(item,outcome.reason,attempts+1,now+delayMs(outcome.reason,attempts+1)),...(outcome.tmdb?{tmdb:String(outcome.tmdb)}:{})};
   }
   try{await LetterboxdFacts.updateDiaryIdentity(env,{set,clear:clear.filter(lid=>stored.films[lid])});}catch{counts.persistFailed=1;}
   return {labels,counts};

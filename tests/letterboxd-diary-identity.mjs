@@ -6,11 +6,12 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {scoped,scopedReplacing} from '../scripts/bundle-scope.mjs';
 
-const records = new Map(), etags = new Map(); let rev = 0; const fail = {view: 0};
+const records = new Map(), etags = new Map(); let rev = 0; const fail = {view: 0, identity: null};
 const bucket = {
   async get(key) {return records.has(key) ? {etag: etags.get(key), json: async () => structuredClone(records.get(key))} : null;},
   async put(key, value, options = {}) {
     if (fail.view && key === 'enrichment/view-index.json') {fail.view--; throw new Error('projection unavailable');}
+    if (fail.identity !== null && key === 'letterboxd/facts/scans/diary-identity.json') {if (fail.identity <= 0) throw new Error('pending write lost'); fail.identity--;}
     const c = options.onlyIf;
     if (c?.etagDoesNotMatch === '*' && records.has(key) || c?.etagMatches && c.etagMatches !== etags.get(key)) return null;
     records.set(key, JSON.parse(value)); etags.set(key, String(++rev)); return {etag: etags.get(key)};
@@ -256,6 +257,39 @@ const oldEntry = {reason: 'forbidden', slug: 'old-one', attempts: 5, lastAttempt
 await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Old1: oldEntry}}));
 out = await Identity.resolve(env, items(['Frs1', 'fixture-frs1-2006'], ['Frs2', 'fixture-frs2-2006'], ['Frs3', 'fixture-frs3-2006'], ['Old1', 'old-one']), opts());
 assert.equal(out.counts.verified, 3); assert.equal(out.counts.deferred, 1); assert.deepEqual(pending().Old1, oldEntry, 'attempts, reason and backoff are not reset by a deferral');
+
+// 17. review of PR #720 (fifth), P1: a durable link intent precedes every non-atomic effect, so a lost final pending write after a partial commit is still repaired off-page.
+const prjView = tmdb => records.get('enrichment/view-index.json')?.['tmdb_' + tmdb];
+// (a) alias + record committed, projection throws, and the final pending write is lost: the intent survives; a later step on another page repairs the projection.
+reset(); fail.view = 0; fail.identity = null; await seed('Crs1', 4); add('Crs1', 'fixture-crs-2005', '900130', 'Fixture Crs', 2005); fail.view = 1; fail.identity = 1;
+out = await Identity.resolve(env, items(['Crs1', 'fixture-crs-2005']), opts()); fail.identity = null;
+assert.equal(out.counts.persistFailed, 1); assert.equal(pending().Crs1.reason, 'linking', 'the intent written before the effects survives the lost final write'); assert.equal(pending().Crs1.tmdb, '900130');
+assert.equal(recordOf('Crs1').links.tmdb, '900130'); assert.equal(prjView('900130'), undefined); assert.equal(canonical.applied.length, 1);
+let crsCalls = net.calls.length;
+out = await Identity.resolve(env, items(['Other6', 'other-6']), opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.repaired, 1); assert.equal(prjView('900130').watched, true); assert.equal(prjView('900130').actualRating, 4); assert.equal(pending().Crs1, undefined);
+assert.equal(net.calls.filter(url => url.includes('Crs1') || url.includes('fixture-crs')).length, 0 + net.calls.slice(0, crsCalls).filter(url => url.includes('Crs1') || url.includes('fixture-crs')).length, 'no source request for the repair'); assert.equal(canonical.applied.length, 1, 'no second admission');
+// (b) a link_failed at attempts = 6 (the source cap) is still repaired off-page, without a source request or a new admission.
+reset(); fail.view = 0; fail.identity = null; await seed('Cap6', 3); add('Cap6', 'fixture-cap6-2004', '900131', 'Fixture Cap6', 2004);
+await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Cap6: {reason: 'forbidden', slug: 'fixture-cap6-2004', attempts: 5, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T12:00:00.000Z'}}}));
+fail.view = 1; await Identity.resolve(env, items(['Cap6', 'fixture-cap6-2004']), opts());
+assert.deepEqual([pending().Cap6.reason, pending().Cap6.attempts], ['link_failed', 6]); crsCalls = net.calls.length;
+out = await Identity.resolve(env, items(['Other5', 'other-5']), opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.repaired, 1, 'the cap on source attempts does not stop a repair'); assert.equal(prjView('900131').watched, true); assert.equal(pending().Cap6, undefined);
+assert.equal(net.calls.slice(crsCalls).filter(url => url.includes('Cap6') || url.includes('fixture-cap6')).length, 0); assert.equal(canonical.applied.length, 1);
+// (c) the intent cannot be written: fail closed, no receipt, no admission, no alias.
+reset(); fail.view = 0; fail.identity = 0; await seed('Fcl1', 3); add('Fcl1', 'fixture-fcl-2003', '900132', 'Fixture Fcl', 2003);
+out = await Identity.resolve(env, items(['Fcl1', 'fixture-fcl-2003']), opts()); fail.identity = null;
+assert.equal(out.counts.persistFailed, 1); assert.equal(canonical.applied.length, 0); assert.equal(records.has('letterboxd/admissions/verified-films.json'), false); assert.equal(recordOf('Fcl1').links.tmdb, null);
+// (d) a kill after the intent and before the alias (admission refused, final write lost): the intent is served later off-page and the source check completes it.
+reset(); fail.view = 0; fail.identity = 1; await seed('Kil1', 3); add('Kil1', 'fixture-kil-2002', '900133', 'Fixture Kil', 2002); canonical.failWith = 'canonical_write_unknown';
+await Identity.resolve(env, items(['Kil1', 'fixture-kil-2002']), opts()); fail.identity = null; canonical.failWith = null;
+assert.equal(pending().Kil1.reason, 'linking'); assert.equal(recordOf('Kil1').links.tmdb, null);
+out = await Identity.resolve(env, items(['Other4', 'other-4']), opts({clock: () => NOW + 1000}));
+assert.equal(out.counts.verified, 1); assert.equal(recordOf('Kil1').links.tmdb, '900133'); assert.equal(prjView('900133').watched, true); assert.equal(pending().Kil1, undefined);
+// an intent whose alias never commits stops being served as a repair once the source cap is reached.
+reset(); fail.identity = null; await seed('Itr1', 3); await bucket.put(Facts.DIARY_IDENTITY_KEY, JSON.stringify({schemaVersion: 1, films: {Itr1: {reason: 'linking', slug: 'fixture-itr-2001', tmdb: '900134', attempts: 6, lastAttemptAt: '2026-11-17T10:00:00.000Z', nextAttemptAt: '2026-11-17T10:00:00.000Z'}}}));
+out = await Identity.resolve(env, items(['Other3', 'other-3']), opts()); assert.equal(pending().Itr1.reason, 'link_interrupted'); assert.equal(net.calls.filter(url => url.includes('Itr1')).length, 0);
 
 // 9. the pending retry spacing is monotone and bounded; transport backs off less than a review.
 assert.ok(Identity.delayMs('forbidden', 1) < Identity.delayMs('slug_mismatch', 1)); assert.ok(Identity.delayMs('forbidden', 9) <= 48 * 3600000);

@@ -27,7 +27,7 @@ const MUTANTS = [
   ['a failed count is ignored', "if(Number(out.failed||0)||Number(out.unknown||0)||Number(out.preflightFailed||0)||Number(out.refused||0)||Number(out.deferred||0))return false;", ''],
   ['any unit counts as an admission', "unit.kind==='film_admission'&&['applied','already','noop'].includes(unit.state)", 'true'],
   ['the network budget is not enforced', "if(!(left>1000))throw Object.assign(new Error('step budget exhausted'),{name:'TimeoutError'});", ''],
-  ['the write reserve is not checked after the checks', "if(remaining()<WRITE_RESERVE_MS)return {state:'pending',reason:'budget',stop:true};", ''],
+  ['the write reserve is not checked after the checks', "if(remaining()<WRITE_RESERVE_MS)throw Object.assign(new Error('budget'),{code:'budget'});", ''],
   ['an id that left the page is never retried', "!onPage.has(lid)&&entry&&", 'false&&entry&&'],
   ['a not-open authority drops the id', "if(!open){defer(item,prior);continue;}", "if(!open){counts.skipped++;continue;}"],
   ['a held bridge read drops the id', "includes(error?.code)){defer(item,prior);continue;}bridge=null;}", "includes(error?.code)){counts.skipped++;continue;}bridge=null;}"],
@@ -36,6 +36,11 @@ const MUTANTS = [
   ['a linked id with a pending entry is cleared without a repair', "if(!prior){clear.push(lid);continue;}", "{clear.push(lid);continue;}"],
   ['a failed repair clears the entry', "else{counts.skipped++;}}catch{counts.skipped++;}", "else{counts.skipped++;}}catch{clear.push(lid);}"],
   ['a step-cap deferral resets the entry', "remaining()<STEP_BUDGET_MS){defer(item,prior);continue;}", "remaining()<STEP_BUDGET_MS){defer(item,null);continue;}"],
+  ['the link intent is not required before the effects', "if(!(await intend(item,outcome.verdict.tmdb,attempts+1)))throw Object.assign(new Error('intent_unwritten'),{code:'intent_unwritten'});", ''],
+  ['a repair is held back by the source cap', "(repair(entry)||typeof entry.slug", "(false||typeof entry.slug"],
+  ['a confirmed link_failed is not completed locally', "if(prior&&prior.reason==='link_failed'&&TMDB.test(String(prior.tmdb||''))){", "if(false){"],
+  ['link_failed loses its verified movie id', "...(linked.state==='conflict'?{}:{tmdb:outcome.verdict.tmdb})", ''],
+  ['an interrupted intent stays a repair forever', "if(attempts>=MAX_ATTEMPTS&&LINK_REASONS.has(prior.reason))set[lid]={...prior,...(set[lid]||{}),reason:'link_interrupted'};", ''],
   ['a deferred id is dropped', "if(item.onPage&&!prior&&item.slug)set[item.lid]={reason:'deferred',slug:item.slug||null,attempts:0,lastAttemptAt:null,nextAttemptAt:iso(now)};", ''],
   ['the slug is not kept for the retry', "slug:item.slug||null,attempts,lastAttemptAt:iso(now)", "slug:null,attempts,lastAttemptAt:iso(now)"],
 ];
@@ -45,7 +50,9 @@ for (const [name, from, to] of MUTANTS) {
   assert.ok(SOURCE.includes(from), 'mutation anchor missing: ' + name);
   const file = path.join(dir, 'mutant.js');
   fs.writeFileSync(file, SOURCE.replace(from, to));
-  const run = spawnSync(process.execPath, ['tests/letterboxd-diary-identity.mjs'], {env: {...process.env, DIARY_IDENTITY_SRC: file}, encoding: 'utf8'});
+  // The behaviour test first; the D1-backed test only when the first did not kill the mutant.
+  let run = spawnSync(process.execPath, ['tests/letterboxd-diary-identity.mjs'], {env: {...process.env, DIARY_IDENTITY_SRC: file}, encoding: 'utf8'});
+  if (run.status === 0) run = spawnSync(process.execPath, ['tests/letterboxd-diary-identity-d1.mjs'], {env: {...process.env, DIARY_IDENTITY_SRC: file}, encoding: 'utf8'});
   assert.notEqual(run.status, 0, 'mutants that no test kills: ' + name);
   killed++;
 }
