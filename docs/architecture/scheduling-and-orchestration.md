@@ -394,7 +394,7 @@ The hourly cron also calls `Monitor.run`, which does nothing unless `MONITOR` is
 
 ## EPG diagnostic canary ([ADR 0121](../adr/0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](../adr/0124-epg-diagnostic-canary-run-contract.md), AIR-455)
 
-An owner-only, on-demand Workflow, not a schedule: no Cron, no Scheduled Task, no change to the daily EPG publication. The routes read the production env only to refuse a launch while the production EPG is active; every diagnostic mutation goes through the allowlisted context to the diagnostic D1 and bucket. Inert until the owner provisions those resources (AIR-456): without them no instance is ever created.
+**Detached from the production Worker by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)): the route, the Workflow class and the bindings in the diagram below no longer exist in the deployed Worker; the diagram is the historical design.** An owner-only, on-demand Workflow, not a schedule: no Cron, no Scheduled Task, no change to the daily EPG publication. The routes read the production env only to refuse a launch while the production EPG is active; every diagnostic mutation goes through the allowlisted context to the diagnostic D1 and bucket. Inert until the owner provisions those resources (AIR-456): without them no instance is ever created.
 
 ```mermaid
 flowchart LR
