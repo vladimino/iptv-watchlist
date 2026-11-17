@@ -1794,7 +1794,7 @@ function integrationTime(value){const ms=Date.parse(value);return Number.isFinit
 // in-flight or failed later run keeps `lastEpgPublishedAt` from the last complete record. Missing or invalid → null.
 //
 // AIR-518: the one read model of the published EPG generation, shared by `/api/programme` `publishedAt`, the header, the
-// footer EPG health and the next run's carried `lastEpgPublishedAt`. Publication and the last attempt are separate facts:
+// footer EPG health and the EPG events/status reads. Publication and the last attempt are separate facts:
 // - the completion receipt is `stage: complete` with a valid `completedAt` (set by `prepareEpgCompletion` only once the run
 //   has passed its pointer switch and every seal phase), or, for a record written before AIR-390, a complete `updatedAt`
 //   without an error;
@@ -1802,33 +1802,39 @@ function integrationTime(value){const ms=Date.parse(value);return Number.isFinit
 //   pinned published programme). A different runId, a missing receipt or an unreadable time never becomes a success;
 // - an `error` kept on a complete record is a failed earlier attempt of the same run that a retry recovered (the seal
 //   step stores the error and the successful retry does not clear it). It is reported as `attempt.outcome: recovered`
-//   and never makes the published generation failed. Without a readable generation (`generationRequired` and no
-//   `report`) such a record is not proven and stays unknown.
+//   and never makes the published generation failed. Without a readable generation (no `report` / no `runId`) or
+//   without `sync.runId` no record is proven and the surfaces stay unknown (`epg_unproven`).
+// The start's carried `lastEpgPublishedAt` is a separate, explicitly unbound helper (`epgCarriedPublishedAt`).
 const EPG_RUNNING_STAGES=['metadata','epg','seal'];
 function epgErrorCode(message){const text=String(message||'');return /HTTP/i.test(text)?'epg_http':/cover the current window/i.test(text)?'epg_window':/parse|xml|unexpected/i.test(text)?'epg_parse':'epg_failed';}
+// The completion receipt: a valid `completedAt`, or, only for a record written before AIR-390 (no `completedAt` field at all),
+// a complete `updatedAt` without an error. A present but malformed `completedAt` is never replaced by `updatedAt`.
 function epgCompletionReceipt(sync){
  if(sync?.stage!=='complete')return null;
- const completedAt=integrationTime(sync.completedAt);
- if(completedAt)return completedAt;
+ if(sync.completedAt!==undefined&&sync.completedAt!==null)return integrationTime(sync.completedAt);
  return sync.error?null:integrationTime(sync.updatedAt);
 }
-function epgPublicationState(sync,report,{generationRequired=false}={}){
- const receipt=epgCompletionReceipt(sync),reportRunId=report?.runId||null,runId=sync?.runId||null,error=typeof sync?.error==='string'&&sync.error?sync.error:sync?.error?String(sync.error):null;
- const mismatch=!!(reportRunId&&runId&&reportRunId!==runId);
- const unproven=!reportRunId&&!!error&&generationRequired;
- const bound=!!receipt&&!mismatch&&!unproven;
+// The published-generation contract of every UI surface: success needs the receipt AND both runIds, non-empty and equal
+// (`report` is the pinned published programme). An absent or unreadable programme, a missing `sync.runId` or another
+// runId never credits the record; those surfaces then show the last proven (carried) date with an unproven state.
+function epgPublicationState(sync,report){
+ const receipt=epgCompletionReceipt(sync),reportRunId=typeof report?.runId==='string'&&report.runId?report.runId:null,runId=typeof sync?.runId==='string'&&sync.runId?sync.runId:null,error=sync?.error?String(sync.error):null;
+ const bound=!!receipt&&!!reportRunId&&reportRunId===runId;
  const carried=integrationTime(sync?.lastEpgPublishedAt);
  const publishedAt=bound?receipt:carried;
  let attempt;
  if(bound)attempt=error?{outcome:'recovered',code:epgErrorCode(error),at:null}:{outcome:'complete',code:null,at:receipt};
- else if(receipt&&error)attempt={outcome:'unproven',code:epgErrorCode(error),at:null};
+ else if(sync?.stage==='complete'&&(receipt||!error))attempt={outcome:'unproven',code:error?epgErrorCode(error):null,at:null};
  else if(error)attempt={outcome:'failed',code:epgErrorCode(error),at:integrationTime(sync.updatedAt)};
  else if(sync&&EPG_RUNNING_STAGES.includes(sync.stage))attempt={outcome:'running',code:null,at:integrationTime(sync.updatedAt)};
- else if(sync?.stage==='complete')attempt={outcome:'unproven',code:null,at:null};
  else attempt={outcome:'unknown',code:null,at:null};
- return {publishedAt,runId:bound?(runId||reportRunId):reportRunId,binding:bound?'run':publishedAt?'carried':'none',attempt};
+ return {publishedAt,runId:bound?runId:reportRunId,binding:bound?'run':publishedAt?'carried':'none',attempt};
 }
 function epgUxPublishedAt(sync,report){return epgPublicationState(sync,report).publishedAt;}
+// Not a UI contract: the timestamp a new run carries forward as `lastEpgPublishedAt` at start, from the previous record
+// alone (no published programme is read there). The previous run's own receipt, else what it carried. Explicitly unbound;
+// the UI surfaces above still bind every date they show to the published runId.
+function epgCarriedPublishedAt(sync){return epgCompletionReceipt(sync)||integrationTime(sync?.lastEpgPublishedAt);}
 function integrationEntry(id,role,state,code,lastSuccessAt,lastFailureAt){return {id,role,state,code,lastSuccessAt:lastSuccessAt||null,lastFailureAt:lastFailureAt||null};}
 function ratingsFailureCode(kind){if(kind==='blocked'||kind==='anti_bot')return 'ratings_blocked';if(kind==='http_429')return 'ratings_rate_limit';if(kind==='degraded'||kind==='incomplete')return 'ratings_incomplete';if(kind==='lookup_failed'||kind==='publish_failed'||kind==='failed')return 'ratings_failed';return null;}
 function ratingsMessageCode(message){if(/403|anti-bot/i.test(message))return 'ratings_blocked';if(/429/.test(message))return 'ratings_rate_limit';if(/incomplete|pagination changed|duplicate letterboxd/i.test(message))return 'ratings_incomplete';return 'ratings_failed';}
@@ -1929,7 +1935,7 @@ function integrationHealth({sync,ratings,enabled,report,continuation,discoverySt
   if(!latestRating.ok)return entry(latestRating.code==='ratings_failed'?'failed':'degraded',latestRating.code,ratingSuccess,ratingFailureAt);
   return entry(fresh(ratingSuccess),freshCode(ratingSuccess),ratingSuccess,ratingFailureAt);
  })();
- const epgPublication=epgPublicationState(sync,report,{generationRequired:true}),epgSuccess=epgPublication.publishedAt,epgAttempt=epgPublication.attempt;
+ const epgPublication=epgPublicationState(sync,report),epgSuccess=epgPublication.publishedAt,epgAttempt=epgPublication.attempt;
  const epg=(()=>{
   const entry=(...args)=>({...integrationEntry('epg','source',...args),runId:epgPublication.runId});
   if(epgAttempt.outcome==='complete')return entry(fresh(epgSuccess),freshCode(epgSuccess),epgSuccess,null);

@@ -1,6 +1,6 @@
 # EPG publication date after a recovered seal attempt (AIR-518)
 
-**Captured:** 2026-11-17. **Scope:** code reading and offline fixture tests (`tests/epg-published-at.mjs`, `tests/status-footer.mjs`, `tests/status-footer-ui.mjs`). No production read or write was made for this report; the production facts below are the ones recorded on the [AIR-518 card](https://trello.com/c/9TuQIIud).
+**Captured:** 2026-11-17 (revised the same day after the independent review of PR #730: binding made mandatory, legacy fallback narrowed). **Scope:** code reading and offline fixture tests (`tests/epg-published-at.mjs`, `tests/status-footer.mjs`, `tests/status-footer-ui.mjs`). No production read or write was made for this report; the production facts below are the ones recorded on the [AIR-518 card](https://trello.com/c/9TuQIIud).
 
 ## Symptom (from the card)
 
@@ -15,7 +15,7 @@ The routine EPG run of 16 November 2026 (`runId` `47663279-3e6b-423d-b696-b22edf
 
 ## Fix (read side only)
 
-`epgPublicationState(sync, report)` in `src/enrichment.js` is the one read model for `GET /api/programme` `publishedAt`, the header, the badge, the compact and detailed footer EPG line, the EPG integration health and the next run's carried `lastEpgPublishedAt`. A complete record is the receipt of the published generation when it has a valid `completedAt` (written only at durable completion) and its `runId` equals the pinned published programme's `runId`. A kept error then becomes `attempt.outcome: recovered`, shown as `lastAttempt` on the EPG entry. The writer, `sync.json`, D1 and R2 are unchanged.
+`epgPublicationState(sync, report)` in `src/enrichment.js` is the one read model for `GET /api/programme` `publishedAt`, the header, the badge, the compact and detailed footer EPG line, the EPG integration health and the next run's carried `lastEpgPublishedAt`. A complete record is the receipt of the published generation when it has a valid `completedAt` (written only at durable completion; the legacy `updatedAt` fallback applies only when the field is absent) and both its `runId` and the pinned published programme's `runId` are present and equal. The start's carried `lastEpgPublishedAt` uses a separate unbound helper, `epgCarriedPublishedAt`. A kept error then becomes `attempt.outcome: recovered`, shown as `lastAttempt` on the EPG entry. The writer, `sync.json`, D1 and R2 are unchanged.
 
 ## Offline results
 
@@ -27,6 +27,10 @@ The routine EPG run of 16 November 2026 (`runId` `47663279-3e6b-423d-b696-b22edf
 | seal in flight, no error | previous completion | `running` |
 | complete record of another run than the published programme (stale mirror, other generation) | previous completion | `unknown` / `epg_unproven` |
 | recovered record, published programme unreadable | previous completion | `unknown` / `epg_unproven` |
+| clean complete record, published programme unreadable | previous completion | `unknown` / `epg_unproven` |
+| no `sync.runId`, or a published programme without `runId` | previous completion | `unknown` / `epg_unproven` |
+| malformed `completedAt` beside a valid `updatedAt` | previous completion | `unknown` / `epg_unproven` |
+| pre-AIR-390 record (no `completedAt` field), same runId | its complete `updatedAt` | `healthy` |
 | error and no completion receipt, or an invalid `completedAt` | previous completion | not a success |
 | feed ended, publication fresh | — | header «Будущей программы нет», not «Данные устарели» |
 

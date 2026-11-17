@@ -117,7 +117,8 @@ assert.notEqual(recoveredFooter.integrations.aggregate,'failed');
 const recoveredState=context.epgPublicationState(recovered,{runId:NEW_RUN});
 assert.equal(recoveredState.binding,'run');
 assert.equal(recoveredState.attempt.outcome,'recovered');
-assert.equal(ux(recovered,null),NEW_DONE,'the next run carries the recovered completion as lastEpgPublishedAt');
+assert.equal(context.epgCarriedPublishedAt(recovered),NEW_DONE,'the next run carries the recovered completion as lastEpgPublishedAt (explicitly unbound helper)');
+assert.equal(ux(recovered,null),OLD,'the UI contract never credits a record without the published programme');
 assert.equal(records.get('sync.json').error,'rated_admission_incomplete','reads never rewrite sync.json');
 
 // Freshness follows the published completion: 37 h later the same publication is stale, not failed.
@@ -160,6 +161,34 @@ const heldFooter=await footer();
 assert.equal(source(heldFooter,'epg').state,'unknown');
 assert.equal(source(heldFooter,'epg').code,'epg_unproven');
 assert.equal(source(heldFooter,'epg').lastSuccessAt,OLD);
+
+// Review of PR #730: the binding is mandatory. A clean complete record without the published programme, a record without
+// sync.runId, a programme without runId, and a malformed completedAt beside a valid updatedAt are never a success.
+records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:NEW_DONE,lastEpgPublishedAt:OLD});
+const cleanNoProgramme=await footer();
+assert.equal(source(cleanNoProgramme,'epg').state,'unknown','generation unavailable, no error: not healthy');
+assert.equal(source(cleanNoProgramme,'epg').code,'epg_unproven');
+assert.equal(source(cleanNoProgramme,'epg').lastSuccessAt,OLD);
+assert.equal(context.epgPublicationState({runId:'run-a',stage:'complete',completedAt:NEW_DONE},null).binding,'none');
+seedGeneration(NEW_RUN);
+records.set('sync.json',{stage:'complete',updatedAt:NEW_DONE,completedAt:NEW_DONE,lastEpgPublishedAt:OLD});
+assert.equal((await programme()).publishedAt,OLD,'no sync.runId: the published run is not credited');
+assert.equal(source(await footer(),'epg').state,'unknown');
+assert.equal(context.epgPublicationState({stage:'complete',completedAt:NEW_DONE},{runId:'run-b'}).binding,'none');
+records.set('programme.json',{...records.get('programme.json'),runId:undefined});
+records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:NEW_DONE,lastEpgPublishedAt:OLD});
+assert.equal((await programme()).publishedAt,OLD,'a published programme without runId proves nothing');
+assert.equal(source(await footer(),'epg').state,'unknown');
+seedGeneration(NEW_RUN);
+records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:'invalid',lastEpgPublishedAt:OLD});
+assert.equal((await programme()).publishedAt,OLD,'a malformed completedAt is not replaced by a valid updatedAt');
+assert.equal(source(await footer(),'epg').state,'unknown');
+assert.equal(context.epgCarriedPublishedAt({runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,completedAt:'invalid',lastEpgPublishedAt:OLD}),OLD);
+// A record written before AIR-390 (no completedAt field) bound to the published run still reads its complete updatedAt.
+records.set('sync.json',{runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE});
+assert.equal((await programme()).publishedAt,NEW_DONE);
+assert.equal(source(await footer(),'epg').state,'healthy');
+records.delete('programme.json');
 
 // A record with an error and no completion receipt (written before AIR-390) proves nothing new.
 assert.equal(ux({runId:NEW_RUN,stage:'complete',updatedAt:NEW_DONE,error:'rated_admission_incomplete',lastEpgPublishedAt:OLD},{runId:NEW_RUN}),OLD);
