@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+# Git passes local/ref and remote/ref pairs. Compare pushed code, not the entire working tree.
+requires_tests=0
+saw_ref=0
+zero=0000000000000000000000000000000000000000
+while read -r local_ref local_sha remote_ref remote_sha; do
+  saw_ref=1
+  if [[ "$local_sha" == "$zero" ]]; then continue; fi
+  if [[ "$remote_sha" != "$zero" ]] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+    base="$remote_sha"
+  elif git rev-parse --verify -q refs/remotes/origin/main >/dev/null; then
+    base="$(git merge-base "$local_sha" refs/remotes/origin/main)"
+  else
+    requires_tests=1
+    break
+  fi
+  if git diff --name-only "$base" "$local_sha" |
+    grep -Eq '^(src/|scripts/|tests/|migrations/|public/|data/|build\.mjs$|package(-lock)?\.json$|wrangler\.jsonc$|\.github/workflows/|\.githooks/)'; then
+    requires_tests=1
+    break
+  fi
+done
+if [[ "$saw_ref" == 0 ]]; then
+  echo '[AIR-514] pre-push: missing ref data, run tests conservatively'
+  requires_tests=1
+fi
+if [[ "$requires_tests" == 0 ]]; then
+  echo '[AIR-514] pre-push: documentation-only change, full suite not needed'
+  exit 0
+fi
+echo '[AIR-514] pre-push: running core and non-functional suites'
+npm run test:all

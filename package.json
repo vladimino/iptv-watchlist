@@ -9,7 +9,10 @@
     "test": "node scripts/run-tests.mjs",
     "test:nonfunctional": "node scripts/run-tests.mjs --suite non-functional",
     "test:all": "node scripts/run-tests.mjs --suite all",
-    "smoke": "node scripts/smoke-check.mjs"
+    "smoke": "node scripts/smoke-check.mjs",
+    "check:mutation-targets": "node scripts/check-mutation-targets.mjs",
+    "hooks:install": "node scripts/install-git-hooks.mjs",
+    "prepare": "node scripts/install-git-hooks.mjs"
   },
   "engines": {
     "node": ">=20"
