@@ -643,6 +643,29 @@ assert.match(findCard,/class="film-similar-card is-catalog has-both-scores"/);
 assert.match(findCard,/class="poster no-poster"/);
 assert.match(findCard,/class="film-similar-badge is-new"/);
 assert.equal(fetches.length,0,'a poster already on the film is not fetched again');
+// AIR-517: the two numbers are independent facts and each cell is its own.
+load({films:[
+ open,
+ watch('ratedonly',{title:'Только оценка'}),
+ watch('stale',{title:'Устаревший прогноз'}),
+],enrichment:{
+ open:openStored,
+ ratedonly:stored({mechanics:['heist'],actualRating:3.5}),
+ stale:stored({mechanics:['heist'],actualRating:4,prediction:{...strong(4.6,.9),stale:true}}),
+ 'lid-only-key':{actualRating:5,watched:true},
+},catalogFilms:[catalog('tmdb_88',88,{title:'Чужой алиас',original:'Alias',year:2015,mechanics:[],execution:{plot_engine:'strong'},prediction:strong(4.4,.86)})]});
+const air517=run('renderSimilar(now).map(row=>similarCard(row,now)).join("\\n")');
+const air517Slice=id=>{const at=air517.indexOf(`data-similar-id="${id}"`),start=air517.lastIndexOf('<article',at);return air517.slice(start,air517.indexOf('</article>',start));};
+const ratedOnlyCard=air517Slice('ratedonly'),staleCard=air517Slice('stale'),aliasCard=air517Slice('tmdb_88');
+assert.match(ratedOnlyCard,/<span>МОЯ ОЦЕНКА<\/span><strong>3\.5<\/strong>/,'AIR-517: rating without a forecast');
+assert.match(ratedOnlyCard,/score-predicted score-none[^>]*><span>ПРОГНОЗ<\/span><strong>—<\/strong>/,'AIR-517: a missing forecast is not turned into the rating');
+assert.match(staleCard,/<span>МОЯ ОЦЕНКА<\/span><strong>4\.0<\/strong>/);
+assert.match(staleCard,/score-predicted score-none/,'AIR-517: a stale forecast is never shown as current');
+assert.doesNotMatch(staleCard,/4\.6/);
+assert.match(aliasCard,/score-actual score-none[^>]*><span>МОЯ ОЦЕНКА<\/span><strong>—<\/strong>/,'AIR-517: another film\'s stored rating under an unrelated key is not borrowed');
+assert.match(aliasCard,/<span>ПРОГНОЗ<\/span><strong>4\.4<\/strong>/);
+assert.doesNotMatch(aliasCard,/<strong>5\.0<\/strong>/);
+
 assert.doesNotMatch(app.slice(app.indexOf('function similarPoster'),app.indexOf('function similarScoreBadges')),/fetch\(|image\.tmdb\.org\/t\/p\//,'the card does not invent a poster URL');
 
 console.log('Similar films: eligibility, ranking, limits, franchise, identity, catalog and watchlist, freshness, links, focus and no fetch passed');
