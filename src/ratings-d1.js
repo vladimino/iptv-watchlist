@@ -313,6 +313,29 @@ export async function overlayView(env,index){
  return next;
 }
 
+// AIR-475 (review of the production acceptance fix): the owner's watched mark and rating of the given ids from D1 `ratings_view`, with no dependence on the R2 view index holding the key. `base` is
+// {id: entry} for exactly `ids`; the answer lays the D1 facts over each entry (its own watched, rating and watchlist facts are dropped first: D1 is the only source while the domain is d1 and open),
+// or is `base` unchanged otherwise. One indexed statement; nothing is written; an id with no D1 row has no rating and no mark.
+export async function viewItems(env,ids,base){
+ const db=database(env);
+ const authority=await readRatingsAuthority(db,env);
+ if(!authority.ready)return base;
+ const list=[...new Set(ids)].filter(id=>typeof id==='string'&&id);
+ if(!list.length)return base;
+ let rows;
+ try{rows=await many(db,'SELECT alias_id, watched, actual_rating, watchlist, rating_known FROM ratings_view WHERE alias_id IN ('+list.map(()=>'?').join(',')+')',list);}
+ catch(error){throw failed('ratings_domain_unavailable',error);}
+ const next={...(base||{})};
+ for(const id of list){const copy=next[id]&&typeof next[id]==='object'&&!Array.isArray(next[id])?{...next[id]}:{};delete copy.actualRating;delete copy.watched;delete copy.watchlist;next[id]=copy;}
+ for(const row of rows){
+  const item=next[row.alias_id];
+  if(row.watched===0||row.watched===1||row.watched==='0'||row.watched==='1')item.watched=Number(row.watched)===1;
+  if(row.watchlist===0||row.watchlist===1||row.watchlist==='0'||row.watchlist==='1')item.watchlist=Number(row.watchlist)===1;
+  if(Number(row.rating_known)===1)item.actualRating=row.actual_rating==null?null:Number(row.actual_rating);
+ }
+ return next;
+}
+
 export async function listDocuments(env){
  const db=database(env);
  const authority=await readRatingsAuthority(db,env);

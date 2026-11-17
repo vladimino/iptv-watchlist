@@ -570,7 +570,20 @@ async function catalogFilmRoute(env,tmdbId){
   if(bridge.state==='conflict'||bridge.state==='retired')degraded.push('identity');
   return bridge.state==='ok'&&bridge.lid?bridge.lid:null;
  });
- const page=catalogFilmPage({film:found.film,alias,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:index||{},profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
+ // The forecast, the fingerprint and the owner's facts of exactly the two verified spellings come from the D1 domains that own them while those are d1 and open, whether or not the R2 view index holds the
+ // keys (the index is only the seed and the fallback of a domain that is not d1). Two bounded reads per domain, nothing written; an unreadable domain is a 503, never a stale mirror.
+ let facts;
+ try{
+  const keys=[...new Set(['tmdb_'+tmdbId,alias].filter(Boolean))];
+  facts=Object.fromEntries(keys.map(key=>[key,index?.[key]||{}]));
+  if(typeof PredictionD1!=='undefined')facts=await PredictionD1.projectItems(env,keys,facts,canonicalMoodFacet);
+  if(typeof RatingsD1!=='undefined')facts=await RatingsD1.viewItems(env,keys,facts);
+ }catch(error){
+  const code=String(error?.code||'');
+  if(code.startsWith('prediction_')||code.startsWith('ratings_'))return json({status:'unavailable',error:'The catalog is not readable right now',reason:code},503);
+  throw error;
+ }
+ const page=catalogFilmPage({film:found.film,alias,programmeRunId:runId,completedOnly:publication?.authority==='d1'&&!!pinnedRunId,index:facts,profile:freshness?profile:null,metadata,watchlist,programme,freshness:freshness||{indexed:()=>false},now});
  try{await catalogMetadataFinish(env,metaGate);}
  catch(error){const refused=titleReadRefusal(error);if(refused)return refused;throw error;}
  return json({status:'found',programmeRunId:runId,generatedAt:new Date(now).toISOString(),...(degraded.length?{degraded}:{}),film:page});
