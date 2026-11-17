@@ -392,7 +392,7 @@ D1 refuses to **evaluate** a `LIKE` or `GLOB` pattern longer than **50 bytes** (
 
 ## EPG diagnostic database (retired)
 
-The separate diagnostic D1 and its `diagnostic-migrations/` (`epg_diagnostic_identity`, `epg_diagnostic_receipt`) no longer exist: the database was deleted (AIR-457) and the migration files removed from the repository ([ADR 0160](../../adr/0160-delete-epg-diagnostic-canary-code.md)). They were never part of the production chain in `migrations/`.
+The separate diagnostic D1 and its `diagnostic-migrations/` (`epg_diagnostic_identity`, `epg_diagnostic_receipt`) no longer exist: the database was deleted (AIR-457) and the migration files removed from the repository ([ADR 0161](../../adr/0160-delete-epg-diagnostic-canary-code.md)). They were never part of the production chain in `migrations/`.
 
 ## Rollback
 

@@ -124,7 +124,7 @@ This is the operator sequence of the shared reliability contract ([ADR 0089](../
 
 ## EPG diagnostic canary (retired)
 
-The canary's bindings, route and Workflow class were removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)) and its code, operator script, diagnostic migrations and tests by AIR-521 ([ADR 0160](../adr/0160-delete-epg-diagnostic-canary-code.md)). `wrangler.jsonc` carries only the production `DB`, `BUCKET` and the four production Workflows; guarded by `tests/epg-diagnostic-bindings-ready.mjs`, which also checks the built bundle. `keep_vars: true` may keep a leftover live var: read the deployed bindings back and treat any leftover as a separate owner-approved settings change. Code rollback restores no deleted resource ([retirement evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md)).
+The canary's bindings, route and Workflow class were removed by AIR-457 ([ADR 0159](../adr/0159-detach-epg-diagnostic-runtime.md)) and its code, operator script, diagnostic migrations and tests by AIR-521 ([ADR 0161](../adr/0160-delete-epg-diagnostic-canary-code.md)). `wrangler.jsonc` carries only the production `DB`, `BUCKET` and the four production Workflows; guarded by `tests/epg-diagnostic-bindings-ready.mjs`, which also checks the built bundle. `keep_vars: true` may keep a leftover live var: read the deployed bindings back and treat any leftover as a separate owner-approved settings change. Code rollback restores no deleted resource ([retirement evidence](../evidence/orchestration/epg-diagnostic-retirement-air-457-2026-11-17.md)).
 
 ## Troubleshooting and recovery
 
@@ -136,7 +136,7 @@ This is the operational Cloudflare runbook. Historical Sites exports and imports
 
 ## Ratings executor switch (AIR-347)
 
-The Ratings owner switch is a high-impact L3 operation requiring an owner-approved scoped plan and all explicit holdpoints. The state transitions remain separate, but safe preflight/readback inside the plan do not require repeated owner prompts: (1) `close_admission` with target `cloudflare` (epoch+1, both writers refused); (2) verify the drain, then `complete`; (3) disable the external Ratings Task. Rollback is the same protocol with target `external`. The switch needs D1 ratings authority open; with a held or non-`d1` marker it is refused and writes nothing. `ratings_storage_migrate apply` is refused while the mode is not `external`. Code deploy and Workflow resource creation start nothing. `clear_quarantine` runs no step.
+The Ratings owner switch is a high-impact L3 operation requiring an owner-approved scoped plan and all explicit holdpoints. The state transitions remain separate, but safe preflight/readback inside the plan do not require repeated owner prompts: (1) `close_admission` with target `cloudflare` (epoch+1, both writers refused); (2) verify the drain, then `complete`; (3) disable the external Ratings Task. Rollback is the same protocol with target `external`. The switch needs D1 ratings authority open; with a held or non-`d1` marker it is refused and writes nothing. Code deploy and Workflow resource creation start nothing. `clear_quarantine` runs no step.
 
 ## A Discovery Workflow instance that errors (AIR-360)
 

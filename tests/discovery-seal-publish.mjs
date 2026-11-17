@@ -143,7 +143,7 @@ for(const mode of ['document','emit']){
   async publishGeneration(env,input){events.push(['publish',sql(file,'SELECT state FROM discovery_transfer')[0].state,sql(file,"SELECT phase FROM discovery_seal")[0].phase]);return {ok:true,programmeRunId:input.programmeRunId};},
   async writeMirrors(){return true;},
  };
- context.ratingsGate=async()=>({active:true,migration:'complete'});
+ context.ratingsGate=async()=>({active:true,storage:'supported'});
  context.flushRemovalHandover=async()=>false;
  context.persistWatchlist=async()=>{events.push(['persist',run.stage]);};
  context.persistScan=async()=>{};
@@ -245,7 +245,7 @@ for(const mode of ['document','emit']){
  await bkt.put('epg/seal/run-x/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
  const env={BUCKET:bkt};
  const calls=[];let failPersist=true;
- context.ratingsGate=async()=>({active:false,migration:'none'});
+ context.ratingsGate=async()=>({active:false,storage:'unsupported'});
  context.persistWatchlist=async()=>{calls.push('persist');if(failPersist){failPersist=false;throw new Error('persist failed');}};
  context.persistScan=async()=>{};
  context.persistEvents=async()=>{};
@@ -254,24 +254,24 @@ for(const mode of ['document','emit']){
  await assert.rejects(()=>context.sealFinalizeStep(env,run),/persist failed/);
  assert.equal(run.seal.phase,'finalize','a failing step leaves its phase');
  const second=await context.sealFinalizeStep(env,run);
- assert.equal(second.stage,'seal');assert.equal(run.seal.phase,'queue');assert.equal(run.ratingsPipeline,'blocked');assert.equal(run.ratingsMigration,'none');
+ assert.equal(second.stage,'seal');assert.equal(run.seal.phase,'queue');assert.equal(run.ratingsPipeline,'blocked');assert.equal(run.ratingsStorage,'unsupported');
  assert.deepEqual(calls,['persist','persist']);
  const done=await context.sealQueueStep(env,run);
- assert.equal(done.stage,'complete');assert.equal(done.ratingsPipeline,'blocked');assert.equal(done.ratingsMigration,'none');
+ assert.equal(done.stage,'complete');assert.equal(done.ratingsPipeline,'blocked');assert.equal(done.ratingsStorage,'unsupported');
  assert.equal(run.seal,undefined);assert.equal(run.watchlist,undefined);assert.equal(run.stage,'complete');
  assert.equal(await bkt.head('epg/seal/run-x/payload.json'),null);
  // A repeated queue step after a lost answer still completes the run and leaves nothing behind.
  const again={runId:'run-x',stage:'seal',seal:{jobId:'j',phase:'queue'},ratingsPipeline:'separate'};
  await bkt.put('epg/seal/run-x/payload.json',JSON.stringify({report,watchlist:{films:[]},uncertain:[],fence:'g'}));
  const repeated=await context.sealQueueStep(env,again);
- assert.equal(repeated.stage,'complete');assert.equal(repeated.ratingsPipeline,'separate');assert.equal(repeated.ratingsMigration,undefined);
+ assert.equal(repeated.stage,'complete');assert.equal(repeated.ratingsPipeline,'separate');assert.equal(repeated.ratingsStorage,undefined);
 }
 
 // AIR-390: the staged path saves the complete run record first and writes the `epg` event after it, with the completion time that is also the run's updatedAt.
 {
  const bkt=bucket(12),env={BUCKET:bkt};
  const report={runId:'run-e',updatedAt:'2026-11-06T10:00:00.000Z',watchlistCount:0,films:[],stats:{a:1}};
- context.ratingsGate=async()=>({active:true,migration:'complete'});
+ context.ratingsGate=async()=>({active:true,storage:'supported'});
  context.persistEvents=async()=>{};
  context.refreshPredictionQueue=async()=>{};
  const template={id:'run-e-epg',type:'epg',at:report.updatedAt,films:1,archive:0,future:0,broadcasts:0};
@@ -456,7 +456,7 @@ for(const mode of ['document','emit']){
  assert.equal(run.seal.phase,'finalize');same(run.sealDegraded,['copy']);assert.equal(count('copy'),3);assert.equal(count('pointer'),1);
  copyFails=0;
  // The degraded names reach the final answer.
- context.ratingsGate=async()=>({active:true,migration:'complete'});context.flushRemovalHandover=async()=>false;
+ context.ratingsGate=async()=>({active:true,storage:'supported'});context.flushRemovalHandover=async()=>false;
  context.persistWatchlist=async()=>{};context.persistScan=async()=>{};context.persistEvents=async()=>{};context.refreshPredictionQueue=async()=>{};
  await context.sealFinalizeStep(env,run);await writePayload();
  const finished=await context.sealQueueStep(env,run);
@@ -473,7 +473,7 @@ for(const mode of ['document','emit']){
  assert.equal(restarted.seal.phase,'finalize');assert.equal(count('pointer'),1,'the repeat after the lost answer does not publish again');assert.equal(count('intent'),1);
  // The deadline bounds the finalize and queue phases between their units as well.
  ev=[];const evs=[];
- context.ratingsGate=async()=>{evs.push('handover');return {active:true,migration:'complete'};};
+ context.ratingsGate=async()=>{evs.push('handover');return {active:true,storage:'supported'};};
  context.persistWatchlist=async()=>{evs.push('watchlist');};context.persistScan=async()=>{evs.push('scan');};context.persistEvents=async()=>{evs.push('events');};
  const fin=fresh();fin.seal.phase='finalize';await writePayload();
  let finCalls=0;do{finCalls++;await context.sealFinalizeStep(env,fin,0);}while(fin.seal.phase==='finalize'&&finCalls<8);
@@ -590,7 +590,7 @@ context.DiscoveryAuthority=Authority;
   async writeMirrors(){return true;},
  };
  let published=false,publishes=0;
- context.ratingsGate=async()=>({active:true,migration:'complete'});
+ context.ratingsGate=async()=>({active:true,storage:'supported'});
  context.flushRemovalHandover=async()=>false;
  context.persistWatchlist=async()=>{};context.persistScan=async()=>{};context.persistEvents=async()=>{};
  context.refreshPredictionQueue=async()=>{};context.queueCommittedDiscovery=async()=>{};context.copyEpgGeneration=async()=>{};

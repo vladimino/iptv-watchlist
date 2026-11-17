@@ -159,7 +159,7 @@ const RatingsOrchestration=(()=>{
  // The external path's gate for ratings_sync_start and ratings_sync_step: `switch_in_progress` while admission is closed,
  // `external_writer_fenced` once the switch to Cloudflare has completed, whatever an old Task prompt sends. Reads stay open.
  async function externalGate(env,action,body={}){
-  const writes=action==='start'||action==='step'||(action==='migrate'&&body?.mode==='apply');
+  const writes=action==='start'||action==='step';
   if(!writes)return {reason:null,fence:null};
   let mode;
   try{mode=await readMode(env);}catch{return {reason:'evidence_unreadable',fence:null};}
@@ -201,7 +201,7 @@ const RatingsOrchestration=(()=>{
   let runId=today?.state==='running'?today.runId:null;
   if(!runId){
    const reply=await ratings().start(fe,{trigger:'scheduled'},now);
-   if(reply.reason==='not_migrated')return {failure:{code:'config_invalid'}};
+   if(reply.reason==='storage_unsupported')return {failure:{code:'config_invalid'}};
    if(reply.reason==='isolated')return {failure:{code:'evidence_contradictory'}};
    if(reply.reason==='busy')return {wake:now+SLEEP_FLOOR_MS*60,note:'busy'};
    if(!reply.created)return {failure:{code:'owner_unknown'}};
@@ -213,7 +213,7 @@ const RatingsOrchestration=(()=>{
   if(reply.reason==='lease_lost')return {...base,failure:{code:'owner_unknown'}};
   if(reply.reason==='busy'){const until=Date.parse(reply.nextCatchUpAt||'');return {...base,wake:Number.isFinite(until)?until:now+SLEEP_FLOOR_MS*60,note:'busy'};}
   if(reply.reason==='unknown')return {...base,failure:{code:'owner_unknown'}};
-  if(reply.reason==='not_migrated')return {...base,failure:{code:'config_invalid'}};
+  if(reply.reason==='storage_unsupported')return {...base,failure:{code:'config_invalid'}};
   if(reply.reason==='not_running')return {...base,failure:{code:'evidence_unreadable'}};
   if(reply.reason==='run_mismatch')return {...base,failure:{code:'owner_conflict'}};
   if(reply.state==='finished'||after?.state==='finished')return {...base,finished:true};

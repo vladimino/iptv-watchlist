@@ -10,6 +10,9 @@ const fn=name=>vm.runInContext(name,ctx);
 const env=baseEnv(bucket);
 const eq=(actual,expected,message)=>assert.deepEqual(plain(actual),plain(expected),message);
 const at=ms=>new Date(ms).toISOString();
+// The Worker has no code that converts a version 1 queue (ADR 0161). Writers must still follow the version they find at their own
+// compare-and-swap, so the race below is emulated by another writer that stores the version 2 form.
+const toV2=(queue,when)=>({schemaVersion:2,films:Object.fromEntries(Object.entries(queue?.films||{}).map(([id,entry])=>[id,{...entry,claim:null,refs:[],legacy:true}])),droppedRefs:0,migratedAt:when,...(queue?.pausedUntil?{pausedUntil:queue.pausedUntil,pausedBy:queue.pausedBy||null}:{})});
 const ref=(n,ms=T0)=>({eventKey:eventKeyOf(at(ms),'run-'+n+'-watchlist'),sourceRunId:'run-'+n,at:at(ms)});
 const v2=(films={})=>({schemaVersion:2,films,droppedRefs:0,migratedAt:at(T0)});
 const enqueue=(queue,films,reference,ms=T0)=>fn('applyRemovalEnqueue')(queue,films,reference,at(ms));
@@ -127,13 +130,13 @@ eq(plain(await fn('settleRemovalRefs')(env,{})),{written:0,resolved:0,waiting:0,
 eq([bucket.value(QUEUE).films.s.refs[0].resolved,bucket.value(QUEUE).films.s.refs[0].issue],[false,'film_not_in_event']);
 assert.equal(bucket.writes().filter(item=>item.key.startsWith('events/items/')).length,eventWrites,'no event write');
 
-// 8. A writer that read version 1 loses its compare-and-swap to the migration and follows version 2 on the retry.
+// 8. A writer that read version 1 loses its compare-and-swap to a writer of version 2 and follows version 2 on the retry.
 bucket.set(QUEUE,{schemaVersion:1,films:{}});
 let migratedOnce=false;
-bucket.hooks.beforePut=key=>{if(key===QUEUE&&!migratedOnce){migratedOnce=true;bucket.set(QUEUE,fn('migrateRemovalQueue')(bucket.value(QUEUE),[],at(T0)));}};
+bucket.hooks.beforePut=key=>{if(key===QUEUE&&!migratedOnce){migratedOnce=true;bucket.set(QUEUE,toV2(bucket.value(QUEUE),at(T0)));}};
 await fn('enqueueRemovalRefs')(env,[film('late')],ref(9),T0);
 bucket.hooks.beforePut=null;
-assert.equal(bucket.value(QUEUE).schemaVersion,2,'the migration is not undone');
+assert.equal(bucket.value(QUEUE).schemaVersion,2,'version 2 is not undone');
 eq(bucket.value(QUEUE).films.late.refs.map(item=>item.eventKey),[ref(9).eventKey]);
 
 console.log('Ratings queue v2 (ADR 0060): idempotent enqueue, remove/re-add/remove from every state, the 21st reference, retention past 28 days and past 100 entries, claim tokens and three attempts, settle with a kill between the event write and resolved, a waiting reference, and a version 1 writer that loses to the migration passed');
