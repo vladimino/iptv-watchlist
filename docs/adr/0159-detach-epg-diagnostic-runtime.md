@@ -1,9 +1,9 @@
 # ADR 0159: Detach the EPG diagnostic runtime from the production Worker
 
-**Status:** **Proposed** (2026-11-17; owner GO on merge and deploy is pending, see AIR-457 holdpoints)
+**Status:** **Accepted** (2026-11-17; owner explicitly approved PR #714 merge/deploy of the runtime detach; deprovisioning remains separate)
 **Original decision date:** 2026-11-17
 **Recorded at:** 2026-11-17
-**Approval source:** Owner card scope of [AIR-457](https://trello.com/c/InwLNuYs) (14 November 2026: GO for planning, safe reads and PR preparation only)
+**Approval source:** Owner's explicit 17 November 2026 acceptance of [PR #714](https://github.com/vladimino/iptv-watchlist/pull/714), recorded on [AIR-457](https://trello.com/c/InwLNuYs). The 14 November authorization was for planning and PR preparation only; diagnostic resource deletion and other live settings changes remain unapproved.
 **Related work:** [AIR-456](https://trello.com/c/eb948eA5) (documented NO-GO), [AIR-457](https://trello.com/c/InwLNuYs); [ADR 0121](0121-epg-diagnostic-rehearsal-design.md), [ADR 0124](0124-epg-diagnostic-canary-run-contract.md), [ADR 0139](0139-epg-diagnostic-chunked-replay-dataset.md)
 **Supersedes:** The deployment wiring of ADR 0121 and ADR 0124 (bindings, var, route, Workflow class). Their design, isolation reasoning and contracts stay Accepted as history and as the contract of the inert modules.
 **Superseded by:** None
