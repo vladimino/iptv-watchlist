@@ -13,6 +13,8 @@
 | Cron reconcile right after the swap | rollover §10 | `in_progress` on the successor, no second id |
 | Two operator requests at once | rollover §9 | exactly one `ok`; the other `write_conflict`/`pin_mismatch`/`unsafe` with `writes: 0`; one create |
 | Repeat of the same request, timeout after the CAS | rollover §8, §12, §13 | `replay: true`, no second swap; a `starting` record is created once by the repeat or by the reconcile; a lost answer of a stored swap proceeds as its own |
+| Repeat after a crash, with a new generation published meanwhile; preflight slow enough to eat into the wake margin | rollover §12 additions | `replay_stale` with no create; `wake_imminent` refusal before the swap with zero writes |
+| Instance step naming unchanged by the version step | rollover §12 additions | the step sequence starts `version`, `owner-0` |
 | Failed or uncertain Cloudflare create | rollover §11 | `successor_uncertain` (202, not accepted); record `uncertain` with due time; reconcile waits, then recreates the same id; total successors: one id |
 | Stale EPG generation; stale owner/version pins | rollover §2, §4 | `generation_handoff`, `generation_mismatch`, `continuation_foreign`; every stale pin `pin_mismatch` with zero writes; `already_current` for a recorded deployed version |
 | Held authority, loading transfer, EPG priority, projector window (requested or held) | rollover §2, §14; gate test | preflight `unsafe`; a window or pause opening between preflight and swap is refused inside the record write with zero writes; `readDiscoveryGates` agrees with `writeWorkflow` on real SQL and writes no row or generation |

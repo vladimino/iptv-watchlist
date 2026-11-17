@@ -44,7 +44,7 @@ Call `{"mode":"apply","confirmGo":true,"requestId":"<8–64 of A-Z a-z 0-9 _ ->"
 | 200, `outcome: handed_over_version_pending` | Accepted; the successor has not run its first step yet. | Read `dry_run` again after a minute: expect `already_current`. |
 | 202, `outcome: successor_uncertain` | The swap is done, but the create could not be confirmed. The record is `uncertain` with a recovery due time. | Do nothing. The hourly reconcile recreates the same id when due. Repeat the same request later to read back. |
 | 202, `outcome: readback_unproven` | The swap and the create answered, but the readback did not prove the owner, its liveness or the checkpoint. | Repeat the same request (same `requestId`, same pins). It never swaps twice. If it stays unproven, stop and escalate with the receipt. |
-| 409, `writes: 0` | Refused: `confirm_required`, `pin_mismatch`, `unsafe`, `unknown`, `already_current`, `write_conflict`, `projector_window`, `epg_priority` or `request_id_reused`. Nothing was written. | Read `dry_run` again; a new GO is needed for new pins. |
+| 409, `writes: 0` | Refused: `confirm_required`, `pin_mismatch`, `unsafe`, `unknown`, `already_current`, `write_conflict`, `projector_window`, `epg_priority`, `request_id_reused` or `replay_stale` (a repeat whose generation is no longer published). Nothing was written. | Read `dry_run` again; a new GO is needed for new pins. |
 
 A timeout or a lost answer: repeat the **same** request. With the same `requestId` the tool recognises its own swap. It then creates the successor if the record still says `starting`, or reads back; `superseded` means a later natural successor already replaced it, which is a success.
 

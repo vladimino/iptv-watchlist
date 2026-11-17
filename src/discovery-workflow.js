@@ -780,7 +780,7 @@ function discoveryRolloverDecision(facts){
  if(!facts?.deployedVersionId)unknowns.push('deployed_version_unknown');
  for(const name of facts?.unreadable||[])unknowns.push(name+'_unreadable');
  if(!facts?.admission?.ok){if(DISCOVERY_ROLLOVER_UNKNOWN_ADMISSION.has(facts?.admission?.reason))unknowns.push(facts.admission.reason);else blockers.push(facts?.admission?.reason||'admission_refused');}
- if(record?.instanceId&&facts?.deployedVersionId&&record.versionId===facts.deployedVersionId&&!unknowns.length)return {decision:'already_current',blockers:[],unknowns:[]};
+ if(record?.instanceId&&facts?.deployedVersionId&&record.versionId===facts.deployedVersionId&&['waiting','running','starting'].includes(record.phase)&&!unknowns.length)return {decision:'already_current',blockers:[],unknowns:[]};
  if(!record?.instanceId)blockers.push('no_active_instance');
  else{
   if(!Number.isInteger(record.series)||record.series<0||record.instanceId!==discoveryInstanceId(record.programmeRunId,record.series))unknowns.push('owner_unknown');
@@ -859,17 +859,24 @@ function discoveryRolloverReceipt(receipt){
 // duplicate id is the same successor (attach). Any other failure arms the existing start recovery: the hourly reconcile recreates the same id.
 async function startRolloverSuccessor(env,receipt){
  const binding=env.DISCOVERY_WORKFLOW,id=receipt.toInstanceId,series=receipt.toSeries,programmeRunId=receipt.programmeRunId;
- const onlyStarting=patch=>record=>record?.instanceId===id&&record.phase==='starting'?patch:{};
- let created;
+ // Writes only while the record is still `starting` for this id: a successor that already wrote its own state is not overwritten, and no empty write
+ // moves the record revision (or, in D1, the authority generation that fences the successor's own commit).
+ const onlyStarting=async patch=>{
+  const state=await readWorkflowState(env),record=state.record;
+  if(record?.instanceId!==id||record.phase!=='starting')return false;
+  const written=await writeWorkflowStateSoft(env,{...record,...patch,updatedAt:new Date().toISOString()},state.etag);
+  return written.saved===true;
+ };
+ let created,settled=false;
  try{await binding.create({id,params:{programmeRunId,series}});created='started';}
  catch(error){created=workflowCreateError(error)==='exists'?'attached':'uncertain';}
  try{
   if(created==='uncertain'){
    const failure=workflowFailure(null,'start_uncertain',Date.now());
-   await settleWorkflowIfOwner(env,id,onlyStarting({phase:'uncertain',reason:'start_uncertain',recovery:failure,waitingUntil:failure.dueAt}));
-  }else await settleWorkflowIfOwner(env,id,onlyStarting({phase:'running',reason:created,recovery:null,waitingUntil:null}));
+   settled=await onlyStarting({phase:'uncertain',reason:'start_uncertain',recovery:failure,waitingUntil:failure.dueAt});
+  }else settled=await onlyStarting({phase:'running',reason:created,recovery:null,waitingUntil:null});
  }catch{}
- return created;
+ return {created,settled};
 }
 async function discoveryWorkflowRollover(env,args={}){
  const refuse=(status,reason,extra={})=>({status,body:{ok:false,mode:args.mode,reason,writes:0,...extra}});
@@ -884,15 +891,23 @@ async function discoveryWorkflowRollover(env,args={}){
  const stored=record?.rollover;
  if(stored&&typeof stored==='object'&&stored.requestId===requestId){
   if(stored.programmeRunId!==pins.programmeRunId||stored.fromInstanceId!==pins.instanceId||stored.fromSeries!==pins.series)return refuse(409,'request_id_reused',{preflight:view});
-  let created=null;
-  if(record.instanceId===stored.toInstanceId&&record.series===stored.toSeries&&record.phase==='starting')created=await startRolloverSuccessor(env,stored);
+  let start=null;
+  if(record.instanceId===stored.toInstanceId&&record.series===stored.toSeries&&record.phase==='starting'){
+   // The create of a swap that never reached it, only while that generation is still the published one; otherwise the reconcile decides.
+   if(stored.programmeRunId!==facts.programmeRunId||!facts.admission.ok)return refuse(409,'replay_stale',{admission:facts.admission,receipt:discoveryRolloverReceipt(stored)});
+   start=await startRolloverSuccessor(env,stored);
+  }
+  const created=start?.created??null;
   const readback=await discoveryRolloverReadback(env,stored,stored.checkpoint);
   const outcome=record.instanceId!==stored.toInstanceId?'superseded':created==='uncertain'||record.phase==='uncertain'?'successor_uncertain':readback.accepted?(readback.versionConfirmed?'handed_over':'handed_over_version_pending'):'readback_unproven';
-  return {status:readback.accepted||outcome==='superseded'?200:202,body:{ok:readback.accepted||outcome==='superseded',mode:'apply',outcome,replay:true,writes:created?1:0,receipt:discoveryRolloverReceipt(stored),readback}};
+  return {status:readback.accepted||outcome==='superseded'?200:202,body:{ok:readback.accepted||outcome==='superseded',mode:'apply',outcome,replay:true,writes:start?.settled?1:0,receipt:discoveryRolloverReceipt(stored),readback}};
  }
  const mismatched=Object.keys(pins).filter(key=>pins[key]!==expect[key]);
  if(mismatched.length)return refuse(409,'pin_mismatch',{mismatched,expect,...verdict,preflight:view});
  if(verdict.decision!=='eligible')return refuse(409,verdict.decision,{blockers:verdict.blockers,unknowns:verdict.unknowns,preflight:view});
+ // The wake margin is measured from the start of the reads; a preflight that took long enough to eat into it is not a proof of sleep any more.
+ const wake=Date.parse(record.waitingUntil||'');
+ if(!Number.isFinite(wake)||wake<=Date.now()+DISCOVERY_ROLLOVER_WAKE_MARGIN_MS/2)return refuse(409,'unsafe',{blockers:['wake_imminent'],preflight:view});
  const series=record.series+1,pinned=record.programmeRunId,toInstanceId=discoveryInstanceId(pinned,series),at=new Date().toISOString();
  const receipt={requestId,programmeRunId:pinned,fromInstanceId:record.instanceId,fromSeries:record.series,fromVersionId:record.versionId||null,toInstanceId,toSeries:series,deployedVersionId:facts.deployedVersionId,requestedAt:at,checkpoint:{etag:facts.continuationEtag??null,revision:rolloverRevision(facts.continuationEtag),hopId:facts.continuation?.hopId??null}};
  const next={schemaVersion:1,...(record.report?{report:record.report}:{}),...(Array.isArray(record.outbox)?{outbox:record.outbox}:{}),rollover:receipt,programmeRunId:pinned,series,instanceId:toInstanceId,phase:'starting',updatedAt:at,waitingUntil:null,reason:'rollover',chunksThisInstance:0,lastProgress:null,recovery:null,versionId:null,createdVersionId:facts.deployedVersionId};
@@ -905,11 +920,11 @@ async function discoveryWorkflowRollover(env,args={}){
   // A swap that reports a refusal but is found stored (an uncertain answer) is this request's swap; anything else changed the record first.
   if(after?.rollover?.requestId!==requestId||after.instanceId!==toInstanceId)return refuse(409,'write_conflict',{owner:after?{instanceId:rolloverString(after.instanceId),series:after.series??null,phase:rolloverString(after.phase,16)}:null});
  }
- const created=await startRolloverSuccessor(env,receipt);
+ const {created,settled}=await startRolloverSuccessor(env,receipt);
  const readback=await discoveryRolloverReadback(env,receipt,receipt.checkpoint);
  const outcome=created==='uncertain'?'successor_uncertain':readback.accepted?(readback.versionConfirmed?'handed_over':'handed_over_version_pending'):'readback_unproven';
  try{console.log(JSON.stringify({event:'discovery_workflow_rollover',outcome,requestId:String(requestId).slice(0,64),from:receipt.fromInstanceId.slice(0,80),to:toInstanceId.slice(0,80),deployedVersionId:String(receipt.deployedVersionId).slice(0,64)}));}catch{}
- return {status:readback.accepted?200:202,body:{ok:readback.accepted,mode:'apply',outcome,replay:false,writes:2,receipt:discoveryRolloverReceipt(receipt),readback}};
+ return {status:readback.accepted?200:202,body:{ok:readback.accepted,mode:'apply',outcome,replay:false,writes:settled?2:1,receipt:discoveryRolloverReceipt(receipt),readback}};
 }
 // The MCP entry. Validates the arguments exactly; dry_run never writes.
 async function handleDiscoveryRolloverTool(env,args={}){
@@ -1015,13 +1030,15 @@ async function runDiscoveryWorkflow(rawEnv,payload,step){
  const ownVersion=discoveryWorkerVersion(rawEnv)?{versionId:discoveryWorkerVersion(rawEnv)}:{};
  try{
    if(ownVersion.versionId){
-    await doStep('version',async()=>{
+    // A fixed step name outside the numbered sequence, so every later step keeps the name it had without this step.
+    const versionStep=await step.do('version',accounted('version',async()=>{
      let state;try{state=await readWorkflowState(env);}catch{return {recorded:false};}
      const record=state.record;
      if(record?.instanceId!==ownId||record.series!==series||record.versionId===ownVersion.versionId)return {recorded:false};
      try{const written=await writeWorkflowStateSoft(env,{...record,versionId:ownVersion.versionId},state.etag);return {recorded:written.saved===true};}
      catch{return {recorded:false};}
-    });
+    }));
+    if(versionStep&&versionStep.__counted===1)tally.total+=Number(versionStep.spent)||0;
    }
    for(;;){
     const gate=await doStep('owner',()=>workflowOwnerGate(env,ownId,series));

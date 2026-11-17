@@ -247,6 +247,29 @@ call('startRolloverSuccessor=globalThis.__realStart');
 reconciled=await call('reconcileDiscoveryWorkflow')(env,{});
 assert.equal(reconciled.started,true,JSON.stringify(reconciled));assert.deepEqual(creates.map(item=>item.id),[NEXT]);
 
+// A crash after the swap, then a new generation published before the repeat: the repeat does not create a stale successor, the reconcile decides.
+seed();
+call('startRolloverSuccessor=async()=>{throw new Error("worker timeout")}');
+await assert.rejects(tool(pins()),/worker timeout/);
+call('startRolloverSuccessor=globalThis.__realStart');
+published=OTHER;authority={...authority,publishedProgrammeRunId:OTHER};
+reply=await tool(pins());assert.equal(reply.body.reason,'replay_stale',JSON.stringify(reply.body));assert.equal(creates.length,0);
+
+// A preflight slow enough to eat into the wake margin is refused before the swap.
+seed({waitingUntil:new Date(Date.now()+150000).toISOString()});
+context.__realFacts=call('discoveryRolloverFacts');const realNow=Date.now;
+call('discoveryRolloverFacts=async(env)=>{const facts=await globalThis.__realFacts(env);globalThis.__slow();return facts;}');
+context.__slow=()=>{Date.now=()=>realNow()+100000;};
+before=snapshot();
+try{reply=await tool(pins());}finally{Date.now=realNow;call('discoveryRolloverFacts=globalThis.__realFacts');}
+assert.equal(reply.body.ok,false);assert.deepEqual(reply.body.blockers,['wake_imminent']);assert.equal(snapshot(),before);assert.equal(creates.length,0);
+
+// The version step has a fixed name outside the numbered sequence: the first owner gate is still `owner-0`.
+seed();
+const names=[];
+await assert.rejects(call('runDiscoveryWorkflow')(env,{programmeRunId:GENERATION,series:0},{async do(name,fn){names.push(name);if(name.startsWith('owner'))throw new Error('halt');return fn();},async sleepUntil(){}}),/halt/);
+assert.deepEqual(names,['version','owner-0']);
+
 // 13. A swap whose answer is lost but which was stored is this request's own swap (an uncertain write): it proceeds to the one create.
 seed();
 putHook=key=>{if(key===STATE){putHook=null;return 'lost';}};
