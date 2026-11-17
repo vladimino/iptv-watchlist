@@ -735,7 +735,7 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
  let replayRun={observations:0,pages:0,complete:true,after:replayAfter,outcomes:{assigned:0,present:0,evidence_drift:0,film_absent:0,guard_skipped:0},refused:false};
  if(source.programmeRunId){
   const replayStop=()=>Date.now()+Math.min(writeCostMs||PAGED_DEFAULT_WRITE_MS,3000)>=t0+PAGED_REPLAY_BUDGET_MS;
-  const result=await inPhase('replay_unassigned',()=>guarded(()=>DiscoveryAuthority.replayUnassignedSlots(env,{programmeRunId:source.programmeRunId,after:replayAfter,shouldStop:replayStop,beforePage:heartbeat,timedCommit:timedWrite},{lease})));
+  const result=await inPhase('replay_assignment',()=>guarded(()=>DiscoveryAuthority.replayUnassignedSlots(env,{programmeRunId:source.programmeRunId,after:replayAfter,shouldStop:replayStop,beforePage:heartbeat,timedCommit:timedWrite},{lease})));
   if(result)replayRun=result;else{replayRun={...replayRun,complete:false,refused:true};}
  }
  timings.replayMs=Date.now()-replayStarted;
