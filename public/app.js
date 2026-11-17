@@ -1637,7 +1637,26 @@ function similarTitle(film){const title=film.title||film.original||'Фильм',
 function similarPoster(film){const name=film.original||film.title||'';if(typeof film.poster==='string'&&film.poster)return `<img class="poster" src="${escapeHTML(film.poster)}" alt="Постер ${escapeHTML(name)}" width="78" height="117" loading="lazy" referrerpolicy="no-referrer">`;return `<div class="poster no-poster" aria-label="Постер недоступен">${escapeHTML(String(film.year||'Кино'))}</div>`;}
 // One compact pair of badges for Finds and Similar: "МОЯ ОЦЕНКА" (actualRating) then "ПРОГНОЗ" (stored prediction). They are independent facts;
 // a missing one is shown as a neutral "—", never as 0.0 and never replaced by the other.
-function ownRatingOf(film){const raw=similarViewItem(film?.id)?.actualRating;return raw!==null&&raw!==undefined&&raw!==''&&Number.isFinite(Number(raw))?Number(raw):null;}
+// The own rating of a card. Only a half-star value 0.5..5.0 counts (0, null, text or out-of-range legacy values are "no rating"). The view entry is found under the card's own id and, when the
+// loaded data verifies it (`similarLidBridge`: programme rows and verified catalog rows agree on one TMDB id for a Letterboxd id), under the other spelling of the same Film. A conflicted or
+// ambiguous mapping bridges nothing, two spellings that disagree on the value show nothing, and a title, year or slug is never matched. No request is made.
+function ratingValue(item){const raw=item?.actualRating;if(raw===null||raw===undefined||raw===''||typeof raw==='boolean')return null;const value=Number(raw);return Number.isFinite(value)&&value>=0.5&&value<=5&&Number.isInteger(value*2)?value:null;}
+let ratingBridgeCache={films:null,finds:null,fresh:null,bridge:null,lidsByTmdb:null};
+function ratingBridge(){
+ const finds=findsSource?.films||null,fresh=findsFresh();
+ if(ratingBridgeCache.films===films&&ratingBridgeCache.finds===finds&&ratingBridgeCache.fresh===fresh&&ratingBridgeCache.bridge)return ratingBridgeCache;
+ const bridge=similarLidBridge(),lidsByTmdb=new Map();
+ for(const [lid,tmdb] of bridge.byLid){if(!lidsByTmdb.has(tmdb))lidsByTmdb.set(tmdb,[]);lidsByTmdb.get(tmdb).push(lid);}
+ ratingBridgeCache={films,finds,fresh,bridge,lidsByTmdb};return ratingBridgeCache;
+}
+function ownRatingOf(film){
+ if(film?.id==null)return null;
+ const id=String(film.id),others=[],{bridge,lidsByTmdb}=ratingBridge(),own=/^tmdb_([1-9]\d*)$/.exec(id);
+ if(own){const lids=lidsByTmdb.get(own[1])||[];if(lids.length===1&&!bridge.conflicted.has(lids[0]))others.push(lids[0]);else if(lids.length>1)return ratingValue(similarViewItem(id));}
+ else if(!bridge.conflicted.has(id)&&bridge.byLid.has(id))others.push('tmdb_'+bridge.byLid.get(id));
+ const values=[id,...others].map(key=>ratingValue(similarViewItem(key))).filter(value=>value!==null);
+ return values.length&&values.every(value=>value===values[0])?values[0]:null;
+}
 function scoreBadgesHTML(actual,rating,chance){
  const own=actual===null?'<div class="score-badge score-actual score-none" aria-label="Моя оценка: нет"><span>МОЯ ОЦЕНКА</span><strong>—</strong></div>':`<div class="score-badge score-actual" aria-label="Моя оценка ${actual.toFixed(1)} из 5"><span>МОЯ ОЦЕНКА</span><strong>${actual.toFixed(1)}</strong></div>`;
  const forecast=Number.isFinite(rating)?`<div class="score-badge score-predicted" aria-label="Прогноз ${rating.toFixed(1)} из 5${chance===null?'':`, шанс оценки 4 и выше ${chance}%`}"><span>ПРОГНОЗ</span><strong>${rating.toFixed(1)}</strong>${chance===null?'':`<small>${chance}% на 4.0+</small>`}</div>`:'<div class="score-badge score-predicted score-none" aria-label="Прогноз: нет"><span>ПРОГНОЗ</span><strong>—</strong></div>';

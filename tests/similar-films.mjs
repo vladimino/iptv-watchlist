@@ -643,6 +643,28 @@ assert.match(findCard,/class="film-similar-card is-catalog has-both-scores"/);
 assert.match(findCard,/class="poster no-poster"/);
 assert.match(findCard,/class="film-similar-badge is-new"/);
 assert.equal(fetches.length,0,'a poster already on the film is not fetched again');
+// AIR-517 review: a rating stored under the other VERIFIED spelling of the same Film is found; a contested, ambiguous or disagreeing one shows nothing.
+const bridged=(entries,filmsList)=>{load({films:[open,...filmsList],enrichment:{open:openStored,...entries}});return id=>run(`ownRatingOf({id:${JSON.stringify(id)}})`);};
+let ownOf=bridged({tmdb_22004:{actualRating:4,watched:true}},[watch('1BbQ',{tmdbId:'22004',canonicalIdentity:'tmdb:22004'})]);
+assert.equal(ownOf('1BbQ'),4,'AIR-517: the watchlist id finds the rating stored under its verified tmdb_<n>');
+ownOf=bridged({'1BbQ':{actualRating:3.5,watched:true}},[watch('1BbQ',{tmdbId:'22004',canonicalIdentity:'tmdb:22004'})]);
+assert.equal(ownOf('tmdb_22004'),3.5,'AIR-517: the tmdb_<n> card finds the rating stored under its verified Letterboxd id');
+ownOf=bridged({tmdb_22004:{actualRating:4},'1BbQ':{actualRating:3}},[watch('1BbQ',{tmdbId:'22004'})]);
+assert.equal(ownOf('1BbQ'),null,'AIR-517: two spellings that disagree show nothing');
+ownOf=bridged({tmdb_22004:{actualRating:4},'1BbQ':{actualRating:4}},[watch('1BbQ',{tmdbId:'22004'})]);
+assert.equal(ownOf('1BbQ'),4,'AIR-517: two spellings that agree are one fact');
+ownOf=bridged({tmdb_22004:{actualRating:4},tmdb_22005:{actualRating:2}},[watch('Dup',{tmdbId:'22004'}),watch('Dup',{tmdbId:'22005'})]);
+assert.equal(ownOf('Dup'),null,'AIR-517: a Letterboxd id with two stored TMDB ids bridges nothing');
+ownOf=bridged({tmdb_22004:{actualRating:4}},[watch('LidA',{tmdbId:'22004'}),watch('LidB',{tmdbId:'22004'})]);
+assert.equal(ownOf('tmdb_22004'),4,'AIR-517: the direct key is still its own fact');
+assert.equal(ownOf('LidA'),4);
+ownOf=bridged({LidA:{actualRating:5}},[watch('LidA',{tmdbId:'22004'}),watch('LidB',{tmdbId:'22004'})]);
+assert.equal(ownOf('tmdb_22004'),null,'AIR-517: two Letterboxd ids for one TMDB id are ambiguous, the tmdb_<n> card borrows neither');
+ownOf=bridged({tmdb_9:{actualRating:4}},[watch('Other',{tmdbId:'10'})]);
+assert.equal(ownOf('Other'),null,'AIR-517: another Film\'s entry is never borrowed');
+for(const bad of [0,'0',-1,5.5,4.2,true,'x',null])assert.equal(bridged({Z:{actualRating:bad}},[watch('Z')])('Z'),null,'AIR-517: '+JSON.stringify(bad)+' is not a rating');
+assert.equal(bridged({Z:{actualRating:0.5}},[watch('Z')])('Z'),0.5);
+
 // AIR-517: the two numbers are independent facts and each cell is its own.
 load({films:[
  open,
