@@ -1,7 +1,7 @@
 # AIR-503: impact of alias provenance on the existing `known_epg_alias` decisions
 
 **Captured:** 17 November 2026 (UTC), read-only `SELECT` against production D1 `iptv` (`database_id` `3fba0e0a-44e9-4a3a-a7ba-edaee6bcafcb`). `rows_written` was 0 on every query. No Worker GET, no TMDB call, no R2 read, no EPG, Discovery, prediction or ratings run, no flag change.
-**Used by:** [AIR-503](https://trello.com/c/t9fZCHLQ), second delivery; [ADR 0157](../../adr/0157-epg-title-alias-provenance.md). Follows [the RCA of the 33 conflicts](air-503-same-title-runtime-conflicts-rca-2026-11-17.md).
+**Used by:** [AIR-503](https://trello.com/c/t9fZCHLQ), second delivery; [ADR 0158](../../adr/0158-epg-title-alias-provenance.md). Follows [the RCA of the 33 conflicts](air-503-same-title-runtime-conflicts-rca-2026-11-17.md).
 **Pinned state:** `published_epg_authority` `d1` / `open`, published run `47663279-3e6b-423d-b696-b22edfcead91` (EPG generation 511). The only total of published shows used for scale is the 16 864 that AIR-500 counted in generation 510 on 16 November; generation 511 was not recounted.
 **Verdict:** the stored aliases carry no provenance, so the origin of the `tmdb_400160` series-title alias stays unproven. The new rule affects 222 of 3 790 current `known_epg_alias` decisions. Those 222 own 99 current shows (58 keys, 56 Films). Nothing stored is rewritten.
 
@@ -21,7 +21,7 @@ For the current `known_epg_alias` decisions with an active observation, aliases 
 
 ## Impact on the existing decisions
 
-Method. All 3 790 current `known_epg_alias` decisions were read with their admission's `title` and `original` (query 1). Each observation key was normalized with the `norm` of `src/sources.js` (NFKC, lower case, `ё` as `е`, punctuation as a space) and compared with the normalized title and original of the Film. Neither `movieTitles` exists in any stored record yet, so these two are the only titles that count under ADR 0157 decision 4.
+Method. All 3 790 current `known_epg_alias` decisions were read with their admission's `title` and `original` (query 1). Each observation key was normalized with the `norm` of `src/sources.js` (NFKC, lower case, `ё` as `е`, punctuation as a space) and compared with the normalized title and original of the Film. Neither `movieTitles` exists in any stored record yet, so these two are the only titles that count under ADR 0158 decision 4.
 
 | Count | Value |
 | --- | --- |
@@ -34,7 +34,20 @@ Method. All 3 790 current `known_epg_alias` decisions were read with their admis
 
 The 99 shows are about 0.6% of the 16 864 that AIR-500 counted in generation 510. The 222 also include `губка боб квадратные штаны|` (`tmdb_400160`), `крушение|` (`tmdb_37094`) and `метро|` (`tmdb_8860`), the two alias titles AIR-500 left as `needs_review`.
 
-What changes for them. A stored decision is not rewritten. A slot under such a key is no longer confirmed by the scan, and a `known_epg_alias` decision has no anchor, so the slot is withheld. The expectation, not yet observed, is that the ordinary bounded revalidation of [ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 6 reads the drifted durations of those decisions with one detail call each, joins the reconfirmed ones to the anchor and so returns the shows; the same detail read lets `catalogFilmFromDetail` record `movieTitles`.
+What changes for them. A stored decision is not rewritten. A slot under such a key is no longer confirmed by the scan, and a `known_epg_alias` decision has no anchor, so the slot is withheld. A decision already has a verdict, so its observation does not re-enter the resolver as a candidate; only the bounded revalidation of [ADR 0142](../../adr/0142-epg-owned-generation-addressed-discovery-slots.md) decision 6 reads it again (`catalogFilmFromDetail` is not on that path). The revalidation therefore records the movie's titles itself: after a drifted duration is reconfirmed alone by the movie-detail gate, one fenced `upsertAdmissions` stores `movieTitles`. See the next section for what that can and cannot recover.
+
+## What the 222 can and cannot recover
+
+Verified by `tests/discovery-revalidation.mjs` scenarios J and K (a sqlite stand-in D1 and a recording TMDB stub; no production call).
+
+| Case | Result |
+| --- | --- |
+| The observed title is listed by TMDB for the stored movie (a `uk` translation, a `US` alternative title), and the drifted duration is accepted alone by the scorer and the gate | The duration joins the anchor, the decision becomes `tmdb_detail`, and the Film record gains `movieTitles` (TMDB's `ru`/`uk`/`en` translations and `RU`/`UA`/`US`/`GB` alternative titles) and the same titles in `aliases`. A later chunk writes nothing more. Slots under any of those titles are then scan-confirmed. |
+| The observed title is only a stored alias that TMDB does not list | The gate refuses with `detail_title_mismatch`. The duration goes to `failedDurations`; no anchor, no provenance, no row. The decision stays `verified`; the Film and its aliases are not rewritten. |
+| Another duration of a recovered key | Covered by the anchor only within its tolerance, `min(10, max(5, 5%))` minutes; otherwise it needs its own revalidation, up to twelve failed durations. |
+| A watchlist Film | Unchanged: it keeps every alias and the revalidation writes no provenance. |
+
+Costs and limits. Revalidation runs after the candidates without a decision and shares the chunk's 16 TMDB calls with them; each reconfirmed Film costs one more fenced admission write that is skipped when the chunk's time does not fit. Nothing recovers by itself in one chunk for all 222: a key whose title TMDB does not list never recovers, and for the series title of `tmdb_400160` the outcome depends on whether TMDB lists it, which this record did not read.
 
 ## Reproduction
 
@@ -290,8 +303,8 @@ The next natural EPG publication and Discovery chunks apply the rule. Nothing he
 
 1. Under `губка боб квадратные штаны|` no show of `tmdb_400160` is added by a later generation, and the stored aliases and decision are unchanged.
 2. `uncertain` diagnostics of the scan can carry `alias_without_movie_provenance`; a count of those slots is the size of the effect.
-3. Of the 58 keys that have a show now, how many still have one in a later generation, and how many of the 222 decisions gained `anchor` or `identitySource` `tmdb_detail`. Shows that do not return are a finding for the owner, not something this record corrects.
+3. Of the 58 keys that have a show now, how many still have one in a later generation, how many of the 222 decisions gained `anchor` or `identitySource` `tmdb_detail`, and how many of their Films gained `movieTitles` in `discovery_admission.payload_json`. Shows that do not return are a finding for the owner, not something this record corrects.
 
 ## Limits
 
-The impact is measured on generation 511 only. Titles that the scan confirmed through a watchlist Film are unaffected and are not counted. Which of the 222 aliases the movie authority really lists cannot be read from stored data, so the share of correct translations among them is not known. The revalidation return is an expectation from the accepted ADR, not an observation.
+The impact is measured on generation 511 only. Titles that the scan confirmed through a watchlist Film are unaffected and are not counted. Which of the 222 aliases the movie authority really lists cannot be read from stored data, so the share of correct translations among them is not known. The revalidation return is an expectation from the code and the stand-in tests, not an observation of production.

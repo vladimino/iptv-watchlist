@@ -109,4 +109,12 @@ const merged=call('mergeCatalogIdentity',{tmdb_1:{id:'tmdb_1',tmdbId:'1',title:'
 assert.deepEqual(merged.tmdb_1.movieTitles,['A','B']);
 const legacyMerge=call('mergeCatalogIdentity',{tmdb_2:{id:'tmdb_2',tmdbId:'2',title:'C',aliases:['C']}},{tmdb_2:{id:'tmdb_2',tmdbId:'2',title:'C',aliases:['C']}},'run-1',{writeAvailability:true});
 assert.equal('movieTitles' in legacyMerge.tmdb_2,false,'a legacy record gains no empty provenance list');
+// 7. The lookup index includes the movie provenance. A translation that is recorded only in `movieTitles` (not duplicated in `aliases`, as a legacy or migrated record may have it) still reaches the check and confirms.
+const onlyProvenance={id:'tmdb_101',tmdbId:'101',catalogOnly:true,title:'Film R',original:'Film R',year:2001,runtime:96,canonicalIdentity:'tmdb:101',aliases:['Film R'],movieTitles:['Film R','Фільм Р']};
+result=await scan([programme('Фільм Р',2,96)],[onlyProvenance]);
+assert.equal(observationOf(result,'фільм р').confirmedTmdbId,'101');
+assert.equal(observationOf(result,'фільм р').confirmedSlots.length,1);
+result=await scan([programme('Фільм Р',2,96)],[{...onlyProvenance,movieTitles:['Film R']}]);
+assert.equal(result.discovery.length,1,'without the recorded title the slot is a plain observation, not a collision or a match');
+assert.equal(observationOf(result,'фільм р').confirmedTmdbId,null);
 console.log('alias provenance: no EPG title becomes an alias without independent confirmation, no alias confirms a catalog film without movie provenance, own titles and watchlist aliases keep matching');

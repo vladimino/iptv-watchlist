@@ -346,7 +346,7 @@ function applySlotConfirmation(candidate,metas){
 // competitor in `knownSlotDecision`, but it never confirms: the slot stays an ordinary discovery observation for the resolver.
 function movieTitleKeys(film){return new Set([film?.title,film?.original,...(film?.movieTitles||[])].map(value=>value?epgTitleParts(value).normalizedTitle:'').filter(Boolean));}
 async function scanEPG(stream,watchlist,now){
- const index=new Map();for(const film of watchlist){for(const title of new Set((film.aliases||[film.original]).map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
+ const index=new Map();for(const film of watchlist){for(const title of new Set([...(film.aliases||[film.original]),...(film.movieTitles||[])].map(norm))){if(!title)continue;if(!index.has(title))index.set(title,[]);index.get(title).push(film);}}
  const rawDiscovery=new Set(),filteredNonMovies=new Set();const channels=new Map(),coverage=new Map(),matched=new Map(),uncertain=new Map(),discovery=new Map(),slotOwners=new Map(),conflictedSlots=new Map(),showMeta=new WeakMap();let scanned=0,min=Infinity,max=-Infinity,kept=0,identityCollision=0,buffer='',complete=false,bytes=0;
  const reader=stream.getReader(),decoder=new TextDecoder();
  // ADR 0142 decision 1: one owner per (channel, start). The same owner again is ignored; a second owner discards both records after the stream.

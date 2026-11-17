@@ -309,11 +309,17 @@ async function tmdbRequest(env,path,options={}){
  const response=await fetch('https://api.themoviedb.org/3/'+path,{headers:{Authorization:'Bearer '+env.TMDB_API_READ_ACCESS_TOKEN,Accept:'application/json'},signal:AbortSignal.timeout(options.timeoutMs>0?Math.min(12000,options.timeoutMs):12000)});
  if(!response.ok){const error=new Error('TMDB HTTP '+response.status);if(response.status===429){error.retryAt=new Date(Date.now()+Math.max(30,Math.min(3600,Number(response.headers.get('Retry-After'))||60))*1000).toISOString();}throw error;}return response.json();
 }
+// AIR-503 / ADR 0158: the titles the movie authority itself gives one TMDB movie. This is movie provenance; an EPG title is never part of it.
+function movieAuthorityTitles(movie){
+ const localized=(movie?.translations?.translations||[]).filter(item=>['ru','uk','en'].includes(item.iso_639_1)).map(item=>item.data?.title);
+ const alternates=(movie?.alternative_titles?.titles||[]).filter(item=>['RU','UA','US','GB'].includes(item.iso_3166_1)).map(item=>item.title);
+ return [...new Set([movie?.title,movie?.original_title,...localized,...alternates].filter(Boolean))];
+}
 function catalogFilmFromDetail(movie,candidate,old,programmeRunId,id,writeAvailability=true){
  const people=(entries,prefix)=>(entries||[]).slice(0,10).map(person=>({id:prefix+'/'+person.id,name:person.name,original:person.name}));
  const localized=(movie.translations?.translations||[]).filter(item=>['ru','uk','en'].includes(item.iso_639_1)).map(item=>item.data?.title);
  const alternates=(movie.alternative_titles?.titles||[]).filter(item=>['RU','UA','US','GB'].includes(item.iso_3166_1)).map(item=>item.title);
- return touchCanonicalFilm({...(old||{}),discoveredAt:old?.discoveredAt||new Date().toISOString(),id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(old?.aliases||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],movieTitles:[...new Set([...(old?.movieTitles||[]),movie.title,movie.original_title,...localized,...alternates].filter(Boolean))],year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(genre=>genre.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,poster:movie.poster_path?'https://image.tmdb.org/t/p/w342'+movie.poster_path:null,directors:people((movie.credits?.crew||[]).filter(person=>person.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor')},candidate,programmeRunId,writeAvailability,true);
+ return touchCanonicalFilm({...(old||{}),discoveredAt:old?.discoveredAt||new Date().toISOString(),id,tmdbId:String(movie.id),url:'https://www.themoviedb.org/movie/'+movie.id,title:movie.title||candidate.title,original:movie.original_title||candidate.title,aliases:[...new Set([...(old?.aliases||[]),...movieAuthorityTitles(movie)])],movieTitles:[...new Set([...(old?.movieTitles||[]),...movieAuthorityTitles(movie)])],year:Number(movie.release_date?.slice(0,4))||candidate.year,genres:(movie.genres||[]).map(genre=>genre.name),synopsis:movie.overview||candidate.description||null,runtime:movie.runtime,poster:movie.poster_path?'https://image.tmdb.org/t/p/w342'+movie.poster_path:null,directors:people((movie.credits?.crew||[]).filter(person=>person.job==='Director'),'tmdb_director'),actors:people(movie.credits?.cast,'tmdb_actor')},candidate,programmeRunId,writeAvailability,true);
 }
 // AIR-503: an EPG title is evidence of an airing, not a title of the Film. A new normalized title key joins the aliases only when the
 // identity of the observation was confirmed independently (`tmdb_detail`, `owner`). A spelling of a key the Film already has is cosmetic and
@@ -965,6 +971,8 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     const movie=await query('movie/'+previous.tmdbId+'?language=ru-RU&append_to_response=credits,translations,alternative_titles');
     const known=knownScorerCandidates(aliasIndex,candidate);
     // The fresh detail is the runtime evidence of the stored TMDB id, even when the alias index already holds that Film with an older runtime; other editions stay as competitors.
+    // AIR-503 / ADR 0158: the movie-detail gate below already requires the observed title among the titles of this TMDB detail, so a stored alias that TMDB does not list cannot reconfirm a duration.
+    const catalogKey='tmdb_'+previous.tmdbId,catalogFilm=!knownTmdb.has(String(previous.tmdbId))?films[catalogKey]:null,authorityTitles=movieAuthorityTitles(movie);
     const scorerCandidates=known.some(row=>String(row.tmdbId)===String(movie.id))?known.map(row=>String(row.tmdbId)===String(movie.id)?{...row,runtime:movie.runtime??row.runtime??null}:row):[...known,{...searchHitCandidate(movie),runtime:movie.runtime??null}];
     const reconfirmed=[],failed=[];let proposed=null;
     for(const duration of plan.todo){
@@ -989,6 +997,13 @@ async function resolvePagedDiscoveryChunk(env,report,limit,lease,checkpoint,sour
     decisions[key]=next;
     revalidation.revalidated+=reconfirmed.length;revalidation.revalidation_failed+=failed.length;
     if(plan.failed.length+failed.length>=DiscoveryAuthority.REVALIDATION_LIMIT)revalidation.revalidation_exhausted++;
+    // A duration that the movie authority reconfirmed alone is independent evidence: record that movie's own titles as the Film's provenance (one fenced admission write).
+    if(reconfirmed.length&&catalogFilm&&authorityTitles.some(title=>!(catalogFilm.movieTitles||[]).includes(title))&&Date.now()+writeEstimate(1)<=persistLimit()){
+     const recorded={...catalogFilm,movieTitles:[...new Set([...(catalogFilm.movieTitles||[]),...authorityTitles])],aliases:[...new Set([...(catalogFilm.aliases||[]),...authorityTitles])]};
+     const stored=await inPhase('revalidation',()=>guarded(()=>timedWrite(()=>DiscoveryAuthority.upsertAdmissions(env,{[catalogKey]:recorded},{lease,canonicalDeadline:canonicalLimit()}))));
+     if(!stored)return programmeChanged();
+     if(stored.written.includes(catalogKey)){films[catalogKey]=recorded;indexFilm(recorded);}
+    }
     if(reconfirmed.length&&Date.now()+writeEstimate(1)<=persistLimit())await assignSlots(key,'revalidation_assignment');
    }catch(e){
     if(e?.name==='BudgetExhaustedError'){revalidation.deferred++;break;}
