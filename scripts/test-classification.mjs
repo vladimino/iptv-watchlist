@@ -1356,6 +1356,9 @@ export const FILES={
  "similar-films.mjs": {
   "suite": "core"
  },
+ "slot-duration-classes.mjs": {
+  "suite": "core"
+ },
  "snapshot.mjs": {
   "suite": "core"
  },
