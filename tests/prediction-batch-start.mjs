@@ -599,4 +599,47 @@ const NO_RUN_KEYS=/^(enrichment\/runs\/|enrichment\/run-diagnostics|enrichment\/
  assert.equal(b.data.films.length,5);
  await w.api('complete',{runId:b.data.runId,reason:'external_termination'});
 }
+
+// AIR-510 P1-A: staged hot films must not starve the next five when cold work remains.
+{
+ const w=await ready(12);
+ setCold(w,['tmdb_6','tmdb_7','tmdb_8','tmdb_9','tmdb_10','tmdb_11','tmdb_12']);
+ await reconcile(w);
+ const a=await batch(w,{manifestSize:5});assert.equal(a.status,200);
+ assert.ok(a.data.films.every(f=>f.lane==='hot'));
+ const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ assert.equal((await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items})).status,200);
+ assert.equal((await w.api('complete',{runId:a.data.runId,reason:'external_termination'})).status,200);
+ const b=await batch(w,{manifestSize:5});
+ assert.equal(b.status,200,JSON.stringify(b.data).slice(0,300));
+ assert.equal(b.data.drained.committed,5,JSON.stringify(b.data.drained));
+ assert.equal(b.data.films.length,5,'cold films fill the new five');
+ assert.ok(b.data.films.every(f=>f.lane==='cold'));
+ const overlap=b.data.films.filter(f=>items.some(i=>i.filmId===f.filmId));
+ assert.equal(overlap.length,0);
+ await w.api('complete',{runId:b.data.runId,reason:'external_termination'});
+}
+
+// AIR-510 P1-B: a changed film input is dropped, not committed as if generated from B's metadata.
+{
+ const w=await ready(12);await reconcile(w);
+ const a=await batch(w,{manifestSize:5});
+ const items=a.data.films.map(f=>({filmId:f.filmId,fingerprint:w.fingerprint,prediction:w.prediction}));
+ assert.equal((await w.api('batch/hold',{runId:a.data.runId,epoch:a.data.lease.epoch,items})).status,200);
+ const ids=items.map(i=>i.filmId);
+ sql(w.file,"UPDATE discovery_admission SET payload_json=json_set(payload_json,'$.synopsis','changed-after-hold') WHERE film_id IN ("+ids.map(id=>"'"+id+"'").join(',')+")");
+ assert.equal((await w.api('complete',{runId:a.data.runId,reason:'external_termination'})).status,200);
+ const b=await batch(w,{manifestSize:5});
+ assert.equal(b.status,200,JSON.stringify(b.data).slice(0,300));
+ assert.equal(b.data.drained.committed,0,'changed input is not committed');
+ assert.equal(b.data.drained.dropped,5);
+ assert.ok((b.data.drained.droppedReasons||[]).every(row=>row.reason==='stale_input'),JSON.stringify(b.data.drained.droppedReasons));
+ assert.equal(b.data.films.length,5);
+ const overlap=b.data.films.filter(f=>ids.includes(f.filmId));
+ assert.equal(overlap.length,0);
+ const bDoc=JSON.parse(sql(w.file,"SELECT document_json AS d FROM prediction_run WHERE run_id='"+b.data.runId+"'")[0].d);
+ const settled=Object.entries(bDoc.results||{}).filter(([,s])=>['created','recalculated','already_current'].includes(s));
+ assert.equal(settled.length,0,'no stale prediction is committed on B start');
+ await w.api('complete',{runId:b.data.runId,reason:'external_termination'});
+}
 console.log('prediction-batch-start: ok');

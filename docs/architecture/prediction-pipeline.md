@@ -92,7 +92,7 @@ sequenceDiagram
                 end
             end
             MCP->>Queue: Acquire the one runner lease
-            MCP->>Queue: Revalidate queue generation, selection of films not in the stage, exact answer
+            MCP->>Queue: Revalidate queue generation, select ready films with staged ids excluded from the hot/cold lane, exact answer
             alt Changed, or over the limit with real values
                 MCP->>Queue: Release the lease
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only

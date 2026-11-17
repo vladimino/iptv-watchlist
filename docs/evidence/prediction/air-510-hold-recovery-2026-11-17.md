@@ -14,6 +14,8 @@ Controller L0 D1 window 16 Nov 23:40–17 Nov 08:07 Europe/Madrid: 34 owned `bat
 2. **A stages, B drains.** Twelve eligible films. A starts 5, MCP `prediction_batch_validate` (`storage: not_accessed`), concurrent hold CAS-merge, digest conflict, `external_termination` 200 with **zero** committed results on A. B start: `drained.committed=5`, `films.length=5` disjoint from A's five, submit those five, `manifest_spent`. B run `results` has **10** unique settled film ids. A later start has `drained.committed=0` (field omitted when both counts are 0).
 3. **Stale profile.** After hold, profile hash moves. B start: `drained.committed=0`, `dropped=5`, still five new films in the manifest.
 4. **Lease expiry.** Expire A's runner lease without complete. B start still drains the five.
+5. **Hot/cold boundary.** Five ready hot films and seven ready cold films. A stages the five hot films. B start commits those five and returns five new **cold** films.
+6. **Stale film input.** After hold, catalogue `synopsis` changes with the same profile/prompt. B start: `drained.committed=0`, `dropped=5` (`stale_input`), five new films; none of A's predictions are committed.
 
 ## Not proven
 
