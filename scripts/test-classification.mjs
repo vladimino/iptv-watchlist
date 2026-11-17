@@ -525,6 +525,9 @@ export const FILES={
  "discovery-workflow-bundle.mjs": {
   "suite": "core"
  },
+ "discovery-workflow-rollover.mjs": {
+  "suite": "core"
+ },
  "discovery-workflow.mjs": {
   "suite": "core"
  },

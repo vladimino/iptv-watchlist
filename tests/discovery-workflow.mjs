@@ -344,7 +344,7 @@ const scheduled=fs.readFileSync('src/worker.js','utf8').match(/async scheduled[\
 assert.match(scheduled,/reconcileDiscoveryWorkflow/);
 assert.doesNotMatch(scheduled,/advanceDiscovery/);
 const build=fs.readFileSync('build.mjs','utf8');
-const indexWrite=build.slice(build.indexOf("fs.writeFileSync('dist/server/index.js'"),build.indexOf("fs.writeFileSync('dist/server/workflow-entry.js'"));
+const indexWrite=build.slice(build.indexOf("writeAtomic('dist/server/index.js'"),build.indexOf("writeAtomic('dist/server/workflow-entry.js'"));
 assert.match(indexWrite,/src\/discovery-workflow\.js/);
 assert.doesNotMatch(indexWrite,/cloudflare:workers/);
 assert.match(build,/import \{ WorkflowEntrypoint \} from 'cloudflare:workers'/);

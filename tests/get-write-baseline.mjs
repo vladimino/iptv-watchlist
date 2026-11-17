@@ -33,7 +33,7 @@ export const MCP_READ_TOOLS={
  probe_read:{},probe_echo:{arguments:{text:'audit'}},feature_flags:{},epg_status:{},epg_pipeline_status:{},enrichment_schema:{},enrichment_profile:{},enrichment_runner:{},enrichment_queue:{},enrichment_status:{},
  prediction_queue_overview:{},prediction_film_diagnostics:{arguments:{filmId:'w1'}},prediction_batch_validate:{arguments:{items:[{filmId:'w1',prediction:{}}]}},prediction_pending:{},prediction_batch_manifest:{arguments:{runId:'w1'}},ratings_sync_status:{},
 };
-export const MCP_WRITE_TOOLS=['epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','film_person_open_handoff'];
+export const MCP_WRITE_TOOLS=['epg_sync_start','epg_sync_step','ratings_sync_start','ratings_sync_step','prediction_batch_start','prediction_batch_submit','prediction_batch_hold','prediction_heartbeat','prediction_complete','discovery_workflow_rollover','film_person_open_handoff'];
 
 // ---- baseline ----
 // Every entry is an effect a read has today. After AIR-413 to AIR-416 no read writes storage: the only entry left is the registered outbound read. `effects` is the exact ordered effect list per scenario
