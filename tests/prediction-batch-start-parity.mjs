@@ -11,7 +11,7 @@ const baseline=JSON.parse(fs.readFileSync(new URL('./fixtures/prediction-batch-s
 const {results}=await runParity();
 const omitSchedule=value=>{
  const clone=JSON.parse(JSON.stringify(value||null));
- if(clone?.body){delete clone.body.nextCatchUpAt;delete clone.body.nextScheduledRunAt;delete clone.body.bytes;}
+ if(clone?.body){delete clone.body.nextCatchUpAt;delete clone.body.nextScheduledRunAt;delete clone.body.bytes;delete clone.body.drained;}
  if(Array.isArray(clone?.state?.runs))for(const run of clone.state.runs)delete run.manifestBytes;
  return clone;
 };
@@ -37,7 +37,7 @@ for(const name of Object.keys(results)){
  assert.equal(now.queue.pending.length,was.queue.pending.length+1,'the far film is still queued');
  assert.deepEqual(now.queue.pending.filter(id=>!was.queue.pending.includes(id)).length,1);
  assert.deepEqual(omitSchedule({state:now.state}),omitSchedule({state:was.state}),'run, lease and diagnostics state are the same except schedule-derived manifestBytes');
- const {queueSettled,eligible,pendingCount,hotRemaining,nextCatchUpAt,nextScheduledRunAt,...restNow}=now.body,{queueSettled:a,eligible:b,pendingCount:c,hotRemaining:d,nextCatchUpAt:e,nextScheduledRunAt:f,...restWas}=was.body;
+ const {queueSettled,eligible,pendingCount,hotRemaining,nextCatchUpAt,nextScheduledRunAt,drained,...restNow}=now.body,{queueSettled:a,eligible:b,pendingCount:c,hotRemaining:d,nextCatchUpAt:e,nextScheduledRunAt:f,...restWas}=was.body;
  assert.equal(nextCatchUpAt,null);assert.equal(nextScheduledRunAt,null);
  assert.deepEqual(restNow,restWas,'every other response field is the same');
 }

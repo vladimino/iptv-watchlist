@@ -104,11 +104,12 @@ sequenceDiagram
     else Nothing eligible or blocked
         MCP-->>Task: noop or blocked, no run and no Event
     else Run created
-        MCP-->>Task: Manifest of up to 5 films, runId, epoch
+        MCP->>D1: Drain transferable stage onto this run when present
+        MCP-->>Task: Manifest of up to 5 new films, runId, epoch, drained counts
         loop Until every selected film is settled
             Task->>Task: Research and predict one film into the buffer
             opt Buffer holds 5 items, next item would pass 56 KiB, or end of manifest
-                Task->>MCP: prediction_batch_validate then prediction_batch_submit
+                Task->>MCP: prediction_batch_validate, prediction_batch_hold, then prediction_batch_submit
                 MCP->>D1: Commit per film, settle queue, renew lease
                 MCP-->>Task: Per-film results, replay same body after a lost answer
             end

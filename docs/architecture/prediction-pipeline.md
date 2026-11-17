@@ -92,12 +92,13 @@ sequenceDiagram
                 end
             end
             MCP->>Queue: Acquire the one runner lease
-            MCP->>Queue: Revalidate queue generation, selection and the exact answer
+            MCP->>Queue: Revalidate queue generation, select ready films with staged ids excluded from the hot/cold lane, exact answer
             alt Changed, or over the limit with real values
                 MCP->>Queue: Release the lease
                 MCP-->>Client: queue_changed or manifest_too_large, acquire and release only
             else Unchanged
-                MCP-->>Client: Manifest: profile, contract, films with metadata and plan, epoch, manifestSize, filmsSelected
+                MCP->>Store: Drain transferable stage onto this run (commit fresh, drop stale)
+                MCP-->>Client: Manifest of new films, drained counts, profile, contract, epoch
                 loop Until every selected manifest film is settled
                     opt Model call may be long
                         Client->>MCP: prediction_heartbeat, before the call and at least every 10 minutes
@@ -111,7 +112,13 @@ sequenceDiagram
                         opt A candidate has issues
                             Client->>Client: Correct only what real knowledge supports, at most one re-preflight, otherwise a failure item
                         end
-                        Client->>MCP: prediction_batch_submit, buffer items (1 to submitBatchSize), runId and epoch
+                        Client->>MCP: prediction_batch_hold, same valid items, runId and epoch (write auth only)
+                        MCP->>Store: CAS-merge transferable stage by item digest (origin runId is provenance)
+                        alt This run still owns the lease
+                            Client->>MCP: prediction_batch_submit with useHeld true, or buffer items
+                        else This Task terminated
+                            Note over Client,Store: Stage outlives the run, the next batch_start drains it
+                        end
                         MCP->>Queue: Set the submit gate, an overlapping call gets submit_in_flight
                         MCP->>MCP: Validate each film, compare profile impact
                         loop Each valid film in order
@@ -139,7 +146,7 @@ sequenceDiagram
     Note over Client,Store: A dry run with dryRun true ignores the lease, reads and validates the same way and writes nothing: no lease, run, queue or storage write
 ```
 
-The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that ends with `manifest_spent` ([ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md)) releases the lease as a normal complete while unsubmitted films of a failed short run stay in the queue for the next `batch_start`. The Events Log receives one terminal `enrichment-<runId>` with `presentation: batch_v2_terminal` and no start or progress item ([ADR 0146](../adr/0146-batch-v2-single-terminal-prediction-event.md)). A hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
+The accepted `prediction_batch_validate` preflight ([ADR 0131 (Accepted)](../adr/0131-batch-candidate-preflight-tool.md)) is a pure read of the contract validators: it touches no storage, run, lease, queue or profile and does not replace the validation of `batch_submit`, which stays authoritative and also checks the manifest, `inputHash` and live profile. [ADR 0157](../adr/0157-batch-candidate-hold-and-honest-complete.md) stores submit-ready items in a **transferable** stage (`enrichment/batch-stage.json`). The generating run's lease authorizes the write; the next `prediction_batch_start` drains fresh items onto the new run and drops stale ones. `external_termination` still releases the lease. `useHeld` remains for same-run recovery. The v5 `next` and `submit` refuse a v2 run, and `batch_submit` refuses a v5 run, so one run belongs to one protocol. A `batch_submit` is a sequence of per-film commits and one queue settlement, not an atomic unit; replaying the same body recovers a crash. A v2 run that ends with `manifest_spent` ([ADR 0136](../adr/0136-prediction-batch-manifest-size-and-spent-complete.md)) releases the lease as a normal complete while unsubmitted films of a failed short run stay in the queue for the next `batch_start`. The Events Log receives one terminal `enrichment-<runId>` with `presentation: batch_v2_terminal` and no start or progress item ([ADR 0146](../adr/0146-batch-v2-single-terminal-prediction-event.md)). A hot film that arrives mid-run waits for that start. Rollback is to disable the v2 Task and re-enable the v5 Task; no data moves.
 
 The optional per-film assessment ([ADR 0132](../adr/0132-prediction-assessment-artifact.md), [contract](../reference/api/prediction-assessment.md)) travels only on the batch runner v2 items. Its own immutable R2 object `enrichment/films/<filmId>/predictions/assessments/<predictionSha256>.json` is written after the version object and before the guarded D1 commit, so a committed prediction has its assessment when one was sent and a failure before the commit leaves only unreferenced objects. It is a diagnostic: no rule, queue, freshness verdict, D1 row, bundle, view index entry, Event or public response reads or carries it, and the v5 path and `prediction_validate` take none.
 

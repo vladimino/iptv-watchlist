@@ -122,7 +122,7 @@ assert.ok(/observedProfileHash/.test(dry)&&/profile_moved/.test(dry)&&/not_submi
 assert.ok(!/trello\.com\/c\/XDyt4qIH\)\s*'s scope/.test(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8')),'AIR-450 is not linked to the AIR-449 card');
 assert.ok(fs.readFileSync('docs/runbooks/prediction-batch-v2-dry-run-ab.md','utf8').includes('[AIR-450](https://trello.com/c/VPd21Y9d)'));
 const enrich=fs.readFileSync('src/enrichment.js','utf8');
-for(const reason of ['profile_changed','runner_aborted','quota','model_unavailable','model_error','api_error','storage_error','external_termination','time_budget'])assert.ok(enrich.includes("'"+reason+"'"),reason+' is a Worker stop reason');
+for(const reason of ['profile_changed','runner_aborted','quota','model_unavailable','model_error','api_error','storage_error','external_termination','time_budget','client_state_lost','manifest_unusable'])assert.ok(enrich.includes("'"+reason+"'"),reason+' is a Worker stop reason');
 const live=fs.readFileSync('docs/reference/scheduled-task-prompts/hourly-predictions-only.md','utf8').match(/---BEGIN PROMPT---\n([\s\S]*)\n---END PROMPT---/)[1];
 assert.equal(sha(live),'fc0b4c1772f33398b4cb4e2eafda6e71b89c260befbee363e299acae4a388d44','the live hourly prompt text is unchanged');
 assert.ok(!/trello\.com\/c\/[\s;)]/.test(doc),'no empty Trello link');
