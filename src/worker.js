@@ -2056,7 +2056,6 @@ async fetch(request,env,execution){
   if(!env.BUCKET)return json({error:'Storage unavailable'},503);
   if(url.pathname.startsWith('/api/migration-export/'))return await migrationExportRoute(request,env,url);
   if(['POST','PUT'].includes(request.method)&&request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin)return json({error:'Origin not allowed'},403);
-  if(url.pathname.startsWith('/api/epg/diagnostic/'))return await EpgDiagnosticRun.route(request,env,url);
   if(url.pathname.startsWith('/api/enrichment/'))return await enrichmentRoute(request,env,url,execution);
   if(url.pathname.startsWith('/api/d1/'))return await catalogD1Route(request,env,url);
   if(url.pathname==='/api/admin/health')return await adminHealthRoute(request,env,url);
